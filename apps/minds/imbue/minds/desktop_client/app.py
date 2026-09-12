@@ -91,11 +91,10 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
-from imbue.minds.desktop_client.skill_chat import AccountBindingState
 from imbue.minds.desktop_client.skill_chat import SkillSupport
-from imbue.minds.desktop_client.skill_chat import check_skill_support
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
-from imbue.minds.desktop_client.skill_chat import resolve_account_binding
+from imbue.minds.desktop_client.skill_chat import probe_skill
+from imbue.minds.desktop_client.skill_chat import resolve_legacy_account_args
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -676,8 +675,8 @@ def _handle_help_assist() -> Response:
     # half-created chat behind. The probe is a quick filesystem check inside the
     # container; on an unsupported/unreachable workspace we return a clear error the
     # modal turns into a "report a bug instead" screen rather than a dead spinner.
-    support = check_skill_support(mngr_caller, workspace_agent_id, ASSIST_SKILL_NAME)
-    if support is SkillSupport.UNSUPPORTED:
+    probe = probe_skill(mngr_caller, workspace_agent_id, ASSIST_SKILL_NAME)
+    if probe.support is SkillSupport.UNSUPPORTED:
         return make_response(
             status_code=409,
             content=json.dumps(
@@ -685,44 +684,24 @@ def _handle_help_assist() -> Response:
             ),
             media_type="application/json",
         )
-    if support is SkillSupport.UNREACHABLE:
+    if probe.support is SkillSupport.UNREACHABLE:
         return make_response(
             status_code=502,
             content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
-            media_type="application/json",
-        )
-
-    # An unbound chat reaches a config dir holding no credential, so it can never take a turn.
-    binding = resolve_account_binding(mngr_caller, workspace_agent_id)
-    if binding.state is AccountBindingState.UNREACHABLE:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
-            media_type="application/json",
-        )
-    if binding.state is AccountBindingState.UNAVAILABLE:
-        return make_response(
-            status_code=409,
-            content=json.dumps(
-                {
-                    "error": (
-                        "This machine has no signed-in Anthropic account for an agent to run on. "
-                        "Sign in inside the machine and try again."
-                    )
-                }
-            ),
             media_type="application/json",
         )
 
     # Wait for the create to finish before responding so the get-help modal keeps its
     # "starting..." state until the chat exists, rather than dismissing into a blank gap
     # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
+    # Which account the chat runs on is the workspace's own default; a workspace with none
+    # signed in refuses the create in its own words, which the spawn carries back.
     spawn = spawn_skill_chat(
         mngr_caller,
         workspace_agent_id,
         chat_name=generate_chat_name(ASSIST_SKILL_NAME),
         message=build_assist_chat_message(description),
-        account_args=binding.create_args,
+        account_args=resolve_legacy_account_args(mngr_caller, workspace_agent_id, probe),
     )
     if not spawn.is_started:
         # The same wall that stops an /assist chat stops every other agent

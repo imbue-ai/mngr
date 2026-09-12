@@ -54,6 +54,7 @@ You can override default values for CLI command parameters in your config files.
 - Config files can define default values for any CLI parameter using `[commands.<command_name>]` sections
 - These defaults only apply when the user doesn't explicitly specify a value
 - User-specified values (via CLI or environment) always take precedence
+- Each settings layer adds the parameters it names to the ones lower layers set: a local `[commands.create]` naming only `type` keeps the project's `connect`. A list assigned bare over a non-empty one from a lower layer is still refused as a narrowing; use `key__extend` to append (see [environment variables](./concepts/environment_variables.md))
 
 **Example:**
 

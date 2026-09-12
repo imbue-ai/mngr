@@ -39,7 +39,6 @@ _DISPATCH_STATUS_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, int]] = {
     UpdateDispatchOutcome.ALREADY_RUNNING: 409,
     UpdateDispatchOutcome.UNSUPPORTED: 409,
     UpdateDispatchOutcome.UNREACHABLE: 502,
-    UpdateDispatchOutcome.NO_ACCOUNT: 409,
     UpdateDispatchOutcome.SPAWN_FAILED: 502,
 }
 
@@ -50,12 +49,9 @@ _DISPATCH_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
         "or create a new machine and migrate your work."
     ),
     UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this machine to start the update.",
-    UpdateDispatchOutcome.NO_ACCOUNT: (
-        "This machine has no signed-in Anthropic account for the update agent to run on. "
-        "Sign in inside the machine, then start the update again."
-    ),
-    # Whatever the machine said travels alongside this, as ``detail``; a spawn
-    # that timed out rather than being refused has nothing to add.
+    # Whatever the machine said travels alongside this, as ``detail`` -- a machine with no
+    # provider account signed in refuses the agent in its own words -- and a spawn that timed
+    # out rather than being refused has nothing to add.
     UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this machine.",
 }
 

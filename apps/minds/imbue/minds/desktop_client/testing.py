@@ -68,6 +68,8 @@ from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
+from imbue.minds.desktop_client.skill_chat import LOCAL_SETTINGS_ABSENT_SENTINEL
+from imbue.minds.desktop_client.skill_chat import LOCAL_SETTINGS_PRESENT_SENTINEL
 from imbue.minds.desktop_client.skill_chat import NO_ACCOUNT_STORE_SENTINEL
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import set_state
@@ -905,14 +907,22 @@ def account_binding_probe_stdout(*, account_dir: str | None = SIGNED_IN_ACCOUNT_
     )
 
 
-def ready_machine_probe_stdout(skill_probe_stdout: str, *, account_dir: str | None = SIGNED_IN_ACCOUNT_DIR) -> str:
+def ready_machine_probe_stdout(
+    skill_probe_stdout: str,
+    *,
+    account_dir: str | None = SIGNED_IN_ACCOUNT_DIR,
+    is_local_settings_present: bool = False,
+) -> str:
     """The one answer a machine ready to host a skill chat gives, whichever pre-spawn probe asks.
 
-    ``RecordingMngrCaller`` answers every call alike, so this carries the skill sentinel and
-    the account probe's fenced binding together. ``account_dir`` keeps
-    ``account_binding_probe_stdout``'s three-way contract.
+    ``RecordingMngrCaller`` answers every call alike, so this carries the skill sentinel,
+    the local-settings sentinel, and the account probe's fenced binding together.
+    ``is_local_settings_present`` renders a workspace that writes its own create defaults
+    (the app then asks its resolver nothing); ``account_dir`` keeps
+    ``account_binding_probe_stdout``'s three-way contract for one that does not.
     """
-    return skill_probe_stdout + account_binding_probe_stdout(account_dir=account_dir)
+    local_settings = LOCAL_SETTINGS_PRESENT_SENTINEL if is_local_settings_present else LOCAL_SETTINGS_ABSENT_SENTINEL
+    return f"{skill_probe_stdout}{local_settings}\n" + account_binding_probe_stdout(account_dir=account_dir)
 
 
 def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:

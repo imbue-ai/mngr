@@ -7,13 +7,19 @@ from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
 from imbue.minds.desktop_client.skill_chat import AUTO_OPEN_CHAT_LABELS
 from imbue.minds.desktop_client.skill_chat import AccountBindingState
+from imbue.minds.desktop_client.skill_chat import LOCAL_SETTINGS_ABSENT_SENTINEL
+from imbue.minds.desktop_client.skill_chat import LOCAL_SETTINGS_PRESENT_SENTINEL
+from imbue.minds.desktop_client.skill_chat import SKIP_CLAUDE_INSTALLATION_CHECK_SETTING
+from imbue.minds.desktop_client.skill_chat import SkillProbe
 from imbue.minds.desktop_client.skill_chat import SkillSupport
+from imbue.minds.desktop_client.skill_chat import USER_CREATED_LABEL
 from imbue.minds.desktop_client.skill_chat import build_account_binding_probe_args
 from imbue.minds.desktop_client.skill_chat import build_skill_chat_mngr_args
 from imbue.minds.desktop_client.skill_chat import build_skill_support_probe_args
-from imbue.minds.desktop_client.skill_chat import check_skill_support
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
+from imbue.minds.desktop_client.skill_chat import probe_skill
 from imbue.minds.desktop_client.skill_chat import resolve_account_binding
+from imbue.minds.desktop_client.skill_chat import resolve_legacy_account_args
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.testing import account_binding_probe_stdout
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -30,35 +36,53 @@ def test_the_probe_targets_the_workspace_and_checks_the_named_skill_file() -> No
     assert "--no-start" in args
     assert len(args) == 5
     assert ".agents/skills/update-self/SKILL.md" in args[3]
+    # The same exec answers whether the workspace writes its own create defaults.
+    assert ".mngr/settings.local.toml" in args[3]
 
 
 def test_a_present_skill_reads_as_supported_and_makes_exactly_one_probe_call() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_UPDATE_SELF_SKILL_PRESENT\n"))
     agent_id = AgentId.generate()
-    assert check_skill_support(caller, agent_id, "update-self") is SkillSupport.SUPPORTED
+    assert probe_skill(caller, agent_id, "update-self").support is SkillSupport.SUPPORTED
     assert caller.calls == [build_skill_support_probe_args(agent_id, "update-self")]
 
 
 def test_an_absent_skill_reads_as_unsupported_rather_than_unreachable() -> None:
     # A reachable workspace whose (older) template lacks the skill: absent sentinel on a clean exit.
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_ABSENT\n"))
-    assert check_skill_support(caller, AgentId.generate(), "assist") is SkillSupport.UNSUPPORTED
+    assert probe_skill(caller, AgentId.generate(), "assist").support is SkillSupport.UNSUPPORTED
 
 
 def test_a_probe_that_never_ran_reads_as_unreachable() -> None:
     # No sentinel in stdout (the exec failed / host down) must not be mistaken for "absent".
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="connection refused"))
-    assert check_skill_support(caller, AgentId.generate(), "assist") is SkillSupport.UNREACHABLE
+    assert probe_skill(caller, AgentId.generate(), "assist").support is SkillSupport.UNREACHABLE
 
 
 def test_one_skills_sentinel_does_not_vouch_for_another() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_PRESENT\n"))
-    assert check_skill_support(caller, AgentId.generate(), "update-self") is SkillSupport.UNREACHABLE
+    assert probe_skill(caller, AgentId.generate(), "update-self").support is SkillSupport.UNREACHABLE
+
+
+@pytest.mark.parametrize(
+    ("sentinel", "is_present"),
+    ((LOCAL_SETTINGS_PRESENT_SENTINEL, True), (LOCAL_SETTINGS_ABSENT_SENTINEL, False), ("", False)),
+    ids=("present", "absent", "unsaid"),
+)
+def test_the_probe_reports_whether_the_workspace_writes_its_create_defaults(sentinel: str, is_present: bool) -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=f"MNGR_ASSIST_SKILL_PRESENT\n{sentinel}\n")
+    )
+
+    probe = probe_skill(caller, AgentId.generate(), "assist")
+
+    assert probe.support is SkillSupport.SUPPORTED
+    assert probe.is_local_settings_present is is_present
 
 
 def test_the_spawn_runs_a_chat_create_inside_the_workspace_with_the_seed_message() -> None:
     agent_id = AgentId.generate()
-    args = build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke", account_args=())
+    args = build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke")
     # Outer: exec targets the workspace agent by id and carries one inner-command string.
     assert args[:3] == ["exec", "--agent", str(agent_id)]
     # The chat create must not boot a stopped workspace as a side effect
@@ -76,8 +100,12 @@ def test_the_spawn_runs_a_chat_create_inside_the_workspace_with_the_seed_message
     assert "--no-connect" in inner
     for label in AUTO_OPEN_CHAT_LABELS:
         assert f"{label}=true" in inner
+    assert USER_CREATED_LABEL in inner
     # No workspace grouping label: the chat lives in the container it was exec'd into.
     assert not any(token.startswith("workspace=") for token in inner)
+    # No harness and no account: the workspace's own create defaults supply both.
+    assert "--type" not in inner and "--env" not in inner
+    assert inner[inner.index("-S") + 1] == SKIP_CLAUDE_INSTALLATION_CHECK_SETTING
     assert inner[-2:] == ["--message", "/assist it broke"]
 
 
@@ -85,7 +113,7 @@ def test_the_seed_message_cannot_break_out_of_the_shell_command() -> None:
     # ``mngr exec`` runs the inner command through a shell, so metacharacters and
     # newlines in the message must stay inside the single --message argument.
     hostile = 'oops"; rm -rf /; echo $(whoami) `id` && touch /tmp/pwned\n\nsecond line'
-    args = build_skill_chat_mngr_args(AgentId.generate(), chat_name="x", message=hostile, account_args=())
+    args = build_skill_chat_mngr_args(AgentId.generate(), chat_name="x", message=hostile)
     inner = shlex.split(args[3])
     assert inner[-2:] == ["--message", hostile]
 
@@ -99,11 +127,11 @@ def test_generated_chat_names_carry_the_skill_and_do_not_repeat() -> None:
 def test_a_successful_spawn_makes_exactly_the_built_call() -> None:
     caller = RecordingMngrCaller()
     agent_id = AgentId.generate()
-    spawn = spawn_skill_chat(caller, agent_id, chat_name="assist-abc123", message="/assist it broke", account_args=())
+    spawn = spawn_skill_chat(caller, agent_id, chat_name="assist-abc123", message="/assist it broke")
     assert spawn.is_started is True
     assert spawn.failure_detail == ""
     assert caller.calls == [
-        build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke", account_args=())
+        build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke")
     ]
 
 
@@ -116,7 +144,7 @@ def test_a_failed_spawn_carries_the_machines_own_refusal() -> None:
     )
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr=stderr, is_mngr_output=True))
 
-    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke", account_args=())
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke")
 
     assert spawn.is_started is False
     assert spawn.failure_detail.startswith("Error: Unknown fields in agent_types.opencode")
@@ -144,10 +172,51 @@ def test_a_spawn_the_workspace_never_answered_quotes_nothing_at_the_user(result:
     """These stderrs are minds' own lines, so showing them as the machine's verdict misattributes our own fault."""
     caller = RecordingMngrCaller(result=result)
 
-    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist my laptop", account_args=())
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist my laptop")
 
     assert spawn.is_started is False
     assert spawn.failure_detail == ""
+
+
+# CLEANUP: the resolver tests below go with the resolver (see skill_chat.py).
+
+
+def test_a_workspace_that_writes_its_create_defaults_is_not_asked_for_an_account() -> None:
+    """Its own mngr binds the create, so the app has no question to ask and makes no call."""
+    caller = RecordingMngrCaller()
+    probe = SkillProbe(support=SkillSupport.SUPPORTED, is_local_settings_present=True)
+
+    assert resolve_legacy_account_args(caller, AgentId.generate(), probe) == ()
+    assert caller.calls == []
+
+
+def test_a_workspace_without_the_file_is_bound_through_its_own_resolver() -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=account_binding_probe_stdout(account_dir="/home/user/acc/a1"))
+    )
+    probe = SkillProbe(support=SkillSupport.SUPPORTED, is_local_settings_present=False)
+
+    args = resolve_legacy_account_args(caller, AgentId.generate(), probe)
+
+    assert args == ("--env", "CLAUDE_CONFIG_DIR=/home/user/acc/a1")
+    assert len(caller.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        MngrCallResult(returncode=0, stdout=account_binding_probe_stdout(account_dir="")),
+        MngrCallResult(returncode=1, stderr="connection refused"),
+        MngrCallResult(returncode=0, stdout=account_binding_probe_stdout(account_dir=None)),
+    ),
+    ids=("resolves-none", "cannot-be-asked", "keeps-no-accounts"),
+)
+def test_a_workspace_the_resolver_cannot_bind_gets_a_bare_create_rather_than_a_refusal(result: MngrCallResult) -> None:
+    """What the workspace makes of a bare create is the verdict the user sees, in the workspace's own words."""
+    caller = RecordingMngrCaller(result=result)
+    probe = SkillProbe(support=SkillSupport.SUPPORTED, is_local_settings_present=False)
+
+    assert resolve_legacy_account_args(caller, AgentId.generate(), probe) == ()
 
 
 def test_the_account_probe_asks_the_template_for_the_binding_without_booting_the_machine() -> None:

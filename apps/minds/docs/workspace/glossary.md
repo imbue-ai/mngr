@@ -44,7 +44,7 @@ Key concepts in the minds system:
   Hidden from the UI agent list and protected against direct destroy.
 
 - **chat agent**: a user-facing mngr agent created on demand in a workspace, one per chat tab.
-  Created with `--transfer none`, so it shares the primary agent's work_dir; its create carries an `--env CLAUDE_CONFIG_DIR=<account dir>` binding it to one signed-in provider account under `~/.minds/accounts/`. A chat created without that binding falls back to the workspace-wide default of `~/.claude`, which holds no credential.
+  Created with `--transfer none`, so it shares the primary agent's work_dir, and bound on its create to one signed-in provider account under `~/.minds/accounts/` (an `--env CLAUDE_CONFIG_DIR=<account dir>` for claude). A create that names no account gets the workspace's default one from `.mngr/settings.local.toml`, which the workspace's chat app writes; with no account signed in the create is refused, since `~/.claude` holds no credential.
   Bootstrap seeds the first one on initial container boot; the count grows and shrinks with the user's workload, and is not capped.
 
 - **worktree agent**: a mngr agent created from the "New agent" tab, using `--template worktree` and `--transfer git-worktree` on branch `mngr/<name>`.

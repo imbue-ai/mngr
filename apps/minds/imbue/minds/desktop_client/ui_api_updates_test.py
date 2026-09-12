@@ -995,7 +995,8 @@ def test_an_outcome_with_nothing_to_add_carries_no_detail(
 def test_the_dispatched_update_chat_is_bound_to_the_machines_signed_in_account(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """An unbound update chat resolves a config dir with no credential and answers every turn "Not logged in"."""
+    """On a machine that writes no create defaults (minds-v0.5.0 through v0.5.2), the app still asks its
+    resolver and splices the answer in: unbound, the chat would answer every turn "Not logged in"."""
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
@@ -1036,25 +1037,64 @@ def test_a_machine_whose_template_keeps_no_accounts_is_dispatched_unbound(
     assert "CLAUDE_CONFIG_DIR" not in spawn[0][3]
 
 
-@pytest.mark.witnesses("workspace-updates.no-account-to-run-on")
-def test_a_machine_with_no_signed_in_account_is_told_so_instead_of_being_sent_a_dead_chat(
+def test_a_machine_that_writes_its_create_defaults_gets_one_probe_and_a_bare_create(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
+    """The machine's own mngr resolves the account and harness, so the app asks nothing and names nothing."""
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
         mngr_result=MngrCallResult(
-            returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, account_dir="")
+            returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, is_local_settings_present=True)
         ),
     )
     _mark_out_of_date(app, agent_id)
 
     response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
-    assert response.status_code == 409
-    assert "signed-in" in response.get_json()["error"]
+    assert response.status_code == 200
     caller = _service(app).mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
-    assert [call for call in caller.calls if any("mngr create" in arg for arg in call)] == []
+    execs = [call for call in caller.calls if call[0] == "exec"]
+    assert len(execs) == 2
+    assert not any("default_account_args.py" in call[3] for call in execs)
+    create = execs[1][3]
+    assert "mngr create" in create
+    assert "CLAUDE_CONFIG_DIR" not in create and "--type" not in create
+    assert "agent_types.claude.check_installation=false" in create
+    assert "user_created=true" in create
+
+
+@pytest.mark.witnesses("workspace-updates.workspace-refuses-the-agent")
+def test_a_machine_that_refuses_the_agent_has_its_refusal_shown_and_the_run_slot_released(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A machine with no provider account signed in refuses the create in its own words; the app shows them
+    and gives the run slot back, so signing in and pressing Update again works."""
+    refusal = "No provider account is signed in on this machine. Sign in from a chat tab, then try again."
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_caller=RefusingSpawnMngrCaller(
+            result=MngrCallResult(
+                returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, account_dir="")
+            ),
+            refusal_stderr=(
+                "Error: Pre-command script(s) failed for 'create':\n"
+                "  Script: python3 system/scripts/require_create_account.py\n"
+                "  Exit code: 1\n"
+                f"  Stderr: {refusal}\n"
+                "ERROR: Command failed on agent system-services\n"
+            ),
+        ),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"] == "Couldn't start the update agent in this machine."
+    assert refusal in body["detail"]
     # The run slot must come back, or a retry after signing in would be refused as already running.
     assert _service(app).state_store.get(agent_id).activity is UpdateActivity.IDLE

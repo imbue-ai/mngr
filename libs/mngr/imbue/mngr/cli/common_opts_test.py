@@ -23,6 +23,8 @@ from imbue.mngr.cli.common_opts import parse_output_options
 from imbue.mngr.cli.common_opts import restore_cli_list_values
 from imbue.mngr.cli.common_opts import save_cli_list_values_for_restoration
 from imbue.mngr.cli.common_opts import setup_command_context
+from imbue.mngr.cli.env_utils import resolve_env_vars
+from imbue.mngr.cli.env_utils import resolve_labels
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommandDefaults
 from imbue.mngr.config.data_types import CommonCliOptions
@@ -272,6 +274,36 @@ def test_pipeline_cli_flag_extends_non_empty_config(mngr_test_prefix: str) -> No
     # No templates here, so apply_create_template would be a no-op.
     result = restore_cli_list_values(after_defaults, cli_values)
     assert result["env"] == ("X=5", "X=6")
+
+
+def test_pipeline_cli_flag_wins_over_a_config_default_for_the_same_key(mngr_test_prefix: str) -> None:
+    """A CLI ``--env``/``--label`` naming a key the config layer already set resolves to the CLI's value.
+
+    The list ordering above is only half the contract: both flags are folded into a map
+    afterwards, and it is the fold that decides which of two entries for one key an agent
+    actually gets. A workspace that keeps its default provider account as ``[commands.create]``
+    defaults relies on this to launch a chat on any *other* account -- without it, an explicit
+    account would silently lose to the workspace default, on a create that reports success.
+    """
+    ctx = _make_click_context(
+        params={"env": ("CLAUDE_CONFIG_DIR=/accounts/chosen",), "label": ("account=chosen",)},
+        source_by_param_name={"env": ParameterSource.COMMANDLINE, "label": ParameterSource.COMMANDLINE},
+    )
+    config = MngrConfig(
+        prefix=mngr_test_prefix,
+        commands={
+            "create": CommandDefaults(
+                defaults={"env": ["CLAUDE_CONFIG_DIR=/accounts/default"], "label": ["account=default"]}
+            )
+        },
+    )
+
+    after_defaults = apply_config_defaults(ctx, config, "create")
+    result = restore_cli_list_values(after_defaults, save_cli_list_values_for_restoration(ctx))
+
+    env_by_key = {env_var.key: env_var.value for env_var in resolve_env_vars((), result["env"])}
+    assert env_by_key["CLAUDE_CONFIG_DIR"] == "/accounts/chosen"
+    assert resolve_labels(result["label"]).labels["account"] == "chosen"
 
 
 def test_pipeline_cli_flag_extends_multiple_values(mngr_test_prefix: str) -> None:
@@ -1201,43 +1233,36 @@ def test_apply_settings_to_config_sets_command_defaults(mngr_test_prefix: str) -
     assert result.commands["create"].defaults["connect"] is False
 
 
-def test_apply_settings_to_config_replaces_existing_command_defaults(mngr_test_prefix: str) -> None:
-    """Assign-by-default: --setting on a command param replaces the whole defaults map.
-
-    To preserve other keys, the user would explicitly write ``defaults__extend``
-    or repeat each key in the --setting list. The narrowing guard is opted out
-    of via ``allow_settings_key_assignment_narrowing=True`` so the test exercises
-    the assign-by-default behavior directly; without the opt-in this would raise
-    a ConfigParseError (see ``test_apply_settings_to_config_narrowing_raises``).
+def test_apply_settings_to_config_adds_to_existing_command_defaults(mngr_test_prefix: str) -> None:
+    """A --setting on a command param joins the defaults map: the other parameters a lower
+    layer set stay, and no narrowing is reported, because ``CommandDefaults.defaults`` is a
+    settings patch rather than a map one layer replaces wholesale.
     """
     config = MngrConfig(
         prefix=mngr_test_prefix,
         commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
-        allow_settings_key_assignment_narrowing=True,
     )
     result = apply_settings_to_config(
         config,
         ("commands.create.connect=false",),
         frozenset(),
     )
-    # Only the new setting's key is present; the prior "branch" entry was wiped.
-    assert result.commands["create"].defaults == {"connect": False}
+    assert result.commands["create"].defaults == {"branch": "main:agent/*", "connect": False}
 
 
 def test_apply_settings_to_config_narrowing_raises_by_default(mngr_test_prefix: str) -> None:
-    """Without the opt-in, a --setting that would drop earlier entries raises ConfigParseError.
-
-    Mirrors the test above but uses the default ``allow_settings_key_assignment_narrowing=False``,
-    which is the safety net for users who haven't migrated to the new assign-by-default behavior.
+    """Without the opt-in, a --setting that assigns a list bare over a non-empty one a lower
+    layer set raises ConfigParseError: the map accumulates keys, but a same-key aggregate
+    replaced wholesale still loses the earlier entries.
     """
     config = MngrConfig(
         prefix=mngr_test_prefix,
-        commands={"create": CommandDefaults(defaults={"branch": "main:agent/*"})},
+        commands={"create": CommandDefaults(defaults={"env": ["X=5"]})},
     )
     with pytest.raises(ConfigParseError, match="narrowing"):
         apply_settings_to_config(
             config,
-            ("commands.create.connect=false",),
+            ('commands.create.env=["Y=1"]',),
             frozenset(),
         )
 

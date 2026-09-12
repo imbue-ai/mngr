@@ -71,6 +71,7 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
+from imbue.minds.desktop_client.skill_chat import USER_CREATED_LABEL
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.errors import BackupProvisioningError
@@ -1168,7 +1169,7 @@ def _build_mngr_create_command(
         "--branch",
         f":mngr/{host_name}",
         "--label",
-        "user_created=true",
+        USER_CREATED_LABEL,
         *latchkey_host_env_args,
         *extra_pass_host_env_args,
         "--label",

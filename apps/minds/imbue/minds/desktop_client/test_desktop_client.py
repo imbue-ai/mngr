@@ -1367,7 +1367,8 @@ _ASSIST_SKILL_PRESENT_STDOUT = "MNGR_ASSIST_SKILL_PRESENT\n"
 
 
 def test_help_assist_spawns_when_the_skill_is_present(tmp_path: Path) -> None:
-    """A supported machine probes clean, then the chat is created, bound to the machine's account."""
+    """A supported machine that writes no create defaults probes clean, is asked its resolver, and the chat is
+    created bound to the account it named."""
     caller = RecordingMngrCaller(
         result=MngrCallResult(returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT))
     )
@@ -1402,8 +1403,30 @@ def test_help_assist_spawns_unbound_on_a_machine_whose_template_keeps_no_account
     assert "CLAUDE_CONFIG_DIR" not in create[3]
 
 
-def test_help_assist_refuses_a_machine_with_no_signed_in_account(tmp_path: Path) -> None:
-    """Spawning here would hand the user a chat that cannot take a turn."""
+def test_help_assist_spawns_bare_on_a_machine_that_writes_its_create_defaults(tmp_path: Path) -> None:
+    """The machine's own mngr resolves the account and harness: one probe, then a create naming neither."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT, is_local_settings_present=True),
+        )
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 200
+    assert len(caller.calls) == 2
+    create = caller.calls[1][3]
+    assert "mngr create" in create
+    assert "CLAUDE_CONFIG_DIR" not in create and "--type" not in create
+    # The one setting the app adds: the lever for a machine whose claude no longer matches its pin.
+    assert "agent_types.claude.check_installation=false" in create
+
+
+def test_help_assist_spawns_unbound_when_the_resolver_names_no_account(tmp_path: Path) -> None:
+    """The create runs, and what the machine makes of it is the verdict the user sees, rather than a
+    refusal the app composes out here."""
     caller = RecordingMngrCaller(
         result=MngrCallResult(
             returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT, account_dir="")
@@ -1413,9 +1436,10 @@ def test_help_assist_refuses_a_machine_with_no_signed_in_account(tmp_path: Path)
 
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
 
-    assert response.status_code == 409
-    assert "signed-in" in response.get_json()["error"]
-    assert not any("mngr create" in call[3] for call in caller.calls if len(call) > 3)
+    assert response.status_code == 200
+    create = caller.calls[2][3]
+    assert "mngr create" in create
+    assert "CLAUDE_CONFIG_DIR" not in create
 
 
 def test_help_assist_tells_the_user_what_a_refusing_machine_said(tmp_path: Path) -> None:

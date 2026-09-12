@@ -2217,6 +2217,35 @@ def test_load_config_extend_avoids_narrowing_without_opt_in(
     assert mngr_ctx.config.commands["create"].defaults["env"] == ["X=4", "X=5"]
 
 
+def test_load_config_local_command_defaults_add_to_the_projects(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A local ``[commands.create]`` naming only a ``type`` keeps every parameter the project's
+    table set: the table is a settings patch, not a map one layer replaces wholesale. Without
+    this a workspace that writes its default agent type locally would lose its project's
+    ``connect`` and ``host_env`` on every create.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+    (tmp_path / "settings.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\nconnect = false\nhost_env__extend = ["A=1"]\n'
+    )
+    (tmp_path / "settings.local.toml").write_text(
+        'is_allowed_in_pytest = true\n\n[commands.create]\ntype = "codex"\nlabel__extend = ["account=a"]\n'
+    )
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+    defaults = mngr_ctx.config.commands["create"].defaults
+    assert defaults["type"] == "codex"
+    assert defaults["label"] == ["account=a"]
+    assert defaults["connect"] is False
+    assert defaults["host_env"] == ["A=1"]
+
+
 # === load_config narrowing guard against agent_types / providers / create_templates ===
 #
 # These layer-level integration tests verify the guard fires uniformly across all

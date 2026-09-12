@@ -24,13 +24,13 @@ Feature: Running an update
     Then no update agent is started
     And the app explains that the workspace cannot update itself
 
-  @no-account-to-run-on
-  Scenario: A workspace with no account for its agents to run on is refused
-    An agent that cannot take a turn is worse than no agent, and this refusal is one the user clears themselves, so the run has to be startable again the moment they have.
-    Given an out-of-date workspace that keeps per-account credentials and has none signed in
+  @workspace-refuses-the-agent
+  Scenario: A workspace that refuses to start the update agent has its refusal shown
+    Which account and harness an agent runs on is the workspace's own decision, and so is whether one can run at all: a workspace with no provider account signed in refuses the agent in its own words, which the app shows rather than composing a reason of its own. That refusal is one the user clears themselves, so the run has to be startable again the moment they have.
+    Given an out-of-date workspace that refuses to start any agent in it
     When the user starts an update for that workspace
     Then no update agent is started
-    And the app explains that the workspace has no signed-in account for the update agent
+    And the app shows the workspace's own refusal
     And starting that workspace's update again is not refused as one already in flight
 
   @stop-mid-apply-is-confirmed
