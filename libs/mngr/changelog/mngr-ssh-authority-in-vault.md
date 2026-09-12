@@ -1,0 +1,1 @@
+`create_pyinfra_host` and the SSH utilities load an OpenSSH certificate found beside a private key (`<key>-cert.pub`) and present it during authentication, so hosts that trust a certificate authority rather than the raw key can be managed through pyinfra (imbue-ai/mngr-internal#850). The paramiko floor moves to 3.2, the first release with the `PKey.from_path` loader this uses.

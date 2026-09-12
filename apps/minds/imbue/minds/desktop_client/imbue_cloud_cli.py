@@ -204,6 +204,20 @@ class LeasedHost(WireModel):
     leased_at: str
 
 
+class MachineSizeCliInfo(WireModel):
+    """Result of `mngr imbue_cloud machines show <ref>`: the machine's sizes and the restart-to-apply flag."""
+
+    host_db_id: str
+    host_id: str
+    host_name: str
+    status: str
+    memory_units: int | None = None
+    target_memory_units: int | None = None
+    disk_gb: int | None = None
+    target_disk_gb: int | None = None
+    is_restart_needed_to_apply: bool = False
+
+
 class LiteLLMKeyMaterial(WireModel):
     """Result of `mngr imbue_cloud keys litellm create`."""
 
@@ -610,6 +624,30 @@ class ImbueCloudCli(MutableModel):
         if not isinstance(entries, list):
             return []
         return [LeasedHost.model_validate(entry) for entry in entries if isinstance(entry, dict)]
+
+    def show_machine(self, account: str, machine_ref: str) -> MachineSizeCliInfo | None:
+        """The machine's sizes for one leased host (by mngr host id, row id, or name), or None when unknown.
+
+        None covers both "no such machine" and any CLI failure: the settings
+        surface renders the size read-only and simply omits it when it cannot
+        be fetched.
+        """
+        result = self._run(
+            ["machines", "show", machine_ref, "--account", account],
+            cg_name="imbue-cloud-machines-show",
+        )
+        if result.returncode != 0:
+            logger.debug(
+                "imbue_cloud machines show failed for {} (exit {}): {}",
+                machine_ref,
+                result.returncode,
+                _short(result.stderr or result.stdout),
+            )
+            return None
+        body = _parse_stdout_json(result.stdout, "machines show")
+        if not isinstance(body, dict):
+            return None
+        return MachineSizeCliInfo.model_validate(body)
 
     def release_host(self, account: str, host_db_id: str) -> bool:
         result = self._run(

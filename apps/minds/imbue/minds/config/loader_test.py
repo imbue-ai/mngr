@@ -2,10 +2,16 @@ from pathlib import Path
 
 import pytest
 from pydantic import AnyUrl
+from pydantic import ValidationError
 
+from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
+from imbue.minds.config.data_types import ManagementPlaneConfig
+from imbue.minds.config.data_types import SshCaConfig
+from imbue.minds.config.data_types import management_overlay_for_tier
 from imbue.minds.config.loader import EnvConfigError
+from imbue.minds.config.loader import _assert_operators_inside_tier_operator_block
 from imbue.minds.config.loader import bundled_client_config_path_or_none
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
@@ -130,3 +136,71 @@ def test_every_committed_deploy_toml_analytics_enablement_matches_bringup_state(
     """Analytics is on only for tiers whose bringup runbook has run (staging + production: 2026-08-26); flipping a tier is a deliberate edit."""
     config = load_deploy_config(tier)
     assert config.analytics.is_deployed is is_deployed
+
+
+def test_management_plane_loader_rejects_an_operator_outside_the_tier_operator_block() -> None:
+    # The block membership check lives in the loader (only it knows the tier);
+    # an address in the tier's BOX range would eventually collide with a box.
+    config = ManagementPlaneConfig.model_validate(
+        {"wireguard": {"operators": [{"name": "josh", "public_key": "opkey1=", "address": "10.112.1.5"}]}}
+    )
+
+    with pytest.raises(EnvConfigError, match="operator block"):
+        _assert_operators_inside_tier_operator_block(config, "dev", Path("deploy.toml"))
+
+
+@pytest.mark.parametrize("tier", ["staging", "production", "ci"])
+def test_committed_deploy_tomls_have_no_management_plane_until_the_tier_brings_one_up(tier: str) -> None:
+    # Pinned so the day a tier commits its [management_plane] table (operator
+    # peers + the Modal Proxy whose IPs the box :22 lockdown allowlists) the
+    # bringup runbook, not an accident, is what flips this.
+    assert load_deploy_config(tier).management_plane is None
+
+
+def test_committed_dev_deploy_toml_carries_the_activated_management_plane() -> None:
+    # The dev tier's [management_plane] table is activated (the gen-2 canary's
+    # management plane): at least one operator peer, and the shared workspace
+    # proxy named with its environment and at least one allowlisted static IP.
+    config = load_deploy_config("dev").management_plane
+
+    assert config is not None
+    assert int(config.wireguard.listen_port) == 51820
+    assert len(config.wireguard.operators) >= 1
+    # Every committed operator sits inside the dev tier's operator block (the
+    # loader enforces it; this pins the committed file itself).
+    dev_operator_block = management_overlay_for_tier("dev").operator_block
+    assert all(operator.address in dev_operator_block for operator in config.wireguard.operators)
+    assert config.modal_proxy is not None
+    assert str(config.modal_proxy.proxy_name) == "minds-dev-connector"
+    assert str(config.modal_proxy.environment_name) == "main"
+    assert len(config.modal_proxy.static_ips) >= 1
+
+
+def test_ssh_ca_config_accepts_an_openssh_public_key_line_and_rejects_junk() -> None:
+    config = SshCaConfig(public_key=NonEmptyStr("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKE minds-dev-ssh-ca"))
+    assert str(config.public_key).startswith("ssh-ed25519 ")
+    with pytest.raises(ValidationError):
+        SshCaConfig(public_key=NonEmptyStr("not-a-key"))
+
+
+@pytest.mark.parametrize("tier", ["staging", "production"])
+def test_committed_deploy_tomls_have_no_ssh_ca_until_the_tier_brings_one_up(tier: str) -> None:
+    # Pinned so the day a tier commits its CA the bringup checklist (not an
+    # accident) is what flips this; until then gen-2 prep and bakes refuse.
+    assert load_deploy_config(tier).ssh_ca is None
+
+
+@pytest.mark.parametrize(
+    ("tier", "ca_key"),
+    [
+        ("dev", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDn/NBtT5XWAmOSPj2S6kXsvEPAoORm1x3ZSkRIX+XW"),
+        ("ci", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO1I1Y1NYn86jMrvCxLkIoMq7nXCNiMgxf6Am1BtCUCO"),
+    ],
+)
+def test_committed_deploy_toml_carries_the_tier_ca_from_its_vault_mount(tier: str, ca_key: str) -> None:
+    # These tiers' CAs were brought up on 2026-09-09; every gen-2 box, VM, and
+    # container on the tier pins exactly this key, so an edit here is a CA
+    # rotation, and the two tiers must never share a key.
+    ssh_ca = load_deploy_config(tier).ssh_ca
+    assert ssh_ca is not None
+    assert str(ssh_ca.public_key).startswith(ca_key)

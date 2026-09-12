@@ -8,7 +8,11 @@ from pydantic import Field
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
+from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.ui_api_options import WHOLE_MACHINE_SERVICE
 from imbue.minds.desktop_client.ui_api_options import _workspace_host_coordinate_for_options
 from imbue.minds.desktop_client.ui_api_options import accepted_service_icon
@@ -222,3 +226,104 @@ def test_workspace_host_coordinate_ignores_non_host_shaped_coordinates() -> None
         display_info_by_agent_id={_AGENT_ID: AgentDisplayInfo(agent_name="sunny", host_id="localhost")},
     )
     assert _workspace_host_coordinate_for_options(resolver, None, _AGENT_ID) == ""
+
+
+def test_machine_size_requires_authentication(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=False, backend_resolver=_seeded_resolver()
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/machine-size")
+
+    assert response.status_code == 401
+
+
+def test_machine_size_rejects_malformed_agent_ids(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=_seeded_resolver()
+    )
+
+    response = client.get("/ui/api/workspaces/not-an-agent-id/machine-size")
+
+    assert response.status_code == 404
+
+
+def test_machine_size_is_unavailable_for_a_non_leased_workspace(tmp_path: Path) -> None:
+    # The seeded resolver reports provider "local", so no connector lookup is
+    # even attempted -- the section simply stays hidden.
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=_seeded_resolver()
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/machine-size")
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_available"] is False
+    assert body["memory_units"] is None
+
+
+class _MachineSizeStubCli(FakeImbueCloudCli):
+    """Fake whose ``show_machine`` returns a canned size and records its arguments.
+
+    The real ``show_machine`` subprocess parsing is covered by
+    ``imbue_cloud_cli_test.py``; this stub isolates the endpoint's glue (which
+    coordinates it passes, how the result is mapped onto the wire model).
+    """
+
+    machine_to_return: MachineSizeCliInfo | None = Field(default=None)
+    show_machine_calls: list[tuple[str, str]] = Field(default_factory=list)
+
+    def show_machine(self, account: str, machine_ref: str) -> MachineSizeCliInfo | None:
+        self.show_machine_calls.append((account, machine_ref))
+        return self.machine_to_return
+
+
+def test_machine_size_reports_the_leased_machines_sizes(tmp_path: Path) -> None:
+    resolver = _OptionsSeededResolver(
+        url_by_agent_and_service={_AGENT_ID: {}},
+        display_info_by_agent_id={
+            _AGENT_ID: AgentDisplayInfo(agent_name="leased", host_id=_HOST_ID, provider_name="imbue_cloud_alice")
+        },
+    )
+    cli = _MachineSizeStubCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        machine_to_return=MachineSizeCliInfo(
+            host_db_id="row-1",
+            host_id=_HOST_ID,
+            host_name="sunny",
+            status="running",
+            memory_units=8,
+            target_memory_units=16,
+            disk_gb=28,
+            target_disk_gb=None,
+            is_restart_needed_to_apply=True,
+        ),
+    )
+    user_id = "33333333-3333-3333-3333-333333333333"
+    cli.add_account(user_id=user_id, email="owner@example.com")
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    session_store.associate_created_workspace(
+        user_id=user_id, agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=False
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=resolver,
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/machine-size")
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["is_available"] is True
+    assert body["memory_units"] == 8
+    assert body["target_memory_units"] == 16
+    assert body["disk_gb"] == 28
+    assert body["target_disk_gb"] is None
+    assert body["is_restart_needed_to_apply"] is True
+    # The lookup keys the connector by the associated account and the
+    # machine's host coordinate (not the agent id).
+    assert cli.show_machine_calls == [("owner@example.com", _HOST_ID)]

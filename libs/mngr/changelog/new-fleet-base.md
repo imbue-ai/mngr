@@ -1,0 +1,3 @@
+`new-fleet-base` is the integration base for the in-progress slice-fleet generation-2 program (specs/slice-fleet-gen2 and specs/slice-fleet): the squash of the formerly stacked PRs #571, #573, #574, #581, #609, and #614. It is deployed only to dev canaries and must not be deployed or merged as-is; follow-up PRs stack on it and the whole program lands on `main` as one change.
+
+For this project it carries only the regenerated command reference (`docs/commands/secondary/imbue_cloud.md`) documenting the `mngr imbue_cloud machines show` and `mngr imbue_cloud machines resize` subcommands, which live in the `mngr_imbue_cloud` plugin. See this directory's `mngr-new-fleet-testing` entry.

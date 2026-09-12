@@ -121,6 +121,14 @@ class UiWorkspaceEntry(FrozenModel):
             "device; empty for live rows"
         ),
     )
+    key_state: str = Field(
+        default="",
+        description=(
+            "For a live cloud row this device holds no SSH key for (so it cannot open the machine): 'locked' "
+            "when the synced key needs the master password here, 'syncing' when the account is unlocked and "
+            "the key has not arrived yet, 'unavailable' when no key can reach this device; empty otherwise"
+        ),
+    )
 
 
 class UiHelloMessage(FrozenModel):

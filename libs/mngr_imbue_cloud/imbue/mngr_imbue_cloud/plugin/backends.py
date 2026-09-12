@@ -18,7 +18,7 @@ from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_file_url
-from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.slice_client import build_slice_vm_client
 
 IMBUE_CLOUD_BACKEND: Final[ProviderBackendName] = ProviderBackendName(IMBUE_CLOUD_BACKEND_NAME)
 
@@ -75,10 +75,11 @@ class ImbueCloudProviderBackend(ProviderBackendInterface):
 
 
 class SliceVpsDockerProviderBackend(ProviderBackendInterface):
-    """Backend for the slice provider (lima-VM "VPS" on a bare-metal box).
+    """Backend for the slice provider (a VM "VPS" on a bare-metal box).
 
     Used by the admin bake (``mngr create ...@<host>.imbue_cloud_slice``), run from
-    the operator's machine; the lima client drives limactl over SSH on the box.
+    the operator's machine; the box's generation-specific slice client drives the
+    VM over SSH on the box.
     """
 
     @staticmethod
@@ -87,7 +88,7 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
 
     @staticmethod
     def get_description() -> str:
-        return "Runs agents in Docker containers inside lima VMs ('slices') on a bare-metal box"
+        return "Runs agents in Docker containers inside VMs ('slices') on a bare-metal box"
 
     @staticmethod
     def get_config_class() -> type[ProviderInstanceConfig]:
@@ -111,22 +112,25 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         if not isinstance(config, SliceVpsDockerProviderConfig):
             raise MngrError(f"Expected SliceVpsDockerProviderConfig, got {type(config).__name__}")
-        # Slices boot from the box-staged guest image (file://) by default so a bake
-        # never hits the Debian mirror; an explicit slice_base_image_url overrides it.
-        base_image_url = config.slice_base_image_url or slice_base_image_file_url(config.box_ssh_user)
-        lima_client = LimaSliceVpsClient(
-            box_address=config.box_public_address,
+        # The box's generation (threaded here by the operator pool bake) selects
+        # the backend. Gen-1 slices boot from the box-staged guest image (file://)
+        # by default so a bake never hits the Debian mirror; slice_base_image_url
+        # overrides it.
+        slice_client = build_slice_vm_client(
+            box_generation=config.box_generation,
+            box_address=config.box_management_address or config.box_public_address,
+            box_ssh_port=config.box_management_ssh_port or 22,
             box_ssh_user=config.box_ssh_user,
             private_key_path=config.pool_private_key_path,
-            vm_image_url=base_image_url,
             box_host_public_key=config.box_host_public_key,
+            gen1_vm_image_url=config.slice_base_image_url or slice_base_image_file_url(config.box_ssh_user),
         )
         return SliceVpsDockerProvider(
             name=name,
             host_dir=config.host_dir,
             mngr_ctx=mngr_ctx,
             config=config,
-            vps_client=lima_client,
+            vps_client=slice_client,
             slice_config=config,
-            lima_client=lima_client,
+            slice_client=slice_client,
         )

@@ -5,6 +5,8 @@ from imbue.mngr_imbue_cloud.plugin.backends import SliceVpsDockerProviderBackend
 from imbue.mngr_imbue_cloud.plugin.slice_entrypoints import register_provider_backend
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
+from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.qemu_slice_client import QemuSliceVpsClient
 
 
 def test_backend_name_and_config_class() -> None:
@@ -18,7 +20,7 @@ def test_plugin_registers_the_slice_backend() -> None:
     assert config_class is SliceVpsDockerProviderConfig
 
 
-def test_build_provider_instance_wires_lima_client_and_slice_config(temp_mngr_ctx: MngrContext) -> None:
+def test_build_provider_instance_wires_slice_client_and_slice_config(temp_mngr_ctx: MngrContext) -> None:
     config = SliceVpsDockerProviderConfig(
         backend=ProviderBackendName("imbue_cloud_slice"),
         box_public_address="15.204.140.221",
@@ -28,7 +30,23 @@ def test_build_provider_instance_wires_lima_client_and_slice_config(temp_mngr_ct
         ProviderInstanceName("imbue_cloud_slice"), config, temp_mngr_ctx
     )
     assert isinstance(provider, SliceVpsDockerProvider)
-    # The base vps_client and the narrow lima_client are the same object, and the
+    # The base vps_client and the narrow slice_client are the same object, and the
     # slice config is exposed for the slice-specific knobs.
-    assert provider.lima_client is provider.vps_client
+    assert provider.slice_client is provider.vps_client
+    assert isinstance(provider.slice_client, LimaSliceVpsClient)
     assert provider.slice_config.box_public_address == "15.204.140.221"
+
+
+def test_build_provider_instance_selects_the_qemu_backend_for_gen2_boxes(temp_mngr_ctx: MngrContext) -> None:
+    config = SliceVpsDockerProviderConfig(
+        backend=ProviderBackendName("imbue_cloud_slice"),
+        box_public_address="15.204.140.221",
+        box_generation=2,
+        slice_vcpus=2,
+    )
+    provider = SliceVpsDockerProviderBackend.build_provider_instance(
+        ProviderInstanceName("imbue_cloud_slice"), config, temp_mngr_ctx
+    )
+    assert isinstance(provider, SliceVpsDockerProvider)
+    assert isinstance(provider.slice_client, QemuSliceVpsClient)
+    assert provider.slice_client is provider.vps_client

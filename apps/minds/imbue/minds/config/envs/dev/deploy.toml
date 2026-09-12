@@ -32,6 +32,7 @@ services = [
     "sharing",
     "storage",
     "sentry",
+    "ssh-ca",
 ]
 
 # Dev envs keep no warm containers (min_containers defaults to 0), so without
@@ -42,6 +43,61 @@ services = [
 [scaledown_window]
 connector = 600
 litellm_proxy = 600
+
+# The tier's SSH certificate authority (imbue-ai/mngr-internal#850): the public
+# half of the Vault ``minds-dev-ssh`` mount's CA, which every gen-2 box, slice VM,
+# and workspace container trusts for management SSH instead of a static key.
+# Read with
+#   vault read -field=public_key minds-dev-ssh/config/ca
+# after the Vault bring-up (imbue-ai/vault terraform, applied 2026-09-09).
+# Rotating the CA means re-prepping every gen-2 box and re-baking every slice
+# on the tier before updating this value (see docs/deploy/setup/vault.md).
+[ssh_ca]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDn/NBtT5XWAmOSPj2S6kXsvEPAoORm1x3ZSkRIX+XW minds-dev-ssh-ca"
+
+# The tier's gen-2 management plane (specs/slice-fleet-gen2, phase 3; runbook:
+# apps/minds/docs/deploy/gen2-management-plane.md). Every value here is PUBLIC
+# (operator WireGuard public keys, the tier's Modal Proxy name and static
+# egress IPs), so peer and allowlist changes are ordinary PR-reviewed edits.
+# The matching private halves never leave their machines: each operator
+# generates their own keypair locally into their per-tier identity directory
+# (`wg genkey | tee ~/.mindsadmin/dev/wireguard.key | wg pubkey`) and each
+# box generates its own at prep.
+#
+# Addressing plan (MANAGEMENT_OVERLAY_CIDR_BY_TIER in the minds config; every
+# tier gets a disjoint carve of the reserved 10.64.0.0/10 supernet, so one
+# operator machine can hold several tiers' tunnels at once). The dev tier's
+# overlay is 10.112.0.0/16:
+#   - operators: 10.112.0.2 - 10.112.0.254, assigned by hand in this table;
+#   - boxes: 10.112.1.1 upward, assigned sequentially at `minds-admin server
+#     prep` and stamped on the bare_metal_servers row (`wireguard_address`).
+#
+# The box `:22` lockdown is applied by gen-2 prep ONLY when
+# [management_plane.modal_proxy] is configured below -- without it the
+# connector would have no allowlisted egress address and every workspace on
+# the box would break. All dev envs share this one table (and the minds-dev
+# workspace's single proxy). A tier without a [management_plane] table has no
+# management plane yet.
+[management_plane.wireguard]
+listen_port = 51820
+
+# One block per operator.
+
+# Josh's operator key. The private half lives on Josh's dev box at
+# ~/.mindsadmin/dev/wireguard.key (generated during the gen-2 canary activation).
+[[management_plane.wireguard.operators]]
+name = "josh"
+public_key = "GbBZ3zKqhQYW8R9nbYrV1le0S10KxLT4KqPcRp2r5QI="
+address = "10.112.0.2"
+
+# The tier's Modal Proxy: created once in the minds-dev Modal workspace,
+# named here with its static egress IPs. Proxy lookup is Modal-environment
+# scoped and the workspace holds at most one proxy, so the shared dev proxy
+# lives in the 'main' environment and every dev env resolves it there.
+[management_plane.modal_proxy]
+proxy_name = "minds-dev-connector"
+environment_name = "main"
+static_ips = ["34.239.15.6"]
 
 # Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. All four
 # are required (no defaults) so a misconfigured tier fails fast on load.
@@ -79,6 +135,8 @@ max_buckets = 5
 max_total_bucket_gb = 25
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
+max_active_machine_units = 8
+max_total_machine_disk_gb = 140
 
 [plans.explorer]
 max_remote_workspaces = 2
@@ -87,6 +145,8 @@ max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
+max_active_machine_units = 16
+max_total_machine_disk_gb = 280
 
 [plans.ally]
 max_remote_workspaces = 10
@@ -95,6 +155,8 @@ max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
+max_active_machine_units = 80
+max_total_machine_disk_gb = 1400
 
 # Enables browser-driven workspace creation (the connector's POST
 # /hosts/claim). The repo is the canonical host/org/repo key the pool bake

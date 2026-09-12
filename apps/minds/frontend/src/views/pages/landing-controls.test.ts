@@ -3,6 +3,7 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
+  keyStateChipFor,
   lifecycleConfirmation,
   mindControlsFor,
   remoteLocationBadgeFor,
@@ -64,6 +65,13 @@ describe("mindControlsFor", () => {
 });
 
 describe("rowClickActionFor", () => {
+  it("blocks a cloud machine this device holds no key for, whatever its health or liveness", () => {
+    expect(rowClickActionFor({ supports_shutdown: true, key_state: "locked" }, "RUNNING", true)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, key_state: "syncing" }, "RUNNING", false)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, key_state: "unavailable" }, "STOPPED", true)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, key_state: "" }, "RUNNING", true)).toBe("enter");
+  });
+
   it("routes an unhealthy machine to recovery regardless of liveness", () => {
     expect(rowClickActionFor({ supports_shutdown: true }, "STOPPED", false)).toBe("recover");
     expect(rowClickActionFor({ supports_shutdown: false }, "RUNNING", false)).toBe("recover");
@@ -79,6 +87,15 @@ describe("rowClickActionFor", () => {
     expect(rowClickActionFor({ supports_shutdown: true }, "RUNNING", true)).toBe("enter");
     expect(rowClickActionFor({ supports_shutdown: false }, "STOPPED", true)).toBe("enter");
     expect(rowClickActionFor({}, "UNKNOWN", true)).toBe("enter");
+  });
+});
+
+describe("keyStateChipFor", () => {
+  it("names the remedy for each state and nothing for a machine this device can open", () => {
+    expect(keyStateChipFor("locked")?.label).toBe("Enter your master password to open");
+    expect(keyStateChipFor("syncing")?.label).toBe("Syncing access…");
+    expect(keyStateChipFor("unavailable")?.label).toBe("No access from this device");
+    expect(keyStateChipFor("")).toBeNull();
   });
 });
 

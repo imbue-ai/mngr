@@ -95,6 +95,8 @@ Key concepts in the minds system:
   IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.
   MODAL runs in a Modal sandbox using the local machine's own Modal token; sandboxes are ephemeral (~1 day max), so it is testing-only.
 
+- **machine size**: how big a remote (imbue_cloud) machine is, in two independent factors (specs/slice-fleet). *Units* are the single compute knob -- 1 unit = 1GiB of machine RAM, with vCPUs and fair-share bandwidth scaling proportionally; allowed sizes are multiples of 8 units up to 128. *Disk* is a second, grow-only factor, sized once at creation (3.5GiB per unit) and grown independently afterwards; it never shrinks. Resizing is record-then-restart: `mngr imbue_cloud machines resize` stamps the desired size, and the machine's next restart applies it (in place when its box has room, otherwise via a restore onto a box that does). Every new workspace starts at the default 8-unit size.
+
 - **environment**: an environment is a single deployed instance of the minds system.
   It owns, among other things, a data root, a Modal environment, a Neon project, and a SuperTokens app.
   Every environment belongs to exactly one tier, and takes its account credentials and deploy configuration from it.
@@ -105,7 +107,7 @@ Key concepts in the minds system:
   Production and staging are tiers that contain exactly one environment within them, while the CI and Dev tiers may have multiple CI and Dev environments respectively.
 
 - **adoption**: the user's own device taking ownership of a leased imbue_cloud slice's SSH trust material.
-  On lease -- and on the first connect for hosts leased earlier -- the client rotates both of the slice's sshd host keys to fresh user-generated keys (pinned user-origin in mngr's host-key store, which connector bake-time material can never displace) and installs an in-VM reconciler that re-asserts the owner's `authorized_keys` and host key on every boot, after cloud-init's replay.
-  After adoption, host-key trust flows only through the user's synced workspace records; the connector is trusted exactly once, at lease handoff.
+  On lease -- and on the first connect for hosts leased earlier -- the client rotates both of the slice's sshd host keys to fresh user-generated keys (pinned user-origin in mngr's host-key store, which connector bake-time material can never displace) and installs an in-VM reconciler that re-asserts the owner's `authorized_keys` and host key on every boot, after cloud-init's replay (a gen-1 lima behavior: a gen-2 slice's cloud-init runs exactly once, at first boot, so its adopted material simply persists across stop/start and restores).
+  After adoption, host-key trust flows only through the user's synced workspace records; the connector is trusted exactly once, at lease handoff. The pins are bound to an address and port, and the machine changes ports on every restore (driven by this client, an operator, a rollback, or another device), so the client remembers the endpoints it last pinned and moves the pins to the connector's current endpoints before every connection, with no network round trip.
   Idempotent and marker-driven; a served key that matches neither the pins nor an in-flight rotation is refused, never re-trusted.
   See `libs/mngr_imbue_cloud/README.md` ("Adoption and key rotation") and [the lost-device runbook](../deploy/reference/lost-device-runbook.md).

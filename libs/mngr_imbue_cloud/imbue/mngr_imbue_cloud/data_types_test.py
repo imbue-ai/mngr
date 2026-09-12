@@ -116,22 +116,36 @@ def test_parse_build_args_rejects_empty_region() -> None:
         parse_imbue_cloud_build_args(["region="])
 
 
-def _audit(*, authorized_key_count: int = 1, foreign_tier_slices: tuple[str, ...] = ()) -> BoxTierAudit:
+def _audit(
+    *,
+    authorized_key_count: int = 1,
+    expected_authorized_key_count: int = 1,
+    foreign_tier_slices: tuple[str, ...] = (),
+    is_trusted_ca_correct: bool = True,
+) -> BoxTierAudit:
     return BoxTierAudit(
         server_id="11111111-1111-1111-1111-111111111111",
         public_address="203.0.113.10",
         slot_count=6,
         box_used_slots=2,
         authorized_key_count=authorized_key_count,
+        expected_authorized_key_count=expected_authorized_key_count,
+        trusted_ca_public_key=None,
+        is_trusted_ca_correct=is_trusted_ca_correct,
         foreign_tier_slices=foreign_tier_slices,
         degraded_md_arrays=(),
         raw_swap_devices=(),
+        is_storage_encrypted=True,
     )
 
 
-def test_box_tier_audit_is_exclusive_only_with_one_key_and_no_foreign_slices() -> None:
+def test_box_tier_audit_is_exclusive_only_with_the_expected_keys_the_tier_ca_and_no_foreign_slices() -> None:
     assert _audit().is_exclusive_to_tier
     assert not _audit(authorized_key_count=2).is_exclusive_to_tier
+    assert _audit(authorized_key_count=0, expected_authorized_key_count=0).is_exclusive_to_tier
+    assert not _audit(
+        authorized_key_count=0, expected_authorized_key_count=0, is_trusted_ca_correct=False
+    ).is_exclusive_to_tier
     assert not _audit(foreign_tier_slices=("mngr-slice-dev-xiaq-" + "a" * 32 + "-data",)).is_exclusive_to_tier
 
 

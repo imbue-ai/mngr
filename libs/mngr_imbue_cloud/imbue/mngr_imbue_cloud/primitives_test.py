@@ -1,12 +1,15 @@
 import pytest
 
 from imbue.imbue_common.ids import InvalidRandomIdError
+from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import CI_TIER
 from imbue.mngr_imbue_cloud.primitives import DEV_TIER
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
+from imbue.mngr_imbue_cloud.primitives import InvalidBareMetalServerStatus
 from imbue.mngr_imbue_cloud.primitives import InvalidImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import OVH_DATACENTER_CODE_BY_US_REGION
 from imbue.mngr_imbue_cloud.primitives import PRODUCTION_TIER
+from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DRAINING
 from imbue.mngr_imbue_cloud.primitives import STAGING_TIER
 from imbue.mngr_imbue_cloud.primitives import US_REGION_BY_OVH_DATACENTER_CODE
 from imbue.mngr_imbue_cloud.primitives import WorkspaceId
@@ -56,12 +59,32 @@ def test_tier_for_env_name_maps_everything_else_to_the_dev_tier() -> None:
     assert tier_for_env_name("dev-ci-leftover") == DEV_TIER
 
 
-def test_is_box_exclusive_to_tier_requires_one_key_and_no_foreign_slices() -> None:
-    assert is_box_exclusive_to_tier(authorized_key_count=1, foreign_tier_slice_count=0)
+def _is_exclusive(
+    *,
+    authorized_key_count: int,
+    expected_authorized_key_count: int = 1,
+    foreign_tier_slice_count: int = 0,
+    is_trusted_ca_correct: bool = True,
+) -> bool:
+    return is_box_exclusive_to_tier(
+        authorized_key_count=authorized_key_count,
+        expected_authorized_key_count=expected_authorized_key_count,
+        foreign_tier_slice_count=foreign_tier_slice_count,
+        is_trusted_ca_correct=is_trusted_ca_correct,
+    )
+
+
+def test_is_box_exclusive_to_tier_requires_the_expected_keys_the_tier_ca_and_no_foreign_slices() -> None:
+    assert _is_exclusive(authorized_key_count=1)
     # An extra key hands another tier SSH into the box; a missing one means prep never ran.
-    assert not is_box_exclusive_to_tier(authorized_key_count=2, foreign_tier_slice_count=0)
-    assert not is_box_exclusive_to_tier(authorized_key_count=0, foreign_tier_slice_count=0)
-    assert not is_box_exclusive_to_tier(authorized_key_count=1, foreign_tier_slice_count=1)
+    assert not _is_exclusive(authorized_key_count=2)
+    assert not _is_exclusive(authorized_key_count=0)
+    assert not _is_exclusive(authorized_key_count=1, foreign_tier_slice_count=1)
+    # A gen-2 box authorizes no static key at all: one is a hand-added backdoor.
+    assert _is_exclusive(authorized_key_count=0, expected_authorized_key_count=0)
+    assert not _is_exclusive(authorized_key_count=1, expected_authorized_key_count=0)
+    # A box pinning another tier's CA accepts certificates that tier signs.
+    assert not _is_exclusive(authorized_key_count=0, expected_authorized_key_count=0, is_trusted_ca_correct=False)
 
 
 def test_us_region_by_ovh_datacenter_code_round_trips_the_forward_map() -> None:
@@ -70,6 +93,12 @@ def test_us_region_by_ovh_datacenter_code_round_trips_the_forward_map() -> None:
     assert len(US_REGION_BY_OVH_DATACENTER_CODE) == len(OVH_DATACENTER_CODE_BY_US_REGION)
     for region, datacenter in OVH_DATACENTER_CODE_BY_US_REGION.items():
         assert US_REGION_BY_OVH_DATACENTER_CODE[datacenter] == region
+
+
+def test_bare_metal_server_status_accepts_draining_and_rejects_junk() -> None:
+    assert BareMetalServerStatus("draining") == SERVER_STATUS_DRAINING
+    with pytest.raises(InvalidBareMetalServerStatus):
+        BareMetalServerStatus("repaving")
 
 
 def test_workspace_id_accepts_a_services_agent_id() -> None:

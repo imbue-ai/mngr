@@ -27,8 +27,10 @@ from imbue.minds.desktop_client.backup_env_store import read_canonical_env
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
+from imbue.minds.desktop_client.dek_store import read_bundle_mirror
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -243,28 +245,6 @@ def test_scheduler_pass_converts_legacy_state_and_tombstones_absent_rows(tmp_pat
 # -- SSH material materialization (cloud rows accessible from any install) ----
 
 
-def _make_profiled_device(
-    base: Path, name: str, cli: FakeImbueCloudCli
-) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore, Path]:
-    """A device whose mngr profile dir exists (SSH material collection + materialization need it)."""
-    paths = InstallationPaths(data_dir=base / name)
-    paths.data_dir.mkdir(parents=True, exist_ok=True)
-    mngr_host_dir = base / name / "mngr"
-    profile_id = uuid4().hex
-    profile_dir = mngr_host_dir / "profiles" / profile_id
-    profile_dir.mkdir(parents=True)
-    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
-    record_store = WorkspaceRecordStore(
-        paths=paths,
-        mngr_host_dir=mngr_host_dir,
-        cli=cli,
-        device_id=device_id_for_test(name),
-        device_label=name,
-    )
-    session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
-    return paths, record_store, session_store, profile_dir
-
-
 def _generate_test_ssh_private_key() -> str:
     """An OpenSSH-format Ed25519 key, the exact flavor mngr's ``generate_ssh_keypair`` produces."""
     private_key = ed25519.Ed25519PrivateKey.generate()
@@ -329,7 +309,7 @@ def _provision_cloud_workspace(
 
 def _provision_cloud_workspace_on_device_a(tmp_path: Path, cli: FakeImbueCloudCli) -> tuple[AgentId, HostId, str, str]:
     """Device A leases a cloud machine: per-host key on disk, record pushed with full secrets."""
-    paths_a, _, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    paths_a, _, session_a, profile_a = make_profiled_device_for_test(tmp_path, "laptop", cli)
     return _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
 
 
@@ -339,7 +319,7 @@ def test_unlock_materializes_cloud_row_ssh_material_on_a_fresh_install(tmp_path:
     _, host_id, private_key, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
     # Device B: fresh install, pulls the record, unlocks, materializes.
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     # Still locked: materialization is a no-op.
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is False
@@ -370,7 +350,7 @@ def test_materializer_applies_advanced_synced_material_to_a_host_this_install_le
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     _, host_id, synced_key, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
 
@@ -395,7 +375,7 @@ def test_materializer_keeps_leaseholder_material_the_record_has_not_advanced_pas
     """
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
-    paths_b, store_b, session_b, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    paths_b, store_b, session_b, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     _, host_id, _, known_hosts_line = _provision_cloud_workspace(paths_b, session_b, profile_b, cli)
 
     # B is the leaseholder and contributed the record's current material; it
@@ -431,7 +411,7 @@ def test_materializer_reapplies_record_pins_over_stale_bootstrap_pins_despite_a_
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     agent_id, host_id, synced_key, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    paths_b, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    paths_b, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
 
@@ -479,7 +459,7 @@ def test_materializer_replaces_a_placeholder_keypair(tmp_path: Path) -> None:
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     _, host_id, synced_key, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
 
@@ -498,7 +478,7 @@ def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases(tm
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     agent_id, host_id, _, _ = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -528,7 +508,7 @@ def test_sweep_removes_key_dirs_for_tombstoned_records_but_keeps_owned_leases(tm
 def test_producer_repushes_secrets_when_the_material_changes(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
-    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    paths_a, store_a, session_a, profile_a = make_profiled_device_for_test(tmp_path, "laptop", cli)
     bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
     assert bundle is not None
     cli.sync_bundle_push(_EMAIL, bundle)
@@ -550,7 +530,7 @@ def test_producer_repushes_secrets_when_the_material_changes(tmp_path: Path) -> 
     assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) > revision_before
 
     # A fresh install decrypts the rotated env.
-    paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
+    paths_b, store_b, _, _ = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     records_b = store_b.list_records(_USER_ID)
@@ -569,7 +549,7 @@ def test_non_contributor_never_clobbers_anothers_secrets_with_partial_material(t
     # Device B is unlocked, sees the cloud workspace in its own discovery, and
     # holds only PARTIAL local material (a backup env, no SSH key). Its
     # reconcile must not replace the record's full secrets with that view.
-    paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
+    paths_b, store_b, _, _ = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     write_canonical_env(paths_b, agent_id, "RESTIC_REPOSITORY=s3:partial-view\n")
@@ -641,7 +621,7 @@ def test_import_applies_synced_pins_as_user_origin_through_the_store(tmp_path: P
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     _, host_id, _, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -666,7 +646,7 @@ def test_import_is_revision_gated_so_an_unchanged_record_never_clobbers_newer_lo
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     _, host_id, _, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -692,7 +672,7 @@ def test_a_metadata_only_revision_advance_does_not_clobber_a_local_rotation(tmp_
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     agent_id, host_id, _, old_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -727,7 +707,7 @@ def test_a_drifted_local_env_is_converged_to_the_record_and_never_pushed(tmp_pat
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
 
     # Device A provisions the cloud workspace, then adds a backup env to the record.
-    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    paths_a, store_a, session_a, profile_a = make_profiled_device_for_test(tmp_path, "laptop", cli)
     agent_id, host_id, _, _ = _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
     resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     record_env = "RESTIC_REPOSITORY=s3:https://r2.example/bucket\nRESTIC_PASSWORD=record-pass\n"
@@ -735,7 +715,7 @@ def test_a_drifted_local_env_is_converged_to_the_record_and_never_pushed(tmp_pat
     store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
 
     # Device B already holds a different local env for this workspace.
-    paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
+    paths_b, store_b, _, _ = make_profiled_device_for_test(tmp_path, "desktop", cli)
     resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
@@ -764,12 +744,12 @@ def test_a_locally_newer_env_is_never_clobbered_and_propagates_outward(tmp_path:
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
 
     # Device A provisions the workspace with env v1; device B reaches parity.
-    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    paths_a, store_a, session_a, profile_a = make_profiled_device_for_test(tmp_path, "laptop", cli)
     agent_id, host_id, _, _ = _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
     resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     write_canonical_env(paths_a, agent_id, "RESTIC_REPOSITORY=s3:v1\nRESTIC_PASSWORD=one\n")
     store_a.reconcile({_USER_ID: _EMAIL}, resolver_a)
-    paths_b, store_b, _, _ = _make_profiled_device(tmp_path, "desktop", cli)
+    paths_b, store_b, _, _ = make_profiled_device_for_test(tmp_path, "desktop", cli)
     resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
@@ -831,7 +811,7 @@ def test_import_reapplies_pins_when_the_rendered_known_hosts_file_went_missing(t
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
     _, host_id, _, known_hosts_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -852,13 +832,13 @@ def test_hosting_device_pin_rotation_replaces_pins_on_other_devices_on_the_next_
     cli.add_account(user_id=_USER_ID, email=_EMAIL)
 
     # Device A provisions the cloud workspace (device made here so its store stays in hand).
-    paths_a, store_a, session_a, profile_a = _make_profiled_device(tmp_path, "laptop", cli)
+    paths_a, store_a, session_a, profile_a = make_profiled_device_for_test(tmp_path, "laptop", cli)
     agent_id, host_id, _, old_line = _provision_cloud_workspace(paths_a, session_a, profile_a, cli)
     key_dir_a = _cloud_host_key_dir(profile_a, host_id)
     resolver_a = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
 
     # Device B pulls, unlocks, and materializes the original pin.
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     store_b.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_b.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -889,7 +869,7 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
     agent_id, host_id, _, old_line = _provision_cloud_workspace_on_device_a(tmp_path, cli)
 
     # Device B materializes the full material (and with it the parity stamp).
-    _, store_b, _, profile_b = _make_profiled_device(tmp_path, "desktop", cli)
+    _, store_b, _, profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
     resolver_b = _cloud_resolver_with_workspace(agent_id, host_id, "cloud-ws")
     store_b.reconcile({_USER_ID: _EMAIL}, resolver_b)
     assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
@@ -912,7 +892,7 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
     assert int(str(cli.sync_records_by_email[_EMAIL][str(agent_id)]["revision"])) > revision_before
 
     # A fresh third device materializes the rotated material, not the original.
-    _, store_c, _, profile_c = _make_profiled_device(tmp_path, "tablet", cli)
+    _, store_c, _, profile_c = make_profiled_device_for_test(tmp_path, "tablet", cli)
     store_c.reconcile({_USER_ID: _EMAIL}, make_resolver_with_data(agents_json=json.dumps({"agents": []})))
     assert store_c.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
     assert store_c.materialize_account_synced_secrets(_USER_ID, _EMAIL) is True
@@ -921,3 +901,116 @@ def test_rotation_run_on_a_non_leasing_device_propagates_through_the_record(tmp_
     content_c = (key_dir_c / "known_hosts").read_text()
     assert rotated_pin in content_c
     assert old_line not in content_c
+
+
+def test_create_path_seed_of_a_cloud_machine_carries_its_provider_and_secrets(tmp_path: Path) -> None:
+    """The very first push of a created cloud machine is complete enough for another device.
+
+    The lease writes the per-host key before ``mngr create`` returns, and the
+    provider follows from the account, so nothing has to wait for the
+    reconcile's refresh: a device that pulls right away sees a secret-carrying
+    record, reads the account as locked, and materializes the key on unlock.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, _store_a, session_a, profile_a = make_profiled_device_for_test(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    key_dir = _cloud_host_key_dir(profile_a, host_id)
+    key_dir.mkdir(parents=True)
+    private_key = _generate_test_ssh_private_key()
+    (key_dir / "ssh_key").write_text(private_key)
+
+    session_a.associate_created_workspace(
+        user_id=_USER_ID,
+        agent_id=str(agent_id),
+        host_id=str(host_id),
+        display_name="fresh",
+        color=None,
+        is_cloud_row=True,
+    )
+
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
+    assert pushed["provider_kind"] == imbue_cloud_provider_name_for_account(_EMAIL)
+    assert pushed["encrypted_secrets"] is not None
+    assert pushed["hosting_device_id"] is None
+
+    paths_b, store_b, session_b, _profile_b = make_profiled_device_for_test(tmp_path, "desktop", cli)
+    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    scheduler_b = WorkspaceSyncScheduler(record_store=store_b, session_store=session_b, resolver=empty_resolver)
+    scheduler_b.run_one_pass()
+    assert store_b.locked_account_user_ids([_USER_ID]) == [_USER_ID]
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+    scheduler_b.run_one_pass()
+    key_path_b = store_b.imbue_cloud_host_ssh_key_path(_EMAIL, str(host_id))
+    assert key_path_b is not None
+    assert key_path_b.read_text() == private_key
+
+
+def test_create_path_seed_of_a_local_machine_leaves_the_provider_to_discovery(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    _paths_a, _store_a, session_a = _make_device(tmp_path, "laptop", cli)
+    agent_id = AgentId.generate()
+
+    session_a.associate_created_workspace(
+        user_id=_USER_ID,
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="local",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    pushed = cli.sync_records_by_email[_EMAIL][str(agent_id)]
+    assert pushed["provider_kind"] == ""
+    assert pushed["encrypted_secrets"] is None
+    assert pushed["hosting_device_id"] == device_id_for_test("laptop")
+
+
+def test_fresh_device_mirrors_the_server_bundle_before_any_record_carries_secrets(tmp_path: Path) -> None:
+    """A device signed in to an account with a master password reads as locked from its first sync.
+
+    The locked signal used to need a secret-carrying record; a fresh device
+    that pulled while every record was still secretless showed no unlock
+    banner. The reconcile now mirrors the server's bundle, which is also what
+    lets the unlock run without a further round trip.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, _store_a, session_a = _make_device(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    cli.sync_bundle_push(_EMAIL, bundle)
+    agent_id = AgentId.generate()
+    resolver_a = _resolver_with_workspace(agent_id, HostId.generate(), "no-material-yet")
+    session_a.associate_workspace(_USER_ID, str(agent_id), resolver_a)
+    assert cli.sync_records_by_email[_EMAIL][str(agent_id)]["encrypted_secrets"] is None
+
+    paths_b, store_b, session_b = _make_device(tmp_path, "desktop", cli)
+    assert read_bundle_mirror(paths_b, _USER_ID) is None
+    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    WorkspaceSyncScheduler(record_store=store_b, session_store=session_b, resolver=empty_resolver).run_one_pass()
+
+    assert read_bundle_mirror(paths_b, _USER_ID) == bundle
+    assert store_b.locked_account_user_ids([_USER_ID]) == [_USER_ID]
+    # The mirror is what the unlock reads, so it works even with the connector away.
+    cli.is_sync_offline = True
+    assert store_b.unlock_account(_USER_ID, _EMAIL, SecretStr(_PASSWORD)) is True
+
+
+def test_a_device_holding_a_mirror_the_server_lacks_uploads_it(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    paths_a, store_a, session_a = _make_device(tmp_path, "laptop", cli)
+    bundle = set_master_password_for_account(paths_a, _USER_ID, SecretStr(_PASSWORD))
+    assert bundle is not None
+    assert _EMAIL not in cli.sync_bundle_by_email
+
+    empty_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    WorkspaceSyncScheduler(record_store=store_a, session_store=session_a, resolver=empty_resolver).run_one_pass()
+
+    assert cli.sync_bundle_by_email[_EMAIL] == bundle

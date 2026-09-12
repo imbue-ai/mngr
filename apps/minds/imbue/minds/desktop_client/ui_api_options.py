@@ -118,6 +118,31 @@ class WorkspaceOptionsData(FrozenModel):
     whole_service: str = Field(description="The share target name that grants the whole machine")
 
 
+class WorkspaceMachineSizeData(FrozenModel):
+    """The read-only machine-size facts the settings page renders for a leased machine.
+
+    ``is_available`` is False when the size cannot be shown (not an
+    imbue_cloud lease, no associated account, or the connector lookup
+    failed); every other field is then absent/None and the page hides the
+    section rather than rendering an error.
+    """
+
+    is_available: bool = Field(description="Whether machine-size facts could be fetched for this workspace")
+    memory_units: int | None = Field(
+        default=None, description="Current size in units (1 unit = 1GiB machine RAM); None when unknown"
+    )
+    target_memory_units: int | None = Field(
+        default=None, description="Pending resize's unit target (applied at the next restart); None when none"
+    )
+    disk_gb: int | None = Field(default=None, description="Current data-disk size in GB; None when unknown")
+    target_disk_gb: int | None = Field(
+        default=None, description="Pending disk grow's GB target (applied at the next restart); None when none"
+    )
+    is_restart_needed_to_apply: bool = Field(
+        default=False, description="Whether a pending size target exists that a restart would apply"
+    )
+
+
 @pure
 def split_share_targets(servers: Sequence[str]) -> tuple[list[str], str]:
     """Split a workspace's services into per-app share targets and the whole-machine one.
@@ -251,10 +276,55 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
 
 
+def _handle_workspace_machine_size(agent_id: str) -> Response:
+    """The read-only machine-size facts for a leased imbue_cloud workspace (specs/slice-fleet).
+
+    Served separately from the options data so the settings page renders
+    immediately and the size loads lazily -- fetching it costs a
+    ``mngr imbue_cloud machines show`` round trip to the connector.
+    """
+    if not is_ui_request_authenticated():
+        return _json_error_response(401, "Not authenticated")
+    try:
+        parsed_agent_id = AgentId(agent_id)
+    except InvalidRandomIdError:
+        return _json_error_response(404, "Unknown workspace")
+
+    unavailable = WorkspaceMachineSizeData(is_available=False)
+    state = get_state()
+    session_store = state.session_store
+    imbue_cloud_cli = state.imbue_cloud_cli
+    backend_resolver = state.backend_resolver
+    info = backend_resolver.get_agent_display_info(parsed_agent_id)
+    is_leased = info is not None and (info.provider_name or "").startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
+    account = session_store.get_account_for_workspace(agent_id) if session_store else None
+    host_id = _workspace_host_coordinate_for_options(backend_resolver, session_store, agent_id)
+    if not is_leased or account is None or imbue_cloud_cli is None or not host_id:
+        return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
+
+    machine = imbue_cloud_cli.show_machine(account.email, host_id)
+    if machine is None:
+        return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
+    data = WorkspaceMachineSizeData(
+        is_available=True,
+        memory_units=machine.memory_units,
+        target_memory_units=machine.target_memory_units,
+        disk_gb=machine.disk_gb,
+        target_disk_gb=machine.target_disk_gb,
+        is_restart_needed_to_apply=machine.is_restart_needed_to_apply,
+    )
+    return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
+
+
 def register_options_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule(
         "/api/workspaces/<agent_id>/options",
         view_func=_handle_workspace_options_data,
+        methods=["GET"],
+    )
+    blueprint.add_url_rule(
+        "/api/workspaces/<agent_id>/machine-size",
+        view_func=_handle_workspace_machine_size,
         methods=["GET"],
     )

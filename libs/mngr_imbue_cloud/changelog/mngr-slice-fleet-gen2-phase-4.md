@@ -1,0 +1,1 @@
+The systemctl verbs limahost may run on the per-ordinal slice units are now the exported `GEN2_SLICE_SUDO_VERBS` constant (previously an inline tuple in `render_slice_sudoers`), so the gen-2 box telemetry collector's sudo-anomaly allowlist is rendered from the same source of truth as the sudoers grants. No behavior change.

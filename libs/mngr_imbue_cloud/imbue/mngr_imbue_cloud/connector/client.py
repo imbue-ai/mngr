@@ -59,6 +59,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
+from imbue.mngr_imbue_cloud.primitives import MAX_SUPPORTED_BOX_GENERATION
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
 from imbue.mngr_imbue_cloud.wire import validate_wire
 from imbue.mngr_imbue_cloud.wire_types import AccountInfo
@@ -595,6 +596,11 @@ class ImbueCloudConnectorClient(MutableModel):
             "attributes": attributes.to_request_dict(),
             "ssh_public_key": ssh_public_key,
             "host_name": host_name,
+            # Declared on every lease (fast and slow): the slow path drops the
+            # template tag from its attributes, so this field is what keeps a
+            # generation-capped connector from handing this client a row it
+            # cannot operate -- and what admits this client to gen-2 rows.
+            "max_box_generation": MAX_SUPPORTED_BOX_GENERATION,
         }
         # Only send region when set so the connector treats an absent field as
         # unconstrained.
@@ -795,6 +801,50 @@ class ImbueCloudConnectorClient(MutableModel):
         self._raise_if_quota_exceeded(response)
         body = self._check(response, ImbueCloudConnectorError)
         return WorkspaceStatus(str(body.get("status", "")))
+
+    def resize_machine(
+        self,
+        access_token: SecretStr,
+        host_db_id: str,
+        target_memory_units: int | None,
+        target_disk_gb: int | None,
+    ) -> dict[str, Any]:
+        """Record a machine resize (applied at the machine's next start); returns the recorded sizes.
+
+        The response is the connector's recorded state: current/target units
+        and disk. Raises the structured quota error on a 403, and a plain
+        connector error naming the refusal (allowed-size set, disk shrink,
+        ``starting`` state) on a 400/409.
+        """
+        body: dict[str, Any] = {}
+        if target_memory_units is not None:
+            body["target_memory_units"] = target_memory_units
+        if target_disk_gb is not None:
+            body["target_disk_gb"] = target_disk_gb
+        response = self._send(
+            "POST",
+            self._url(f"/machines/{host_db_id}/resize"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(access_token),
+            json=body,
+            timeout=self.timeout_seconds,
+        )
+        # An old connector has no /machines routes: FastAPI's fixed 404 "Not
+        # Found" (a modern connector's own 404 carries "No such machine" and
+        # falls through to the normal error mapping).
+        if response.status_code in (404, 405):
+            try:
+                missing_body = response.json()
+            except ValueError:
+                missing_body = None
+            missing_detail = missing_body.get("detail") if isinstance(missing_body, dict) else None
+            if missing_detail is None or missing_detail in ("Not Found", "Method Not Allowed"):
+                raise ImbueCloudConnectorError(
+                    "This connector does not serve machine resizing yet; redeploy it "
+                    "(Imbue-internal: `minds-admin env deploy`)."
+                )
+        self._raise_if_quota_exceeded(response)
+        return self._check(response, ImbueCloudConnectorError)
 
     def admin_release_workspace(self, admin_key: SecretStr, host_db_id: str) -> str:
         """Operator release of one workspace regardless of owner (admin-key authenticated).
@@ -1322,6 +1372,17 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return self._check(response, ImbueCloudAccountError)
+
+    def admin_start_workspace(self, admin_api_key: SecretStr, host_db_id: str) -> dict[str, Any]:
+        """Operator start of one stopped workspace (idempotent, like the owner start; no quota check)."""
+        response = self._send(
+            "POST",
+            self._url(f"/admin/workspaces/{host_db_id}/start"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(admin_api_key),
+            timeout=self.timeout_seconds,
+        )
+        return self._check(response, ImbueCloudConnectorError)
 
     def admin_stop_workspace(self, admin_api_key: SecretStr, host_db_id: str) -> dict[str, Any]:
         """Operator force-stop of one workspace (idempotent, like the owner stop)."""

@@ -1,20 +1,29 @@
 import json
 import tomllib
+from ipaddress import IPv4Network
+from itertools import combinations
 from pathlib import Path
 from typing import Final
 
 import pytest
+from inline_snapshot import snapshot
 from pydantic import AnyUrl
+from pydantic import ValidationError
 
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.config.data_types import MANAGEMENT_OVERLAY_CIDR_BY_TIER
+from imbue.minds.config.data_types import MANAGEMENT_OVERLAY_SUPERNET_CIDR
+from imbue.minds.config.data_types import ManagementPlaneConfig
 from imbue.minds.config.data_types import OriginsConfig
 from imbue.minds.config.data_types import PlanQuotasConfig
+from imbue.minds.config.data_types import management_overlay_for_tier
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.errors import MalformedMngrOutputError
+from imbue.minds.errors import ManagementPlaneConfigError
 from imbue.mngr.primitives import AgentId
 
 
@@ -106,6 +115,8 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
         max_total_bucket_gb=NonNegativeInt(50),
         monthly_llm_spend_usd=NonNegativeFloat(0),
         max_active_synced_workspaces=NonNegativeInt(200),
+        max_active_machine_units=NonNegativeInt(16),
+        max_total_machine_disk_gb=NonNegativeInt(280),
     )
     row = config.to_plan_row()
     assert row["max_total_bucket_bytes"] == 50 * 1024**3
@@ -113,11 +124,15 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     assert row["max_remote_workspaces"] == 2
     # Every quota column the connector's plans table carries is present.
     assert row["max_total_workspaces"] == 10
+    assert row["max_active_machine_units"] == 16
+    assert row["max_total_machine_disk_gb"] == 280
     assert sorted(row) == [
+        "max_active_machine_units",
         "max_active_synced_workspaces",
         "max_buckets",
         "max_remote_workspaces",
         "max_total_bucket_bytes",
+        "max_total_machine_disk_gb",
         "max_total_workspaces",
         "monthly_llm_spend_usd",
     ]
@@ -197,3 +212,137 @@ def test_committed_tier_deploy_tomls_parse_with_their_origins_blocks() -> None:
         config = load_deploy_config(tier)
         assert config.origins is not None
         assert str(config.origins.cookie_domain) == apex
+
+
+def test_management_plane_config_parses_a_full_document() -> None:
+    config = ManagementPlaneConfig.model_validate(
+        {
+            "wireguard": {
+                "listen_port": 51820,
+                "operators": [
+                    {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
+                    {"name": "alex", "public_key": "opkey2=", "address": "10.112.0.3"},
+                ],
+            },
+            "modal_proxy": {
+                "proxy_name": "minds-dev-connector",
+                "environment_name": "main",
+                "static_ips": ["203.0.113.10", "203.0.113.11"],
+            },
+        }
+    )
+
+    assert len(config.wireguard.operators) == 2
+    assert str(config.wireguard.operators[0].address) == "10.112.0.2"
+    assert config.modal_proxy is not None
+    assert str(config.modal_proxy.proxy_name) == "minds-dev-connector"
+    assert str(config.modal_proxy.environment_name) == "main"
+    assert [str(ip) for ip in config.modal_proxy.static_ips] == ["203.0.113.10", "203.0.113.11"]
+
+
+def test_management_modal_proxy_config_defaults_to_no_environment_name() -> None:
+    config = ManagementPlaneConfig.model_validate(
+        {"modal_proxy": {"proxy_name": "minds-dev-connector", "static_ips": ["203.0.113.10"]}}
+    )
+
+    assert config.modal_proxy is not None
+    assert config.modal_proxy.environment_name is None
+
+
+def test_management_plane_config_rejects_duplicate_operator_addresses() -> None:
+    with pytest.raises(ValidationError, match="addresses must be unique"):
+        ManagementPlaneConfig.model_validate(
+            {
+                "wireguard": {
+                    "operators": [
+                        {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
+                        {"name": "alex", "public_key": "opkey2=", "address": "10.112.0.2"},
+                    ],
+                },
+            }
+        )
+
+
+def test_management_plane_config_rejects_duplicate_operator_names() -> None:
+    # `minds-admin wireguard config --operator <name>` selects by name, so duplicates
+    # would silently resolve to whichever entry comes first.
+    with pytest.raises(ValidationError, match="names must be unique"):
+        ManagementPlaneConfig.model_validate(
+            {
+                "wireguard": {
+                    "operators": [
+                        {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
+                        {"name": "josh", "public_key": "opkey2=", "address": "10.112.0.3"},
+                    ],
+                },
+            }
+        )
+
+
+def test_management_plane_config_rejects_duplicate_operator_public_keys() -> None:
+    with pytest.raises(ValidationError, match="public keys must be unique"):
+        ManagementPlaneConfig.model_validate(
+            {
+                "wireguard": {
+                    "operators": [
+                        {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
+                        {"name": "alex", "public_key": "opkey1=", "address": "10.112.0.3"},
+                    ],
+                },
+            }
+        )
+
+
+def test_management_overlay_allocations_are_disjoint_carves_of_the_supernet() -> None:
+    # Disjointness is what lets one operator machine hold several tiers'
+    # tunnels at once; the supernet bound keeps every allocation inside the
+    # reserved block (clear of the Tailscale/CGNAT range and the box-local
+    # 10.201.0.0/16 per-slice range).
+    supernet = IPv4Network(MANAGEMENT_OVERLAY_SUPERNET_CIDR)
+    allocations = [management_overlay_for_tier(tier) for tier in sorted(MANAGEMENT_OVERLAY_CIDR_BY_TIER)]
+    for allocation in allocations:
+        assert allocation.overlay.subnet_of(supernet), allocation
+        assert allocation.operator_block.subnet_of(allocation.overlay)
+        assert allocation.operator_block.prefixlen == 24
+    for first, second in combinations(allocations, 2):
+        assert not first.overlay.overlaps(second.overlay), (first, second)
+
+
+def test_management_overlay_allocation_table_matches_the_agreed_layout() -> None:
+    assert dict(MANAGEMENT_OVERLAY_CIDR_BY_TIER) == snapshot(
+        {"production": "10.64.0.0/11", "staging": "10.96.0.0/16", "ci": "10.104.0.0/16", "dev": "10.112.0.0/16"}
+    )
+
+
+def test_management_overlay_for_tier_rejects_an_unknown_tier() -> None:
+    with pytest.raises(ManagementPlaneConfigError, match="no management overlay"):
+        management_overlay_for_tier("karaoke")
+
+
+def test_management_plane_config_rejects_operator_values_that_cannot_render_on_one_line() -> None:
+    # name and public_key are rendered verbatim into the box's wg0.conf inside
+    # a root-executed prep heredoc, so multi-line (or non-base64-key) values
+    # must be rejected at parse time.
+    with pytest.raises(ValidationError, match="must be a single line"):
+        ManagementPlaneConfig.model_validate(
+            {"wireguard": {"operators": [{"name": "josh\nevil", "public_key": "opkey1=", "address": "10.112.0.2"}]}}
+        )
+    with pytest.raises(ValidationError, match="base64"):
+        ManagementPlaneConfig.model_validate(
+            {"wireguard": {"operators": [{"name": "josh", "public_key": "opkey1=\nevil", "address": "10.112.0.2"}]}}
+        )
+
+
+def test_management_plane_config_rejects_an_out_of_range_listen_port() -> None:
+    # The port is rendered into every box's wg0.conf and every operator client
+    # config, so an out-of-range value must fail at parse time instead of
+    # on-box when wg-quick rejects the rendered file.
+    with pytest.raises(ValidationError, match="not a valid UDP port"):
+        ManagementPlaneConfig.model_validate({"wireguard": {"listen_port": 651820}})
+
+
+def test_management_plane_config_rejects_a_named_proxy_with_no_static_ips() -> None:
+    # A named proxy with an empty allowlist would lock the connector out of
+    # every gen-2 box the moment prep applies the :22 policy.
+    with pytest.raises(ValidationError, match="static_ips must not be empty"):
+        ManagementPlaneConfig.model_validate({"modal_proxy": {"proxy_name": "minds-dev-connector", "static_ips": []}})

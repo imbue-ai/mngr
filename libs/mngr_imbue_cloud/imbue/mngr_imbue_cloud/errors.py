@@ -176,6 +176,20 @@ class BareMetalProvisioningError(ImbueCloudError):
     """Raised when ordering, installing, or carving a bare-metal server / slice fails."""
 
 
+class SliceCommandError(ImbueCloudError):
+    """Raised when a box-side slice management command (over SSH) fails."""
+
+    def __init__(self, command: str, returncode: int | None, stderr: str, stdout: str = "") -> None:
+        self.command = command
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = stdout
+        message = f"slice {command} failed (exit code {returncode}): {stderr}"
+        if stdout:
+            message += f"\nstdout: {stdout}"
+        super().__init__(message)
+
+
 class SliceReserveOutputError(BareMetalProvisioningError):
     """Raised when the on-box slice reservation script produces no/garbled port output."""
 

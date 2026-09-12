@@ -44,6 +44,7 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL_FILENAME
@@ -55,6 +56,7 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import RemoteWorkspaceKind
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
+from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
@@ -610,6 +612,73 @@ def test_build_workspace_list_returns_workspaces_for_the_channel(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+def test_build_workspace_list_says_why_a_cloud_row_cannot_open_from_this_device(tmp_path: Path) -> None:
+    """A live cloud row this device holds no SSH key for carries a ``key_state`` naming the remedy.
+
+    The machine is listed on every device signed in to its account, but only
+    a device that has decrypted its record can connect: without the key the
+    row used to open onto a blank surface until the forward gave up.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    paths, record_store, session_store, _profile_dir = make_profiled_device_for_test(tmp_path, "this", cli)
+    instance_name = imbue_cloud_provider_name_for_account("a@b.com")
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    agents = [
+        {
+            "id": str(agent_id),
+            "labels": {"is_primary": "true"},
+            "host": {"id": str(host_id), "name": "cloud-ws"},
+            "provider": instance_name,
+        }
+    ]
+    backend_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(host_id),
+        display_name="cloud-ws",
+        color=None,
+        is_cloud_row=True,
+    )
+
+    # No bundle anywhere: nothing to unlock, so no key can ever arrive.
+    assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "unavailable"
+    # Unlocked, key not materialized yet: the sync is what brings it.
+    assert set_master_password_for_account(paths, "user-1", SecretStr("pw")) is not None
+    assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "syncing"
+    # A bundle mirror without a DEK is a locked account: the password opens it.
+    delete_dek(paths, "user-1")
+    assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "locked"
+    # With the key on disk the row opens like any other, whatever the lock state.
+    key_path = record_store.imbue_cloud_host_ssh_key_path("a@b.com", str(host_id))
+    assert key_path is not None
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text("not-a-real-key\n")
+    assert "key_state" not in _build_workspace_list(backend_resolver, session_store)[0]
+
+
+def test_build_workspace_list_never_flags_a_local_row_for_a_missing_key(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    agent_id = AgentId.generate()
+    backend_resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="local-ws"))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id="host-local",
+        display_name="local-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    rows = _build_workspace_list(backend_resolver, session_store)
+    assert rows[0]["account"] == "a@b.com"
+    assert "key_state" not in rows[0]
 
 
 def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> None:

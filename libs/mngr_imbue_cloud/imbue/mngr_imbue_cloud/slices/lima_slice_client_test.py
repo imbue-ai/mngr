@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_HOST_ID_HEX_LENGTH
+from imbue.mngr_imbue_cloud.slices.bare_metal import build_read_management_trust_command
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -42,7 +44,7 @@ def test_get_instance_ip_is_the_box_address() -> None:
 
 def test_box_ssh_command_targets_the_lima_user_with_the_pool_key() -> None:
     client = _client()
-    command = client._box_ssh_command("limactl list --json")
+    command = client._box_ssh_command("limactl list --json", Path("/tmp/known_hosts"))
     assert command[0] == "ssh"
     assert "-i" in command and "/tmp/id" in command
     assert "limahost@box.example" in command
@@ -70,7 +72,9 @@ def test_box_ssh_command_quotes_a_known_hosts_path_containing_a_space(tmp_path: 
         private_key_path=str(key_dir / "id"),
         box_host_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI" + "A" * 20,
     )
-    command = client._box_ssh_command("limactl list --json")
+    known_hosts_path = client._box_known_hosts_file()
+    assert known_hosts_path.parent == key_dir
+    command = client._box_ssh_command("limactl list --json", known_hosts_path)
     option = next(arg for arg in command if arg.startswith("UserKnownHostsFile="))
     value = option.removeprefix("UserKnownHostsFile=")
     assert value.startswith('"') and value.endswith('"'), option
@@ -80,7 +84,7 @@ def test_box_ssh_command_quotes_a_known_hosts_path_containing_a_space(tmp_path: 
 def test_box_ssh_command_requires_a_private_key() -> None:
     client = LimaSliceVpsClient(box_address="box.example", box_ssh_user="limahost", private_key_path=None)
     with pytest.raises(LimaCommandError):
-        client._box_ssh_command("limactl list --json")
+        client._box_ssh_command("limactl list --json", Path("/tmp/known_hosts"))
 
 
 class _RecordingClient(LimaSliceVpsClient):
@@ -143,20 +147,19 @@ def test_list_disk_names_parses_jsonl_names() -> None:
     assert client.list_disk_names() == {"mngr-slice-aaa-data", "mngr-slice-bbb-data"}
 
 
-def test_count_authorized_keys_counts_the_service_users_file() -> None:
-    keys = "ssh-ed25519 AAAApool pool@mngr\nssh-ed25519 AAAAother someone@elsewhere\n"
-    client = _recording_client({"authorized_keys": (0, keys, "")})
-    assert client.count_authorized_keys() == 2
+def test_read_management_trust_counts_the_service_users_file() -> None:
+    keys = "ssh-ed25519 AAAApool pool@mngr\nssh-ed25519 AAAAother someone@elsewhere\nMNGR_MANAGEMENT_TRUST_SPLIT\n"
+    client = _recording_client({"MNGR_MANAGEMENT_TRUST_SPLIT": (0, keys, "")})
+    trust = client.read_management_trust()
+    assert trust.authorized_key_count == 2
+    assert trust.trusted_ca_public_key is None
     assert any("cat ~/.ssh/authorized_keys" in cmd for cmd in client.recorded_commands)
 
 
-def test_count_authorized_keys_raises_when_the_file_cannot_be_read() -> None:
-    # A failed read must not pass for a count: the tier guard reads exactly 1 as
-    # proof the box is reachable by this tier alone, so an unreadable file has to
-    # refuse loudly rather than resolve to some number.
-    client = _recording_client({"authorized_keys": (1, "", "Permission denied")})
+def test_read_management_trust_raises_when_the_file_cannot_be_read() -> None:
+    client = _recording_client({"MNGR_MANAGEMENT_TRUST_SPLIT": (1, "", "Permission denied")})
     with pytest.raises(BareMetalProvisioningError) as exc_info:
-        client.count_authorized_keys()
+        client.read_management_trust()
     assert "Permission denied" in str(exc_info.value)
 
 
@@ -244,3 +247,22 @@ def test_provision_slice_vm_raises_slice_capacity_error_when_box_is_full() -> No
             port_range_start=22000,
             port_range_end=32000,
         )
+
+
+def test_box_ssh_command_exports_the_path_so_compound_commands_run() -> None:
+    # The management-trust read is an `if` statement; an assignment prefix
+    # (`PATH=... if ...`) is a bash syntax error, an export is not.
+    client = _client()
+    remote_string = client._box_ssh_command(build_read_management_trust_command(), Path("/tmp/known_hosts"))[-1]
+    assert remote_string.startswith("export PATH=")
+    assert "; if [ -e ~/.ssh/authorized_keys ]" in remote_string
+    syntax_check = subprocess.run(["bash", "-n", "-c", remote_string], capture_output=True, text=True)
+    assert syntax_check.returncode == 0, syntax_check.stderr
+
+
+def test_run_on_box_raises_its_own_error_for_a_missing_pool_key() -> None:
+    # The audit catches the client's error types per box; a precondition failure
+    # must not surface wrapped in the concurrency group's exception group.
+    client = LimaSliceVpsClient(box_address="box.example", box_ssh_user="limahost", private_key_path=None)
+    with pytest.raises(LimaCommandError):
+        client.run_on_box("true", timeout=5.0, label="test")

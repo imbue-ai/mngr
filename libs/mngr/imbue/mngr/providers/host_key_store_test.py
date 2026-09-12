@@ -13,6 +13,8 @@ from imbue.mngr.providers.host_key_store import HostKeyStoreState
 from imbue.mngr.providers.host_key_store import UNATTRIBUTED_HOST_KEY_RECORD_ID
 from imbue.mngr.providers.host_key_store import _apply_pin
 from imbue.mngr.providers.host_key_store import clear_endpoint_pins
+from imbue.mngr.providers.host_key_store import drop_bootstrap_pins
+from imbue.mngr.providers.host_key_store import drop_host_pins_outside_endpoints
 from imbue.mngr.providers.host_key_store import gc_dead_host_key_records
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import has_unpinned_bootstrap_drift
@@ -658,3 +660,53 @@ def test_has_unpinned_bootstrap_drift_ignores_unparseable_and_blank_lines(tmp_pa
     known_hosts = tmp_path / "known_hosts"
 
     assert has_unpinned_bootstrap_drift(known_hosts, "junk line\n\n") is False
+
+
+# =============================================================================
+# drop_bootstrap_pins / drop_host_pins_outside_endpoints
+# =============================================================================
+
+
+def test_drop_bootstrap_pins_forgets_only_that_hosts_bootstrap_material(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    host_id = HostId.generate()
+    other_host = HostId.generate()
+    pin_host_key(known_hosts, "1.2.3.4", 22010, _ED25519_KEY_B, host_id=host_id, origin=HostKeyOrigin.BOOTSTRAP)
+    pin_host_key(known_hosts, "1.2.3.4", 22011, _RSA_KEY, host_id=host_id, origin=HostKeyOrigin.BOOTSTRAP)
+    pin_host_key(known_hosts, "1.2.3.4", 23010, _ED25519_KEY_A, host_id=host_id, origin=HostKeyOrigin.USER)
+    pin_host_key(known_hosts, "9.9.9.9", 22, _ED25519_KEY_B, host_id=other_host, origin=HostKeyOrigin.BOOTSTRAP)
+
+    drop_bootstrap_pins(known_hosts, host_id)
+
+    assert known_hosts.read_text() == f"9.9.9.9 {_ED25519_KEY_B}\n[1.2.3.4]:23010 {_ED25519_KEY_A}\n"
+
+
+def test_drop_bootstrap_pins_is_a_noop_for_a_host_without_a_record(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    pin_host_key(known_hosts, "9.9.9.9", 22, _ED25519_KEY_B, host_id=HostId.generate(), origin=HostKeyOrigin.BOOTSTRAP)
+
+    drop_bootstrap_pins(known_hosts, HostId.generate())
+
+    assert known_hosts.read_text() == f"9.9.9.9 {_ED25519_KEY_B}\n"
+
+
+def test_drop_host_pins_outside_endpoints_keeps_the_named_endpoints_and_other_hosts(tmp_path: Path) -> None:
+    known_hosts = tmp_path / "known_hosts"
+    host_id = HostId.generate()
+    other_host = HostId.generate()
+    pin_host_key(known_hosts, "1.2.3.4", 22010, _ED25519_KEY_A, host_id=host_id, origin=HostKeyOrigin.USER)
+    pin_host_key(known_hosts, "1.2.3.4", 22011, _ED25519_KEY_B, host_id=host_id, origin=HostKeyOrigin.USER)
+    pin_host_key(known_hosts, "1.2.3.4", 21000, _RSA_KEY, host_id=host_id, origin=HostKeyOrigin.BOOTSTRAP)
+    pin_host_key(known_hosts, "1.2.3.4", 21000, _ED25519_KEY_B, host_id=other_host, origin=HostKeyOrigin.USER)
+
+    drop_host_pins_outside_endpoints(known_hosts, host_id, {("1.2.3.4", 22010), ("1.2.3.4", 22011)})
+
+    record = load_host_key_record(known_hosts, host_id)
+    assert record is not None
+    assert sorted((pin.port, pin.public_key) for pin in record.pins) == [
+        (22010, _ED25519_KEY_A),
+        (22011, _ED25519_KEY_B),
+    ]
+    other_record = load_host_key_record(known_hosts, other_host)
+    assert other_record is not None
+    assert [(pin.port, pin.public_key) for pin in other_record.pins] == [(21000, _ED25519_KEY_B)]

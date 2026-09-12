@@ -66,8 +66,8 @@ def _install_fake_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
 
 def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        # An absent region must not be sent so the connector treats the lease as
-        # region-agnostic.
+        # An absent region must not be sent so the connector treats the lease
+        # as unconstrained on it.
         body = _json.loads(request.content)
         assert "region" not in body
         return httpx.Response(503, json={"detail": "no match"})
@@ -84,8 +84,13 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         assert body["attributes"] == {"cpus": 2}
         assert body["ssh_public_key"] == "ssh-ed25519 AAAA"
         assert body["host_name"] == "my-host"
-        # The hard region rides alongside attributes as a top-level field when set.
+        # The hard region rides alongside attributes as a top-level field
+        # when set.
         assert body["region"] == "US-EAST-VA"
+        # Every lease declares the highest box generation this client can
+        # operate (the slow path drops the template tag, so this field alone
+        # keeps generation routing correct there).
+        assert body["max_box_generation"] == 2
         return httpx.Response(
             200,
             json={
@@ -2044,11 +2049,13 @@ def test_admin_suspension_endpoints_hit_the_right_paths(monkeypatch: pytest.Monk
     client.admin_suspend_account(SecretStr("adm"), "alice@imbue.com", "abuse", block_storage=True)
     client.admin_unsuspend_account(SecretStr("adm"), "alice@imbue.com")
     client.admin_stop_workspace(SecretStr("adm"), "11111111-2222-3333-4444-555566667777")
+    client.admin_start_workspace(SecretStr("adm"), "11111111-2222-3333-4444-555566667777")
     assert seen == [
         ("POST", "/admin/accounts/alice@imbue.com/revoke-sessions", None),
         ("POST", "/admin/accounts/alice@imbue.com/suspend", {"reason": "abuse", "block_storage": True}),
         ("POST", "/admin/accounts/alice@imbue.com/unsuspend", None),
         ("POST", "/admin/workspaces/11111111-2222-3333-4444-555566667777/stop", None),
+        ("POST", "/admin/workspaces/11111111-2222-3333-4444-555566667777/start", None),
     ]
 
 

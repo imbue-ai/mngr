@@ -364,3 +364,35 @@ def test_active_share_cache_invalidate_forces_the_next_lookup_to_miss() -> None:
     cache.invalidate("host-" + "d" * 32)
 
     assert cache.get("host-" + "d" * 32) is None
+
+
+def test_show_machine_parses_the_sizes_payload_and_records_the_argv() -> None:
+    payload = {
+        "host_db_id": "row-1",
+        "host_id": "host-" + "a" * 32,
+        "host_name": "sunny",
+        "status": "stopped",
+        "memory_units": 8,
+        "target_memory_units": 16,
+        "disk_gb": 28,
+        "target_disk_gb": None,
+        "is_restart_needed_to_apply": True,
+    }
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    machine = cli.show_machine("owner@example.com", "host-" + "a" * 32)
+
+    assert machine is not None
+    assert machine.memory_units == 8
+    assert machine.target_memory_units == 16
+    assert machine.disk_gb == 28
+    assert machine.is_restart_needed_to_apply is True
+    assert caller.calls[0][:3] == ["imbue_cloud", "machines", "show"]
+
+
+def test_show_machine_returns_none_when_the_invocation_fails() -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout="", stderr="NotFound"))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    assert cli.show_machine("owner@example.com", "host-" + "b" * 32) is None

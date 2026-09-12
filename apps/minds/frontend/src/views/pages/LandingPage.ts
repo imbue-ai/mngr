@@ -22,6 +22,7 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
+  keyStateChipFor,
   lifecycleConfirmation,
   mindControlsFor,
   remoteLocationBadgeFor,
@@ -426,12 +427,16 @@ export const LandingPage: m.ClosureComponent = () => {
         : ("UNKNOWN" as MindLiveness);
     const controls = mindControlsFor(entry, liveness, discoveryHealth);
     const providerLabel = entry.provider_label ?? "";
+    // A cloud machine this device holds no key for cannot be entered, so the
+    // row is not clickable and says why in place of an open that would hang.
+    const keyChip = keyStateChipFor(entry.key_state ?? "");
+    const isOpenable = keyChip === null;
     const row = m(
       Card,
       {
         layout: "row",
-        interactive: true,
-        extra: "accent-spine relative overflow-hidden cursor-pointer",
+        interactive: isOpenable,
+        extra: `accent-spine relative overflow-hidden ${isOpenable ? "cursor-pointer" : "cursor-default"}`,
         style: `--workspace-accent: ${entry.accent};`,
         "data-agent-id": entry.id,
         onclick: () => rowClick(entry),
@@ -439,6 +444,16 @@ export const LandingPage: m.ClosureComponent = () => {
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
         providerLabel ? m("span", { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` }, providerLabel) : null,
+        keyChip === null
+          ? null
+          : m(
+              "span",
+              {
+                class: `${BADGE_CLASS} bg-fill-subtle text-important landing-key-state-chip`,
+                "data-tooltip": keyChip.tooltip,
+              },
+              keyChip.label,
+            ),
         // Slot for the backup badge (T4 wires the backup-status data source).
         m("span", { class: "landing-backup-badge hidden" }),
         (entry.supports_shutdown ?? false) ? livenessBadge(liveness) : null,
@@ -500,25 +515,27 @@ export const LandingPage: m.ClosureComponent = () => {
               m(Icon16, { name: "restart" }),
             )
           : null,
-        m(
-          Button,
-          {
-            variant: "ghost",
-            size: "icon",
-            "aria-label": "Open machine in new window",
-            "data-tooltip": "Open in new window",
-            onclick: (event: MouseEvent) => {
-              event.stopPropagation();
-              if (electronBridge.isDesktop) {
-                electronBridge.openWorkspaceInNewWindow(entry.id);
-              } else {
-                const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
-                window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
-              }
-            },
-          },
-          m(Icon16, { name: "arrow-up-right" }),
-        ),
+        !isOpenable
+          ? null
+          : m(
+              Button,
+              {
+                variant: "ghost",
+                size: "icon",
+                "aria-label": "Open machine in new window",
+                "data-tooltip": "Open in new window",
+                onclick: (event: MouseEvent) => {
+                  event.stopPropagation();
+                  if (electronBridge.isDesktop) {
+                    electronBridge.openWorkspaceInNewWindow(entry.id);
+                  } else {
+                    const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
+                    window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
+                  }
+                },
+              },
+              m(Icon16, { name: "arrow-up-right" }),
+            ),
         m(
           Button,
           {

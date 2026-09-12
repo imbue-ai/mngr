@@ -109,6 +109,7 @@ from imbue.mngr_vps.container_setup import remove_container
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import remove_volume
 from imbue.mngr_vps.container_setup import snapshot_trigger_volume_name_for
+from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
@@ -842,6 +843,10 @@ class VpsProvider(BaseProviderInstance):
         known_hosts: Sequence[str] | None,
         authorized_keys: Sequence[str] | None,
         allow_local_image: bool = False,
+        # Files installed in the agent container before its sshd starts (an
+        # sshd_config.d drop-in plus the CA material it names, for certificate
+        # management access); empty for providers whose agents need none.
+        extra_ssh_config_files: tuple[ContainerFile, ...] = (),
     ) -> Host:
         """Build the container and finalize host state on an already-reachable VPS.
 
@@ -875,6 +880,7 @@ class VpsProvider(BaseProviderInstance):
                 tags=tags,
                 known_hosts=known_hosts,
                 authorized_keys=authorized_keys,
+                extra_ssh_config_files=extra_ssh_config_files,
             ),
         )
 

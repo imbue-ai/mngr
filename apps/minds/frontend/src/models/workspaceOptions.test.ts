@@ -11,6 +11,8 @@ import {
   defaultFetchJson,
   documentGrantsAnyone,
   errorMessageFromBody,
+  formatMachineSize,
+  formatPendingMachineSize,
   normalizeWorkspaceColorHex,
 } from "./workspaceOptions";
 
@@ -116,7 +118,9 @@ describe("ShareModel sharing API coordinate", () => {
       { agentId: "agent-" + "b".repeat(32) },
     );
     await model.load();
-    expect(requests[0].url).toBe("/api/v1/workspace-sharing/agent-" + "b".repeat(32));
+    expect(requests[0].url).toBe(
+      "/api/v1/workspace-sharing/agent-" + "b".repeat(32),
+    );
   });
 
   it("falls back to the legacy host id when no workspace id is known", async () => {
@@ -126,7 +130,9 @@ describe("ShareModel sharing API coordinate", () => {
       body: sharingResponse(),
     }));
     await model.load();
-    expect(requests[0].url).toBe("/api/v1/workspace-sharing/host-" + "a".repeat(32));
+    expect(requests[0].url).toBe(
+      "/api/v1/workspace-sharing/host-" + "a".repeat(32),
+    );
   });
 });
 
@@ -739,5 +745,73 @@ describe("pure helpers", () => {
         services: { web: { emails: ["a@b.c"], email_domains: [] } },
       }),
     ).toBe(true);
+  });
+});
+
+describe("machine size formatting", () => {
+  const baseSize = {
+    is_available: true,
+    memory_units: 8,
+    target_memory_units: null,
+    disk_gb: 28,
+    target_disk_gb: null,
+    is_restart_needed_to_apply: false,
+  };
+
+  it("renders the current size from units and disk", () => {
+    expect(formatMachineSize(baseSize)).toBe("8 GB RAM · 28 GB disk");
+  });
+
+  it("omits the factors it does not know", () => {
+    expect(formatMachineSize({ ...baseSize, disk_gb: null })).toBe("8 GB RAM");
+    expect(
+      formatMachineSize({ ...baseSize, memory_units: null, disk_gb: null }),
+    ).toBe("");
+  });
+
+  it("renders nothing pending when no restart is needed", () => {
+    expect(formatPendingMachineSize(baseSize)).toBe("");
+  });
+
+  it("falls back to the current value for the factor without a pending target", () => {
+    const pending = {
+      ...baseSize,
+      target_memory_units: 16,
+      is_restart_needed_to_apply: true,
+    };
+    expect(formatPendingMachineSize(pending)).toBe("16 GB RAM · 28 GB disk");
+  });
+});
+
+describe("WorkspaceOptionsModel machine size load", () => {
+  it("stores an available size and leaves an unavailable one hidden", async () => {
+    const availableModel = new WorkspaceOptionsModel("agent-1", {
+      fetchJson: async () => ({
+        ok: true,
+        status: 200,
+        body: {
+          is_available: true,
+          memory_units: 16,
+          target_memory_units: null,
+          disk_gb: 56,
+          target_disk_gb: null,
+          is_restart_needed_to_apply: false,
+        },
+      }),
+      redraw: () => undefined,
+    });
+    await availableModel.loadMachineSize();
+    expect(availableModel.machineSize?.memory_units).toBe(16);
+
+    const unavailableModel = new WorkspaceOptionsModel("agent-2", {
+      fetchJson: async () => ({
+        ok: true,
+        status: 200,
+        body: { is_available: false },
+      }),
+      redraw: () => undefined,
+    });
+    await unavailableModel.loadMachineSize();
+    expect(unavailableModel.machineSize).toBe(null);
   });
 });

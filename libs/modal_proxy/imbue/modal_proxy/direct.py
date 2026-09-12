@@ -34,6 +34,7 @@ from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import retry_if_exception_type
 from tenacity import stop_after_attempt
+from tenacity import stop_after_delay
 from tenacity import wait_exponential
 
 from imbue.modal_proxy.data_types import FileEntry
@@ -231,11 +232,24 @@ def _volume_wait(retry_state: RetryCallState) -> float:
 # persistent provider app) race and one fails with "The selected app is
 # locked". The lock clears as soon as the other deploy finishes, so retry with
 # backoff. min=2 because a deploy takes several seconds, so retrying sooner just
-# wastes attempts; max=15 and 6 attempts gives ~45s of headroom under the
-# 180s deploy subprocess timeout.
+# wastes attempts. The window is bounded by elapsed time rather than attempts
+# because contention is a queue: CI fans dozens of creates out against one
+# shared app name, and several CI runs can do so at once, so the lock can stay
+# held for minutes while the deploys behind it drain one by one. A deploy that
+# is merely queued must keep waiting rather than fail.
 _DEPLOY_LOCK_RETRY = retry_if_exception_type(ModalProxyAppLockedError)
-_DEPLOY_LOCK_STOP = stop_after_attempt(6)
-_DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=15)
+_DEPLOY_LOCK_RETRY_BUDGET_SECONDS = 300
+_DEPLOY_LOCK_MAX_BACKOFF_SECONDS = 15
+_DEPLOY_ATTEMPT_TIMEOUT_SECONDS = 180
+_DEPLOY_LOCK_STOP = stop_after_delay(_DEPLOY_LOCK_RETRY_BUDGET_SECONDS)
+_DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=_DEPLOY_LOCK_MAX_BACKOFF_SECONDS)
+# Upper bound on how long deploy() can block. The budget only gates whether
+# another attempt starts, so the last attempt can begin just under it (after a
+# full backoff) and still run to its own subprocess timeout. Callers that wait
+# on deploy() from another thread size their deadline from this.
+DEPLOY_MAX_DURATION_SECONDS = (
+    _DEPLOY_LOCK_RETRY_BUDGET_SECONDS + _DEPLOY_LOCK_MAX_BACKOFF_SECONDS + _DEPLOY_ATTEMPT_TIMEOUT_SECONDS
+)
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +701,7 @@ class DirectModalInterface(ModalInterface):
             try:
                 result = subprocess.run(
                     cmd,
-                    timeout=180,
+                    timeout=_DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
                     check=False,
                     capture_output=True,
                     text=True,

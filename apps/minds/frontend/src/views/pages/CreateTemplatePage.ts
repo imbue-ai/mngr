@@ -26,7 +26,7 @@ import { FormLabel, Select } from "../components/FormControls";
 import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
-import { rowClickActionFor } from "./landing-controls";
+import { keyStateChipFor, rowClickActionFor } from "./landing-controls";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
@@ -286,17 +286,22 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     // common and not actionable from a template picker).
     const isBadged = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
     const livenessLabel = (entry.supports_shutdown ?? false) && isBadged ? MIND_LIVENESS_LABELS[liveness] : null;
+    // A cloud machine this device holds no key for cannot be opened, so the
+    // row says why in place of the chevron and offers no click.
+    const keyChip = keyStateChipFor(entry.key_state ?? "");
+    const isOpenable = keyChip === null;
     return m(
       Card,
       {
         layout: "row",
-        interactive: true,
-        extra: "accent-spine relative overflow-hidden cursor-pointer",
+        interactive: isOpenable,
+        extra: `accent-spine relative overflow-hidden ${isOpenable ? "cursor-pointer" : "cursor-default"}`,
         style: `--workspace-accent: ${entry.accent};`,
         onclick: () => {
           // This page has no health tracker, so the row is treated as healthy
           // (the pre-existing behavior: it never routes to plain recovery).
           const action = rowClickActionFor(entry, entry.liveness ?? "", true);
+          if (action === "blocked") return;
           if (action === "recover-start") {
             const returnTo = `/goto/${entry.id}/`;
             m.route.set(recoveryRoute(entry.id, returnTo, "start"));
@@ -308,7 +313,16 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
         livenessLabel ? m(StatusBadge, livenessLabel) : null,
-        m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" })),
+        keyChip === null
+          ? m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" }))
+          : m(
+              "span",
+              {
+                class: "inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important",
+                "data-tooltip": keyChip.tooltip,
+              },
+              keyChip.label,
+            ),
       ],
     );
   }

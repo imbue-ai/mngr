@@ -196,6 +196,9 @@ export class ShellState {
       case "enter":
         this.enterWorkspace(entry.id);
         return;
+      case "blocked":
+        // The row's own chip says why; there is nowhere useful to go.
+        return;
     }
   }
 

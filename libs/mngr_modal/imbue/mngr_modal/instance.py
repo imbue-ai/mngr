@@ -128,6 +128,7 @@ from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
+from imbue.modal_proxy.direct import DEPLOY_MAX_DURATION_SECONDS
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInternalError
@@ -1257,7 +1258,9 @@ class ModalProviderInstance(BaseProviderInstance):
 
             with log_span("Waiting for deploy to finish and creating shutdown script"):
                 if snapshot_url_future is not None:
-                    snapshot_url = snapshot_url_future.result(2 * 60.0)
+                    # The deploy may legitimately sit behind Modal's app lock
+                    # for minutes; the future resolves as soon as it finishes.
+                    snapshot_url = snapshot_url_future.result(DEPLOY_MAX_DURATION_SECONDS)
                     self._create_shutdown_script(host, sandbox, host_id, snapshot_url)
 
             # Start the activity watcher. We have to start it here because we only created the shutdown script (with the hardcoded sandbox id)

@@ -85,6 +85,17 @@ its current relay set from the connector's `GET /shares/assignment`
 endpoint (authenticated by the relay token) and re-polls it, so relay
 fleet changes never require re-injecting materials.
 
+## Sandboxed runtime on remote workspaces
+
+Remote (imbue_cloud) workspaces run their container under gVisor (`runsc`, a
+user-space kernel between the container and the VM's kernel; `uname -r` inside
+the container reports `4.19.0-gvisor`), with `/run` and `/tmp` on tmpfs.
+Software that needs ptrace tooling (`strace`, `gdb` attach, `perf`), eBPF,
+FUSE, `io_uring`, nested container runtimes, or unusual `ioctl`s does not work
+inside the sandbox, and filesystem-metadata-heavy operations (`find`, `tar`,
+`git status` over large trees) are several times slower than on a plain kernel.
+The template's `CLAUDE.md` / `AGENTS.md` tell the agent the same.
+
 ## How apps register ports
 
 Apps call `system/scripts/forward_port.py` on startup to register their ports. An app with

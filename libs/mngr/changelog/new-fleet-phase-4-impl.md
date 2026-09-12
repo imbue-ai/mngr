@@ -1,0 +1,1 @@
+`ssh_utils.read_served_host_key_or_none(hostname, port, timeout_seconds=...)`: the unauthenticated host-key probe now also returns the served key as an OpenSSH line (the existing `is_server_presenting_host_key` / `wait_for_expected_host_key` are built on it); the gen-2 cutover uses it to tell a rotated slice VM key from the row's bake-time key.

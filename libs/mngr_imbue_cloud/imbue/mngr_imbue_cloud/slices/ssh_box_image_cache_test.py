@@ -6,10 +6,10 @@ from pydantic import Field
 
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
-from imbue.mngr_imbue_cloud.slices.lima_box_image_cache import LimaBoxImageCache
 from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.ssh_box_image_cache import SshBoxImageCache
 
-_CACHE_DIR = "/home/limahost/.cache/mngr-slice-default-workspace-template"
+_CACHE_DIR = "/home/slicehost/.cache/mngr-slice-default-workspace-template"
 _TAG = "default-workspace-template:minds-v0.3.2"
 _KEY = TransferKey(private_key_path_on_box=f"{_CACHE_DIR}/.transfer-abc", public_key="ssh-ed25519 AAA")
 
@@ -29,18 +29,18 @@ class _ScriptedBoxClient(LimaSliceVpsClient):
         return self.responder(remote_command)
 
 
-def _build(responder: Callable[[str], tuple[int | None, str, str]]) -> tuple[_ScriptedBoxClient, LimaBoxImageCache]:
+def _build(responder: Callable[[str], tuple[int | None, str, str]]) -> tuple[_ScriptedBoxClient, SshBoxImageCache]:
     client = _ScriptedBoxClient(
         box_address="box.example",
-        box_ssh_user="limahost",
+        box_ssh_user="slicehost",
         private_key_path="/tmp/id",
         responder=responder,
         recorded=[],
     )
-    return client, LimaBoxImageCache(slice_client=client, cache_dir=_CACHE_DIR)
+    return client, SshBoxImageCache(slice_client=client, cache_dir=_CACHE_DIR)
 
 
-def _cache(responder: Callable[[str], tuple[int | None, str, str]]) -> LimaBoxImageCache:
+def _cache(responder: Callable[[str], tuple[int | None, str, str]]) -> SshBoxImageCache:
     return _build(responder)[1]
 
 

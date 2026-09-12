@@ -52,17 +52,23 @@ export function lifecycleConfirmation(action: "stop" | "restart", name: string, 
     : `Stop "${name}"? ${consequence}`;
 }
 
-/** What clicking a machines-list row should do, as a testable pure decision. */
-export type RowClickAction = "enter" | "recover" | "recover-start";
+/** What clicking a machines-list row should do, as a testable pure decision.
+ * "blocked" is a cloud machine this device holds no SSH key for: nothing on
+ * the far side would answer, so the row explains itself with a chip instead. */
+export type RowClickAction = "enter" | "recover" | "recover-start" | "blocked";
 
 // ``liveness`` is a plain string (only the "STOPPED" comparison matters) so
 // callers without a MindLivenessTracker (e.g. CreateTemplatePage) can pass
 // the entry's raw liveness field directly.
 export function rowClickActionFor(
-  entry: Pick<UiWorkspaceEntry, "supports_shutdown">,
+  entry: Pick<UiWorkspaceEntry, "supports_shutdown" | "key_state">,
   liveness: string,
   isHealthy: boolean,
 ): RowClickAction {
+  // A missing key outranks health: the machine reads unreachable from here
+  // precisely because this device cannot connect to it, and recovery could
+  // not change that.
+  if ((entry.key_state ?? "") !== "") return "blocked";
   if (!isHealthy) return "recover";
   if ((entry.supports_shutdown ?? false) && liveness === "STOPPED") {
     // A stopped container cannot be entered: go straight to Recovery, which
@@ -156,6 +162,34 @@ export function remoteStateChipFor(
       return { label: "unreachable", isImportant: true, isAccountsLink: false };
     case "error":
       return { label: "sync error", isImportant: true, isAccountsLink: false };
+    default:
+      return null;
+  }
+}
+
+export interface KeyStateChip {
+  label: string;
+  tooltip: string;
+}
+
+/** The chip a live cloud row shows when this device cannot open it, or null when it can. */
+export function keyStateChipFor(keyState: string): KeyStateChip | null {
+  switch (keyState) {
+    case "locked":
+      return {
+        label: "Enter your master password to open",
+        tooltip: "This machine's access key is synced to your account; unlock it above to open the machine here",
+      };
+    case "syncing":
+      return {
+        label: "Syncing access…",
+        tooltip: "This machine's access key has not reached this device yet; it arrives with the next sync",
+      };
+    case "unavailable":
+      return {
+        label: "No access from this device",
+        tooltip: "This machine's access key was never synced: set a master password on the device that created it",
+      };
     default:
       return null;
   }

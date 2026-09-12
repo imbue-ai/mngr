@@ -7,6 +7,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from flask import Flask
@@ -433,6 +434,32 @@ def make_session_store_for_test(
     return MultiAccountSessionStore(
         data_dir=data_dir, cli=effective_cli, record_store=record_store, mngr_host_dir=mngr_host_dir
     )
+
+
+def make_profiled_device_for_test(
+    base: Path, name: str, cli: FakeImbueCloudCli
+) -> tuple[InstallationPaths, WorkspaceRecordStore, MultiAccountSessionStore, Path]:
+    """A device (paths, record store, session store) whose mngr profile dir exists, plus that profile dir.
+
+    SSH material collection and materialization need the profile dir; the
+    per-host key of a cloud machine lives under it.
+    """
+    paths = InstallationPaths(data_dir=base / name)
+    paths.data_dir.mkdir(parents=True, exist_ok=True)
+    mngr_host_dir = base / name / "mngr"
+    profile_id = uuid4().hex
+    profile_dir = mngr_host_dir / "profiles" / profile_id
+    profile_dir.mkdir(parents=True)
+    (mngr_host_dir / "config.toml").write_text(f'profile = "{profile_id}"\n')
+    record_store = WorkspaceRecordStore(
+        paths=paths,
+        mngr_host_dir=mngr_host_dir,
+        cli=cli,
+        device_id=device_id_for_test(name),
+        device_label=name,
+    )
+    session_store = MultiAccountSessionStore(data_dir=paths.data_dir, cli=cli, record_store=record_store)
+    return paths, record_store, session_store, profile_dir
 
 
 def build_desktop_client_for_test(

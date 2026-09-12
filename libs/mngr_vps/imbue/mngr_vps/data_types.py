@@ -30,6 +30,14 @@ class AgentEndpoint(FrozenModel):
     )
 
 
+class ContainerFile(FrozenModel):
+    """A file to install inside the agent container before its sshd starts (path, content, octal mode)."""
+
+    path: str = Field(description="Absolute path inside the container")
+    content: str = Field(description="File content")
+    mode: str = Field(description="Octal permission bits, e.g. 0644")
+
+
 class RealizePlacementContext(FrozenModel):
     """Inputs a realizer needs to place an agent on an already-booted VPS.
 
@@ -52,6 +60,13 @@ class RealizePlacementContext(FrozenModel):
     tags: Mapping[str, str] | None = Field(default=None, description="User tags to stamp onto the placement")
     known_hosts: Sequence[str] | None = Field(default=None, description="Extra known_hosts entries for the agent")
     authorized_keys: Sequence[str] | None = Field(default=None, description="Extra authorized_keys for the agent")
+    extra_ssh_config_files: tuple[ContainerFile, ...] = Field(
+        default=(),
+        description=(
+            "Files installed in the container before its sshd starts (e.g. an sshd_config.d drop-in and the "
+            "CA material it references), so certificate-based management access works from the first boot"
+        ),
+    )
 
 
 class PlacementHandle(FrozenModel):

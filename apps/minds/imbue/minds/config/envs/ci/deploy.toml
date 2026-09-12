@@ -24,7 +24,27 @@ services = [
     "sharing",
     "storage",
     "sentry",
+    "ssh-ca",
 ]
+
+# The tier's SSH certificate authority (imbue-ai/mngr-internal#850): the public
+# half of the Vault ``minds-ci-ssh`` mount's CA, which every gen-2 box, slice VM,
+# and workspace container trusts for management SSH instead of a static key.
+# Read with
+#   vault read -field=public_key minds-ci-ssh/config/ca
+# after the Vault bring-up (imbue-ai/vault terraform, applied 2026-09-09).
+# Rotating the CA means re-prepping every gen-2 box and re-baking every slice
+# on the tier before updating this value (see docs/deploy/setup/vault.md).
+[ssh_ca]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO1I1Y1NYn86jMrvCxLkIoMq7nXCNiMgxf6Am1BtCUCO minds-ci-ssh-ca"
+
+# The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
+# whose static IPs the box `:22` lockdown allowlists; runbook:
+# apps/minds/docs/deploy/gen2-management-plane.md). Absent until the tier's
+# management-plane bring-up; see the dev tier's deploy.toml for the schema.
+# [management_plane.wireguard]
+# [[management_plane.wireguard.operators]]
+# [management_plane.modal_proxy]
 
 # Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. Matches
 # the dev tier: every CI env is dynamic, creates its own resources,
@@ -59,6 +79,8 @@ max_buckets = 5
 max_total_bucket_gb = 25
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
+max_active_machine_units = 8
+max_total_machine_disk_gb = 140
 
 [plans.explorer]
 max_remote_workspaces = 2
@@ -67,6 +89,8 @@ max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
+max_active_machine_units = 16
+max_total_machine_disk_gb = 280
 
 [plans.ally]
 max_remote_workspaces = 10
@@ -75,6 +99,8 @@ max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
+max_active_machine_units = 80
+max_total_machine_disk_gb = 1400
 
 # Whether this tier deploys the analytics app (analytics-<tier>): the
 # gold-table aggregation + lake maintenance crons. Off until the tier's

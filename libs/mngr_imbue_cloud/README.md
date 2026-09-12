@@ -62,7 +62,7 @@ mngr create my-agent@my-host.imbue_cloud_alice --new-host \
     -b repo_branch_or_tag=v1.2.3
 ```
 
-The recognized build args (`repo_url`, `repo_branch_or_tag`, `cpus`, `memory_gb`, `gpu_count`) select which pool host to lease. Any other `-b` entry (e.g. `--file=Dockerfile`, `.`) is forwarded as a build arg to the slow-path container rebuild.
+The recognized build args (`repo_url`, `repo_branch_or_tag`, `cpus`, `memory_gb`, `gpu_count`) select which pool host to lease. One hard requirement rides alongside them: `-b region=<label>` (only lease in that lease region, e.g. `US-EAST-VA`); when no matching host is available the create fails with a clear no-capacity error instead of relaxing it. Any other `-b` entry (e.g. `--file=Dockerfile`, `.`) is forwarded as a build arg to the slow-path container rebuild.
 
 ## Fast path vs. slow path (`fast_mode`)
 
@@ -81,19 +81,76 @@ minds drives this automatically: it tries `fast_mode=require` first and, on `Fas
 
 - `mngr destroy <agent>` is **terminal**: it wipes the workspace and its data, then releases the lease back to the pool. The user's data is gone before the lease is released.
 - `mngr delete <agent>` (or `mngr imbue_cloud hosts release <host-db-id>`) runs the same flow; it's the path mngr's GC takes after the destroyed-host grace period. Safe to re-run on an already-released lease.
-- `mngr stop <agent>` is the "resume later" path: it gracefully stops the container, halts the slice VM, and uploads the VM's disks (encrypted) to the tier's storage bucket -- the workspace shows as stopping while the upload runs and reports stopped once it verifies; the halted local VM (and its bare-metal slot) is kept through the local-retention window for a fast restart in place, then reaped. `mngr start <agent>` brings the same workspace back: near-instantly on its origin box within the window, or restored onto any same-region box with a free slot after it (the client re-resolves the new coordinates automatically). Against a connector without the workspace-lifecycle endpoints, stop falls back to the old container-only behavior.
+- `mngr stop <agent> --stop-host` is the "resume later" path (plain `mngr stop <agent>` only stops the agent process inside the container and leaves the machine running): it gracefully stops the container, halts the slice VM, and uploads the VM's disks (encrypted) to the tier's storage bucket -- the workspace shows as stopping while the upload runs and reports stopped once it verifies; the halted local VM (and its bare-metal slot) is kept through the local-retention window for a fast restart in place, then reaped. `mngr start <agent>` brings the same workspace back: near-instantly on its origin box within the window, or restored onto any same-region box with a free slot after it (the client re-resolves the new coordinates automatically). Against a connector without the workspace-lifecycle endpoints, stop falls back to the old container-only behavior.
+
+## Machine sizing
+
+A remote workspace runs in a **machine** (the sized slice VM; its mngr host id is stable
+across stop/start). A machine's size has two independent factors:
+
+- **Units** -- the single compute knob: 1 unit = 1GiB of machine RAM, with vCPUs and
+  fair-share bandwidth scaling proportionally. Allowed sizes are any multiple of 8 units
+  from 8 to 128; every new workspace starts at the default 8 units.
+- **Disk** -- grow-only: the data disk is sized once at creation (3.5GiB per unit, so
+  28GB at the default size) and can be grown independently afterwards. It never shrinks.
+
+Resizing is **record-then-restart**: the resize stamps the desired size on the connector
+and nothing changes until the machine's next restart (stop it and start it again, or use
+the desktop client's restart), which applies the size in place when the machine's box has
+room, or restores it onto a box that does -- transparently, the workspace's content and
+address contract are unchanged.
+
+```bash
+# Show every machine's current/target sizes and whether a restart is pending.
+mngr imbue_cloud machines show
+
+# Or just one (by mngr host id, connector row id, or friendly name).
+mngr imbue_cloud machines show my-workspace
+
+# Record a resize (applied at the next restart). Units may go up or down;
+# disk only grows.
+mngr imbue_cloud machines resize my-workspace --units 16
+mngr imbue_cloud machines resize my-workspace --disk-gb 56
+```
+
+Units and disk are metered by two plan quotas: `max_active_machine_units` caps the units
+summed across your running machines, and `max_total_machine_disk_gb` caps data-disk GB
+across running + stopped machines. Both return the standard structured 403
+(`quota_exceeded`) when a resize, create, or start would exceed them. A size the fleet
+cannot place right now fails the start gracefully: the machine lands back on stopped with
+a clear "try a smaller size or try again later" error and nothing is lost.
 
 ## Adoption and key rotation (slices)
 
 A freshly-leased slice's SSH trust material is bake-time: its sshd host keys
 were generated by the operator tooling (and recorded by the connector), and the
-VM root's `authorized_keys` is owned by the carve's cloud-init scripts. On
+VM root's `authorized_keys` was written by the carve's cloud-init (on a
+gen-2 slice that file authorizes nothing: the VM root and the container trust
+the tier's SSH certificate authority instead, installed by the same cloud-init
+and by the container setup, and management access presents a short-lived
+CA-signed certificate). On
 lease -- and on the first connect for a host leased earlier -- the client
 **adopts** the slice: it rotates both endpoints' sshd host keys to fresh
 user-generated keys (pinned user-origin in the host-key store, which bootstrap
 material can never displace), and installs an in-VM systemd reconciler that
 re-asserts a root-owned desired-state `authorized_keys` and host key on every
-boot, after cloud-init's replay. Adoption is idempotent and marker-driven:
+boot, after cloud-init's replay. That replay is a gen-1 (lima) behavior: a gen-2
+slice's cloud-init runs exactly once, at first boot -- its instance-id is
+stable and its network comes from the box's DHCP server, so a stop/start or a
+restore onto another box never reruns it, and the adopted host key and
+`authorized_keys` simply persist. The pins are bound to an address and port,
+and a workspace comes back at fresh ports (possibly on another box) on every
+restore -- one driven by this client's own `mngr start`, by an operator, by a
+watchdog, by a rollback, or by another of your devices. So the client remembers
+the endpoints it last wrote the host's pins at (`bound_endpoints.json` in the
+per-host state dir) and, before every connection, compares them with the
+endpoints the connector currently reports: when they differ, the VM pin and
+the container pin are moved to the new endpoints, origins intact, with no
+network round trip. A device that has no such record yet (a second device that
+only synced the workspace record) seeds it from the synced pins, by port order
+when the record predates a relocation (the VM port is always the lower of the
+pair). The connector's bake-time keys are dropped once both endpoints are
+verified. Adoption is idempotent and marker-driven:
 later connects are a pure-local check, with one full re-verification per
 process (plus after start/restart/rebuild), which heals drift. A served key
 that matches neither the pins nor an in-flight rotation is refused, not

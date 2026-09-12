@@ -34,6 +34,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
 from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
+from imbue.mngr_imbue_cloud.providers.adoption import rebind_host_key_pins_to_endpoints
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_endpoint_host_key
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
@@ -175,6 +176,17 @@ def rotate_host_keys(host_ref: str, account: str | None, connector_url: str | No
         known_hosts_path=target.known_hosts_path,
     )
 
+    # An adopted host's own pins must sit at the lease's current endpoints
+    # before adoption's strict sessions open (the provider does this on its
+    # own paths; this command reads the lease directly).
+    rebind_host_key_pins_to_endpoints(
+        host_state_dir,
+        target.known_hosts_path,
+        host_id,
+        lease.vps_address,
+        lease.ssh_port,
+        lease.container_ssh_port,
+    )
     # An unadopted host is adopted here first, which already rotates both host
     # keys as part of taking ownership; an adopted host gets verified/healed
     # and then explicitly re-rotated. This explicit rotate is the user's
