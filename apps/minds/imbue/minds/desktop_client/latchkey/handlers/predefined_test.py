@@ -1,4 +1,5 @@
 import json
+import shlex
 from collections.abc import Callable
 from collections.abc import Iterator
 from pathlib import Path
@@ -327,7 +328,8 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    assert argv[0] == "message"
+    # The nudge goes to the request's chat through its workspace's chat app.
+    assert argv[0] == "exec"
 
 
 def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> None:
@@ -999,6 +1001,12 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
     assert not (tmp_path / "auth_latchkey_report.jsonl").exists()
 
 
+def _nudge_text(argv: list[str]) -> str:
+    """The notice text inside the nudge's ``mngr exec`` command string (``... -m <text>``)."""
+    command_tokens = shlex.split(argv[2])
+    return command_tokens[command_tokens.index("-m") + 1]
+
+
 def test_deny_sends_mngr_message(tmp_path: Path) -> None:
     handler = _build_handler(tmp_path, credential_status="valid")
 
@@ -1011,7 +1019,7 @@ def test_deny_sends_mngr_message(tmp_path: Path) -> None:
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    assert "denied" in argv[argv.index("-m") + 1].lower()
+    assert "denied" in _nudge_text(argv).lower()
 
 
 def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: Path) -> None:
@@ -1148,7 +1156,7 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
     mngr_argvs = _wait_for_recorded_mngr_argvs(handler)
     assert len(mngr_argvs) == 1
     argv = mngr_argvs[0]
-    message_text = argv[argv.index("-m") + 1]
+    message_text = _nudge_text(argv)
     assert "denied" in message_text.lower()
     assert "not-in-catalog-scope" in message_text
 
