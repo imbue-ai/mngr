@@ -173,10 +173,10 @@ class MngrMessageSender(MutableModel):
         self.concurrency_group.start_new_thread(
             self._send_with_retries,
             args=(str(agent_id), text),
-            name="mngr-message-send",
+            name="resolution-nudge-send",
             is_checked=False,
             on_failure=lambda exc: logger.opt(exception=True).error(
-                "mngr message send to agent {} failed: {}", agent_id, exc
+                "resolution nudge to chat {} failed: {}", agent_id, exc
             ),
         )
 
@@ -194,16 +194,16 @@ class MngrMessageSender(MutableModel):
         while not is_shutting_down:
             if self.deliver(target, text):
                 if attempt_index > 0:
-                    logger.info("mngr message to target {} delivered after retry", target)
+                    logger.info("resolution nudge to target {} delivered after retry", target)
                 return True
             # An empty schedule means single-attempt (tests use it to keep a
             # failing send to one call).
             if not self.retry_delays_seconds:
-                logger.warning("mngr message to target {} was not delivered and retries are disabled", target)
+                logger.warning("resolution nudge to target {} was not delivered and retries are disabled", target)
                 return False
             if attempt_index == len(self.retry_delays_seconds):
                 logger.warning(
-                    "mngr message to target {} is still undelivered after the backoff ramp; retrying "
+                    "resolution nudge to target {} is still undelivered after the backoff ramp; retrying "
                     "every {}s until it lands or the app exits",
                     target,
                     self.retry_delays_seconds[-1],
@@ -213,7 +213,7 @@ class MngrMessageSender(MutableModel):
                 timeout=self.retry_delays_seconds[delay_index]
             )
             attempt_index += 1
-        logger.info("mngr message retry to target {} abandoned: shutting down", target)
+        logger.info("resolution nudge retry to target {} abandoned: shutting down", target)
         return False
 
     def deliver(self, target: str, text: str) -> bool:
