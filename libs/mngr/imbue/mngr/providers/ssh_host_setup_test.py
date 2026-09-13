@@ -3,6 +3,7 @@
 import importlib.resources
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -531,6 +532,20 @@ def test_configure_ssh_command_writes_provisioned_marker() -> None:
     assert cmd.index("rm -f /etc/ssh/ssh_host_*") < cmd.index(f"touch '{SSHD_PROVISIONED_MARKER_PATH}'")
     # The marker must not be caught by the ssh_host_* removal glob.
     assert not SSHD_PROVISIONED_MARKER_PATH.rsplit("/", 1)[-1].startswith("ssh_host_")
+
+
+def test_sshd_start_options_refuse_password_and_keyboard_interactive_authentication() -> None:
+    """Every mngr-launched sshd authenticates by key or certificate only.
+
+    Debian's stock sshd_config leaves both password and keyboard-interactive
+    authentication on, so the launch flags must switch them off explicitly.
+    """
+    options = shlex.split(SSHD_START_OPTIONS)
+    assert "PasswordAuthentication=no" in options
+    assert "KbdInteractiveAuthentication=no" in options
+    assert options[::2] == ["-o"] * (len(options) // 2)
+    assert build_start_sshd_command().endswith(f"/usr/sbin/sshd -D {SSHD_START_OPTIONS} )")
+    assert f"/usr/sbin/sshd {SSHD_START_OPTIONS}" in build_self_healing_host_entrypoint_command()
 
 
 def test_start_sshd_command_is_guarded_and_valid_shell() -> None:

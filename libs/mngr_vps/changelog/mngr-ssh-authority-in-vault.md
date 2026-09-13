@@ -1,0 +1,1 @@
+Container SSH setup accepts extra SSH config files (`RealizePlacementContext.extra_ssh_config_files`, threaded through `setup_container_ssh`), used by Imbue Cloud gen-2 slices to install the tier's SSH certificate-authority trust into the workspace container's sshd (imbue-ai/mngr-internal#850).

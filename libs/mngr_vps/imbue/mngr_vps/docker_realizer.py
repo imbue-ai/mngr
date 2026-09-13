@@ -28,6 +28,7 @@ from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr_vps.container_setup import CONTAINER_ENTRYPOINT_CMD
 from imbue.mngr_vps.container_setup import HOME_SUBPATH
 from imbue.mngr_vps.container_setup import HOST_DIR_SUBPATH
+from imbue.mngr_vps.container_setup import HOST_VOLUME_HOME_PATH
 from imbue.mngr_vps.container_setup import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import LABEL_HOST_NAME
@@ -58,6 +59,7 @@ from imbue.mngr_vps.container_setup import start_container
 from imbue.mngr_vps.container_setup import start_container_sshd
 from imbue.mngr_vps.container_setup import stop_container
 from imbue.mngr_vps.data_types import AgentEndpoint
+from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.data_types import PlacementHandle
 from imbue.mngr_vps.data_types import RealizePlacementContext
 from imbue.mngr_vps.data_types import RealizedPlacement
@@ -275,6 +277,7 @@ class DockerRealizer(SnapshotCapableRealizer):
         known_hosts_entries: tuple[str, ...],
         authorized_keys_entries: tuple[str, ...],
         home_volume_symlink: tuple[str, str] | None,
+        extra_ssh_config_files: tuple[ContainerFile, ...],
     ) -> None:
         """Set up SSH inside the container via docker exec."""
         # Creation path: mint this host's own container client key so the new
@@ -292,6 +295,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             known_hosts_entries=known_hosts_entries,
             authorized_keys_entries=authorized_keys_entries,
             home_volume_symlink=home_volume_symlink,
+            extra_ssh_config_files=extra_ssh_config_files,
         )
 
     def _prepare_btrfs_on_outer(self, outer: OuterHostInterface, host_id: HostId) -> Path:
@@ -393,10 +397,7 @@ class DockerRealizer(SnapshotCapableRealizer):
             # volume's host_dir/ subdir exactly as before.
             if self.config.volume_home_path is not None:
                 host_dir_symlink_target = None
-                home_volume_symlink = (
-                    str(self.config.volume_home_path),
-                    f"{HOST_VOLUME_MOUNT_PATH}/{HOME_SUBPATH}",
-                )
+                home_volume_symlink = (str(self.config.volume_home_path), HOST_VOLUME_HOME_PATH)
             else:
                 host_dir_symlink_target = f"{HOST_VOLUME_MOUNT_PATH}/{HOST_DIR_SUBPATH}"
                 home_volume_symlink = None
@@ -408,6 +409,7 @@ class DockerRealizer(SnapshotCapableRealizer):
                 known_hosts_entries=tuple(ctx.known_hosts or ()),
                 authorized_keys_entries=tuple(ctx.authorized_keys or ()),
                 home_volume_symlink=home_volume_symlink,
+                extra_ssh_config_files=ctx.extra_ssh_config_files,
             )
 
         _container_host_key_path, container_host_public_key = self._container_host_keypair(ctx.host_id)

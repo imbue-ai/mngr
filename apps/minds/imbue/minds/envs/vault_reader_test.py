@@ -9,7 +9,9 @@ from imbue.minds.envs.primitives import VaultReadError
 from imbue.minds.envs.primitives import VaultSecretNotFoundError
 from imbue.minds.envs.vault_reader import VaultPath
 from imbue.minds.envs.vault_reader import admin_key_from_supertokens_secret
+from imbue.minds.envs.vault_reader import read_ssh_ca_public_key
 from imbue.minds.envs.vault_reader import read_vault_kv
+from imbue.minds.envs.vault_reader import sign_ssh_public_key
 
 
 def _write_fake_vault(tmp_path: Path, body: str) -> Path:
@@ -206,3 +208,70 @@ def test_admin_key_from_secret_falls_back_to_deprecated_field() -> None:
 def test_admin_key_from_secret_raises_when_neither_field_set() -> None:
     with pytest.raises(VaultReadError, match="missing 'MINDS_ADMIN_KEY'"):
         admin_key_from_supertokens_secret({"MINDS_PAID_ADMIN_KEY": ""}, "secret/minds/dev")
+
+
+def _make_ssh_vault_binary(tmp_path: Path, *, write_stdout: str, write_exit: int = 0, read_stdout: str = "") -> Path:
+    """Fake ``vault`` answering ``write <mount>/sign/<role>`` and ``read <mount>/config/ca``; records the write argv."""
+    write_out = tmp_path / "_write_out.json"
+    write_out.write_text(write_stdout)
+    read_out = tmp_path / "_read_out.json"
+    read_out.write_text(read_stdout)
+    argv_log = tmp_path / "_argv.txt"
+    body = "\n".join(
+        [
+            'sub="$1"',
+            f'if [ "$sub" = "write" ]; then printf "%s\\n" "$@" > {shlex.quote(str(argv_log))}; '
+            f"cat {shlex.quote(str(write_out))}; exit {write_exit}; fi",
+            f'if [ "$sub" = "read" ]; then cat {shlex.quote(str(read_out))}; exit 0; fi',
+            'echo "unexpected vault invocation" >&2; exit 9',
+        ]
+    )
+    return _write_fake_vault(tmp_path, body + "\n")
+
+
+def test_sign_ssh_public_key_requests_the_role_principals_and_returns_the_certificate(tmp_path: Path) -> None:
+    fake = _make_ssh_vault_binary(
+        tmp_path, write_stdout=json.dumps({"data": {"signed_key": "ssh-ed25519-cert-v01@openssh.com AAAAcert\n"}})
+    )
+    public_key_path = tmp_path / "id.pub"
+    public_key_path.write_text("ssh-ed25519 AAAAoperator\n")
+    certificate = sign_ssh_public_key(
+        mount="minds-dev-ssh",
+        role="operator",
+        public_key_path=public_key_path,
+        ttl="12h",
+        principals=("mngr-operator", "mngr-service"),
+        vault_binary=str(fake),
+    )
+    assert certificate == "ssh-ed25519-cert-v01@openssh.com AAAAcert"
+    argv = (tmp_path / "_argv.txt").read_text().splitlines()
+    assert argv[:3] == ["write", "-format=json", "minds-dev-ssh/sign/operator"]
+    assert f"public_key=@{public_key_path}" in argv
+    assert "ttl=12h" in argv
+    assert "valid_principals=mngr-operator,mngr-service" in argv
+
+
+def test_sign_ssh_public_key_surfaces_a_refused_sign(tmp_path: Path) -> None:
+    fake = _make_ssh_vault_binary(tmp_path, write_stdout="", write_exit=2)
+    public_key_path = tmp_path / "id.pub"
+    public_key_path.write_text("ssh-ed25519 AAAAoperator\n")
+    with pytest.raises(VaultReadError, match="minds-dev-ssh/sign/operator"):
+        sign_ssh_public_key(
+            mount="minds-dev-ssh",
+            role="operator",
+            public_key_path=public_key_path,
+            ttl="12h",
+            principals=("mngr-operator",),
+            vault_binary=str(fake),
+        )
+
+
+def test_read_ssh_ca_public_key_returns_the_configured_ca(tmp_path: Path) -> None:
+    fake = _make_ssh_vault_binary(
+        tmp_path, write_stdout="", read_stdout=json.dumps({"data": {"public_key": "ssh-ed25519 AAAAca minds-dev\n"}})
+    )
+    assert read_ssh_ca_public_key("minds-dev-ssh", vault_binary=str(fake)) == "ssh-ed25519 AAAAca minds-dev"
+    (tmp_path / "empty").mkdir()
+    empty = _make_ssh_vault_binary(tmp_path / "empty", write_stdout="", read_stdout=json.dumps({"data": {}}))
+    with pytest.raises(VaultReadError, match="no data.public_key"):
+        read_ssh_ca_public_key("minds-dev-ssh", vault_binary=str(empty))

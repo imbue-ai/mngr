@@ -9,30 +9,42 @@ from inline_snapshot import snapshot
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
+from imbue.mngr.providers.host_key_store import load_current_host_key_pins
 from imbue.mngr.providers.host_key_store import load_host_key_record
+from imbue.mngr.providers.host_key_store import move_host_endpoint_pins
+from imbue.mngr.providers.host_key_store import pin_known_hosts_text
+from imbue.mngr.providers.host_key_store import render_pins_as_known_hosts_text
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
+from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_imbue_cloud.errors import AdoptionError
 from imbue.mngr_imbue_cloud.errors import HostKeyDriftError
 from imbue.mngr_imbue_cloud.interfaces import SliceReconcilerState
 from imbue.mngr_imbue_cloud.providers.adoption import ADOPTION_SCHEMA_VERSION
 from imbue.mngr_imbue_cloud.providers.adoption import AdoptionEndpointKind
+from imbue.mngr_imbue_cloud.providers.adoption import BoundEndpoints
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
+from imbue.mngr_imbue_cloud.providers.adoption import bound_endpoints_path
 from imbue.mngr_imbue_cloud.providers.adoption import build_reconciler_install_command
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
 from imbue.mngr_imbue_cloud.providers.adoption import expected_reconciler_content_hash
 from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
 from imbue.mngr_imbue_cloud.providers.adoption import load_adoption_marker
+from imbue.mngr_imbue_cloud.providers.adoption import load_bound_endpoints
 from imbue.mngr_imbue_cloud.providers.adoption import load_pending_host_key_rotation
 from imbue.mngr_imbue_cloud.providers.adoption import parse_reconciler_state_output
+from imbue.mngr_imbue_cloud.providers.adoption import rebind_host_key_pins_to_endpoints
+from imbue.mngr_imbue_cloud.providers.adoption import record_bound_endpoints
 from imbue.mngr_imbue_cloud.providers.adoption import remove_key_from_desired_authorized_keys
 from imbue.mngr_imbue_cloud.providers.adoption import render_desired_authorized_keys
 from imbue.mngr_imbue_cloud.providers.adoption import render_reconciler_unit
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_client_key
 from imbue.mngr_imbue_cloud.providers.adoption import rotate_endpoint_host_key
 from imbue.mngr_imbue_cloud.providers.mock_slice_vm_access_test import MockSliceVmAccess
+from imbue.mngr_imbue_cloud.providers.testing import load_pins_by_endpoint
 
+_ADDRESS = "203.0.113.7"
 _VM_PORT = 22010
 _CONTAINER_PORT = 22011
 _BAKE_KEY = "ssh-ed25519 AAAABAKE bake-key"
@@ -47,7 +59,7 @@ def _make_target(tmp_path: Path, host_id: HostId) -> SliceAdoptionTarget:
     host_state_dir.mkdir(parents=True, exist_ok=True)
     return SliceAdoptionTarget(
         host_id=host_id,
-        address="203.0.113.7",
+        address=_ADDRESS,
         vm_port=_VM_PORT,
         container_port=_CONTAINER_PORT,
         host_state_dir=host_state_dir,
@@ -75,10 +87,36 @@ def _pin_bootstrap_keys(target: SliceAdoptionTarget) -> None:
     )
 
 
+def _adopt_fresh_slice(tmp_path: Path, host_id: HostId) -> tuple[SliceAdoptionTarget, MockSliceVmAccess]:
+    """Adopt a bake-fresh slice from this device: bootstrap pins present, no marker yet."""
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+    ensure_adopted(access, target, is_full_verification=False)
+    return target, access
+
+
 def _endpoint_pin_map(target: SliceAdoptionTarget) -> dict[int, tuple[str, HostKeyOrigin]]:
-    record = load_host_key_record(target.known_hosts_path, target.host_id)
-    assert record is not None
-    return {pin.port: (pin.public_key, pin.origin) for pin in record.pins}
+    """The host's pins by port (the slice's two endpoints share one address)."""
+    pins = load_pins_by_endpoint(target.known_hosts_path, target.host_id)
+    return {port: pin for (_address, port), pin in pins.items()}
+
+
+def _rebind(target: SliceAdoptionTarget, address: str, vm_port: int, container_port: int) -> None:
+    rebind_host_key_pins_to_endpoints(
+        target.host_state_dir, target.known_hosts_path, target.host_id, address, vm_port, container_port
+    )
+
+
+def _make_second_device(tmp_path: Path, first_target: SliceAdoptionTarget) -> SliceAdoptionTarget:
+    """A second device's view of the host: its own state dir, no marker, and the first
+    device's pins delivered as user-origin material the way the synced workspace record does."""
+    second_target = _make_target(tmp_path / "second", first_target.host_id)
+    synced_text = render_pins_as_known_hosts_text(load_current_host_key_pins(first_target.known_hosts_path))
+    pin_known_hosts_text(
+        second_target.known_hosts_path, synced_text, host_id=first_target.host_id, origin=HostKeyOrigin.USER
+    )
+    return second_target
 
 
 def test_render_desired_authorized_keys_preserves_pool_key_and_appends_client_key() -> None:
@@ -199,13 +237,19 @@ def test_full_adoption_installs_reconciler_rotates_both_endpoints_and_writes_the
     assert access.desired_authorized_keys is not None
     assert set(access.desired_authorized_keys.splitlines()) == {_BAKE_KEY, _POOL_KEY, _CLIENT_KEY}
     assert access.vm_authorized_keys == access.desired_authorized_keys
-    # Both endpoints serve fresh user-origin keys that are pinned in the store.
+    # Both endpoints serve fresh user-origin keys that are pinned in the store;
+    # the bake-time bootstrap pins are gone, and the endpoints the pins were
+    # written at are remembered for the next relocation.
     pin_by_port = _endpoint_pin_map(target)
+    assert set(pin_by_port) == {_VM_PORT, _CONTAINER_PORT}
     for port in (_VM_PORT, _CONTAINER_PORT):
         pinned_key, origin = pin_by_port[port]
         assert origin is HostKeyOrigin.USER
         assert access.served_key_by_port[port] == pinned_key
         assert pinned_key not in (_OLD_VM_HOST_KEY, _OLD_CONTAINER_HOST_KEY)
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address=target.address, ssh_port=_VM_PORT, container_ssh_port=_CONTAINER_PORT
+    )
     assert load_adoption_marker(target.host_state_dir) is not None
     # No rotation is left pending.
     for kind in AdoptionEndpointKind:
@@ -641,18 +685,314 @@ def test_adopting_a_host_another_device_already_adopted_verifies_instead_of_rero
 
     # The second device: same synced user-origin pins (the record channel), its
     # own state dir, no marker.
-    second_target = _make_target(tmp_path / "second", host_id)
-    for port, (public_key, _origin) in first_pins.items():
-        add_host_to_known_hosts(
-            second_target.known_hosts_path,
-            second_target.address,
-            port,
-            public_key,
-            host_id=host_id,
-            origin=HostKeyOrigin.USER,
-        )
+    second_target = _make_second_device(tmp_path, first_target)
     ensure_adopted(access, second_target, is_full_verification=False)
 
     assert access.served_key_by_port == served_after_first
     assert _endpoint_pin_map(second_target) == first_pins
     assert load_adoption_marker(second_target.host_state_dir) is not None
+
+
+def test_rotation_keeps_the_other_endpoints_bootstrap_pin_until_adoption_completes(tmp_path: Path) -> None:
+    """Between the VM and container rotations the container still serves its bake-time
+    key, so its bootstrap pin must survive the VM rotation: the bootstrap sweep happens
+    only once both endpoints are verified. The rotation also records the endpoints."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    access = _make_unadopted_access()
+
+    new_vm_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
+
+    assert _endpoint_pin_map(target) == {
+        _VM_PORT: (new_vm_key, HostKeyOrigin.USER),
+        _CONTAINER_PORT: (_OLD_CONTAINER_HOST_KEY, HostKeyOrigin.BOOTSTRAP),
+    }
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address=target.address, ssh_port=_VM_PORT, container_ssh_port=_CONTAINER_PORT
+    )
+
+
+def test_rerotation_replaces_the_previous_user_key_at_the_endpoint(tmp_path: Path) -> None:
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    first_vm_key = _endpoint_pin_map(target)[_VM_PORT][0]
+
+    second_vm_key = rotate_endpoint_host_key(access, target, AdoptionEndpointKind.VM)
+
+    assert second_vm_key != first_vm_key
+    assert first_vm_key not in target.known_hosts_path.read_text()
+    assert _endpoint_pin_map(target)[_VM_PORT] == (second_vm_key, HostKeyOrigin.USER)
+
+
+def test_full_verification_sweeps_bootstrap_pins_of_a_host_adopted_by_an_older_client(tmp_path: Path) -> None:
+    """The bootstrap sweep runs after any verification, so a host whose bootstrap pins
+    an older client left at stale endpoints is cleaned on its next verification."""
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    add_host_to_known_hosts(target.known_hosts_path, target.address, 29999, _OLD_VM_HOST_KEY, host_id=host_id)
+    invalidate_adoption_verification(target.host_state_dir)
+
+    ensure_adopted(access, target, is_full_verification=True)
+
+    record = load_host_key_record(target.known_hosts_path, host_id)
+    assert record is not None
+    assert all(pin.origin is HostKeyOrigin.USER for pin in record.pins)
+    assert {pin.port for pin in record.pins} == {_VM_PORT, _CONTAINER_PORT}
+
+
+# =============================================================================
+# rebind_host_key_pins_to_endpoints
+# =============================================================================
+
+
+def test_rebind_moves_both_pins_to_the_new_endpoints_and_records_them(tmp_path: Path) -> None:
+    """A restore at fresh ports (driven by anyone: this client, an admin, a rollback)
+    is reachable without a client-side start: the pins follow the endpoints with
+    their origins intact, and the old endpoints are gone."""
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    vm_key, container_key = (access.served_key_by_port[port] for port in (_VM_PORT, _CONTAINER_PORT))
+
+    _rebind(target, "198.51.100.9", 23010, 23011)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == {
+        ("198.51.100.9", 23010): (vm_key, HostKeyOrigin.USER),
+        ("198.51.100.9", 23011): (container_key, HostKeyOrigin.USER),
+    }
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address="198.51.100.9", ssh_port=23010, container_ssh_port=23011
+    )
+    assert target.address not in target.known_hosts_path.read_text()
+
+
+@pytest.mark.parametrize(
+    ("new_vm_port", "new_container_port"),
+    [
+        # A same-box restore can hand the host a new VM port equal to its old
+        # container port (both pairs come from the box's first-free-port picker).
+        (_CONTAINER_PORT, _CONTAINER_PORT + 1),
+        # The mirror image: the new container port equals the old VM port.
+        (_VM_PORT - 1, _VM_PORT),
+    ],
+)
+def test_rebind_survives_a_new_port_reusing_the_other_endpoints_old_port(
+    tmp_path: Path, new_vm_port: int, new_container_port: int
+) -> None:
+    """The moves must be ordered so neither evicts the other's not-yet-moved pin (a move
+    clears whatever sits at its destination) -- either order mistake would strand an
+    adopted host on wrong pins."""
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    vm_key, container_key = (access.served_key_by_port[port] for port in (_VM_PORT, _CONTAINER_PORT))
+
+    _rebind(target, target.address, new_vm_port, new_container_port)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == {
+        (target.address, new_vm_port): (vm_key, HostKeyOrigin.USER),
+        (target.address, new_container_port): (container_key, HostKeyOrigin.USER),
+    }
+
+
+def test_rebind_is_a_noop_while_the_endpoints_are_unchanged(tmp_path: Path) -> None:
+    host_id = HostId()
+    target, _access = _adopt_fresh_slice(tmp_path, host_id)
+    rendered_before = target.known_hosts_path.read_text()
+    pins_before = load_current_host_key_pins(target.known_hosts_path)
+
+    _rebind(target, target.address, _VM_PORT, _CONTAINER_PORT)
+
+    assert target.known_hosts_path.read_text() == rendered_before
+    assert load_current_host_key_pins(target.known_hosts_path) == pins_before
+
+
+def test_rebind_seeds_the_record_from_pins_already_at_the_current_endpoints(tmp_path: Path) -> None:
+    """A second device that synced the record after the last restore holds pins at the
+    current endpoints and no record of them: nothing moves, the endpoints are recorded."""
+    host_id = HostId()
+    first_target, _access = _adopt_fresh_slice(tmp_path / "first", host_id)
+    second_target = _make_second_device(tmp_path, first_target)
+
+    _rebind(second_target, second_target.address, _VM_PORT, _CONTAINER_PORT)
+
+    assert load_pins_by_endpoint(second_target.known_hosts_path, host_id) == load_pins_by_endpoint(
+        first_target.known_hosts_path, host_id
+    )
+    assert load_bound_endpoints(second_target.host_state_dir) == BoundEndpoints(
+        vps_address=second_target.address, ssh_port=_VM_PORT, container_ssh_port=_CONTAINER_PORT
+    )
+
+
+def test_rebind_seeds_the_record_by_port_order_when_the_synced_pins_predate_a_relocation(tmp_path: Path) -> None:
+    """A second device whose synced record still names the pre-restore ports has no way
+    to tell the VM pin from the container pin except port order (the box picker
+    reserves the VM port below the container port)."""
+    host_id = HostId()
+    first_target, access = _adopt_fresh_slice(tmp_path / "first", host_id)
+    vm_key, container_key = (access.served_key_by_port[port] for port in (_VM_PORT, _CONTAINER_PORT))
+    second_target = _make_second_device(tmp_path, first_target)
+
+    _rebind(second_target, "198.51.100.9", 23010, 23011)
+
+    assert load_pins_by_endpoint(second_target.known_hosts_path, host_id) == {
+        ("198.51.100.9", 23010): (vm_key, HostKeyOrigin.USER),
+        ("198.51.100.9", 23011): (container_key, HostKeyOrigin.USER),
+    }
+    assert load_bound_endpoints(second_target.host_state_dir) == BoundEndpoints(
+        vps_address="198.51.100.9", ssh_port=23010, container_ssh_port=23011
+    )
+
+
+def test_rebind_prefers_synced_user_pins_at_the_current_endpoints_over_a_stale_record(tmp_path: Path) -> None:
+    """A sibling device relocated the host, rotated a key, and pushed the record before
+    this device saw the new coordinates: the synced pins at the current endpoints are
+    the newer trust, so they stay and the pins at the recorded (old) endpoints go."""
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    stale_vm_key = access.served_key_by_port[_VM_PORT]
+    container_key = access.served_key_by_port[_CONTAINER_PORT]
+    add_host_to_known_hosts(
+        target.known_hosts_path,
+        target.address,
+        23010,
+        "ssh-ed25519 AAAAROTATED sibling",
+        host_id=host_id,
+        origin=HostKeyOrigin.USER,
+    )
+    add_host_to_known_hosts(
+        target.known_hosts_path, target.address, 23011, container_key, host_id=host_id, origin=HostKeyOrigin.USER
+    )
+
+    _rebind(target, target.address, 23010, 23011)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == {
+        (target.address, 23010): ("ssh-ed25519 AAAAROTATED sibling", HostKeyOrigin.USER),
+        (target.address, 23011): (container_key, HostKeyOrigin.USER),
+    }
+    assert stale_vm_key not in target.known_hosts_path.read_text()
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address=target.address, ssh_port=23010, container_ssh_port=23011
+    )
+
+
+def test_rebind_reseeds_a_record_naming_endpoints_the_host_has_nothing_pinned_at(tmp_path: Path) -> None:
+    """A 0.5.2 client sharing the profile moves the pins itself (from lease.json) and
+    leaves bound_endpoints.json behind; on the next restore the stale record must not
+    be trusted, or the moves would no-op and every user pin would be dropped."""
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    vm_key, container_key = (access.served_key_by_port[port] for port in (_VM_PORT, _CONTAINER_PORT))
+    for old_port, new_port in ((_VM_PORT, 23010), (_CONTAINER_PORT, 23011)):
+        move_host_endpoint_pins(target.known_hosts_path, host_id, target.address, old_port, target.address, new_port)
+
+    _rebind(target, "198.51.100.9", 24010, 24011)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == {
+        ("198.51.100.9", 24010): (vm_key, HostKeyOrigin.USER),
+        ("198.51.100.9", 24011): (container_key, HostKeyOrigin.USER),
+    }
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address="198.51.100.9", ssh_port=24010, container_ssh_port=24011
+    )
+
+
+@pytest.mark.parametrize(
+    ("new_address", "new_vm_port", "new_container_port"),
+    [
+        ("198.51.100.9", 24010, 24011),
+        # The host can come back to the very ports the record names (a same-box
+        # first-free-port scan), which must not pass for the pins being in place.
+        (_ADDRESS, _VM_PORT, _CONTAINER_PORT),
+    ],
+)
+def test_rebind_reseeds_a_record_whose_endpoints_hold_only_bootstrap_pins(
+    tmp_path: Path, new_address: str, new_vm_port: int, new_container_port: int
+) -> None:
+    """This device leased the host (record and bootstrap pins at the lease endpoints) but
+    never adopted it; a sibling adopted it, a restore moved it, and the sibling's push
+    synced the user pins here; then another restore happened before this device
+    connected. Bootstrap pins need no relocation (the connector key is re-pinned at the
+    current endpoints anyway), so the synced user pins are what must follow the host."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    record_bound_endpoints(
+        target.host_state_dir,
+        BoundEndpoints(vps_address=target.address, ssh_port=_VM_PORT, container_ssh_port=_CONTAINER_PORT),
+    )
+    sibling_vm_key = "ssh-ed25519 AAAASIBVM sibling-vm"
+    sibling_container_key = "ssh-ed25519 AAAASIBC sibling-container"
+    for port, key in ((23010, sibling_vm_key), (23011, sibling_container_key)):
+        add_host_to_known_hosts(
+            target.known_hosts_path, target.address, port, key, host_id=host_id, origin=HostKeyOrigin.USER
+        )
+
+    _rebind(target, new_address, new_vm_port, new_container_port)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == {
+        (new_address, new_vm_port): (sibling_vm_key, HostKeyOrigin.USER),
+        (new_address, new_container_port): (sibling_container_key, HostKeyOrigin.USER),
+    }
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address=new_address, ssh_port=new_vm_port, container_ssh_port=new_container_port
+    )
+
+
+def test_rebind_leaves_an_unadopted_host_alone(tmp_path: Path) -> None:
+    """Bootstrap-only pins carry no role information and are re-pinned from the
+    connector by the caller; nothing moves and no record is written."""
+    host_id = HostId()
+    target = _make_target(tmp_path, host_id)
+    _pin_bootstrap_keys(target)
+    pins_before = load_pins_by_endpoint(target.known_hosts_path, host_id)
+
+    _rebind(target, "198.51.100.9", 23010, 23011)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == pins_before
+    assert load_bound_endpoints(target.host_state_dir) is None
+    absent_target = _make_target(tmp_path / "absent", host_id)
+    _rebind(absent_target, "198.51.100.9", 23010, 23011)
+    assert not absent_target.known_hosts_path.exists()
+
+
+def test_rebind_refuses_to_guess_roles_from_more_than_two_user_endpoints(tmp_path: Path) -> None:
+    host_id = HostId()
+    target, _access = _adopt_fresh_slice(tmp_path, host_id)
+    bound_endpoints_path(target.host_state_dir).unlink()
+    add_host_to_known_hosts(
+        target.known_hosts_path, target.address, 29999, _OLD_VM_HOST_KEY, host_id=host_id, origin=HostKeyOrigin.USER
+    )
+    pins_before = load_pins_by_endpoint(target.known_hosts_path, host_id)
+
+    with allow_warnings():
+        _rebind(target, "198.51.100.9", 23010, 23011)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id) == pins_before
+    assert load_bound_endpoints(target.host_state_dir) is None
+
+
+def test_rebind_treats_a_malformed_record_as_unrecorded(tmp_path: Path) -> None:
+    host_id = HostId()
+    target, access = _adopt_fresh_slice(tmp_path, host_id)
+    vm_key = access.served_key_by_port[_VM_PORT]
+    bound_endpoints_path(target.host_state_dir).write_text("{not json")
+
+    with allow_warnings():
+        _rebind(target, "198.51.100.9", 23010, 23011)
+
+    assert load_pins_by_endpoint(target.known_hosts_path, host_id)[("198.51.100.9", 23010)] == (
+        vm_key,
+        HostKeyOrigin.USER,
+    )
+    assert load_bound_endpoints(target.host_state_dir) == BoundEndpoints(
+        vps_address="198.51.100.9", ssh_port=23010, container_ssh_port=23011
+    )
+
+
+def test_record_bound_endpoints_round_trips(tmp_path: Path) -> None:
+    endpoints = BoundEndpoints(vps_address="198.51.100.9", ssh_port=23010, container_ssh_port=23011)
+
+    record_bound_endpoints(tmp_path, endpoints)
+
+    assert load_bound_endpoints(tmp_path) == endpoints
+    assert load_bound_endpoints(tmp_path / "absent") is None

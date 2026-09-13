@@ -37,6 +37,22 @@ class BackupAccessState(LowerCaseStrEnum):
     UNAVAILABLE = auto()
 
 
+class CloudRowKeyState(LowerCaseStrEnum):
+    """Why this device cannot open a live cloud row it lists (lowercase wire values).
+
+    A cloud workspace's per-host SSH key arrives through the synced record, so
+    a device that has not decrypted the record has nothing to connect with.
+    Each state names what the user can do about it.
+    """
+
+    # The synced key is here but needs the account's master password.
+    LOCKED = auto()
+    # The account is unlocked; the key has not landed with a sync yet.
+    SYNCING = auto()
+    # No key bundle exists anywhere, so no key will ever reach this device.
+    UNAVAILABLE = auto()
+
+
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from a synced record (not in local discovery), for the landing list."""
 

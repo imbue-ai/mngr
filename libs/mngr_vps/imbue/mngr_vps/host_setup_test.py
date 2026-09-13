@@ -11,10 +11,12 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_VERSION
+from imbue.mngr_vps.host_setup import PINNED_GVISOR_BINARY_INSTALL_SCRIPT
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
 from imbue.mngr_vps.host_setup import build_host_setup_steps
 from imbue.mngr_vps.host_setup import build_remote_script_command
+from imbue.mngr_vps.host_setup import render_gvisor_binary_install_script
 
 
 class _StubOuter(MutableModel):
@@ -149,3 +151,16 @@ def test_apply_host_setup_on_outer_raises_on_step_failure() -> None:
         apply_host_setup_on_outer(outer, install_gvisor_runtime=False, is_qemu_purge_enabled=False)
     # Stops at the failing step -- does not run sshd tuning afterward.
     assert len(_stub(outer).recorded_commands) == 2
+
+
+def test_render_gvisor_binary_install_script_downloads_from_the_given_release_directory() -> None:
+    # The default rendering fetches gVisor's own release bucket; a caller with a
+    # mirrored copy of the same per-arch layout swaps only the base URL.
+    assert f"storage.googleapis.com/gvisor/releases/release/{PINNED_GVISOR_RELEASE}/" in (
+        PINNED_GVISOR_BINARY_INSTALL_SCRIPT
+    )
+    mirrored = render_gvisor_binary_install_script("https://mirror.example.test/artifacts/gvisor/20260601")
+    assert 'URL="https://mirror.example.test/artifacts/gvisor/20260601/${ARCH}"' in mirrored
+    assert "storage.googleapis.com" not in mirrored
+    assert "sha512sum -c runsc.sha512" in mirrored
+    assert "sha512sum -c containerd-shim-runsc-v1.sha512" in mirrored

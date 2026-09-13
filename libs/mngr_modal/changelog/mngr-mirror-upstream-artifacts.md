@@ -1,0 +1,1 @@
+- Persistent Modal host creation now waits for the snapshot-function deploy for as long as `modal deploy` can legitimately block behind Modal's app lock, instead of a fixed two minutes. Creates fanned out concurrently against one shared app name no longer fail with a bare timeout while their deploy is still queued behind the lock.

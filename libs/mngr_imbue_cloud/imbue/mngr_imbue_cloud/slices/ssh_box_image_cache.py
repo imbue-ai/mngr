@@ -6,17 +6,17 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
+from imbue.mngr_imbue_cloud.interfaces import SliceVmClientInterface
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BUILD_LOCK_TTL_SECONDS
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
 from imbue.mngr_imbue_cloud.slices.box_image_cache import box_image_tar_name
-from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
 
 # SSH options for the box's loopback connection into a freshly-carved slice's
 # VM-root sshd: the slice is operator-controlled during the bake and reached over
 # the box's own loopback (the box-forwarded VM ssh port), so we accept its
 # (unpinned) host key rather than fail-closed -- there is no persistent key to pin.
-_SLICE_LOOPBACK_SSH_OPTS: Final[str] = (
+SLICE_LOOPBACK_SSH_OPTS: Final[str] = (
     "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30"
 )
 # A ~11 GiB docker save/load over the box loopback is bounded but not instant.
@@ -24,10 +24,11 @@ _TRANSFER_TIMEOUT_SECONDS: Final[float] = 1200.0
 _SHORT_TIMEOUT_SECONDS: Final[float] = 60.0
 
 
-class LimaBoxImageCache(BoxImageCacheInterface):
+class SshBoxImageCache(BoxImageCacheInterface):
     """BoxImageCache backed by files + box-local docker save/load on a bare-metal box.
 
-    Every operation runs on the box over SSH via the lima client's ``run_on_box``.
+    Every operation runs on the box over SSH via the slice client's ``run_on_box``,
+    so it serves both box generations unchanged.
     The box has no Docker daemon; it only stores the ``docker save`` tar and pipes
     it to/from the slice's VM-root dockerd over the box's own loopback to the
     box-forwarded VM ssh port.
@@ -35,7 +36,7 @@ class LimaBoxImageCache(BoxImageCacheInterface):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    slice_client: LimaSliceVpsClient = Field(frozen=True, description="Runs commands on the box over SSH")
+    slice_client: SliceVmClientInterface = Field(frozen=True, description="Runs commands on the box over SSH")
     cache_dir: str = Field(frozen=True, description="Box dir holding the cached image tar(s), lock, and transfer keys")
 
     def _run(
@@ -184,7 +185,7 @@ class LimaBoxImageCache(BoxImageCacheInterface):
         tmp_path = f"{tar_path}.tmp"
         key = shlex.quote(transfer_key.private_key_path_on_box)
         remote_save = (
-            f"ssh -i {key} {_SLICE_LOOPBACK_SSH_OPTS} -p {int(vm_ssh_port)} root@127.0.0.1 "
+            f"ssh -i {key} {SLICE_LOOPBACK_SSH_OPTS} -p {int(vm_ssh_port)} root@127.0.0.1 "
             f"{shlex.quote('docker save ' + image_tag)}"
         )
         # Clean any stale .tmp from an interrupted prior save, stream the save to a
@@ -204,7 +205,7 @@ class LimaBoxImageCache(BoxImageCacheInterface):
     def load_image_into_slice(self, image_tag: str, *, vm_ssh_port: int, transfer_key: TransferKey) -> None:
         tar_path = shlex.quote(self._tar_path(image_tag))
         key = shlex.quote(transfer_key.private_key_path_on_box)
-        remote_load = f"ssh -i {key} {_SLICE_LOOPBACK_SSH_OPTS} -p {int(vm_ssh_port)} root@127.0.0.1 'docker load'"
+        remote_load = f"ssh -i {key} {SLICE_LOOPBACK_SSH_OPTS} -p {int(vm_ssh_port)} root@127.0.0.1 'docker load'"
         command = f"cat {tar_path} | {remote_load}"
         rc, _out, err = self._run(command, timeout=_TRANSFER_TIMEOUT_SECONDS, label="cache-load", is_streaming=True)
         if rc != 0:

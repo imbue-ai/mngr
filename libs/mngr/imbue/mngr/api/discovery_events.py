@@ -1232,7 +1232,36 @@ def resolve_hosts_for_identifiers(
     identifiers: Sequence[str],
     live_discovery_fallback: Callable[[Sequence[str]], Sequence[DiscoveredAgent]] | None = None,
 ) -> dict[str, ResolvedAgentHost]:
-    """Resolve agent identifiers to the hosts that run them, without any SSH.
+    """Resolve agent identifiers to the single host each runs on, without any SSH.
+
+    The one-host form of :func:`resolve_candidate_hosts_for_identifiers`: an
+    identifier spanning more than one host raises :class:`AgentNotFoundError`
+    (it must be disambiguated with ``NAME@HOST.PROVIDER``).
+    """
+    candidates_by_identifier = resolve_candidate_hosts_for_identifiers(mngr_ctx, identifiers, live_discovery_fallback)
+    resolved: dict[str, ResolvedAgentHost] = {}
+    for identifier, candidates in candidates_by_identifier.items():
+        if len(candidates) > 1:
+            raise ambiguous_hosts_error(identifier, candidates)
+        resolved[identifier] = candidates[0]
+    return resolved
+
+
+def ambiguous_hosts_error(identifier: str, candidates: Sequence[ResolvedAgentHost]) -> AgentNotFoundError:
+    """The error for an identifier whose agents run on several hosts."""
+    host_ids = ", ".join(sorted(str(candidate.host_id) for candidate in candidates))
+    return AgentNotFoundError(
+        f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_ids}); "
+        "disambiguate using NAME@HOST.PROVIDER (or ID@HOST)"
+    )
+
+
+def resolve_candidate_hosts_for_identifiers(
+    mngr_ctx: MngrContext,
+    identifiers: Sequence[str],
+    live_discovery_fallback: Callable[[Sequence[str]], Sequence[DiscoveredAgent]] | None = None,
+) -> dict[str, tuple[ResolvedAgentHost, ...]]:
+    """Resolve agent identifiers to every host that runs them, without any SSH.
 
     Reads the latest DISCOVERY_FULL snapshot and replays incremental events to
     map each agent identifier (name or ID) to the ``host_id`` and provider
@@ -1248,7 +1277,9 @@ def resolve_hosts_for_identifiers(
     lookup against the one relevant provider both validates and names the host,
     with no need to scan every provider's hosts up front.
 
-    Returns a map from each input identifier to its :class:`ResolvedAgentHost`.
+    Returns a map from each input identifier to the :class:`ResolvedAgentHost` of
+    every host it runs on (more than one when the same name or id exists on
+    several hosts, e.g. mid-migration; the caller decides how to disambiguate).
 
     ``live_discovery_fallback`` (injected by the caller to avoid a circular import on
     the live discovery path) is consulted for any identifier the event stream cannot
@@ -1256,8 +1287,7 @@ def resolve_hosts_for_identifiers(
     from the latest snapshot), or one created before any stream exists, still resolves.
 
     Raises :class:`AgentNotFoundError` if any identifier is absent from both the event
-    stream and the live fallback, has been destroyed, or maps to agents on more than one
-    host (which must be disambiguated with ``NAME@HOST.PROVIDER``).
+    stream and the live fallback, or has been destroyed.
 
     Event lines that do not match the current schema (e.g. written by a different
     mngr version sharing the log) are skipped during the replay; an identifier
@@ -1274,8 +1304,9 @@ def resolve_hosts_for_identifiers(
     # Drop destroyed instances so they cannot resolve.
     _drop_destroyed_instances(maps)
 
-    # Build id- and name-based lookup maps over the surviving instances; the
-    # single-host requirement is checked below.
+    # Build id- and name-based lookup maps over the surviving instances; every
+    # host an identifier runs on is collected below (the one-host contract is
+    # resolve_hosts_for_identifiers's).
     instances_by_agent_id, instances_by_name = _build_instance_lookup_maps(maps)
 
     # Read-after-write fallback: an agent created during an in-flight discovery span may
@@ -1294,7 +1325,7 @@ def resolve_hosts_for_identifiers(
                 _record_agent(maps, agent)
             instances_by_agent_id, instances_by_name = _build_instance_lookup_maps(maps)
 
-    resolved: dict[str, ResolvedAgentHost] = {}
+    resolved: dict[str, tuple[ResolvedAgentHost, ...]] = {}
     for identifier in identifiers:
         if identifier in instances_by_agent_id:
             candidate_instances = instances_by_agent_id[identifier]
@@ -1305,9 +1336,7 @@ def resolve_hosts_for_identifiers(
                 f"Could not resolve a host for agent '{identifier}' from the discovery event stream"
             )
 
-        # Collect the distinct hosts the candidate instance(s) run on. An
-        # identifier (name or id) spanning more than one host is ambiguous and
-        # must be disambiguated explicitly.
+        # Collect the distinct hosts the candidate instance(s) run on.
         candidate_hosts: dict[str, ResolvedAgentHost] = {}
         for instance_key in candidate_instances:
             provider_str = maps.provider_by_agent_instance.get(instance_key)
@@ -1322,14 +1351,7 @@ def resolve_hosts_for_identifiers(
             raise AgentNotFoundError(
                 f"Could not resolve a host for agent '{identifier}' from the discovery event stream"
             )
-        if len(candidate_hosts) > 1:
-            host_ids = ", ".join(sorted(candidate_hosts))
-            raise AgentNotFoundError(
-                f"Agent identifier '{identifier}' matches agents on multiple hosts ({host_ids}); "
-                "disambiguate using NAME@HOST.PROVIDER (or ID@HOST)"
-            )
-        resolved[identifier] = next(iter(candidate_hosts.values()))
-
+        resolved[identifier] = tuple(candidate_hosts[host_id] for host_id in sorted(candidate_hosts))
     return resolved
 
 

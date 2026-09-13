@@ -106,7 +106,6 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_dir_layouts import host_dir_fallbacks
-from imbue.mngr.providers.host_key_store import move_host_endpoint_pins
 from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
@@ -140,17 +139,22 @@ from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import POOL_HOST_SERVICES_AGENT_NAME
 from imbue.mngr_imbue_cloud.primitives import WORKSPACE_PRIMARY_AGENT_LABEL
+from imbue.mngr_imbue_cloud.providers.adoption import BoundEndpoints
 from imbue.mngr_imbue_cloud.providers.adoption import ParamikoSliceVmAccess
 from imbue.mngr_imbue_cloud.providers.adoption import SliceAdoptionTarget
 from imbue.mngr_imbue_cloud.providers.adoption import ensure_adopted
 from imbue.mngr_imbue_cloud.providers.adoption import invalidate_adoption_verification
 from imbue.mngr_imbue_cloud.providers.adoption import is_slice_lease
+from imbue.mngr_imbue_cloud.providers.adoption import rebind_host_key_pins_to_endpoints
+from imbue.mngr_imbue_cloud.providers.adoption import record_bound_endpoints
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
 from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provider
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
+from imbue.mngr_imbue_cloud.providers.slice_provider import read_container_ca_trust_files_from_vm
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
@@ -371,6 +375,18 @@ def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
         outer_host_public_key=workspace.outer_host_public_key,
         container_host_public_key=workspace.container_host_public_key,
     )
+
+
+@pure
+def should_read_container_ca_trust_from_vm(*, is_slice: bool, box_generation: int) -> bool:
+    """Whether a leased container rebuild must re-read the tier CA trust from its slice VM.
+
+    Only a gen-2 slice's container trusts a CA (the connector and analytics
+    reach it by certificate, never by a static key); every other rebuild
+    (an OVH host, or a gen-1 slice) authorizes keys the normal way and needs
+    no CA trust files.
+    """
+    return is_slice and box_generation >= FIRST_QEMU_BOX_GENERATION
 
 
 def _workspace_start_failed_error(host_id: HostId, transition_error: str | None) -> WorkspaceStartFailedError:
@@ -1102,11 +1118,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         host_id = HostId(lease.host_id)
         host_dir = str(self.host_dir)
         try:
-            # ``_ensure_outer_host_key_known`` is documented as best-effort
-            # but performs disk I/O that could in principle raise; keep it
-            # inside the guard so a single bad lease can never drop the
-            # rest of the listing.
-            self._ensure_outer_host_key_known(lease)
             with self.outer_host_for(host_id) as outer:
                 assert outer is not None
                 script = build_outer_listing_collection_script(
@@ -1214,22 +1225,54 @@ class ImbueCloudProvider(BaseProviderInstance):
             ]
         return host_details, agent_details_list
 
+    def _rebind_host_key_pins(self, lease: LeasedHostInfo) -> None:
+        """Move the host's stored pins to the lease's current endpoints if a restore moved them.
+
+        Runs before the connector-key add-if-absent so an adopted host's
+        user-origin pins already cover the current endpoints when that
+        fallback looks, instead of regressing to the connector's bake-time
+        keys.
+        """
+        host_id = HostId(lease.host_id)
+        rebind_host_key_pins_to_endpoints(
+            self._host_state_dir(host_id),
+            self._host_known_hosts_path(host_id),
+            host_id,
+            lease.vps_address,
+            lease.ssh_port,
+            lease.container_ssh_port,
+        )
+
+    def _ensure_lease_endpoint_known(
+        self, lease: LeasedHostInfo, hostname: str, port: int, public_key: str | None
+    ) -> Path:
+        """Make ``hostname:port`` (one of the lease's two sshd endpoints) verifiable, and return the known_hosts path.
+
+        An adopted host's own pins are first moved to the lease's current
+        endpoints (``_rebind_host_key_pins``), so the connector-recorded
+        ``public_key`` -- pinned add-if-absent by ``_ensure_host_key_pinned``
+        -- only ever recovers a fresh or unadopted machine and never displaces
+        a locally-recorded key.
+        """
+        self._rebind_host_key_pins(lease)
+        return self._ensure_host_key_pinned(HostId(lease.host_id), hostname, port, public_key)
+
     def _ensure_outer_host_key_known(self, lease: LeasedHostInfo) -> None:
-        """Pin the outer (VPS-root) sshd's host key the connector recorded, if not already present.
+        """Make the outer (VPS-root) sshd endpoint verifiable, best-effort.
 
         ``outer_host_for`` connects with strict host-key checking. The outer sshd
         is reached at ``lease.ssh_port`` -- ``22`` for an OVH VPS (root sshd on
         :22) and the box-forwarded VM-root port for a slice (where ``:22`` is the
-        bare-metal box's own sshd, not the VM). This recovers a fresh machine from
-        the connector-provided key; it is add-if-absent so a locally-recorded key
-        is never clobbered, and a None key (connector too old) is a no-op (the
-        connection then fails strict checking, never trust-on-first-use). On local
-        disk failure we log and proceed -- the caller's outer-SSH guard maps the
+        bare-metal box's own sshd, not the VM). See
+        ``_ensure_lease_endpoint_known`` for how adopted and unadopted hosts
+        are handled; a None key (connector too old) is a no-op (the connection
+        then fails strict checking, never trust-on-first-use). On local disk
+        failure we log and proceed -- the caller's outer-SSH guard maps the
         resulting error to the lease-only fallback.
         """
         host_id = HostId(lease.host_id)
         try:
-            self._ensure_host_key_pinned(host_id, lease.vps_address, lease.ssh_port, lease.outer_host_public_key)
+            self._ensure_lease_endpoint_known(lease, lease.vps_address, lease.ssh_port, lease.outer_host_public_key)
         except OSError as exc:
             logger.warning(
                 "imbue_cloud[{}] could not update known_hosts for host {} (vps {}): {}",
@@ -1240,7 +1283,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
 
     def _ensure_container_host_key_known(self, lease: LeasedHostInfo) -> None:
-        """Pin the container sshd's host key the connector recorded, if not already present.
+        """Make the container sshd endpoint verifiable, best-effort.
 
         The streaming discovery path advertises each host's *container* endpoint
         (``vps_address:container_ssh_port``) as its SSHInfo but, unlike the full
@@ -1249,14 +1292,12 @@ class ImbueCloudProvider(BaseProviderInstance):
         connection to the advertised endpoint (the desktop latchkey reverse
         tunnel) would then reject it as ``not found in known_hosts`` whenever the
         per-host known_hosts file already exists from the outer VPS-root pin but
-        carries no container-port entry. Pinning here keeps the advertised
-        endpoint verifiable. Add-if-absent, and a None key (connector too old) is
-        a no-op, exactly mirroring ``_ensure_outer_host_key_known``.
+        carries no container-port entry. Mirrors ``_ensure_outer_host_key_known``.
         """
         host_id = HostId(lease.host_id)
         try:
-            self._ensure_host_key_pinned(
-                host_id, lease.vps_address, lease.container_ssh_port, lease.container_host_public_key
+            self._ensure_lease_endpoint_known(
+                lease, lease.vps_address, lease.container_ssh_port, lease.container_host_public_key
             )
         except OSError as exc:
             logger.warning(
@@ -1518,14 +1559,15 @@ class ImbueCloudProvider(BaseProviderInstance):
             self.generate_per_host_keypair(host_id)
             private_key_path, _ = self._host_keypair_paths(host_id)
 
-        # Pin the container's host key (and the VM-root key for later outer SSH)
-        # from the connector-recorded key, add-if-absent so a locally-recorded
-        # slow-path rebuilt key is never clobbered. Recovers a fresh machine
-        # without any scan; a None key (old connector) leaves strict checking to
-        # fail rather than falling back to trust-on-first-use.
-        self._ensure_host_key_pinned(host_id, vps_address, lease.ssh_port, lease.outer_host_public_key)
-        known_hosts_path = self._ensure_host_key_pinned(
-            host_id, vps_address, container_ssh_port, lease.container_host_public_key
+        # Make both endpoints verifiable (the VM-root one for later outer SSH):
+        # an adopted host's own pins follow the workspace to the lease's current
+        # endpoints, and an unadopted one gets the connector-recorded keys
+        # add-if-absent, without any scan; a None key (old connector) leaves
+        # strict checking to fail rather than falling back to
+        # trust-on-first-use.
+        self._ensure_lease_endpoint_known(lease, vps_address, lease.ssh_port, lease.outer_host_public_key)
+        known_hosts_path = self._ensure_lease_endpoint_known(
+            lease, vps_address, container_ssh_port, lease.container_host_public_key
         )
 
         # Adopt the slice (or re-verify its adoption) before handing back a
@@ -1923,8 +1965,8 @@ class ImbueCloudProvider(BaseProviderInstance):
         )
         tmp_private_key, tmp_public_key, public_key_text = self._prepare_pending_keypair()
         try:
-            # Region constraints are NOT relaxed: a hard ``region`` requirement
-            # still applies to the rebuilt host.
+            # The region constraint is NOT relaxed: the hard requirement still
+            # applies to the rebuilt host.
             lease_result = self.client.lease_host(
                 token,
                 relaxed_attributes,
@@ -2042,6 +2084,17 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
         combined_authorized_keys = tuple(authorized_keys or ()) + (per_host_public_key,)
         with self._outer_for_leased_vps(host_id, lease_result) as outer:
+            # A gen-2 slice's container trusts the tier's SSH CA (the connector and
+            # analytics reach it by certificate, never by a static key); the
+            # rebuilt container must keep that trust, and the VM is where the
+            # bake left the CA.
+            rebuilt_container_ssh_config_files = (
+                read_container_ca_trust_files_from_vm(outer)
+                if should_read_container_ca_trust_from_vm(
+                    is_slice=is_slice, box_generation=lease_result.box_generation
+                )
+                else ()
+            )
             delegated_provider.teardown_container_on_existing_vps(outer, host_id)
             # Re-apply the full idempotent host setup on the leased VPS before
             # rebuilding, so a host baked with an old version (or before runsc
@@ -2080,6 +2133,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 lifecycle=lifecycle,
                 known_hosts=known_hosts,
                 authorized_keys=combined_authorized_keys,
+                extra_ssh_config_files=rebuilt_container_ssh_config_files,
             )
         # The rebuilt container's host key is the delegated provider's own
         # (injected into the container at rebuild), so it is known locally without
@@ -2211,73 +2265,25 @@ class ImbueCloudProvider(BaseProviderInstance):
         return final_private_key, final_public_key
 
     def _persist_lease_meta(self, host_id: HostId, lease_result: LeaseResult) -> None:
-        """Persist lease metadata so later commands find host_db_id without the connector."""
-        lease_meta_path = self._host_state_dir(host_id) / "lease.json"
-        lease_meta_path.write_text(json.dumps(lease_result.model_dump(), indent=2, default=str))
+        """Persist lease metadata so later commands find host_db_id without the connector.
 
-    def _move_host_pins_to_new_endpoints(self, host_id: HostId, started: LeasedHostInfo) -> None:
-        """Relocate the host's stored pins after a stop/start moved its endpoints.
-
-        The old endpoints come from the persisted lease.json (present on any
-        machine that leased or previously moved this host); on a machine
-        without one, the connector-key fallback that follows this call covers
-        the fresh endpoints. Origins are preserved -- this is what keeps an
-        adopted host's user-origin pins authoritative at the new address
-        instead of regressing to the connector's recorded bake keys. The
-        persisted coordinates are updated afterwards so a later move starts
-        from these endpoints. Best-effort: a failure here leaves the
-        connector-key fallback to do what it did before this existed.
+        Also records the lease's endpoints as the ones the host's pins are
+        written at, so that once user-origin pins sit there (this device's
+        adoption, or a sibling's arriving through the synced record) a later
+        relocation starts from these coordinates rather than the port-order
+        fallback. An unadopted host's bootstrap pins are never relocated: the
+        connector-key add-if-absent re-pins them at the new endpoints.
         """
         lease_meta_path = self._host_state_dir(host_id) / "lease.json"
-        lease_meta = read_json_dict(lease_meta_path)
-        old_address = lease_meta.get("vps_address")
-        old_ssh_port = lease_meta.get("ssh_port")
-        old_container_port = lease_meta.get("container_ssh_port")
-        if (
-            not isinstance(old_address, str)
-            or not isinstance(old_ssh_port, int)
-            or not isinstance(old_container_port, int)
-        ):
-            logger.debug("No usable persisted lease coordinates for host {}; skipping pin relocation", host_id)
-            return
-        known_hosts_path = self._host_known_hosts_path(host_id)
-        endpoint_moves = [
-            (old_ssh_port, started.ssh_port),
-            (old_container_port, started.container_ssh_port),
-        ]
-        # A move clears whatever pins sit at its destination endpoint before the
-        # host's own pins land there, so no move's destination may equal the
-        # other move's still-pending source. A same-box restore can violate that
-        # for the default (VM-first) order: both port pairs come from the box's
-        # first-free-port picker, so the new VM port can be the old container
-        # port (e.g. (22010, 22011) -> (22011, 22012)) -- the VM move would
-        # evict the not-yet-moved container pin and the container move would
-        # then relocate the freshly-placed VM pin. Moving the container endpoint
-        # first resolves that; the mirror-image collision (new container port ==
-        # old VM port) is handled by the default order, and both at once is
-        # impossible (the picker always reserves the VM port below the
-        # container port).
-        if (started.vps_address, started.ssh_port) == (old_address, old_container_port):
-            endpoint_moves.reverse()
-        try:
-            for old_port, new_port in endpoint_moves:
-                if (old_address, old_port) != (started.vps_address, new_port):
-                    move_host_endpoint_pins(
-                        known_hosts_path, host_id, old_address, old_port, started.vps_address, new_port
-                    )
-        except OSError as exc:
-            logger.warning("imbue_cloud[{}] could not relocate pins for host {}: {}", self.name, host_id, exc)
-            return
-        updated_meta = {
-            **lease_meta,
-            "vps_address": started.vps_address,
-            "ssh_port": started.ssh_port,
-            "container_ssh_port": started.container_ssh_port,
-        }
-        try:
-            atomic_write(lease_meta_path, json.dumps(updated_meta, indent=2, default=str))
-        except OSError as exc:
-            logger.warning("imbue_cloud[{}] could not update lease.json for host {}: {}", self.name, host_id, exc)
+        lease_meta_path.write_text(json.dumps(lease_result.model_dump(), indent=2, default=str))
+        record_bound_endpoints(
+            self._host_state_dir(host_id),
+            BoundEndpoints(
+                vps_address=lease_result.vps_address,
+                ssh_port=lease_result.ssh_port,
+                container_ssh_port=lease_result.container_ssh_port,
+            ),
+        )
 
     def _record_host_key(
         self,
@@ -2492,8 +2498,8 @@ class ImbueCloudProvider(BaseProviderInstance):
             # unrecoverable.
             start_container_sshd(outer, container_id)
             self._wait_for_container_sshd(leased)
-        # A restart may have rebooted the VM (replaying cidata over the SSH
-        # material); make the host build below run a full adoption
+        # A restart may have rebooted the VM (on gen-1, replaying cidata over
+        # the SSH material); make the host build below run a full adoption
         # re-verification rather than the durable already-verified path.
         self._adoption_attempted_host_ids.discard(str(host_id))
         invalidate_adoption_verification(self._host_state_dir(host_id))
@@ -2549,23 +2555,22 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
         if isinstance(outcome, Exception):
             raise outcome
-        # Fresh coordinates: refresh every cache, persist the lease meta, and
-        # pin the (unchanged, but possibly re-addressed) host keys.
+        # Fresh coordinates: refresh every cache and, before anything that can
+        # still fail, force a full adoption re-verification on the next host
+        # build (a gen-1 relocation re-runs cloud-init from the uploaded
+        # cidata; a gen-2 one never does, but the address and ports changed)
+        # and move the host's own pins (unchanged keys, origins intact) to the
+        # new endpoints -- neither needs the VM's sshd up yet.
         self.reset_caches()
         started = leased_info_from_workspace(outcome)
-        # The keys did not change across the move, so first relocate the host's
-        # own pins from the store (origins intact -- an adopted host's
-        # user-origin pins must never regress to the connector's bake-time
-        # keys), then let the connector-key add-if-absent fill any endpoint the
-        # store had nothing for (fresh machine, legacy host).
-        self._move_host_pins_to_new_endpoints(host_id, started)
-        self._ensure_outer_host_key_known(started)
-        self._ensure_container_host_key_known(started)
-        # The relocation may have re-run cloud-init from the uploaded cidata;
-        # force a full adoption re-verification on the next host build.
         self._adoption_attempted_host_ids.discard(str(host_id))
         invalidate_adoption_verification(self._host_state_dir(host_id))
+        self._rebind_host_key_pins(started)
+        # Then let the connector-key add-if-absent fill any endpoint the store
+        # had nothing for (a fresh machine, an unadopted host).
         wait_for_sshd(started.vps_address, started.ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
+        self._ensure_outer_host_key_known(started)
+        self._ensure_container_host_key_known(started)
         logger.debug(
             "Workspace {} is running again on {} (ports vm={}/container={})",
             host_id,
@@ -2788,6 +2793,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         if not private_key_path.exists():
             raise HostNotFoundError(self.name, host_id)
 
+        # An adopted host reached at endpoints its pins have not caught up
+        # with (a restore driven elsewhere) has them moved here, so callers
+        # that open the outer without a discovery pass first still verify it.
+        self._ensure_outer_host_key_known(leased)
         known_hosts_path = self._host_known_hosts_path(host_id)
         known_hosts_path.parent.mkdir(parents=True, exist_ok=True)
         if not known_hosts_path.exists():

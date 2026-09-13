@@ -24,6 +24,8 @@ import os
 import shutil
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
@@ -184,6 +186,100 @@ def delete_vault_kv(
         raise VaultReadError(
             f"`{vault_binary} kv metadata delete {leaf_relative}` failed (exit {result.returncode}): {stderr}"
         )
+
+
+def sign_ssh_public_key(
+    *,
+    mount: str,
+    role: str,
+    public_key_path: Path,
+    ttl: str,
+    principals: Sequence[str],
+    parent_concurrency_group: ConcurrencyGroup | None = None,
+    vault_binary: str = VAULT_BINARY,
+) -> str:
+    """Have ``mount``'s SSH CA sign the OpenSSH public key at ``public_key_path``; return the certificate line.
+
+    Runs ``vault write <mount>/sign/<role>`` with the operator's own login (the
+    OIDC token ``vault login`` left behind), so the certificate's key id records
+    who asked. The requested ``ttl`` is capped by the role's ``max_ttl`` in
+    Vault; the returned certificate is a single ``ssh-ed25519-cert-v01@openssh.com``
+    line ready to be written beside the private key as ``<key>-cert.pub``.
+
+    Raises :class:`VaultReadError` when the CLI is missing, the sign fails
+    (no login, no policy for the role, a principal outside the role), or the
+    response lacks a signed key.
+    """
+    _check_vault_binary(vault_binary)
+    command = [
+        vault_binary,
+        "write",
+        "-format=json",
+        f"{mount}/sign/{role}",
+        f"public_key=@{public_key_path}",
+        f"ttl={ttl}",
+        f"valid_principals={','.join(principals)}",
+    ]
+    return _read_vault_data_field(
+        command,
+        field="signed_key",
+        label=f"write {mount}/sign/{role}",
+        failure_hint=(
+            "Check that `vault login` succeeded with a role allowed to sign this tier's management SSH "
+            "certificates (apps/minds/docs/deploy/setup/vault.md)."
+        ),
+        parent=parent_concurrency_group,
+        vault_binary=vault_binary,
+    )
+
+
+def read_ssh_ca_public_key(
+    mount: str,
+    *,
+    parent_concurrency_group: ConcurrencyGroup | None = None,
+    vault_binary: str = VAULT_BINARY,
+) -> str:
+    """The OpenSSH public key of the SSH CA configured on ``mount`` (``vault read <mount>/config/ca``).
+
+    Raises :class:`VaultReadError` when the mount has no CA or cannot be read.
+    """
+    _check_vault_binary(vault_binary)
+    command = [vault_binary, "read", "-format=json", f"{mount}/config/ca"]
+    return _read_vault_data_field(
+        command,
+        field="public_key",
+        label=f"read {mount}/config/ca",
+        failure_hint="Has the tier's SSH CA been brought up (imbue-ai/vault terraform)?",
+        parent=parent_concurrency_group,
+        vault_binary=vault_binary,
+    )
+
+
+def _read_vault_data_field(
+    command: list[str],
+    *,
+    field: str,
+    # The ``<verb> <path>`` fragment naming the command in every error message.
+    label: str,
+    # Appended to the failure message when the command exits non-zero.
+    failure_hint: str,
+    parent: ConcurrencyGroup | None,
+    vault_binary: str,
+) -> str:
+    """Run a ``-format=json`` vault command and return the non-empty string at ``data.<field>`` of its output."""
+    result = _run_vault_command(command, parent=parent, vault_binary=vault_binary)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise VaultReadError(f"`{vault_binary} {label}` failed (exit {result.returncode}): {stderr}. {failure_hint}")
+    try:
+        parsed = json.loads(result.stdout)
+    except ValueError as exc:
+        raise VaultReadError(f"`{vault_binary} {label}` returned non-JSON output: {exc}") from exc
+    data = parsed.get("data") if isinstance(parsed, dict) else None
+    value = data.get(field) if isinstance(data, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        raise VaultReadError(f"`{vault_binary} {label}` returned no data.{field}")
+    return value.strip()
 
 
 def _check_vault_binary(vault_binary: str) -> None:

@@ -14,7 +14,7 @@ from imbue.mngr_vps.errors import VpsProvisioningError
 # re-provisions reproducible instead of "whatever get.docker.com served that day".
 #
 # The full apt version string is ``<core>~<id>.<version_id>~<codename>`` where the
-# trailing distro suffix is repo-specific. ``_PINNED_DOCKER_APT_VERSION_CORE`` is
+# trailing distro suffix is repo-specific. ``PINNED_DOCKER_APT_VERSION_CORE`` is
 # the distro-independent prefix; ``PINNED_DOCKER_INSTALL_SCRIPT`` derives the suffix
 # from ``/etc/os-release`` at run time so the same step works on every Debian-
 # family outer (Debian 12 "bookworm" across all providers; the os-release
@@ -32,8 +32,8 @@ from imbue.mngr_vps.errors import VpsProvisioningError
 # replaced). Images pre-baked with the old pin must be re-staged (delete the
 # box's debian-base.qcow2 + re-run prep).
 PINNED_DOCKER_VERSION: Final[str] = "29.6.2"
-_PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.6.2-1"
-PINNED_DOCKER_APT_VERSION: Final[str] = f"{_PINNED_DOCKER_APT_VERSION_CORE}~debian.12~bookworm"
+PINNED_DOCKER_APT_VERSION_CORE: Final[str] = "5:29.6.2-1"
+PINNED_DOCKER_APT_VERSION: Final[str] = f"{PINNED_DOCKER_APT_VERSION_CORE}~debian.12~bookworm"
 
 # containerd.io is pinned alongside docker-ce: the daemon/shim pairing between
 # the two is exactly the axis the lima-2.2.0 "unsupported protocol: Yunix" class
@@ -42,8 +42,8 @@ PINNED_DOCKER_APT_VERSION: Final[str] = f"{_PINNED_DOCKER_APT_VERSION_CORE}~debi
 # different times. 2.2.6 is the version verified working with docker-ce 29.6.2
 # across the dev, staging, and production slice fleets. Same core/suffix split
 # as the docker pin (no epoch in containerd.io's version).
-_PINNED_CONTAINERD_APT_VERSION_CORE: Final[str] = "2.2.6-1"
-PINNED_CONTAINERD_APT_VERSION: Final[str] = f"{_PINNED_CONTAINERD_APT_VERSION_CORE}~debian.12~bookworm"
+PINNED_CONTAINERD_APT_VERSION_CORE: Final[str] = "2.2.6-1"
+PINNED_CONTAINERD_APT_VERSION: Final[str] = f"{PINNED_CONTAINERD_APT_VERSION_CORE}~debian.12~bookworm"
 
 # gVisor publishes date-stamped releases under
 # ``https://storage.googleapis.com/gvisor/releases/release/<yyyymmdd>/<arch>/``.
@@ -51,6 +51,24 @@ PINNED_CONTAINERD_APT_VERSION: Final[str] = f"{_PINNED_CONTAINERD_APT_VERSION_CO
 # deploying (the apt repo only ever serves "latest", so we download + checksum
 # the dated binaries directly instead).
 PINNED_GVISOR_RELEASE: Final[str] = "20260601"
+GVISOR_UPSTREAM_RELEASES_URL: Final[str] = "https://storage.googleapis.com/gvisor/releases/release"
+# The directory holding the pinned release's per-arch subdirectories upstream.
+# Callers that mirror the release elsewhere (the imbue slice fleet's artifact
+# mirror) render the install script against their own copy of this layout.
+PINNED_GVISOR_UPSTREAM_RELEASE_URL: Final[str] = f"{GVISOR_UPSTREAM_RELEASES_URL}/{PINNED_GVISOR_RELEASE}"
+
+# The flags runsc is registered with in the Docker daemon config. ``--overlay2=none``
+# writes the container's writable layer through to the persistent Docker overlay2
+# layer so it survives a ``docker stop``/``start`` (and a host reboot that brings
+# the container back via its restart policy). gVisor's default overlay
+# (``--overlay2=root:self``) keeps the rootfs upper in a per-sandbox
+# ``.gvisor.filestore`` that is recreated on every start, so without this every
+# in-container write outside a named volume -- the injected sshd host key, the
+# ``/mngr`` host_dir symlink, mngr's provisioning markers, etc. -- is silently
+# lost on restart, leaving the container unreachable until mngr re-provisions it.
+GVISOR_RUNSC_RUNTIME_ARGS: Final[tuple[str, ...]] = ("--overlay2=none",)
+_GVISOR_INSTALL_DIR: Final[str] = "/usr/local/bin"
+GVISOR_RUNSC_BINARY_PATH: Final[str] = f"{_GVISOR_INSTALL_DIR}/runsc"
 
 # Each host-setup step is a self-contained shell script run with a generous hard
 # timeout. apt mirror round-trips plus package extraction routinely take a couple
@@ -103,8 +121,8 @@ apt-get install -y curl ca-certificates gnupg rsync inotify-tools jq"""
 PINNED_DOCKER_INSTALL_SCRIPT: Final[str] = f"""set -e
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
-DOCKER_APT_VERSION="{_PINNED_DOCKER_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
-CONTAINERD_APT_VERSION="{_PINNED_CONTAINERD_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
+DOCKER_APT_VERSION="{PINNED_DOCKER_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
+CONTAINERD_APT_VERSION="{PINNED_CONTAINERD_APT_VERSION_CORE}~${{ID}}.${{VERSION_ID}}~${{VERSION_CODENAME}}"
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/${{ID}}/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
@@ -117,26 +135,21 @@ containerd.io="${{CONTAINERD_APT_VERSION}}" docker-buildx-plugin docker-compose-
 systemctl enable docker
 systemctl start docker"""
 
-# Install and register the pinned gVisor runsc runtime by downloading the dated
-# release binaries and verifying their checksums.
-#
-# runsc is registered with ``--overlay2=none`` so the container's writable layer
-# is written through to the persistent Docker overlay2 layer and survives a
-# ``docker stop``/``start`` (and a host reboot that brings the container back via
-# its restart policy). gVisor's default overlay (``--overlay2=root:self``) keeps
-# the rootfs upper in a per-sandbox ``.gvisor.filestore`` that is recreated on
-# every start, so without this every in-container write outside a named volume --
-# the injected sshd host key, the ``/mngr`` host_dir symlink, mngr's
-# provisioning markers, etc. -- is silently lost on restart, leaving the
-# container unreachable until mngr re-provisions it.
-#
-# The binary download is skipped when runsc is already present; the daemon
-# (re)registration only runs when the ``--overlay2=none`` flag is not already in
-# the Docker config, so a correctly-configured host is a no-op (no docker bounce).
-_GVISOR_INSTALL_SCRIPT: Final[str] = f"""set -e
+
+@pure
+def render_gvisor_binary_install_script(release_url: str) -> str:
+    """The script that downloads the pinned gVisor binaries from ``release_url``'s per-arch subdirectories.
+
+    Verifies the release's published sha512 checksums (served beside the
+    binaries) and installs runsc + its containerd shim under /usr/local/bin;
+    skipped when runsc is already present. Registration with the Docker daemon
+    is the caller's (a live host runs ``runsc install`` + a docker restart, an
+    offline image write is the daemon.json directly).
+    """
+    return f"""set -e
 if ! command -v runsc >/dev/null 2>&1; then
     ARCH="$(uname -m)"
-    URL="https://storage.googleapis.com/gvisor/releases/release/{PINNED_GVISOR_RELEASE}/${{ARCH}}"
+    URL="{release_url}/${{ARCH}}"
     GVISOR_TMP="$(mktemp -d)"
     cd "${{GVISOR_TMP}}"
     curl -fsSL -o runsc "${{URL}}/runsc"
@@ -146,12 +159,25 @@ if ! command -v runsc >/dev/null 2>&1; then
     sha512sum -c runsc.sha512
     sha512sum -c containerd-shim-runsc-v1.sha512
     chmod a+rx runsc containerd-shim-runsc-v1
-    mv runsc containerd-shim-runsc-v1 /usr/local/bin/
+    mv runsc containerd-shim-runsc-v1 {_GVISOR_INSTALL_DIR}/
     cd /
     rm -rf "${{GVISOR_TMP}}"
-fi
-if ! grep -q -- '--overlay2=none' /etc/docker/daemon.json 2>/dev/null; then
-    runsc install -- --overlay2=none
+fi"""
+
+
+# Rendered against upstream: the variant every VPS provider's host setup runs
+# (the gen-2 bare-metal prep renders its own copy against the artifact mirror).
+PINNED_GVISOR_BINARY_INSTALL_SCRIPT: Final[str] = render_gvisor_binary_install_script(
+    PINNED_GVISOR_UPSTREAM_RELEASE_URL
+)
+
+# Install and register the pinned gVisor runsc runtime on a live host (see
+# ``GVISOR_RUNSC_RUNTIME_ARGS`` for why ``--overlay2=none``). The daemon
+# (re)registration only runs when the flag is not already in the Docker config,
+# so a correctly-configured host is a no-op (no docker bounce).
+_GVISOR_INSTALL_SCRIPT: Final[str] = f"""{PINNED_GVISOR_BINARY_INSTALL_SCRIPT}
+if ! grep -q -- '{GVISOR_RUNSC_RUNTIME_ARGS[0]}' /etc/docker/daemon.json 2>/dev/null; then
+    runsc install -- {" ".join(GVISOR_RUNSC_RUNTIME_ARGS)}
     systemctl restart docker
 fi"""
 

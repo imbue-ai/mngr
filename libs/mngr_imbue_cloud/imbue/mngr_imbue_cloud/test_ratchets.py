@@ -30,7 +30,7 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    rc.check_time_sleep(_DIR, snapshot(2))
+    rc.check_time_sleep(_DIR, snapshot(1))
 
 
 def test_prevent_global_keyword() -> None:
@@ -117,8 +117,14 @@ def test_prevent_yaml_usage() -> None:
     # reads and patches existing slices' stored lima.yaml files. This is
     # necessary lima usage, not a config-file anti-pattern (mngr_lima itself
     # allows YAML for the same reason); most matches are the literal substring
-    # in "lima.yaml" strings and comments.
-    rc.check_yaml_usage(_DIR, snapshot(40))
+    # in "lima.yaml" strings and comments. The gen-2 path (slices/gen2_scripts,
+    # shipped into the connector container) adds the same class of usage:
+    # cloud-init's NoCloud user-data / network-config are YAML by external
+    # contract, rendered with yaml.safe_dump (and parsed back with yaml.safe_load
+    # by the guest tests that check what cloud-init will see) -- and the
+    # subpackage's import ratchet in test_project_ratchets.py names that library
+    # as an allowed root.
+    rc.check_yaml_usage(_DIR, snapshot(47))
 
 
 def test_prevent_functools_partial() -> None:

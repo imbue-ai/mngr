@@ -23,9 +23,38 @@
 #   - For "cleanup", the snapshot named by "target" is deleted; "request_id"
 #     is only used to correlate the result.
 #
-# Result file format (atomically renamed from result.json.tmp):
+# Result file format (atomically renamed into place from a random-named
+# temp file in the same directory):
 #     {"request_id": "<same id>", "operation": "...", "exit_code": int,
 #      "stdout": "...", "stderr": "...", "snapshot_path": "..."}
+#
+# Trust boundary: the trigger directory is a plain bind mount shared
+# read-write with the workspace container, and no user namespace separates
+# the two, so root inside the container is root on this directory and can
+# plant anything in it -- symlinks above all -- at any moment. This script
+# runs as VM root and must therefore never let a name in that directory
+# decide which inode it reads or writes:
+#   - bash's `>` redirection, `cat`, `[ -f ]` and `[ -e ]` all follow
+#     symlinks, so a planted `request.json -> /etc/shadow` would make us read
+#     an arbitrary VM file, and a symlink planted at a predictable staging
+#     name would make us truncate and overwrite a VM file with
+#     request-derived content;
+#   - checking `[ -L ]` before acting is a race (the container can swap the
+#     entry between the check and the open), so every open below is done
+#     with O_NOFOLLOW and the type is checked on the OPEN descriptor, which
+#     bash cannot express -- hence the perl one-liners (perl ships on every
+#     Debian image we run this on);
+#   - results are written to a random-named temp file created with
+#     O_CREAT|O_EXCL in the SAME directory and then rename(2)d over
+#     result.json: O_EXCL cannot be satisfied by a pre-planted entry, the
+#     create and the write share one descriptor so nothing can be swapped in
+#     between, and rename(2) replaces whatever sits at the destination
+#     (a symlink included) without following it. A temp file elsewhere
+#     (e.g. /tmp) would be wrong: `mv` across filesystems copies into the
+#     destination path and follows a symlink there again.
+# Only the trigger directory is hostile in this way; the snapshots
+# directory is exposed to the container read-only and the request payload's
+# names are confined to it by is_safe_name.
 #
 # Environment (set by the systemd unit, parameterized at host-create time
 # by the install template the mngr_vps provider materializes):
@@ -45,9 +74,49 @@ set -euo pipefail
 SNAPSHOTS_DIR="${MNGR_BTRFS_MOUNT_PATH}/snapshots"
 REQUEST_PATH="${MNGR_TRIGGER_DIR}/request.json"
 RESULT_PATH="${MNGR_TRIGGER_DIR}/result.json"
-RESULT_TMP="${MNGR_TRIGGER_DIR}/result.json.tmp"
 
 # --- helpers ----------------------------------------------------------------
+
+# Print the content of the regular file at $1 without following a symlink
+# there; exit non-zero (printing nothing) when the entry is absent, is a
+# symlink, or is anything but a regular file. See the trust-boundary note in
+# the header for why this is perl and why the type check is on the open
+# descriptor. O_NONBLOCK keeps a planted FIFO from parking us forever on
+# the open (a FIFO fails the regular-file check right after).
+read_regular_file() {
+    perl -MFcntl -e '
+        my $path = shift;
+        sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 1;
+        -f $fh or exit 1;
+        local $/;
+        my $content = <$fh>;
+        print $content if defined $content;
+    ' "$1"
+}
+
+# Write stdin to the regular file at $1, atomically and without following a
+# planted symlink at (or on the way to) the destination: create a
+# random-named temp file in the same directory with O_CREAT|O_EXCL|O_NOFOLLOW,
+# write through that same descriptor, then rename(2) it over $1. See the
+# trust-boundary note in the header.
+write_regular_file_atomically() {
+    perl -MFcntl -e '
+        my $path = shift;
+        my ($dir, $name) = $path =~ m{^(.*)/([^/]+)$} ? ($1, $2) : (".", $path);
+        my ($fh, $tmp);
+        for (1 .. 100) {
+            my $suffix = join "", map { ("a" .. "z", "A" .. "Z", 0 .. 9)[rand 62] } 1 .. 12;
+            $tmp = "$dir/.$name.$suffix";
+            last if sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+            undef $fh;
+        }
+        defined $fh or die "could not create a temp file next to $path: $!\n";
+        local $/;
+        my $content = <STDIN>;
+        (print {$fh} $content) && close($fh) or do { unlink $tmp; die "could not write $tmp: $!\n" };
+        rename($tmp, $path) or do { unlink $tmp; die "could not rename $tmp over $path: $!\n" };
+    ' "$1"
+}
 
 # Emit a result.json. Args: request_id operation exit_code stdout stderr snapshot_path
 emit_result() {
@@ -60,9 +129,8 @@ emit_result() {
         --arg stdout "$stdout" \
         --arg stderr "$stderr" \
         --arg snapshot_path "$snapshot_path" \
-        '{request_id: $request_id, operation: $operation, exit_code: $exit_code, stdout: $stdout, stderr: $stderr, snapshot_path: $snapshot_path}' \
-        > "$RESULT_TMP"
-    mv "$RESULT_TMP" "$RESULT_PATH"
+        '{request_id: $request_id, operation: $operation, exit_code: $exit_code, stdout: $stdout, stderr: $stderr, snapshot_path: $snapshot_path}' |
+        write_regular_file_atomically "$RESULT_PATH"
 }
 
 # Block until the data volume is actually mounted. On slice VMs the btrfs
@@ -171,12 +239,14 @@ handle_request() {
     # minutes, and a request superseded during it should never be serviced --
     # once the volume appears we read (and answer) the newest request on disk.
     wait_until_data_volume_mounted
-    payload=$(cat "$REQUEST_PATH" 2>/dev/null || echo "{}")
+    # A request that is not a regular file (a planted symlink, FIFO, ...) is
+    # treated exactly like an absent one: nothing is read through it.
+    payload=$(read_regular_file "$REQUEST_PATH" 2>/dev/null || echo "{}")
     request_id=$(echo "$payload" | jq -r '.request_id // ""')
     operation=$(echo "$payload" | jq -r '.operation // ""')
     target=$(echo "$payload" | jq -r '.target // ""')
     if [ -z "$request_id" ]; then
-        echo "snapshot_helper: request missing request_id; skipping" >&2
+        echo "snapshot_helper: request missing request_id (or request.json is not a regular file); skipping" >&2
         return
     fi
     # Idempotency guard: skip a request we have already produced a result for.
@@ -189,7 +259,7 @@ handle_request() {
     # requester uses a fresh request_id each time, so this never suppresses a real
     # new request; a genuinely-unserviced request (no matching result yet) still
     # runs via the startup path below.
-    last_result_request_id=$(jq -r '.request_id // ""' "$RESULT_PATH" 2>/dev/null || echo "")
+    last_result_request_id=$(read_regular_file "$RESULT_PATH" 2>/dev/null | jq -r '.request_id // ""' 2>/dev/null || echo "")
     if [ "$request_id" = "$last_result_request_id" ]; then
         return
     fi
@@ -209,7 +279,9 @@ mkdir -p "$MNGR_TRIGGER_DIR"
 
 # Process any request that's already on disk at startup (covers the case
 # where the helper restarted while the inner script was waiting for a result).
-if [ -f "$REQUEST_PATH" ]; then
+# The probe is the same no-follow open as the read itself (`[ -f ]` would
+# follow a planted symlink and report whatever it points at).
+if read_regular_file "$REQUEST_PATH" >/dev/null 2>&1; then
     handle_request
 fi
 

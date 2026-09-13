@@ -1,0 +1,3 @@
+- `modal deploy` retries on Modal's app-lock ("concurrent modification") error for up to five minutes of elapsed time instead of six attempts (~45s). Contention is a queue: CI fans dozens of creates out against one shared app name, and concurrent CI runs stack on top, so the lock can stay held for minutes while queued deploys drain; the short window lost whole acceptance runs to that storm.
+
+- `imbue.modal_proxy.direct` exposes `DEPLOY_MAX_DURATION_SECONDS`, the longest `deploy()` can block (retry budget plus the final backoff and per-attempt subprocess timeout), so callers that wait on a deploy from another thread can size their deadline from it instead of guessing.

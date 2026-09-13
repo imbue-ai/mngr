@@ -477,6 +477,49 @@ def pin_sole_endpoint_host_key(
     _mutate_store(known_hosts_path, lambda state: _apply_sole_endpoint_pin(state, str(host_id), pin))
 
 
+@pure
+def _drop_record_pins_in_state(
+    state: HostKeyStoreState, record_id: str, should_drop: Callable[[HostKeyPin], bool]
+) -> HostKeyStoreState:
+    record = _record_by_id(state, record_id)
+    if record is None:
+        return state
+    kept_pins = tuple(pin for pin in record.pins if not should_drop(pin))
+    return _upsert_record(state, record.model_copy_update(to_update(record.field_ref().pins, kept_pins)))
+
+
+def drop_bootstrap_pins(known_hosts_path: Path, host_id: HostId) -> None:
+    """Forget every BOOTSTRAP-origin pin of ``host_id``, and re-render.
+
+    Called once the user's devices own the host's keys (both endpoints verified
+    serving user-origin material): the externally-vouched keys are dead trust
+    that would otherwise be re-emitted at the host's old endpoints forever.
+    """
+    _mutate_store(
+        known_hosts_path,
+        lambda state: _drop_record_pins_in_state(
+            state, str(host_id), lambda pin: pin.origin is HostKeyOrigin.BOOTSTRAP
+        ),
+    )
+
+
+def drop_host_pins_outside_endpoints(
+    known_hosts_path: Path, host_id: HostId, endpoints: AbstractSet[tuple[str, int]]
+) -> None:
+    """Drop every pin of ``host_id`` at an endpoint other than ``endpoints``, and re-render.
+
+    For a host whose endpoints just moved: whatever it had pinned anywhere else
+    is dead (the host no longer listens there), and a stale pin left behind
+    would shadow the key served at a recycled endpoint next time.
+    """
+    _mutate_store(
+        known_hosts_path,
+        lambda state: _drop_record_pins_in_state(
+            state, str(host_id), lambda pin: (pin.address, pin.port) not in endpoints
+        ),
+    )
+
+
 def clear_endpoint_pins(known_hosts_path: Path, hostname: str, port: int) -> None:
     """Drop every pin for ``hostname:port`` (all keytypes) and re-render the known_hosts file."""
     _mutate_store(known_hosts_path, lambda state: _clear_endpoint_from_state(state, hostname, port))

@@ -1,4 +1,5 @@
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -20,6 +21,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
@@ -34,6 +36,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr.utils.ssh import quote_ssh_option_value_for_shell
+from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_store import AGENTS_SUBPATH
@@ -61,6 +64,9 @@ HOST_DIR_SUBPATH: Final[str] = "host_dir"
 # the provider's ``volume_home_path`` is configured (e.g. /home/user symlinks
 # to <volume>/home and host_dir lives inside it as a plain directory).
 HOME_SUBPATH: Final[str] = "home"
+# Where that home subdirectory appears inside the container: the target of the
+# container home symlink ``setup_container_ssh`` creates.
+HOST_VOLUME_HOME_PATH: Final[str] = f"{HOST_VOLUME_MOUNT_PATH}/{HOME_SUBPATH}"
 
 # Shell command for the agent container's PID 1. Self-heals sshd on every
 # (re)start once mngr has provisioned a host key, so the container is reachable
@@ -488,11 +494,14 @@ def provision_snapshot_helper_on_outer(
     enabled and active; the ``docker volume create`` is no-op-with-warning
     when the volume already exists.
 
-    Assumes ``inotify-tools`` and ``jq`` are already installed. The cloud-init
-    and SSH host-setup paths install both via the shared ``host_setup``
-    base-packages step; the slice path installs them in its lima VM provisioning
-    (``mngr_imbue_cloud.slices.lima_slice``: ``jq`` via the base lima script,
-    ``inotify-tools`` via its own provision step).
+    Assumes ``inotify-tools``, ``jq``, and ``perl`` are already installed. The
+    cloud-init and SSH host-setup paths install the first two via the shared
+    ``host_setup`` base-packages step; the slice path installs them in its lima
+    VM provisioning (``mngr_imbue_cloud.slices.lima_slice``: ``jq`` via the base
+    lima script, ``inotify-tools`` via its own provision step). ``perl`` (used by
+    the helper for its no-follow reads and writes of the trigger directory) is
+    ``perl-base``, Essential on every Debian-family image, so nothing installs
+    it explicitly.
     """
     helper_script = load_resource_text("snapshot_helper.sh")
     helper_service = load_resource_text("snapshot_helper.service")
@@ -748,18 +757,34 @@ def prepare_btrfs_on_outer(
     return subvolume_path
 
 
+# The btrfs qgroup that holds everything an agent host writes on a gen-2 slice's
+# data disk (its home subvolume and containerd's image/container layers), limited by the
+# guest's grow oneshot to the disk minus a system reserve. A data filesystem
+# without quotas (gen-1 boxes, plain VPS hosts) has no such group, and
+# subvolumes are then created unassigned.
+HOST_QUOTA_QGROUP: Final[str] = "1/0"
+
+
 def ensure_btrfs_subvolume_on_outer(outer: OuterHostInterface, subvolume_path: Path) -> None:
     """Create a btrfs subvolume at ``subvolume_path`` if it does not already exist.
 
     Idempotent: a re-run on an already-provisioned outer is a no-op. Raises
-    ``VpsProvisioningError`` if the create fails.
+    ``VpsProvisioningError`` if the create fails. On a quota-enabled filesystem the
+    subvolume joins :data:`HOST_QUOTA_QGROUP`.
     """
     if check_directory_exists_on_outer(outer, subvolume_path):
         return
+    quoted_path = shlex.quote(str(subvolume_path))
+    quoted_parent = shlex.quote(str(subvolume_path.parent))
     with log_span("Creating btrfs subvolume {}", subvolume_path):
+        # Join the host quota group when the filesystem has one (gen-2
+        # slices), so the new subvolume's usage counts against the host's
+        # single disk limit from its first write.
         _run_provisioning_step(
             outer,
-            f"btrfs subvolume create {shlex.quote(str(subvolume_path))}",
+            f"if btrfs qgroup show {quoted_parent} 2>/dev/null | grep -q '^{HOST_QUOTA_QGROUP} '; "
+            f"then btrfs subvolume create -i {HOST_QUOTA_QGROUP} {quoted_path}; "
+            f"else btrfs subvolume create {quoted_path}; fi",
             error_prefix=f"Failed to create btrfs subvolume at {subvolume_path}",
             timeout_seconds=30.0,
         )
@@ -846,6 +871,33 @@ def run_container(
     return container_id
 
 
+@pure
+def build_home_volume_symlink_command(container_home_path: str, volume_home_path: str) -> str:
+    """The in-container command that points the home directory at the host volume's home subdirectory.
+
+    ``ln -sfn`` alone would link *inside* an existing home directory, so the
+    image's (empty) directory is removed first; an existing symlink is left for
+    ``ln`` to replace, which keeps a re-run idempotent.
+    """
+    return " && ".join(
+        [
+            f"mkdir -p {shlex.quote(volume_home_path)}",
+            f"( [ -L {shlex.quote(container_home_path)} ] || rm -rf {shlex.quote(container_home_path)} )",
+            f"ln -sfn {shlex.quote(volume_home_path)} {shlex.quote(container_home_path)}",
+        ]
+    )
+
+
+@pure
+def build_write_container_file_command(container_file: ContainerFile) -> str:
+    """A shell command that writes ``container_file`` (creating its directory) with the given mode."""
+    directory = posixpath.dirname(container_file.path)
+    return (
+        f"mkdir -p {shlex.quote(directory)} && printf '%s' {shlex.quote(container_file.content)} > "
+        f"{shlex.quote(container_file.path)} && chmod {container_file.mode} {shlex.quote(container_file.path)}"
+    )
+
+
 def setup_container_ssh(
     outer: OuterHostInterface,
     container_name: str,
@@ -858,14 +910,15 @@ def setup_container_ssh(
     known_hosts_entries: tuple[str, ...],
     authorized_keys_entries: tuple[str, ...],
     home_volume_symlink: tuple[str, str] | None = None,
+    extra_ssh_config_files: Sequence[ContainerFile] = (),
 ) -> None:
     """Set up SSH inside the container via docker exec.
 
     Installs the required packages, points the container's mngr host_dir at
     the mounted volume, installs the client/host SSH keys, seeds known_hosts
-    and authorized_keys, and starts sshd. Pure-ish orchestration over
-    ``exec_in_container`` so both the VPS and Lima providers share it; the
-    caller supplies the keypairs it manages.
+    and authorized_keys, installs any extra sshd config files (CA trust), and
+    starts sshd. Pure-ish orchestration over ``exec_in_container`` so both the
+    VPS and Lima providers share it; the caller supplies the keypairs it manages.
 
     When ``home_volume_symlink`` is provided as ``(container_home_path,
     volume_home_path)``, the container home path is symlinked onto the
@@ -875,14 +928,9 @@ def setup_container_ssh(
     if home_volume_symlink is not None:
         container_home_path, volume_home_path = home_volume_symlink
         with log_span("Linking container home onto host volume"):
-            symlink_cmd = " && ".join(
-                [
-                    f"mkdir -p {shlex.quote(volume_home_path)}",
-                    f"( [ -L {shlex.quote(container_home_path)} ] || rm -rf {shlex.quote(container_home_path)} )",
-                    f"ln -sfn {shlex.quote(volume_home_path)} {shlex.quote(container_home_path)}",
-                ]
+            exec_in_container(
+                outer, container_name, build_home_volume_symlink_command(container_home_path, volume_home_path)
             )
-            exec_in_container(outer, container_name, symlink_cmd)
 
     with log_span("Installing packages in container"):
         install_cmd = build_check_and_install_packages_command(
@@ -907,6 +955,9 @@ def setup_container_ssh(
     auth_keys_cmd = build_add_authorized_keys_command("root", authorized_keys_entries)
     if auth_keys_cmd is not None:
         exec_in_container(outer, container_name, auth_keys_cmd)
+
+    for ssh_config_file in extra_ssh_config_files:
+        exec_in_container(outer, container_name, build_write_container_file_command(ssh_config_file))
 
     start_container_sshd(outer, container_name)
 

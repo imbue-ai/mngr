@@ -213,6 +213,25 @@ What the app does in the minutes after a laptop wakes cannot be checked in CI.
 spare Mac and reports what each did; see `sleep-wake-drill.md` (in this
 folder).
 
+### 1.9 Multi-device tests by hand (extra env roots on one machine)
+
+A "second device" for a sync or sharing check is a second env root on the
+same machine, made with `minds-admin env activate --create dev-<you>-b` and a
+copy of the first root's `client.toml`, driven by its own `minds run`. Two
+rules keep that from corrupting the workspaces under test:
+
+- **One instance per env root, and never two roots signed in to the same
+  account against the same workspaces at once.** Each root's detached
+  `mngr latchkey forward` supervisor provisions the same remote machines,
+  and the last pass overwrites the desktop-owned latchkey secrets on them
+  while only one supervisor holds the tunnel they are checked against, so
+  the agents there lose their permission channel with "Unauthorized". Run the
+  second device only for the step that needs it.
+- **Stop a root completely when its step is done.** `just minds-stop` and
+  killing `minds run` deliberately leave the supervisor running, so use
+  `uv run minds-admin env stop-local dev-<you>-b` (backend plus supervisor);
+  `--list-only` reports what still holds a root without stopping it.
+
 ## Part 2 -- End-to-end tests worth adding
 
 Legend for where each test best fits:

@@ -15,8 +15,11 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_vps.container_setup import _clone_build_context_for_self_contained_git
 from imbue.mngr_vps.container_setup import _raise_if_cwd_deleted_for_relative_context
+from imbue.mngr_vps.container_setup import build_home_volume_symlink_command
 from imbue.mngr_vps.container_setup import build_image_on_outer_from_build_args
+from imbue.mngr_vps.container_setup import build_write_container_file_command
 from imbue.mngr_vps.container_setup import image_exists
+from imbue.mngr_vps.data_types import ContainerFile
 
 
 class _ImageInspectOuter(MutableModel):
@@ -174,3 +177,25 @@ def test_build_image_on_outer_checks_the_cwd_before_touching_anything(tmp_path: 
             )
     finally:
         os.chdir(original_cwd)
+
+
+def test_build_home_volume_symlink_command_replaces_a_plain_directory_but_keeps_an_existing_link() -> None:
+    command = build_home_volume_symlink_command("/home/user", "/mngr-vol/home")
+
+    assert command == (
+        "mkdir -p /mngr-vol/home && ( [ -L /home/user ] || rm -rf /home/user ) && ln -sfn /mngr-vol/home /home/user"
+    )
+
+
+def test_build_write_container_file_command_creates_the_directory_and_quotes_the_content() -> None:
+    command = build_write_container_file_command(
+        ContainerFile(path="/etc/ssh/principals/root", content="mngr-container\n", mode="0644")
+    )
+    assert command.startswith(
+        "mkdir -p /etc/ssh/principals && printf '%s' 'mngr-container\n' > /etc/ssh/principals/root"
+    )
+    assert command.endswith("chmod 0644 /etc/ssh/principals/root")
+    quoted = build_write_container_file_command(
+        ContainerFile(path="/etc/ssh/sshd_config.d/61-mngr-user-ca.conf", content="it's %u\n", mode="0644")
+    )
+    assert """'it'"'"'s %u\n'""" in quoted

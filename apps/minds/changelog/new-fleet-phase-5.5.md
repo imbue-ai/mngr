@@ -1,0 +1,1 @@
+The gen-2 rollout docs (`docs/deploy/gen2-cutover.md`, `next_deploy.md`) are rewritten around the incremental migration model: 0.5.x releases pair with gen-1 boxes and 0.6.x+ with gen-2, existing workspaces move per-workspace via `minds-admin cutover migrate` (with `cutover rollback` as the escape hatch), and boxes are repaved as they empty -- no per-tier downtime windows.

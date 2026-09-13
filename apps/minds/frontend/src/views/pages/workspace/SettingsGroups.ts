@@ -16,7 +16,7 @@ import { SectionHeader } from "../../components/Layout";
 import { TextInput } from "../../components/FormControls";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type { SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
-import { normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
+import { formatMachineSize, formatPendingMachineSize, normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
 import {
   devOverridePrefill,
   isRecreationRequired,
@@ -534,6 +534,8 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
         : null,
     ]),
 
+    renderMachineSizeSection(model),
+
     m(SectionHeader, "ID"),
     m("p", { class: "type-body font-mono text-secondary mb-8 select-all break-all" }, data.agent_id),
 
@@ -558,6 +560,30 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
       ? m("p", { id: "destroy-error", class: "type-body text-important mt-2" }, model.destroyErrorMessage)
       : null,
   ]);
+}
+
+/** Read-only machine size for leased machines (specs/slice-fleet): current
+ * size plus a passive restart-to-apply note when a resize is pending. Hidden
+ * entirely (null) until the lazy size fetch succeeds. */
+function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
+  const size = model.machineSize;
+  if (size === null || !size.is_available) return null;
+  const currentLabel = formatMachineSize(size);
+  if (!currentLabel) return null;
+  const pendingLabel = formatPendingMachineSize(size);
+  return [
+    m(SectionHeader, "Machine size"),
+    m("div", { id: "machine-size-section", class: "mb-8" }, [
+      m("p", { class: "type-body text-secondary" }, currentLabel),
+      pendingLabel
+        ? m(
+            Notice,
+            { variant: "info" },
+            `A new size is pending (${pendingLabel}). Restart this machine to apply it.`,
+          )
+        : null,
+    ]),
+  ];
 }
 
 async function saveColorDraft(

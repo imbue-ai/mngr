@@ -8,7 +8,9 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.pure import pure
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.regions import OVH_DATACENTER_CODE_BY_US_REGION
 
 IMBUE_CLOUD_BACKEND_NAME: Final[str] = "imbue_cloud"
 
@@ -33,22 +35,17 @@ STAGING_TIER: Final[str] = "staging"
 DEV_TIER: Final[str] = "dev"
 CI_TIER: Final[str] = "ci"
 
-# Public keys a correctly prepped box authorizes for its lima service user: exactly
-# the one pool-management key of the tier that owns the box.
-# ``bare_metal_prep.build_box_prep_script`` writes ``authorized_keys`` with a
-# single-key overwrite (``cat >``, never an append), so any other count means a key
-# was added out of band.
-EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 1
+# Static keys a correctly prepped box authorizes for its slice service user:
+# the owning tier's one pool key on gen-1, none on gen-2 (management SSH is by
+# certificate from the tier's Vault SSH CA, so any key there was added out of band).
+# CLEANUP: drop the gen-1 count once the gen-1 -> gen-2 cutover has run on
+# every tier (phase 6 of blueprint/slice-fleet-cutover).
+GEN1_EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 1
+GEN2_EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 0
 
-# The OVH-US regions the imbue_cloud host pool can land hosts in (the lease-region
-# labels stamped on pool rows), each mapped to the OVH datacenter code serving it,
-# as used by the OVH order/catalog and ``/dedicated/server/datacenter/availabilities``
-# APIs and stored in ``bare_metal_servers.region``: ``vin`` = Vint Hill,
-# ``hil`` = Hillsboro. The single source for the pairing -- the region/datacenter
-# collections below derive from it. Kept small and explicit on purpose; extend
-# when the pool gains new datacenters.
-OVH_DATACENTER_CODE_BY_US_REGION: Final[Mapping[str, str]] = {"US-EAST-VA": "vin", "US-WEST-OR": "hil"}
-
+# The region-label / datacenter-code pairing is defined in the connector-mounted
+# ``slices.gen2_scripts.regions`` and re-exported here; the collections below
+# derive from it.
 # Used to validate the ``region`` create-path knob client-side (the connector
 # itself accepts any string and simply matches the column).
 KNOWN_OVH_US_REGIONS: Final[frozenset[str]] = frozenset(OVH_DATACENTER_CODE_BY_US_REGION)
@@ -100,16 +97,30 @@ def tier_for_env_name(env_name: str) -> str:
 
 
 @pure
-def is_box_exclusive_to_tier(*, authorized_key_count: int, foreign_tier_slice_count: int) -> bool:
+def is_box_exclusive_to_tier(
+    *,
+    authorized_key_count: int,
+    expected_authorized_key_count: int,
+    foreign_tier_slice_count: int,
+    # Whether the box's sshd trusts exactly the owning tier's SSH CA (always
+    # True for a gen-1 box, which has no CA trust to check).
+    is_trusted_ca_correct: bool,
+) -> bool:
     """Whether a bare-metal box belongs solely to the tier reading it.
 
     The one definition of the rule, so the bake-time guard
     (``assert_box_is_exclusive_to_tier``) and the read-only audit
     (``minds-admin server list --verify-occupancy``, which tells operators a bake would
-    refuse) can never disagree. A box is exclusive when it authorizes exactly the
-    owning tier's pool key and carries no slice stamped for an env in another tier.
+    refuse) can never disagree. A box is exclusive when its service user authorizes
+    exactly the static keys its generation expects (one pool key on gen-1, none on
+    gen-2), its sshd trusts the owning tier's CA and no other, and it carries no
+    slice stamped for an env in another tier.
     """
-    return authorized_key_count == EXPECTED_AUTHORIZED_KEY_COUNT and foreign_tier_slice_count == 0
+    return (
+        authorized_key_count == expected_authorized_key_count
+        and is_trusted_ca_correct
+        and foreign_tier_slice_count == 0
+    )
 
 
 class WorkspaceId(RandomId):
@@ -142,10 +153,16 @@ class BareMetalServerDbId(NonEmptyStr):
 # Wire / DB values for bare_metal_servers.status, in lifecycle order. The box
 # advances ORDERED -> DELIVERED -> INSTALLING -> READY (or -> FAILED from any
 # non-terminal state); the admin command moves it forward one step per run.
+# READY -> DRAINING is the box-maintenance state (repave, kernel reboot,
+# hardware repair, retirement): a draining box takes no new work (bake, restore
+# candidates, restart-in-place all exclude it) while its leased workspaces are
+# force-stopped off it. ``server undrain`` returns it to READY; a repave lands
+# there on its own.
 SERVER_STATUS_ORDERED: Final[str] = "ordered"
 SERVER_STATUS_DELIVERED: Final[str] = "delivered"
 SERVER_STATUS_INSTALLING: Final[str] = "installing"
 SERVER_STATUS_READY: Final[str] = "ready"
+SERVER_STATUS_DRAINING: Final[str] = "draining"
 SERVER_STATUS_FAILED: Final[str] = "failed"
 _SERVER_STATUSES: Final[frozenset[str]] = frozenset(
     {
@@ -153,6 +170,7 @@ _SERVER_STATUSES: Final[frozenset[str]] = frozenset(
         SERVER_STATUS_DELIVERED,
         SERVER_STATUS_INSTALLING,
         SERVER_STATUS_READY,
+        SERVER_STATUS_DRAINING,
         SERVER_STATUS_FAILED,
     }
 )
@@ -163,7 +181,7 @@ class InvalidBareMetalServerStatus(ValueError):
 
 
 class BareMetalServerStatus(NonEmptyStr):
-    """Lifecycle state of a bare-metal server: ordered/delivered/installing/ready/failed."""
+    """Lifecycle state of a bare-metal server: ordered/delivered/installing/ready/draining/failed."""
 
     def __new__(cls, value: str) -> Self:
         normalized = value.strip().lower()
@@ -172,6 +190,27 @@ class BareMetalServerStatus(NonEmptyStr):
                 f"server status must be one of {sorted(_SERVER_STATUSES)}, got '{value}'"
             )
         return super().__new__(cls, normalized)
+
+
+class MachineUnits(PositiveInt):
+    """A machine's size in units (1 unit = 1GiB of guest RAM; drives vCPUs and bandwidth too).
+
+    Deliberately just a positive int: the launch allowed-size set (multiples of
+    ``MACHINE_UNITS_STEP`` up to ``MAX_MACHINE_UNITS``) is validated at the
+    wire/CLI boundary via ``is_allowed_machine_units``, so lowering the
+    architectural floor later is a validation change, not a type change.
+    """
+
+
+class SliceContainerRuntime(UpperCaseStrEnum):
+    """The Docker runtime a gen-2 slice's workspace container is created under at the bake.
+
+    RUNSC (gVisor) is the fleet's runtime; RUNC exists only so an operator can
+    bake a plain-runc slice next to a runsc one for a side-by-side comparison.
+    """
+
+    RUNC = auto()
+    RUNSC = auto()
 
 
 class ImbueCloudKeyType(UpperCaseStrEnum):
@@ -263,3 +302,11 @@ def slugify_account(account: str) -> str:
     if not slug:
         raise InvalidImbueCloudAccount(f"Cannot slugify account: '{account}'")
     return slug
+
+
+# The highest slice-fleet box generation this client release can operate,
+# declared on every pool-host lease so the connector never hands it a row it
+# cannot run (and admits it to rows old clients cannot). Matches
+# ``gen2_scripts.layout.FIRST_QEMU_BOX_GENERATION`` (which cannot be imported
+# from this layer, and gen2_scripts itself is stdlib-only by ratchet).
+MAX_SUPPORTED_BOX_GENERATION: Final[int] = 2

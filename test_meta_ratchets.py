@@ -3,6 +3,7 @@ import fnmatch
 import re
 import subprocess
 import sys
+import tomllib
 from functools import cache
 from pathlib import Path
 
@@ -438,6 +439,10 @@ def test_prevent_old_mng_name_in_file_paths() -> None:
     )
 
 
+# See test_no_import_layer_violations for the flaky/timeout rationale: under a
+# loaded sandbox the per-project pyproject parse loop has exceeded the 10s default.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_every_project_has_pypi_readme() -> None:
     """Ensure each project's pyproject.toml has a readme field pointing to an existing file.
 
@@ -451,7 +456,10 @@ def test_every_project_has_pypi_readme() -> None:
 
     for project_dir in _get_all_project_dirs():
         pyproject_path = project_dir / "pyproject.toml"
-        pyproject = tomlkit.parse(pyproject_path.read_text())
+        # Read-only lookup, so the stdlib parser: tomlkit's round-trip document
+        # model is an order of magnitude slower, which is what let this loop
+        # trip the timeout under load.
+        pyproject = tomllib.loads(pyproject_path.read_text())
         project_section = pyproject.get("project", {})
 
         readme_value = project_section.get("readme")

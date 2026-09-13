@@ -27,7 +27,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 # Pinned owner-exec release. MUST stay in lockstep with the default-workspace-template
 # inner-install pin (system/scripts/install_owner_exec.sh); see the
 # bump-owner-exec skill.
-OWNER_EXEC_VERSION: Final[str] = "v0.2.1"
+OWNER_EXEC_VERSION: Final[str] = "v0.2.2"
 OWNER_EXEC_REPO: Final[str] = "imbue-ai/owner-exec"
 
 # The port the daemon listens on. It binds at the address resolved by

@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import json
 import shlex
 import tempfile
@@ -13,15 +12,23 @@ from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.primitives import HostId
-from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.utils.ssh import quote_ssh_option_value
+from imbue.mngr_imbue_cloud.data_types import BoxManagementTrust
+from imbue.mngr_imbue_cloud.data_types import SliceProvisionResult
+from imbue.mngr_imbue_cloud.data_types import StorageVolumeState
 from imbue.mngr_imbue_cloud.errors import BareMetalProvisioningError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
-from imbue.mngr_imbue_cloud.slices.bare_metal import count_authorized_key_lines
-from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_disk_name
-from imbue.mngr_imbue_cloud.slices.bare_metal import slice_lima_instance_name
+from imbue.mngr_imbue_cloud.interfaces import SliceVmClientInterface
+from imbue.mngr_imbue_cloud.slices.bare_metal import build_read_management_trust_command
+from imbue.mngr_imbue_cloud.slices.bare_metal import build_read_storage_volume_command
+from imbue.mngr_imbue_cloud.slices.bare_metal import parse_management_trust_output
+from imbue.mngr_imbue_cloud.slices.bare_metal import parse_storage_volume_output
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_disk_name
+from imbue.mngr_imbue_cloud.slices.bare_metal import slice_instance_name
+from imbue.mngr_imbue_cloud.slices.box_known_hosts import remove_box_known_hosts_file
+from imbue.mngr_imbue_cloud.slices.box_known_hosts import write_box_known_hosts_file
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import SliceInstanceObservation
 from imbue.mngr_imbue_cloud.slices.lima_slice import CONTAINER_SSH_PORT_PLACEHOLDER
 from imbue.mngr_imbue_cloud.slices.lima_slice import SLICE_BOX_FULL_MARKER
 from imbue.mngr_imbue_cloud.slices.lima_slice import SLICE_NO_PORTS_MARKER
@@ -33,7 +40,6 @@ from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
-from imbue.mngr_vps.vps_client import VpsClientInterface
 
 # Lima "Status" strings (from `limactl list --json`) mapped to VPS statuses.
 _LIMA_STATUS_MAP: Final[dict[str, VpsInstanceStatus]] = {
@@ -83,16 +89,7 @@ def _is_already_absent_error(stderr: str) -> bool:
     return "not found" in stderr_lower or "does not exist" in stderr_lower
 
 
-class SliceProvisionResult(FrozenModel):
-    """What a slice provision produced: the lima instance/disk and the two host ports."""
-
-    instance_name: str = Field(description="Lima instance name (also the VpsInstanceId)")
-    disk_name: str = Field(description="Lima additional-disk name backing the slice's btrfs data")
-    vm_ssh_host_port: int = Field(description="Box host port forwarded to the VM's root sshd")
-    container_ssh_host_port: int = Field(description="Box host port forwarded to the inner container sshd")
-
-
-class LimaSliceVpsClient(VpsClientInterface):
+class LimaSliceVpsClient(SliceVmClientInterface):
     """VpsClientInterface backed by a lima VM -- a 'slice' -- carved on a bare-metal box.
 
     Drives ``limactl`` **over SSH on the box** (as the dedicated lima user, using
@@ -111,40 +108,24 @@ class LimaSliceVpsClient(VpsClientInterface):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    box_address: str = Field(description="SSH-reachable address of the bare-metal box that hosts the slices")
-    box_ssh_user: str = Field(description="Dedicated non-root lima user on the box (owns the VMs)")
-    private_key_path: str | None = Field(
-        default=None,
-        description="Path to the pool management private key used to SSH the box (None only in unit tests).",
-    )
+    # box_address / box_ssh_user / private_key_path / box_host_public_key come
+    # from SliceVmClientInterface; only the lima-specific image override is ours.
     vm_image_url: str | None = Field(
         default=None,
         description="Optional override of the lima guest image URL (defaults to mngr_lima's Debian image).",
     )
-    box_host_public_key: str | None = Field(
-        default=None,
-        description=(
-            "The box's sshd host public key, pinned for strict host-key checking (no trust-on-first-use). "
-            "None only in unit tests that never SSH the box; an actual box SSH with no key fails closed."
-        ),
-    )
 
-    def _box_known_hosts_file(self) -> str:
-        """Write the box's pinned host key to a known_hosts file and return its path.
+    def _box_known_hosts_file(self) -> Path:
+        """Write the box's pinned host key to a throwaway known_hosts file for one command and return its path.
 
-        Fails closed when no pinned key is configured -- we never fall back to
-        trust-on-first-use. The file is idempotently (re)written next to the pool
-        key (or a temp dir) keyed by box address.
+        Fails closed when no pinned key is configured -- never trust-on-first-use.
         """
         if not self.box_host_public_key:
             raise LimaCommandError(
                 "ssh", 1, f"no pinned host key configured for box {self.box_address}; run the host-key backfill"
             )
         base_dir = Path(self.private_key_path).parent if self.private_key_path else Path(tempfile.gettempdir())
-        box_digest = hashlib.sha256(self.box_address.encode()).hexdigest()[:16]
-        known_hosts_path = base_dir / f".box_known_hosts_{box_digest}"
-        add_host_to_known_hosts(known_hosts_path, self.box_address, 22, self.box_host_public_key)
-        return str(known_hosts_path)
+        return write_box_known_hosts_file(base_dir, self.box_address, self.box_ssh_port, self.box_host_public_key)
 
     def _unavailable(self, operation: str) -> NotImplementedError:
         return NotImplementedError(
@@ -153,7 +134,7 @@ class LimaSliceVpsClient(VpsClientInterface):
             "snapshot, or ssh-key API."
         )
 
-    def _box_ssh_command(self, remote_command: str) -> list[str]:
+    def _box_ssh_command(self, remote_command: str, known_hosts_path: Path) -> list[str]:
         """Build the argv that runs ``remote_command`` on the box as the lima user."""
         if not self.private_key_path:
             raise LimaCommandError("ssh", 1, "no pool private key configured for the slice box")
@@ -161,16 +142,21 @@ class LimaSliceVpsClient(VpsClientInterface):
             "ssh",
             "-i",
             self.private_key_path,
+            "-p",
+            str(self.box_ssh_port),
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
-            f"UserKnownHostsFile={quote_ssh_option_value(self._box_known_hosts_file())}",
+            f"UserKnownHostsFile={quote_ssh_option_value(str(known_hosts_path))}",
             "-o",
             f"ConnectTimeout={_BOX_CONNECT_TIMEOUT_SECONDS}",
             "-o",
             "ServerAliveInterval=30",
             f"{self.box_ssh_user}@{self.box_address}",
-            f"{_BOX_PATH_PREFIX} {remote_command}",
+            # A standalone export rather than an assignment prefix: some remote
+            # commands are compound statements (the management-trust read's
+            # `if`), which an assignment prefix cannot precede.
+            f"export {_BOX_PATH_PREFIX}; {remote_command}",
         ]
 
     def run_on_box(
@@ -178,14 +164,21 @@ class LimaSliceVpsClient(VpsClientInterface):
     ) -> tuple[int | None, str, str]:
         """Run a command on the box over SSH; return (returncode, stdout, stderr)."""
         on_output = (lambda line, _is_stdout: logger.info("  [{}] {}", label, line.rstrip())) if is_streaming else None
-        cg = ConcurrencyGroup(name=f"slice-box-{label}")
-        with cg:
-            result = cg.run_process_to_completion(
-                command=self._box_ssh_command(remote_command),
-                timeout=timeout,
-                is_checked_after=False,
-                on_output=on_output,
-            )
+        # Built outside the group so a precondition failure (no key, no pinned
+        # host key) raises as itself rather than wrapped in the group's error.
+        known_hosts_path = self._box_known_hosts_file()
+        try:
+            command = self._box_ssh_command(remote_command, known_hosts_path)
+            cg = ConcurrencyGroup(name=f"slice-box-{label}")
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=command,
+                    timeout=timeout,
+                    is_checked_after=False,
+                    on_output=on_output,
+                )
+        finally:
+            remove_box_known_hosts_file(known_hosts_path)
         return result.returncode, result.stdout, result.stderr
 
     def run_in_vm_as_root(
@@ -216,7 +209,7 @@ class LimaSliceVpsClient(VpsClientInterface):
         memory_mib: int,
         disk_gib: int,
         host_dir: str,
-        root_authorized_public_key: str,
+        root_authorized_public_key: str | None,
         host_private_key_pem: str,
         host_public_key_openssh: str,
         boot_disk_gib: int,
@@ -224,6 +217,18 @@ class LimaSliceVpsClient(VpsClientInterface):
         port_range_start: int,
         port_range_end: int,
         extra_root_authorized_keys: tuple[str, ...] = (),
+        # Gen-1 VMs are reached with static keys (the lima guest replays its
+        # cloud-init every boot, which is why gen-2 exists), so the CA is accepted
+        # and ignored.
+        trusted_user_ca_public_key: str | None = None,
+        # Gen-1 has no per-VM traffic classes (all guest egress shares the qemu
+        # slirp path), so the declared uplink rate is accepted and ignored.
+        uplink_mbps: int | None = None,
+        # Gen-1 sizing rides memory_mib / disk_gib / slot_count, so the gen-2
+        # machine-sizing knobs are accepted and ignored.
+        units: int | None = None,
+        box_total_units: int | None = None,
+        box_disk_budget_gib: int | None = None,
     ) -> SliceProvisionResult:
         """Reserve a box slot + ports, create the (env-stamped) VM, and boot it; return its handle.
 
@@ -237,8 +242,10 @@ class LimaSliceVpsClient(VpsClientInterface):
         Raises ``SliceCapacityError`` if the box is already full or has no free port
         pair; cleans up a half-reserved instance on any other failure.
         """
-        instance_name = slice_lima_instance_name(host_id, env_name)
-        disk_name = slice_lima_disk_name(host_id, env_name)
+        if root_authorized_public_key is None:
+            raise BareMetalProvisioningError("a gen-1 slice carve needs a static root key (the bake key) to authorize")
+        instance_name = slice_instance_name(host_id, env_name)
+        disk_name = slice_disk_name(host_id, env_name)
         config = build_slice_lima_yaml(
             host_dir=host_dir,
             vcpus=vcpus,
@@ -367,6 +374,54 @@ class LimaSliceVpsClient(VpsClientInterface):
                 names.add(name)
         return names
 
+    def list_instance_observations(self) -> tuple[SliceInstanceObservation, ...]:
+        """Every lima instance with its running state (``limactl list``) and the age of its instance dir."""
+        list_rc, list_out, list_err = self.run_on_box(
+            "limactl list --json", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="list"
+        )
+        if list_rc != 0:
+            raise LimaCommandError("list", list_rc or 1, list_err)
+        age_rc, age_out, age_err = self.run_on_box(
+            'echo "NOW $(date +%s)"; stat -c "%Y %n" "$HOME"/.lima/*/ 2>/dev/null; true',
+            timeout=_LIMA_SHORT_TIMEOUT_SECONDS,
+            label="instance-ages",
+        )
+        if age_rc != 0:
+            raise LimaCommandError("instance ages", age_rc or 1, age_err)
+        now_epoch: float | None = None
+        age_by_name: dict[str, float] = {}
+        for line in age_out.splitlines():
+            parts = line.strip().split(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            if parts[0] == "NOW":
+                now_epoch = float(parts[1])
+                continue
+            if now_epoch is None:
+                continue
+            age_by_name[parts[1].rstrip("/").split("/")[-1]] = max(0.0, now_epoch - float(parts[0]))
+        observations: list[SliceInstanceObservation] = []
+        for line in list_out.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                instance = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Lima instance JSON: {}", exc)
+                continue
+            name = instance.get("name")
+            if not name:
+                continue
+            observations.append(
+                SliceInstanceObservation(
+                    instance_name=name,
+                    is_active=(instance.get("status") == "Running"),
+                    age_seconds=age_by_name.get(name, 0.0),
+                )
+            )
+        return tuple(observations)
+
     def list_disk_names(self) -> set[str]:
         """Return the names of all lima disks currently on the box."""
         list_rc, list_out, list_err = self.run_on_box(
@@ -389,24 +444,16 @@ class LimaSliceVpsClient(VpsClientInterface):
                 names.add(name)
         return names
 
-    def count_authorized_keys(self) -> int:
-        """Number of public keys authorized for the box's lima service user.
-
-        Reads the service user's ``authorized_keys`` and counts it with
-        :func:`count_authorized_key_lines`. ``build_box_prep_script`` writes that
-        file with a single-key overwrite (``cat > ``, never an append), so any count
-        other than 1 means a key was added out of band -- which is how a box ends up
-        reachable by a tier that does not own it.
-        """
+    def read_management_trust(self) -> BoxManagementTrust:
         read_rc, read_out, read_err = self.run_on_box(
-            "cat ~/.ssh/authorized_keys", timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="read-authorized-keys"
+            build_read_management_trust_command(), timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="read-management-trust"
         )
         if read_rc != 0:
             raise BareMetalProvisioningError(
-                f"could not read ~/.ssh/authorized_keys for {self.box_ssh_user} on {self.box_address} "
+                f"could not read the management trust material for {self.box_ssh_user} on {self.box_address} "
                 f"(exit {read_rc}): {read_err.strip()}"
             )
-        return count_authorized_key_lines(read_out)
+        return parse_management_trust_output(read_out)
 
     def read_box_health_texts(self) -> tuple[str, str]:
         """Return the box's ``/proc/mdstat`` and ``/proc/swaps`` contents in one round-trip.
@@ -426,6 +473,16 @@ class LimaSliceVpsClient(VpsClientInterface):
             )
         mdstat_text, _, proc_swaps_text = read_out.partition(f"{_BOX_HEALTH_SPLIT_MARKER}\n")
         return mdstat_text, proc_swaps_text
+
+    def read_storage_volume_state(self) -> StorageVolumeState:
+        read_rc, read_out, read_err = self.run_on_box(
+            build_read_storage_volume_command(), timeout=_LIMA_SHORT_TIMEOUT_SECONDS, label="read-storage-volume"
+        )
+        if read_rc != 0:
+            raise BareMetalProvisioningError(
+                f"could not read the storage volume state on {self.box_address} (exit {read_rc}): {read_err.strip()}"
+            )
+        return parse_storage_volume_output(read_out)
 
     def destroy_disk(self, disk_name: str) -> None:
         """Delete a lima data disk on the box, unlocking it first so a leaked locked disk still goes.

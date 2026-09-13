@@ -56,6 +56,7 @@ from imbue.mngr.api.discovery_events import make_discovered_provider
 from imbue.mngr.api.discovery_events import make_host_discovery_event
 from imbue.mngr.api.discovery_events import make_provider_discovery_snapshot_event
 from imbue.mngr.api.discovery_events import parse_discovery_event_line
+from imbue.mngr.api.discovery_events import resolve_candidate_hosts_for_identifiers
 from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
 from imbue.mngr.api.discovery_events import tail_discovery_events_file
@@ -2316,6 +2317,15 @@ def test_resolve_hosts_raises_disambiguation_for_agent_id_on_multiple_hosts(
 
     with pytest.raises(AgentNotFoundError, match="multiple hosts"):
         resolve_hosts_for_identifiers(temp_mngr_ctx, [str(shared_agent_id)])
+
+
+def test_resolve_candidate_hosts_returns_every_host_of_a_shared_id(
+    temp_mngr_ctx: MngrContext, local_provider: LocalProviderInstance
+) -> None:
+    """The candidates form hands back both hosts so a caller with an ``@HOST`` qualifier can pick."""
+    shared_agent_id, host_id_a, host_id_b = _write_same_id_agent_on_two_hosts(temp_mngr_ctx.config, local_provider)
+    candidates = resolve_candidate_hosts_for_identifiers(temp_mngr_ctx, [str(shared_agent_id)])
+    assert {candidate.host_id for candidate in candidates[str(shared_agent_id)]} == {host_id_a, host_id_b}
 
 
 def test_resolve_hosts_destroy_on_one_host_leaves_same_id_on_other_host_resolvable(

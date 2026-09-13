@@ -1,0 +1,1 @@
+The pinned docker/containerd apt version cores (`PINNED_DOCKER_APT_VERSION_CORE`, `PINNED_CONTAINERD_APT_VERSION_CORE`) are now public, so the gen-2 box prep's image customize can derive the distro suffix from the guest's own os-release (landing the identical pinned engine on trixie guests) instead of hardcoding the bookworm string.

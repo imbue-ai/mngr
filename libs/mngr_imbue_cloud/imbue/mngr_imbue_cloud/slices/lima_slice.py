@@ -4,7 +4,7 @@ from typing import Any
 from typing import Final
 
 from imbue.mngr_imbue_cloud.errors import SliceReserveOutputError
-from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_LIMA_INSTANCE_PREFIX
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_INSTANCE_PREFIX
 from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_INSTALL_SCRIPT
 
@@ -252,7 +252,7 @@ flock 9
 # trailing ``|| true`` keeps an empty box (grep matches nothing, exits 1) from
 # aborting the whole script under ``set -o pipefail`` -- ``wc -l`` still yields 0.
 disk_count=$(limactl disk list --json 2>/dev/null \
-    | grep -oE '"name":[[:space:]]*"{SLICE_LIMA_INSTANCE_PREFIX}[^"]*"' | wc -l | tr -d ' ' || true)
+    | grep -oE '"name":[[:space:]]*"{SLICE_INSTANCE_PREFIX}[^"]*"' | wc -l | tr -d ' ' || true)
 if [ "$disk_count" -ge {slot_count} ]; then
     echo "{SLICE_BOX_FULL_MARKER} $disk_count/{slot_count}" >&2
     exit 4

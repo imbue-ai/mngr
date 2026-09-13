@@ -540,6 +540,10 @@ def wait_for_sshd_with_retry(
             )
 
 
+# One handshake attempt per host-key probe; the callers poll.
+_HOST_KEY_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
+
+
 def parse_openssh_public_key_blob(public_key: str) -> tuple[str, str]:
     """Split an OpenSSH public key line into its (key_type, base64_blob).
 
@@ -552,23 +556,25 @@ def parse_openssh_public_key_blob(public_key: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _server_presents_host_key(hostname: str, port: int, expected_type: str, expected_blob: str) -> bool:
-    """Return True iff the server at hostname:port currently serves the expected host key.
+def read_served_host_key_or_none(hostname: str, port: int, *, timeout_seconds: float) -> str | None:
+    """The sshd host key the server at ``hostname:port`` serves right now (an OpenSSH ``<type> <base64>`` line).
 
-    One handshake attempt: any connection/SSH error (including a non-matching key)
-    is a clean False so the caller can keep polling.
+    One unauthenticated transport handshake, so it can tell which key is live
+    even when the caller's pins or credentials are stale. Any connection/SSH
+    error is None (logged at debug) so callers can keep polling.
     """
     transport = None
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        sock.settimeout(5.0)
+        sock.settimeout(timeout_seconds)
         sock.connect((hostname, port))
         transport = paramiko.Transport(sock)
         transport.connect()
         remote_key = transport.get_remote_server_key()
-        return remote_key.get_name() == expected_type and remote_key.get_base64() == expected_blob
-    except (socket.error, socket.timeout, paramiko.SSHException, EOFError, OSError):
-        return False
+        return f"{remote_key.get_name()} {remote_key.get_base64()}"
+    except (OSError, paramiko.SSHException, EOFError) as e:
+        logger.debug("Could not read the sshd host key served at {}:{}: {}", hostname, port, e)
+        return None
     finally:
         if transport is not None:
             try:
@@ -577,6 +583,16 @@ def _server_presents_host_key(hostname: str, port: int, expected_type: str, expe
                 pass
         else:
             sock.close()
+
+
+def _server_presents_host_key(hostname: str, port: int, expected_type: str, expected_blob: str) -> bool:
+    """Return True iff the server at hostname:port currently serves the expected host key.
+
+    One handshake attempt: any connection/SSH error (including a non-matching key)
+    is a clean False so the caller can keep polling.
+    """
+    served_key = read_served_host_key_or_none(hostname, port, timeout_seconds=_HOST_KEY_PROBE_TIMEOUT_SECONDS)
+    return served_key is not None and parse_openssh_public_key_blob(served_key) == (expected_type, expected_blob)
 
 
 def is_server_presenting_host_key(hostname: str, port: int, public_key: str) -> bool:
@@ -616,6 +632,31 @@ def wait_for_expected_host_key(
         )
 
 
+# OpenSSH's naming for the certificate that accompanies a private key: ``ssh -i
+# <key>`` picks ``<key>-cert.pub`` up on its own, and so does paramiko when it
+# is handed the key as a filename.
+SSH_CERTIFICATE_SUFFIX: Final[str] = "-cert.pub"
+
+
+def ssh_certificate_path_for(private_key_path: Path) -> Path:
+    return private_key_path.with_name(private_key_path.name + SSH_CERTIFICATE_SUFFIX)
+
+
+def load_private_key_with_certificate_or_none(private_key_path: Path) -> paramiko.PKey | None:
+    """The private key with its ``-cert.pub`` attached, or None when no certificate sits beside the key.
+
+    pyinfra loads ``ssh_key`` files itself (a bare ``PKey``, never the sibling
+    certificate), so a caller that authenticates by certificate hands pyinfra the
+    loaded key through its paramiko connect kwargs instead.
+    """
+    certificate_path = ssh_certificate_path_for(private_key_path)
+    if not certificate_path.is_file():
+        return None
+    private_key = paramiko.PKey.from_path(str(private_key_path))
+    private_key.load_certificate(str(certificate_path))
+    return private_key
+
+
 def create_pyinfra_host(
     hostname: str,
     port: int,
@@ -626,17 +667,24 @@ def create_pyinfra_host(
     """Create a pyinfra host with SSH connector.
 
     Clears pyinfra's memoized known_hosts cache to ensure fresh reads,
-    since we add new entries dynamically.
+    since we add new entries dynamically. A ``<key>-cert.pub`` beside the private
+    key is presented as an OpenSSH certificate (pyinfra's own key loading would
+    ignore it; the connect kwargs it applies last carry the certificate-bearing
+    key instead).
     """
     get_host_keys.cache.clear()
 
+    paramiko_connect_kwargs: dict[str, object] = {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS}
+    certified_key = load_private_key_with_certificate_or_none(private_key_path)
+    if certified_key is not None:
+        paramiko_connect_kwargs["pkey"] = certified_key
     host_data = {
         "ssh_user": ssh_user,
         "ssh_port": port,
         "ssh_key": str(private_key_path),
         "ssh_known_hosts_file": str(known_hosts_path),
         "ssh_strict_host_key_checking": "yes",
-        "ssh_paramiko_connect_kwargs": {"banner_timeout": SSH_BANNER_TIMEOUT_SECONDS},
+        "ssh_paramiko_connect_kwargs": paramiko_connect_kwargs,
     }
 
     names_data = ([(hostname, host_data)], {})

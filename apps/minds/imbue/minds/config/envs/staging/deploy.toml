@@ -18,7 +18,26 @@ services = [
     "sharing",
     "storage",
     "sentry",
+    "ssh-ca",
 ]
+
+# The tier's SSH certificate authority (imbue-ai/mngr-internal#850): the public
+# half of the Vault ``minds-staging-ssh`` mount's CA, which every gen-2 box, slice VM,
+# and workspace container trusts for management SSH instead of a static key.
+# Read it after the Vault bring-up (imbue-ai/vault terraform) with
+#   vault read -field=public_key minds-staging-ssh/config/ca
+# and commit it here. Until this block exists, gen-2 box prep and slice bakes
+# on the tier refuse.
+# [ssh_ca]
+# public_key = "ssh-ed25519 AAAA... minds-staging-ssh-ca"
+
+# The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
+# whose static IPs the box `:22` lockdown allowlists; runbook:
+# apps/minds/docs/deploy/gen2-management-plane.md). Absent until the tier's
+# management-plane bring-up; see the dev tier's deploy.toml for the schema.
+# [management_plane.wireguard]
+# [[management_plane.wireguard.operators]]
+# [management_plane.modal_proxy]
 
 [lifecycle]
 creates_resources = false
@@ -51,6 +70,8 @@ max_buckets = 5
 max_total_bucket_gb = 25
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
+max_active_machine_units = 8
+max_total_machine_disk_gb = 140
 
 [plans.explorer]
 max_remote_workspaces = 2
@@ -59,6 +80,8 @@ max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
+max_active_machine_units = 16
+max_total_machine_disk_gb = 280
 
 [plans.ally]
 max_remote_workspaces = 10
@@ -67,6 +90,8 @@ max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
+max_active_machine_units = 80
+max_total_machine_disk_gb = 1400
 
 # Enable web workspace creation (the hosted chrome's POST /hosts/claim).
 # Deliberately unadvertised for now: only people who know the /web URL use it.

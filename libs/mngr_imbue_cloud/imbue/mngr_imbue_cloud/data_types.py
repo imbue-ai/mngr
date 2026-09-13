@@ -21,13 +21,70 @@ from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.primitives import is_box_exclusive_to_tier
 
 
-class PoolHostDestroyTarget(FrozenModel):
-    """The teardown coordinates of a claimed pool_hosts row: its lima VM and the box hosting it."""
+class BoxManagementTrust(FrozenModel):
+    """What a box's slice service user trusts for management SSH, read over SSH."""
 
-    lima_instance_name: str | None = Field(description="The slice's lima instance name on the box, if recorded")
+    authorized_key_count: int = Field(description="Static public keys in the service user's authorized_keys")
+    trusted_ca_public_key: str | None = Field(
+        description="The SSH CA public key the box's sshd trusts (None when no CA trust is installed)"
+    )
+
+
+class StorageVolumeState(FrozenModel):
+    """What backs the gen-2 storage root right now, as the box reports it."""
+
+    mounted_source: str | None = Field(
+        description="The block device mounted at the storage root (None when unmounted)"
+    )
+    is_encrypted: bool = Field(
+        description=(
+            "Whether the mounted device is the opened LUKS mapper (an unmounted root is unencrypted: nothing "
+            "is protecting the slices on it, whatever the underlying partition holds)"
+        )
+    )
+
+
+class SliceProvisionResult(FrozenModel):
+    """What a slice provision produced: the VM instance/disk identifiers and the two box host ports."""
+
+    instance_name: str = Field(description="Slice VM instance name (also the VpsInstanceId)")
+    disk_name: str = Field(description="Identifier of the slice's btrfs data disk on the box")
+    vm_ssh_host_port: int = Field(description="Box host port forwarded to the VM's root sshd")
+    container_ssh_host_port: int = Field(description="Box host port forwarded to the inner container sshd")
+    slice_ordinal: int | None = Field(
+        default=None,
+        description=(
+            "The gen-2 slice's box-local slot ordinal (drives its tap/user/subnet names); "
+            "None for gen-1 (lima) slices, which have no ordinal"
+        ),
+    )
+
+
+class PoolHostDestroyTarget(FrozenModel):
+    """The teardown coordinates of a claimed pool_hosts row: its slice VM and the box hosting it."""
+
+    slice_instance_name: str | None = Field(description="The slice's VM instance name on the box, if recorded")
     box_public_address: str | None = Field(description="SSH-reachable address of the box, if its record exists")
-    lima_service_user: str | None = Field(description="The box's non-root lima user that owns the VMs, if recorded")
+    box_wireguard_address: str | None = Field(
+        default=None,
+        description=(
+            "The box's WireGuard overlay address, if assigned -- the teardown dials it (through a "
+            "userspace or interface tunnel) instead of the public address when reachable (a "
+            "locked-down box drops direct :22)"
+        ),
+    )
+    box_wireguard_public_key: str | None = Field(
+        default=None,
+        description="The box's WireGuard public key, if recorded -- the userspace tunnel's peer key",
+    )
+    slice_service_user: str | None = Field(
+        description="The box's non-root service user that owns the slice VMs, if recorded"
+    )
     box_host_public_key: str | None = Field(description="The box's sshd host public key, pinned for the teardown SSH")
+    box_generation: int = Field(
+        default=1,
+        description="The row's stamped slice-fleet generation, selecting the teardown client (lima vs raw qemu)",
+    )
 
 
 class PoolHostDestroyOutcome(FrozenModel):
@@ -79,6 +136,21 @@ class SliceBakeReport(FrozenModel):
     slices: tuple[SliceBakeOutcome, ...] = Field(description="Per-slice outcomes, in completion order")
 
 
+class OrphanReapReport(FrozenModel):
+    """What one orphan reap did (or, dry-run, would do) on a box."""
+
+    server_id: str = Field(description="The bare_metal_servers row id of the reaped box")
+    is_dry_run: bool = Field(description="Whether the reap only reported, without destroying anything")
+    reaped_instances: tuple[str, ...] = Field(description="Rowless, stopped, old slice VMs destroyed (or to destroy)")
+    reaped_disks: tuple[str, ...] = Field(
+        description="Rowless data disks whose slice VM is gone (not running, not spared) deleted (or to delete)"
+    )
+    spared_instances: tuple[str, ...] = Field(
+        description="Rowless slice VMs left alone because they are running or younger than a bake"
+    )
+    failed: tuple[str, ...] = Field(description="Resources whose destroy failed (logged; the next reap retries)")
+
+
 class WarmCacheReport(FrozenModel):
     """The summary the cache pre-warm (``pool warm-cache``) emits."""
 
@@ -107,7 +179,16 @@ class BoxTierAudit(FrozenModel):
     public_address: str = Field(description="SSH-reachable public address the audit reached the box at")
     slot_count: int = Field(description="Slices the box holds when full")
     box_used_slots: int = Field(description="Slice resources actually on the box, across every env (plus legacy)")
-    authorized_key_count: int = Field(description="Public keys authorized for the box's lima service user")
+    authorized_key_count: int = Field(description="Static public keys authorized for the box's slice service user")
+    expected_authorized_key_count: int = Field(
+        description="Static keys the box's generation should authorize (one pool key on gen-1, none on gen-2)"
+    )
+    trusted_ca_public_key: str | None = Field(
+        description="The SSH CA public key the box's sshd trusts, when it trusts one"
+    )
+    is_trusted_ca_correct: bool = Field(
+        description="Whether the box trusts exactly the owning tier's SSH CA (always true for a gen-1 box)"
+    )
     foreign_tier_slices: tuple[str, ...] = Field(
         description="Slice resources on the box stamped for an env belonging to another tier, sorted"
     )
@@ -120,6 +201,14 @@ class BoxTierAudit(FrozenModel):
             "their pages and SIGBUS-kills processes; fixed by a prep re-run (from /proc/swaps)"
         )
     )
+    is_storage_encrypted: bool = Field(
+        description=(
+            "Whether the gen-2 storage root is mounted from its opened LUKS mapper, so every slice disk on "
+            "the box is ciphertext at rest (always false for a gen-1 box, which has no storage volume; a "
+            "gen-2 box reading false is either locked -- its TPM unlock failed at boot -- or was prepped "
+            "before storage encryption existed and must be drained and repaved)"
+        )
+    )
 
     @computed_field
     @property
@@ -127,7 +216,9 @@ class BoxTierAudit(FrozenModel):
         """Whether a bake onto this box would pass the tier-exclusivity guard."""
         return is_box_exclusive_to_tier(
             authorized_key_count=self.authorized_key_count,
+            expected_authorized_key_count=self.expected_authorized_key_count,
             foreign_tier_slice_count=len(self.foreign_tier_slices),
+            is_trusted_ca_correct=self.is_trusted_ca_correct,
         )
 
 
@@ -324,10 +415,10 @@ class AuthSession(FrozenModel):
 
 
 class BareMetalServer(FrozenModel):
-    """A rented OVH bare-metal server that we carve into lima-VM slices.
+    """A rented OVH bare-metal server that we carve into slice VMs.
 
     Mirrors one ``bare_metal_servers`` row. Resource fields and ``raid_level`` /
-    ``lima_service_user`` / ``ovh_service_name`` / ``public_address`` are filled
+    ``slice_service_user`` / ``ovh_service_name`` / ``public_address`` are filled
     in as the box advances through its lifecycle, so they are optional until the
     box reaches the state that populates them.
     """
@@ -350,18 +441,69 @@ class BareMetalServer(FrozenModel):
     )
     slot_count: int = Field(description="Number of slices this box holds (floor(ram_gb / memory_per_slice_gb))")
     raid_level: str | None = Field(default=None, description="RAID level set at OS-install time (e.g. 'RAID1')")
-    lima_service_user: str | None = Field(default=None, description="Non-root OS user that owns the box's lima VMs")
+    slice_service_user: str | None = Field(
+        default=None, description="Non-root OS user that owns the box's slice VMs (set once the box is prepped)"
+    )
     box_host_public_key: str | None = Field(
         default=None,
         description=(
             "The box's sshd host public key (port 22), injected by us at OS reinstall so it is "
-            "deterministically known. Pinned by admin tooling, the lima slice client, and the connector's "
+            "deterministically known. Pinned by admin tooling, the slice clients, and the connector's "
             "slice teardown. None until set at provision (or by the one-time keyscan backfill)."
         ),
     )
-    status: BareMetalServerStatus = Field(description="Lifecycle state: ordered/delivered/installing/ready/failed")
+    status: BareMetalServerStatus = Field(
+        description="Lifecycle state: ordered/delivered/installing/ready/draining/failed"
+    )
     created_at: datetime = Field(description="When the row was created")
     updated_at: datetime = Field(description="When the row was last updated")
+    box_generation: int = Field(
+        default=1,
+        description=(
+            "Which slice-fleet generation this box runs (specs/slice-fleet-gen2): 1 = bookworm + lima/slirp, "
+            "2 = trixie + raw qemu with routed-tap networking. Determines the slice backend every bake and "
+            "teardown against this box uses."
+        ),
+    )
+    uplink_mbps: int = Field(
+        description=(
+            "The box's declared uplink rate in Mbit/s (from its plan's bandwidth option, not measured), the "
+            "source of truth for gen-2 per-slice fair-share bandwidth classes, the egress signal, and the "
+            "link-speed audit."
+        ),
+    )
+    wireguard_address: str | None = Field(
+        default=None,
+        description="The box's WireGuard overlay IP for operator management access (gen-2; assigned at prep).",
+    )
+    wireguard_public_key: str | None = Field(
+        default=None,
+        description=(
+            "The box's WireGuard public key (gen-2; the private key is generated on the box at prep and "
+            "never leaves it). The rendered operator client configs pin each box peer by it."
+        ),
+    )
+
+
+class Gen2BoxDefaultMachineFit(FrozenModel):
+    """How a gen-2 box's estimated disk budget compares with the full complement of default machines its RAM sells."""
+
+    machine_capacity: int = Field(description="Default-size machines the box's RAM budget holds")
+    required_disk_budget_gib: int = Field(description="Disk budget (GiB) that full complement needs")
+    disk_budget_gib: int = Field(
+        description="Disk budget (GiB) estimated from the catalog's usable-disk GB figure, after the storage reserve"
+    )
+
+    @property
+    def is_sufficient(self) -> bool:
+        return self.disk_budget_gib >= self.required_disk_budget_gib
+
+    @property
+    def machines_that_fit(self) -> int:
+        # Each default machine costs the same slice of the disk budget, so the
+        # fit is the budget's whole share of that per-machine cost.
+        per_machine_gib = self.required_disk_budget_gib // self.machine_capacity
+        return min(self.machine_capacity, self.disk_budget_gib // per_machine_gib)
 
 
 class BareMetalServerCapacity(FrozenModel):
@@ -451,4 +593,12 @@ class SlicePricingRow(FrozenModel):
     price_per_slice_usd: Decimal = Field(description="amortized_monthly / slot_count -- the primary sort key")
     storage_options: tuple[SliceStorageOption, ...] = Field(
         description="Other in-region storage configs as per-slice disk upgrades (not splatted into their own rows)"
+    )
+    is_units_valid: bool = Field(
+        default=False,
+        description=(
+            "Whether the base storage passes the gen-2 units-valid guard (specs/slice-fleet): its disk "
+            "budget holds the RAM's full complement of default-size machines, so the config is orderable "
+            "as a gen-2 box."
+        ),
     )

@@ -36,6 +36,39 @@ export interface WorkspaceOptionsData {
   whole_service: string;
 }
 
+/** Response shape of GET /ui/api/workspaces/<id>/machine-size (ui_api_options.py). */
+export interface WorkspaceMachineSizeData {
+  is_available: boolean;
+  memory_units: number | null;
+  target_memory_units: number | null;
+  disk_gb: number | null;
+  target_disk_gb: number | null;
+  is_restart_needed_to_apply: boolean;
+}
+
+/** "8 GB RAM · 28 GB disk" for the current size; "" when nothing is known (1 unit = 1 GiB RAM). */
+export function formatMachineSize(size: WorkspaceMachineSizeData): string {
+  const parts: string[] = [];
+  if (size.memory_units !== null) parts.push(`${size.memory_units} GB RAM`);
+  if (size.disk_gb !== null) parts.push(`${size.disk_gb} GB disk`);
+  return parts.join(" · ");
+}
+
+/** The pending size a restart would apply ("16 GB RAM · 56 GB disk"), falling
+ * back to the current value for the factor that has no pending target; "" when
+ * no restart is needed. */
+export function formatPendingMachineSize(
+  size: WorkspaceMachineSizeData,
+): string {
+  if (!size.is_restart_needed_to_apply) return "";
+  const pendingUnits = size.target_memory_units ?? size.memory_units;
+  const pendingDisk = size.target_disk_gb ?? size.disk_gb;
+  const parts: string[] = [];
+  if (pendingUnits !== null) parts.push(`${pendingUnits} GB RAM`);
+  if (pendingDisk !== null) parts.push(`${pendingDisk} GB disk`);
+  return parts.join(" · ");
+}
+
 export interface SharingGrantList {
   emails: string[];
   email_domains: string[];
@@ -668,6 +701,8 @@ export class WorkspaceOptionsModel {
   status: "loading" | "load_failed" | "ready" = "loading";
   data: WorkspaceOptionsData | null = null;
   share: ShareModel | null = null;
+  /** Read-only machine size for leased machines; null until (and unless) it loads. */
+  machineSize: WorkspaceMachineSizeData | null = null;
   loadErrorMessage = "";
 
   renameErrorMessage = "";
@@ -734,6 +769,19 @@ export class WorkspaceOptionsModel {
     this.status = "ready";
     this.redrawImpl();
     void this.share.load();
+    if (data.is_leased_imbue_cloud) void this.loadMachineSize();
+  }
+
+  /** Fetch the machine's read-only size lazily; failures just leave the section hidden. */
+  async loadMachineSize(): Promise<void> {
+    const result = await this.fetchJsonImpl(
+      `/ui/api/workspaces/${encodeURIComponent(this.agentId)}/machine-size`,
+    );
+    if (!result.ok) return;
+    const size = result.body as WorkspaceMachineSizeData;
+    if (!size.is_available) return;
+    this.machineSize = size;
+    this.redrawImpl();
   }
 
   dispose(): void {

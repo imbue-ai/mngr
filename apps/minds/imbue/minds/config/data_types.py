@@ -1,11 +1,17 @@
 import json
+import re
+from collections.abc import Mapping
 from enum import auto
+from functools import cached_property
+from ipaddress import IPv4Address
+from ipaddress import IPv4Network
 from pathlib import Path
 from typing import Final
 
 from pydantic import AnyUrl
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import computed_field
 from pydantic import model_validator
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
@@ -13,9 +19,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.imbue_common.primitives import PositiveInt
 from imbue.minds.errors import DeployLifecycleConfigError
 from imbue.minds.errors import MalformedMngrOutputError
+from imbue.minds.errors import ManagementPlaneConfigError
 from imbue.minds.errors import OriginsConfigError
+from imbue.minds.errors import SshCaConfigError
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
@@ -377,6 +386,12 @@ class PlanQuotasConfig(FrozenModel):
         description="Monthly LLM spend cap in USD (rolling; 0 disables imbue-cloud key minting)"
     )
     max_active_synced_workspaces: NonNegativeInt = Field(description="Max ACTIVE synced workspace records")
+    max_active_machine_units: NonNegativeInt = Field(
+        description="Max machine units (1 unit = 1GiB guest RAM) summed across running remote machines"
+    )
+    max_total_machine_disk_gb: NonNegativeInt = Field(
+        description="Max machine data-disk GB summed across running + stopped remote machines"
+    )
 
     def to_plan_row(self) -> dict[str, float]:
         """The connector-table column values for this plan (storage converted to bytes)."""
@@ -387,6 +402,8 @@ class PlanQuotasConfig(FrozenModel):
             "max_total_bucket_bytes": int(self.max_total_bucket_gb) * 1024**3,
             "monthly_llm_spend_usd": float(self.monthly_llm_spend_usd),
             "max_active_synced_workspaces": int(self.max_active_synced_workspaces),
+            "max_active_machine_units": int(self.max_active_machine_units),
+            "max_total_machine_disk_gb": int(self.max_total_machine_disk_gb),
         }
 
 
@@ -485,6 +502,234 @@ class OriginsConfig(FrozenModel):
         return self
 
 
+# The gen-2 management overlay addressing plan (specs/slice-fleet-gen2 and the
+# slice-fleet canary follow-ups): every tier is its own isolated WireGuard
+# network, and all tiers' overlays are carved DISJOINT from one reserved
+# supernet -- identical numbers across tiers would be ambiguous on an operator
+# machine holding several tiers' tunnels at once, even though the tiers never
+# meet on the wire. The supernet deliberately avoids the Tailscale/CGNAT range
+# (100.64.0.0/10 -- in use on operator machines), the box-local 10.201.0.0/16
+# per-slice /30 range, Docker's 172.17+ pools, GCP default-VPC space
+# (10.128.0.0/9), and the low 10.0.x/10.8.x home-router/OpenVPN defaults;
+# overlapping Kubernetes' default ranges is accepted (not in use here).
+MANAGEMENT_OVERLAY_SUPERNET_CIDR: Final[str] = "10.64.0.0/10"
+
+# Per-tier overlay allocations. Production takes the /11 (the only tier whose
+# box count can plausibly grow without bound); each small tier sits at the
+# BASE of its own reserved /13 so it can later widen 8x by changing this one
+# value -- a superset widening is a pure config-converge (re-prep / peer
+# sync), no box ever changes address. 10.120.0.0/13 stays spare for a future
+# tier. Keys are tier names as defined by mngr_imbue_cloud's
+# ``tier_for_env_name``. Within each allocation, operators are hand-assigned
+# inside the first /24 in the ``[management_plane]`` table of the tier's
+# committed ``deploy.toml``;
+# boxes are assigned sequentially above it at prep, so the two never collide.
+MANAGEMENT_OVERLAY_CIDR_BY_TIER: Final[Mapping[str, str]] = {
+    "production": "10.64.0.0/11",
+    "staging": "10.96.0.0/16",
+    "ci": "10.104.0.0/16",
+    "dev": "10.112.0.0/16",
+}
+
+
+class ManagementOverlayAllocation(FrozenModel):
+    """One tier's management-overlay address allocation (its own isolated WireGuard network)."""
+
+    tier: NonEmptyStr = Field(description="The tier this allocation belongs to.")
+    overlay: IPv4Network = Field(description="The tier's overlay network (operators + boxes).")
+
+    @computed_field
+    @cached_property
+    def operator_block(self) -> IPv4Network:
+        # The reserved operator /24 at the base of the overlay; boxes are
+        # assigned above it at prep, so the two can never collide.
+        return next(iter(self.overlay.subnets(new_prefix=24)))
+
+
+def management_overlay_for_tier(tier: str) -> ManagementOverlayAllocation:
+    """The tier's overlay allocation. Raises ManagementPlaneConfigError for an unknown tier."""
+    cidr = MANAGEMENT_OVERLAY_CIDR_BY_TIER.get(tier)
+    if cidr is None:
+        known = sorted(MANAGEMENT_OVERLAY_CIDR_BY_TIER)
+        raise ManagementPlaneConfigError(f"no management overlay is allocated for tier {tier!r} (have: {known})")
+    overlay = IPv4Network(cidr)
+    if not overlay.subnet_of(IPv4Network(MANAGEMENT_OVERLAY_SUPERNET_CIDR)):
+        raise ManagementPlaneConfigError(
+            f"tier {tier!r} overlay {cidr} lies outside the reserved supernet {MANAGEMENT_OVERLAY_SUPERNET_CIDR}"
+        )
+    return ManagementOverlayAllocation(tier=NonEmptyStr(tier), overlay=overlay)
+
+
+# WireGuard keys are base64; anything outside this charset (in particular
+# whitespace and newlines) cannot be a key and would corrupt the rendered
+# wg0.conf, which is written inside a root-executed prep heredoc.
+_WIREGUARD_PUBLIC_KEY_CHARSET_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9+/=]+$")
+
+
+class WireguardOperatorConfig(FrozenModel):
+    """One operator peer on a tier's gen-2 management WireGuard overlay.
+
+    All values are public (the private key stays on the operator's machine),
+    so the tier's committed ``deploy.toml`` can carry them and peer changes
+    are ordinary PRs.
+    """
+
+    name: NonEmptyStr = Field(description="Human label for the operator (used in rendered config comments).")
+    public_key: NonEmptyStr = Field(description="The operator's WireGuard public key (base64).")
+    address: IPv4Address = Field(
+        description=(
+            "The operator's assigned overlay address: a /32 inside the operator block (first /24) of the "
+            "operator's tier overlay. Membership is validated at load time, where the tier is known."
+        )
+    )
+
+    @model_validator(mode="after")
+    def _check_values_render_as_single_config_lines(self) -> "WireguardOperatorConfig":
+        # Both values are rendered verbatim into the box's wg0.conf inside a
+        # root-executed prep heredoc (and into operator client configs), so a
+        # value spanning lines could corrupt -- or inject lines into -- the
+        # rendered script. Reject at parse time.
+        if "\n" in self.name or "\r" in self.name:
+            raise ManagementPlaneConfigError(f"operator name {str(self.name)!r} must be a single line")
+        if not _WIREGUARD_PUBLIC_KEY_CHARSET_PATTERN.match(self.public_key):
+            raise ManagementPlaneConfigError(
+                f"operator '{self.name}' public_key {str(self.public_key)!r} must contain only "
+                "base64 characters (a WireGuard public key)"
+            )
+        return self
+
+
+class ManagementWireguardConfig(FrozenModel):
+    """The ``[management_plane.wireguard]`` table of a tier's ``deploy.toml``: the operator peer list.
+
+    Gen-2 box prep renders these peers into the box's ``wg0`` config, and the
+    ``minds-admin wireguard sync-peers`` command pushes changes to the live fleet.
+    """
+
+    listen_port: PositiveInt = Field(
+        default=PositiveInt(51820),
+        description="UDP port each gen-2 box's WireGuard endpoint listens on.",
+    )
+    operators: tuple[WireguardOperatorConfig, ...] = Field(
+        default=(),
+        description="The tier's operator peers. Empty means no operator currently has overlay access.",
+    )
+
+    @model_validator(mode="after")
+    def _check_listen_port_is_a_valid_udp_port(self) -> "ManagementWireguardConfig":
+        # The port is rendered into every box's wg0.conf and every operator
+        # client config's Endpoint; an out-of-range value would only surface
+        # on-box when wg-quick rejects the rendered file, so reject it at
+        # parse time like every other rendered value in this config.
+        if int(self.listen_port) > 65535:
+            raise ManagementPlaneConfigError(
+                f"[management_plane.wireguard] listen_port {int(self.listen_port)} is not a valid UDP port (must be <= 65535)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_operator_identities_are_unique(self) -> "ManagementWireguardConfig":
+        # Names too: `minds-admin wireguard config --operator <name>` selects by name,
+        # so a duplicate would silently resolve to whichever entry comes first.
+        names = [str(operator.name) for operator in self.operators]
+        addresses = [str(operator.address) for operator in self.operators]
+        public_keys = [str(operator.public_key) for operator in self.operators]
+        if len(set(names)) != len(names):
+            raise ManagementPlaneConfigError("[management_plane.wireguard] operator names must be unique")
+        if len(set(addresses)) != len(addresses):
+            raise ManagementPlaneConfigError("[management_plane.wireguard] operator addresses must be unique")
+        if len(set(public_keys)) != len(public_keys):
+            raise ManagementPlaneConfigError("[management_plane.wireguard] operator public keys must be unique")
+        return self
+
+
+class ManagementModalProxyConfig(FrozenModel):
+    """The ``[management_plane.modal_proxy]`` table of a tier's ``deploy.toml``.
+
+    Names the tier's Modal Proxy (attached to the connector's functions at
+    deploy so all connector egress leaves from its static IPs) and lists those
+    static IPs (allowlisted on gen-2 box ``:22`` by the prep-installed
+    management nftables policy). Both halves must be kept in step with the
+    proxy configured in the tier's Modal workspace.
+    """
+
+    proxy_name: NonEmptyStr = Field(
+        description="Name of the Modal Proxy in the tier's Modal workspace (dashboard -> Proxies)."
+    )
+    environment_name: NonEmptyStr | None = Field(
+        default=None,
+        description=(
+            "The Modal environment the proxy lives in. Proxy lookup is environment-scoped and a "
+            "workspace holds at most one proxy, so a tier whose apps deploy into per-env Modal "
+            "environments (dev) keeps its shared proxy in one environment (typically 'main') and "
+            "names it here; None resolves the proxy in each deploy's own environment."
+        ),
+    )
+    static_ips: tuple[IPv4Address, ...] = Field(
+        description="The proxy's static egress IPs, allowlisted for box management SSH."
+    )
+
+    @model_validator(mode="after")
+    def _check_static_ips_present(self) -> "ManagementModalProxyConfig":
+        # An empty allowlist with a named proxy would lock the connector out of
+        # every gen-2 box the moment prep applies the policy.
+        if not self.static_ips:
+            raise ManagementPlaneConfigError(
+                "[management_plane.modal_proxy] static_ips must not be empty when a proxy is named"
+            )
+        return self
+
+
+class ManagementPlaneConfig(FrozenModel):
+    """The optional ``[management_plane]`` table of a tier's ``deploy.toml``: its gen-2 management plane.
+
+    All values are public (operator WireGuard public keys, the tier's Modal
+    Proxy name and its static egress IPs), so changes are ordinary
+    PR-reviewed edits like the rest of the file. The box
+    ``:22`` lockdown is applied by gen-2 prep only when ``modal_proxy`` is
+    configured -- without it the connector would have no allowlisted egress
+    address and every workspace on the box would break.
+    """
+
+    wireguard: ManagementWireguardConfig = Field(
+        default_factory=ManagementWireguardConfig,
+        description="Operator WireGuard peers for the tier's management overlay.",
+    )
+    modal_proxy: ManagementModalProxyConfig | None = Field(
+        default=None,
+        description=(
+            "The tier's Modal Proxy (connector egress + box :22 allowlist). None means the tier "
+            "has no proxy yet: the connector egresses from dynamic IPs and gen-2 prep installs "
+            "no :22 lockdown."
+        ),
+    )
+
+
+class SshCaConfig(FrozenModel):
+    """The ``[ssh_ca]`` block of a tier's ``deploy.toml``: the public half of the tier's SSH CA in Vault.
+
+    Management SSH into gen-2 boxes, slice VMs, and workspace containers is by
+    short-lived certificate signed by the tier's Vault SSH CA
+    (imbue-ai/mngr-internal#850). The public key is committed so box prep, the
+    slice bake, and the cutover render CA trust without a Vault read, and so
+    the deploy can check Vault still holds the CA the fleet trusts.
+    """
+
+    public_key: NonEmptyStr = Field(
+        description="The tier CA's OpenSSH public key line (``vault read -field=public_key minds-<tier>-ssh/config/ca``)."
+    )
+
+    @model_validator(mode="after")
+    def _validate_public_key_shape(self) -> "SshCaConfig":
+        fields = str(self.public_key).split()
+        if len(fields) < 2 or not fields[0].startswith("ssh-"):
+            raise SshCaConfigError(
+                f"ssh_ca.public_key must be an OpenSSH public key line ('ssh-ed25519 AAAA... comment'), "
+                f"got {str(self.public_key)[:40]!r}"
+            )
+        return self
+
+
 class DeployEnvConfig(FrozenModel):
     """Per-tier deploy-time config read by deploy scripts and `minds-admin env create`.
 
@@ -580,6 +825,23 @@ class DeployEnvConfig(FrozenModel):
             "User-facing custom-domain origin layout (accounts surface + web chrome + shared "
             "cookie apex). None (the default) keeps the tier on the bare connector URL with "
             "host-only cookies (dev/ci)."
+        ),
+    )
+    ssh_ca: SshCaConfig | None = Field(
+        default=None,
+        description=(
+            "The tier's SSH CA public key (its Vault ``minds-<tier>-ssh`` mount's CA). None means the tier's CA has "
+            "not been brought up yet: gen-2 box prep and slice bakes refuse, since a gen-2 host has no other "
+            "management-access path (see apps/minds/docs/deploy/setup/tier-bringup.md)."
+        ),
+    )
+    management_plane: ManagementPlaneConfig | None = Field(
+        default=None,
+        description=(
+            "The tier's gen-2 management plane: operator WireGuard peers and the Modal Proxy whose static "
+            "egress IPs gen-2 box prep allowlists on ``:22``. None means the tier has none yet -- no operator "
+            "peers, no proxy, no box lockdown -- exactly like an absent ``ssh_ca`` (see "
+            "apps/minds/docs/deploy/gen2-management-plane.md)."
         ),
     )
 

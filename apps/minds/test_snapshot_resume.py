@@ -694,6 +694,11 @@ def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
+# The Electron sign-in click intermittently times out (playwright Frame.click,
+# 30s) while the page is still settling; the flow passes on re-run. Retried
+# while the timing is investigated -- the marker routes it into the retrying
+# offload group.
+@pytest.mark.flaky
 def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

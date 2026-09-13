@@ -3,6 +3,7 @@
 import contextlib
 import socket
 import stat
+import subprocess
 import threading
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
@@ -37,12 +38,15 @@ from imbue.mngr.providers.ssh_utils import load_or_create_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.providers.ssh_utils import load_private_key_with_certificate_or_none
 from imbue.mngr.providers.ssh_utils import parse_openssh_public_key_blob
 from imbue.mngr.providers.ssh_utils import per_host_key_dir
 from imbue.mngr.providers.ssh_utils import read_host_public_key_with_legacy_fallback
+from imbue.mngr.providers.ssh_utils import read_served_host_key_or_none
 from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr.providers.ssh_utils import save_ssh_keypair
+from imbue.mngr.providers.ssh_utils import ssh_certificate_path_for
 from imbue.mngr.providers.ssh_utils import wait_for_expected_host_key
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.providers.ssh_utils import wait_for_sshd_with_retry
@@ -829,3 +833,55 @@ def test_create_pyinfra_host_uses_custom_ssh_user(tmp_path: Path) -> None:
     )
 
     assert host.data.get("ssh_user") == "ubuntu"
+
+
+def test_read_served_host_key_or_none_is_none_for_a_closed_port() -> None:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+    assert read_served_host_key_or_none("127.0.0.1", closed_port, timeout_seconds=1.0) is None
+
+
+def _generate_certified_key(tmp_path: Path) -> Path:
+    """A fresh ed25519 key with a ``-cert.pub`` signed by a throwaway CA beside it."""
+    ca_path = tmp_path / "ca"
+    key_path = tmp_path / "id"
+    for path in (ca_path, key_path):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)], check=True)
+    subprocess.run(
+        ["ssh-keygen", "-q", "-s", str(ca_path), "-I", "test-identity", "-n", "mngr-vm", str(key_path) + ".pub"],
+        check=True,
+    )
+    return key_path
+
+
+def test_load_private_key_with_certificate_attaches_the_sibling_cert(tmp_path: Path) -> None:
+    key_path = _generate_certified_key(tmp_path)
+    assert ssh_certificate_path_for(key_path) == tmp_path / "id-cert.pub"
+    certified = load_private_key_with_certificate_or_none(key_path)
+    assert certified is not None
+    # paramiko records the loaded certificate as the key's public blob, which is
+    # what it offers the server in place of the raw public key.
+    assert certified.public_blob is not None
+    assert certified.public_blob.key_type == "ssh-ed25519-cert-v01@openssh.com"
+
+
+def test_load_private_key_with_certificate_returns_none_without_a_cert(tmp_path: Path) -> None:
+    key_path = tmp_path / "id"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)], check=True)
+    assert load_private_key_with_certificate_or_none(key_path) is None
+
+
+def test_create_pyinfra_host_hands_pyinfra_the_certified_key_through_its_connect_kwargs(tmp_path: Path) -> None:
+    key_path = _generate_certified_key(tmp_path)
+    known_hosts_path = tmp_path / "known_hosts"
+    known_hosts_path.write_text("")
+    pyinfra_host = create_pyinfra_host(
+        hostname="203.0.113.7", port=22001, private_key_path=key_path, known_hosts_path=known_hosts_path
+    )
+    connect_kwargs = pyinfra_host.data.ssh_paramiko_connect_kwargs
+    assert connect_kwargs["pkey"].public_blob.key_type == "ssh-ed25519-cert-v01@openssh.com"
+    # The plain key path still rides along for the OpenSSH-driven paths (rsync's
+    # ``-i``), which pick the ``-cert.pub`` up on their own.
+    assert pyinfra_host.data.ssh_key == str(key_path)

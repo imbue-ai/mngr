@@ -1,0 +1,1 @@
+This branch carries the earlier slice-fleet gen-2 phase 1-4 and variable-sizing spec work as its base; the substantive changes to this project are described by the `mngr-slice-fleet-gen2-phase-*` and `mngr-variable-sizing` entries in this same PR. The variable-machine-sizing implementation itself (specs/slice-fleet, phase 1) does not change this project.

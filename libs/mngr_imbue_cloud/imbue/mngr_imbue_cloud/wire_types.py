@@ -127,6 +127,28 @@ class LeaseResult(WireModel):
             "agent connection on the fast/adopt path; None only against a connector too old to return it."
         ),
     )
+    box_generation: int = Field(
+        default=1,
+        description=(
+            "Slice-fleet generation of the leased host's box (specs/slice-fleet-gen2); selects "
+            "per-generation client behavior (e.g. the rebuild's slice-client dispatch). Defaults to 1 "
+            "against a connector too old to return it."
+        ),
+    )
+    memory_units: int | None = Field(
+        default=None,
+        description=(
+            "The machine's current size in units (1 unit = 1GiB guest RAM; specs/slice-fleet). None "
+            "against a connector too old to return it."
+        ),
+    )
+    disk_gb: int | None = Field(
+        default=None,
+        description=(
+            "The machine's data-disk size in GB (grow-only; specs/slice-fleet). None against a connector "
+            "too old to return it."
+        ),
+    )
 
 
 class WorkspaceInfo(WireModel):
@@ -167,6 +189,38 @@ class WorkspaceInfo(WireModel):
     transition_error: str | None = Field(default=None, description="Last stop/start failure, if any")
     outer_host_public_key: str | None = Field(default=None, description="Pinned VM-root sshd host key")
     container_host_public_key: str | None = Field(default=None, description="Pinned container sshd host key")
+    box_generation: int = Field(
+        default=1,
+        description=(
+            "Slice-fleet generation of the workspace's placement (specs/slice-fleet-gen2). Defaults "
+            "to 1 against a connector too old to return it."
+        ),
+    )
+    memory_units: int | None = Field(
+        default=None,
+        description=(
+            "The machine's current size in units (1 unit = 1GiB guest RAM; specs/slice-fleet). None "
+            "against a connector too old to return it."
+        ),
+    )
+    target_memory_units: int | None = Field(
+        default=None,
+        description=(
+            "A pending resize's unit target, applied at the machine's next start; None when no "
+            "resize is pending (or against an older connector)."
+        ),
+    )
+    disk_gb: int | None = Field(
+        default=None,
+        description="The machine's data-disk size in GB (grow-only). None against a connector too old to return it.",
+    )
+    target_disk_gb: int | None = Field(
+        default=None,
+        description=(
+            "A pending disk grow's GB target, applied at the machine's next start; None when no "
+            "grow is pending (or against an older connector)."
+        ),
+    )
 
 
 class LeasedHostInfo(WireModel):
@@ -346,6 +400,20 @@ class AccountEntitlementValues(WireModel):
     max_total_bucket_bytes: int = Field(description="Max total bytes across all the account's buckets")
     monthly_llm_spend_usd: float = Field(description="Monthly LLM spend cap in USD (rolling)")
     max_active_synced_workspaces: int = Field(description="Max ACTIVE synced workspace records")
+    max_active_machine_units: int | None = Field(
+        default=None,
+        description=(
+            "Max machine units (1 unit = 1GiB guest RAM) summed across running remote machines "
+            "(specs/slice-fleet); None against a connector too old to have machine sizing."
+        ),
+    )
+    max_total_machine_disk_gb: int | None = Field(
+        default=None,
+        description=(
+            "Max machine data-disk GB summed across running + stopped remote machines; None against "
+            "an older connector."
+        ),
+    )
 
 
 class AccountUsageInfo(WireModel):
@@ -358,6 +426,20 @@ class AccountUsageInfo(WireModel):
     llm_spend_usd_this_period: float = Field(description="LiteLLM aggregate spend in the current budget period")
     llm_budget_resets_at: str | None = Field(default=None, description="When the rolling LLM budget period resets")
     active_synced_workspaces: int = Field(description="Current ACTIVE synced workspace records")
+    active_machine_units: int | None = Field(
+        default=None,
+        description=(
+            "Machine units currently counted against max_active_machine_units (running machines, "
+            "pending resize targets included); None against an older connector."
+        ),
+    )
+    total_machine_disk_gb: int | None = Field(
+        default=None,
+        description=(
+            "Data-disk GB currently counted against max_total_machine_disk_gb (running + stopped "
+            "machines); None against an older connector."
+        ),
+    )
 
 
 class AccountInfo(WireModel):

@@ -41,6 +41,7 @@ from imbue.minds.envs.vault_reader import read_vault_kv
 from imbue.minds.envs.vault_reader import write_vault_kv
 from imbue.minds.errors import MindError
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
 
 _SUPERTOKENS_TENANT_ID: Final[str] = "public"
 _CONNECTOR_HTTP_TIMEOUT_SECONDS: Final[float] = 60.0
@@ -79,6 +80,13 @@ CI_TEST_USER_PASSWORD_KEY: Final[str] = "CI_TEST_USER_PASSWORD"
 # The ci tier's Vault prefix; ``<prefix>/supertokens`` carries the
 # MINDS_ADMIN_KEY that authenticates connector admin endpoints.
 _CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
+
+
+# Every lease these tests place is served by this checkout's mngr, which runs
+# gen-2 workspaces; the connector treats a lease without the field as a client
+# from before gen-2 and confines it to gen-1 rows, so a gen-2-only pool would
+# answer every test 503.
+LEASE_MAX_BOX_GENERATION: Final[int] = FIRST_QEMU_BOX_GENERATION
 
 
 def ci_admin_auth_header() -> dict[str, str]:

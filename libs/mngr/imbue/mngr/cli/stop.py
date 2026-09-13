@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
 from datetime import datetime
@@ -11,8 +12,9 @@ from loguru import logger
 
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.discovery_events import ResolvedAgentHost
+from imbue.mngr.api.discovery_events import ambiguous_hosts_error
 from imbue.mngr.api.discovery_events import emit_discovery_events_for_host
-from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
+from imbue.mngr.api.discovery_events import resolve_candidate_hosts_for_identifiers
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
 from imbue.mngr.api.find import group_agents_by_host
@@ -36,6 +38,7 @@ from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import HostOfflineError
 from imbue.mngr.errors import HostShutdownNotSupportedError
 from imbue.mngr.errors import UserInputError
@@ -46,6 +49,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import DiscoveredAgent
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.providers.base_provider import BaseProviderInstance
@@ -77,7 +81,7 @@ def _ensure_providers_support_host_shutdown(providers: Sequence[BaseProviderInst
 def _live_discover_agents_for_resolution(mngr_ctx: MngrContext, identifiers: Sequence[str]) -> list[DiscoveredAgent]:
     """Live-discover agents for ``identifiers`` (the read-after-write fallback for host resolution).
 
-    Injected into ``resolve_hosts_for_identifiers`` so the SSH-free stream replay can fall
+    Injected into ``resolve_candidate_hosts_for_identifiers`` so the SSH-free stream replay can fall
     back to a live discovery for an agent not yet in the event stream (e.g. just created),
     without ``discovery_events`` importing the live discovery path (which would be circular).
     """
@@ -110,26 +114,26 @@ def _stop_hosts_for_addresses(
     Returns the list of agent identifiers whose host was stopped (or was
     already stopped).
     """
-    resolved_by_identifier = resolve_hosts_for_identifiers(
+    candidates_by_identifier = resolve_candidate_hosts_for_identifiers(
         mngr_ctx,
         [str(addr.agent) for addr in agent_addresses],
         live_discovery_fallback=lambda identifiers: _live_discover_agents_for_resolution(mngr_ctx, identifiers),
     )
 
     # Fetch each distinct host once (SSH-free) -- this is also what validates
-    # the resolved host still exists. Honor any explicit @HOST[.PROVIDER]
-    # qualifier against the fetched host's name and id, mirroring the
-    # non-stop-host path.
+    # the resolved host still exists. An explicit @HOST[.PROVIDER] qualifier is
+    # matched against each candidate host's id, name and provider, so a name
+    # that exists on several hosts resolves to the one the qualifier names.
     hosts_to_stop: dict[HostId, tuple[ResolvedAgentHost, HostInterface]] = {}
     for address in agent_addresses:
-        resolved = resolved_by_identifier[str(address.agent)]
-        if resolved.host_id in hosts_to_stop:
-            host = hosts_to_stop[resolved.host_id][1]
+        candidates = candidates_by_identifier[str(address.agent)]
+        if address.host is None:
+            if len(candidates) > 1:
+                raise ambiguous_hosts_error(str(address.agent), candidates)
+            resolved = candidates[0]
+            host = _fetch_host_for_stop(resolved, hosts_to_stop, mngr_ctx)
         else:
-            host = get_provider_instance(resolved.provider_name, mngr_ctx).get_host(resolved.host_id)
-        if address.host is not None:
-            if not address.host.matches_host(resolved.host_id, host.get_name(), resolved.provider_name):
-                raise AgentNotFoundError(f"No agent found matching address: {address}")
+            resolved, host = _select_qualified_candidate(address, address.host, candidates, hosts_to_stop, mngr_ctx)
         hosts_to_stop[resolved.host_id] = (resolved, host)
 
     providers = [get_provider_instance(resolved.provider_name, mngr_ctx) for resolved, _ in hosts_to_stop.values()]
@@ -155,6 +159,70 @@ def _stop_hosts_for_addresses(
         _output(future.result(), output_opts)
 
     return [str(address.agent) for address in agent_addresses]
+
+
+def _fetch_host_for_stop(
+    resolved: ResolvedAgentHost,
+    hosts_to_stop: Mapping[HostId, tuple[ResolvedAgentHost, HostInterface]],
+    mngr_ctx: MngrContext,
+) -> HostInterface:
+    """The (SSH-free) host object for a resolved candidate, reusing one already fetched for this stop."""
+    if resolved.host_id in hosts_to_stop:
+        return hosts_to_stop[resolved.host_id][1]
+    return get_provider_instance(resolved.provider_name, mngr_ctx).get_host(resolved.host_id)
+
+
+def _fetch_host_for_stop_or_none(
+    resolved: ResolvedAgentHost,
+    hosts_to_stop: Mapping[HostId, tuple[ResolvedAgentHost, HostInterface]],
+    mngr_ctx: MngrContext,
+) -> HostInterface | None:
+    """Like :func:`_fetch_host_for_stop`, but a host the provider no longer knows is skipped rather than fatal."""
+    try:
+        return _fetch_host_for_stop(resolved, hosts_to_stop, mngr_ctx)
+    except HostNotFoundError as e:
+        logger.debug(
+            "Skipping candidate host {} (provider {}): the provider no longer knows it ({})",
+            resolved.host_id,
+            resolved.provider_name,
+            e,
+        )
+        return None
+
+
+def _select_qualified_candidate(
+    address: AgentAddress,
+    qualifier: HostAddress,
+    candidates: Sequence[ResolvedAgentHost],
+    hosts_to_stop: Mapping[HostId, tuple[ResolvedAgentHost, HostInterface]],
+    mngr_ctx: MngrContext,
+) -> tuple[ResolvedAgentHost, HostInterface]:
+    """Pick the candidate host the address's ``@HOST[.PROVIDER]`` qualifier names.
+
+    A candidate the provider no longer knows (a stale duplicate next to the live
+    host, e.g. mid-migration) is skipped; when nothing is left to match, the
+    error names those skipped hosts so the operator sees why the qualified
+    address found nothing.
+    """
+    matching: list[tuple[ResolvedAgentHost, HostInterface]] = []
+    gone_host_ids: list[HostId] = []
+    for candidate in candidates:
+        host = _fetch_host_for_stop_or_none(candidate, hosts_to_stop, mngr_ctx)
+        if host is None:
+            gone_host_ids.append(candidate.host_id)
+        elif qualifier.matches_host(candidate.host_id, host.get_name(), candidate.provider_name):
+            matching.append((candidate, host))
+        else:
+            pass
+    if not matching:
+        message = f"No agent found matching address: {address}"
+        if gone_host_ids:
+            gone = ", ".join(sorted(str(host_id) for host_id in gone_host_ids))
+            message += f" (candidate host(s) {gone} are no longer known to their provider)"
+        raise AgentNotFoundError(message)
+    if len(matching) > 1:
+        raise ambiguous_hosts_error(str(address), [candidate for candidate, _ in matching])
+    return matching[0]
 
 
 def _stop_single_host(

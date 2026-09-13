@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.errors import WorkspaceSyncError
+from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr_imbue_cloud.config import get_active_profile_dir
 from imbue.mngr_imbue_cloud.config import get_sessions_dir
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
@@ -344,26 +345,36 @@ class MultiAccountSessionStore(MutableModel):
         color: str | None,
         is_cloud_row: bool,
     ) -> None:
-        """Create-path association: seed a minimal record now, queued for push.
+        """Create-path association: seed the record now, queued for push.
 
         Runs right after ``mngr create`` returns the canonical ids -- before
-        discovery has seen the workspace -- so the record starts with just the
-        form metadata. The reconcile's metadata refresh enriches it (provider,
-        secrets) once discovery catches up. Never blocks or fails creation:
-        a push failure just leaves the row dirty for the reconcile.
+        discovery has seen the workspace -- so the record starts with the form
+        metadata plus whatever this device already holds: a cloud row's
+        provider is known from the account, and its SSH key and pins were
+        written by the lease before create returned, so the first push carries
+        the secrets when the account is unlocked: a device that pulls before
+        the reconcile's refresh already sees a record it can unlock and a
+        machine it can open. The refresh still enriches whatever is missing (a
+        local row's provider, a backup env written later). Never blocks or
+        fails creation: a push failure just leaves the row dirty for the
+        reconcile.
         """
         if self.record_store is None:
             logger.warning("Machine sync is not configured; created machine {} stays private", agent_id)
             return
         account = self._require_account(user_id)
+        provider_kind = imbue_cloud_provider_name_for_account(str(account.email)) if is_cloud_row else ""
+        built_secrets = self.record_store.build_encrypted_secrets(user_id, agent_id, host_id, None)
         seed = ReplicaRecord(
             host_id=host_id,
             agent_id=agent_id,
             display_name=display_name or agent_id,
             color=color,
-            provider_kind="",
+            provider_kind=provider_kind,
             hosting_device_id=None if is_cloud_row else self.record_store.device_id,
             device_label=self.record_store.device_label,
+            encrypted_secrets=built_secrets.encrypted if built_secrets is not None else None,
+            secrets_content_hash=built_secrets.content_hash if built_secrets is not None else None,
         )
         self.record_store.upsert_local_record(user_id, account.email, seed)
         logger.info("Associated created machine {} with user {}", agent_id, user_id[:8])

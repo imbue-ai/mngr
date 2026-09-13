@@ -344,6 +344,50 @@ mngr imbue_cloud hosts enable-sharing [OPTIONS] HOST_REF
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud machines
+
+**Usage:**
+
+```text
+mngr imbue_cloud machines [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud machines show
+
+**Usage:**
+
+```text
+mngr imbue_cloud machines show [OPTIONS] [MACHINE_REF]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud machines resize
+
+**Usage:**
+
+```text
+mngr imbue_cloud machines resize [OPTIONS] MACHINE_REF
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--units` | integer | Desired size in units (1 unit = 1GiB of machine RAM; vCPUs and bandwidth scale with it). Any multiple of 8 from 8 to 128; up or down. | None |
+| `--disk-gb` | integer | Desired data-disk size in GB. Grow-only: a value below the current size is refused. | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud keys
 
 **Usage:**

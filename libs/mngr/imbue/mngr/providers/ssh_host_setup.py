@@ -139,9 +139,15 @@ def build_check_and_install_packages_command(
 # peer): without it the only reaper is kernel TCP keepalive (~2h11m at Linux
 # defaults), so a dead client's remote processes -- a cooperative host-lock
 # holder above all -- linger for hours and block every subsequent operation.
-# 30s x 4 bounds that to ~2 minutes. Passed as ``-o`` flags so they override
-# whatever sshd_config the container image baked.
-SSHD_START_OPTIONS: Final[str] = "-o MaxSessions=100 -o ClientAliveInterval=30 -o ClientAliveCountMax=4"
+# 30s x 4 bounds that to ~2 minutes. Password and keyboard-interactive
+# authentication are switched off because every mngr host authenticates by
+# key (or certificate) only, while Debian's stock sshd_config leaves both on.
+# Passed as ``-o`` flags so they override whatever sshd_config the container
+# image baked.
+SSHD_START_OPTIONS: Final[str] = (
+    "-o MaxSessions=100 -o ClientAliveInterval=30 -o ClientAliveCountMax=4"
+    " -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no"
+)
 
 # Marker file mngr writes (alongside its injected host key) once it has
 # provisioned sshd. The self-healing entrypoint gates on THIS marker rather than

@@ -821,7 +821,7 @@ requires-dist = [
     { name = "markdown-it-py", specifier = ">=2.2.0" },
     { name = "overlay", editable = "../../../../libs/overlay" },
     { name = "packaging", specifier = ">=21.0" },
-    { name = "paramiko", specifier = ">=3.0" },
+    { name = "paramiko", specifier = ">=3.2" },
     { name = "pluggy", specifier = ">=1.5.0" },
     { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },
