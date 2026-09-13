@@ -21,9 +21,7 @@ from imbue.mngr.utils.git_utils import find_git_worktree_root
 _SETTINGS_FILENAME: Final[str] = "settings.toml"
 _LOCAL_SETTINGS_FILENAME: Final[str] = "settings.local.toml"
 
-# =============================================================================
 # Config File Discovery and Loading
-# =============================================================================
 
 
 def try_load_toml(path: Path | None) -> dict[str, Any] | None:
@@ -129,28 +127,45 @@ def _find_project_root(cg: ConcurrencyGroup, start: Path | None = None) -> Path 
     return find_git_worktree_root(start, cg)
 
 
+def _project_config_dir_override() -> Path | None:
+    """The MNGR_PROJECT_CONFIG_DIR override, or None when it is unset or empty."""
+    env_project_dir = os.environ.get("MNGR_PROJECT_CONFIG_DIR")
+    return Path(env_project_dir) if env_project_dir else None
+
+
+def derive_project_config_dir(root_name: str, project_root: Path | None) -> Path | None:
+    """Derive the project config directory from an already-resolved project root.
+
+    If MNGR_PROJECT_CONFIG_DIR is set, returns that path directly.
+    Otherwise, returns <project_root>/.<root_name>/ (the default behavior).
+    Returns None if there is no project root and MNGR_PROJECT_CONFIG_DIR is not set.
+
+    Callers that already hold a project root use this rather than
+    ``resolve_project_config_dir``, which would resolve the same root a second time.
+    """
+    override = _project_config_dir_override()
+    if override is not None:
+        return override
+    if project_root is None:
+        return None
+    return project_root / f".{root_name}"
+
+
 def resolve_project_config_dir(
     root_name: str,
     cg: ConcurrencyGroup,
 ) -> Path | None:
-    """Resolve the project config directory.
+    """Resolve the project config directory, finding the project root along the way.
 
-    If MNGR_PROJECT_CONFIG_DIR is set, returns that path directly.
-    Otherwise, returns <git_root>/.<root_name>/ (the default behavior).
-    Returns None if no project root can be determined and MNGR_PROJECT_CONFIG_DIR is not set.
+    For callers with no project root in hand. The git lookup is skipped entirely when the
+    override already settles the answer, since its result would only be discarded.
     """
-    env_project_dir = os.environ.get("MNGR_PROJECT_CONFIG_DIR")
-    if env_project_dir:
-        return Path(env_project_dir)
-    root = _find_project_root(cg=cg)
-    if root is None:
-        return None
-    return root / f".{root_name}"
+    if _project_config_dir_override() is not None:
+        return derive_project_config_dir(root_name, project_root=None)
+    return derive_project_config_dir(root_name, _find_project_root(cg=cg))
 
 
-# =============================================================================
 # Lightweight config pre-readers
-# =============================================================================
 #
 # These functions read specific values from config files before the full
 # config is loaded.  They run early in startup (CLI parse time or plugin
@@ -222,7 +237,7 @@ def _resolve_config_files() -> list[dict[str, Any]]:
     return [raw for _scope, _path, raw in read_config_layers(profile_dir, project_config_dir)]
 
 
-# --- Default subcommand pre-reader ---
+# Default subcommand pre-reader
 
 
 def read_default_command(command_name: str) -> str | None:
@@ -250,7 +265,7 @@ def read_default_command(command_name: str) -> str | None:
     return merged.get(command_name)
 
 
-# --- Disabled plugins pre-reader ---
+# Disabled plugins pre-reader
 
 # Plugins that are DISABLED by default and must be explicitly opted into with
 # ``[plugins.<name>] enabled = true`` in a config layer to load. This inverts

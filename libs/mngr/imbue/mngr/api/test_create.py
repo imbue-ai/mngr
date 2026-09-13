@@ -46,9 +46,7 @@ from imbue.mngr.utils.testing import make_ctx_with_plugins
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
-# =============================================================================
 # Create API Integration Tests
-# =============================================================================
 
 
 def _get_local_host_for_test(test_ctx: MngrContext) -> OnlineHostInterface:
@@ -188,8 +186,6 @@ def test_create_agent_with_new_host(
 
 @pytest.mark.tmux
 @pytest.mark.flaky
-# real agent setup/teardown occasionally exceeds the 10s default.
-@pytest.mark.timeout(30)
 def test_create_agent_work_dir_is_created(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
@@ -255,9 +251,7 @@ def test_agent_state_is_persisted(
         assert data["type"] == PLACEHOLDER_AGENT_TYPE
 
 
-# =============================================================================
 # Edge Cases
-# =============================================================================
 
 
 def test_create_agent_with_unknown_type_raises(
@@ -297,9 +291,7 @@ def test_create_agent_with_unknown_type_raises(
     assert "--type command" in user_help_text
 
 
-# =============================================================================
 # Worktree Tests
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -541,9 +533,7 @@ def test_worktree_in_repo_with_no_commits_gives_helpful_error(
         )
 
 
-# =============================================================================
 # Branch Cleanup on Create Failure
-# =============================================================================
 
 
 class _RaiseAfterFileCopy:
@@ -687,9 +677,7 @@ def test_preexisting_branch_is_preserved_when_create_fails(
         assert not path.exists(), f"worktree directory {path} should be removed"
 
 
-# =============================================================================
 # is_generated_work_dir Tests
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -952,9 +940,7 @@ def test_target_path_same_as_source_sets_is_generated_work_dir_false(
         )
 
 
-# =============================================================================
 # create_work_dir=False Tests
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -1026,9 +1012,7 @@ def test_create_work_dir_false_without_target_path_uses_source(
         assert data["work_dir"] == str(temp_work_dir), "work_dir should be the source path when target_path is None"
 
 
-# =============================================================================
 # Duplicate Agent Name Tests
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -1108,8 +1092,6 @@ def test_create_rejects_duplicate_agent_id_on_same_host(
 
 
 @pytest.mark.tmux
-# real agent setup/teardown occasionally exceeds the 10s default.
-@pytest.mark.timeout(30)
 def test_create_with_update_flag_updates_existing_agent(
     temp_mngr_ctx: MngrContext,
     temp_work_dir: Path,
@@ -1182,9 +1164,7 @@ def test_create_with_update_flag_updates_existing_agent(
         assert len(matching) == 1
 
 
-# =============================================================================
 # on_before_create Hook Tests
-# =============================================================================
 
 
 class PluginModifyingAgentOptions:

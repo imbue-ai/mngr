@@ -16,9 +16,7 @@ from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.testing import tmux_session_exists
 
-# =============================================================================
 # Tests with no agents (lightweight, no tmux)
-# =============================================================================
 
 
 def test_cleanup_dry_run_json_format_no_agents(
@@ -153,9 +151,7 @@ def test_cleanup_alias_clean(
     assert result.exit_code == 0
 
 
-# =============================================================================
 # Tests with real agents (create then cleanup)
-# =============================================================================
 
 
 def _create_agent(
@@ -202,8 +198,6 @@ def _create_agent(
 
 
 @pytest.mark.tmux
-# real agent setup/teardown occasionally exceeds the 10s default.
-@pytest.mark.timeout(30)
 def test_cleanup_destroy_single_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -269,8 +263,6 @@ def test_cleanup_dry_run_with_real_agent(
 
 @pytest.mark.tmux
 @pytest.mark.flaky
-# real agent setup/teardown occasionally exceeds the 10s default.
-@pytest.mark.timeout(30)
 def test_cleanup_stop_action_with_real_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -298,7 +290,6 @@ def test_cleanup_stop_action_with_real_agent(
 
 @pytest.mark.tmux
 @pytest.mark.flaky
-@pytest.mark.timeout(30)
 def test_cleanup_destroy_multiple_agents(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -348,8 +339,6 @@ def test_cleanup_destroy_multiple_agents(
 
 
 @pytest.mark.tmux
-# real agent setup/teardown occasionally exceeds the 10s default.
-@pytest.mark.timeout(30)
 def test_cleanup_destroy_with_provider_filter_matches(
     cli_runner: CliRunner,
     temp_work_dir: Path,
@@ -411,7 +400,6 @@ def test_cleanup_destroy_with_provider_filter_excludes(
 
 @pytest.mark.flaky
 @pytest.mark.tmux
-@pytest.mark.timeout(30)
 def test_cleanup_destroy_json_output_with_real_agent(
     cli_runner: CliRunner,
     temp_work_dir: Path,

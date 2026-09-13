@@ -17,7 +17,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
 def test_exec_branch_show_current(e2e: E2eSession) -> None:
     """Tutorial block:
         # check what branch an agent is on (it may have shifted if the agent checked out a new branch)
@@ -114,7 +113,6 @@ def test_exec_git_status_short(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
 def test_exec_git_log(e2e: E2eSession) -> None:
     """Tutorial block:
         # see the agent's recent commits
@@ -314,7 +312,6 @@ def test_exec_git_push_then_merge(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
 def test_destroy_remove_created_branch_inline(e2e: E2eSession) -> None:
     """Tutorial block:
         # when destroying, clean up the branch that was originally created when the agent was created

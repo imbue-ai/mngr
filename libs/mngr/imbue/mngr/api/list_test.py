@@ -88,9 +88,7 @@ from imbue.mngr.utils.cel_utils import TolerantMapType
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.testing import capture_loguru
 
-# =============================================================================
 # Helpers
-# =============================================================================
 
 
 def _make_host_details() -> HostDetails:
@@ -116,9 +114,7 @@ def _make_agent_details(name: str, host_details: HostDetails) -> AgentDetails:
     )
 
 
-# =============================================================================
 # Duplicate Host Name Warning Tests
-# =============================================================================
 
 
 def _make_discovered_host(
@@ -216,9 +212,7 @@ def test_warn_on_duplicate_host_names_no_warning_when_destroyed_host_shares_name
     assert "Duplicate host name" not in log_output.getvalue()
 
 
-# =============================================================================
 # ErrorInfo Tests
-# =============================================================================
 
 
 def test_error_info_build_creates_correct_error_from_exception() -> None:
@@ -237,9 +231,7 @@ def test_error_info_build_captures_custom_exception_type() -> None:
     assert error.message == "bad value"
 
 
-# =============================================================================
 # ProviderErrorInfo Tests
-# =============================================================================
 
 
 def test_provider_error_info_build_for_provider() -> None:
@@ -277,9 +269,7 @@ def test_provider_error_info_from_generic_exception_is_not_inaccessible() -> Non
     assert error.help_text is None
 
 
-# =============================================================================
 # HostErrorInfo Tests
-# =============================================================================
 
 
 def test_host_error_info_build_for_host() -> None:
@@ -292,9 +282,7 @@ def test_host_error_info_build_for_host() -> None:
     assert error.host_id == host_id
 
 
-# =============================================================================
 # AgentErrorInfo Tests
-# =============================================================================
 
 
 def test_agent_error_info_build_for_agent() -> None:
@@ -307,9 +295,7 @@ def test_agent_error_info_build_for_agent() -> None:
     assert error.agent_id == agent_id
 
 
-# =============================================================================
 # ListResult Tests
-# =============================================================================
 
 
 def test_list_result_initializes_with_empty_lists() -> None:
@@ -333,9 +319,7 @@ def test_list_result_allows_appending() -> None:
     assert len(result.errors) == 1
 
 
-# =============================================================================
 # agent_details_to_cel_context Tests
-# =============================================================================
 
 
 def test_agent_details_to_cel_context_basic_fields() -> None:
@@ -709,9 +693,7 @@ def test_agent_details_to_cel_context_exposes_host_provider_under_both_names() -
     assert host["provider_name"] == "modal"
 
 
-# =============================================================================
 # _apply_cel_filters Tests
-# =============================================================================
 
 
 def test_apply_cel_filters_includes_matching_agent() -> None:
@@ -754,9 +736,7 @@ def test_apply_cel_filters_no_filters_includes_all() -> None:
     assert _apply_cel_filters(agent, [], []) is True
 
 
-# =============================================================================
 # _maybe_write_provider_discovery_snapshots Tests
-# =============================================================================
 
 
 def test_maybe_write_provider_discovery_snapshots_writes_when_unfiltered_and_error_free(
@@ -888,9 +868,7 @@ def test_maybe_write_provider_discovery_snapshots_skips_when_include_filters_set
     assert not events_path.exists()
 
 
-# =============================================================================
 # list_agents Tests
-# =============================================================================
 
 
 def test_list_agents_batch_mode_no_agents_returns_empty_result(
@@ -984,8 +962,6 @@ def test_list_agents_streaming_mode_on_agent_callback_is_called(
 
 
 @pytest.mark.tmux
-# real agent setup/teardown occasionally exceeds the 10s default.
-@pytest.mark.timeout(30)
 def test_list_agents_with_include_filter_excludes_non_matching(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -1025,9 +1001,7 @@ def test_list_agents_with_include_filter_excludes_non_matching(
     assert "list-include-no" not in result_names
 
 
-# =============================================================================
 # discover_hosts_and_agents Tests
-# =============================================================================
 
 
 def test_discover_hosts_and_agents_returns_empty_for_no_agents(
@@ -1104,9 +1078,7 @@ def test_discover_by_address_narrows_to_the_constrained_host(
     assert {host_ref.host_name for host_ref in kept.agents_by_host} == {HostName(LOCAL_HOST_NAME)}
 
 
-# =============================================================================
 # _all_identifiers_found Tests
-# =============================================================================
 
 
 def test_all_identifiers_found_by_name() -> None:
@@ -1146,9 +1118,7 @@ def test_all_identifiers_found_returns_true_for_empty_identifiers() -> None:
     assert _all_identifiers_found([], {})
 
 
-# =============================================================================
 # agent_field_generators integration tests
-# =============================================================================
 
 
 class _FieldGeneratorPlugin:
@@ -1348,9 +1318,7 @@ def test_no_field_generators_produces_empty_plugin(
         assert agent.plugin == {}
 
 
-# =============================================================================
 # discover_hosts_and_agents Tests
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -1393,9 +1361,7 @@ def test_discover_hosts_and_agents_groups_agents_by_host(
     assert found_agent
 
 
-# =============================================================================
 # Test Provider Implementations (for error-path coverage)
-# =============================================================================
 
 
 class _RaisingDiscoveryProviderInstance(MockProviderInstance):
@@ -1798,9 +1764,7 @@ def _make_list_params(
     )
 
 
-# =============================================================================
 # Provider instantiation errors honor --on-error in get_all_provider_instances
-# =============================================================================
 
 
 def _make_broken_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
@@ -1980,9 +1944,7 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
         )
 
 
-# =============================================================================
 # Lines 235-237: OSError when writing full discovery snapshot
-# =============================================================================
 
 
 def test_maybe_write_provider_discovery_snapshots_logs_warning_on_oserror(
@@ -2063,9 +2025,7 @@ def test_maybe_write_provider_discovery_snapshots_emits_ssh_host_info(
     assert "ssh-agent" in content
 
 
-# =============================================================================
 # Lines 271-279: ProviderInstanceNotFoundError in batch mode
-# =============================================================================
 
 
 def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
@@ -2123,9 +2083,7 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
         del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
 
 
-# =============================================================================
 # Lines 348-385: Provider-level MngrError in streaming mode
-# =============================================================================
 
 
 def _make_raising_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
@@ -2238,9 +2196,7 @@ def test_construct_discover_and_emit_for_provider_success_path_processes_agents(
     assert result.errors == []
 
 
-# =============================================================================
 # ProviderEmptyError: always silently skipped in listing, regardless of mode
-# =============================================================================
 
 
 def _make_empty_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
@@ -2306,9 +2262,7 @@ def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
         del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
-# =============================================================================
 # Lines 396-405: Error differentiation in _handle_listing_error
-# =============================================================================
 
 
 def test_handle_listing_error_continue_with_discovered_agent_creates_agent_error() -> None:
@@ -2419,9 +2373,7 @@ def test_handle_listing_error_abort_mode_raises() -> None:
     assert result.errors == []
 
 
-# =============================================================================
 # Lines 416-430: CEL filter application in _collect_and_emit_details_for_host
-# =============================================================================
 
 
 def _make_offline_test_provider(
@@ -2665,9 +2617,7 @@ def test_collect_and_emit_details_for_host_no_filter_adds_all_agents(
     assert len(result.agents) == 3
 
 
-# =============================================================================
 # Lines 446-463: Host-level error handling in _process_host_with_error_handling
-# =============================================================================
 
 
 @pytest.mark.allow_warnings(match=r"Error processing host")

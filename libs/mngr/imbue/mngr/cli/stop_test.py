@@ -132,9 +132,7 @@ def test_stop_host_rejects_archive_combination(
     assert "Cannot use --stop-host together with --archive" in result.output
 
 
-# =============================================================================
 # Host-shutdown capability validation
-# =============================================================================
 
 
 def _make_mock_provider(
@@ -177,9 +175,7 @@ def test_ensure_providers_support_host_shutdown_raises_for_unsupported(
     assert exc_info.value.provider_name == ProviderInstanceName("bad")
 
 
-# =============================================================================
 # --stop-host SSH-free host resolution
-# =============================================================================
 
 
 def _write_local_provider_snapshot(
@@ -455,9 +451,7 @@ def test_stop_host_uses_ssh_free_resolution(
     assert "Cannot stop the local host" in result.output
 
 
-# =============================================================================
 # StopCliOptions additional field tests
-# =============================================================================
 
 
 def test_stop_cli_options_accepts_all_optional_fields() -> None:
@@ -491,9 +485,7 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
     assert opts.disable_plugin == ("other-plugin",)
 
 
-# =============================================================================
 # Output helper function tests
-# =============================================================================
 
 
 def test_stop_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
@@ -570,9 +562,7 @@ def test_stop_output_result_json_reports_failures(capsys: pytest.CaptureFixture[
     assert data["exit_code"] == 3
 
 
-# =============================================================================
 # Archive integration tests (require tmux for running agents)
-# =============================================================================
 
 
 @pytest.mark.tmux
@@ -635,13 +625,8 @@ def test_stop_dry_run_does_not_stop_agent(
     assert "Stopped agent: dry-run-agent" in real_result.output
 
 
-# Real tmux agent create plus a stop that rewrites the agent's labels: ~2s locally, but
-# it has been observed exceeding the global 10s pytest-timeout on a slow CI sandbox.
-# Same remedy as the sibling tmux CLI tests: per-test timeout room when slow, offload
-# retry via @pytest.mark.flaky beyond it.
 @pytest.mark.tmux
 @pytest.mark.flaky
-@pytest.mark.timeout(60)
 def test_stop_archive_sets_archived_at_label(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

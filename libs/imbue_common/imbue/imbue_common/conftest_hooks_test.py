@@ -15,11 +15,12 @@ from imbue.imbue_common.conftest_hooks import _compute_lock_deadline
 from imbue.imbue_common.conftest_hooks import _compute_max_duration
 from imbue.imbue_common.conftest_hooks import _is_process_alive
 from imbue.imbue_common.conftest_hooks import _read_lock_info
+from imbue.imbue_common.conftest_hooks import _resolve_marker_class_timeout
 from imbue.imbue_common.conftest_hooks import _try_break_stale_lock
 from imbue.imbue_common.conftest_hooks import _verify_lock_inode
 from imbue.imbue_common.conftest_hooks import _write_lock_info
 
-# --- _is_process_alive ---
+# _is_process_alive
 
 
 def test_current_process_is_alive() -> None:
@@ -31,7 +32,7 @@ def test_nonexistent_pid_is_not_alive() -> None:
     assert _is_process_alive(2**22) is False
 
 
-# --- _read_lock_info / _write_lock_info ---
+# _read_lock_info / _write_lock_info
 
 
 def test_lock_info_round_trip_with_deadline(tmp_path: Path) -> None:
@@ -80,7 +81,7 @@ def test_read_lock_info_non_dict_json(tmp_path: Path) -> None:
     assert _read_lock_info(lock_file) is None
 
 
-# --- _compute_max_duration ---
+# _compute_max_duration
 
 
 def test_max_duration_explicit_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -117,7 +118,7 @@ def test_max_duration_local_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _compute_max_duration() == 300.0
 
 
-# --- _compute_lock_deadline ---
+# _compute_lock_deadline
 
 
 def test_lock_deadline_none_without_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,7 +134,7 @@ def test_lock_deadline_computed_with_env_var(monkeypatch: pytest.MonkeyPatch) ->
     assert deadline == 1180.0
 
 
-# --- _try_break_stale_lock ---
+# _try_break_stale_lock
 
 
 def test_break_stale_lock_dead_pid(tmp_path: Path) -> None:
@@ -188,7 +189,7 @@ def test_break_stale_lock_expired_deadline_kills(tmp_path: Path) -> None:
         proc.wait()
 
 
-# --- _verify_lock_inode ---
+# _verify_lock_inode
 
 
 def test_verify_inode_matching(tmp_path: Path) -> None:
@@ -216,7 +217,7 @@ def test_verify_inode_missing_path(tmp_path: Path) -> None:
         assert _verify_lock_inode(fh, lock_file) is False
 
 
-# --- _acquire_global_test_lock ---
+# _acquire_global_test_lock
 
 
 def test_acquire_lock_basic(tmp_path: Path) -> None:
@@ -244,7 +245,7 @@ def test_acquire_lock_after_stale_dead_pid(tmp_path: Path) -> None:
         handle.close()
 
 
-# --- _compute_junit_test_id ---
+# _compute_junit_test_id
 
 
 def test_compute_junit_test_id_without_offload_root(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -278,3 +279,36 @@ def test_compute_junit_test_id_with_class(monkeypatch: pytest.MonkeyPatch) -> No
         )
         == "libs/foo/test_bar.py::TestCls::test_method"
     )
+
+
+# _resolve_marker_class_timeout
+
+
+def test_marker_class_timeout_is_offered_to_a_test_in_that_class() -> None:
+    assert _resolve_marker_class_timeout(["tmux"], has_explicit_timeout=False, global_timeout=10.0) == 60
+
+
+def test_marker_class_timeout_is_declined_for_a_test_in_no_such_class() -> None:
+    assert _resolve_marker_class_timeout(["flaky"], has_explicit_timeout=False, global_timeout=10.0) is None
+
+
+def test_marker_class_timeout_is_declined_for_a_test_with_no_markers_at_all() -> None:
+    assert _resolve_marker_class_timeout([], has_explicit_timeout=False, global_timeout=10.0) is None
+
+
+def test_an_explicitly_declared_timeout_beats_the_class_budget() -> None:
+    """A test's own @pytest.mark.timeout is how it says it differs from its class."""
+    assert _resolve_marker_class_timeout(["tmux"], has_explicit_timeout=True, global_timeout=10.0) is None
+
+
+def test_a_more_generous_global_timeout_is_not_clamped_back_to_the_class_budget() -> None:
+    """A generous `--timeout` passed while debugging must not be narrowed to the class budget."""
+    assert _resolve_marker_class_timeout(["tmux"], has_explicit_timeout=False, global_timeout=300.0) is None
+
+
+def test_a_global_timeout_equal_to_the_class_budget_needs_no_marker() -> None:
+    assert _resolve_marker_class_timeout(["tmux"], has_explicit_timeout=False, global_timeout=60.0) is None
+
+
+def test_the_class_budget_applies_when_no_global_timeout_is_configured() -> None:
+    assert _resolve_marker_class_timeout(["tmux"], has_explicit_timeout=False, global_timeout=None) == 60
