@@ -56,7 +56,7 @@ API_SPEC: SpecTree = SpecTree(
     "flask",
     before=_emit_custom_validation_error,
     validation_error_status=422,
-    title="Mind desktop client API",
+    title="Minds desktop client API",
     version="1.0",
     openapi_version="3.1.0",
 )

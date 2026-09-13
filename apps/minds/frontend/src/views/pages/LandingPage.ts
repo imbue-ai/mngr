@@ -9,8 +9,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { LandingExtras, MindLiveness } from "../../models/create";
-import { MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
-import { onboardingProgress } from "../../models/onboarding";
+import { MIND_LIVENESS_LABELS, MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { UiProviderEntry } from "../../generated/ui";
 import { Button, ButtonLink } from "../components/Button";
@@ -23,14 +22,10 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
-  keyStateChipFor,
   lifecycleConfirmation,
-  livenessBadgeLabelFor,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
-  removeRecordFailureMessage,
-  rowClickActionFor,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
@@ -70,21 +65,6 @@ interface LandingState {
   dismissedNoteKeys: Set<string>;
   /** Which bulk press is held for the go-ahead-without-backups confirmation. */
   bulkNoBackupConfirm: "now" | "schedule" | null;
-}
-
-/**
- * An install that has never been taken past the start flow, with discovery
- * finished and nothing found, belongs on the start flow. Electron's startup
- * router lands there itself; this is the same rule for a plain browser, and
- * for a window that reaches home before the flow has completed.
- */
-export function shouldRedirectToStartFlow(
-  isOnboardingComplete: boolean,
-  hasRows: boolean,
-  extras: LandingExtras | null,
-): boolean {
-  if (isOnboardingComplete || hasRows || extras === null) return false;
-  return extras.is_discovery_complete && !extras.has_restorable_workspaces;
 }
 
 function loadExtras(state: LandingState): void {
@@ -159,19 +139,12 @@ export const LandingPage: m.ClosureComponent = () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ host_id: hostId }),
     })
-      .then(async (response) => {
-        if (response.ok) {
-          m.redraw();
-          return;
-        }
-        state.removedHostIds.delete(hostId);
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
-        window.alert(removeRecordFailureMessage(response.status, body));
+      .then((response) => {
+        if (!response.ok) state.removedHostIds.delete(hostId);
         m.redraw();
       })
       .catch(() => {
         state.removedHostIds.delete(hostId);
-        window.alert(removeRecordFailureMessage(null, null));
         m.redraw();
       });
   }
@@ -238,9 +211,9 @@ export const LandingPage: m.ClosureComponent = () => {
     });
   }
 
-  function livenessBadge(liveness: MindLiveness, stopKind: string): m.Children {
+  function livenessBadge(liveness: MindLiveness): m.Children {
     if (liveness === "RUNNING") return null;
-    const label = livenessBadgeLabelFor(liveness, stopKind);
+    const label = MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
     const tone =
       liveness === "STOPPING" || liveness === "STARTING"
         ? "bg-warning/15 text-warning"
@@ -422,31 +395,27 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
-  function destroyRow(agentId: string, name: string, accent: string, destroyStatus: string): m.Children {
-    return m(
-      Card,
-      {
-        layout: "row",
-        interactive: true,
-        extra: "accent-spine relative overflow-hidden cursor-pointer",
-        style: `--workspace-accent: ${accent};`,
-        onclick: () => m.route.set(`/destroying/${agentId}`),
-      },
-      [
-        m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, name),
-        destroyStatus === "running"
-          ? m(StatusBadge, { extra: "gap-2" }, [m(Spinner, { size: "sm" }), "Destroying..."])
-          : m(StatusBadge, { variant: "error" }, "Destroy failed"),
-      ],
-    );
-  }
-
   function liveRow(entry: UiWorkspaceEntry): m.Children {
     const { stores } = getAppContext();
     const extras = state.extras;
     const destroyStatus = extras?.destroying_status_by_agent_id[entry.id];
     if (destroyStatus !== undefined) {
-      return destroyRow(entry.id, entry.name, entry.accent, destroyStatus);
+      return m(
+        Card,
+        {
+          layout: "row",
+          interactive: true,
+          extra: "accent-spine relative overflow-hidden cursor-pointer",
+          style: `--workspace-accent: ${entry.accent};`,
+          onclick: () => m.route.set(`/destroying/${entry.id}`),
+        },
+        [
+          m("span", { class: "flex-1 min-w-0 truncate font-semibold text-secondary pl-1" }, entry.name),
+          destroyStatus === "running"
+            ? m(StatusBadge, { extra: "gap-2" }, [m(Spinner, { size: "sm" }), "Destroying..."])
+            : m(StatusBadge, { variant: "error" }, "Destroy failed"),
+        ],
+      );
     }
     const discoveryHealth = stores.health.discoveryHealth;
     // Nothing is arriving to correct a frozen reading, so the row reports
@@ -457,41 +426,22 @@ export const LandingPage: m.ClosureComponent = () => {
         : ("UNKNOWN" as MindLiveness);
     const controls = mindControlsFor(entry, liveness, discoveryHealth);
     const providerLabel = entry.provider_label ?? "";
-    // A row whose click would go nowhere (a cloud machine this device holds no
-    // key for, a stop an operator holds) is not clickable; the chip or the
-    // badge says why in place of an open that would hang. Decided by the same
-    // rule the click runs, so the two cannot disagree.
-    const keyChip = keyStateChipFor(entry.key_state ?? "");
-    const isHealthy = stores.health.statusFor(entry.id) === "healthy";
-    const isOpenable =
-      rowClickActionFor(entry, state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""), isHealthy) !==
-      "blocked";
     const row = m(
       Card,
       {
         layout: "row",
-        interactive: isOpenable,
-        extra: `accent-spine relative overflow-hidden ${isOpenable ? "cursor-pointer" : "cursor-default"}`,
+        interactive: true,
+        extra: "accent-spine relative overflow-hidden cursor-pointer",
         style: `--workspace-accent: ${entry.accent};`,
         "data-agent-id": entry.id,
-        onclick: isOpenable ? () => rowClick(entry) : undefined,
+        onclick: () => rowClick(entry),
       },
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
         providerLabel ? m("span", { class: `${BADGE_CLASS} bg-fill-subtle text-secondary` }, providerLabel) : null,
-        keyChip === null
-          ? null
-          : m(
-              "span",
-              {
-                class: `${BADGE_CLASS} bg-fill-subtle text-important landing-key-state-chip`,
-                "data-tooltip": keyChip.tooltip,
-              },
-              keyChip.label,
-            ),
         // Slot for the backup badge (T4 wires the backup-status data source).
         m("span", { class: "landing-backup-badge hidden" }),
-        (entry.supports_shutdown ?? false) ? livenessBadge(liveness, entry.stop_kind ?? "") : null,
+        (entry.supports_shutdown ?? false) ? livenessBadge(liveness) : null,
         healthBadge(entry, liveness),
         updateBadge(entry),
         backupsButton(entry, liveness),
@@ -550,27 +500,25 @@ export const LandingPage: m.ClosureComponent = () => {
               m(Icon16, { name: "restart" }),
             )
           : null,
-        !isOpenable
-          ? null
-          : m(
-              Button,
-              {
-                variant: "ghost",
-                size: "icon",
-                "aria-label": "Open machine in new window",
-                "data-tooltip": "Open in new window",
-                onclick: (event: MouseEvent) => {
-                  event.stopPropagation();
-                  if (electronBridge.isDesktop) {
-                    electronBridge.openWorkspaceInNewWindow(entry.id);
-                  } else {
-                    const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
-                    window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
-                  }
-                },
-              },
-              m(Icon16, { name: "arrow-up-right" }),
-            ),
+        m(
+          Button,
+          {
+            variant: "ghost",
+            size: "icon",
+            "aria-label": "Open machine in new window",
+            "data-tooltip": "Open in new window",
+            onclick: (event: MouseEvent) => {
+              event.stopPropagation();
+              if (electronBridge.isDesktop) {
+                electronBridge.openWorkspaceInNewWindow(entry.id);
+              } else {
+                const forwardOrigin = getAppContext().shell.mngrForwardOrigin;
+                window.open(`${forwardOrigin}/goto/${entry.id}/`, "_blank", "noopener");
+              }
+            },
+          },
+          m(Icon16, { name: "arrow-up-right" }),
+        ),
         m(
           Button,
           {
@@ -719,23 +667,10 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
-  // Every input (the extras landing, the workspace list, the onboarding copy)
-  // arrives with a redraw, so the hook sees each change; view() stays free of
-  // navigation.
-  function redirectToStartFlowIfDue(): void {
-    const hasRows = getAppContext().stores.workspaces.workspaces.length > 0;
-    if (shouldRedirectToStartFlow(onboardingProgress.isComplete, hasRows, state.extras)) {
-      m.route.set("/start");
-    }
-  }
-
   return {
     oninit() {
       loadExtras(state);
       state.unsubscribe = getAppContext().stores.workspaces.onChanged(() => loadExtras(state));
-    },
-    onupdate() {
-      redirectToStartFlowIfDue();
     },
     onremove() {
       state.unsubscribe?.();
@@ -745,18 +680,9 @@ export const LandingPage: m.ClosureComponent = () => {
       const entries = stores.workspaces.workspaces;
       const liveEntries = entries.filter((entry) => !(entry.is_remote ?? false) && (entry.create_attempt_state ?? "") === "");
       const createEntries = entries.filter((entry) => (entry.create_attempt_state ?? "") !== "");
+      const remoteEntries = entries.filter((entry) => (entry.is_remote ?? false));
+      const hasRows = liveEntries.length + createEntries.length + remoteEntries.length > 0;
       const extras = state.extras;
-      // A destroy that failed after its host went away has no live entry to badge.
-      const orphanedFailedDestroys = (extras?.orphaned_failed_destroys ?? []).filter(
-        (orphan) => !liveEntries.some((entry) => entry.id === orphan.agent_id),
-      );
-      // Until discovery re-lists the destroyed host, its still-active record also reads as a remote tile.
-      const remoteEntries = entries.filter(
-        (entry) =>
-          (entry.is_remote ?? false) && !orphanedFailedDestroys.some((orphan) => orphan.agent_id === entry.id),
-      );
-      const hasRows =
-        liveEntries.length + orphanedFailedDestroys.length + createEntries.length + remoteEntries.length > 0;
       const isDiscovering =
         !hasRows &&
         !state.isExtrasFailed &&
@@ -820,7 +746,6 @@ export const LandingPage: m.ClosureComponent = () => {
                 : null,
               m("div", { class: "flex flex-col gap-1.5" }, [
                 liveEntries.map((entry) => liveRow(entry)),
-                orphanedFailedDestroys.map((orphan) => destroyRow(orphan.agent_id, orphan.name, orphan.accent, "failed")),
                 createEntries.map((entry) => createAttemptRow(entry)),
                 remoteEntries.map((entry) => remoteRow(entry)),
               ]),
@@ -890,7 +815,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
               onclick: () => m.route.set("/settings"),
             },
-            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Mind Settings")],
+            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Minds Settings")],
           ),
           m(
             "button",

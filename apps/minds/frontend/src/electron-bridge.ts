@@ -103,10 +103,6 @@ declare global {
 }
 
 function native(): MindsNativeSurface | null {
-  // Guarded for the sake of the view suites, which render components straight
-  // to vnodes under node with no DOM at all. Every caller already treats null
-  // as "not the desktop app", so there is nothing else to answer there.
-  if (typeof window === "undefined") return null;
   return window.mindsNative ?? null;
 }
 

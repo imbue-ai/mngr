@@ -227,9 +227,9 @@ host = "ssh://user@server"      # or "tcp://host:2376"
 
 When `host` is unset, mngr resolves the daemon from `DOCKER_HOST`, then the active Docker context, then the platform default -- the same order the Docker CLI uses.
 
-For remote daemons, the SSH endpoint mngr uses to reach each container is the daemon's hostname (parsed out of `ssh://user@server` or `tcp://host:2376`); for local daemons, it is `127.0.0.1`. The SSH port for each container is auto-assigned by Docker. Its bind address follows the same rule: local daemons publish it on `127.0.0.1` only (`-p 127.0.0.1::22`), so the container's sshd is not reachable from your LAN, while remote daemons publish it on all of the daemon host's interfaces (`-p :22`), since a loopback bind there would be unreachable from your machine. Override either default with `ssh_bind_address` in the provider config (an IP address, e.g. `"0.0.0.0"` to expose local containers to the LAN). On a local daemon mngr then connects to that address (a wildcard bind is reached via `127.0.0.1`), so it must be IPv4; a loopback address is rejected for a remote daemon. Containers created before a change keep their original bind until they are recreated or restored from a snapshot.
+For remote daemons, the SSH endpoint mngr uses to reach each container is the daemon's hostname (parsed out of `ssh://user@server` or `tcp://host:2376`); for local daemons, it is `127.0.0.1`. The SSH port for each container is auto-assigned by Docker via `-p :22`.
 
-The SSH hostname is derived only from the provider config (`host`, plus a non-wildcard `ssh_bind_address` on a local daemon), never from `DOCKER_HOST` or the Docker context. If you point mngr at a remote daemon via `DOCKER_HOST`/context but leave `host` empty, the daemon connection will work but mngr will try to SSH to `127.0.0.1` -- which will fail. Set `host = "ssh://..."` (or `"tcp://..."`) in the provider config when the daemon is not local.
+The SSH hostname is derived only from the explicit `host` config field, not from `DOCKER_HOST` or the Docker context. If you point mngr at a remote daemon via `DOCKER_HOST`/context but leave `host` empty, the daemon connection will work but mngr will try to SSH to `127.0.0.1` -- which will fail. Set `host = "ssh://..."` (or `"tcp://..."`) in the provider config when the daemon is not local.
 
 ## What else is possible
 

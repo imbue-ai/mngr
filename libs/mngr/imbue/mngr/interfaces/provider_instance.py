@@ -510,9 +510,8 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Generate a name for a new host.
 
         The default implementation auto-generates a name using the given style.
-        Providers whose single host already exists (e.g. the local provider,
-        whose host is named by its host record) should override this to return
-        that host's name.
+        Providers that only support a fixed host name (e.g. "localhost" for the
+        local provider) should override this to return that name.
         """
         return generate_host_name(style)
 

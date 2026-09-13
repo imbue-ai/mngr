@@ -1,8 +1,8 @@
 {
   "name": "minds",
-  "productName": "Mind",
-  "version": "0.6.1",
-  "description": "Mind - Self-improving, persistent AI agents",
+  "productName": "Minds",
+  "version": "0.5.2",
+  "description": "Minds - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",
@@ -19,7 +19,7 @@
     "@sentry/electron": "^7.13.0",
     "@todesktop/runtime": "^1.6.0",
     "electron-updater": "6.8.9",
-    "latchkey": "^3.14.0",
+    "latchkey": "^3.11.1",
     "semver": "^7.6.3",
     "smol-toml": "^1.6.1"
   },

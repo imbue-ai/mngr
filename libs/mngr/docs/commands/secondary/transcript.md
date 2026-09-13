@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr transcript TARGET [--preserved|--preserved-only] [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]
+mngr transcript TARGET [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]
 ```
 
 View the message transcript for an agent.
@@ -16,16 +16,6 @@ user turns, agent turns, and tool results in a common, agent-agnostic format.
 
 The command automatically finds the correct transcript file regardless
 of the agent type (e.g. claude, codex).
-
-Pass --preserved to fall back to a destroyed agent in the preservation
-archives when no live agent matches. With --format atif it also reaches
-destroyed subagents of an agent that IS live, so a document built for a live
-parent embeds the children it delegated to that no longer exist. Pass
---preserved-only to skip live discovery. The archives are under the caller's
-local mngr host directory. Preserved agents can be selected by name or id; use
-the id (or a host qualifier, for archives that recorded their origin host)
-when names are ambiguous. The preserved snapshot reflects the bytes available
-at destruction time and is not a live or automatically refreshed stream.
 
 Use --role to filter by message role (user, agent, system, tool). This
 option is repeatable to include multiple roles.
@@ -66,8 +56,6 @@ mngr transcript [OPTIONS] TARGET
 | ---- | ---- | ----------- | ------- |
 | `--tail` | integer range | Show only the last N transcript events | None |
 | `--head` | integer range | Show only the first N transcript events | None |
-| `--preserved`, `--no-preserved` | boolean | Include caller-local preserved data: a destroyed agent when no live one matches, and (with --format atif) a live agent's destroyed subagents | `False` |
-| `--preserved-only` | boolean | Read only caller-local preserved data, without live discovery | `False` |
 | `--output` | path | Write the built ATIF document to this file instead of stdout (only with --format atif) | None |
 | `--full` | boolean | Disable display-time truncation of tool inputs/outputs and thinking (human output only) | `False` |
 
@@ -134,16 +122,4 @@ $ mngr transcript my-agent --format json
 
 ```bash
 $ mngr transcript my-agent --format atif
-```
-
-**Include a destroyed agent**
-
-```bash
-$ mngr transcript my-agent --preserved
-```
-
-**Read only a preserved snapshot**
-
-```bash
-$ mngr transcript my-agent --preserved-only
 ```

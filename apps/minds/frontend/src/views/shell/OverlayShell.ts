@@ -1,4 +1,4 @@
-// The one overlay. Every surface the shell floats over the page -- Mind
+// The one overlay. Every surface the shell floats over the page -- Minds
 // settings, Accounts, the AI-keys dialog, the New machine stepper, the docked
 // machine-options panel, the permission-request popup, the notification feed,
 // Get help -- is this component with a different `placement` and a different

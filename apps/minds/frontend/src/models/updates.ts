@@ -280,8 +280,8 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
       // including ones whose version it did read.
       tooltip:
         update.unknown_reason === "NO_APP_VERSION"
-          ? "This build of Mind has no released version to compare machines against — open to check anyway"
-          : "Mind can't tell which version this machine is running — open to check",
+          ? "This build of Minds has no released version to compare machines against — open to check anyway"
+          : "Minds can't tell which version this machine is running — open to check",
       isSpinnerShown: false,
     };
   }

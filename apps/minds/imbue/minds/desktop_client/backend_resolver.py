@@ -249,11 +249,9 @@ class BackendResolverInterface(MutableModel, ABC):
         Maps a service name to its persistent origin ``label`` (``<name>-<rand>``),
         the hostname component of the service's public origin
         (``<label>.<machine domain>``). Services with no known label (legacy
-        rows, or registrations that have not reached this client yet) are
-        omitted: such a service has no share link yet, since only the label
-        origin routes on a share. Used by the Share tab to build each share
-        link. Default implementation returns an empty mapping (resolvers that
-        carry no labels).
+        rows) are omitted; callers fall back to the service name. Used by the
+        Share tab to build each per-service share link. Default implementation
+        returns an empty mapping (resolvers that carry no labels).
         """
         return {}
 
@@ -1223,7 +1221,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
         ``labels`` maps each service name to its public origin hostname label
         (``<name>-<rand>``). Services absent from it (legacy rows written before
-        labels existed) have no label and therefore no share link.
+        labels existed) have no label, and callers fall back to the service name.
         ``icons`` maps each service name to its registered SVG icon markup;
         services absent from it have none.
         """

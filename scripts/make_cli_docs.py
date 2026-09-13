@@ -68,7 +68,6 @@ PRIMARY_COMMANDS = {
 }
 SECONDARY_COMMANDS = {
     "ask",
-    "autocompact",
     "aws",
     "azure",
     "behaviors",
@@ -94,11 +93,11 @@ SECONDARY_COMMANDS = {
     "schedule",
     "snapshot",
     "tmr",
+    "tmr-behaviors",
     "transcript",
     "tutor",
     "robinhood",
     "usage",
-    "witness",
     "wait",
     "notify",
 }

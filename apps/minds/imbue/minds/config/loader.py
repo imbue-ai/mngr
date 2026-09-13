@@ -30,8 +30,6 @@ from pydantic import ValidationError
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
-from imbue.minds.config.data_types import ManagementPlaneConfig
-from imbue.minds.config.data_types import management_overlay_for_tier
 from imbue.minds.errors import MindError
 
 _ENVS_DIR: Final[Path] = Path(__file__).parent / "envs"
@@ -86,11 +84,6 @@ def load_client_config(path: Path) -> ClientEnvConfig:
         raise EnvConfigError(f"Invalid client config at {path}: {exc}") from exc
 
 
-def committed_deploy_config_tiers() -> list[str]:
-    """The tiers with a committed ``imbue/minds/config/envs/<tier>/deploy.toml``, sorted by name."""
-    return sorted(path.parent.name for path in _ENVS_DIR.glob(f"*/{_DEPLOY_FILENAME}"))
-
-
 def load_deploy_config(tier: str) -> DeployEnvConfig:
     """Load a tier's deploy config from ``imbue/minds/config/envs/<tier>/deploy.toml``."""
     path = _ENVS_DIR / tier / _DEPLOY_FILENAME
@@ -105,34 +98,9 @@ def load_deploy_config(tier: str) -> DeployEnvConfig:
     except tomllib.TOMLDecodeError as exc:
         raise EnvConfigError(f"Failed to parse deploy config {path}: {exc}") from exc
     try:
-        config = DeployEnvConfig.model_validate(raw)
+        return DeployEnvConfig.model_validate(raw)
     except ValidationError as exc:
         raise EnvConfigError(f"Invalid deploy config at {path}: {exc}") from exc
-    if config.management_plane is not None:
-        _assert_operators_inside_tier_operator_block(config.management_plane, tier, path)
-    return config
-
-
-def _assert_operators_inside_tier_operator_block(config: ManagementPlaneConfig, tier: str, path: Path) -> None:
-    """Every operator address must be a host in the tier's reserved operator block.
-
-    Validated here rather than in the model: the operator block is the first
-    /24 of the TIER's overlay allocation, and only the loader knows the tier.
-    Boxes are assigned above the block at prep, so an address outside it would
-    eventually collide with a box's.
-    """
-    operator_block = management_overlay_for_tier(tier).operator_block
-    for operator in config.wireguard.operators:
-        is_usable_host = operator.address in operator_block and operator.address not in (
-            operator_block.network_address,
-            operator_block.broadcast_address,
-        )
-        if not is_usable_host:
-            raise EnvConfigError(
-                f"Invalid deploy config at {path}: [management_plane] operator '{operator.name}' address "
-                f"{operator.address} must be a host inside the reserved operator block {operator_block} "
-                f"of tier '{tier}' (boxes are assigned above it at prep)"
-            )
 
 
 # Services that need a per-env Modal Secret backed by a Vault entry.
@@ -153,7 +121,6 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "sharing",
     "storage",
     "sentry",
-    "ssh-ca",
 )
 
 

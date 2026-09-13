@@ -1,5 +1,4 @@
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -13,7 +12,6 @@ from imbue.minds.desktop_client.conftest import SucceedingCreateShareCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import make_share_probe_result
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
@@ -218,23 +216,6 @@ def test_resolve_agent_for_host_raises_when_neither_discovery_nor_records_know_t
         resolve_agent_for_host(undiscovered, str(HostId.generate()), store)
 
 
-def _enable_sharing_for_test(
-    host_id: str, agent_id: AgentId, grants: dict[str, list[str]], cli: ImbueCloudCli, *, is_cloud_row: bool
-) -> dict[str, Any]:
-    """Run the share bring-up for ``host_id`` as its owner, with no service labels known yet."""
-    return _enable_sharing_with_cli(
-        host_id,
-        agent_id,
-        grants,
-        {},
-        cli,
-        "owner@example.com",
-        _client_env_config(),
-        is_cloud_row=is_cloud_row,
-        service_labels={},
-    )
-
-
 def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     # An unshared imbue_cloud row provisions exactly like a local one: connector
     # ``shares create`` plus materials injection over the user's own SSH. (The
@@ -247,7 +228,9 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     host_id = "host-" + "d" * 32
     grants = {"emails": ["owner@example.com", "friend@example.com"], "email_domains": []}
 
-    document = _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=True)
+    document = _enable_sharing_with_cli(
+        host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
+    )
 
     assert cli.create_share_calls == [("owner@example.com", host_id, None, None, str(agent_id))]
     # Exactly TWO execs touch the workspace: the one-shot state probe and the
@@ -280,7 +263,9 @@ def test_enable_sharing_stamps_the_connector_reported_chrome_origin_into_share_e
     host_id = "host-" + "d" * 32
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
-    _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+    _enable_sharing_with_cli(
+        host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+    )
 
     share_env_text = read_injected_share_env_text(cli)
     assert "export SHARE_CHROME_ORIGIN=https://minds.shares.example\n" in share_env_text
@@ -300,7 +285,9 @@ def test_enable_sharing_falls_back_to_the_connector_origin_without_a_reported_ch
     host_id = "host-" + "d" * 32
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
-    _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+    _enable_sharing_with_cli(
+        host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+    )
 
     connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
     assert f"export SHARE_CHROME_ORIGIN={connector_url}\n" in read_injected_share_env_text(cli)
@@ -321,7 +308,9 @@ def test_enable_sharing_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError, match="update itself"):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=is_cloud_row)
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=is_cloud_row
+        )
 
     # Nothing was provisioned: no connector share, no injection past the probe.
     assert cli.shares_by_account == {}
@@ -376,7 +365,9 @@ def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_reg
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
 
     assert cli.recorded_preferred_regions == ["us9"]
     assert cli.relay_list_call_count == 1
@@ -400,7 +391,9 @@ def test_enable_sharing_re_share_still_measures_but_the_preference_is_advisory()
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
 
     assert cli.recorded_preferred_regions == ["us9"]
     assert cli.relay_list_call_count == 1
@@ -422,7 +415,9 @@ def test_enable_sharing_with_stale_materials_reprovisions_without_measuring() ->
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=False
+        )
 
     assert cli.recorded_preferred_regions == [None]
     assert cli.relay_list_call_count == 0
@@ -443,7 +438,9 @@ def test_enable_sharing_cloud_row_skips_the_relay_latency_measurement() -> None:
     grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=True)
+        _enable_sharing_with_cli(
+            host_id, agent_id, grants, {}, cli, "owner@example.com", _client_env_config(), is_cloud_row=True
+        )
 
     assert cli.recorded_preferred_regions == [None]
     assert cli.relay_list_call_count == 0

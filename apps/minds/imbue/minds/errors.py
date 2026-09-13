@@ -142,26 +142,6 @@ class OriginsConfigError(MindError, ValueError):
     ...
 
 
-class ManagementPlaneConfigError(MindError, ValueError):
-    """Raised when a deploy.toml ``[management_plane]`` table is invalid.
-
-    Subclasses ``ValueError`` so pydantic treats it as a validation failure
-    when raised inside a model validator.
-    """
-
-    ...
-
-
-class SshCaConfigError(MindError, ValueError):
-    """Raised when a deploy.toml ``[ssh_ca]`` block does not hold an OpenSSH public key line.
-
-    Subclasses ``ValueError`` so pydantic treats it as a validation failure
-    when raised inside a model validator.
-    """
-
-    ...
-
-
 class WebTemplateRefRequiredError(MindError):
     """Raised when a dev-tier deploy with web workspaces enabled has no explicit ``MINDS_WEB_TEMPLATE_REF``."""
 
@@ -254,17 +234,5 @@ class InvalidSha256HexError(LimaImageError, ValueError):
     Subclasses ``ValueError`` so pydantic treats it as a validation failure when
     raised from the ``Sha256Hex`` primitive's constructor.
     """
-
-    ...
-
-
-class FolderSyncError(MindError):
-    """Raised when a folder sync cannot be started or stopped."""
-
-    ...
-
-
-class FolderSyncStoreError(MindError):
-    """Raised when the record of which folders to keep synced cannot be written."""
 
     ...

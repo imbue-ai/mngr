@@ -20,11 +20,9 @@ from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentIdNotFoundError
-from imbue.mngr.errors import AgentNameNotFoundError
 from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import AgentStateInconsistencyError
-from imbue.mngr.errors import HostNameNotFoundError
 from imbue.mngr.errors import LockNotHeldError
 from imbue.mngr.errors import NoMatchingHostsError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -133,14 +131,14 @@ def filter_one_host(
 
     Raises :class:`NoMatchingHostsError` when a host *id* matches nothing (an id
     is machine-generated, so a miss means the host is gone),
-    :class:`HostNameNotFoundError` when a user-typed host name matches nothing, and
+    :class:`UserInputError` when a user-typed host name matches nothing, and
     :class:`UserInputError` when more than one host matches.
     """
     matches = filter_all_hosts(address, all_hosts)
     if len(matches) == 0:
         if isinstance(address.host, HostId):
             raise NoMatchingHostsError(f"Could not find host with ID: {address}")
-        raise HostNameNotFoundError(f"Could not find host with ID or name: {address}")
+        raise UserInputError(f"Could not find host with ID or name: {address}")
     if len(matches) > 1:
         raise UserInputError(f"Multiple hosts found with name: {address}")
     return matches[0]
@@ -173,8 +171,8 @@ def filter_one_agent(
     """Find the single agent matching the given identifier (by ID or name).
 
     Raises :class:`AgentIdNotFoundError` when ``agent`` is an :class:`AgentId`
-    and no agent has that ID. Raises :class:`AgentNameNotFoundError` when an
-    :class:`AgentName` has no match, or :class:`UserInputError` when more than one agent matches
+    and no agent has that ID. Raises :class:`UserInputError` when an
+    :class:`AgentName` has no match, or when more than one agent matches
     (an agent id is unique per host, not globally, so an id can match one
     instance per host -- e.g. mid-migration). If ``resolved_host`` is given,
     only agents on that host are considered.
@@ -186,10 +184,10 @@ def filter_one_agent(
     if len(matches) == 0:
         if isinstance(agent, AgentId):
             raise AgentIdNotFoundError(str(agent))
-        # A name miss keeps the generic exit code: a name is user-typed, so not matching
+        # A name miss stays a UserInputError: a name is user-typed, so not matching
         # is as likely a typo as a gone agent. An id is machine-generated, so a miss
-        # there really does mean the target is gone, and reserves the target-not-found code.
-        raise AgentNameNotFoundError(f"Could not find agent with ID or name: {agent}")
+        # there really does mean the target is gone.
+        raise UserInputError(f"Could not find agent with ID or name: {agent}")
     if len(matches) > 1:
         match_lines = "\n".join(
             f"  - {agent_ref.agent_name}@{host_ref.host_name}.{host_ref.provider_name} (ID: {agent_ref.agent_id})"
@@ -792,8 +790,8 @@ def find_one_agent_and_agents_by_host(
     :func:`resolve_to_started_host_and_running_agent`.
 
     Raises :class:`NoMatchingHostsError` if a host-id constraint matches no
-    hosts, or :class:`HostNameNotFoundError` if a host-name one does.
-    Raises :class:`AgentNotFoundError` / :class:`AgentNameNotFoundError` if the
+    hosts, or :class:`UserInputError` if a host-name one does.
+    Raises :class:`AgentNotFoundError` / :class:`UserInputError` if the
     agent cannot be resolved (see :func:`filter_one_agent`), or
     :class:`ProviderUnavailableError` in place of either when a provider that
     could have held the agent was unreachable (see
@@ -812,7 +810,7 @@ def find_one_agent_and_agents_by_host(
         # The same id-vs-name split filter_one_agent makes, applied to the host.
         if isinstance(address.host.host, HostId):
             raise NoMatchingHostsError(f"No hosts found matching {address.host}")
-        raise HostNameNotFoundError(f"No hosts found matching {address.host}")
+        raise UserInputError(f"No hosts found matching {address.host}")
 
     host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return host_ref, agent_ref, agents_by_host

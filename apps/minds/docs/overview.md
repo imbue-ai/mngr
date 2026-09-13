@@ -20,7 +20,7 @@ Each workspace runs its own system interface (the `system-interface` CLI, source
 
 Inside each agent's Docker container:
 - **Claude Code** runs as the main agent process in tmux window 0
-- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`, or in the drop-in files its `[include]` glob pulls in (logs under `/var/log/supervisor`)
+- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
 - Apps register their ports via `system/scripts/forward_port.py` into `data/.state/apps.toml`
 - An **app watcher** service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for discovery
 - A **share-gateway** service watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled
@@ -30,7 +30,7 @@ Inside each agent's Docker container:
 
 Agents can be created in two ways:
 
-1. **Via the web UI**: On a fresh install the desktop client opens on the first-run start flow, a chat that asks where the first workspace should run (Imbue Cloud, or your own platform through the full create form) and creates it; see [desktop-app.md](./desktop-app.md#the-first-run). Later workspaces come from the home page's Create button and its form: a git repository URL (or local path), a name, and a launch mode (DOCKER, LIMA, CLOUD, or IMBUE_CLOUD). Either way the desktop client clones the repo (if URL) and runs `mngr create` with the appropriate templates, and the creation page shows the attempt's progress. Sharing is machine-level and user-initiated, so nothing sharing-related happens at create time.
+1. **Via the web UI**: Visit the desktop client. If no agents exist, you'll see a creation form. Enter a git repository URL (or local path), agent name, and launch mode (DOCKER, LIMA, CLOUD, or IMBUE_CLOUD). The desktop client clones the repo (if URL) and runs `mngr create` with the appropriate templates. Sharing is machine-level and user-initiated, so nothing sharing-related happens at create time.
 
 2. **Via the API**: POST to `/api/create-agent` with a JSON body containing `git_url`, `agent_name`, and `launch_mode`. Poll `/api/create-agent/{agent_id}/status` for progress.
 

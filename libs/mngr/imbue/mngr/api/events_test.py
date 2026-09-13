@@ -38,14 +38,11 @@ from imbue.mngr.api.events import discover_event_sources
 from imbue.mngr.api.events import filter_sources_by_name
 from imbue.mngr.api.events import parse_event_line
 from imbue.mngr.api.events import read_all_historical_events
-from imbue.mngr.api.events import read_common_transcript_content
 from imbue.mngr.api.events import read_event_content
 from imbue.mngr.api.events import refresh_events_target
 from imbue.mngr.api.events import resolve_events_target
 from imbue.mngr.api.events import sort_events_by_timestamp
 from imbue.mngr.api.events import stream_all_events
-from imbue.mngr.cli.testing import SAMPLE_ATIF_STREAM_EVENTS
-from imbue.mngr.cli.testing import write_common_transcript_events
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
@@ -185,36 +182,6 @@ def test_discover_and_read_events_through_offline_volume_backed_host(
 
     content = read_event_content(target, "messages/events.jsonl")
     assert "e1" in content
-
-
-# =============================================================================
-# read_common_transcript_content tests
-# =============================================================================
-
-
-def test_a_rotated_segment_that_ends_mid_line_does_not_swallow_the_next_segment(
-    tmp_path: Path, local_provider
-) -> None:
-    """A torn rotated segment would otherwise glue two records into one malformed line.
-
-    Which the jsonl warner skips, so the conversation would come back with a hole in it
-    rather than an error.
-    """
-    events_dir = tmp_path / "events"
-    transcript_dir = events_dir / "claude" / "common_transcript"
-    transcript_dir.mkdir(parents=True)
-    (transcript_dir / "events.jsonl.20260101000000000000").write_text(
-        "\n".join(json.dumps(event) for event in SAMPLE_ATIF_STREAM_EVENTS[:2])
-    )
-    write_common_transcript_events(transcript_dir, SAMPLE_ATIF_STREAM_EVENTS[2:])
-
-    _event_file_name, content = read_common_transcript_content(_make_local_host_target(local_provider, events_dir))
-
-    lines = [line for line in content.splitlines() if line.strip()]
-    assert len(lines) == len(SAMPLE_ATIF_STREAM_EVENTS), lines
-    assert [json.loads(line)["event_id"] for line in lines] == [
-        event["event_id"] for event in SAMPLE_ATIF_STREAM_EVENTS
-    ]
 
 
 # =============================================================================
@@ -1419,52 +1386,6 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
         )
         assert result is not None
         assert result.event_id == "new1"
-    finally:
-        stop_event.set()
-        online_event.set()
-        watch_group.wake_all()
-        thread.join(timeout=5.0)
-        watch_group.stop()
-
-
-def test_tail_thread_follows_a_common_transcript_written_after_it_starts(tmp_path: Path, local_provider) -> None:
-    """A transcript's header (no timestamp) is appended live when a new agent's stream begins."""
-    events_dir = tmp_path / "events"
-    (events_dir / "claude" / "common_transcript").mkdir(parents=True)
-    events_file = events_dir / "claude" / "common_transcript" / "events.jsonl"
-    events_file.write_text("")
-
-    offset_dir = tmp_path / "offsets"
-    offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
-    stop_event = threading.Event()
-    online_event = threading.Event()
-    online_event.set()
-    watch_group = DirectoryWatchGroup()
-    thread = _start_tail_thread(
-        target_holder=[_make_local_host_target(local_provider, events_dir)],
-        source_path="claude/common_transcript",
-        event_queue=event_queue,
-        cel_include_filters=[],
-        cel_exclude_filters=[],
-        stop_event=stop_event,
-        online_event=online_event,
-        read_failure_event=threading.Event(),
-        offset_dir_path=offset_dir,
-        initial_byte_offset=0,
-        watch_group=watch_group,
-    )
-
-    try:
-        write_common_transcript_events(events_file.parent, SAMPLE_ATIF_STREAM_EVENTS)
-
-        first_event, _, _ = poll_for_value(
-            producer=lambda: event_queue.get_nowait() if not event_queue.empty() else None,
-            timeout=15.0,
-            poll_interval=0.5,
-        )
-        assert first_event is not None
-        assert first_event.event_id == "u1-user"
     finally:
         stop_event.set()
         online_event.set()

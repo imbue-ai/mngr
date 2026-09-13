@@ -33,7 +33,6 @@ import { openReviewRoute } from "../../models/notificationsUi";
 import { SidebarMenu } from "./SidebarMenu";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
-import { Wash } from "./Wash";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
 import {
@@ -113,7 +112,7 @@ function anchoredOverlayAttrs(
   };
 }
 
-/** Per-route sizing for a CENTERED app modal. Mind settings takes a definite
+/** Per-route sizing for a CENTERED app modal. Minds settings takes a definite
  * height -- its two columns scroll within it, and a card that resized itself
  * per section would move the section list out from under the cursor -- capped
  * to the window by the same min() the others' max uses. Accounts is a short
@@ -126,7 +125,7 @@ function appOverlayCardClass(path: string): string {
   return "w-[460px] min-h-0";
 }
 
-/** How the card holds its body. Mind settings is a two-column pane that
+/** How the card holds its body. Minds settings is a two-column pane that
  * scrolls its own columns -- a scroller here would take its section list down
  * with the panel -- so it gets a height-bounded column instead, the same shape
  * the docked options card gives its panes. Every other overlay is a single
@@ -374,8 +373,6 @@ export function Shell(): m.Component<ShellAttrs> {
           // wifi off. A row we have no entry for keeps the conservative default.
           isWorkspaceNetworkDependent: entry?.is_network_dependent ?? true,
           isDeviceCannotConnect: entry?.is_device_cannot_connect ?? false,
-          liveness: entry?.liveness ?? "",
-          stopKind: entry?.stop_kind ?? "",
           updateRunPhase: updatePhase,
           updateHoldDetail: published?.is_hold_recorded ? (published.hold_detail ?? "") : null,
           updateRunOutcome: updateOutcome,
@@ -445,12 +442,9 @@ export function Shell(): m.Component<ShellAttrs> {
               onClose: () => shell.closeUpdateModal(),
             })
           : null,
-        // The browser sign-in waiting modal: any page (the start flow,
-        // accounts, create) can trigger it through the shared webLogin model.
+        // The browser sign-in waiting modal: any page (welcome, accounts,
+        // create) can trigger it through the shared webLogin model.
         m(WebLoginModal),
-        // The creation page's crossing into the workspace; it outlives that
-        // page's route, so the shell owns it.
-        m(Wash),
         isReconnecting
           ? m(
               "div",

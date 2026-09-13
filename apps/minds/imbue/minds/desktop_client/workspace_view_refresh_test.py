@@ -22,8 +22,6 @@ from imbue.minds.desktop_client.testing import build_resolver_with_provider_back
 from imbue.minds.desktop_client.testing import build_stub_connectivity_detector
 from imbue.minds.desktop_client.testing import build_ui_state_publisher_for_test
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
-from imbue.minds.desktop_client.testing import make_sleep_tracker
-from imbue.minds.desktop_client.testing import record_sleep_of
 from imbue.minds.desktop_client.workspace_view_refresh import WorkspaceViewRefresher
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
@@ -31,12 +29,6 @@ from imbue.mngr.utils.polling import poll_until
 # Long enough that "nothing has published yet" cannot pass by being quick, and
 # that a settle worker still waiting is unmistakably still waiting.
 _SETTLE_SECONDS: Final[float] = 0.5
-
-# For the one test that has to place an edge *inside* a window and then tell the
-# two deadlines apart afterwards. Long enough that half of it is unambiguously
-# before the first worker comes round, at the cost of a slower test, so the rest
-# of the file keeps the short settle above.
-_SUPERSEDED_SETTLE_SECONDS: Final[float] = 2.0
 
 # Ceiling on "the held refresh has been published": the wait ends the instant
 # the frame lands (measured at 0.5-2.6s), so this only bounds a failing run.
@@ -224,126 +216,6 @@ def test_a_network_that_drops_again_inside_the_settle_keeps_the_refresh_held() -
         # The recovery that does hold is what publishes it.
         bring_stub_network_back(detector, prober)
         assert _wait_for_refreshes(client_queue) == [str(agent_id)]
-
-
-def test_a_settle_worker_whose_window_was_superseded_leaves_the_publish_to_the_newer_one() -> None:
-    """A second recovery inside the first settle moves the deadline out; it does not keep the old one.
-
-    The older worker's wait expires while the newer window still has seconds to
-    run, on a device that by then reads perfectly fine and has not slept -- so
-    nothing but the window's own identity stops it publishing a settle early,
-    into the interface the newer recovery says is still coming back.
-    """
-    agent_id = AgentId.generate()
-    publisher, client_queue = build_ui_state_publisher_for_test()
-    with ConcurrencyGroup(name="test-view-refresh-superseded") as concurrency_group:
-        detector, prober = build_stub_connectivity_detector(concurrency_group, is_internet_up=False)
-        detector.probe_now()
-        refresher = WorkspaceViewRefresher(
-            publisher=publisher,
-            connectivity_detector=detector,
-            concurrency_group=concurrency_group,
-            settle_seconds=_SUPERSEDED_SETTLE_SECONDS,
-        )
-        detector.add_on_recovery_callback(refresher.on_connectivity_recovered)
-
-        refresher(agent_id)
-        started_at = time.monotonic()
-        bring_stub_network_back(detector, prober)
-
-        # Nothing publishes in the first half of the window -- which is also
-        # how this test reaches the middle of it, so the edge below is
-        # unmistakably one the first worker is still waiting through.
-        assert not poll_until(
-            lambda: bool(_refreshed_agent_ids(client_queue)),
-            timeout=_SUPERSEDED_SETTLE_SECONDS / 2,
-            poll_interval=0.02,
-        )
-        # The network flaps again: down and back is another bad -> good edge,
-        # and so another window.
-        prober.reachable_hosts = set()
-        prober.ssh_endpoints = set()
-        detector.probe_now()
-        bring_stub_network_back(detector, prober)
-
-        assert _wait_for_refreshes(client_queue) == [str(agent_id)]
-        # Half a settle plus a whole one, against the single settle the
-        # superseded worker would have published on.
-        assert time.monotonic() - started_at >= _SUPERSEDED_SETTLE_SECONDS * 1.4
-
-
-def test_a_settle_the_device_slept_through_is_waited_out_again_from_the_wake() -> None:
-    """The incident's shape: the laptop slept inside the settle, and the wait ended at the wake.
-
-    A timed wait can return the instant the machine is back -- exactly the
-    interface transition the settle exists to outlast. The worker establishes
-    the wake for itself rather than racing the heartbeat for it, and stands
-    down for the window that wake opens.
-    """
-    agent_id = AgentId.generate()
-    publisher, client_queue = build_ui_state_publisher_for_test()
-    sleep_tracker, clock = make_sleep_tracker()
-    with ConcurrencyGroup(name="test-view-refresh-slept-through") as concurrency_group:
-        detector, prober = build_stub_connectivity_detector(concurrency_group, is_internet_up=False)
-        detector.probe_now()
-        refresher = WorkspaceViewRefresher(
-            publisher=publisher,
-            connectivity_detector=detector,
-            sleep_tracker=sleep_tracker,
-            concurrency_group=concurrency_group,
-            settle_seconds=_SETTLE_SECONDS,
-        )
-        detector.add_on_recovery_callback(refresher.on_connectivity_recovered)
-        sleep_tracker.add_on_wake_callback(refresher.on_wake)
-
-        # The last heartbeat anyone recorded is long before the settle begins,
-        # so the worker's own tick at the end of its wait is what closes the
-        # gap -- the heartbeat loop has not got there first.
-        clock.lag_seconds = 700.0
-        sleep_tracker.record_heartbeat()
-        clock.lag_seconds = 0.0
-
-        refresher(agent_id)
-        started_at = time.monotonic()
-        bring_stub_network_back(detector, prober)
-
-        # One settle is not enough: the first one was slept through.
-        assert not poll_until(
-            lambda: bool(_refreshed_agent_ids(client_queue)), timeout=_SETTLE_SECONDS * 1.5, poll_interval=0.02
-        )
-        assert _wait_for_refreshes(client_queue) == [str(agent_id)]
-        assert time.monotonic() - started_at >= _SETTLE_SECONDS * 2
-
-
-def test_a_refresh_raised_just_after_a_wake_waits_out_a_settle() -> None:
-    """A wake is a network transition for the settle's purposes, whatever the reading says.
-
-    The reading after a wake is UNKNOWN, which holds nothing on its own; the
-    wake itself opens the window, so a machine whose recovery lands in the
-    seconds after the lid opens is not reloaded into the interface coming up.
-    """
-    agent_id = AgentId.generate()
-    publisher, client_queue = build_ui_state_publisher_for_test()
-    sleep_tracker, clock = make_sleep_tracker()
-    with ConcurrencyGroup(name="test-view-refresh-after-wake") as concurrency_group:
-        detector, _prober = build_stub_connectivity_detector(concurrency_group)
-        detector.probe_now()
-        refresher = WorkspaceViewRefresher(
-            publisher=publisher,
-            connectivity_detector=detector,
-            sleep_tracker=sleep_tracker,
-            concurrency_group=concurrency_group,
-            settle_seconds=_SETTLE_SECONDS,
-        )
-        sleep_tracker.add_on_wake_callback(refresher.on_wake)
-
-        started_at = time.monotonic()
-        record_sleep_of(sleep_tracker, clock, seconds=700.0)
-        refresher(agent_id)
-        assert _refreshed_agent_ids(client_queue) == []
-
-        assert _wait_for_refreshes(client_queue) == [str(agent_id)]
-        assert time.monotonic() - started_at >= _SETTLE_SECONDS
 
 
 class _RecoveringMidCallDetector(ConnectivityDetector):

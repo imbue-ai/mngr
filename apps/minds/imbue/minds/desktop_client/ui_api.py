@@ -25,10 +25,8 @@ from flask import Response
 from flask import request
 from loguru import logger
 
-from imbue.minds.desktop_client.onboarding_progress import resolve_is_onboarding_complete
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_create import register_create_routes
-from imbue.minds.desktop_client.ui_api_folder_syncs import register_folder_sync_routes
 from imbue.minds.desktop_client.ui_api_inbox import register_inbox_routes
 from imbue.minds.desktop_client.ui_api_lifecycle import register_lifecycle_routes
 from imbue.minds.desktop_client.ui_api_onboarding import register_onboarding_routes
@@ -132,7 +130,6 @@ def _build_bootstrap_json() -> str:
         is_mac="Macintosh" in user_agent or "Mac OS" in user_agent,
         # minds always runs the forward proxy with TLS, so the scheme is https.
         mngr_forward_origin=f"https://localhost:{state.mngr_forward_port or 8421}",
-        is_onboarding_complete=resolve_is_onboarding_complete(state.minds_config, state.backend_resolver),
     )
     bootstrap = UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=publisher.build_snapshot())
     # "</" must not appear verbatim inside an inline <script> body: a name or
@@ -189,7 +186,7 @@ def serve_spa_index(**_path_params: str) -> Response:
         "  <head>\n"
         '    <meta charset="utf-8">\n'
         '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        "    <title>Mind</title>\n"
+        "    <title>minds</title>\n"
         f"{_build_sentry_head_tags()}"
         f"    <script>window.__MINDS_BOOTSTRAP__ = {_build_bootstrap_json()};</script>\n"
         '    <script src="/_static/embed_contract.js"></script>\n'
@@ -222,15 +219,16 @@ def _handle_app_status() -> Response:
     ]
     minds_config = state.minds_config
     needs_consent = minds_config is not None and not minds_config.get_error_reporting_consent_given()
+    session_store = state.session_store
+    has_accounts = session_store is not None and len(session_store.list_accounts()) > 0
     payload = {
         "is_authenticated": True,
         "restorable_workspace_ids": restorable_ids,
         "needs_error_reporting_consent": needs_consent,
-        # The Electron startup router's inputs (decideStartupRoute): how many
-        # workspaces exist, and whether the install is past the first-run
-        # start flow.
+        # The Electron startup router's inputs (decideStartupRoute): whether
+        # any imbue account is signed in and how many workspaces exist.
+        "has_accounts": has_accounts,
         "workspace_count": len(state.backend_resolver.list_active_workspace_ids()),
-        "is_onboarding_complete": resolve_is_onboarding_complete(minds_config, state.backend_resolver),
     }
     return Response(json.dumps(payload), mimetype="application/json")
 
@@ -264,7 +262,6 @@ def create_ui_blueprint() -> Blueprint:
     register_settings_routes(blueprint)
     register_options_routes(blueprint)
     register_permissions_routes(blueprint)
-    register_folder_sync_routes(blueprint)
     register_lifecycle_routes(blueprint)
     register_inbox_routes(blueprint)
     register_onboarding_routes(blueprint)

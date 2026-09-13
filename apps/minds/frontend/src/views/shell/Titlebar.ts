@@ -13,13 +13,8 @@
 // breadcrumb and switcher row to be found.
 
 import m from "mithril";
-// Inlined: the built bundle is served under /_static/ui/, a prefix Vite does
-// not know, so a URL import would point at a path Flask never serves.
-import lockupUrl from "../../assets/mind-wordmark.svg?inline";
 import { Badge } from "../components/Badge";
-import { Button } from "../components/Button";
 import { Icon12, Icon16 } from "../components/Icon";
-import { Modal } from "../components/Modal";
 import { TitlebarButton } from "../components/TitlebarButton";
 import { electronBridge } from "../../electron-bridge";
 import type { OptionsTab } from "../../models/workspaceOptions";
@@ -34,63 +29,14 @@ export interface TitlebarAttrs {
   routePath: string;
 }
 
-/** What each tab's dialog says on a creation page, where the workspace does not exist yet. */
-export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
-  permissions: "Check back here after the workspace is created to manage its permissions.",
-  settings: "Check back here after the workspace is created to change its settings.",
-  share: "Check back here after the workspace is created to share it.",
-};
-
-/**
- * The start flow's titlebar: nothing but the lockup, centered, in brand blue.
- * Every other control points at something that does not exist yet.
- */
-function startTitlebar(shell: ShellState): m.Children {
-  const isDesktop = electronBridge.isDesktop;
-  return m(
-    "div#minds-titlebar",
-    {
-      style: "background-color: var(--titlebar-bg, var(--c-surface-primary));",
-      class: "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1",
-      "data-titlebar-kind": "start",
-    },
-    [
-      m("div", { class: "flex-1" }),
-      m("img", {
-        id: "start-mark",
-        class: "start-chrome-mark absolute left-1/2 top-1/2 h-4 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
-        src: lockupUrl,
-        alt: "mind",
-        draggable: false,
-      }),
-      m("div", { class: "flex" + (shell.isMac ? " hidden" : "") }, [
-        m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
-        m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),
-        m(TitlebarButton, { variant: "control", tone: "danger", "aria-label": "Close", hidden: !isDesktop, onclick: () => electronBridge.close() }, m(Icon12, { name: "close" })),
-      ]),
-    ],
-  );
-}
-
 export function Titlebar(): m.Component<TitlebarAttrs> {
-  // The tab whose "check back after the workspace is created" dialog is up,
-  // on a creation page.
-  let notYetTab: OptionsTab | null = null;
   return {
     view(vnode) {
       const { shell, routePath } = vnode.attrs;
       const routeSearch = (m.route.get() ?? "").split("?")[1] ?? "";
       const context = classifyRoute(routePath, routeSearch);
-      if (context.kind === "start") return startTitlebar(shell);
       const workspaces = shell.stores.workspaces;
-      // A creation page wears the frame of the workspace it is making: the
-      // attempt's list row carries the name and accent, and the tabs open a
-      // dialog instead of a workspace that is not there yet.
-      const isCreating = context.kind === "creating";
-      // The dialog belongs to the creation page: a route change (the wash
-      // entering the workspace, the home button) takes it down with the page.
-      if (!isCreating) notYetTab = null;
-      const isWorkspace = context.kind === "workspace" || isCreating;
+      const isWorkspace = context.kind === "workspace";
       const workspaceName = isWorkspace
         ? (workspaces.accentEntry(context.workspaceAnyId ?? "")?.name ?? "…")
         : "";
@@ -129,7 +75,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
         shell.isNotificationsOpen;
       const popupHiddenClass = isTitlebarPopupOpen ? "invisible" : "";
 
-      const bar = m(
+      return m(
         "div#minds-titlebar",
         {
           style:
@@ -150,11 +96,12 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               variant: "crumb",
               tone: isHomeSelected ? "default" : "muted",
               extra: "gap-1",
+              hidden: context.kind === "welcome",
               onclick: () => m.route.set("/"),
             },
             [
               m(Icon16, { name: "home" }),
-              m("span", { class: "type-label" }, "Mind"),
+              m("span", { class: "type-label" }, "Minds"),
             ],
           ),
           m(
@@ -233,16 +180,16 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                           // Pointing at the key starts the read the pane makes
                           // on its first mount, so opening it usually lands on
                           // an answer instead of on "Loading permissions...".
-                          onpointerenter: () => {
-                            if (!isCreating) warmPermissionsFor(shell, context);
-                          },
-                          onfocus: () => {
-                            if (!isCreating) warmPermissionsFor(shell, context);
-                          },
-                          onclick: () => {
-                            if (isCreating) notYetTab = "permissions";
-                            else toggleWorkspaceOptions(shell, routePath, context, "permissions");
-                          },
+                          onpointerenter: () =>
+                            warmPermissionsFor(shell, context),
+                          onfocus: () => warmPermissionsFor(shell, context),
+                          onclick: () =>
+                            toggleWorkspaceOptions(
+                              shell,
+                              routePath,
+                              context,
+                              "permissions",
+                            ),
                         },
                         [
                           m(Icon16, { name: "key" }),
@@ -285,10 +232,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                             : context.activeTab === "settings"
                               ? "bg-fill-active"
                               : "",
-                          onclick: () => {
-                            if (isCreating) notYetTab = "settings";
-                            else toggleWorkspaceOptions(shell, routePath, context, "settings");
-                          },
+                          onclick: () =>
+                            toggleWorkspaceOptions(
+                              shell,
+                              routePath,
+                              context,
+                              "settings",
+                            ),
                         },
                         m(Icon16, { name: "settings" }),
                       ),
@@ -305,10 +255,13 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                             : context.activeTab === "share"
                               ? "bg-fill-active"
                               : "",
-                          onclick: () => {
-                            if (isCreating) notYetTab = "share";
-                            else toggleWorkspaceOptions(shell, routePath, context, "share");
-                          },
+                          onclick: () =>
+                            toggleWorkspaceOptions(
+                              shell,
+                              routePath,
+                              context,
+                              "share",
+                            ),
                         },
                         m(Icon16, { name: "user-plus" }),
                       ),
@@ -404,24 +357,6 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           ],
         ),
       );
-      // A sibling of the bar, not a child: .titlebar-surface re-bases the text
-      // tokens for the accent, which would paint the dialog's card white on white.
-      const dialog =
-        notYetTab !== null
-          ? m(
-              Modal,
-              { isOpen: true, id: "creating-not-yet-dialog", onClose: () => (notYetTab = null) },
-              [
-                m("p", { class: "type-body text-primary mb-4" }, NOT_YET_CREATED_MESSAGE_BY_TAB[notYetTab]),
-                m(
-                  "div",
-                  { class: "flex justify-end" },
-                  m(Button, { variant: "secondary", onclick: () => (notYetTab = null) }, "Close"),
-                ),
-              ],
-            )
-          : null;
-      return [bar, dialog];
     },
   };
 }
@@ -452,7 +387,7 @@ function notificationsBell(
         tone: "muted",
         // relative for the badge's own absolute positioning.
         extra: "relative " + popupHiddenClass,
-        // The switch, not a bare open: a CENTERED app modal (Mind settings,
+        // The switch, not a bare open: a CENTERED app modal (Minds settings,
         // Accounts) leaves this button reachable, and the feed's backdrop
         // draws under a later-DOM modal's at the same z -- so the modal must
         // be put away first or the feed raises beneath it, dimmed and

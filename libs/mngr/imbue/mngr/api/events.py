@@ -67,7 +67,6 @@ TAIL_READ_FAILURES_BEFORE_REPROBE: Final[int] = 3
 # that has quietly stopped delivering is visible in the log.
 _TAIL_READ_FAILURES_BEFORE_WARNING: Final[int] = 30
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
-_STREAM_HEADER_RECORD_TYPE: Final[str] = "header"
 
 
 # =============================================================================
@@ -406,21 +405,6 @@ def parse_event_line(line: str, source_hint: str) -> EventRecord:
     return _record_from_event_data(data, stripped, source_hint)
 
 
-def _parse_stream_line(warner: MalformedJsonLineWarner, line: str, source_hint: str) -> EventRecord | None:
-    """Parse one line of an events.jsonl stream, or None when the line holds no event.
-
-    Besides the blank and malformed lines the warner skips, a common-transcript
-    stream opens with a header record: stream framing with no timestamp to order it by.
-    """
-    parsed = warner.parse(line)
-    if parsed is None:
-        return None
-    data, stripped = parsed
-    if data.get("type") == _STREAM_HEADER_RECORD_TYPE and not data.get("timestamp"):
-        return None
-    return _record_from_event_data(data, stripped, source_hint)
-
-
 def _create_source_mismatch_warning(original_source: str, correct_source: str) -> EventRecord:
     """Create a warning event about an incorrect source field encountered in the stream."""
     now = datetime.now(timezone.utc)
@@ -507,8 +491,8 @@ def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
 COMMON_TRANSCRIPT_SOURCE_SUFFIX: Final[str] = "common_transcript"
 
 
-def find_common_transcript_source(target: EventsTarget) -> EventSourceInfo:
-    """Find the event source ending with 'common_transcript'.
+def find_common_transcript_source(target: EventsTarget) -> str:
+    """Find the event source path ending with 'common_transcript'.
 
     Discovers all event sources for the target and returns the one whose
     source_path ends with 'common_transcript' (e.g. 'claude/common_transcript'),
@@ -538,38 +522,25 @@ def find_common_transcript_source(target: EventsTarget) -> EventSourceInfo:
             f"Multiple common transcript sources found for {target.display_name}: {source_paths}. "
             "This is unexpected -- please report this as a bug."
         )
-    return matching_sources[0]
+    return matching_sources[0].source_path
 
 
 def read_common_transcript_content(target: EventsTarget) -> tuple[str, str]:
-    """Read the target's whole common-transcript stream, rotated segments included.
+    """Read the target's common-transcript stream file.
 
     Returns ``(event_file_name, content)`` where ``event_file_name`` is the
     path of the stream relative to the events directory (e.g.
     ``claude/common_transcript/events.jsonl``), suitable for use as a
-    human-readable source description. Rotation splits one conversation across
-    files, so the segments are read oldest first and the current file last:
-    reading only the current file would render the tail of a conversation as
-    though it were the whole of it. Raises :class:`MngrError` when the source
-    cannot be found or read.
+    human-readable source description. Raises :class:`MngrError` when the
+    source cannot be found or read.
     """
-    source = find_common_transcript_source(target)
-    event_file_name = f"{source.source_path}/{_EVENTS_JSONL_FILENAME}"
-    segment_names = list(source.rotated_files)
-    if source.is_current_file_present:
-        segment_names.append(_EVENTS_JSONL_FILENAME)
-    segments = []
-    for segment_name in segment_names:
-        try:
-            segment = read_event_content(target, f"{source.source_path}/{segment_name}")
-        except (MngrError, OSError) as e:
-            raise MngrError(f"Failed to read transcript for {target.display_name}: {e}") from e
-        # A segment whose last line was written without its newline would
-        # otherwise be glued onto the next segment's first line.
-        if segment and not segment.endswith("\n"):
-            segment += "\n"
-        segments.append(segment)
-    return event_file_name, "".join(segments)
+    source_path = find_common_transcript_source(target)
+    event_file_name = f"{source_path}/events.jsonl"
+    try:
+        content = read_event_content(target, event_file_name)
+    except (MngrError, OSError) as e:
+        raise MngrError(f"Failed to read transcript for {target.display_name}: {e}") from e
+    return event_file_name, content
 
 
 def discover_event_sources(target: EventsTarget) -> list[EventSourceInfo]:
@@ -668,9 +639,11 @@ def _read_events_from_file(
     events: list[EventRecord] = []
     warner = MalformedJsonLineWarner(source_description=f"event file '{relative_file_path}'")
     for line in content.split("\n"):
-        record = _parse_stream_line(warner, line, source_hint)
-        if record is not None:
-            events.append(record)
+        parsed = warner.parse(line)
+        if parsed is None:
+            continue
+        data, stripped = parsed
+        events.append(_record_from_event_data(data, stripped, source_hint))
 
     return events, len(content.encode("utf-8"))
 
@@ -1075,8 +1048,12 @@ def _read_local_source_once(
     for line in tail:
         if stop_event.is_set():
             break
-        record = _parse_stream_line(warner, line, source_path)
-        if record is None or not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
+        parsed = warner.parse(line)
+        if parsed is None:
+            continue
+        data, stripped = parsed
+        record = _record_from_event_data(data, stripped, source_path)
+        if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
             continue
         event_queue.put(record)
 
@@ -1118,8 +1095,12 @@ def _read_remote_source_once(
         # cause the line to be split and silently lost.
         lines, bytes_consumed = split_complete_lines(new_content)
         for line in lines:
-            record = _parse_stream_line(warner, line, source_path)
-            if record is None or not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
+            parsed = warner.parse(line)
+            if parsed is None:
+                continue
+            data, stripped = parsed
+            record = _record_from_event_data(data, stripped, source_path)
+            if not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
                 continue
             event_queue.put(record)
         byte_offset += bytes_consumed

@@ -13,8 +13,6 @@ import pluggy
 import pytest
 from click.testing import CliRunner
 
-from imbue.mngr.api.address_parsers import parse_agent_address
-from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.list import ErrorInfo
 from imbue.mngr.api.list import ListResult
 from imbue.mngr.api.list import ProviderErrorInfo
@@ -43,11 +41,8 @@ from imbue.mngr.cli.list import _should_use_streaming_mode
 from imbue.mngr.cli.list import _sort_agents_by_cel
 from imbue.mngr.cli.list import _truncate_to_width
 from imbue.mngr.cli.list import list_command
-from imbue.mngr.cli.testing import create_agent_with_sample_transcript
 from imbue.mngr.colors import ERROR_COLOR
 from imbue.mngr.colors import RESET_COLOR
-from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.host import Host
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.primitives import AgentLifecycleState
@@ -57,7 +52,6 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.utils.cel_utils import compile_cel_sort_keys
 from imbue.mngr.utils.testing import make_test_agent_details
-from imbue.mngr.utils.testing import record_host_name
 
 
 def _create_test_snapshot(name: str, idx: int) -> SnapshotInfo:
@@ -2036,29 +2030,3 @@ def test_list_command_schema_rejects_hosts_view(
     assert result.exit_code != 0
     assert "--schema lists fields and cannot be combined with" in result.output
     assert "--hosts" in result.output
-
-
-@pytest.mark.tmux
-def test_the_address_list_prints_resolves_when_the_host_record_names_the_host(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-    local_host: Host,
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """``list --addrs`` and address resolution must agree on the local host's name.
-
-    A host dir built by an outer provider (a workspace container) records the name
-    that provider gave the host, not ``localhost``, and ``list`` prints that name.
-    """
-    agent_id, _events_dir = create_agent_with_sample_transcript(local_host.host_dir, agent_name="chatty")
-    record_host_name(local_host, "workspace-1")
-
-    result = cli_runner.invoke(
-        list_command, ["--addrs", "--provider", "local"], obj=plugin_manager, catch_exceptions=False
-    )
-
-    assert result.exit_code == 0, result.output
-    (printed_address,) = result.output.strip().splitlines()
-    assert printed_address == "chatty@workspace-1.local"
-    _host_ref, agent_ref = find_one_agent(parse_agent_address(printed_address), temp_mngr_ctx)
-    assert agent_ref.agent_id == agent_id

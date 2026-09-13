@@ -6,9 +6,7 @@ from imbue.mngr_imbue_cloud.wire import WireModel
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
 from imbue.mngr_imbue_cloud.wire import validate_wire
 from imbue.mngr_imbue_cloud.wire_types import R2BucketAccess
-from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
-from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 
 
 class _ExampleWireModel(WireModel):
@@ -33,34 +31,6 @@ def test_wire_model_still_requires_required_fields() -> None:
 def test_wire_enum_coerces_unrecognized_value_to_unknown() -> None:
     assert WorkspaceStatus("migrating") is WorkspaceStatus.UNKNOWN
     assert R2BucketAccess("append-only") is R2BucketAccess.UNKNOWN
-
-
-def test_workspace_stop_kind_coerces_and_defaults_to_absent() -> None:
-    assert WorkspaceStopKind("maintenance") is WorkspaceStopKind.MAINTENANCE
-    assert WorkspaceStopKind("quarantine") is WorkspaceStopKind.UNKNOWN
-    entry = validate_wire(
-        WorkspaceInfo,
-        {
-            "host_db_id": "11111111-2222-3333-4444-555555555555",
-            "status": "stopped",
-            "agent_id": "a",
-            "host_id": "h",
-            "host_name": "n",
-        },
-    )
-    assert entry.stop_kind is None
-    held = validate_wire(
-        WorkspaceInfo,
-        {
-            "host_db_id": "11111111-2222-3333-4444-555555555555",
-            "status": "stopped",
-            "agent_id": "a",
-            "host_id": "h",
-            "host_name": "n",
-            "stop_kind": "suspension",
-        },
-    )
-    assert held.stop_kind is WorkspaceStopKind.SUSPENSION
 
 
 def test_wire_enum_normalizes_case_and_whitespace_before_unknown() -> None:

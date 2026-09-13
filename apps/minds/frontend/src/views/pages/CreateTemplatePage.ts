@@ -18,7 +18,7 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import { fetchCreateFormDefaults, recoveryRoute } from "../../models/create";
+import { MIND_LIVENESS_LABELS, fetchCreateFormDefaults, recoveryRoute } from "../../models/create";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { Button, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
@@ -26,7 +26,7 @@ import { FormLabel, Select } from "../components/FormControls";
 import { PageNarrowContainer } from "../components/Layout";
 import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
-import { keyStateChipFor, livenessBadgeLabelFor, rowClickActionFor } from "./landing-controls";
+import { rowClickActionFor } from "./landing-controls";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
@@ -285,47 +285,30 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     // here (this page has no liveness tracker, so an unknown reading is
     // common and not actionable from a template picker).
     const isBadged = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
-    const livenessLabel =
-      (entry.supports_shutdown ?? false) && isBadged ? livenessBadgeLabelFor(liveness, entry.stop_kind ?? "") : null;
-    // A cloud machine this device holds no key for, or one an operator holds
-    // stopped, cannot be opened: the row says why (the chip or the badge) in
-    // place of the chevron and offers no click. This page has no health
-    // tracker, so the row is treated as healthy (it never routes to plain
-    // recovery); the same rule decides the cursor and the click.
-    const keyChip = keyStateChipFor(entry.key_state ?? "");
-    const action = rowClickActionFor(entry, liveness, true);
-    const isOpenable = action !== "blocked";
+    const livenessLabel = (entry.supports_shutdown ?? false) && isBadged ? MIND_LIVENESS_LABELS[liveness] : null;
     return m(
       Card,
       {
         layout: "row",
-        interactive: isOpenable,
-        extra: `accent-spine relative overflow-hidden ${isOpenable ? "cursor-pointer" : "cursor-default"}`,
+        interactive: true,
+        extra: "accent-spine relative overflow-hidden cursor-pointer",
         style: `--workspace-accent: ${entry.accent};`,
-        onclick: isOpenable
-          ? () => {
-              if (action === "recover-start") {
-                const returnTo = `/goto/${entry.id}/`;
-                m.route.set(recoveryRoute(entry.id, returnTo, "start"));
-              } else {
-                shell.enterWorkspace(entry.id);
-              }
-            }
-          : undefined,
+        onclick: () => {
+          // This page has no health tracker, so the row is treated as healthy
+          // (the pre-existing behavior: it never routes to plain recovery).
+          const action = rowClickActionFor(entry, entry.liveness ?? "", true);
+          if (action === "recover-start") {
+            const returnTo = `/goto/${entry.id}/`;
+            m.route.set(recoveryRoute(entry.id, returnTo, "start"));
+          } else {
+            shell.enterWorkspace(entry.id);
+          }
+        },
       },
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
         livenessLabel ? m(StatusBadge, livenessLabel) : null,
-        keyChip === null
-          ? m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" }))
-          : m(
-              "span",
-              {
-                class: "inline-flex items-center px-2 py-0.5 rounded-md type-label bg-fill-subtle text-important",
-                "data-tooltip": keyChip.tooltip,
-              },
-              keyChip.label,
-            ),
+        m("span", { class: "text-tertiary shrink-0" }, m(Icon16, { name: "chevron-right" })),
       ],
     );
   }

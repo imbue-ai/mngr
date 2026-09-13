@@ -2,7 +2,7 @@
 
 Brand marks for the services latchkey can connect to, keyed by latchkey
 canonical service name (`<service_id>.svg`). Used by the Permissions tab's
-service marks.
+service marks and by the creating-page onboarding carousel.
 
 These are each vendor's own artwork, in the vendor's own colors. Nothing here
 is recolored, and nothing may be: several of these brands publish usage rules
@@ -102,7 +102,7 @@ That is the brand's choice, not a monochrome treatment applied here.
 Drop `<service_id>.svg` in, using the vendor's published artwork. Add
 `<service_id>-on-dark.svg` only if the mark is illegible on black *and* the
 vendor publishes a white variant — do not make one by recoloring. A service
-with no file falls back to a plain glyph in the Permissions tab (every current
-catalog service has one). `service_icons_test.py` pins
+with no file falls back to a plain glyph in the Permissions tab and a monogram
+in the carousel (every current catalog service has one). `service_icons_test.py` pins
 which marks are single-color and which ship a dark-surface variant, so a file
 swapped for a fill-less silhouette fails there rather than shipping invisible.

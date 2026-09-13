@@ -35,7 +35,7 @@ Key concepts in the minds system:
   A template can include zero or more creations plus customizations to existing things.
   See the workspace's publish-template / use-template skills.
 
-- **template base**: the pristine template commit a workspace started from (or last updated itself to), named by the newest template-state marker on its first-parent history: an `Initial workspace commit` is its own base, and an `update-self:` merge's base is its upstream (second) parent, never the merge itself, which also holds the workspace's own work.
+- **template base**: the template state a workspace started from (or last updated itself to) -- the newest `update-self:` / `Initial workspace commit` marker on its first-parent history.
   Publishing a template diffs against it; formerly called the "creation snapshot".
 
 - **primary agent**: the single `system-services` agent on each workspace host, labeled `is_primary=true`.
@@ -43,7 +43,7 @@ Key concepts in the minds system:
   Its `workspace_display_name` label holds the workspace's human-readable name (the normalized slug is the host's name).
   Hidden from the UI agent list and protected against direct destroy.
 
-- **chat**: a user-facing conversation in a workspace, one per chat tab: a sequence of agent transcripts run by one agent at a time (the template's `docs/system/blueprint/chat-agent-split/`). Its id is its first agent's id, and every agent the chat app creates for it carries that id as `MINDS_CHAT_ID`. Today every chat runs on exactly one agent.
+- **chat**: a user-facing conversation in a workspace, one per chat tab: a sequence of agent transcripts run by one agent at a time (the template's `docs/system/blueprint/chat-agent-split/`). Its id is its first agent's id, and every agent the chat app creates for it carries that id as `MINDS_CHAT_ID`. A chat that has run on several agents has a chat record in the workspace (`data/.apps/chat/chats/<chat-id>/record.json`) naming its agents in order; the earlier ones are *archived agents*, kept for their transcripts and never listed as chats. Nothing writes such a record yet: the handoff that does is a later phase of that plan.
 - **chat agent**: the mngr agent a chat currently runs on, created on demand in a workspace by the chat app; the phrase names the agent, never the chat.
   Created with `--transfer none`, so it shares the primary agent's work_dir, and bound on its create to one signed-in provider account under `~/.minds/accounts/` (an `--env CLAUDE_CONFIG_DIR=<account dir>` for claude). A create that names no account gets the workspace's default one from `.mngr/settings.local.toml`, which the workspace's chat app writes; with no account signed in the create is refused, since `~/.claude` holds no credential.
   Bootstrap seeds the first one on initial container boot; the count grows and shrinks with the user's workload, and is not capped.
@@ -75,7 +75,7 @@ Key concepts in the minds system:
 
 - **bootstrap**: `uv run bootstrap`, the process that runs first-boot setup inside each agent container and then execs `supervisord -n` to launch the apps and background services.
 
-- **supervisord**: the process-control system running inside each agent container that supervises the apps and background services, each declared as a `[program:*]` section in `supervisord.conf` -- or, where a template splits them out, in its own file pulled in by that config's `[include]` glob (logs under `/var/log/supervisor`).
+- **supervisord**: the process-control system running inside each agent container that supervises the apps and background services, each declared as a `[program:*]` section in `supervisord.conf` (logs under `/var/log/supervisor`).
   Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
 
 - **app watcher**: a background service that monitors `data/.state/apps.toml` and writes service events to `events/services/events.jsonl` so the desktop client can discover an agent's apps.
@@ -96,8 +96,6 @@ Key concepts in the minds system:
   IMBUE_CLOUD leases a pre-baked pool host via the imbue_cloud provider plugin.
   MODAL runs in a Modal sandbox using the local machine's own Modal token; sandboxes are ephemeral (~1 day max), so it is testing-only.
 
-- **machine size**: how big a remote (imbue_cloud) machine is, in two independent factors (specs/slice-fleet). *Units* are the single compute knob -- 1 unit = 1GiB of machine RAM, with vCPUs and fair-share bandwidth scaling proportionally; allowed sizes are multiples of 8 units up to 128. *Disk* is a second, grow-only factor, sized once at creation (3.5GiB per unit) and grown independently afterwards; it never shrinks. Resizing is record-then-restart: `mngr imbue_cloud machines resize` stamps the desired size, and the machine's next restart applies it (in place when its box has room, otherwise via a restore onto a box that does). Every new workspace starts at the default 8-unit size.
-
 - **environment**: an environment is a single deployed instance of the minds system.
   It owns, among other things, a data root, a Modal environment, a Neon project, and a SuperTokens app.
   Every environment belongs to exactly one tier, and takes its account credentials and deploy configuration from it.
@@ -108,11 +106,7 @@ Key concepts in the minds system:
   Production and staging are tiers that contain exactly one environment within them, while the CI and Dev tiers may have multiple CI and Dev environments respectively.
 
 - **adoption**: the user's own device taking ownership of a leased imbue_cloud slice's SSH trust material.
-  On lease -- and on the first connect for hosts leased earlier -- the client rotates both of the slice's sshd host keys to fresh user-generated keys (pinned user-origin in mngr's host-key store, which connector bake-time material can never displace) and installs an in-VM reconciler that re-asserts the owner's `authorized_keys` and host key on every boot, after cloud-init's replay (a gen-1 lima behavior: a gen-2 slice's cloud-init runs exactly once, at first boot, so its adopted material simply persists across stop/start and restores).
-  After adoption, host-key trust flows only through the user's synced workspace records; the connector is trusted exactly once, at lease handoff. The pins are bound to an address and port, and the machine changes ports on every restore (driven by this client, an operator, a rollback, or another device), so the client remembers the endpoints it last pinned and moves the pins to the connector's current endpoints before every connection, with no network round trip.
+  On lease -- and on the first connect for hosts leased earlier -- the client rotates both of the slice's sshd host keys to fresh user-generated keys (pinned user-origin in mngr's host-key store, which connector bake-time material can never displace) and installs an in-VM reconciler that re-asserts the owner's `authorized_keys` and host key on every boot, after cloud-init's replay.
+  After adoption, host-key trust flows only through the user's synced workspace records; the connector is trusted exactly once, at lease handoff.
   Idempotent and marker-driven; a served key that matches neither the pins nor an in-flight rotation is refused, never re-trusted.
   See `libs/mngr_imbue_cloud/README.md` ("Adoption and key rotation") and [the lost-device runbook](../deploy/reference/lost-device-runbook.md).
-
-- **stop kind**: why a remote (imbue_cloud) machine's current stop happened, recorded by the connector beside its lifecycle status and cleared by every start (`specs/workspace-stop-kinds.md`).
-  `owner` (the user's own stop, from any device) and `idle` (an operator stop to free capacity) are the owner's to end with Start; `maintenance` (an operator hold, such as the gen-2 migration) and `suspension` (the account suspend fan-out) are not -- a held machine offers no Start control (a `maintenance` hold is named "Maintenance" by its badge; a `suspension` reads as plain "Stopped"), and the connector refuses owner starts of it.
-  A kind this build does not recognize is treated as a hold (shown but not actionable).

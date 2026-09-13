@@ -141,7 +141,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 # then put the log sentinel. The creating page's status poll
                 # (`operations/create/<create_attempt_id>`) is the authoritative
                 # completion signal: once it returns DONE + redirect_url the
-                # creation page enters the workspace. The redirect URL is the
+                # walkthrough enters the workspace. The redirect URL is the
                 # canonical `/goto/<agent>/` route the real creator populates.
                 with creator._lock:
                     creator._statuses[str(create_attempt_id)] = AgentCreateAttemptStatus.DONE
@@ -151,10 +151,8 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 log_sink.put("[test] Agent created successfully.")
                 log_sink.put(LOG_SENTINEL)
 
-                # The creation page enters the workspace once its status poll
-                # sees DONE: the ready line streams, then the wash covers the
-                # window and the shell swaps the route under it (a few seconds
-                # in all). Entry is an in-app route change: the SPA
+                # The walkthrough enters the workspace as soon as its status
+                # poll sees DONE. Entry is an in-app route change: the SPA
                 # extracts the agent id from the `/goto/<agent>/` redirect URL
                 # and routes to `/workspace/<agent-id>` (the workspace
                 # surface), so that main-frame URL is the observable
@@ -163,7 +161,7 @@ def test_sse_redirect_on_done(tmp_path: Path) -> None:
                 # main frame; this minimal fixture runs no forward plugin, so
                 # that iframe dead-ends in a 404, which does not matter here.
                 logger.info("CreateAttempt done, waiting for the redirect into the workspace...")
-                page.wait_for_url(re.compile(rf"/workspace/{agent_id}"), timeout=15000)
+                page.wait_for_url(re.compile(rf"/workspace/{agent_id}"), timeout=10000)
                 logger.info("Redirect happened! URL: {}", page.url)
                 assert f"/workspace/{agent_id}" in page.url
 

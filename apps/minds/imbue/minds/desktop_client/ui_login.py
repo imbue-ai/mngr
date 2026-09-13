@@ -33,9 +33,9 @@ def _render_login_document(body_html: str, head_extra: str = "") -> Response:
 
 def render_missing_code_page() -> Response:
     return _render_login_document(
-        "<h1>Sign in to Mind</h1>"
+        "<h1>Sign in to minds</h1>"
         "<p>This page needs the one-time login link printed in your terminal.</p>"
-        "<p>Find the line with the login URL where the Mind app is running and open "
+        "<p>Find the line with the login URL where the minds app is running and open "
         "that full link here.</p>"
     )
 

@@ -358,11 +358,6 @@ def test_mark_stuck_rolls_back_recovering_and_fires_callback() -> None:
     tracker.mark_stuck(aid)
     assert tracker.get_health(aid) == AgentHealth.STUCK
     assert seen == [AgentHealth.RECOVERING, AgentHealth.STUCK]
-    # The ended episode's kind is gone with it: the next recovery's kind is
-    # what is read, never the previous one carried over.
-    assert tracker.get_recovery_kind(aid) is None
-    tracker.mark_recovering(aid, HostRecoveryKind.START)
-    assert tracker.get_recovery_kind(aid) == HostRecoveryKind.START
 
 
 def test_mark_stuck_is_idempotent() -> None:

@@ -23,7 +23,6 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 | version_management | Y | Y | - | Y | - | - | n/a | n/a |
 | deploy_contributions | Y | - | - | - | - | - | - | - |
 | usage_tracking | Y | - | - | Y | Y | Y | n/a | n/a |
-| compaction | Y | n/a | - | - | - | - | n/a | n/a |
 | headless_output | n/a | Y | n/a | n/a | n/a | n/a | n/a | Y |
 
 ## Capabilities
@@ -40,5 +39,4 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 - **version_management** -- Controls which version of its binary runs, by pinning a version or following an update policy. Absent for CLIs that just use whatever is on PATH.
 - **deploy_contributions** -- Bakes config/cred files + env vars into a `mngr schedule` image (via the get_files_for_deploy hookimpl). Only needed if the agent runs under `mngr schedule`.
 - **usage_tracking** -- Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.
-- **compaction** -- Supports manually triggering context compaction for active context management.
 - **headless_output** -- Runs non-interactively and exposes its output via output(). Only for headless agent variants.

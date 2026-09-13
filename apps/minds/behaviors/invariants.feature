@@ -1,4 +1,4 @@
-Feature: Mind desktop client invariants
+Feature: Minds desktop client invariants
   Properties that hold across every surface, flow, and interleaving in this corpus. They concern what the desktop client may conclude about a workspace or a provider from evidence gathered on a laptop, whose sleep and network are conditions of the observer rather than of the thing observed.
 
   @no-verdict-on-unobserved-time

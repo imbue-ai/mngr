@@ -3,64 +3,21 @@
 // truth on submit. Submission POSTs the existing /api/v1/workspaces front
 // door and routes to /creating/<operation_id>. DOM ids match the legacy form
 // (the e2e workspace runner drives them).
-//
-// The same component also runs embedded in a modal (the start flow's Custom
-// answer, the creation page's Retry): there the masthead is the modal's, the
-// caller picks the opening preset and whether the advanced view starts open,
-// and a successful submit reports the operation id instead of routing.
 
 import m from "mithril";
 import type { CreateFormDefaults } from "../../models/create";
-import {
-  backupProviderLabel,
-  fetchCreateFormDefaults,
-  launchModeLabel,
-  submitCreateRequest,
-} from "../../models/create";
+import { fetchCreateFormDefaults } from "../../models/create";
 import { webLogin } from "../../models/webLogin";
 import { Button, ButtonSubmit } from "../components/Button";
 import { FormLabel, Select, TextInput, Textarea } from "../components/FormControls";
 import { Link } from "../components/Link";
 import { PageNarrowContainer } from "../components/Layout";
-import { DialogCloseButton, Modal } from "../components/Modal";
 import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
 import { PresetCards } from "./create/PresetCards";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
 
-export interface CreatePageAttrs {
-  /** `page` (the default) is the routed /create page; `embedded` is the form inside a modal. */
-  mode?: "page" | "embedded";
-  /** The preset to open on; the page defaults to remote. */
-  initialPreset?: PresetName;
-  /** Open with the advanced view expanded. */
-  isAdvancedOpen?: boolean;
-  /** Prefill from an interrupted / failed attempt's record (the page reads `?retry=` instead). */
-  retryId?: string;
-  /** Embedded mode's outcome: called with the new attempt's operation id instead of routing. */
-  onSubmitted?: (operationId: string) => void;
-}
-
-/**
- * The create form in a modal, as the start flow's Custom answer and the
- * creation page's Retry host it: one shell (size, title) around the embedded
- * form, so the two hosts cannot drift. `key` and `id` are the caller's, since
- * both render it inside a keyed fragment and name it for tests.
- */
-export function createFormModal(
-  attrs: Omit<CreatePageAttrs, "mode"> & { key: string; id: string; onClose: () => void },
-): m.Children {
-  const { key, id, onClose, ...form } = attrs;
-  return m(Modal, { key, id, isOpen: true, size: "xl", onClose, cardExtra: "relative" }, [
-    m(DialogCloseButton, { onClose }),
-    m("h2", { class: "type-heading mb-4 pr-8" }, "Create a workspace"),
-    m(CreatePage, { mode: "embedded", ...form }),
-  ]);
-}
-
-export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) => {
-  const attrs = initialVnode.attrs;
-  const isEmbedded = attrs.mode === "embedded";
+export const CreatePage: m.ClosureComponent = () => {
   const model = new CreateFormModel();
   const byokModal = new CloudAccountsModalState();
   let hostNameDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -107,40 +64,45 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     model.isSubmitting = true;
     model.submitError = "";
     model.submitErrorField = "";
-    void submitCreateRequest({ ...model.submitBody() }).then((result) => {
-      if (result.status === 0) {
+    fetch("/api/v1/workspaces", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(model.submitBody()),
+    })
+      .then(async (response) => ({
+        status: response.status,
+        data: (await response.json().catch(() => ({}))) as Record<string, unknown>,
+      }))
+      .then((result) => {
+        if (result.status === 202 && typeof result.data.operation_id === "string") {
+          m.route.set(`/creating/${result.data.operation_id}`);
+          return;
+        }
+        const error = normalizeCreateApiError(result.data);
+        if (error.redirectUrl) {
+          // The remote preset needs a signed-in Imbue account: launch the
+          // browser sign-in and stay on the create form (the user re-submits
+          // once signed in).
+          model.isSubmitting = false;
+          void webLogin.start(
+            "Sign in or create an Imbue account to run your machine on Imbue Cloud. " +
+              "You can also cancel and run it directly on your computer.",
+          );
+          m.redraw();
+          return;
+        }
+        model.isSubmitting = false;
+        model.submitError = error.message;
+        model.submitErrorField = error.field;
+        if (error.field) model.isAdvancedOpen = true;
+        m.redraw();
+      })
+      .catch(() => {
         model.isSubmitting = false;
         model.submitError = "Could not reach the server. Please try again.";
         m.redraw();
-        return;
-      }
-      if (result.status === 202 && typeof result.data.operation_id === "string") {
-        if (attrs.onSubmitted) {
-          attrs.onSubmitted(result.data.operation_id);
-        } else {
-          m.route.set(`/creating/${result.data.operation_id}`);
-        }
-        return;
-      }
-      const error = normalizeCreateApiError(result.data);
-      if (error.redirectUrl) {
-        // The remote preset needs a signed-in Imbue account: launch the
-        // browser sign-in and stay on the create form (the user re-submits
-        // once signed in).
-        model.isSubmitting = false;
-        void webLogin.start(
-          "Sign in or create an Imbue account to run your machine on Imbue Cloud. " +
-            "You can also cancel and run it directly on your computer.",
-        );
-        m.redraw();
-        return;
-      }
-      model.isSubmitting = false;
-      model.submitError = error.message;
-      model.submitErrorField = error.field;
-      if (error.field) model.isAdvancedOpen = true;
-      m.redraw();
-    });
+      });
   }
 
   function fieldRing(fieldId: string): string {
@@ -212,7 +174,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       selected: model.launchValue === mode,
                       disabled: mode === "IMBUE_CLOUD" && model.accountId === "" && defaults.accounts.length === 0,
                     },
-                    launchModeLabel(mode),
+                    mode === "MODAL" ? "Modal (1-day ephemeral)" : mode.toLowerCase(),
                   ),
                 ),
                 defaults.byok_clouds_enabled
@@ -272,7 +234,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                     selected: model.backupProvider === provider,
                     disabled: provider === "IMBUE_CLOUD" && model.accountId === "" && defaults.accounts.length === 0,
                   },
-                  backupProviderLabel(provider),
+                  provider === "API_KEY" ? "manual" : provider.toLowerCase(),
                 ),
               ),
             ),
@@ -440,15 +402,11 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         ]),
         m("div", [
           m(FormLabel, { target: "branch" }, "Branch"),
-          m(
-            "p",
-            { class: "mb-1 type-helper text-tertiary" },
-            "Defaults to the template version this app was released with",
-          ),
+          m("p", { class: "mb-1 type-helper text-tertiary" }, "Leave empty for latest version"),
           m(TextInput, {
             id: "branch",
             name: "branch",
-            placeholder: "this app's version",
+            placeholder: "latest tag",
             value: model.branch,
             oninput: (event: InputEvent) => {
               model.branch = (event.target as HTMLInputElement).value;
@@ -461,19 +419,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   return {
     oninit() {
-      const retryId = attrs.retryId ?? m.route.param("retry") ?? null;
+      const retryId = m.route.param("retry") ?? null;
       fetchCreateFormDefaults(retryId)
         .then((defaults) => {
           model.applyDefaults(defaults);
-          // An embedded caller's opening preset and view, unless a retry
-          // prefill already decided both.
-          if (defaults.prefill === null) {
-            if (attrs.initialPreset !== undefined) model.applyPreset(attrs.initialPreset);
-            if (attrs.isAdvancedOpen) {
-              model.isAdvancedOpen = true;
-              model.selectedPreset = null;
-            }
-          }
           m.redraw();
         })
         .catch(() => {
@@ -495,13 +444,11 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
     },
     view() {
       const defaults = model.defaults;
-      // Embedded, the modal is the page: no centering container, and the
-      // masthead is the modal's own title.
-      const container = (content: m.Children): m.Children =>
-        isEmbedded ? m("div", { class: "w-full" }, content) : m(PageNarrowContainer, { padding: "form", maxWidth: "max-w-[720px]" }, content);
-      return container(
+      return m(
+        PageNarrowContainer,
+        { padding: "form", maxWidth: "max-w-[720px]" },
         defaults === null
-          ? m("p", { class: "type-helper text-tertiary text-center " + (isEmbedded ? "py-12" : "pt-24") }, model.loadError || "Loading…")
+          ? m("p", { class: "type-helper text-tertiary text-center pt-24" }, model.loadError || "Loading…")
           : m(
               "form",
               {
@@ -525,12 +472,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                 },
               },
               [
-                isEmbedded
-                  ? null
-                  : m("div", { class: "text-center mb-12" }, [
-                      m("p", { class: "type-label uppercase tracking-wide text-secondary" }, "Create a machine"),
-                      m("h1", { class: "type-heading-lg text-primary mt-1" }, "Where should it run?"),
-                    ]),
+                m("div", { class: "text-center mb-12" }, [
+                  m("p", { class: "type-label uppercase tracking-wide text-secondary" }, "Create a machine"),
+                  m("h1", { class: "type-heading-lg text-primary mt-1" }, "Where should it run?"),
+                ]),
                 model.submitError
                   ? m(
                       "p",

@@ -72,7 +72,7 @@ class FileAuthStore(AuthStoreInterface):
     # Serializes first-time signing-key generation. FastAPI dispatches sync
     # route handlers on a threadpool, so on a fresh data directory the desktop
     # client's startup burst (``/authenticate`` plus the ``/`` redirect target,
-    # ``/_chrome``, and ``/start`` -- each of which calls ``get_signing_key``)
+    # ``/_chrome``, and ``/welcome`` -- each of which calls ``get_signing_key``)
     # can all reach generation concurrently. Without this lock they would mint
     # *different* keys and race to write; the last writer wins and silently
     # invalidates the cookie just signed with an earlier key, so the next

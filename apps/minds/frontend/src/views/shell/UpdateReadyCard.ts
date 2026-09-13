@@ -34,7 +34,7 @@ export function UpdateReadyCard(): m.Component<UpdateReadyCardAttrs> {
           // Two lines, so the version does not have to share weight with the
           // instruction: what happened, then what it costs.
           m("div", { class: "flex flex-col gap-0.5 min-w-0" }, [
-            m("span", { class: "type-label text-primary truncate" }, `Mind ${version} is ready`),
+            m("span", { class: "type-label text-primary truncate" }, `Minds ${version} is ready`),
             m("span", { class: "type-helper text-tertiary" }, "Installs when you restart"),
           ]),
           m(Button, { variant: "primary", onclick: onRestart, extra: "shrink-0" }, "Restart now"),

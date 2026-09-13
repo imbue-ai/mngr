@@ -2,8 +2,6 @@ import subprocess
 from pathlib import Path
 from typing import cast
 
-import pytest
-
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.testing import FakeHost
 from imbue.mngr.interfaces.host import OnlineHostInterface
@@ -14,7 +12,6 @@ from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_pair.api import GitSyncAction
 from imbue.mngr_pair.api import UnisonSyncer
 from imbue.mngr_pair.api import determine_git_sync_actions
-from imbue.mngr_pair.api import parse_transfer_progress
 from imbue.mngr_pair.remote import SshEndpoint
 from imbue.mngr_pair.remote import UnisonRoot
 
@@ -117,14 +114,8 @@ def test_unison_syncer_builds_command_with_exclude_patterns(tmp_path: Path, cg: 
     assert "__pycache__" in cmd_str
 
 
-def test_unison_syncer_excludes_nothing_it_was_not_asked_to(tmp_path: Path, cg: ConcurrencyGroup) -> None:
-    """``.git`` is the caller's decision, not the syncer's.
-
-    It used to be excluded here unconditionally, which was right only for the
-    git-reconciling mode -- ``pair_files`` adds it for that mode now. A caller
-    that opted out of the git pass was still having ``.git`` dropped from a
-    folder nothing else was reconciling.
-    """
+def test_unison_syncer_always_excludes_git_directory(tmp_path: Path, cg: ConcurrencyGroup) -> None:
+    """Test that UnisonSyncer always excludes .git directory."""
     source = tmp_path / "source"
     target = tmp_path / "target"
     source.mkdir()
@@ -139,8 +130,9 @@ def test_unison_syncer_excludes_nothing_it_was_not_asked_to(tmp_path: Path, cg: 
     )
 
     cmd = syncer._build_unison_command()
+    cmd_str = " ".join(cmd)
 
-    assert ".git" not in " ".join(cmd)
+    assert ".git" in cmd_str
 
 
 def test_unison_syncer_is_not_running_initially(tmp_path: Path, cg: ConcurrencyGroup) -> None:
@@ -494,31 +486,3 @@ def test_remote_syncer_force_names_the_full_ssh_root(tmp_path: Path, cg: Concurr
     cmd = syncer._build_unison_command()
 
     assert cmd[cmd.index("-force") + 1] == "ssh://root@10.0.0.4//work/repo"
-
-
-def test_progress_is_read_from_unisons_own_narration() -> None:
-    """Taken from a real 2.54 run, so the shape is unison's rather than one we invented."""
-    progress = parse_transfer_progress(" 70%  1/3  (12.0 MiB of 17.0 MiB)  --:-- ETA")
-    assert progress is not None
-    assert progress.bytes_done == 12 * 1024**2
-    assert progress.bytes_total == 17 * 1024**2
-
-
-def test_progress_in_bytes_is_read_without_a_unit_prefix() -> None:
-    progress = parse_transfer_progress("100%  1/1  (5 B of 5 B)  00:00:00 ETA")
-    assert progress is not None
-    assert (progress.bytes_done, progress.bytes_total) == (5, 5)
-
-
-@pytest.mark.parametrize(
-    "line",
-    [
-        "Looking for changes",
-        "Synchronization complete at 13:09:34  (3 items transferred, 0 skipped, 0 failed)",
-        "17.0 MiB to be synced from sz1 to sz2",
-        "",
-    ],
-)
-def test_lines_that_carry_no_progress_are_ignored(line: str) -> None:
-    """Nearly every line, so this must be cheap and quiet rather than a parse failure."""
-    assert parse_transfer_progress(line) is None

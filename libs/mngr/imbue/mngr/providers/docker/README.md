@@ -103,11 +103,7 @@ create_host(name, image, ...)
     3. Create host volume directory at volumes/<host_id>/ (if enabled).
        Required in both shared and isolated mode -- the latter because
        `volume-subpath` fails if the path is missing inside the volume.
-    4. Run container: docker run -d --name <prefix><name> -p <ssh publish spec> ...
-       - `-p 127.0.0.1::22` for a local daemon (empty `host` or unix://),
-         `-p :22` (all interfaces) for a remote one (ssh:// or tcp://), or
-         `-p <ssh_bind_address>::22` when that setting is given; on a local
-         daemon mngr SSHes to the bound address (127.0.0.1 for a wildcard bind)
+    4. Run container: docker run -d --name <prefix><name> -p :22 ...
        - shared mode:   -v <state_volume>:/mngr-state:rw
        - isolated mode: --mount type=volume,source=<state_volume>,target=<host_dir>,
                               volume-subpath=volumes/<host_id>

@@ -15,9 +15,6 @@ from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 
 
-# FIXME: lol, what the hell is that record of changes?
-#  also, this is a nightmare to merge
-#  please break the history into something that merges more cleanly.
 def test_schema_version_tracks_breaking_wire_changes() -> None:
     """Bumped to 2 when the inbox detail payload replaced its flat permission
     lists with server-grouped rows, to 3 when every offered connection started
@@ -47,36 +44,8 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     missing the renamed no-op field, so a machine that merely never answered
     would be badged as a restart that failed, and by matching neither recovery
     value, so an in-flight recovery would raise no band and a failed one no
-    card, while the content stayed withheld either way; and to 10 when Local files
-    became one row per shared path, carrying the access the agent holds and the
-    sync running on it, in place of one row per granted permission name, so an
-    older client reads a field that is gone and lists nothing at all where the
-    user's shared paths used to be, and to 12 when the bootstrap seed gained a
-    required ``is_onboarding_complete`` flag, and to 15 when a shared path's sync gained
-    RESTARTING as a state -- an older client has no label for a value it has
-    never seen, so a sync coming back up on a changed setting would show a
-    blank status where it says what it is doing -- and to 16 when the three
-    folder-sync routes moved out from under ``permissions/`` to their own
-    ``folder-syncs/`` prefix, so an older window's clicks would post to URLs
-    that are no longer registered and every one of them would 404, and to 17
-    when a shared path gained ``sync_overlap_warning`` -- an older window drops
-    it, so a folder another workspace also syncs would be offered with nothing
-    said about it, and to 18 when a failed sync gained a retry route -- an
-    older window has no way to ask for it, so a sync that failed on its own is
-    a resting place it cannot leave, and to 19 when the sync state gained
-    UNKNOWN -- an older window has no label for it, so a folder that should be
-    syncing and is not would show a blank status, which is the very thing the
-    state was added to stop, and to 20 when a shared path gained
-    ``sync_unavailable_reason`` -- an older window drops it and so offers the
-    option on folders that cannot have it, which is the silent refusal the
-    field exists to prevent, and to 21 when the poll's rows gained
-    ``overlap_warning`` -- an older window drops it and so keeps whatever
-    warning it opened with, which is the staleness the field was added to
-    end, and to 22 when a shared path lost ``is_directory`` -- nothing read it
-    once the reason a folder cannot be synced was sent as a sentence, and an
-    older window reads its absence as "not a folder" and hides the option on
-    every row."""
-    assert UI_SCHEMA_VERSION == 22
+    card, while the content stayed withheld either way."""
+    assert UI_SCHEMA_VERSION == 9
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -85,7 +54,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 22}
+    assert parsed == {"type": "hello", "schema_version": 9}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -139,11 +108,6 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "AgentHealth",
             "DiscoveryHealth",
             "EnvironmentCondition",
-            "FileSharingAccess",
-            "FolderSyncActivity",
-            "FolderSyncConflict",
-            "FolderSyncDirection",
-            "FolderSyncState",
             "HostRecoveryKind",
             "NotificationOutcome",
             "ProviderPanelStatus",
@@ -159,17 +123,11 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiCredentialParameter",
             "UiDiscoveryHealthMessage",
             "UiEnvironmentMessage",
-            "UiFolderSyncDiscardCopyRequest",
-            "UiFolderSyncRetryRequest",
-            "UiFolderSyncRow",
-            "UiFolderSyncToggleRequest",
-            "UiFolderSyncs",
             "UiHealthMessage",
             "UiHelloMessage",
             "UiNotificationEntry",
             "UiNotificationsMessage",
             "UiOpenHelpMessage",
-            "UiPathSync",
             "UiPermissionConnection",
             "UiPermissionGrantGroup",
             "UiPermissionGrantRow",
@@ -183,9 +141,6 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiSelfPermissionToggle",
             "UiSelfToggleRequest",
             "UiServiceSignIn",
-            "UiSharedPath",
-            "UiSharedPathRemoveRequest",
-            "UiSharedPathRequest",
             "UiSnapshot",
             "UiWaitingPermissionRequest",
             "UiWorkspaceEntry",

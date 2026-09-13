@@ -1,34 +1,11 @@
 """Shared pytest fixtures for the mngr_codex package tests."""
 
 import json
-from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
-from websockets.sync.server import ServerConnection
-from websockets.sync.server import unix_serve
 
 from imbue.mngr_codex.codex_config import get_codex_auth_path
-
-
-@pytest.fixture
-def codex_large_frame_socket() -> Iterator[Path]:
-    def handle(connection: ServerConnection) -> None:
-        for message in connection:
-            connection.send("x" * (2 * 1024 * 1024) if message == "history" else "ready")
-
-    # Keep the Unix socket path short enough for macOS as well as Linux.
-    with TemporaryDirectory(prefix="codex-ws-", dir="/tmp") as directory:
-        socket_path = Path(directory) / "socket"
-        with unix_serve(handle, path=str(socket_path), compression=None) as server:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                executor.submit(server.serve_forever)
-                try:
-                    yield socket_path
-                finally:
-                    server.shutdown()
 
 
 @pytest.fixture

@@ -3,13 +3,10 @@ import {
   backupsControlFor,
   healthBadgeLabelFor,
   isMachineStateKnown,
-  keyStateChipFor,
   lifecycleConfirmation,
-  livenessBadgeLabelFor,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
-  removeRecordFailureMessage,
   rowClickActionFor,
 } from "./landing-controls";
 
@@ -26,20 +23,6 @@ describe("mindControlsFor", () => {
       isStartShown: false,
       isStopShown: true,
     });
-  });
-
-  it("withholds Start from a machine an operator is holding, or whose stop kind this build does not know", () => {
-    for (const stopKind of ["maintenance", "suspension", "unknown"]) {
-      expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy")).toEqual({
-        isStartShown: false,
-        isStopShown: false,
-      });
-    }
-    for (const stopKind of ["", "owner", "idle"]) {
-      expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy").isStartShown).toBe(
-        true,
-      );
-    }
   });
 
   it("offers neither when the liveness is unknown or transitioning", () => {
@@ -81,13 +64,6 @@ describe("mindControlsFor", () => {
 });
 
 describe("rowClickActionFor", () => {
-  it("blocks a cloud machine this device holds no key for, whatever its health or liveness", () => {
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "locked" }, "RUNNING", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "syncing" }, "RUNNING", false)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "unavailable" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, key_state: "" }, "RUNNING", true)).toBe("enter");
-  });
-
   it("routes an unhealthy machine to recovery regardless of liveness", () => {
     expect(rowClickActionFor({ supports_shutdown: true }, "STOPPED", false)).toBe("recover");
     expect(rowClickActionFor({ supports_shutdown: false }, "RUNNING", false)).toBe("recover");
@@ -103,34 +79,6 @@ describe("rowClickActionFor", () => {
     expect(rowClickActionFor({ supports_shutdown: true }, "RUNNING", true)).toBe("enter");
     expect(rowClickActionFor({ supports_shutdown: false }, "STOPPED", true)).toBe("enter");
     expect(rowClickActionFor({}, "UNKNOWN", true)).toBe("enter");
-  });
-
-  it("blocks the row of a held machine and routes an idle-stopped one to the start", () => {
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPING", false)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "unknown" }, "STOPPED", true)).toBe("blocked");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "idle" }, "STOPPED", true)).toBe("recover-start");
-    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "RUNNING", true)).toBe("enter");
-  });
-});
-
-describe("livenessBadgeLabelFor", () => {
-  it("says Maintenance for a held machine that is stopped or stopping, and the lifecycle label otherwise", () => {
-    expect(livenessBadgeLabelFor("STOPPED", "maintenance")).toBe("Maintenance");
-    expect(livenessBadgeLabelFor("STOPPING", "maintenance")).toBe("Maintenance");
-    expect(livenessBadgeLabelFor("STARTING", "maintenance")).toBe("Starting…");
-    expect(livenessBadgeLabelFor("STOPPED", "idle")).toBe("Stopped");
-    expect(livenessBadgeLabelFor("STOPPED", "")).toBe("Stopped");
-    expect(livenessBadgeLabelFor("WEIRD", "")).toBe("Status unknown");
-  });
-});
-
-describe("keyStateChipFor", () => {
-  it("names the remedy for each state and nothing for a machine this device can open", () => {
-    expect(keyStateChipFor("locked")?.label).toBe("Enter your master password to open");
-    expect(keyStateChipFor("syncing")?.label).toBe("Syncing access…");
-    expect(keyStateChipFor("unavailable")?.label).toBe("No access from this device");
-    expect(keyStateChipFor("")).toBeNull();
   });
 });
 
@@ -307,25 +255,5 @@ describe("backupsControlFor", () => {
         false,
       );
     }
-  });
-});
-
-describe("removeRecordFailureMessage", () => {
-  it("relays the server's own explanation for a refused removal", () => {
-    const refusal = "This machine still holds its cloud lease, so its record cannot be removed; destroy the workspace instead.";
-    expect(removeRecordFailureMessage(409, { error: refusal })).toBe(
-      `Could not remove this machine from the list: ${refusal}`,
-    );
-  });
-
-  it("falls back to the status when the response carries no explanation", () => {
-    expect(removeRecordFailureMessage(502, null)).toBe("Could not remove this machine from the list: HTTP 502");
-    expect(removeRecordFailureMessage(404, {})).toBe("Could not remove this machine from the list: HTTP 404");
-  });
-
-  it("names a request that never got an answer", () => {
-    expect(removeRecordFailureMessage(null, null)).toBe(
-      "Could not remove this machine from the list (the request failed).",
-    );
   });
 });

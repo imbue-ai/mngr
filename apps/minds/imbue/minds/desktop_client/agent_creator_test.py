@@ -48,13 +48,10 @@ from imbue.minds.desktop_client.agent_creator import checkout_existing_branch
 from imbue.minds.desktop_client.agent_creator import classify_create_attempt_error
 from imbue.minds.desktop_client.agent_creator import clone_git_repo
 from imbue.minds.desktop_client.agent_creator import extract_repo_name
-from imbue.minds.desktop_client.agent_creator import is_default_workspace_template_url
 from imbue.minds.desktop_client.agent_creator import latchkey_gateway_location_for_launch
-from imbue.minds.desktop_client.agent_creator import latest_release_tag_from_ls_remote_output
 from imbue.minds.desktop_client.agent_creator import make_scratch_clone_root
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
-from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
@@ -69,8 +66,6 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
-from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
-from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
 from imbue.minds.errors import MngrCommandError
@@ -89,61 +84,6 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
-
-
-def test_latest_release_tag_prefers_the_minds_scheme_over_newer_plain_semver_tags() -> None:
-    output = (
-        "aaaa\trefs/tags/v0.3.0\n"
-        "bbbb\trefs/tags/minds-v0.5.2\n"
-        "cccc\trefs/tags/minds-v0.6.0\n"
-        "dddd\trefs/tags/minds-v0.6.0^{}\n"
-        "eeee\trefs/tags/v9.9.9\n"
-    )
-    assert latest_release_tag_from_ls_remote_output(output) == "minds-v0.6.0"
-
-
-def test_latest_release_tag_falls_back_to_plain_semver_when_no_minds_tags_exist() -> None:
-    output = "aaaa\trefs/tags/v1.2.3\nbbbb\trefs/tags/v1.10.0\ncccc\trefs/tags/v1.9.9\n"
-    assert latest_release_tag_from_ls_remote_output(output) == "v1.10.0"
-
-
-def test_latest_release_tag_is_none_when_nothing_matches() -> None:
-    assert latest_release_tag_from_ls_remote_output("aaaa\trefs/tags/release-candidate\n") is None
-    assert latest_release_tag_from_ls_remote_output("") is None
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        DEFAULT_WORKSPACE_TEMPLATE_GIT_URL,
-        DEFAULT_WORKSPACE_TEMPLATE_GIT_URL.removesuffix(".git"),
-        DEFAULT_WORKSPACE_TEMPLATE_GIT_URL.removesuffix(".git") + "/",
-        DEFAULT_WORKSPACE_TEMPLATE_GIT_URL.upper(),
-    ],
-)
-def test_is_default_workspace_template_url_tolerates_suffix_and_case_variants(url: str) -> None:
-    assert is_default_workspace_template_url(url)
-
-
-def test_is_default_workspace_template_url_rejects_other_repos() -> None:
-    assert not is_default_workspace_template_url("https://github.com/imbue-ai/mngr.git")
-
-
-def test_resolve_template_version_uses_the_app_pin_for_the_default_template_with_no_branch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Scrub any operator dev-loop vars left in the shell (`just minds-start`
-    # sets them): under the opt-in the default repo is a local path, and the
-    # public URL would fall through to the network.
-    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
-    monkeypatch.delenv("MINDS_WORKSPACE_GIT_URL", raising=False)
-    monkeypatch.delenv("MINDS_WORKSPACE_BRANCH", raising=False)
-    # No network: the default template never reaches ``git ls-remote``.
-    assert resolve_template_version(DEFAULT_WORKSPACE_TEMPLATE_GIT_URL, "") == default_workspace_template_ref()
-
-
-def test_resolve_template_version_keeps_an_explicit_branch() -> None:
-    assert resolve_template_version(DEFAULT_WORKSPACE_TEMPLATE_GIT_URL, "mngr/some-branch") == "mngr/some-branch"
 
 
 def test_extract_repo_name_strips_dot_git_and_trailing_slash() -> None:
@@ -1038,10 +978,6 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     assert (dest / "f").read_text() == "uncommitted edit\n"
 
 
-# Seen timing out at the 10s mark under a parallel run, with the root
-# concurrency group already EXITED -- a real git clone racing teardown under
-# load rather than anything about the branch it is checking. Passes alone.
-@pytest.mark.flaky
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
     """Requesting a branch that does not exist fails at clone time (cleanly)."""
     origin = tmp_path / "origin"

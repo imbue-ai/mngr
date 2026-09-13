@@ -7,7 +7,6 @@ const { initElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
 const { initSentry, captureManualReport } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
-const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
@@ -16,7 +15,6 @@ const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink')
 const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('./surface-routing');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 const updater = require('./updater');
-const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -111,7 +109,7 @@ const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null;
 let hasCompletedInitialStart = false;
-// The app's FIRST-window route (session restore / start flow / consent) has not
+// The app's FIRST-window route (session restore / welcome / consent) has not
 // landed on a window yet: either it is still being computed, or the window it
 // was for was closed mid-startup. Set once per launch and cleared by
 // applyStartupRouting, which IS that landing.
@@ -133,32 +131,6 @@ const SHELL_EVENT_DEDUPE_WINDOW_MS = 3000;
 
 function getSessionStatePath() {
   return path.join(paths.getDataDir(), 'window-state.json');
-}
-
-// The loading document's first-launch intro plays once per install. Electron
-// owns this marker because Electron is the only thing that plays the film; the
-// backend separately owns whether onboarding is complete.
-function getIntroSeenPath() {
-  return path.join(paths.getDataDir(), 'intro-seen.json');
-}
-
-function hasSeenIntro() {
-  try {
-    return fs.existsSync(getIntroSeenPath());
-  } catch (err) {
-    console.warn('[startup] could not read the intro-seen marker; skipping the intro:', err.message);
-    return true;
-  }
-}
-
-// Written when the film STARTS, so a quit during it still counts as seen.
-function markIntroSeen() {
-  try {
-    fs.mkdirSync(paths.getDataDir(), { recursive: true });
-    fs.writeFileSync(getIntroSeenPath(), JSON.stringify({ has_seen_intro: true }));
-  } catch (err) {
-    console.warn('[startup] could not write the intro-seen marker:', err.message);
-  }
 }
 
 function toAbsoluteUrl(url) {
@@ -338,9 +310,9 @@ function computeTitleFor(bundle) {
   if (agentId) {
     const ws = workspaceList.find((w) => sameWorkspaceId(w.id, agentId));
     const name = ws ? (ws.name || ws.id) : null;
-    return name ? `${name} — Mind` : 'Mind';
+    return name ? `${name} — Minds` : 'Minds';
   }
-  return 'Mind';
+  return 'Minds';
 }
 
 function updateOsTitle(bundle) {
@@ -408,7 +380,7 @@ function buildBundleWindowOptions() {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: 'Mind',
+    title: 'Minds',
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#ffffff',
@@ -447,11 +419,6 @@ function createBundle() {
     showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
-    // Resolves once this window's loading document reports its intro over
-    // (played, skipped, or never shown). Only the startup window can play it;
-    // every other window starts already resolved.
-    introFinished: Promise.resolve(),
-    resolveIntroFinished: () => {},
   };
   bundles.add(bundle);
   mruWindows.unshift(bundle);
@@ -500,7 +467,7 @@ function wireBundleWindowEvents(bundle) {
 
   win.on('close', (event) => {
     // Off macOS, closing the LAST window quits the app; route that close
-    // through the quit sequence so the workspace shutdown prompt appears
+    // through the quit sequence so the local-mind shutdown prompt appears
     // BEFORE the window disappears. If the user cancels, the window stays open.
     // On macOS the app keeps running with no windows, so the last close is an
     // ordinary window close and the prompt fires only on an explicit Quit.
@@ -525,9 +492,6 @@ function wireBundleWindowEvents(bundle) {
     const mruIdx = mruWindows.indexOf(bundle);
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
     if (initialBundle === bundle) initialBundle = null;
-    // A window closed mid-intro can never report the film over; the startup
-    // route waiting on it must not wait forever.
-    bundle.resolveIntroFinished();
   });
 }
 
@@ -1260,13 +1224,13 @@ ipcMain.on('shell-event', (event, evt) => {
   }
 });
 
-const WORKSPACE_HTTP_TIMEOUT_MS = 10000;
-const WORKSPACE_COMMAND_TIMEOUT_MS = 150000;
+const MIND_HTTP_TIMEOUT_MS = 10000;
+const MIND_COMMAND_TIMEOUT_MS = 150000;
 
-function getRunningWorkspaces() {
+function getRunningMinds() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
-      console.warn('[workspace-shutdown] no backend URL; cannot list running workspaces');
+      console.warn('[mind-shutdown] no backend URL; cannot list running minds');
       resolve({ ok: false, running: [] });
       return;
     }
@@ -1274,7 +1238,7 @@ function getRunningWorkspaces() {
     try {
       req = net.request({ url: backendBaseUrl + '/api/v1/desktop/running-workspaces', method: 'GET', useSessionCookies: true });
     } catch (e) {
-      console.warn('[workspace-shutdown] failed to construct running-workspaces request:', e);
+      console.warn('[mind-shutdown] failed to construct running-minds request:', e);
       resolve({ ok: false, running: [] });
       return;
     }
@@ -1283,13 +1247,13 @@ function getRunningWorkspaces() {
     let statusOk = false;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     const timer = setTimeout(() => {
-      console.warn(`[workspace-shutdown] running-workspaces request timed out after ${WORKSPACE_HTTP_TIMEOUT_MS}ms`);
+      console.warn(`[mind-shutdown] running-minds request timed out after ${MIND_HTTP_TIMEOUT_MS}ms`);
       try { req.abort(); } catch { /* noop */ }
       settle({ ok: false, running: [] });
-    }, WORKSPACE_HTTP_TIMEOUT_MS);
+    }, MIND_HTTP_TIMEOUT_MS);
     req.on('response', (response) => {
       statusOk = response.statusCode < 400;
-      if (!statusOk) console.warn(`[workspace-shutdown] running-workspaces returned HTTP ${response.statusCode}`);
+      if (!statusOk) console.warn(`[mind-shutdown] running-minds returned HTTP ${response.statusCode}`);
       response.on('data', (chunk) => { body += chunk.toString(); });
       response.on('end', () => {
         clearTimeout(timer);
@@ -1298,21 +1262,21 @@ function getRunningWorkspaces() {
           const parsed = JSON.parse(body);
           settle({ ok: true, running: Array.isArray(parsed.running) ? parsed.running : [] });
         } catch (e) {
-          console.warn('[workspace-shutdown] failed to parse running-workspaces response:', e);
+          console.warn('[mind-shutdown] failed to parse running-minds response:', e);
           settle({ ok: false, running: [] });
         }
       });
-      response.on('error', (err) => { console.warn('[workspace-shutdown] running-workspaces response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] running-minds response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
     });
-    req.on('error', (err) => { console.warn('[workspace-shutdown] running-workspaces request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+    req.on('error', (err) => { console.warn('[mind-shutdown] running-minds request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
     req.end();
   });
 }
 
-function postStopWorkspaceHosts(agentIds) {
+function postStopMinds(agentIds) {
   return new Promise((resolve) => {
     if (!backendBaseUrl || !agentIds || agentIds.length === 0) {
-      console.warn('[workspace-shutdown] no backend URL or no agent ids; cannot bulk-stop workspaces');
+      console.warn('[mind-shutdown] no backend URL or no agent ids; cannot bulk-stop minds');
       resolve({ ok: false, stillRunning: [] });
       return;
     }
@@ -1321,7 +1285,7 @@ function postStopWorkspaceHosts(agentIds) {
     try {
       req = net.request({ url: `${backendBaseUrl}/api/v1/desktop/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
     } catch (e) {
-      console.warn('[workspace-shutdown] failed to construct bulk-stop request:', e);
+      console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
       resolve({ ok: false, stillRunning: [] });
       return;
     }
@@ -1330,13 +1294,13 @@ function postStopWorkspaceHosts(agentIds) {
     let statusOk = false;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     const timer = setTimeout(() => {
-      console.warn(`[workspace-shutdown] bulk-stop request timed out after ${WORKSPACE_COMMAND_TIMEOUT_MS}ms`);
+      console.warn(`[mind-shutdown] bulk-stop request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
       try { req.abort(); } catch { /* noop */ }
       settle({ ok: false, stillRunning: [] });
-    }, WORKSPACE_COMMAND_TIMEOUT_MS);
+    }, MIND_COMMAND_TIMEOUT_MS);
     req.on('response', (response) => {
       statusOk = response.statusCode < 400;
-      if (!statusOk) console.warn(`[workspace-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
+      if (!statusOk) console.warn(`[mind-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
       response.on('data', (chunk) => { body += chunk.toString(); });
       response.on('end', () => {
         clearTimeout(timer);
@@ -1345,13 +1309,13 @@ function postStopWorkspaceHosts(agentIds) {
           const parsed = JSON.parse(body);
           settle({ ok: true, stillRunning: Array.isArray(parsed.still_running) ? parsed.still_running : [] });
         } catch (e) {
-          console.warn('[workspace-shutdown] failed to parse bulk-stop response:', e);
+          console.warn('[mind-shutdown] failed to parse bulk-stop response:', e);
           settle({ ok: false, stillRunning: [] });
         }
       });
-      response.on('error', (err) => { console.warn('[workspace-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
     });
-    req.on('error', (err) => { console.warn('[workspace-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    req.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
     req.end();
   });
 }
@@ -1359,7 +1323,7 @@ function postStopWorkspaceHosts(agentIds) {
 function postStopStateContainer() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
-      console.warn('[workspace-shutdown] no backend URL; cannot stop state container');
+      console.warn('[mind-shutdown] no backend URL; cannot stop state container');
       resolve();
       return;
     }
@@ -1367,48 +1331,48 @@ function postStopStateContainer() {
     try {
       req = net.request({ url: backendBaseUrl + '/api/v1/desktop/state-container/stop', method: 'POST', useSessionCookies: true });
     } catch (e) {
-      console.warn('[workspace-shutdown] failed to construct stop-state-container request:', e);
+      console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
       resolve();
       return;
     }
     let settled = false;
     const settle = () => { if (!settled) { settled = true; resolve(); } };
     const timer = setTimeout(() => {
-      console.warn(`[workspace-shutdown] stop-state-container request timed out after ${WORKSPACE_COMMAND_TIMEOUT_MS}ms`);
+      console.warn(`[mind-shutdown] stop-state-container request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
       try { req.abort(); } catch { /* noop */ }
       settle();
-    }, WORKSPACE_COMMAND_TIMEOUT_MS);
+    }, MIND_COMMAND_TIMEOUT_MS);
     req.on('response', (response) => {
-      if (response.statusCode >= 400) console.warn(`[workspace-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
+      if (response.statusCode >= 400) console.warn(`[mind-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
       response.on('data', () => {});
       response.on('end', () => { clearTimeout(timer); settle(); });
-      response.on('error', (err) => { console.warn('[workspace-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
     });
-    req.on('error', (err) => { console.warn('[workspace-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
+    req.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
     req.end();
   });
 }
 
-async function stopAllWorkspacesThenDecide(running) {
+async function stopAllMindsThenDecide(running) {
   let remaining = running;
   while (true) {
-    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 workspace…' : `Stopping ${remaining.length} workspaces…`);
-    const stopIds = remaining.map((workspace) => workspace.id);
-    console.log('[workspace-shutdown] posting bulk stop for', JSON.stringify(stopIds));
-    const { ok, stillRunning } = await postStopWorkspaceHosts(stopIds);
-    console.log(`[workspace-shutdown] bulk stop result: ok=${ok} stillRunning=${JSON.stringify(stillRunning)}`);
+    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
+    const stopIds = remaining.map((mind) => mind.id);
+    console.log('[mind-shutdown] posting bulk stop for', JSON.stringify(stopIds));
+    const { ok, stillRunning } = await postStopMinds(stopIds);
+    console.log(`[mind-shutdown] bulk stop result: ok=${ok} stillRunning=${JSON.stringify(stillRunning)}`);
     if (ok && stillRunning.length === 0) {
       await postStopStateContainer();
       return true;
     }
     const blocked = stillRunning.length > 0 ? stillRunning : remaining;
-    const names = blocked.map((workspace) => workspace.name).join(', ');
+    const names = blocked.map((mind) => mind.name).join(', ');
     const { response } = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel quit', 'Quit anyway', 'Retry'],
       defaultId: 2,
       cancelId: 0,
-      message: blocked.length === 1 ? 'A workspace could not be stopped' : 'Some workspaces could not be stopped',
+      message: blocked.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
       detail: `${names}\n\nRetry stopping them, quit anyway (they keep running and using resources), or cancel and stay open.`,
     });
     if (response === 0) return false;
@@ -1417,38 +1381,38 @@ async function stopAllWorkspacesThenDecide(running) {
   }
 }
 
-async function promptWorkspaceShutdown() {
+async function promptMindShutdown() {
   if (!getBackendProcess() || !backendBaseUrl) return { proceed: true, stop: false, running: [] };
-  const { ok, running } = await getRunningWorkspaces();
+  const { ok, running } = await getRunningMinds();
   if (!ok) {
     const { response } = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel', 'Quit anyway'],
       defaultId: 1,
       cancelId: 0,
-      message: 'Could not check for running workspaces',
-      detail: 'Any workspaces still running on this computer would keep using its resources. '
+      message: 'Could not check for running minds',
+      detail: 'Any local minds still running would keep using your computer\'s resources. '
         + 'Quit anyway (they may keep running in the background), or cancel and stay open.',
     });
     if (response === 0) return { proceed: false, stop: false, running: [] };
     return { proceed: true, stop: false, running: [] };
   }
-  console.log('[workspace-shutdown] prompt: running workspaces =', JSON.stringify(running));
+  console.log('[mind-shutdown] prompt: running minds =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
-  const names = running.map((workspace) => workspace.name).join(', ');
+  const names = running.map((mind) => mind.name).join(', ');
   const { response } = await dialog.showMessageBox({
     type: 'question',
     buttons: ['Cancel', 'Leave running', 'Shut down all'],
     defaultId: 2,
     cancelId: 0,
     message: running.length === 1
-      ? '1 workspace is still running on this computer'
-      : `${running.length} workspaces are still running on this computer`,
+      ? '1 local mind is still running'
+      : `${running.length} local minds are still running`,
     detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
       + 'Shutting them down stops their agents and makes their services inaccessible '
       + '(your data is preserved and you can start them again).',
   });
-  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
+  console.log(`[mind-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
   if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
@@ -1456,8 +1420,8 @@ async function promptWorkspaceShutdown() {
 
 function fetchAppStatus(timeoutMs = 25000) {
   // One GET to /ui/api/app-status to learn auth status, the restore inputs
-  // (is_onboarding_complete, workspace_count, restorable ids), and whether
-  // the error-reporting notice still needs acknowledging. See the startup
+  // (has_accounts, workspace_count, restorable ids), and whether the
+  // error-reporting notice still needs acknowledging. See the startup
   // sequence for how the result routes the cold-start landing screen.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -1501,9 +1465,7 @@ function fetchAppStatus(timeoutMs = 25000) {
           const parsed = JSON.parse(body);
           finish({
             authenticated: !!parsed.is_authenticated,
-            // Absent on a backend that predates the flag: such a backend has
-            // no start flow to route to either.
-            isOnboardingComplete: parsed.is_onboarding_complete !== false,
+            hasAccounts: !!parsed.has_accounts,
             workspaceCount: typeof parsed.workspace_count === 'number' ? parsed.workspace_count : 0,
             restorableWorkspaceIds: Array.isArray(parsed.restorable_workspace_ids)
               ? parsed.restorable_workspace_ids.map(String)
@@ -1576,13 +1538,6 @@ async function onReady() {
     restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
   }
   updater.init({ onStatus: broadcastUpdateStatus });
-  // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the "Mind"
-  // rename has been on stable long enough for installs to have launched once.
-  // A dev run shares the machine with an installed app, whose directories these
-  // would be. Deferred so the delete cannot hold up the first window.
-  if (app.isPackaged) {
-    setImmediate(removeLegacyNameDirs);
-  }
   await runStartupSequence(initialBundle);
 }
 
@@ -1620,7 +1575,7 @@ function installApplicationMenu() {
   appMenuInstalled = true;
   const template = [
     {
-      label: app.name || 'Mind',
+      label: app.name || 'Minds',
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -1702,21 +1657,9 @@ function installDevDockIcon() {
 async function runStartupSequence(bundle) {
   console.log('[startup] Loading shell.html...');
   bundle.isLoadingState = true;
-  const isIntroDue = !hasSeenIntro();
-  if (isIntroDue) {
-    // Held open until the document says the film is over, so the first route
-    // never lands mid-intro (see startBackendWithRetry).
-    bundle.introFinished = new Promise((resolve) => {
-      bundle.resolveIntroFinished = resolve;
-    });
-    markIntroSeen();
-  }
   try {
-    await bundle.window.webContents.loadFile(
-      path.join(__dirname, 'shell.html'),
-      isIntroDue ? { hash: 'intro' } : {},
-    );
-    console.log(`[startup] shell.html loaded (intro=${isIntroDue})`);
+    await bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'));
+    console.log('[startup] shell.html loaded');
   } catch (err) {
     // Closing the window mid-load rejects the load. This sequence owns the
     // backend start and the one-time code, so it runs on without a window.
@@ -1724,10 +1667,7 @@ async function runStartupSequence(bundle) {
   }
 
   try {
-    await runEnvSetup(
-      (status) => broadcastStatusToLoadingWindows(status),
-      (line) => broadcastStartupLogLine(line),
-    );
+    await runEnvSetup((status) => broadcastStatusToLoadingWindows(status));
   } catch (err) {
     console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
@@ -1740,26 +1680,14 @@ async function runStartupSequence(bundle) {
   await startBackendWithRetry();
 }
 
-function sendToLoadingWindows(channel, payload) {
+function broadcastStatusToLoadingWindows(status) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
     if (!b.isLoadingState) continue;
     if (!b.window.webContents.isDestroyed()) {
-      b.window.webContents.send(channel, payload);
+      b.window.webContents.send('status-update', status);
     }
   }
-}
-
-function broadcastStatusToLoadingWindows(status) {
-  sendToLoadingWindows('status-update', status);
-}
-
-// One line of startup console output for the loading document's "Show
-// details" log. Lines carrying a credential the app consumes itself (the
-// one-time login code, the forward tokens) never reach the page.
-function broadcastStartupLogLine(line) {
-  if (isSecretStartupLogLine(line)) return;
-  sendToLoadingWindows('status-log-line', line);
 }
 
 // Consume the backend's one-time login code so the default session -- used by
@@ -1792,7 +1720,7 @@ async function computeStartupRouting() {
   const savedState = loadSessionState();
   const appStatus = await fetchAppStatus();
   const authenticated = appStatus && appStatus.authenticated;
-  const isOnboardingComplete = !!(appStatus && appStatus.isOnboardingComplete);
+  const hasAccounts = !!(appStatus && appStatus.hasAccounts);
 
   const restorableWorkspaceIds = (authenticated && appStatus.restorableWorkspaceIds) || [];
   const knownAgentIdsSet = restorableWorkspaceIds.length > 0
@@ -1806,13 +1734,13 @@ async function computeStartupRouting() {
   const needsConsent = !!(appStatus && appStatus.needsErrorReportingConsent);
   const route = decideStartupRoute({
     authenticated,
-    isOnboardingComplete,
+    hasAccounts,
     workspaceCount,
     restorableCount: restorable.length,
     needsConsent,
   });
   console.log(
-    `[startup] route=${route} authenticated=${authenticated} isOnboardingComplete=${isOnboardingComplete} workspaceCount=${workspaceCount} restorableCount=${restorable.length} needsConsent=${needsConsent}`,
+    `[startup] route=${route} authenticated=${authenticated} hasAccounts=${hasAccounts} workspaceCount=${workspaceCount} restorableCount=${restorable.length} needsConsent=${needsConsent}`,
   );
   return { route, restorable, savedState };
 }
@@ -1833,8 +1761,8 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
   // This IS the first-window route landing, so nothing is owed any more.
   isStartupRoutingPending = false;
   const wc = bundle.window.webContents;
-  if (route === 'start') {
-    wc.loadURL(backendBaseUrl + '/start').catch(() => {});
+  if (route === 'welcome') {
+    wc.loadURL(backendBaseUrl + '/welcome').catch(() => {});
     return;
   }
   if (route === 'consent') {
@@ -1868,7 +1796,7 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
 }
 
 async function startBackendWithRetry() {
-  broadcastStatusToLoadingWindows('Starting Mind...');
+  broadcastStatusToLoadingWindows('Starting Minds...');
 
   try {
     const { loginUrl, port } = await startBackend(
@@ -1876,7 +1804,6 @@ async function startBackendWithRetry() {
       (event) => handleNotification(event),
       (event) => handleAuthEvent(event),
       (event) => handleMngrForwardStarted(event),
-      (line) => broadcastStartupLogLine(line),
     );
 
     // `localhost` (not `127.0.0.1`) so the auth cookie, issued with
@@ -1890,36 +1817,6 @@ async function startBackendWithRetry() {
 
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
-
-    // Attached before the routing waits below (the one-time code, the app
-    // status probe, and on a first launch the loading document's intro), so a
-    // backend that dies during any of them is reported rather than missed.
-    const proc = getBackendProcess();
-    if (proc) {
-      proc.on('exit', (code) => {
-        // The direct child is `uv run`, which traps SIGTERM (forwarding it on)
-        // and reports the backend's death as a plain exit status: a graceful
-        // stop is 0, a backend killed out from under us is uv's nonzero 128+n.
-        // So shutdown()'s SIGTERM on a quit or a retry arrives as 0, and the
-        // one thing that arrives as null -- a real signal death -- is its
-        // SIGKILL escalation, SIGKILL being the signal uv cannot trap. Not
-        // airtight (any SIGKILL of uv reads the same), but treating that as a
-        // crash would pop the error screen over an escalated teardown.
-        if (code === 0 || code === null) return;
-        console.error(
-          `[backend] exited unexpectedly with code ${code} (${bundles.size} window(s) open)`,
-        );
-        // Deliberately NOT gated on there being a window. Recording the
-        // takeover is what makes the crash recoverable: with none open it is
-        // replayed into the next window the user opens, so they get the error
-        // screen and its Retry instead of a fresh window loaded at the dead
-        // port -- whose own Reload button only re-loads that same dead port.
-        showErrorInAllWindows(
-          'Mind stopped unexpectedly',
-          readLastLogLines(50) || `Process exited with code ${code}`,
-        );
-      });
-    }
 
     if (isFirstStart) {
       // The first-window route is now owed. Marked BEFORE the awaits below so a
@@ -1944,18 +1841,7 @@ async function startBackendWithRetry() {
       const isInitialAlive = initialBundle && !initialBundle.window.isDestroyed();
       const target = isInitialAlive ? initialBundle : getMostRecentWindow();
       if (target) {
-        // A first launch may still be playing the loading document's intro;
-        // the route waits for it rather than cutting the film short.
-        await target.introFinished;
-        if (lastErrorTakeover) {
-          // The backend died while the film played. The takeover owns the
-          // window now; landing the route would paint the dead port over it.
-          console.log('[startup] the backend failed during the intro; leaving the error takeover up');
-        } else if (!target.window.isDestroyed()) {
-          applyStartupRouting(target, routing, { boundsAlreadyApplied: isInitialAlive });
-        } else {
-          console.log('[startup] the startup window closed during the intro; holding the route for the next one');
-        }
+        applyStartupRouting(target, routing, { boundsAlreadyApplied: isInitialAlive });
       } else {
         // Nothing is open at all. macOS keeps the app alive, so leave the route
         // owed rather than popping windows up unprompted a minute after the
@@ -1968,8 +1854,35 @@ async function startBackendWithRetry() {
     }
 
     flushPendingDeeplink();
+
+    const proc = getBackendProcess();
+    if (proc) {
+      proc.on('exit', (code) => {
+        // The direct child is `uv run`, which traps SIGTERM (forwarding it on)
+        // and reports the backend's death as a plain exit status: a graceful
+        // stop is 0, a backend killed out from under us is uv's nonzero 128+n.
+        // So shutdown()'s SIGTERM on a quit or a retry arrives as 0, and the
+        // one thing that arrives as null -- a real signal death -- is its
+        // SIGKILL escalation, SIGKILL being the signal uv cannot trap. Not
+        // airtight (any SIGKILL of uv reads the same), but treating that as a
+        // crash would pop the error screen over an escalated teardown.
+        if (code === 0 || code === null) return;
+        console.error(
+          `[backend] exited unexpectedly with code ${code} (${bundles.size} window(s) open)`,
+        );
+        // Deliberately NOT gated on there being a window. Recording the
+        // takeover is what makes the crash recoverable: with none open it is
+        // replayed into the next window the user opens, so they get the error
+        // screen and its Retry instead of a fresh window loaded at the dead
+        // port -- whose own Reload button only re-loads that same dead port.
+        showErrorInAllWindows(
+          'Minds stopped unexpectedly',
+          readLastLogLines(50) || `Process exited with code ${code}`,
+        );
+      });
+    }
   } catch (err) {
-    showErrorInAllWindows('Failed to start Mind', err.message);
+    showErrorInAllWindows('Failed to start Minds', err.message);
   }
 }
 
@@ -2010,7 +1923,7 @@ function handleDeeplink(rawUrl) {
     // documented contract for it.
     //
     // An explicit deeplink outranks a first-window route still owed (the docs'
-    // rule: a deeplink wins over the start flow), and settles it -- this
+    // rule: a deeplink wins over the welcome screen), and settles it -- this
     // window is where the launch landed, so a later Cmd+N must not still pop
     // the restored session open.
     isStartupRoutingPending = false;
@@ -2217,12 +2130,15 @@ async function handleMngrForwardStarted(event) {
 }
 
 function handleAuthEvent(event) {
-  // auth_success needs nothing from the shell: sign-in happens on the hosted
-  // browser page and the SPA's accounts channel frame carries the new identity
-  // to every window, which advances whatever it was doing (the start flow's
-  // account step, the accounts page) in place. A reload here would throw that
-  // away.
-  if (event.event === 'auth_required') {
+  if (event.event === 'auth_success') {
+    // Sign-in happens on the hosted browser page; the SPA's accounts channel
+    // frame carries the new identity, but pre-WS surfaces (and any window
+    // stuck on a stale state) pick it up from a plain reload.
+    for (const b of bundles) {
+      if (b.window.isDestroyed() || b.window.webContents.isDestroyed()) continue;
+      b.window.webContents.reload();
+    }
+  } else if (event.event === 'auth_required') {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
@@ -2303,11 +2219,6 @@ ipcMain.on('reload-chrome', (event) => {
   else if (backendBaseUrl) bundle.window.webContents.loadURL(backendBaseUrl + '/').catch(() => {});
 });
 
-ipcMain.on('intro-finished', (event) => {
-  const senderBundle = getBundleFromEvent(event);
-  if (senderBundle) senderBundle.resolveIntroFinished();
-});
-
 ipcMain.on('retry', async (event) => {
   const senderBundle = getBundleFromEvent(event);
   if (senderBundle) focusBundle(senderBundle);
@@ -2379,14 +2290,14 @@ async function runQuitSequence() {
   let plan = { proceed: true, stop: false, running: [] };
   try {
     if (!isHeadlessQuit) {
-      plan = await promptWorkspaceShutdown();
+      plan = await promptMindShutdown();
       if (!plan.proceed) {
         isQuitSequenceRunning = false;
         return;
       }
     }
   } catch (err) {
-    console.warn('[lifecycle] workspace shutdown prompt failed, quitting anyway:', err);
+    console.warn('[lifecycle] local-mind shutdown prompt failed, quitting anyway:', err);
     plan = { proceed: true, stop: false, running: [] };
   }
 
@@ -2398,9 +2309,9 @@ async function runQuitSequence() {
   if (plan.stop && plan.running.length > 0) {
     let shouldProceed = true;
     try {
-      shouldProceed = await stopAllWorkspacesThenDecide(plan.running);
+      shouldProceed = await stopAllMindsThenDecide(plan.running);
     } catch (err) {
-      console.warn('[lifecycle] stopping workspaces failed, quitting anyway:', err);
+      console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);
     }
     if (!shouldProceed) {
       isShuttingDown = false;

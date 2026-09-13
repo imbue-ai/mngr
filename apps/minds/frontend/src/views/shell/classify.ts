@@ -7,11 +7,7 @@ import type { OptionsTab } from "../../models/workspaceOptions";
 import { toOptionsTab } from "../../models/workspaceOptions";
 
 export interface TitlebarContext {
-  /** `start`: the first-run start flow, whose titlebar holds only the centered
-   * mark. `creating`: a create attempt's page, rendered like a workspace
-   * context with `workspaceAnyId` holding the attempt id (its list row already
-   * carries the name and accent). */
-  kind: "home" | "workspace" | "page" | "start" | "creating";
+  kind: "home" | "workspace" | "page" | "welcome";
   workspaceAnyId: string | null;
   activeTab: OptionsTab | null;
   pageLabel: string;
@@ -46,13 +42,6 @@ function pageContext(label: string): TitlebarContext {
 }
 
 const ID_SEGMENT = "((?:agent|host)-[a-f0-9]+)";
-const CREATE_ATTEMPT_ID_SEGMENT = "(create-attempt-[a-f0-9]+)";
-
-/** The create attempt id when `path` is the creation page, else null. */
-export function creatingAttemptIdFromPath(path: string): string | null {
-  const match = path.match(new RegExp(`^/creating/${CREATE_ATTEMPT_ID_SEGMENT}$`, "i"));
-  return match ? match[1] : null;
-}
 
 /** The workspace id when `path` is the workspace content surface
  * (/workspace/<agent-or-host-id>, no sub-page suffix), else null. */
@@ -84,7 +73,7 @@ export function isWorkspaceOverlayPath(path: string): boolean {
 }
 
 /** App-level modal routes the Shell floats as a centered overlay over the
- * surface they were opened from (Mind settings, Accounts, Get help, the
+ * surface they were opened from (Minds settings, Accounts, Get help, the
  * request-review popup, and the AI-keys mint dialog)
  * instead of a full breadcrumbed page. The AI-keys mint dialog is
  * workspace-triggered ("Sign in with Imbue" inside a machine) and floats over
@@ -174,15 +163,11 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
       ? workspaceContext(behind, null)
       : pageContext("New machine");
   }
-  const creatingAttemptId = creatingAttemptIdFromPath(path);
-  if (creatingAttemptId !== null) {
-    return { kind: "creating", workspaceAnyId: creatingAttemptId, activeTab: null, pageLabel: "" };
-  }
   if (path === "/create" || path.startsWith("/creating/")) {
     return pageContext("New machine");
   }
   if (isAppOverlayPath(path)) {
-    // Mind settings / Accounts / Get help / the request popup / the AI-keys
+    // Minds settings / Accounts / Get help / the request popup / the AI-keys
     // mint dialog float as a centered modal over the surface they were opened
     // from; the titlebar keeps that surface's context (the workspace behind Get
     // help / the popup / AI-keys, else Home) rather than a standalone page.
@@ -192,16 +177,20 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (path === "/workspaces/destroyed")
     return pageContext("Recently destroyed");
   if (path === "/consent") return pageContext("Consent");
-  if (path === "/start") {
-    return { kind: "start", workspaceAnyId: null, activeTab: null, pageLabel: "" };
+  if (path === "/welcome") {
+    return {
+      kind: "welcome",
+      workspaceAnyId: null,
+      activeTab: null,
+      pageLabel: "",
+    };
   }
   return HOME_CONTEXT;
 }
 
 /** Which workspace's accent (if any) a route belongs to (accent survives on
- * workspace-scoped pages like destroying/recovery, exactly as before). A
- * creation page takes its in-flight attempt's accent. */
+ * workspace-scoped pages like destroying/recovery, exactly as before). */
 export function accentSourceForRoute(path: string, search = ""): string | null {
   const context = classifyRoute(path, search);
-  return context.kind === "workspace" || context.kind === "creating" ? context.workspaceAnyId : null;
+  return context.kind === "workspace" ? context.workspaceAnyId : null;
 }

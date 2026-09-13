@@ -31,7 +31,6 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
-import { MAINTENANCE_MESSAGE, isOwnerStartableStopKind } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { RecoveryPanel } from "../recovery/RecoveryCard";
 import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
@@ -47,8 +46,6 @@ interface RecoveryState {
    * reading of the state that recovery was meant to change, so returning on it
    * would leave without doing the thing the click-through came to do. */
   isDispatchSettled: boolean;
-  /** The sentence shown instead of dispatching a start the connector would refuse; null otherwise. */
-  heldMessage: string | null;
 }
 
 /**
@@ -107,12 +104,7 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     // crafted deeplink cannot turn the return into an open redirect.
     vnode.state.returnTo = rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") ? rawReturnTo : null;
     vnode.state.hasReturned = false;
-    // A start of a machine an operator is holding would only be refused: the
-    // page says so instead of dispatching, in the connector's own words.
-    const entry = getAppContext().shell.stores.workspaces.entryByAnyId(workspaceAnyId);
-    const isHeld = intent === "start" && !isOwnerStartableStopKind(entry?.stop_kind ?? "");
-    vnode.state.heldMessage = isHeld ? MAINTENANCE_MESSAGE : null;
-    const dispatchKind: RecoveryKind | null = !isHeld && (intent === "start" || intent === "restart") ? intent : null;
+    const dispatchKind: RecoveryKind | null = intent === "start" || intent === "restart" ? intent : null;
     vnode.state.isDispatchSettled = dispatchKind === null;
     const model = new RecoveryModel(workspaceAnyId, browserLifecycleDeps(() => m.redraw()));
     vnode.state.model = model;
@@ -155,17 +147,6 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
       return m(
         PageContainer,
         m("div", { class: "flex items-center gap-2 pt-10" }, [m(Spinner, { size: "sm" }), "Loading..."]),
-      );
-    }
-    // Only while the machine is not answering: once the operator's start
-    // brings it back, the panel (and its Open machine) takes over.
-    if (vnode.state.heldMessage !== null && !isMachineAnswering(model)) {
-      return m(
-        PageContainer,
-        m("div", { class: "flex flex-col gap-4 pt-10" }, [
-          m("h1", { class: "type-heading-lg" }, "Machine maintenance"),
-          m(Notice, { variant: "info" }, vnode.state.heldMessage),
-        ]),
       );
     }
     return m(

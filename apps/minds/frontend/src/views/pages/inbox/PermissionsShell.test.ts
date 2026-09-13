@@ -196,7 +196,7 @@ describe("PermissionsShell manual credentials", () => {
     const nodes = renderShell(
       modelWithDetail({
         ...MANUAL_DETAIL,
-        manual_credentials: { parameters: [], message: "Mind cannot work out which credentials to ask for" },
+        manual_credentials: { parameters: [], message: "Minds cannot work out which credentials to ask for" },
       }),
     );
 

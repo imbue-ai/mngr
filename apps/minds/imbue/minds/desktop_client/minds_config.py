@@ -211,26 +211,13 @@ class MindsConfig(MutableModel):
         """Return whether the user has seen and answered the error-reporting consent screen. Default: False.
 
         Gates the first-launch consent screen: while False, the consent screen is shown ahead of
-        the home page; once the user answers it (either way) this flips to True and stays there.
+        welcome/login; once the user answers it (either way) this flips to True and stays there.
         """
         return self._get_bool("error_reporting_consent_given", default=False)
 
     def set_error_reporting_consent_given(self, given: bool) -> None:
         """Record that the user has answered the error-reporting consent screen."""
         self._set_bool("error_reporting_consent_given", given)
-
-    def get_is_onboarding_complete(self) -> bool:
-        """Return whether this installation has been taken past the first-run start flow. Default: False.
-
-        Flips to True once the user starts creating a workspace (any surface) or signs in
-        from the start flow's "I already have one" answer; while False and no workspace
-        exists, a launch lands on the start flow.
-        """
-        return self._get_bool("is_onboarding_complete", default=False)
-
-    def set_is_onboarding_complete(self, is_complete: bool) -> None:
-        """Record whether the installation has been taken past the first-run start flow."""
-        self._set_bool("is_onboarding_complete", is_complete)
 
     def get_report_unexpected_errors(self) -> bool:
         """Return whether unexpected errors (with their log/traceback attachments) are reported to

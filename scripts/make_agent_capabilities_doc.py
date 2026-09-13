@@ -37,7 +37,6 @@ from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
-from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -61,15 +60,12 @@ _USAGE_PLUGIN_SUFFIX: Final[str] = "_usage"
 _USAGE_SOURCE_HOOK: Final[str] = "aggregate_usage_source"
 
 # Agent types excluded from the matrix: task-specialized skill variants that reuse a
-# parent agent's class wholesale (only injecting a SKILL.md), mngr-proxy-child (an
-# internal proxy, not a user-facing port), and witness-claude (claude with the unattended
-# defaults `mngr witness` needs). They are not distinct enough to warrant their
+# parent agent's class wholesale (only injecting a SKILL.md), plus mngr-proxy-child (an
+# internal proxy, not a user-facing port). They are not distinct enough to warrant their
 # own column -- a reader wants the parent's row. (headless_claude is deliberately NOT here:
 # it runs `claude --print` with genuinely different logic, so its capabilities can
 # legitimately diverge from claude's and are worth showing.)
-_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset(
-    {"code-guardian", "fixme-fairy", "mngr-proxy-child", "witness-claude"}
-)
+_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset({"code-guardian", "fixme-fairy", "mngr-proxy-child"})
 
 # The fixed left-to-right column order for the matrix: the primary Claude ports first,
 # then the other CLI ports, with the thin shell-command runners last. Every registered
@@ -300,13 +296,6 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.",
         detection_kind=CapabilityDetectionKind.USAGE_SOURCE,
         scope=CapabilityScope.CLI_BACKED_ONLY,
-    ),
-    AgentCapability(
-        key="compaction",
-        description="Supports manually triggering context compaction for active context management.",
-        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
-        scope=CapabilityScope.INTERACTIVE_ONLY,
-        mixin=HasCompactionMixin,
     ),
     # The headless-output row is kept last: it applies only to headless agent variants.
     AgentCapability(

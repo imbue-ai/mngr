@@ -22,7 +22,10 @@ The pending record itself is deleted only on DONE -- a failed destroy keeps
 the row visible with the error, per the reliability decision log.
 """
 
+import os
+import shlex
 import shutil
+import subprocess
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -37,8 +40,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.destroying import is_pid_alive
-from imbue.minds.desktop_client.destroying import read_exit_code_file
-from imbue.minds.desktop_client.destroying import spawn_detached_destroy
 
 _DISCARDING_DIR_NAME: Final[str] = "discarding_create_attempts"
 _PID_FILE_NAME: Final[str] = "pid"
@@ -93,17 +94,36 @@ def start_discard_of_host(
     dir_path = _discard_dir(paths, create_attempt_id)
     dir_path.mkdir(parents=True, exist_ok=True)
     log_path = dir_path / _LOG_FILE_NAME
-    pid = spawn_detached_destroy(
-        [mngr_binary, "destroy", f"@{host_id}.{provider_name}", "--force"],
-        log_path,
-        dir_path / _EXIT_CODE_FILE_NAME,
-        env,
+    # Truncate leftovers so a retry does not show the previous run's output,
+    # and clear a stale exit_code so the fresh run reads RUNNING.
+    log_path.write_bytes(b"")
+    (dir_path / _EXIT_CODE_FILE_NAME).unlink(missing_ok=True)
+
+    # ``host_id`` / ``provider_name`` come from mngr's own JSON listing (no
+    # untrusted input), and every substitution is shlex-quoted anyway.
+    shell_command = "{} destroy {} --force; echo $? > {}".format(
+        shlex.quote(mngr_binary),
+        shlex.quote(f"@{host_id}.{provider_name}"),
+        shlex.quote(str(dir_path / _EXIT_CODE_FILE_NAME)),
     )
-    (dir_path / _PID_FILE_NAME).write_text(f"{pid}\n")
+    log_handle = log_path.open("ab")
+    try:
+        process = subprocess.Popen(
+            ["bash", "-c", shell_command],
+            stdin=subprocess.DEVNULL,
+            stdout=log_handle,
+            stderr=log_handle,
+            env=dict(os.environ) if env is None else dict(env),
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_handle.close()
+    (dir_path / _PID_FILE_NAME).write_text(f"{process.pid}\n")
     logger.info(
         "Started detached discard for create attempt {} (pid={}, host={}, provider={})",
         create_attempt_id,
-        pid,
+        process.pid,
         host_id,
         provider_name,
     )
@@ -152,10 +172,16 @@ def read_discard(create_attempt_id: str, paths: InstallationPaths) -> CreateAtte
     if pid is not None and is_pid_alive(pid):
         status = CreateAttemptDiscardStatus.RUNNING
     else:
-        exit_code = read_exit_code_file(dir_path / _EXIT_CODE_FILE_NAME)
-        if exit_code == 0:
+        exit_code_path = dir_path / _EXIT_CODE_FILE_NAME
+        exit_code_text = ""
+        if exit_code_path.is_file():
+            try:
+                exit_code_text = exit_code_path.read_text().strip()
+            except OSError as e:
+                logger.warning("Could not read discard exit-code file {}: {}", exit_code_path, e)
+        if exit_code_text == "0":
             status = CreateAttemptDiscardStatus.DONE
-        elif exit_code is not None:
+        elif exit_code_text:
             status = CreateAttemptDiscardStatus.FAILED
         elif pid is None:
             # Neither a pid nor an exit code: the spawn never got as far as

@@ -64,18 +64,6 @@ terminal `DESTROYED` state is treated as gone:
 3. Every active surface (the Landing list, the workspace chrome list, the
    backup-status panel, and the destroy-status checks that feed
    `read_destroying`) calls `list_active_workspace_ids()`.
-4. The shared discovery aggregator (`libs/mngr/.../discovery_aggregator.py`)
-   keeps a DESTROYED tombstone for a host on its `HostDestroyedEvent` rather
-   than forgetting it. An earlier version of the aggregator forgot the host,
-   which reintroduced the false "failed" for the poll interval between the
-   event and the provider's next snapshot re-listing the host as DESTROYED:
-   with no state for the host, the status check fell back to the last clean
-   snapshot, which still listed it.
-5. The detached `mngr destroy` records its exit status (`exit_code` beside the
-   `pid` file). A non-zero status reads as FAILED whatever the host reads as;
-   a zero status keeps the host-gone gate above for DONE. A failed destroy whose
-   host is already gone has no active-list row, so the landing extras carry it
-   as an orphaned failed destroy and the Landing list renders a row for it.
 
 Result: destroyed workspaces drop off the active list, `read_destroying` returns
 `DONE` (no more bogus `FAILED`), and the destroyed-host info remains available

@@ -95,16 +95,9 @@ host = ""                    # Docker host URL (empty = local daemon)
 default_image = "debian:bookworm-slim"
 default_start_args = ["--cpus=2", "--memory=4g"]  # Default docker run flags
 default_idle_timeout = 800
-# ssh_bind_address = "0.0.0.0"  # Host IP the container's published SSH port binds to
 ```
 
 Set `host` to connect to a remote Docker daemon (e.g., `ssh://user@server` or `tcp://host:2376`).
-
-### SSH port binding
-
-Each container's sshd is published on a random host port. By default that port binds to `127.0.0.1` when the daemon is local (`host` empty or a `unix://` socket), so the container is not reachable from the machine's LAN, and to all interfaces when the daemon is remote (`ssh://` or `tcp://`), since mngr reaches remote containers via the daemon's hostname. Set `ssh_bind_address` to an IP address to override either default, for example `"0.0.0.0"` to expose local containers to the LAN. On a local daemon mngr then connects to that address (a wildcard bind is reached via `127.0.0.1`), so it must be an IPv4 address. A loopback address is rejected for a remote daemon because mngr could not reach the container.
-
-The binding is fixed when the container is created: existing containers keep theirs across stop/start, and pick up the current setting on a snapshot restore or recreate.
 
 ## Limitations
 

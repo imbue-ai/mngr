@@ -1,9 +1,9 @@
-// Layer-0 smoke: confirm Mind.app launches to a usable state.
+// Layer-0 smoke: confirm minds.app launches to a usable state.
 //
 // A successful launch can land on any of the SPA's cold-start routes:
 //   - the machines list / home (a runner with prior auth state, like a
 //     logged-in dev machine),
-//   - the first-run start flow (vanilla macos-latest CI runner),
+//   - the first-run welcome splash (vanilla macos-latest CI runner),
 //   - the once-per-install error-reporting notice, or
 //   - a restored workspace window (dev machine with saved session state).
 //
@@ -13,12 +13,12 @@
 
 const { test, expect } = require('./fixtures');
 
-test('main window launches to a usable state (home, start flow, consent, or a restored workspace)', async ({ mindsApp }, testInfo) => {
+test('main window launches to a usable state (Create or Welcome)', async ({ mindsApp }, testInfo) => {
   const { mainWindow, app, pickContentWindow } = mindsApp;
   // Assert against the content window, not firstWindow(): firstWindow()
   // can return the SPA title-bar view (Projects / Home / Back /
   // Forward, no auth UI), which carries none of the landing elements.
-  // pickContentWindow returns the view that renders the start flow or
+  // pickContentWindow returns the view that renders the welcome splash or
   // projects home.
   let content;
   try {
@@ -29,11 +29,11 @@ test('main window launches to a usable state (home, start flow, consent, or a re
     // titlebar #minds-titlebar deliberately does NOT count: it also renders
     // on the RouteError page, so it can't prove a good landing):
     //   #landing-minds-settings  the home page's fixed settings launcher
-    //   #start-flow              the first-run start flow (the chat that creates the first workspace)
+    //   #welcome-signup-btn      the first-run welcome splash (three-choice gate)
     //   #consent-continue        the error-reporting notice
     //   #content-frame           the workspace surface (restored session)
     const landingMarker = content.locator(
-      '#landing-minds-settings, #start-flow, #consent-continue, #content-frame'
+      '#landing-minds-settings, #welcome-signup-btn, #consent-continue, #content-frame'
     );
     await expect(landingMarker.first()).toBeVisible({ timeout: 2 * 60 * 1000 });
   } finally {

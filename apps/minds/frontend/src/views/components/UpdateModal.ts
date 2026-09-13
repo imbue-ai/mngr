@@ -84,7 +84,7 @@ function modalTitle(update: UiWorkspaceUpdate, workspaceName: string): string {
     // every machine; titling it after this one invites a hunt for a fault in it.
     return update.unknown_reason === "NO_APP_VERSION" ? "This build can't compare versions" : `${workspaceName}'s version`;
   }
-  if (update.availability === "APP_BEHIND") return `${workspaceName} is ahead of Mind`;
+  if (update.availability === "APP_BEHIND") return `${workspaceName} is ahead of Minds`;
   if (isRecreationRequired(update)) return `${workspaceName} needs a new machine`;
   return `Update ${workspaceName}`;
 }
@@ -175,7 +175,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "Mind can't detect the version of this machine.",
+        "Minds can't detect the version of this machine.",
       ),
       m(
         "p",
@@ -194,17 +194,17 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "This build of Mind tracks a branch rather than a released version, so it has nothing to " +
+        "This build of Minds tracks a branch rather than a released version, so it has nothing to " +
           "compare machines against. Every machine reads as unknown here, whatever version it is on.",
       ),
       m("div", { class: "flex flex-col gap-1" }, [
         updateVersionRow("This machine", update.current_version),
-        updateVersionRow("This build of Mind", update.supported_version),
+        updateVersionRow("This build of Minds", update.supported_version),
       ]),
       m(
         "p",
         { class: "type-helper text-tertiary" },
-        "A released Mind compares each machine against the template version it ships with. You can still " +
+        "A released Minds compares each machine against the template version it ships with. You can still " +
           "run the update: the agent inside the machine reads its own upstream, and may find there's nothing to do.",
       ),
       // Dev-loop instructions in product copy: a released build is pinned to a
@@ -232,7 +232,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
       m(
         "p",
         { class: "type-body text-secondary" },
-        "This machine is running a version of Mind too old to update in place. " +
+        "This machine is running a version of Minds too old to update in place. " +
           "To get it up to date, create a new machine and move your work across.",
       ),
       m("ol", { class: "type-helper text-secondary list-decimal pl-5 flex flex-col gap-1" }, [
@@ -250,7 +250,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     return m(
       "p",
       { class: "type-body text-secondary" },
-      `This machine (${update.current_version}) is newer than this copy of Mind ` +
+      `This machine (${update.current_version}) is newer than this copy of Minds ` +
         `(${update.supported_version}). Update the app to catch up — there's nothing to run here.`,
     );
   }
@@ -275,7 +275,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         body.push(
           m("div", { class: "flex flex-col gap-1" }, [
             updateVersionRow("This machine", update.current_version),
-            updateVersionRow("Supported by Mind", update.supported_version),
+            updateVersionRow("Supported by Minds", update.supported_version),
           ]),
         );
         const labelNote = update.is_version_from_label

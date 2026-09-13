@@ -16,7 +16,7 @@ import { SectionHeader } from "../../components/Layout";
 import { TextInput } from "../../components/FormControls";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type { SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
-import { formatMachineSize, formatPendingMachineSize, normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
+import { normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
 import {
   devOverridePrefill,
   isRecreationRequired,
@@ -166,7 +166,7 @@ function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
     update.availability === "UP_TO_DATE"
       ? "This machine is up to date."
       : update.availability === "APP_BEHIND"
-        ? "This machine is newer than this copy of Mind. Update the app to catch up."
+        ? "This machine is newer than this copy of Minds. Update the app to catch up."
         : isRecreationRequired(update)
           ? "This machine is too old to update in place. Create a new machine and ask its agent to migrate your work across."
           : "";
@@ -246,7 +246,7 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
     m(SectionHeader, "Version"),
     m("div", { class: "flex flex-col gap-1 mb-8" }, [
       updateVersionRow("This machine", update.current_version ?? ""),
-      updateVersionRow("Supported by Mind", update.supported_version ?? ""),
+      updateVersionRow("Supported by Minds", update.supported_version ?? ""),
     ]),
     m(SectionHeader, "Update"),
     m("div", { id: "ws-updates-group", class: "mb-3" }, [
@@ -384,13 +384,13 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
                     ? m(
                         "p",
                         { class: "type-helper text-tertiary" },
-                        "Prefilled with the template ref this build of Mind runs from.",
+                        "Prefilled with the template ref this build of Minds runs from.",
                       )
                     : null,
                   m(
                     "p",
                     { class: "type-helper text-tertiary" },
-                    "Works on an up-to-date machine too. A version newer than this Mind app, a branch, or a bare " +
+                    "Works on an up-to-date machine too. A version newer than this Minds app, a branch, or a bare " +
                       "ref is allowed and applied without further confirmation: it may not be a tested release, " +
                       "parts of this machine may stop working until the app catches up, and the update agent " +
                       'offers a rollback afterwards. On a branch, this machine may afterwards read as "version unknown".',
@@ -534,8 +534,6 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
         : null,
     ]),
 
-    renderMachineSizeSection(model),
-
     m(SectionHeader, "ID"),
     m("p", { class: "type-body font-mono text-secondary mb-8 select-all break-all" }, data.agent_id),
 
@@ -560,30 +558,6 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
       ? m("p", { id: "destroy-error", class: "type-body text-important mt-2" }, model.destroyErrorMessage)
       : null,
   ]);
-}
-
-/** Read-only machine size for leased machines (specs/slice-fleet): current
- * size plus a passive restart-to-apply note when a resize is pending. Hidden
- * entirely (null) until the lazy size fetch succeeds. */
-function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
-  const size = model.machineSize;
-  if (size === null || !size.is_available) return null;
-  const currentLabel = formatMachineSize(size);
-  if (!currentLabel) return null;
-  const pendingLabel = formatPendingMachineSize(size);
-  return [
-    m(SectionHeader, "Machine size"),
-    m("div", { id: "machine-size-section", class: "mb-8" }, [
-      m("p", { class: "type-body text-secondary" }, currentLabel),
-      pendingLabel
-        ? m(
-            Notice,
-            { variant: "info" },
-            `A new size is pending (${pendingLabel}). Restart this machine to apply it.`,
-          )
-        : null,
-    ]),
-  ];
 }
 
 async function saveColorDraft(

@@ -3,8 +3,6 @@
 // everything testable lives here.
 
 import m from "mithril";
-import type { OnboardingProgress } from "./onboarding";
-import { onboardingProgress } from "./onboarding";
 
 // ---- /ui/api/create response shapes (hand-typed: the per-area /ui/api
 // bodies are not part of the generated channel schema yet). Keep in sync
@@ -58,30 +56,16 @@ export interface CreateFormDefaults {
   prefill: CreateRetryPrefill | null;
 }
 
-export interface OrphanedFailedDestroy {
-  agent_id: string;
-  name: string;
-  accent: string;
-}
-
 export interface LandingExtras {
   destroying_status_by_agent_id: Record<string, string>;
-  orphaned_failed_destroys: OrphanedFailedDestroy[];
   locked_account_emails: string[];
   is_discovery_complete: boolean;
   has_restorable_workspaces: boolean;
 }
 
-/** The settings a create attempt was submitted with, as the creation page restates them. */
-export interface CreateAttemptRequestSummary {
-  display_name: string;
-  launch_mode: string;
-  cloud_account: string;
-  backup_provider: string;
-  region: string;
-  instance_type: string;
-  repository: string;
-  branch: string;
+export interface OnboardingCloudApp {
+  icon: string;
+  name: string;
 }
 
 export interface LiveCreateAttemptDetail {
@@ -89,7 +73,7 @@ export interface LiveCreateAttemptDetail {
   provider_label: string;
   is_remote: boolean;
   expected_duration_seconds: number;
-  request: CreateAttemptRequestSummary;
+  onboarding_services: OnboardingCloudApp[];
 }
 
 export interface CreateAttemptDetail {
@@ -102,7 +86,6 @@ export interface CreateAttemptDetail {
     error_kind: string | null;
     log_tail: string[];
     provider_label: string;
-    request: CreateAttemptRequestSummary;
   } | null;
 }
 
@@ -123,56 +106,6 @@ export function fetchLandingExtras(): Promise<LandingExtras> {
 
 export function fetchCreateAttemptDetail(createAttemptId: string): Promise<CreateAttemptDetail> {
   return fetchJson<CreateAttemptDetail>(`/ui/api/create/attempts/${encodeURIComponent(createAttemptId)}`);
-}
-
-/** What the create front door answered: the HTTP status and its JSON body (or {} when it sent none). */
-export interface CreateSubmitResult {
-  status: number;
-  data: Record<string, unknown>;
-}
-
-/**
- * POST a create request to the single create front door (``/api/v1/workspaces``).
- * Shared by the create form and the start flow's form-less cloud submit, so
- * the two can never drift on how a create is asked for. Resolves with status 0
- * when the server could not be reached at all.
- *
- * An accepted create completes onboarding (the server records the same fact
- * for every surface), so this window's copy flips here too, and the home page
- * never bounces a window that just created something back to the start flow.
- */
-export async function submitCreateRequest(
-  body: Record<string, unknown>,
-  fetcher: (url: string, init?: RequestInit) => Promise<Response> = (url, init) => fetch(url, init),
-  progress: OnboardingProgress = onboardingProgress,
-): Promise<CreateSubmitResult> {
-  try {
-    const response = await fetcher("/api/v1/workspaces", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (response.status === 202) progress.markComplete();
-    return { status: response.status, data };
-  } catch {
-    return { status: 0, data: {} };
-  }
-}
-
-// ---- How the compute and backup enums are said. One home for both, so the
-// create form's options and the creation page's summary of what was chosen
-// cannot name the same value differently.
-
-/** A launch mode as the create form offers it. */
-export function launchModeLabel(launchMode: string): string {
-  return launchMode === "MODAL" ? "Modal (1-day ephemeral)" : launchMode.toLowerCase();
-}
-
-/** A backup provider as the create form offers it. */
-export function backupProviderLabel(backupProvider: string): string {
-  return backupProvider === "API_KEY" ? "manual" : backupProvider.toLowerCase();
 }
 
 // ---- Name validation (port of the Create form's live host-name rules).

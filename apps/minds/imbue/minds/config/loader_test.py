@@ -2,18 +2,11 @@ from pathlib import Path
 
 import pytest
 from pydantic import AnyUrl
-from pydantic import ValidationError
 
-from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
-from imbue.minds.config.data_types import ManagementPlaneConfig
-from imbue.minds.config.data_types import SshCaConfig
-from imbue.minds.config.data_types import management_overlay_for_tier
 from imbue.minds.config.loader import EnvConfigError
-from imbue.minds.config.loader import _assert_operators_inside_tier_operator_block
 from imbue.minds.config.loader import bundled_client_config_path_or_none
-from imbue.minds.config.loader import committed_deploy_config_tiers
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import per_env_secret_services
@@ -94,12 +87,6 @@ def test_deploy_config_secrets_match_canonical_per_env_services(tier: str) -> No
     assert set(config.secrets.services) == set(per_env_secret_services())
 
 
-def test_committed_deploy_config_tiers_lists_only_the_directories_with_a_deploy_toml() -> None:
-    # ``ci-snapshot/`` (client.toml only) and ``_bundled/`` sit alongside the
-    # tiers under envs/ and must not be reported as tiers.
-    assert committed_deploy_config_tiers() == ["ci", "dev", "production", "staging"]
-
-
 def test_load_deploy_config_unknown_tier_raises() -> None:
     with pytest.raises(EnvConfigError, match="No deploy config found for tier"):
         load_deploy_config("not_a_real_tier")
@@ -143,87 +130,3 @@ def test_every_committed_deploy_toml_analytics_enablement_matches_bringup_state(
     """Analytics is on only for tiers whose bringup runbook has run (staging + production: 2026-08-26); flipping a tier is a deliberate edit."""
     config = load_deploy_config(tier)
     assert config.analytics.is_deployed is is_deployed
-
-
-def test_management_plane_loader_rejects_an_operator_outside_the_tier_operator_block() -> None:
-    # The block membership check lives in the loader (only it knows the tier);
-    # an address in the tier's BOX range would eventually collide with a box.
-    config = ManagementPlaneConfig.model_validate(
-        {"wireguard": {"operators": [{"name": "josh", "public_key": "opkey1=", "address": "10.112.1.5"}]}}
-    )
-
-    with pytest.raises(EnvConfigError, match="operator block"):
-        _assert_operators_inside_tier_operator_block(config, "dev", Path("deploy.toml"))
-
-
-def test_committed_ci_deploy_toml_has_no_management_plane() -> None:
-    # The ci tier's gen-2 boxes stay open on purpose (no Modal Proxy, no :22
-    # lockdown); pinned so a [management_plane] table there is deliberate.
-    assert load_deploy_config("ci").management_plane is None
-
-
-@pytest.mark.parametrize(
-    ("tier", "static_ip"),
-    [
-        ("staging", "98.90.51.49"),
-        ("production", "52.206.40.121"),
-    ],
-)
-def test_committed_shared_tier_deploy_toml_carries_its_management_plane(tier: str, static_ip: str) -> None:
-    # Both shared tiers' proxies were created on 2026-09-13 (Modal us-east) and
-    # every gen-2 box on the tier allowlists exactly these addresses on :22, so
-    # an edit here changes who can reach the fleet's management sshd.
-    config = load_deploy_config(tier).management_plane
-
-    assert config is not None
-    assert int(config.wireguard.listen_port) == 51820
-    assert len(config.wireguard.operators) >= 1
-    operator_block = management_overlay_for_tier(tier).operator_block
-    assert all(operator.address in operator_block for operator in config.wireguard.operators)
-    assert config.modal_proxy is not None
-    assert str(config.modal_proxy.proxy_name) == "mind-connector-east"
-    assert str(config.modal_proxy.environment_name) == "main"
-    assert [str(ip) for ip in config.modal_proxy.static_ips] == [static_ip]
-
-
-def test_committed_dev_deploy_toml_carries_the_activated_management_plane() -> None:
-    # The dev tier's [management_plane] table is activated (the gen-2 canary's
-    # management plane): at least one operator peer, and the shared workspace
-    # proxy named with its environment and at least one allowlisted static IP.
-    config = load_deploy_config("dev").management_plane
-
-    assert config is not None
-    assert int(config.wireguard.listen_port) == 51820
-    assert len(config.wireguard.operators) >= 1
-    # Every committed operator sits inside the dev tier's operator block (the
-    # loader enforces it; this pins the committed file itself).
-    dev_operator_block = management_overlay_for_tier("dev").operator_block
-    assert all(operator.address in dev_operator_block for operator in config.wireguard.operators)
-    assert config.modal_proxy is not None
-    assert str(config.modal_proxy.proxy_name) == "minds-dev-connector"
-    assert str(config.modal_proxy.environment_name) == "main"
-    assert len(config.modal_proxy.static_ips) >= 1
-
-
-def test_ssh_ca_config_accepts_an_openssh_public_key_line_and_rejects_junk() -> None:
-    config = SshCaConfig(public_key=NonEmptyStr("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFAKE minds-dev-ssh-ca"))
-    assert str(config.public_key).startswith("ssh-ed25519 ")
-    with pytest.raises(ValidationError):
-        SshCaConfig(public_key=NonEmptyStr("not-a-key"))
-
-
-@pytest.mark.parametrize(
-    ("tier", "ca_key"),
-    [
-        ("dev", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDn/NBtT5XWAmOSPj2S6kXsvEPAoORm1x3ZSkRIX+XW"),
-        ("ci", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO1I1Y1NYn86jMrvCxLkIoMq7nXCNiMgxf6Am1BtCUCO"),
-        ("staging", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIImy5mn5Tp2Ofq17LQVNhlq2Ldyb5NQSyvLagAMKx7rq"),
-    ],
-)
-def test_committed_deploy_toml_carries_the_tier_ca_from_its_vault_mount(tier: str, ca_key: str) -> None:
-    # dev and ci brought their CAs up on 2026-09-09, staging on 2026-09-13; every
-    # gen-2 box, VM, and container on the tier pins exactly this key, so an edit
-    # here is a CA rotation, and no two tiers may share a key.
-    ssh_ca = load_deploy_config(tier).ssh_ca
-    assert ssh_ca is not None
-    assert str(ssh_ca.public_key).startswith(ca_key)

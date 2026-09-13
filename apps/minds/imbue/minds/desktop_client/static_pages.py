@@ -30,7 +30,7 @@ def build_static_page_html(body_html: str, head_extra: str = "") -> str:
         "<!doctype html>\n"
         '<html lang="en">\n'
         f'<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>Mind</title><style>{_PAGE_STYLE}</style>{head_extra}</head>\n"
+        f"<title>minds</title><style>{_PAGE_STYLE}</style>{head_extra}</head>\n"
         f"<body><main>{body_html}</main></body>\n"
         "</html>\n"
     )

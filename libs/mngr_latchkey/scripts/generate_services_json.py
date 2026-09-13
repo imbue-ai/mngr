@@ -9,14 +9,11 @@ Each detent built-in file describes one service (the file name is the raw
 service name, e.g. ``slack.json`` -> ``slack``). Within a file, every
 top-level schema is either a *scope* (matches a whole service, used as a
 detent rule key) or a *permission* (a narrower grant, used as a rule value).
-detent itself does not mark which of its schemas are scopes -- any schema can
-be used as a rule key -- so the split is made here: a schema is a scope when it
-constrains nothing but the request's domain (and so cannot be a narrower grant),
-or when it is named in the curated :data:`_DISPLAY_NAME_BY_SCOPE`, which is what
-recognizes the scopes that *do* pin a path as well (``github-rest-api``,
-``google-calendar-api``). AWS is special-cased (only the top-level ``aws``
-schema is a scope; the service-specific ``aws-s3`` etc. double as permissions
-inside it).
+The scope/permission classification mirrors detent's own
+``scripts/generateBuiltinSchemaDocs.ts``: a scope requires ``domain`` and does
+not constrain ``method``; everything else is a permission. AWS is special-cased
+exactly as detent does (only the top-level ``aws`` schema is a scope; the
+service-specific ``aws-s3`` etc. double as permissions inside it).
 
 detent's recent ``$comment`` annotations on each schema are carried over into
 the catalog under the friendlier ``description`` key: the scope's summary sits
@@ -76,11 +73,6 @@ _COMMENT_KEY: Final[str] = "$comment"
 # The ``any.json`` catch-all is not a service and has no scope; skip it.
 _NON_SERVICE_FILES: Final[frozenset[str]] = frozenset({"any.json"})
 
-# JSON Schema keywords that compose subschemas. A schema using one of them
-# constrains more than the properties it lists at the top level, so it is never
-# a domain-only whole-service match.
-_COMPOSITION_KEYWORDS: Final[frozenset[str]] = frozenset({"anyOf", "allOf", "oneOf", "not"})
-
 # AWS is structurally ambiguous: every ``aws-*`` schema matches only on domain
 # and so looks like a scope, but detent treats only the top-level ``aws`` schema
 # as a scope and folds the service-specific ones in as permissions.
@@ -104,11 +96,7 @@ _DISPLAY_NAME_BY_SERVICE: Final[Mapping[str, str]] = {
 }
 
 # Human-readable scope labels. detent has no notion of a display name, so this
-# is curated here. Keyed by detent scope schema name. Membership here also
-# *declares* a schema to be a scope, which is the only way to recognize one that
-# narrows the path as well as the domain (``github-rest-api`` covers everything
-# on api.github.com except ``/graphql``, and is otherwise shaped exactly like a
-# permission).
+# is curated here. Keyed by detent scope schema name.
 _DISPLAY_NAME_BY_SCOPE: Final[Mapping[str, str]] = {
     "slack-api": "Slack",
     "discord-api": "Discord",
@@ -216,24 +204,15 @@ class _ScopeCatalogEntry(FrozenModel):
     )
 
 
-def _matches_on_domain_alone(schema: Mapping[str, object]) -> bool:
-    """Whether a schema constrains nothing but the domain, and so can only be a whole service."""
-    if not schema.keys().isdisjoint(_COMPOSITION_KEYWORDS):
-        return False
-    required = schema.get("required")
-    required_fields = required if isinstance(required, list) else []
-    properties = schema.get("properties")
-    property_names = properties if isinstance(properties, dict) else {}
-    return set(required_fields) == {"domain"} and set(property_names) == {"domain"}
-
-
 def _is_scope_schema(schema_name: str, schema: Mapping[str, object], file_name: str) -> bool:
     """Whether a detent schema identifies a whole service (a scope) vs. a narrower permission."""
     if file_name == _AWS_SCHEMA_FILE:
         return schema_name in _AWS_SCOPE_SCHEMAS
-    if schema_name in _DISPLAY_NAME_BY_SCOPE:
-        return True
-    return _matches_on_domain_alone(schema)
+    required = schema.get("required")
+    required_fields = required if isinstance(required, list) else []
+    properties = schema.get("properties")
+    property_names = properties if isinstance(properties, dict) else {}
+    return "domain" in required_fields and "method" not in property_names
 
 
 def _select_scope_for_permission(
@@ -378,14 +357,8 @@ def build_services_catalog(builtin_schemas_directory: Path) -> dict[str, list[di
             continue
         schemas_by_name = _read_service_schema_file(file_path)
         scope_entries = _build_scope_entries_for_service(service_name, schemas_by_name)
-        if len(scope_entries) == 0:
-            logger.warning(
-                "Service {} contributes no scope: every schema in it constrains more than the domain. "
-                "If one of them is its scope, add it to _DISPLAY_NAME_BY_SCOPE in generate_services_json.py",
-                service_name,
-            )
-            continue
-        entries_by_service_name[service_name] = scope_entries
+        if len(scope_entries) > 0:
+            entries_by_service_name[service_name] = scope_entries
 
     # Emit services in curated order, serializing each entry to a plain dict.
     ordered_service_names = sorted(entries_by_service_name, key=_service_sort_key)

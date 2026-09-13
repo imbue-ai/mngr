@@ -11,14 +11,14 @@ client-side; name/color/account are pass-throughs to mngr labels guarded by
 mngr's own host/agent locks, so there is no minds-owned version to If-Match).
 
 The small context helpers here are the successors of ``app.py``'s private
-``_build_workspace_context`` family, deleted with the legacy pages. The
-share-target splitting and label resolution live in ``share_targets.py``,
-shared with the sharing routes so every surface builds share links from one
-label map.
+``_build_workspace_context`` family and ``templates.py``'s share-target
+splitters, both deleted with the legacy pages; this module is their single
+home.
 """
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Final
 
 from flask import Blueprint
@@ -32,14 +32,28 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
-from imbue.minds.desktop_client.share_targets import split_share_targets
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.mngr.primitives import AgentId
+
+# The share target that grants the whole machine (the shell service).
+WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
+
+# Interfaces the workspace is built out of (or internal infrastructure) rather
+# than apps built on top of it: excluded from the per-app share targets (the
+# whole machine remains the deliberate way to grant everything). ``owner-exec``
+# is the internal SSH-equivalent exec channel (authorized by request signatures
+# against authorized_keys, never a share grant), so it must never be offered as
+# a per-app share target.
+_NON_APP_SHARE_SERVICES: Final[frozenset[str]] = frozenset(
+    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "owner-exec"}
+)
+
+# A per-app share link is a real origin, so only DNS-label-safe names qualify.
+_DNS_SAFE_SERVICE_NAME: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # App icons are SVG markup authored inside the workspace -- untrusted content
 # headed for the trusted shell's DOM. This is the server-side backstop
@@ -104,29 +118,32 @@ class WorkspaceOptionsData(FrozenModel):
     whole_service: str = Field(description="The share target name that grants the whole machine")
 
 
-class WorkspaceMachineSizeData(FrozenModel):
-    """The read-only machine-size facts the settings page renders for a leased machine.
+@pure
+def split_share_targets(servers: Sequence[str]) -> tuple[list[str], str]:
+    """Split a workspace's services into per-app share targets and the whole-machine one.
 
-    ``is_available`` is False when the size cannot be shown (not an
-    imbue_cloud lease, no associated account, or the connector lookup
-    failed); every other field is then absent/None and the page hides the
-    section rather than rendering an error.
+    The whole-machine entry is always offered; interface services and names
+    that cannot be a hostname label are excluded from the per-app list (they
+    stay reachable through a whole-machine share).
     """
+    app_services = [
+        str(service)
+        for service in servers
+        if str(service) != WHOLE_MACHINE_SERVICE
+        and str(service).lower() not in _NON_APP_SHARE_SERVICES
+        and _DNS_SAFE_SERVICE_NAME.match(str(service)) is not None
+        and not str(service).startswith(("host-", "agent-"))
+    ]
+    return app_services, WHOLE_MACHINE_SERVICE
 
-    is_available: bool = Field(description="Whether machine-size facts could be fetched for this workspace")
-    memory_units: int | None = Field(
-        default=None, description="Current size in units (1 unit = 1GiB machine RAM); None when unknown"
-    )
-    target_memory_units: int | None = Field(
-        default=None, description="Pending resize's unit target (applied at the next restart); None when none"
-    )
-    disk_gb: int | None = Field(default=None, description="Current data-disk size in GB; None when unknown")
-    target_disk_gb: int | None = Field(
-        default=None, description="Pending disk grow's GB target (applied at the next restart); None when none"
-    )
-    is_restart_needed_to_apply: bool = Field(
-        default=False, description="Whether a pending size target exists that a restart would apply"
-    )
+
+@pure
+def share_target_labels(app_services: Sequence[str], service_labels: dict[str, str]) -> dict[str, str]:
+    """The origin-label map for the rendered share targets (services without a label are omitted)."""
+    target_labels = {service: service_labels[service] for service in app_services if service in service_labels}
+    if WHOLE_MACHINE_SERVICE in service_labels:
+        target_labels[WHOLE_MACHINE_SERVICE] = service_labels[WHOLE_MACHINE_SERVICE]
+    return target_labels
 
 
 def _recorded_workspace_name(session_store: MultiAccountSessionStore | None, agent_id: str) -> str:
@@ -202,6 +219,10 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
     stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
 
     services = [str(service) for service in backend_resolver.list_services_for_agent(parsed_agent_id)]
+    labels = {
+        str(service): label
+        for service, label in backend_resolver.list_service_labels_for_agent(parsed_agent_id).items()
+    }
     icons = {
         str(service): icon for service, icon in backend_resolver.list_service_icons_for_agent(parsed_agent_id).items()
     }
@@ -223,49 +244,9 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         current_account=_account_entry(current_account) if current_account else None,
         accounts=tuple(_account_entry(account) for account in accounts),
         app_services=tuple(app_services),
-        service_labels=resolve_share_target_labels(backend_resolver, parsed_agent_id),
+        service_labels=share_target_labels(app_services, labels),
         service_icons=service_icons,
         whole_service=whole_service,
-    )
-    return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
-
-
-def _handle_workspace_machine_size(agent_id: str) -> Response:
-    """The read-only machine-size facts for a leased imbue_cloud workspace (specs/slice-fleet).
-
-    Served separately from the options data so the settings page renders
-    immediately and the size loads lazily -- fetching it costs a
-    ``mngr imbue_cloud machines show`` round trip to the connector.
-    """
-    if not is_ui_request_authenticated():
-        return _json_error_response(401, "Not authenticated")
-    try:
-        parsed_agent_id = AgentId(agent_id)
-    except InvalidRandomIdError:
-        return _json_error_response(404, "Unknown workspace")
-
-    unavailable = WorkspaceMachineSizeData(is_available=False)
-    state = get_state()
-    session_store = state.session_store
-    imbue_cloud_cli = state.imbue_cloud_cli
-    backend_resolver = state.backend_resolver
-    info = backend_resolver.get_agent_display_info(parsed_agent_id)
-    is_leased = info is not None and (info.provider_name or "").startswith(_IMBUE_CLOUD_PROVIDER_PREFIX)
-    account = session_store.get_account_for_workspace(agent_id) if session_store else None
-    host_id = _workspace_host_coordinate_for_options(backend_resolver, session_store, agent_id)
-    if not is_leased or account is None or imbue_cloud_cli is None or not host_id:
-        return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
-
-    machine = imbue_cloud_cli.show_machine(account.email, host_id)
-    if machine is None:
-        return make_response(content=unavailable.model_dump_json(), status_code=200, media_type="application/json")
-    data = WorkspaceMachineSizeData(
-        is_available=True,
-        memory_units=machine.memory_units,
-        target_memory_units=machine.target_memory_units,
-        disk_gb=machine.disk_gb,
-        target_disk_gb=machine.target_disk_gb,
-        is_restart_needed_to_apply=machine.is_restart_needed_to_apply,
     )
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
 
@@ -275,10 +256,5 @@ def register_options_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule(
         "/api/workspaces/<agent_id>/options",
         view_func=_handle_workspace_options_data,
-        methods=["GET"],
-    )
-    blueprint.add_url_rule(
-        "/api/workspaces/<agent_id>/machine-size",
-        view_func=_handle_workspace_machine_size,
         methods=["GET"],
     )

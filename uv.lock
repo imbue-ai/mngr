@@ -8,7 +8,10 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-09-01T00:00:00Z"
+exclude-newer = "2026-07-20T00:00:00Z"
+
+[options.exclude-newer-package]
+modal = "2026-08-13T00:00:00Z"
 
 [manifest]
 members = [
@@ -1755,11 +1758,6 @@ dependencies = [
 dev = [
     { name = "inline-snapshot" },
 ]
-testing = [
-    { name = "import-linter" },
-    { name = "inline-snapshot" },
-    { name = "pytest" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -1769,17 +1767,14 @@ requires-dist = [
     { name = "cowsay-python", specifier = ">=1.0.2" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "import-linter", marker = "extra == 'testing'", specifier = ">=2.0" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
-    { name = "inline-snapshot", marker = "extra == 'testing'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.0" },
-    { name = "pytest", marker = "extra == 'testing'", specifier = ">=9.0" },
     { name = "sentry-sdk", specifier = ">=2.63.0" },
     { name = "tenacity", specifier = ">=8.0" },
     { name = "traceback-with-variables", specifier = ">=2.0" },
 ]
-provides-extras = ["dev", "testing"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "imbue-mngr"
@@ -1829,7 +1824,7 @@ requires-dist = [
     { name = "markdown-it-py", specifier = ">=2.2.0" },
     { name = "overlay", editable = "libs/overlay" },
     { name = "packaging", specifier = ">=21.0" },
-    { name = "paramiko", specifier = ">=3.2" },
+    { name = "paramiko", specifier = ">=3.0" },
     { name = "pluggy", specifier = ">=1.5.0" },
     { name = "psutil", specifier = ">=7.2" },
     { name = "pydantic", specifier = ">=2.0" },

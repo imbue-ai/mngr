@@ -251,6 +251,8 @@ def test_send_message_to_agents_starts_stopped_agent_when_start_desired(
 
 
 @pytest.mark.tmux
+# real agent setup/teardown plus a stop-and-restart can exceed the 10s default.
+@pytest.mark.timeout(30)
 def test_send_message_to_agents_revives_done_agent_when_start_desired(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -653,6 +655,8 @@ def test_agent_missing_from_its_host_is_recorded_before_the_abort(
 
 
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_send_message_to_agents_only_messages_requested_agents(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -716,6 +720,8 @@ def test_send_message_to_agents_only_messages_requested_agents(
 
 @pytest.mark.tmux
 @pytest.mark.flaky
+# real agent setup/teardown for two agents occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_send_message_one_agent_failure_does_not_prevent_other_agents(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,

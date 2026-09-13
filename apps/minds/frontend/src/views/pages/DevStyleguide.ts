@@ -29,7 +29,6 @@ const BUTTON_VARIANTS: ButtonVariant[] = [
   "primary",
   "secondary",
   "danger",
-  "danger-soft",
   "success",
   "ghost",
 ];
@@ -516,7 +515,7 @@ export function DevStyleguide(): m.Component {
                   { variant: "nav", tone: "muted", "aria-label": "Inbox" },
                   m(Icon16, { name: "inbox" }),
                 ),
-                m(TitlebarButton, { variant: "crumb" }, "Mind"),
+                m(TitlebarButton, { variant: "crumb" }, "Minds"),
                 m(
                   TitlebarButton,
                   { variant: "control", "aria-label": "Minimize" },
@@ -880,7 +879,7 @@ export function DevStyleguide(): m.Component {
               m(
                 "h1",
                 { class: "type-heading-lg text-primary" },
-                "Mind Styleguide",
+                "Minds Styleguide",
               ),
               m("p", { class: "type-body text-secondary mt-1" }, [
                 "Tokens live in ",

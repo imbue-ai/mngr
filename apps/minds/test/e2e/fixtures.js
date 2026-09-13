@@ -1,4 +1,4 @@
-// Playwright fixture: launches the installed /Applications/Mind.app.
+// Playwright fixture: launches the installed /Applications/Minds.app.
 //
 // Note on isolation: the signed bundle's `getMindsRootName()` reads the
 // baked-in `resources/pyproject/imbue/minds/config/envs/_bundled/root_name`
@@ -8,7 +8,7 @@
 // Specs are responsible for cleaning up any workspaces they create
 // (`mngr destroy` or the destroy button) before exiting.
 //
-// To run cleanly, quit any user-launched Mind.app first -- Playwright's
+// To run cleanly, quit any user-launched minds.app first -- Playwright's
 // `electron.launch()` will deadlock-exit silently on Electron's
 // requestSingleInstanceLock if a prior Minds is still alive (we hit this
 // in early iterations: PID 28024 lingered after Cmd-Q).
@@ -18,7 +18,7 @@ const fs = require('fs');
 const { _electron: electron } = require('playwright');
 const base = require('@playwright/test');
 
-const DEFAULT_APP_PATH = '/Applications/Mind.app/Contents/MacOS/Mind';
+const DEFAULT_APP_PATH = '/Applications/Minds.app/Contents/MacOS/Minds';
 
 // Each Minds window is a single web context now (the chrome page, which hosts
 // hub pages, the sandboxed workspace iframe, and the in-DOM modals), so
@@ -32,7 +32,7 @@ const _BACKEND_ORIGIN_RE = /^http:\/\/localhost:\d+(?:\/|$)/;
 // `page.url()` is Playwright's own bookkeeping, updated from the CDP navigation
 // events its session receives. main.js drives these WebContentsViews from the
 // Electron MAIN process (`webContents.loadURL` / `loadFile`), and such a commit
-// does not reliably reach an attached client: a view can sit on `/start`
+// does not reliably reach an attached client: a view can sit on `/welcome`
 // while Playwright still reports the `shell.html` it saw at attach time, for the
 // rest of the run. The session stays healthy -- evaluating in the live document
 // reports the real URL.
@@ -69,7 +69,7 @@ const test = base.test.extend({
     const execPath = process.env.MINDS_APP_PATH || DEFAULT_APP_PATH;
     if (!fs.existsSync(execPath)) {
       throw new Error(
-        `Mind.app binary not found at ${execPath}. Install it to /Applications/ or ` +
+        `minds.app binary not found at ${execPath}. Install it to /Applications/ or ` +
           `set MINDS_APP_PATH to a downloaded build.`
       );
     }
@@ -133,7 +133,7 @@ const test = base.test.extend({
     // timeout on a cold GHA mac. The `timeout` caps it. (macos-launch runs on an
     // ephemeral GHA Mac, so a broad minds-scoped pkill is safe.)
     try {
-      execSync('pkill -9 -if "minds?\\.app|/\\.minds/|mngr latchkey|mngr observe|Minds?/Crashpad" 2>/dev/null || true', {
+      execSync('pkill -9 -if "minds\\.app|/\\.minds/|mngr latchkey|mngr observe|Minds/Crashpad" 2>/dev/null || true', {
         stdio: 'ignore',
         timeout: 10000,
       });

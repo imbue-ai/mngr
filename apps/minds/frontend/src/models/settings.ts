@@ -470,7 +470,7 @@ export class SettingsModel {
       this.peekedChannels = await electronBridge.peekUpdateChannels();
       const target = this.peekedChannels[channel];
       if (target !== undefined && target.version === null) {
-        this.updateError = `The ${channel} channel is unavailable right now, so Mind stayed on ${this.updateState.channel}.`;
+        this.updateError = `The ${channel} channel is unavailable right now, so Minds stayed on ${this.updateState.channel}.`;
         return;
       }
       if (target !== undefined && target.wouldPark) {

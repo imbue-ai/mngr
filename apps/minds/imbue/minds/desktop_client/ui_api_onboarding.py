@@ -1,10 +1,11 @@
-"""/ui/api routes for the first-run flow: the consent acknowledgement and onboarding completion.
+"""/ui/api routes owned by tranche T6 (onboarding/welcome/consent).
 
-Two tiny state transitions, both session-authed: acknowledging the
-error-reporting notice (the JSON twin of the legacy ``POST /consent``), and
-marking onboarding complete. The SPA routes to ``/consent`` while
+Two tiny state transitions the first-run flow needs, as JSON twins of the
+legacy ``POST /consent`` and ``GET /welcome/skip`` handlers: acknowledging the
+error-reporting notice, and choosing to continue without signing in. Both are
+session-authed; the SPA routes to ``/consent`` while
 ``needs_error_reporting_consent`` (from ``/ui/api/app-status``) is true, and to
-``/start`` while ``is_onboarding_complete`` is false and no workspace exists.
+``/welcome`` on a functionally empty first run.
 """
 
 import json
@@ -46,23 +47,23 @@ def _handle_consent_acknowledge() -> Response:
     return _ok_response()
 
 
-def _handle_onboarding_complete() -> Response:
-    """Record that the installation is past the start flow (POST /ui/api/onboarding/complete).
+def _handle_skip_account_setup() -> Response:
+    """Record the continue-without-an-account choice (POST /ui/api/onboarding/skip-account-setup).
 
-    The SPA posts this when the start flow's "I already have one (log in)" answer
-    signs in, since that path creates nothing (the create front door records the
-    same fact for every create attempt on its own). Persisted, so the next launch
-    lands on the home page rather than on the start flow again.
+    Sets the per-run ``is_account_setup_skipped`` flag so the SPA's first-run
+    routing stops sending the user back to the welcome splash; the choice is
+    intentionally not persisted (a fresh cold start of an empty app re-offers
+    it), matching the legacy ``/welcome/skip``.
     """
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
-    minds_config: MindsConfig | None = get_state().minds_config
-    if minds_config is not None:
-        minds_config.set_is_onboarding_complete(True)
+    get_state().is_account_setup_skipped = True
     return _ok_response()
 
 
 def register_onboarding_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule("/api/onboarding/consent", view_func=_handle_consent_acknowledge, methods=["POST"])
-    blueprint.add_url_rule("/api/onboarding/complete", view_func=_handle_onboarding_complete, methods=["POST"])
+    blueprint.add_url_rule(
+        "/api/onboarding/skip-account-setup", view_func=_handle_skip_account_setup, methods=["POST"]
+    )

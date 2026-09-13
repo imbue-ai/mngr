@@ -15,7 +15,6 @@ from functools import wraps
 from io import StringIO
 from pathlib import Path
 from typing import Any
-from typing import Final
 from typing import Mapping
 from typing import NoReturn
 from typing import ParamSpec
@@ -26,7 +25,6 @@ import modal
 import modal.exception
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
-from loguru import logger
 from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
 from pydantic import ConfigDict
@@ -35,9 +33,7 @@ from tenacity import RetryCallState
 from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import retry_if_exception_type
-from tenacity import retry_if_result
 from tenacity import stop_after_attempt
-from tenacity import stop_after_delay
 from tenacity import wait_exponential
 
 from imbue.modal_proxy.data_types import FileEntry
@@ -48,7 +44,6 @@ from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
-from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -70,6 +65,10 @@ from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.log_utils import ModalLoguruWriter
 from imbue.modal_proxy.log_utils import enable_modal_output_capture
 
+# ---------------------------------------------------------------------------
+# Exception translation
+# ---------------------------------------------------------------------------
+
 
 def _translate_modal_cli_not_found(e: FileNotFoundError) -> NoReturn:
     """Translate a FileNotFoundError into ModalProxyError when the modal CLI binary is missing, otherwise re-raise."""
@@ -90,9 +89,6 @@ def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
         return ModalProxyInternalError(str(e))
     if isinstance(e, modal.exception.ResourceExhaustedError):
         return ModalProxyRateLimitError(str(e))
-    # Checked before RemoteError, which it subclasses.
-    if isinstance(e, modal.exception.ImageBuildError):
-        return ModalProxyImageBuildError(str(e))
     if isinstance(e, modal.exception.RemoteError):
         return ModalProxyRemoteError(str(e))
     # The SDK raises this when it cannot open a connection to the control plane
@@ -121,6 +117,11 @@ def _translate_exceptions(func: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
+# ---------------------------------------------------------------------------
+# Conversion helpers
+# ---------------------------------------------------------------------------
+
+
 def _to_modal_stream_type(st: StreamType) -> ModalStreamType:
     """Convert our StreamType to modal's StreamType."""
     match st:
@@ -141,6 +142,11 @@ def _to_file_entry_type(modal_type: ModalFileEntryType) -> FileEntryType:
             return FileEntryType.DIRECTORY
         case _:
             raise ModalProxyError(f"Unsupported Modal FileEntryType: {modal_type}")
+
+
+# ---------------------------------------------------------------------------
+# Unwrap helpers
+# ---------------------------------------------------------------------------
 
 
 def _unwrap_image(iface: ImageInterface) -> modal.Image:
@@ -169,6 +175,11 @@ def _unwrap_secret(iface: SecretInterface) -> modal.Secret:
     if not isinstance(iface, DirectSecret):
         raise ModalProxyTypeError(f"Expected DirectSecret, got {type(iface).__name__}")
     return iface.secret
+
+
+# ---------------------------------------------------------------------------
+# Retry parameters for volume operations
+# ---------------------------------------------------------------------------
 
 
 def _should_retry_volume_op(e: BaseException) -> bool:
@@ -212,31 +223,24 @@ def _volume_wait(retry_state: RetryCallState) -> float:
     return _VOLUME_TRANSIENT_WAIT(retry_state)
 
 
+# ---------------------------------------------------------------------------
+# Retry parameters for `modal deploy`
+# ---------------------------------------------------------------------------
 # Modal locks an app for the duration of a mutation, so two deploys targeting
 # the same app name concurrently (e.g. parallel `mngr create` against the same
 # persistent provider app) race and one fails with "The selected app is
 # locked". The lock clears as soon as the other deploy finishes, so retry with
 # backoff. min=2 because a deploy takes several seconds, so retrying sooner just
-# wastes attempts. The window is bounded by elapsed time rather than attempts
-# because contention is a queue: CI fans dozens of creates out against one
-# shared app name, and several CI runs can do so at once, so the lock can stay
-# held for minutes while the deploys behind it drain one by one. A deploy that
-# is merely queued must keep waiting rather than fail.
+# wastes attempts; max=15 and 6 attempts gives ~45s of headroom under the
+# 180s deploy subprocess timeout.
 _DEPLOY_LOCK_RETRY = retry_if_exception_type(ModalProxyAppLockedError)
-_DEPLOY_LOCK_RETRY_BUDGET_SECONDS = 300
-_DEPLOY_LOCK_MAX_BACKOFF_SECONDS = 15
-_DEPLOY_ATTEMPT_TIMEOUT_SECONDS = 180
-_DEPLOY_LOCK_STOP = stop_after_delay(_DEPLOY_LOCK_RETRY_BUDGET_SECONDS)
-_DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=_DEPLOY_LOCK_MAX_BACKOFF_SECONDS)
-# Upper bound on how long deploy() can block. The budget only gates whether
-# another attempt starts, so the last attempt can begin just under it (after a
-# full backoff) and still run to its own subprocess timeout. Callers that wait
-# on deploy() from another thread size their deadline from this.
-DEPLOY_MAX_DURATION_SECONDS = (
-    _DEPLOY_LOCK_RETRY_BUDGET_SECONDS + _DEPLOY_LOCK_MAX_BACKOFF_SECONDS + _DEPLOY_ATTEMPT_TIMEOUT_SECONDS
-)
+_DEPLOY_LOCK_STOP = stop_after_attempt(6)
+_DEPLOY_LOCK_WAIT = wait_exponential(multiplier=1, min=2, max=15)
 
 
+# ---------------------------------------------------------------------------
+# Retry parameters for post-deploy function lookup
+# ---------------------------------------------------------------------------
 # Looking up a function immediately after deploying it can lose a
 # deploy-then-lookup eventual-consistency race: the freshly-deployed function is
 # not yet registered/propagated, so Modal raises NotFoundError when get_web_url
@@ -250,42 +254,9 @@ _LOOKUP_STOP = stop_after_attempt(5)
 _LOOKUP_WAIT = wait_exponential(multiplier=1, min=1, max=4)
 
 
-# Modal's build-failure result is not ordered against its build logs: the
-# ImageBuildError arrives seconds before the failing layer's output is
-# queryable, and the log then fills in a piece at a time, so an early fetch
-# returns a prefix that stops short of the failing command's output.
-#
-# Nothing structural marks the end. The batches carry `eof` and `app_done`
-# flags and the entries carry a `task_state`, but on this path Modal leaves
-# all three unset, and its public log API drops them regardless. The only
-# end-of-build signal it gives is a line its builder writes as it terminates
-# the failed task, so that is what this waits for -- and because that is prose
-# and not protocol, `test_modal_still_reports_a_failed_build_terminating`
-# holds Modal to it, and giving up warns rather than quietly truncating.
-BUILD_TERMINATION_MARKER: Final[str] = "Terminating task"
-_BUILD_LOG_STOP = stop_after_delay(15)
-_BUILD_LOG_WAIT = wait_exponential(multiplier=1, min=1, max=4)
-
-
-def _is_build_log_incomplete(build_log: str) -> bool:
-    """Whether a fetched build log has yet to show the build terminating."""
-    return BUILD_TERMINATION_MARKER not in build_log
-
-
-def _last_fetched_build_log(retry_state: RetryCallState) -> str:
-    """Report the last log Modal gave us, rather than raising, once the budget is spent."""
-    logger.warning(
-        "Gave up waiting for Modal to report the build terminating (looking for {!r}); the build log "
-        "below may be truncated. If Modal has reworded that line, this marker needs updating.",
-        BUILD_TERMINATION_MARKER,
-    )
-    outcome = retry_state.outcome
-    if outcome is None:
-        return ""
-    return str(outcome.result())
-
-
-_BUILD_LOG_RETRY = retry_if_result(_is_build_log_incomplete)
+# ---------------------------------------------------------------------------
+# Object implementations
+# ---------------------------------------------------------------------------
 
 
 class DirectExecOutput(ExecOutput):
@@ -368,19 +339,6 @@ class DirectImage(ImageInterface):
     @_translate_exceptions
     def build(self, app: AppInterface) -> None:
         self.image.build(_unwrap_app(app))
-
-    @_translate_exceptions
-    @retry(
-        retry=_BUILD_LOG_RETRY,
-        stop=_BUILD_LOG_STOP,
-        wait=_BUILD_LOG_WAIT,
-        retry_error_callback=_last_fetched_build_log,
-    )
-    def fetch_build_logs(self) -> str:
-        # One layer back is the one that failed; the layers under it succeeded.
-        # Modal resolves the fetch through the failed build attempt it keeps on
-        # this object, so a fresh handle from an image id would not serve.
-        return "".join(entry.message for entry in self.image.logs.fetch(layers=1))
 
 
 class DirectVolume(VolumeInterface):
@@ -523,6 +481,11 @@ class DirectApp(AppInterface):
                 yield self
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e
+
+
+# ---------------------------------------------------------------------------
+# Top-level implementation
+# ---------------------------------------------------------------------------
 
 
 class DirectModalInterface(ModalInterface):
@@ -724,7 +687,7 @@ class DirectModalInterface(ModalInterface):
             try:
                 result = subprocess.run(
                     cmd,
-                    timeout=_DEPLOY_ATTEMPT_TIMEOUT_SECONDS,
+                    timeout=180,
                     check=False,
                     capture_output=True,
                     text=True,

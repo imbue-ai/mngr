@@ -132,12 +132,12 @@ export async function withReceiverGuardedGlobalFetch(
   }
 }
 
-/** Flush pending promise work: a timer turn runs only after the microtask queue
- * is empty, so every await chain the models queued has run by the time it
- * fires -- including `Response.json()`, whose body read takes more microtask
- * hops than a caller can count. */
+/** Flush pending promise work: three microtask hops cover the await chains
+ * inside the models (fetch result -> body parse -> state application). */
 export async function settle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 /** An in-memory stand-in for the sticky-preference `localStorage`, injected

@@ -38,17 +38,12 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
-from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
-from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
-from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
-from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 
 
 def _make_client(handler) -> tuple[ImbueCloudConnectorClient, httpx.MockTransport]:
@@ -71,8 +66,8 @@ def _install_fake_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
 
 def test_lease_host_503_raises_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        # An absent region must not be sent so the connector treats the lease
-        # as unconstrained on it.
+        # An absent region must not be sent so the connector treats the lease as
+        # region-agnostic.
         body = _json.loads(request.content)
         assert "region" not in body
         return httpx.Response(503, json={"detail": "no match"})
@@ -89,13 +84,8 @@ def test_lease_host_success_parses_response(monkeypatch: pytest.MonkeyPatch) -> 
         assert body["attributes"] == {"cpus": 2}
         assert body["ssh_public_key"] == "ssh-ed25519 AAAA"
         assert body["host_name"] == "my-host"
-        # The hard region rides alongside attributes as a top-level field
-        # when set.
+        # The hard region rides alongside attributes as a top-level field when set.
         assert body["region"] == "US-EAST-VA"
-        # Every lease declares the highest box generation this client can
-        # operate (the slow path drops the template tag, so this field alone
-        # keeps generation routing correct there).
-        assert body["max_box_generation"] == 2
         return httpx.Response(
             200,
             json={
@@ -1891,114 +1881,6 @@ def test_start_workspace_surfaces_quota_exceeded(monkeypatch: pytest.MonkeyPatch
         client.start_workspace(SecretStr("tok"), "00000000-0000-0000-0000-000000000042")
 
 
-def test_start_workspace_surfaces_an_operator_hold_as_the_typed_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            409,
-            json={"detail": {"code": "workspace_under_maintenance", "message": WORKSPACE_HELD_MESSAGE}},
-        )
-
-    client = _install_mock_httpx(monkeypatch, handler)
-    with pytest.raises(ImbueCloudWorkspaceHeldError) as excinfo:
-        client.start_workspace(SecretStr("tok"), "00000000-0000-0000-0000-000000000042")
-    assert str(excinfo.value) == WORKSPACE_HELD_MESSAGE
-
-
-def test_admin_start_reports_a_parked_rows_hold_as_a_plain_connector_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The same detail the owner start maps to the typed hold error is, on the
-    # operator's route, an ordinary refusal: the operator is the one doing the
-    # maintenance, so the user-facing sentence is not the error they get.
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            409,
-            json={"detail": {"code": "workspace_under_maintenance", "message": WORKSPACE_HELD_MESSAGE}},
-        )
-
-    client = _install_mock_httpx(monkeypatch, handler)
-    with pytest.raises(ImbueCloudConnectorError) as excinfo:
-        client.admin_start_workspace(SecretStr("adm"), "00000000-0000-0000-0000-000000000042")
-    assert not isinstance(excinfo.value, ImbueCloudWorkspaceHeldError)
-    assert "workspace_under_maintenance" in str(excinfo.value)
-
-
-def test_workspace_held_error_always_leads_with_the_sentence_and_never_shows_an_empty_detail() -> None:
-    # The desktop matches the sentence in mngr's stderr, so it must lead; a
-    # server detail with no message must not leave an empty "()" behind it.
-    assert str(ImbueCloudWorkspaceHeldError(WORKSPACE_HELD_MESSAGE)) == WORKSPACE_HELD_MESSAGE
-    assert str(ImbueCloudWorkspaceHeldError("")) == WORKSPACE_HELD_MESSAGE
-    assert str(ImbueCloudWorkspaceHeldError("  ")) == WORKSPACE_HELD_MESSAGE
-    assert str(ImbueCloudWorkspaceHeldError("held for a migration")) == (
-        f"{WORKSPACE_HELD_MESSAGE} (held for a migration)"
-    )
-
-
-def test_admin_stop_workspace_posts_the_kind_and_set_stop_kind_hits_its_route(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, dict]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.url.path, _json.loads(request.content)))
-        return httpx.Response(
-            202,
-            json={
-                "host_db_id": "00000000-0000-0000-0000-000000000042",
-                "status": "stopping",
-                "stop_kind": "maintenance",
-            },
-        )
-
-    client = _install_mock_httpx(monkeypatch, handler)
-    stopped = client.admin_stop_workspace(
-        SecretStr("adminkey"), "00000000-0000-0000-0000-000000000042", WorkspaceStopKind.MAINTENANCE
-    )
-    client.admin_set_workspace_stop_kind(
-        SecretStr("adminkey"), "00000000-0000-0000-0000-000000000042", WorkspaceStopKind.IDLE
-    )
-
-    assert stopped["stop_kind"] == "maintenance"
-    assert seen == [
-        ("/admin/workspaces/00000000-0000-0000-0000-000000000042/stop", {"kind": "maintenance"}),
-        ("/admin/workspaces/00000000-0000-0000-0000-000000000042/stop-kind", {"kind": "idle"}),
-    ]
-
-
-def test_admin_set_workspace_stop_kind_types_the_missing_route_and_the_running_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The cutover probes the connector for stop-kind support through this
-    # route and reads its answers by type: an older connector's fixed 404
-    # (no such route), the connector's 409 (a running row has no stop to
-    # describe). A modern connector's own 404 is neither.
-    host_db_id = "00000000-0000-0000-0000-000000000042"
-    answers: dict[str, httpx.Response] = {
-        "fixed-404": httpx.Response(404, json={"detail": "Not Found"}),
-        "running-409": httpx.Response(409, json={"detail": "Workspace is running and has no stop to describe"}),
-        "unknown-row-404": httpx.Response(404, json={"detail": "No such workspace"}),
-        "restamped-200": httpx.Response(
-            200, json={"host_db_id": host_db_id, "status": "stopped", "stop_kind": "idle"}
-        ),
-    }
-    current = {"answer": "fixed-404"}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return answers[current["answer"]]
-
-    client = _install_mock_httpx(monkeypatch, handler)
-    with pytest.raises(WorkspaceStopKindRouteUnavailableError, match="migration 042"):
-        client.admin_set_workspace_stop_kind(SecretStr("adm"), host_db_id, WorkspaceStopKind.MAINTENANCE)
-    current["answer"] = "running-409"
-    with pytest.raises(WorkspaceHasNoStopError, match="no stop to describe"):
-        client.admin_set_workspace_stop_kind(SecretStr("adm"), host_db_id, WorkspaceStopKind.MAINTENANCE)
-    current["answer"] = "unknown-row-404"
-    with pytest.raises(ImbueCloudConnectorError) as excinfo:
-        client.admin_set_workspace_stop_kind(SecretStr("adm"), host_db_id, WorkspaceStopKind.MAINTENANCE)
-    assert not isinstance(excinfo.value, (WorkspaceStopKindRouteUnavailableError, WorkspaceHasNoStopError))
-    current["answer"] = "restamped-200"
-    assert (
-        client.admin_set_workspace_stop_kind(SecretStr("adm"), host_db_id, WorkspaceStopKind.IDLE)["stop_kind"]
-        == "idle"
-    )
-
-
 def test_admin_abandon_workspace_posts_reason_with_admin_key(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict = {}
 
@@ -2161,14 +2043,12 @@ def test_admin_suspension_endpoints_hit_the_right_paths(monkeypatch: pytest.Monk
     client.admin_revoke_sessions(SecretStr("adm"), "alice@imbue.com")
     client.admin_suspend_account(SecretStr("adm"), "alice@imbue.com", "abuse", block_storage=True)
     client.admin_unsuspend_account(SecretStr("adm"), "alice@imbue.com")
-    client.admin_stop_workspace(SecretStr("adm"), "11111111-2222-3333-4444-555566667777", WorkspaceStopKind.SUSPENSION)
-    client.admin_start_workspace(SecretStr("adm"), "11111111-2222-3333-4444-555566667777")
+    client.admin_stop_workspace(SecretStr("adm"), "11111111-2222-3333-4444-555566667777")
     assert seen == [
         ("POST", "/admin/accounts/alice@imbue.com/revoke-sessions", None),
         ("POST", "/admin/accounts/alice@imbue.com/suspend", {"reason": "abuse", "block_storage": True}),
         ("POST", "/admin/accounts/alice@imbue.com/unsuspend", None),
-        ("POST", "/admin/workspaces/11111111-2222-3333-4444-555566667777/stop", {"kind": "suspension"}),
-        ("POST", "/admin/workspaces/11111111-2222-3333-4444-555566667777/start", None),
+        ("POST", "/admin/workspaces/11111111-2222-3333-4444-555566667777/stop", None),
     ]
 
 

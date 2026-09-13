@@ -358,13 +358,6 @@ def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> Non
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(60)
-# The "every workspace container is exited" assertion only holds before any
-# other test in the same offload sandbox has `docker start`ed one (the
-# running_workspace fixture and the Electron create test both do), and the
-# batch order is not fixed; seen failing with the forever-* and docker-state
-# containers running on 2026-09-13. The durable fix is to take this reading in
-# the session fixture before anything starts a container.
-@pytest.mark.flaky
 def test_workspace_docker_container_is_present_and_stopped() -> None:
     """The snapshot captured a stopped DEFAULT_WORKSPACE_TEMPLATE workspace Docker container.
 
@@ -701,12 +694,6 @@ def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
-# Drives a real Electron app end-to-end (launch, CDP attach, create flow, chooser
-# sign-in, chat), and individual steps have intermittently timed out under CI load
-# (the sign-in Frame.click, and the 240s wait for the agent's reply); the marker
-# routes the test into the retrying offload group. A genuine break still surfaces
-# by failing every retry, as MIND-285's New Tab regression did.
-@pytest.mark.flaky
 def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1649,16 +1636,14 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     staging_dir = tmp_path / "bug-report-staging"
     staging_dir.mkdir()
     # Dated far ahead so the planted chat outranks any real chat the workspace
-    # holds: selection ranks a transcript by the newest timestamp in it.
-    planted_marker = f"planted-chat-{get_short_random_string()}"
+    # holds: selection prefers the transcript whose USER last spoke (the file
+    # mtimes only break ties and cover transcripts with no user message).
     chat_line = json.dumps(
         {
-            "type": "step",
-            "event_id": f"planted-{get_short_random_string()}",
-            "emitter": "claude/common_transcript",
+            "type": "user_message",
             "timestamp": "2030-01-01T00:00:00.000000000Z",
-            "source": "user",
-            "message": planted_marker,
+            "source": "claude/common_transcript",
+            "message": f"planted-chat-{get_short_random_string()}",
         }
     )
     # mngr is the collector's source of truth for what agents exist, so the
@@ -1716,9 +1701,7 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     chat_member_names = [name for name in member_text_by_name if name.startswith(_CHAT_MEMBER_DIR_PREFIX)]
     assert chat_member_names, sorted(member_text_by_name)
     assert all(name.endswith(".jsonl") for name in chat_member_names), chat_member_names
-    # The marker rather than the planted line itself: what mngr writes out is
-    # its own serialization of the record, not the bytes the plant wrote.
-    assert any(planted_marker in member_text_by_name[name] for name in chat_member_names), (
+    assert any(chat_line in member_text_by_name[name] for name in chat_member_names), (
         f"the planted chat is missing from the attached archive: {chat_member_names}"
     )
     # Conversations have to stay tellable apart, and the member name is the only
@@ -1765,21 +1748,17 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
     clean_marker = f"planted-clean-chat-{get_short_random_string()}"
     clean_chat_line = json.dumps(
         {
-            "type": "step",
-            "event_id": f"planted-clean-{get_short_random_string()}",
-            "emitter": "claude/common_transcript",
+            "type": "user_message",
             "timestamp": "2030-01-01T00:00:00.000000000Z",
-            "source": "user",
+            "source": "claude/common_transcript",
             "message": clean_marker,
         }
     )
     poisoned_chat_line = json.dumps(
         {
-            "type": "step",
-            "event_id": f"planted-poisoned-{get_short_random_string()}",
-            "emitter": "claude/common_transcript",
+            "type": "user_message",
             "timestamp": "2030-01-01T00:00:01.000000000Z",
-            "source": "user",
+            "source": "claude/common_transcript",
             "message": f"here is my key: {fake_api_key}",
         }
     )

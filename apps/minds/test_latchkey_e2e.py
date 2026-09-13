@@ -72,10 +72,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.loader import load_config
 from imbue.mngr.main import get_or_create_plugin_manager
-from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.ssh import quote_ssh_option_value
 from imbue.mngr.utils.testing import build_test_known_hosts_file
@@ -114,9 +112,6 @@ _OPT_IN_ENV_VAR: Final[str] = "MNGR_LATCHKEY_E2E_TESTS"
 pytestmark = [
     pytest.mark.release,
     pytest.mark.docker,
-    # Step (c) opens the workspace's outer host in-process through the docker
-    # provider, which talks to the daemon with the docker SDK.
-    pytest.mark.docker_sdk,
     pytest.mark.rsync,
     pytest.mark.timeout(1800),
     pytest.mark.skipif(
@@ -528,15 +523,8 @@ def _machine_of(
     host through its provider; here that config lives in ``env``, so it is
     applied to this process for the duration.
     """
-    with _environment(env), ConcurrencyGroup(name="latchkey-e2e-providers") as concurrency_group:
-        # The autouse plugin_manager fixture loads the backend registry in
-        # local-only mode (no docker), and that load is sticky: the singleton
-        # created below would otherwise find the registry already loaded and
-        # never register the docker backend this provider block names. Start
-        # from a clean registry so the singleton's own load includes it.
-        reset_backend_registry()
-        reset_plugin_manager()
-        mngr_ctx = load_config(get_or_create_plugin_manager(), concurrency_group)
+    with _environment(env):
+        mngr_ctx = load_config(get_or_create_plugin_manager(), ConcurrencyGroup(name="latchkey-e2e-providers"))
         provider = get_provider_instance(ProviderInstanceName("docker"), mngr_ctx)
         with provider.outer_host_for(HostId(host_id)) as outer:
             assert outer is not None and not outer.is_local, "the fake VPS did not resolve as a remote outer host"

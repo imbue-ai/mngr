@@ -83,11 +83,6 @@ class HostInterface(MutableModel, ABC):
         """Return the human-readable name of this host."""
         ...
 
-    @abstractmethod
-    def get_provider_name(self) -> ProviderInstanceName:
-        """Return the name of the provider instance this host belongs to."""
-        ...
-
     # =========================================================================
     # Activity Configuration
     # =========================================================================

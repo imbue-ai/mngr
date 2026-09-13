@@ -250,7 +250,7 @@ def test_execute_cleanup_dry_run_returns_cleanup_result_type(
     assert isinstance(result, CleanupResult)
 
 
-# Integration tests with real local provider
+# --- Integration tests with real local provider ---
 
 
 @pytest.mark.tmux
@@ -346,6 +346,8 @@ def test_execute_cleanup_destroy_on_online_host(
 
 
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_execute_cleanup_stop_on_online_host(
     temp_work_dir: Path,
     temp_mngr_ctx: MngrContext,
@@ -398,7 +400,7 @@ def test_execute_cleanup_stop_on_online_host(
     local_host.destroy_agent(agent)
 
 
-# Error path tests
+# --- Error path tests ---
 
 
 def test_execute_cleanup_destroy_agent_not_found_on_host_treated_as_destroyed(

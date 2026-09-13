@@ -3,7 +3,6 @@
 import pytest
 
 from imbue.mngr.primitives import HostState
-from imbue.mngr_imbue_cloud.providers.listing import CONTAINER_MISSING_NOTE
 from imbue.mngr_imbue_cloud.providers.listing import INNER_UNREADABLE_NOTE
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
@@ -81,10 +80,3 @@ def test_derive_host_state_running_without_certified_data_is_unknown_with_note()
     raw = {"container_state": "running"}
     assert derive_host_state_from_raw(raw) == HostState.UNKNOWN
     assert derive_offline_note_from_raw(raw) == INNER_UNREADABLE_NOTE
-
-
-def test_derive_host_state_missing_container_is_failed_with_note() -> None:
-    """A leased VM with no container is a terminal failure that still holds its lease, not a destroyed host."""
-    raw = {"container_missing": True}
-    assert derive_host_state_from_raw(raw) == HostState.FAILED
-    assert derive_offline_note_from_raw(raw) == CONTAINER_MISSING_NOTE

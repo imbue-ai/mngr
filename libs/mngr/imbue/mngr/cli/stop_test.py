@@ -132,7 +132,9 @@ def test_stop_host_rejects_archive_combination(
     assert "Cannot use --stop-host together with --archive" in result.output
 
 
+# =============================================================================
 # Host-shutdown capability validation
+# =============================================================================
 
 
 def _make_mock_provider(
@@ -175,7 +177,9 @@ def test_ensure_providers_support_host_shutdown_raises_for_unsupported(
     assert exc_info.value.provider_name == ProviderInstanceName("bad")
 
 
+# =============================================================================
 # --stop-host SSH-free host resolution
+# =============================================================================
 
 
 def _write_local_provider_snapshot(
@@ -315,64 +319,6 @@ def test_stop_hosts_for_addresses_honors_host_id_qualifier(
         )
 
 
-def test_stop_hosts_for_addresses_disambiguates_a_shared_name_with_the_host_qualifier(
-    temp_mngr_ctx: MngrContext,
-    local_provider: LocalProviderInstance,
-) -> None:
-    """The same agent name on two hosts resolves through ``@HOST`` instead of failing as ambiguous.
-
-    The second host only exists in the event stream (the provider no longer
-    knows it), so a name qualifier has to skip it rather than fail on its
-    ``get_host``. Reaching ``LocalHostNotStoppableError`` proves the qualified
-    address routed through to ``provider.stop_host`` on the real local host.
-    """
-    ghost_host_id = HostId.generate()
-    agents = [
-        DiscoveredAgent(
-            host_id=host_id,
-            agent_id=AgentId.generate(),
-            agent_name=AgentName("shared-name"),
-            provider_name=ProviderInstanceName("local"),
-            certified_data={},
-        )
-        for host_id in (local_provider.host_id, ghost_host_id)
-    ]
-    hosts = [
-        DiscoveredHost(
-            host_id=local_provider.host_id,
-            host_name=HostName(LOCAL_HOST_NAME),
-            provider_name=ProviderInstanceName("local"),
-        ),
-        DiscoveredHost(
-            host_id=ghost_host_id, host_name=HostName("ghost"), provider_name=ProviderInstanceName("local")
-        ),
-    ]
-    _write_local_provider_snapshot(temp_mngr_ctx, agents, hosts)
-    output_opts = OutputOptions(output_format=OutputFormat.HUMAN)
-    with pytest.raises(AgentNotFoundError, match="multiple hosts"):
-        _stop_hosts_for_addresses([AgentAddress(agent=AgentName("shared-name"))], temp_mngr_ctx, output_opts)
-    with pytest.raises(LocalHostNotStoppableError):
-        _stop_hosts_for_addresses(
-            [AgentAddress(agent=AgentName("shared-name"), host=HostAddress(host=local_provider.host_id))],
-            temp_mngr_ctx,
-            output_opts,
-        )
-    with pytest.raises(LocalHostNotStoppableError):
-        _stop_hosts_for_addresses(
-            [AgentAddress(agent=AgentName("shared-name"), host=HostAddress(host=HostName(LOCAL_HOST_NAME)))],
-            temp_mngr_ctx,
-            output_opts,
-        )
-    # Qualifying the gone host itself matches nothing; the error must say the
-    # host was skipped as unknown to its provider, not just "no agent found".
-    with pytest.raises(AgentNotFoundError, match=f"No agent found matching address.*{ghost_host_id}.*no longer known"):
-        _stop_hosts_for_addresses(
-            [AgentAddress(agent=AgentName("shared-name"), host=HostAddress(host=ghost_host_id))],
-            temp_mngr_ctx,
-            output_opts,
-        )
-
-
 def test_stop_hosts_for_addresses_raises_for_unknown_agent(
     temp_mngr_ctx: MngrContext,
     local_provider: LocalProviderInstance,
@@ -451,7 +397,9 @@ def test_stop_host_uses_ssh_free_resolution(
     assert "Cannot stop the local host" in result.output
 
 
+# =============================================================================
 # StopCliOptions additional field tests
+# =============================================================================
 
 
 def test_stop_cli_options_accepts_all_optional_fields() -> None:
@@ -485,7 +433,9 @@ def test_stop_cli_options_accepts_all_optional_fields() -> None:
     assert opts.disable_plugin == ("other-plugin",)
 
 
+# =============================================================================
 # Output helper function tests
+# =============================================================================
 
 
 def test_stop_output_result_human_with_agents(capsys: pytest.CaptureFixture[str]) -> None:
@@ -562,7 +512,9 @@ def test_stop_output_result_json_reports_failures(capsys: pytest.CaptureFixture[
     assert data["exit_code"] == 3
 
 
+# =============================================================================
 # Archive integration tests (require tmux for running agents)
+# =============================================================================
 
 
 @pytest.mark.tmux
@@ -625,8 +577,13 @@ def test_stop_dry_run_does_not_stop_agent(
     assert "Stopped agent: dry-run-agent" in real_result.output
 
 
+# Real tmux agent create plus a stop that rewrites the agent's labels: ~2s locally, but
+# it has been observed exceeding the global 10s pytest-timeout on a slow CI sandbox.
+# Same remedy as the sibling tmux CLI tests: per-test timeout room when slow, offload
+# retry via @pytest.mark.flaky beyond it.
 @pytest.mark.tmux
 @pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_stop_archive_sets_archived_at_label(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

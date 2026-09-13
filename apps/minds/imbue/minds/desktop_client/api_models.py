@@ -121,15 +121,8 @@ class RestartOperationStatusResponse(FrozenModel):
     operation_id: str = Field(description="The workspace agent id being recovered")
     kind: str = Field(description="Always 'restart'")
     status: str = Field(description="Raw operation status")
-    is_done: bool = Field(description="Whether the operation finished successfully (status DONE)")
+    is_done: bool = Field(description="Whether the operation has finished")
     error: str | None = Field(default=None, description="Failure message, when the operation failed")
-    warning: str | None = Field(
-        default=None,
-        description=(
-            "A DONE operation's non-fatal caveat, or the reason a DECLINED one was refused before it mutated "
-            "anything (an operator holds the machine); None otherwise"
-        ),
-    )
 
 
 class BackupOperationStatusResponse(FrozenModel):
@@ -622,14 +615,6 @@ class SharingReadinessResponse(FrozenModel):
             "(it persists across re-shares, so its mere presence is not enough)."
         ),
     )
-    service_labels: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Public origin label per share target, as currently known from the workspace's service "
-            "registrations (the share link of a target is https://<label>.<workspace_domain>/). A target "
-            "absent here has no link yet; clients must show a pending state, never a bare-domain URL."
-        ),
-    )
 
 
 class MachineSharingResponse(FrozenModel):
@@ -638,24 +623,10 @@ class MachineSharingResponse(FrozenModel):
     host_id: str = Field(description="The machine's host coordinate (host-<hex>)")
     enabled: bool = Field(description="Whether the machine is currently shared")
     workspace_domain: str | None = Field(default=None, description="The share's public domain")
-    url: str | None = Field(
-        default=None,
-        description=(
-            "The share's base URL (https://<workspace_domain>/). The bare domain itself does not route: a "
-            "target's link is https://<service_labels[target]>.<workspace_domain>/"
-        ),
-    )
+    url: str | None = Field(default=None, description="The share's public URL (https://<workspace_domain>/)")
     region: str | None = Field(default=None, description="Relay region code")
     last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel connect stamp")
     cert_not_after: str | None = Field(default=None, description="Expiry of the share's TLS certificate")
-    service_labels: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Public origin label per share target, as currently known from the workspace's service "
-            "registrations. A target absent here has no link yet (its registration has not reached this "
-            "client); clients must show a pending state for it, never a bare-domain URL."
-        ),
-    )
     grants: SharingGrantsDocument | None = Field(
         default=SharingGrantsDocument(),
         description=(

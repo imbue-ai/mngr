@@ -36,39 +36,6 @@ export interface WorkspaceOptionsData {
   whole_service: string;
 }
 
-/** Response shape of GET /ui/api/workspaces/<id>/machine-size (ui_api_options.py). */
-export interface WorkspaceMachineSizeData {
-  is_available: boolean;
-  memory_units: number | null;
-  target_memory_units: number | null;
-  disk_gb: number | null;
-  target_disk_gb: number | null;
-  is_restart_needed_to_apply: boolean;
-}
-
-/** "8 GB RAM · 28 GB disk" for the current size; "" when nothing is known (1 unit = 1 GiB RAM). */
-export function formatMachineSize(size: WorkspaceMachineSizeData): string {
-  const parts: string[] = [];
-  if (size.memory_units !== null) parts.push(`${size.memory_units} GB RAM`);
-  if (size.disk_gb !== null) parts.push(`${size.disk_gb} GB disk`);
-  return parts.join(" · ");
-}
-
-/** The pending size a restart would apply ("16 GB RAM · 56 GB disk"), falling
- * back to the current value for the factor that has no pending target; "" when
- * no restart is needed. */
-export function formatPendingMachineSize(
-  size: WorkspaceMachineSizeData,
-): string {
-  if (!size.is_restart_needed_to_apply) return "";
-  const pendingUnits = size.target_memory_units ?? size.memory_units;
-  const pendingDisk = size.target_disk_gb ?? size.disk_gb;
-  const parts: string[] = [];
-  if (pendingUnits !== null) parts.push(`${pendingUnits} GB RAM`);
-  if (pendingDisk !== null) parts.push(`${pendingDisk} GB disk`);
-  return parts.join(" · ");
-}
-
 export interface SharingGrantList {
   emails: string[];
   email_domains: string[];
@@ -81,21 +48,8 @@ export interface SharingGrantsDocument {
 
 export interface MachineSharingResponse {
   enabled: boolean;
-  /** The share's base URL (https://<workspace domain>/). The bare domain does
-   * not route: a target's link is https://<label>.<workspace domain>/. */
   url: string | null;
   grants: SharingGrantsDocument | null;
-  /** Public origin label per share target, as the backend currently knows
-   * them; a target absent here has no link yet. */
-  service_labels?: Record<string, string>;
-}
-
-/** Response shape of GET /api/v1/workspace-sharing/<id>/readiness. */
-export interface SharingReadinessResponse {
-  ready?: boolean;
-  cert_not_after?: string | null;
-  last_tunnel_login_at?: string | null;
-  service_labels?: Record<string, string>;
 }
 
 /** The options panel's tabs, in the order the tab strip shows them. */
@@ -209,11 +163,6 @@ export class ShareModel {
   isRetryOffered = false;
 
   private readonly options: ShareModelOptions;
-  // The label per share target. Seeded from the options snapshot and then
-  // merged from every sharing/readiness response, since the snapshot can
-  // predate the workspace's registrations reaching the backend (right after
-  // app start) and a link is only buildable once its label is known.
-  private serviceLabels: Record<string, string>;
   private readonly stateByTarget = new Map<string, ShareTargetState>();
   private extraServiceGrants: Record<string, SharingGrantList> = {};
   private pendingKindByTarget = new Map<string, SharePendingKind>();
@@ -232,7 +181,6 @@ export class ShareModel {
 
   constructor(options: ShareModelOptions) {
     this.options = options;
-    this.serviceLabels = { ...options.serviceLabels };
     this.currentTarget = options.wholeService;
   }
 
@@ -287,11 +235,7 @@ export class ShareModel {
     );
   }
 
-  /** The public link for a target (its label-prefixed origin), '' when it cannot be built yet.
-   *
-   * Never falls back to the bare machine domain or to the bare service name:
-   * only `<label>.<domain>` origins route on a share, so a link without the
-   * label would be one that can never work. */
+  /** The public link for a target (label-prefixed service origin), '' when unknown. */
   targetUrl(target: string): string {
     if (!this.machineUrl) return "";
     let host: string;
@@ -300,15 +244,13 @@ export class ShareModel {
     } catch {
       return "";
     }
-    const label = this.serviceLabels[target];
-    return label ? `https://${label}.${host}/` : "";
+    const label = this.options.serviceLabels[target];
+    if (target === this.options.wholeService) {
+      return label ? `https://${label}.${host}/` : this.machineUrl;
+    }
+    return `https://${label ?? target}.${host}/`;
   }
 
-  isLabelKnown(target: string): boolean {
-    return Boolean(this.serviceLabels[target]);
-  }
-
-  /** A shared target whose link is not live yet: the share is still provisioning. */
   isAwaitingLink(target: string): boolean {
     return (
       this.status === "ready" &&
@@ -316,24 +258,6 @@ export class ShareModel {
       !this.isLive &&
       this.machineUrl !== ""
     );
-  }
-
-  /** A shared target whose link cannot be shown yet because its label has not
-   * reached the backend (typically right after app start). */
-  isAwaitingLabel(target: string): boolean {
-    return (
-      this.status === "ready" &&
-      this.mutableTargetState(target).isEnabled &&
-      this.machineUrl !== "" &&
-      !this.isLabelKnown(target)
-    );
-  }
-
-  private mergeServiceLabels(labels: Record<string, string> | undefined): void {
-    if (!labels) return;
-    for (const [target, label] of Object.entries(labels)) {
-      if (label) this.serviceLabels[target] = label;
-    }
   }
 
   async load(): Promise<void> {
@@ -524,7 +448,6 @@ export class ShareModel {
     const data = body as MachineSharingResponse;
     this.isMachineEnabled = Boolean(data.enabled);
     this.machineUrl = data.url ?? "";
-    this.mergeServiceLabels(data.service_labels);
     const grants = data.grants ?? {
       workspace: { emails: [], email_domains: [] },
       services: {},
@@ -644,14 +567,9 @@ export class ShareModel {
     this.tunnelLoginAtSnapshot = undefined;
   }
 
-  /** Keep exactly one readiness poll running while the on-screen target awaits
-   * its link -- either still provisioning, or with its label not known yet (the
-   * poll's responses carry the labels, so this is also how a late label lands). */
+  /** Keep exactly one readiness poll running while the on-screen target awaits its link. */
   private syncReadinessPolling(): void {
-    if (
-      !this.isAwaitingLink(this.currentTarget) &&
-      !this.isAwaitingLabel(this.currentTarget)
-    ) {
+    if (!this.isAwaitingLink(this.currentTarget)) {
       this.stopReadinessPolling();
       return;
     }
@@ -686,10 +604,13 @@ export class ShareModel {
     const result = await this.fetchJson(`${this.shareApiBase()}/readiness`);
     if (this.isDisposed || this.pollingTarget !== target) return;
     const body = result.ok
-      ? (result.body as SharingReadinessResponse | null)
+      ? (result.body as {
+          ready?: boolean;
+          cert_not_after?: string | null;
+          last_tunnel_login_at?: string | null;
+        } | null)
       : null;
     if (body) {
-      this.mergeServiceLabels(body.service_labels);
       if (body.cert_not_after != null) this.isCertIssued = true;
       const tunnelStamp = body.last_tunnel_login_at ?? null;
       if (this.tunnelLoginAtSnapshot === undefined) {
@@ -701,14 +622,10 @@ export class ShareModel {
         this.isTunnelConnected = true;
       }
     }
-    // Ready means the shell's label origin answers; the on-screen target may
-    // still lack its own label (a per-app target registered later), so keep
-    // polling until this target's link can actually be shown.
-    if (body?.ready === true && this.isLabelKnown(target)) {
+    if (body?.ready === true) {
       this.markLive();
       return;
     }
-    if (body?.ready === true) this.isLive = true;
     this.redraw();
     this.scheduleReadinessProbe(target, this.nowMs() - this.pollStartedAtMs);
   }
@@ -751,8 +668,6 @@ export class WorkspaceOptionsModel {
   status: "loading" | "load_failed" | "ready" = "loading";
   data: WorkspaceOptionsData | null = null;
   share: ShareModel | null = null;
-  /** Read-only machine size for leased machines; null until (and unless) it loads. */
-  machineSize: WorkspaceMachineSizeData | null = null;
   loadErrorMessage = "";
 
   renameErrorMessage = "";
@@ -819,19 +734,6 @@ export class WorkspaceOptionsModel {
     this.status = "ready";
     this.redrawImpl();
     void this.share.load();
-    if (data.is_leased_imbue_cloud) void this.loadMachineSize();
-  }
-
-  /** Fetch the machine's read-only size lazily; failures just leave the section hidden. */
-  async loadMachineSize(): Promise<void> {
-    const result = await this.fetchJsonImpl(
-      `/ui/api/workspaces/${encodeURIComponent(this.agentId)}/machine-size`,
-    );
-    if (!result.ok) return;
-    const size = result.body as WorkspaceMachineSizeData;
-    if (!size.is_available) return;
-    this.machineSize = size;
-    this.redrawImpl();
   }
 
   dispose(): void {

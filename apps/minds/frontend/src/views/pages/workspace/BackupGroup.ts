@@ -231,7 +231,7 @@ function renderStorageForm(
                       value: "IMBUE_CLOUD",
                       selected: vnode.state.storageProvider === "IMBUE_CLOUD",
                     },
-                    "Mind",
+                    "Minds",
                   ),
                   m(
                     "option",
@@ -305,7 +305,7 @@ function renderVerification(
     m(
       "p",
       { class: "type-body text-secondary mb-2" },
-      "Mind checks your backups regularly and warns you below if anything looks wrong.",
+      "Minds checks your backups regularly and warns you below if anything looks wrong.",
     ),
     model.verificationError !== null
       ? m(Notice, { variant: "error", extra: "mb-2" }, model.verificationError)

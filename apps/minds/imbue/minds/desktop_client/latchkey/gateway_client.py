@@ -120,13 +120,6 @@ class PredefinedRequestPayload(FrozenModel):
     )
 
 
-# The rationale stored on a request Minds files for itself. The request is
-# approved in the same breath so nobody reads it in the UI, but the gateway
-# requires one and a reader of the permissions file deserves to know the grant
-# did not come from an agent asking.
-_MINDS_SHARE_RATIONALE: Final[str] = "Shared by the user from Minds."
-
-
 class FileSharingAccess(UpperCaseStrEnum):
     """Access mode an agent requests for a file-sharing grant.
 
@@ -607,55 +600,6 @@ class LatchkeyGatewayClient(MutableModel):
             raise LatchkeyGatewayClientError(
                 f"DELETE {url} returned {response.status_code}: {response.text.strip()}",
             )
-
-    def create_file_sharing_request(
-        self,
-        agent_id: str,
-        path: str,
-        access: FileSharingAccess,
-        target: Path,
-    ) -> str:
-        """File a file-sharing permission request against ``target`` and return its id.
-
-        Normally an *agent* files these and the user answers; Minds files one
-        itself when the user shares a path from the Local files pane, having
-        decided already. Approving it right after is what turns it into a grant.
-
-        ``target`` is the workspace's own permissions file. Naming it is
-        necessary and privileged: the gateway otherwise writes an approved
-        effect into whichever file the *caller's* context names, which for Minds
-        is its own admin file -- and a file-sharing grant landing there wedges
-        the gateway, since that file declares no ``latchkey-self`` scope. The
-        extension only honours the override for the desktop client.
-
-        Going the long way round rather than writing the rule directly is
-        deliberate. The gateway owns how a path becomes a permission -- the URL
-        pattern over a percent-encoded WebDAV path, the verb set, the traversal
-        and mount-root checks -- and a second copy of that in Python would be a
-        security decision free to drift.
-        """
-        self.ensure_initialized()
-        url = f"{self._require_base_url().rstrip('/')}/permission-requests"
-        body = {
-            "agent_id": agent_id,
-            "rationale": _MINDS_SHARE_RATIONALE,
-            "type": "file-sharing",
-            "payload": {"path": path, "access": str(access)},
-            "target": str(target),
-        }
-        try:
-            with self._one_shot_client() as client:
-                response = client.post(url, headers=self._build_headers(), json=body)
-        except httpx.HTTPError as e:
-            raise self._wrap_transport_error(e, f"POST {url} failed") from e
-        if response.status_code >= 400:
-            raise LatchkeyGatewayClientError(
-                f"POST {url} returned {response.status_code}: {response.text.strip()}",
-            )
-        request_id = response.json().get("request_id")
-        if not isinstance(request_id, str) or not request_id:
-            raise LatchkeyGatewayClientError(f"POST {url} returned no request id: {response.text.strip()}")
-        return request_id
 
     def approve_permission_request(
         self,

@@ -78,10 +78,6 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.docker.config import DockerProviderConfig
-from imbue.mngr.providers.docker.config import LOCAL_DOCKER_SSH_HOST
-from imbue.mngr.providers.docker.config import format_docker_publish_address
-from imbue.mngr.providers.docker.config import is_docker_daemon_local
-from imbue.mngr.providers.docker.config import ssh_host_for_docker_daemon
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -250,37 +246,20 @@ def parse_container_labels(
     return host_id, host_name, provider_name, user_tags
 
 
-@pure
-def build_ssh_publish_spec(config: DockerProviderConfig) -> str:
-    """Build the `docker run -p` spec that publishes the container's sshd on a random host port.
+def _get_ssh_host_from_docker_config(docker_host_url: str) -> str:
+    """Extract the SSH-reachable hostname from a Docker host URL.
 
-    An explicit `ssh_bind_address` wins. Otherwise a local daemon binds loopback only
-    (nothing needs LAN reachability, since mngr itself connects to 127.0.0.1) and a
-    remote daemon binds all interfaces, since mngr reaches it via the daemon's hostname.
+    For local Docker (empty string or unix socket), returns 127.0.0.1.
+    For remote Docker (ssh:// or tcp://), returns the hostname from the URL.
     """
-    if config.ssh_bind_address is not None:
-        return f"{format_docker_publish_address(config.ssh_bind_address)}::{CONTAINER_SSH_PORT}"
-    if is_docker_daemon_local(config.host):
-        return f"{LOCAL_DOCKER_SSH_HOST}::{CONTAINER_SSH_PORT}"
-    return f":{CONTAINER_SSH_PORT}"
+    if not docker_host_url or docker_host_url.startswith("unix://"):
+        return "127.0.0.1"
 
+    parsed = urlparse(docker_host_url)
+    if parsed.hostname:
+        return parsed.hostname
 
-@pure
-def ssh_host_for_docker_config(config: DockerProviderConfig) -> str:
-    """Return the hostname mngr SSHes to for containers created under `config`.
-
-    Mirrors `build_ssh_publish_spec`: a local daemon publishes sshd on this machine, so
-    mngr connects to the interface it is bound to -- the explicit `ssh_bind_address` when it
-    names one, else loopback (which also reaches a wildcard bind). A remote daemon's bind is
-    an address on the daemon's machine, so mngr connects via the daemon's hostname regardless.
-    """
-    if (
-        config.ssh_bind_address is not None
-        and not config.ssh_bind_address.is_unspecified
-        and is_docker_daemon_local(config.host)
-    ):
-        return str(config.ssh_bind_address)
-    return ssh_host_for_docker_daemon(config.host)
+    return "127.0.0.1"
 
 
 def _get_docker_context_host() -> str | None:
@@ -623,7 +602,7 @@ class DockerProviderInstance(BaseProviderInstance):
 
     def _get_ssh_host(self) -> str:
         """Get the SSH-reachable hostname for containers."""
-        return ssh_host_for_docker_config(self.config)
+        return _get_ssh_host_from_docker_config(self.config.host)
 
     # =========================================================================
     # Docker Exec Helpers
@@ -1037,7 +1016,7 @@ kill -TERM 1
         `["--mount", "<spec>"]` for the isolated subpath mount). Empty when
         the host has no persistent volume.
         """
-        cmd = ["run", "-d", "--name", container_name, "-p", build_ssh_publish_spec(self.config)]
+        cmd = ["run", "-d", "--name", container_name, "-p", f":{CONTAINER_SSH_PORT}"]
 
         # Select a non-default container runtime (e.g. 'runsc' for gVisor) when configured.
         # The named runtime must be registered with the Docker daemon, otherwise this run

@@ -430,7 +430,7 @@ class WorkspaceRecordStore(MutableModel):
     _records_by_user_id: dict[str, dict[str, ReplicaRecord]] = PrivateAttr(default_factory=dict)
     _is_loaded: bool = PrivateAttr(default=False)
     # Accounts whose server-side key bundle presence was confirmed this
-    # process run (see _reconcile_key_bundle). In-memory on purpose: one
+    # process run (see _ensure_bundle_uploaded). In-memory on purpose: one
     # redundant GET per account per app launch is cheap, and no on-disk
     # marker can go stale.
     _bundle_confirmed_user_ids: set[str] = PrivateAttr(default_factory=set)
@@ -951,7 +951,7 @@ class WorkspaceRecordStore(MutableModel):
         """
         if read_canonical_env(self.paths, AgentId(agent_id)) is not None:
             return True
-        found = self.find_record_any_state(agent_id)
+        found = self._find_record_any_state(agent_id)
         if found is None:
             return False
         user_id, record = found
@@ -1209,7 +1209,7 @@ class WorkspaceRecordStore(MutableModel):
             logger.info("Sweeping orphaned imbue_cloud host key dir {} (no lease, no active record)", host_dir)
             shutil.rmtree(host_dir, ignore_errors=True)
 
-    def find_record_any_state(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
+    def _find_record_any_state(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
         """Like :meth:`find_active_record` but tombstoned records count too (backup access)."""
         fallback: tuple[str, ReplicaRecord] | None = None
         for user_id, records in self.list_all_records().items():
@@ -1344,7 +1344,7 @@ class WorkspaceRecordStore(MutableModel):
             is_legacy_fully_converted = True
             is_pull_ok_by_user_id: dict[str, bool] = {}
             for user_id, account_email in accounts.items():
-                self._reconcile_key_bundle(user_id, account_email)
+                self._ensure_bundle_uploaded(user_id, account_email)
                 is_pull_ok_by_user_id[user_id] = self.pull(user_id, account_email)
                 for agent_id in legacy.get(user_id, []):
                     if self.find_active_record(agent_id) is None:
@@ -1378,35 +1378,30 @@ class WorkspaceRecordStore(MutableModel):
                 self._retire_legacy_associations()
             return is_pull_ok_by_user_id
 
-    def _reconcile_key_bundle(self, user_id: str, account_email: str) -> None:
-        """Bring this device's key-bundle mirror and the server's bundle into agreement, once per session.
+    def _ensure_bundle_uploaded(self, user_id: str, account_email: str) -> None:
+        """Upload this device's key-bundle mirror when the server has none.
 
-        Two directions. A device holding a mirror the server lacks uploads
-        it: the settings password-change flow pushes bundles directly, but
-        the legacy one-shot conversion (and any crash between wrapping and
-        pushing) can leave a wrapped key the connector never saw -- then no
-        other device can ever unlock the synced secrets. A device holding no
-        mirror while the server has a bundle mirrors it: the mirror is what
-        marks the account as locked here, so a fresh device shows the unlock
-        banner from its first sync rather than only once some record carries
-        secrets. A server bundle that already exists always wins (it may be newer,
-        e.g. a password changed on another device while this one was
-        offline), so this can never clobber a rewrap.
+        The settings password-change flow pushes bundles directly, but the
+        legacy one-shot conversion (and any crash between wrapping and
+        pushing) can leave a device holding a wrapped key the connector never
+        saw -- then no other device can ever unlock the synced secrets. Heal
+        that here: when a mirror exists and the server has NO bundle, push
+        the mirror. A server bundle that already exists always wins (it may
+        be newer, e.g. a password changed on another device while this one
+        was offline), so this can never clobber a rewrap.
         """
         if user_id in self._bundle_confirmed_user_ids or self.cli is None:
             return
         mirror = dek_store.read_bundle_mirror(self.paths, user_id)
+        if mirror is None:
+            return
         try:
-            server_bundle = self.cli.sync_bundle_pull(account_email)
-            if server_bundle is None and mirror is not None:
+            if self.cli.sync_bundle_pull(account_email) is None:
                 self.cli.sync_bundle_push(account_email, mirror)
                 logger.info("Uploaded the missing key bundle for account {}", user_id[:8])
         except ImbueCloudCliError as e:
             logger.warning("Could not verify/upload the key bundle for {}: {}", user_id[:8], e)
             return
-        if server_bundle is not None and mirror is None:
-            dek_store.write_bundle_mirror(self.paths, user_id, server_bundle)
-            logger.info("Mirrored the key bundle for account {}; enter the master password to unlock", user_id[:8])
         self._bundle_confirmed_user_ids.add(user_id)
 
     def _is_definitively_absent_from_discovery(self, agent_id: str, resolver: BackendResolverInterface) -> bool:

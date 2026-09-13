@@ -97,15 +97,6 @@ class ImageInterface(MutableModel, ABC):
         """Eagerly build this image (triggers the remote build if not already cached)."""
         ...
 
-    @abstractmethod
-    def fetch_build_logs(self) -> str:
-        """Fetch the final layer's build output from Modal, blocking briefly for it, or "" if there is none.
-
-        Must be called on the image object whose build failed, which is the
-        only handle Modal will resolve a failed build's logs through.
-        """
-        ...
-
 
 class VolumeInterface(MutableModel, ABC):
     """A persistent volume for storing files (mirrors modal.Volume)."""

@@ -1,6 +1,6 @@
 # mngr forward behavior corpus
 
-Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
+Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
 
 This corpus specifies the externally observable behavior of the `mngr forward` proxy (`libs/mngr_forward/`).
 The proxy is a local HTTP/WebSocket gateway that serves each agent on its own origin and byte-forwards every request to that agent's backend, behind a single sign-in.

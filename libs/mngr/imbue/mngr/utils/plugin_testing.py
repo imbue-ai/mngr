@@ -33,12 +33,8 @@ from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.host import Host
-from imbue.mngr.hosts.outer_host import OuterHost
-from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
-from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.main import load_plugin_hookspecs
 from imbue.mngr.plugins import hookspecs
-from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
@@ -283,21 +279,6 @@ def local_host(local_provider: LocalProviderInstance) -> Host:
 
 
 @pytest.fixture
-def local_outer_host(temp_mngr_ctx: MngrContext) -> OuterHost:
-    """Create an OuterHost backed by the local pyinfra connector.
-
-    Use this when a test needs an ``OuterHostInterface`` that really runs the
-    commands and file operations it is given (against the local machine) rather
-    than a stub -- e.g. to exercise a shell script a caller builds.
-    """
-    return OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(create_local_pyinfra_host()),
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-
-@pytest.fixture
 def temp_work_dir(tmp_path: Path) -> Path:
     """Create a temporary work_dir directory for agents."""
     work_dir = tmp_path / "work_dir"
@@ -362,7 +343,6 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["cg"] = cg
     namespace["cli_runner"] = cli_runner
     namespace["local_host"] = local_host
-    namespace["local_outer_host"] = local_outer_host
     namespace["local_provider"] = local_provider
     namespace["log_warnings"] = log_warnings
     namespace["mngr_test_id"] = mngr_test_id

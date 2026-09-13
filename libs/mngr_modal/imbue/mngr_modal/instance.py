@@ -114,7 +114,6 @@ from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
-from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import ModalSandboxTimeoutMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.routes.deployment import deploy_function
@@ -129,10 +128,8 @@ from imbue.mngr_modal.ssh_utils import resolve_per_host_host_keypair
 from imbue.mngr_modal.ssh_utils import wait_for_sshd_with_retry
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.modal_proxy.data_types import StreamType
-from imbue.modal_proxy.direct import DEPLOY_MAX_DURATION_SECONDS
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
-from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -196,11 +193,6 @@ MODAL_VOLUME_NAME_MAX_LENGTH: Final[int] = 64
 
 # Fixed namespace for deterministic VolumeId derivation from Modal volume names.
 _MODAL_VOLUME_ID_NAMESPACE: Final[uuid.UUID] = uuid.UUID("c8f1a2b3-d4e5-6789-abcd-ef0123456789")
-
-# A shell no-op: the cheapest command that exits 0 if and only if the sandbox ran it.
-_SANDBOX_LIVENESS_PROBE_COMMAND: Final[str] = ":"
-
-_SANDBOX_CREATE_ATTEMPT_COUNT: Final[int] = 3
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -370,22 +362,6 @@ class HostRecord(FrozenModel):
     ssh_port: int | None = Field(default=None, description="SSH port number")
     ssh_host_public_key: str | None = Field(default=None, description="SSH host public key for verification")
     config: SandboxConfig | None = Field(default=None, description="Sandbox configuration")
-
-
-class _ImageBuildAttempt(FrozenModel):
-    """An image build we triggered, and the state needed to report on it if it fails.
-
-    Modal only hands over a failed build's logs through the very image object
-    that failed, and the output capture accumulates everything streamed since
-    the app was created -- so telling whether *this* build streamed means
-    comparing against how long the capture was before it started.
-    """
-
-    image: ImageInterface = Field(description="The image whose build was triggered")
-    captured_length_before_build: int = Field(description="Length of the Modal output capture before the build began")
-
-    def has_streamed_into(self, captured_output: str) -> bool:
-        return len(captured_output) > self.captured_length_before_build
 
 
 class ModalProviderApp(FrozenModel):
@@ -583,93 +559,6 @@ class ModalProviderInstance(BaseProviderInstance):
         if self.config.is_vm_runtime_enabled:
             return {"vm_runtime": True}
         return None
-
-    # No backoff: each attempt already spends a container start-up waiting on the
-    # liveness probe, so there is nothing to pace.
-    @retry(
-        stop=stop_after_attempt(_SANDBOX_CREATE_ATTEMPT_COUNT),
-        retry=retry_if_exception_type(ModalSandboxDiedMngrError),
-        reraise=True,
-    )
-    def _create_running_sandbox(
-        self,
-        *,
-        image: ImageInterface,
-        app: AppInterface,
-        config: SandboxConfig,
-        volumes: Mapping[str, VolumeInterface],
-    ) -> SandboxInterface:
-        """Create a Modal sandbox and return it only once it is running commands.
-
-        ``sandbox_create`` returns as soon as Modal accepts the sandbox, and ``tunnels()``
-        resolves from the allocated tunnel rather than from a running container, so
-        neither tells us the container started. Modal kills a fraction of sandboxes on
-        the way up, and every command queued against one of those comes back SIGKILLed
-        (exit 137), which the caller would otherwise read as a failure of whichever
-        bring-up command happened to be first.
-
-        Raises ModalSandboxDiedMngrError when every attempt dies before running a command.
-        """
-        # Add the shutdown buffer to the timeout sent to Modal so the activity watcher can
-        # trigger a clean shutdown before Modal's hard timeout kills the host.
-        modal_timeout = config.timeout + self.config.shutdown_buffer_seconds
-        with log_span(
-            "Creating Modal sandbox",
-            timeout=config.timeout,
-            modal_timeout=modal_timeout,
-            shutdown_buffer=self.config.shutdown_buffer_seconds,
-            cpu=config.cpu,
-            memory_gb=config.memory,
-        ):
-            sandbox = self._modal_interface.sandbox_create(
-                image=image,
-                app=app,
-                # note: we do NOT pass the environment_name here because that is deprecated (it is inferred from the app)
-                timeout=modal_timeout,
-                cpu=config.cpu,
-                # Memory is in GB but Modal expects MB
-                memory=int(config.memory * 1024),
-                unencrypted_ports=[CONTAINER_SSH_PORT],
-                gpu=config.gpu,
-                region=config.region,
-                cidr_allowlist=config.effective_cidr_allowlist,
-                volumes=volumes,
-                experimental_options=self._build_experimental_options(),
-            )
-        logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
-
-        if sandbox.exec("sh", "-c", _SANDBOX_LIVENESS_PROBE_COMMAND).wait() == 0:
-            return sandbox
-        # Terminating the dud keeps it from lingering and billing, but it is already
-        # unusable, so a failure to terminate must not mask why we are discarding it.
-        try:
-            sandbox.terminate()
-        except ModalProxyError as e:
-            logger.warning("Failed to terminate discarded sandbox {}: {}", sandbox.get_object_id(), e)
-        raise ModalSandboxDiedMngrError(f"Modal sandbox {sandbox.get_object_id()} died before it ran a single command")
-
-    def _run_bring_up_command(self, sandbox: SandboxInterface, command: str, description: str) -> str:
-        """Run one host bring-up command in a sandbox and return its stdout.
-
-        Modal reports exit 137 (SIGKILL) for every command queued against a sandbox
-        that has died, so a non-zero exit says nothing about the command itself until
-        the sandbox's own liveness has been checked. ``poll()`` is that check.
-
-        Raises ModalSandboxDiedMngrError if the sandbox died, MngrError if the command
-        failed on a live sandbox.
-        """
-        process = sandbox.exec("sh", "-c", command)
-        stdout = process.get_stdout().read()
-        exit_code = process.wait()
-        if exit_code == 0:
-            return stdout
-        sandbox_exit_code = sandbox.poll()
-        if sandbox_exit_code is not None:
-            raise ModalSandboxDiedMngrError(
-                f"Modal sandbox {sandbox.get_object_id()} exited with code {sandbox_exit_code} "
-                f"while mngr was trying to {description}"
-            )
-        raise MngrError(f"Failed to {description} (exit code {exit_code}): {stdout}")
 
     def _get_host_volume(self, host: HostInterface | HostId) -> ModalVolume | None:
         """Build a fresh, lazy reference to a host's persistent volume.
@@ -1105,7 +994,13 @@ class ModalProviderInstance(BaseProviderInstance):
             str(self.host_dir),
             host_volume_mount_path=effective_volume_mount_path,
         )
-        stdout = self._run_bring_up_command(sandbox, check_install_cmd, "install required packages")
+        process = sandbox.exec("sh", "-c", check_install_cmd)
+
+        # Read output and check exit code
+        stdout = process.get_stdout().read()
+        exit_code = process.wait()
+        if exit_code != 0:
+            raise MngrError(f"Failed to install required packages (exit code {exit_code}): {stdout}")
 
         # Parse warnings from output and log them
         warnings = parse_warnings_from_output(stdout)
@@ -1161,7 +1056,9 @@ class ModalProviderInstance(BaseProviderInstance):
             setup_parts.append(f"mkdir -p '{self.host_dir}/events/logs'")
 
             combined_cmd = " && ".join(setup_parts)
-            self._run_bring_up_command(sandbox, combined_cmd, "configure SSH in sandbox")
+            exit_code = sandbox.exec("sh", "-c", combined_cmd).wait()
+            if exit_code != 0:
+                raise MngrError(f"Failed to configure SSH in sandbox (exit code {exit_code})")
 
         with log_span("Starting sshd in sandbox"):
             # Start sshd (-D: don't detach, -E: log to file instead of syslog)
@@ -1360,9 +1257,7 @@ class ModalProviderInstance(BaseProviderInstance):
 
             with log_span("Waiting for deploy to finish and creating shutdown script"):
                 if snapshot_url_future is not None:
-                    # The deploy may legitimately sit behind Modal's app lock
-                    # for minutes; the future resolves as soon as it finishes.
-                    snapshot_url = snapshot_url_future.result(DEPLOY_MAX_DURATION_SECONDS)
+                    snapshot_url = snapshot_url_future.result(2 * 60.0)
                     self._create_shutdown_script(host, sandbox, host_id, snapshot_url)
 
             # Start the activity watcher. We have to start it here because we only created the shutdown script (with the hardcoded sandbox id)
@@ -1372,7 +1267,9 @@ class ModalProviderInstance(BaseProviderInstance):
                 start_activity_watcher_cmd = build_start_activity_watcher_command(
                     str(self.host_dir), host_log_dir=self._host_log_dir_str()
                 )
-                self._run_bring_up_command(sandbox, start_activity_watcher_cmd, "start activity watcher in sandbox")
+                exit_code = sandbox.exec("sh", "-c", start_activity_watcher_cmd).wait()
+                if exit_code != 0:
+                    raise MngrError(f"Failed to start activity watcher in sandbox (exit code {exit_code})")
 
             # Start periodic volume sync to flush writes to the host volume (only when a host volume is mounted)
             if self.config.is_host_volume_created:
@@ -1380,7 +1277,9 @@ class ModalProviderInstance(BaseProviderInstance):
                     volume_sync_cmd = build_start_volume_sync_command(
                         HOST_VOLUME_MOUNT_PATH, str(self.host_dir), host_log_dir=self._host_log_dir_str()
                     )
-                    self._run_bring_up_command(sandbox, volume_sync_cmd, "start volume sync in sandbox")
+                    exit_code = sandbox.exec("sh", "-c", volume_sync_cmd).wait()
+                    if exit_code != 0:
+                        raise MngrError(f"Failed to start volume sync in sandbox (exit code {exit_code})")
 
             with log_span("Waiting for modal operations to complete"):
                 # something has gone horribly wrong if those operations take longer than that
@@ -1628,32 +1527,6 @@ log "=== Shutdown script completed ==="
         Returns an empty string if no app has been created yet.
         """
         return self.modal_app.get_captured_output()
-
-    def _collect_build_log(self, error: ModalProxyError | MngrError, build_attempt: _ImageBuildAttempt | None) -> str:
-        """Assemble the build output to report for a host that failed to come up.
-
-        Modal's live log stream is best-effort: when its build-failure result
-        beats the stream, nothing is streamed and the user is told only that
-        "Image build for <id> failed", with no sign of which line of their
-        Dockerfile broke. Ask Modal for the failing layer's output in exactly
-        that case -- fetching a build that did stream would only print it back
-        a second time.
-        """
-        captured_output = self.get_captured_output()
-        if not isinstance(error, ModalProxyImageBuildError) or build_attempt is None:
-            return captured_output
-        if build_attempt.has_streamed_into(captured_output):
-            return captured_output
-        with log_span("Fetching build logs for a failed build that Modal never streamed"):
-            try:
-                fetched_build_log = build_attempt.image.fetch_build_logs()
-            except ModalProxyError as fetch_error:
-                # Explaining the failure must never displace it.
-                logger.warning("Could not fetch the failed build's logs from Modal: {}", fetch_error)
-                return ""
-        if not fetched_build_log:
-            logger.warning("Modal has no build output for the failed image build")
-        return fetched_build_log
 
     def _list_all_sandboxes_for_app(self, app: AppInterface) -> list[SandboxInterface]:
         """
@@ -1962,7 +1835,6 @@ log "=== Shutdown script completed ==="
                 DEFAULT_BASE_IMAGE,
             )
 
-        build_attempt: _ImageBuildAttempt | None = None
         try:
             # Get or create the Modal app (uses singleton pattern with context manager)
             with log_span("Getting Modal app", app_name=self.app_name):
@@ -1980,11 +1852,13 @@ log "=== Shutdown script completed ==="
                     )
 
                 # Eagerly trigger the image build so we can measure build time separately from sandbox creation
-                build_attempt = _ImageBuildAttempt(
-                    image=modal_image, captured_length_before_build=len(self.get_captured_output())
-                )
                 with log_span("Building Modal image"):
                     modal_image.build(app)
+
+            # Create the sandbox
+            # Add shutdown buffer to the timeout sent to Modal so the activity watcher can
+            # trigger a clean shutdown before Modal's hard timeout kills the host
+            modal_timeout = config.timeout + self.config.shutdown_buffer_seconds
 
             # Build volume mounts from build args
             sandbox_volumes = _build_modal_volumes(config.volumes, self.environment_name, self._modal_interface)
@@ -1994,11 +1868,35 @@ log "=== Shutdown script completed ==="
                 with log_span("Ensuring host volume for {}", host_id):
                     sandbox_volumes[HOST_VOLUME_MOUNT_PATH] = self._build_host_volume(host_id)
 
-            sandbox = self._create_running_sandbox(image=modal_image, app=app, config=config, volumes=sandbox_volumes)
+            with log_span(
+                "Creating Modal sandbox",
+                timeout=config.timeout,
+                modal_timeout=modal_timeout,
+                shutdown_buffer=self.config.shutdown_buffer_seconds,
+                cpu=config.cpu,
+                memory_gb=config.memory,
+            ):
+                # Memory is in GB but Modal expects MB
+                memory_mb = int(config.memory * 1024)
+                sandbox = self._modal_interface.sandbox_create(
+                    image=modal_image,
+                    app=app,
+                    # note: we do NOT pass the environment_name here because that is deprecated (it is inferred from the app)
+                    timeout=modal_timeout,
+                    cpu=config.cpu,
+                    memory=memory_mb,
+                    unencrypted_ports=[CONTAINER_SSH_PORT],
+                    gpu=config.gpu,
+                    region=config.region,
+                    cidr_allowlist=config.effective_cidr_allowlist,
+                    volumes=sandbox_volumes,
+                    experimental_options=self._build_experimental_options(),
+                )
+                logger.trace("Created Modal sandbox", sandbox_id=sandbox.get_object_id())
         except (ModalProxyError, MngrError) as e:
             # On failure, save a failed host record so the user can see what happened
             failure_reason = str(e)
-            build_log = self._collect_build_log(e, build_attempt)
+            build_log = self.get_captured_output()
             logger.error("Host creation failed: {}", failure_reason)
             self._save_failed_host_record(
                 host_id=host_id,
@@ -2253,6 +2151,12 @@ log "=== Shutdown script completed ==="
             # Get or create the Modal app
             app = self._get_modal_app()
 
+            # Create the sandbox from the snapshot image
+            # Add shutdown buffer to the timeout sent to Modal so the activity watcher can
+            # trigger a clean shutdown before Modal's hard timeout kills the host
+            modal_timeout = config.timeout + self.config.shutdown_buffer_seconds
+            memory_mb = int(config.memory * 1024)
+
             # Build volume mounts from the stored config
             sandbox_volumes = _build_modal_volumes(config.volumes, self.environment_name, self._modal_interface)
 
@@ -2260,8 +2164,19 @@ log "=== Shutdown script completed ==="
             if self.config.is_host_volume_created:
                 sandbox_volumes[HOST_VOLUME_MOUNT_PATH] = self._build_host_volume(host_id)
 
-            new_sandbox = self._create_running_sandbox(
-                image=modal_image, app=app, config=config, volumes=sandbox_volumes
+            new_sandbox = self._modal_interface.sandbox_create(
+                image=modal_image,
+                app=app,
+                # note: we do NOT pass the environment_name here because that is deprecated (it is inferred from the app)
+                timeout=modal_timeout,
+                cpu=config.cpu,
+                memory=memory_mb,
+                unencrypted_ports=[CONTAINER_SSH_PORT],
+                gpu=config.gpu,
+                region=config.region,
+                cidr_allowlist=config.effective_cidr_allowlist,
+                volumes=sandbox_volumes,
+                experimental_options=self._build_experimental_options(),
             )
         logger.info("Created sandbox from snapshot", sandbox_id=new_sandbox.get_object_id())
 

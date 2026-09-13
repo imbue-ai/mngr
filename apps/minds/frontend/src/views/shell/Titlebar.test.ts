@@ -40,10 +40,6 @@ interface RenderTitlebarOptions {
   /** Records the shell's switchToNotifications calls. */
   switchToNotifications?: () => void;
   notificationEntries?: UiNotificationEntry[];
-  /** Runs against the first render; the same instance is then rendered again. */
-  afterFirstRender?: (root: AnyVnode) => void;
-  /** The route the second render runs under; defaults to `routePath`. */
-  rerenderRoutePath?: string;
 }
 
 /** Render the titlebar without a DOM. `window` is stubbed because the Electron
@@ -89,15 +85,14 @@ function renderTitlebar(
     (routeSearch === ""
       ? `/workspace/${WORKSPACE_ID}`
       : `/workspace/${WORKSPACE_ID}/options`);
-  const render = (path: string): AnyVnode =>
-    (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
-      instance,
-      m(instance, { shell, routePath: path } as unknown as m.Attributes) as m.Vnode,
-    ) as unknown as AnyVnode;
-  const first = render(routePath);
-  if (options.afterFirstRender === undefined) return first;
-  options.afterFirstRender(first);
-  return render(options.rerenderRoutePath ?? routePath);
+  const vnode = m(instance, {
+    shell,
+    routePath,
+  } as unknown as m.Attributes) as m.Vnode;
+  return (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+    instance,
+    vnode,
+  ) as unknown as AnyVnode;
 }
 
 function tabStripIds(root: AnyVnode): unknown[] {
@@ -379,52 +374,6 @@ describe("Titlebar workspace tab strip", () => {
       .mockImplementation(() => undefined);
     (attrsOf(tabButton(root, "ws-tab-permissions")).onclick as () => void)();
     expect(routeSet).toHaveBeenCalledWith(`/workspace/${WORKSPACE_ID}`);
-  });
-});
-
-describe("Titlebar on a creation page", () => {
-  const CREATING_PATH = "/creating/create-attempt-0123abcd";
-
-  it("answers a tab with the check-back dialog, rendered beside the bar rather than inside it", () => {
-    const root = renderTitlebar("", {
-      routePath: CREATING_PATH,
-      afterFirstRender: (first) => {
-        (attrsOf(tabButton(first, "ws-tab-settings")).onclick as () => void)();
-      },
-    });
-    const dialog = collectVnodes(root).find(
-      (vnode) => attrsOf(vnode).id === "creating-not-yet-dialog",
-    );
-    expect(dialog).toBeDefined();
-    // The bar re-bases its text tokens for the accent (.titlebar-surface), so
-    // a dialog nested in it would paint white on white.
-    const bar = collectVnodes(root).find(
-      (vnode) => attrsOf(vnode).id === "minds-titlebar",
-    );
-    expect(bar).toBeDefined();
-    expect(collectVnodes(bar)).not.toContain(dialog);
-  });
-
-  it("shows no dialog until a tab is pressed", () => {
-    const root = renderTitlebar("", { routePath: CREATING_PATH });
-    expect(
-      collectVnodes(root).find((vnode) => attrsOf(vnode).id === "creating-not-yet-dialog"),
-    ).toBeUndefined();
-  });
-
-  it("drops an open dialog once the route leaves the creation page", () => {
-    // The wash enters the finished workspace on its own timer; a dialog left
-    // up on the creation page must not follow it onto the workspace.
-    const root = renderTitlebar("", {
-      routePath: CREATING_PATH,
-      afterFirstRender: (first) => {
-        (attrsOf(tabButton(first, "ws-tab-settings")).onclick as () => void)();
-      },
-      rerenderRoutePath: `/workspace/${WORKSPACE_ID}`,
-    });
-    expect(
-      collectVnodes(root).find((vnode) => attrsOf(vnode).id === "creating-not-yet-dialog"),
-    ).toBeUndefined();
   });
 });
 

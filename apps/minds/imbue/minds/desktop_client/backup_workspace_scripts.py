@@ -65,11 +65,6 @@ RESTORE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_RESTORE_JSON:"
 # override it via the scripts' ``--official-url`` argument. Must stay equal to
 # the default baked into ``_SCRIPT_PREAMBLE`` (asserted by a unit test).
 OFFICIAL_REMOTE_URL: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
-# The name that remote goes under, also reused by the desktop client's version
-# read (``workspace_version.py``), which fetches release tags through it. Must
-# stay equal to the name baked into ``_SCRIPT_PREAMBLE`` (asserted by a unit
-# test alongside the URL).
-OFFICIAL_REMOTE_NAME: Final[str] = "official"
 
 # Shared helper functions textually prepended to each script body. Kept as one
 # plain string (not f-string) so braces inside the python source need no

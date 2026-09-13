@@ -80,7 +80,6 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
-from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
@@ -138,10 +137,6 @@ from imbue.mngr_claude.claude_config import is_source_directory_trusted
 from imbue.mngr_claude.claude_config import read_claude_config
 from imbue.mngr_claude.claude_config import remove_claude_trust_for_path
 from imbue.mngr_claude.claude_config import resolve_shared_claude_config_dir
-from imbue.mngr_claude.compaction import CLAUDE_DEFAULT_CACHE_TTL_MINUTES
-from imbue.mngr_claude.compaction import get_agent_context_tokens
-from imbue.mngr_claude.compaction import get_agent_idle_since
-from imbue.mngr_claude.compaction import record_agent_compacted
 from imbue.mngr_claude.dialogs import DialogBlocked
 from imbue.mngr_claude.dialogs import INPUT_PROMPT_GLYPH
 from imbue.mngr_claude.dialogs import Unrecognized
@@ -2364,7 +2359,6 @@ class ClaudeAgent(
     InteractiveTuiAgent[ClaudeAgentConfig],
     SupportsLiveOutputMixin,
     HasSessionAdoptionMixin,
-    HasCompactionMixin,
 ):
     """Interactive (TUI-driven) Claude agent.
 
@@ -2792,30 +2786,6 @@ class ClaudeAgent(
                 f"Agent did not signal readiness within {timeout}s. "
                 "This may indicate a trust dialog appeared or Claude Code failed to start.",
             )
-
-    # --- HasCompactionMixin capability implementation ---
-
-    def request_compaction(self, instructions: str | None = None) -> None:
-        """Perform context compaction by sending /compact to Claude Code.
-
-        If ``instructions`` is provided, it is appended to the ``/compact`` command
-        (e.g. ``/compact <instructions>``).
-        """
-        command = f"/compact {instructions.strip()}" if instructions and instructions.strip() else "/compact"
-        self.send_message(command)
-        record_agent_compacted(self)
-
-    def get_cache_ttl_minutes(self) -> int | None:
-        """Return Claude Code's prompt cache TTL (60 minutes)."""
-        return CLAUDE_DEFAULT_CACHE_TTL_MINUTES
-
-    def get_context_tokens(self) -> int | None:
-        """Extract prompt context token count from Claude's transcript."""
-        return get_agent_context_tokens(self)
-
-    def get_idle_since(self) -> datetime | None:
-        """Return the datetime when the Claude agent entered idle state, or None."""
-        return get_agent_idle_since(self)
 
     def _build_background_tasks_command(self, session_name: str, primary_window_name: str) -> str:
         """Build a shell command that starts the background tasks script.

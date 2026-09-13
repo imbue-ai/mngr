@@ -303,13 +303,13 @@ chmod +x "$HOME/.local/bin/minds-wsl-start"
 
 # ---------------------------------------------------------------- Windows shortcut
 if command -v powershell.exe >/dev/null 2>&1; then
-    step "Creating the 'Mind (WSL)' shortcut on the Windows desktop"
+    step "Creating the 'Minds (WSL)' shortcut on the Windows desktop"
     distro_name="${WSL_DISTRO_NAME:-}"
     if [ -n "$distro_name" ]; then
         powershell.exe -NoProfile -NonInteractive -Command "
             \$desktop = [Environment]::GetFolderPath('Desktop')
             \$ws = New-Object -ComObject WScript.Shell
-            \$sc = \$ws.CreateShortcut(\"\$desktop\\Mind (WSL).lnk\")
+            \$sc = \$ws.CreateShortcut(\"\$desktop\\Minds (WSL).lnk\")
             \$sc.TargetPath = 'C:\\Windows\\System32\\wsl.exe'
             \$sc.Arguments = '-d $distro_name -- bash -lc ~/.local/bin/minds-wsl-start'
             \$sc.Description = 'Start the minds desktop app inside WSL'
@@ -324,7 +324,7 @@ fi
 
 # ---------------------------------------------------------------- launch
 printf '\n\033[1;32mminds is installed.\033[0m (env: %s, version: %s, dir: %s)\n' "$ENV_NAME" "$VERSION" "$INSTALL_DIR"
-echo "Start it any time with the 'Mind (WSL)' desktop shortcut, or: minds-wsl-start"
+echo "Start it any time with the 'Minds (WSL)' desktop shortcut, or: minds-wsl-start"
 
 if [ "$IS_LAUNCH" = "1" ]; then
     step "Starting the minds desktop app"

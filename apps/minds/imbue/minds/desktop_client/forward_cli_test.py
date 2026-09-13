@@ -847,12 +847,13 @@ def test_host_discovered_event_updates_host_state(consumer: EnvelopeStreamConsum
     assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.STOPPED
 
 
-def test_host_destroyed_event_marks_host_destroyed_and_forgets_its_agents(consumer: EnvelopeStreamConsumer) -> None:
-    """A HostDestroyedEvent reports the host as DESTROYED at once and drops every agent on it.
+def test_host_destroyed_event_forgets_host_and_its_agents(consumer: EnvelopeStreamConsumer) -> None:
+    """A HostDestroyedEvent drops the host and its agents outright (terminal removal).
 
-    The destroy-status check keys on this reading: without it the host has no
-    state until the provider's next snapshot re-lists it as DESTROYED, and a
-    finished destroy reads as failed for the whole poll interval in between.
+    Unlike a snapshot that re-lists a host with state ``DESTROYED`` during its
+    persistence window, an explicit destroy event is terminal: the shared
+    aggregator forgets the host and every agent on it, so the resolver reports
+    neither.
     """
     counter = [0]
     snapshot = _provider_snapshot(
@@ -870,7 +871,7 @@ def test_host_destroyed_event_marks_host_destroyed_and_forgets_its_agents(consum
     )
     _dispatch(consumer, _observe_envelope(host_destroyed))
 
-    assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.DESTROYED
+    assert consumer.resolver.get_host_state(_HOST_ID_1) is None
     assert consumer.resolver.list_known_agent_ids() == ()
 
 

@@ -33,10 +33,6 @@ The state machine:
 - RECOVERING -> RECOVERY_FAILED: a recovery failed to bring the workspace back
   within its window, or its ``mngr`` commands errored. The recovery card
   renders the failure reason and the restart affordance.
-- RECOVERING -> STUCK: a recovery ended with no verdict to give on the machine
-  (the connector refused the start because an operator holds the machine's
-  stop). The agent goes back to the probe loop, which is what will notice the
-  operator's start bringing it back.
 - {STUCK, RECOVERING, RECOVERY_FAILED} -> HEALTHY: a successful probe.
 
 Which of the two recoveries ran is :class:`HostRecoveryKind`, and the surfaces
@@ -652,9 +648,6 @@ class SystemInterfaceHealthTracker(MutableModel):
         (:func:`stop_workspace_hosts`), which needs it because a partial quit
         offers Cancel quit and hands back an app whose machines are down, and by
         the destroy route, whose machine is on its way to not existing at all.
-        The connector sets it too, through the unattended dispatch: a live read
-        that finds a cloud machine stopping, stopped or starting (someone asked
-        for that stop), and a start the connector refused as an operator hold.
         Cleared by the in-app start, or by any probe that finds the machine
         answering again. That probe clear is what makes the mark self-limiting:
         a stopped machine can also be started by a route that never touches the
@@ -688,7 +681,7 @@ class SystemInterfaceHealthTracker(MutableModel):
                 self._in_flight_intentional_stop_agents.add(aid_str)
             else:
                 self._in_flight_intentional_stop_agents.discard(aid_str)
-        logger.debug("Suppressed unattended recovery for {} (stopped on purpose)", agent_id)
+        logger.debug("Suppressed unattended recovery for {} (stopped from inside the app)", agent_id)
 
     def allow_unattended_recovery(self, agent_id: AgentId) -> None:
         """Drop any intentional-stop marker for ``agent_id``, in flight or not. Idempotent."""
@@ -701,7 +694,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             logger.debug("Allowed unattended recovery for {} again", agent_id)
 
     def is_unattended_recovery_suppressed(self, agent_id: AgentId) -> bool:
-        """Whether ``agent_id`` was stopped on purpose (from inside the app, or per the connector) and left stopped."""
+        """Whether ``agent_id`` was stopped from inside the app and left stopped."""
         with self._lock:
             return str(agent_id) in self._unattended_recovery_suppressed_agents
 
@@ -996,11 +989,7 @@ class SystemInterfaceHealthTracker(MutableModel):
         with self._lock:
             record = self._records.setdefault(aid_str, _AgentRecord())
             if record.health != AgentHealth.STUCK:
-                # A RECOVERING record's episode ends here; its kind and its
-                # wake mark describe nothing once the agent is back to STUCK.
                 record.health = AgentHealth.STUCK
-                record.recovery_kind = None
-                record.is_recovery_progress_unverified = False
                 fire_health = AgentHealth.STUCK
         if fire_health is not None:
             self._fire_on_change(agent_id, fire_health)

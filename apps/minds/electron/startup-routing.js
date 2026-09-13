@@ -10,44 +10,42 @@
  * Decide which screen the desktop client lands on at cold start.
  *
  * Returns one of:
- *   'start'   -> the first-run start flow (`/start`): the manifesto exchange
- *                and the first workspace's questions, asked as a chat
+ *   'welcome' -> the onboarding / sign-in splash (`/welcome`)
  *   'consent' -> the once-per-install error-reporting notice (`/consent`)
  *   'create'  -> the home / create-agent page (`/`)
  *   'restore' -> reopen the previous session's saved windows
  *
  * Precedence (first match wins):
- *   1. Not authenticated to the local backend -> start. Graceful fallback;
+ *   1. Not authenticated to the local backend -> welcome. Graceful fallback;
  *      the one-time login code should already have authenticated us.
- *   2. Onboarding not complete AND no workspaces exist -> start. Onboarding
- *      is complete once the install has started creating a workspace or
- *      signed in from the start flow (the backend owns the flag); an install
- *      that already has workspaces is past it whatever the flag says. This
- *      holds even when stale window-state lingers from a previous session
- *      (e.g. a leftover home/`/` window after a workspace teardown): a
- *      non-workspace saved window must NOT suppress the start flow for an
- *      install that has never made a workspace. (A bare `/` window survives
- *      restore-filtering because it isn't a workspace URL, so without this
- *      clause it would silently win over the start flow.)
+ *   2. "Functionally empty": signed out of every account AND no workspaces to
+ *      return to -> welcome. This holds even when stale window-state lingers
+ *      from a previous session (e.g. a leftover home/`/` window left behind
+ *      after a sign-out + workspace teardown). A non-workspace saved window
+ *      must NOT suppress onboarding for a signed-out, workspace-less user --
+ *      we want to nudge them to sign in again before using the app. (A bare
+ *      `/` window survives restore-filtering because it isn't a workspace URL,
+ *      so without this clause it would silently win over the welcome screen.)
  *   3. The error-reporting notice was never acknowledged -> consent. Sits
- *      after the start branches and before the landing content, matching
- *      the legacy server-side gate. ConsentPage's accept action records the
+ *      after the welcome branches and before the landing content, matching
+ *      the legacy server-side gate (welcome redirect first, then consent,
+ *      then the landing page). ConsentPage's accept action records the
  *      acknowledgement (POST /ui/api/onboarding/consent) and lands home, so
  *      the route never recurs.
  *   4. Nothing restorable -> the home/create page.
  *   5. Otherwise -> restore the saved windows.
  *
  * @param {object} state
- * @param {boolean} state.authenticated          Local backend session is authenticated.
- * @param {boolean} state.isOnboardingComplete   The install is past the first-run start flow.
- * @param {number}  state.workspaceCount         Number of existing workspaces.
- * @param {number}  state.restorableCount        Saved windows that survived restore-filtering.
- * @param {boolean} state.needsConsent           The error-reporting notice is unacknowledged.
- * @returns {'start'|'consent'|'create'|'restore'}
+ * @param {boolean} state.authenticated   Local backend session is authenticated.
+ * @param {boolean} state.hasAccounts     Whether >=1 signed-in account exists.
+ * @param {number}  state.workspaceCount  Number of existing workspaces.
+ * @param {number}  state.restorableCount Saved windows that survived restore-filtering.
+ * @param {boolean} state.needsConsent    The error-reporting notice is unacknowledged.
+ * @returns {'welcome'|'consent'|'create'|'restore'}
  */
-function decideStartupRoute({ authenticated, isOnboardingComplete, workspaceCount, restorableCount, needsConsent }) {
-  if (!authenticated) return 'start';
-  if (!isOnboardingComplete && workspaceCount === 0) return 'start';
+function decideStartupRoute({ authenticated, hasAccounts, workspaceCount, restorableCount, needsConsent }) {
+  if (!authenticated) return 'welcome';
+  if (!hasAccounts && workspaceCount === 0) return 'welcome';
   if (needsConsent) return 'consent';
   if (restorableCount === 0) return 'create';
   return 'restore';

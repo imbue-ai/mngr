@@ -839,23 +839,6 @@ def test_agent_observer_on_discovery_stream_output_handles_host_destroyed(
         assert str(host.host_id) not in observer._events_processes
 
 
-def test_agent_observer_does_not_stream_activity_from_a_host_a_snapshot_lists_as_destroyed(
-    temp_mngr_ctx: MngrContext, noop_binary: str
-) -> None:
-    """A provider re-listing a destroyed host for its persistence window must not restart its stream."""
-    observer = _make_observer(temp_mngr_ctx, noop_binary)
-    host = make_test_discovered_host()
-    destroyed_host = host.model_copy_update(to_update(host.field_ref().host_state, HostState.DESTROYED))
-
-    with observer._concurrency_group:
-        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[host])
-        assert str(host.host_id) in observer._events_processes
-
-        _feed_provider_snapshot(observer, ProviderInstanceName("local"), hosts=[destroyed_host])
-        assert str(host.host_id) not in observer._known_hosts
-        assert str(host.host_id) not in observer._events_processes
-
-
 # === UNKNOWN State Tests ===
 
 

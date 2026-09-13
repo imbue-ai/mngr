@@ -18,8 +18,8 @@ importers:
         specifier: 6.8.9
         version: 6.8.9
       latchkey:
-        specifier: ^3.14.0
-        version: 3.14.0
+        specifier: ^3.11.1
+        version: 3.11.1
       semver:
         specifier: ^7.6.3
         version: 7.7.4
@@ -289,8 +289,8 @@ packages:
     resolution: {integrity: sha512-RE815I4arJFtt+FVeU1Tgp9/Xvecacji8w/V6XtXsWWH/wz/eNkNbhb+ny/+PlVZjV0rxQpRSQKNKE3lcktHEA==}
     engines: {node: '>=10.10.0'}
 
-  '@imbue-ai/detent@1.15.2':
-    resolution: {integrity: sha512-VFPwD24zgY1VJYg7fImiZINNLtAeNGIjoKKoHM/1t6fkVd+mQC9lU2FahXBw16v3wFZG9S+aYGZwJpp/QXH9AQ==}
+  '@imbue-ai/detent@1.15.1':
+    resolution: {integrity: sha512-x1liPzdefjPm/G7ucM30NKdVVgWWh9d3LUFMXPEfovtMuO9c0cpKIGxjwOjGiFPjRpurZ/M7dqaidxg8ZOPH2w==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -1760,8 +1760,8 @@ packages:
   keyv@4.5.4:
     resolution: {integrity: sha512-oxVHkHR/EJf2CNXnWxRLW6mg7JyCCUcG0DtEGmL2ctUo1PNTin1PUil+r/+4r5MpVgC/fn1kjsx7mjSujKqIpw==}
 
-  latchkey@3.14.0:
-    resolution: {integrity: sha512-8fuA3UVWkqZbjEp1LJsfSe7nVTngsKGNDhm2TtXAZzb3FHRBH/wiw4RxhH4hAGkg9vgoA4NIFYvCQeEy/6zLng==}
+  latchkey@3.11.1:
+    resolution: {integrity: sha512-NBIz74801B2SkX1msje+K24xXhZtfH2H8AElPYdW4AvTnhk0v9jeWtGWXtU9uGxB3eiXrAi/dmKNaOydL2/TJQ==}
     engines: {node: '>=20'}
     hasBin: true
 
@@ -2077,19 +2077,9 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  playwright-core@1.63.0:
-    resolution: {integrity: sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg==}
-    engines: {node: '>=20'}
-    hasBin: true
-
   playwright@1.60.0:
     resolution: {integrity: sha512-hheHdokM8cdqCb0lcE3s+zT4t4W+vvjpGxsZlDnikarzx8tSzMebh3UiFtgqwFwnTnjYQcsyMF8ei2mCO/tpeA==}
     engines: {node: '>=18'}
-    hasBin: true
-
-  playwright@1.63.0:
-    resolution: {integrity: sha512-+7ziBLidS4NaNCdt57SUDT+wYmmd5fmiQejUic/kb+YsYSCPyOOE9sebzMjNmQrsnNpDJqd4WHvV/8lfKfUDUg==}
-    engines: {node: '>=20'}
     hasBin: true
 
   postgres-array@2.0.0:
@@ -2959,7 +2949,7 @@ snapshots:
 
   '@humanwhocodes/momoa@2.0.4': {}
 
-  '@imbue-ai/detent@1.15.2':
+  '@imbue-ai/detent@1.15.1':
     dependencies:
       '@cfworker/json-schema': 4.1.1
       commander: 14.0.3
@@ -4682,12 +4672,12 @@ snapshots:
     dependencies:
       json-buffer: 3.0.1
 
-  latchkey@3.14.0:
+  latchkey@3.11.1:
     dependencies:
-      '@imbue-ai/detent': 1.15.2
+      '@imbue-ai/detent': 1.15.1
       '@napi-rs/keyring': 1.2.0
       commander: 12.1.0
-      playwright: 1.63.0
+      playwright: 1.60.0
       zod: 3.25.76
 
   latest-version@5.1.0:
@@ -4929,17 +4919,11 @@ snapshots:
 
   playwright-core@1.60.0: {}
 
-  playwright-core@1.63.0: {}
-
   playwright@1.60.0:
     dependencies:
       playwright-core: 1.60.0
     optionalDependencies:
       fsevents: 2.3.2
-
-  playwright@1.63.0:
-    dependencies:
-      playwright-core: 1.63.0
 
   postgres-array@2.0.0: {}
 

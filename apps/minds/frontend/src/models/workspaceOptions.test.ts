@@ -11,8 +11,6 @@ import {
   defaultFetchJson,
   documentGrantsAnyone,
   errorMessageFromBody,
-  formatMachineSize,
-  formatPendingMachineSize,
   normalizeWorkspaceColorHex,
 } from "./workspaceOptions";
 
@@ -118,9 +116,7 @@ describe("ShareModel sharing API coordinate", () => {
       { agentId: "agent-" + "b".repeat(32) },
     );
     await model.load();
-    expect(requests[0].url).toBe(
-      "/api/v1/workspace-sharing/agent-" + "b".repeat(32),
-    );
+    expect(requests[0].url).toBe("/api/v1/workspace-sharing/agent-" + "b".repeat(32));
   });
 
   it("falls back to the legacy host id when no workspace id is known", async () => {
@@ -130,9 +126,7 @@ describe("ShareModel sharing API coordinate", () => {
       body: sharingResponse(),
     }));
     await model.load();
-    expect(requests[0].url).toBe(
-      "/api/v1/workspace-sharing/host-" + "a".repeat(32),
-    );
+    expect(requests[0].url).toBe("/api/v1/workspace-sharing/host-" + "a".repeat(32));
   });
 });
 
@@ -340,7 +334,7 @@ describe("ShareModel load failures", () => {
 });
 
 describe("ShareModel target urls", () => {
-  it("builds label-prefixed origins and no link at all for a target without a label", async () => {
+  it("builds label-prefixed origins and falls back for label-less services", async () => {
     const { model } = makeShareModel(() => ({
       ok: true,
       status: 200,
@@ -354,197 +348,10 @@ describe("ShareModel target urls", () => {
     expect(model.targetUrl("web")).toBe(
       "https://web-r4nd.machine.relay.example/",
     );
-    // Only <label>.<domain> origins route on a share: a bare service name
-    // would be a link that can never work, so none is offered.
-    expect(model.targetUrl("docs")).toBe("");
+    expect(model.targetUrl("docs")).toBe("https://docs.machine.relay.example/");
     expect(model.targetUrl("system_interface")).toBe(
       "https://shell-r4nd.machine.relay.example/",
     );
-  });
-
-  it("never falls back to the bare machine domain when the shell label is unknown", async () => {
-    // The options snapshot was taken before the workspace's registrations
-    // reached the backend (right after app start): the whole-machine target
-    // has no label, and the unrouted bare domain must not stand in for it.
-    const { model } = makeShareModel(
-      () => ({
-        ok: true,
-        status: 200,
-        body: sharingResponse({
-          enabled: true,
-          url: "https://machine.relay.example/",
-          grants: {
-            workspace: { emails: [OWNER], email_domains: [] },
-            services: {},
-          },
-        }),
-      }),
-      { serviceLabels: {} },
-    );
-    await model.load();
-
-    expect(model.targetUrl("system_interface")).toBe("");
-    expect(model.isLabelKnown("system_interface")).toBe(false);
-    expect(model.isAwaitingLabel("system_interface")).toBe(true);
-  });
-
-  it("adopts the labels carried by the sharing document", async () => {
-    const { model } = makeShareModel(
-      () => ({
-        ok: true,
-        status: 200,
-        body: sharingResponse({
-          enabled: true,
-          url: "https://machine.relay.example/",
-          grants: {
-            workspace: { emails: [OWNER], email_domains: [] },
-            services: {},
-          },
-          service_labels: { system_interface: "shell-l4te", web: "web-l4te" },
-        }),
-      }),
-      { serviceLabels: {} },
-    );
-    await model.load();
-
-    expect(model.targetUrl("system_interface")).toBe(
-      "https://shell-l4te.machine.relay.example/",
-    );
-    expect(model.targetUrl("web")).toBe(
-      "https://web-l4te.machine.relay.example/",
-    );
-    expect(model.isAwaitingLabel("system_interface")).toBe(false);
-  });
-
-  it("keeps polling an already-live share until its label arrives, then shows the link", async () => {
-    const scheduled: (() => void)[] = [];
-    let probeCount = 0;
-    const { model } = makeShareModel(
-      (url) => {
-        if (url.endsWith("/readiness")) {
-          probeCount += 1;
-          // The first poll still lacks the label; the second carries it.
-          return {
-            ok: true,
-            status: 200,
-            body:
-              probeCount === 1
-                ? { ready: false, service_labels: {} }
-                : {
-                    ready: true,
-                    service_labels: { system_interface: "shell-l4te" },
-                  },
-          };
-        }
-        return {
-          ok: true,
-          status: 200,
-          body: sharingResponse({
-            enabled: true,
-            url: "https://machine.relay.example/",
-            grants: {
-              workspace: { emails: [OWNER], email_domains: [] },
-              services: {},
-            },
-          }),
-        };
-      },
-      {
-        serviceLabels: {},
-        setTimer: (callback: () => void) => {
-          scheduled.push(callback);
-          return scheduled.length;
-        },
-      },
-    );
-    await model.load();
-
-    // Already published, so assumed live -- but with no label there is no link
-    // to show yet, and the readiness poll is what will deliver it.
-    expect(model.isLive).toBe(true);
-    expect(model.targetUrl("system_interface")).toBe("");
-    expect(scheduled).toHaveLength(1);
-
-    scheduled.shift()?.();
-    await settle();
-    expect(model.targetUrl("system_interface")).toBe("");
-    expect(scheduled).toHaveLength(1);
-
-    scheduled.shift()?.();
-    await settle();
-    expect(model.targetUrl("system_interface")).toBe(
-      "https://shell-l4te.machine.relay.example/",
-    );
-    expect(model.isAwaitingLabel("system_interface")).toBe(false);
-    // The link is known and live: nothing left to poll for.
-    expect(scheduled).toHaveLength(0);
-  });
-
-  it("keeps polling after the shell answers until the on-screen app's own label arrives", async () => {
-    const scheduled: (() => void)[] = [];
-    let probeCount = 0;
-    const { model } = makeShareModel(
-      (url, init) => {
-        if (url.endsWith("/readiness")) {
-          probeCount += 1;
-          return {
-            ok: true,
-            status: 200,
-            body:
-              probeCount === 1
-                ? {
-                    ready: true,
-                    service_labels: { system_interface: "shell-r4nd" },
-                  }
-                : {
-                    ready: true,
-                    service_labels: {
-                      system_interface: "shell-r4nd",
-                      docs: "docs-l4te",
-                    },
-                  },
-          };
-        }
-        if (init?.method === "PUT") {
-          const body = JSON.parse(init.body as string) as SharingGrantsDocument;
-          return {
-            ok: true,
-            status: 200,
-            body: sharingResponse({
-              enabled: true,
-              url: "https://machine.relay.example/",
-              grants: body,
-            }),
-          };
-        }
-        return { ok: true, status: 200, body: sharingResponse() };
-      },
-      {
-        setTimer: (callback: () => void) => {
-          scheduled.push(callback);
-          return scheduled.length;
-        },
-      },
-    );
-    await model.load();
-    model.selectTarget("docs");
-    await model.enable("");
-    expect(model.targetUrl("docs")).toBe("");
-
-    // Probe 1: the shell is live end to end, but docs still has no label.
-    scheduled.shift()?.();
-    await settle();
-    expect(model.isLive).toBe(true);
-    expect(model.targetUrl("docs")).toBe("");
-    expect(scheduled).toHaveLength(1);
-
-    // Probe 2: the docs label lands; the link appears and polling stops.
-    scheduled.shift()?.();
-    await settle();
-    expect(model.targetUrl("docs")).toBe(
-      "https://docs-l4te.machine.relay.example/",
-    );
-    expect(scheduled).toHaveLength(0);
   });
 
   it("selecting an unknown target falls back to the whole machine", async () => {
@@ -932,73 +739,5 @@ describe("pure helpers", () => {
         services: { web: { emails: ["a@b.c"], email_domains: [] } },
       }),
     ).toBe(true);
-  });
-});
-
-describe("machine size formatting", () => {
-  const baseSize = {
-    is_available: true,
-    memory_units: 8,
-    target_memory_units: null,
-    disk_gb: 28,
-    target_disk_gb: null,
-    is_restart_needed_to_apply: false,
-  };
-
-  it("renders the current size from units and disk", () => {
-    expect(formatMachineSize(baseSize)).toBe("8 GB RAM · 28 GB disk");
-  });
-
-  it("omits the factors it does not know", () => {
-    expect(formatMachineSize({ ...baseSize, disk_gb: null })).toBe("8 GB RAM");
-    expect(
-      formatMachineSize({ ...baseSize, memory_units: null, disk_gb: null }),
-    ).toBe("");
-  });
-
-  it("renders nothing pending when no restart is needed", () => {
-    expect(formatPendingMachineSize(baseSize)).toBe("");
-  });
-
-  it("falls back to the current value for the factor without a pending target", () => {
-    const pending = {
-      ...baseSize,
-      target_memory_units: 16,
-      is_restart_needed_to_apply: true,
-    };
-    expect(formatPendingMachineSize(pending)).toBe("16 GB RAM · 28 GB disk");
-  });
-});
-
-describe("WorkspaceOptionsModel machine size load", () => {
-  it("stores an available size and leaves an unavailable one hidden", async () => {
-    const availableModel = new WorkspaceOptionsModel("agent-1", {
-      fetchJson: async () => ({
-        ok: true,
-        status: 200,
-        body: {
-          is_available: true,
-          memory_units: 16,
-          target_memory_units: null,
-          disk_gb: 56,
-          target_disk_gb: null,
-          is_restart_needed_to_apply: false,
-        },
-      }),
-      redraw: () => undefined,
-    });
-    await availableModel.loadMachineSize();
-    expect(availableModel.machineSize?.memory_units).toBe(16);
-
-    const unavailableModel = new WorkspaceOptionsModel("agent-2", {
-      fetchJson: async () => ({
-        ok: true,
-        status: 200,
-        body: { is_available: false },
-      }),
-      redraw: () => undefined,
-    });
-    await unavailableModel.loadMachineSize();
-    expect(unavailableModel.machineSize).toBe(null);
   });
 });

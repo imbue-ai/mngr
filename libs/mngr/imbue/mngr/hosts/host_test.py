@@ -458,7 +458,6 @@ def test_get_created_branch_name_returns_none_when_absent(
     assert agent.get_created_branch_name() is None
 
 
-@pytest.mark.flaky
 def test_create_agent_state_stores_created_branch_name(
     local_host: Host,
     temp_host_dir: Path,
@@ -3093,9 +3092,9 @@ def test_host_get_name_returns_host_name(
 ) -> None:
     """get_name() returns the explicit host_name supplied at Host construction.
 
-    The local provider passes the name its host record carries ("localhost"
-    until a record is written, as here) rather than relying on the pyinfra
-    connector's "@local" string.
+    Local provider hosts construct Host with host_name=LOCAL_HOST_NAME
+    ("localhost") rather than relying on the pyinfra connector's "@local"
+    string.
     """
     assert local_host.get_name() == HostName(LOCAL_HOST_NAME)
 

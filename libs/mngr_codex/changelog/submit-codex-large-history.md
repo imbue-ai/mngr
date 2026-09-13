@@ -1,1 +1,0 @@
-Codex chats remain reachable for sending messages after their history grows beyond 1 MiB. The local WebSocket client now accepts the complete history returned by the Codex daemon instead of disconnecting during resume or status reads.

@@ -976,12 +976,12 @@ _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # chat's agent id, which is how the frame is found among the workspace frame's children.
 _CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/agent-[0-9a-f]+/?$")
 _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
-# A fresh workspace lands on the New Tab page with no chat; each of the page's tiles runs one
+# A fresh workspace lands on the New Tab page with no chat. The dockview add button opens a
+# New Tab page and is shown only in a group without one; each of the page's tiles runs one
 # app's ``new`` action. The shell opens the first New Tab page once its app list has arrived
-# and renders the tiles from that list, so the page and its tiles can still be on their way
+# and renders the tiles from that list, so both the page and a tile can still be on their way
 # when the dockview is first visible.
 _NEW_TAB_ADD_BUTTON_SELECTOR: Final[str] = "button.dockview-add-tab-button"
-_NEW_TAB_PAGE_SELECTOR: Final[str] = ".new-tab-launcher"
 _NEW_CHAT_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="chat:new"]'
 _NEW_TERMINAL_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="terminal:new"]'
 _NEW_TAB_TILE_TIMEOUT_SECONDS: Final[int] = 60
@@ -1221,17 +1221,14 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
 
 
 def _press_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> None:
-    """Run an app action from the visible New Tab page's tile, opening the page first when none is showing."""
-    # The add button always opens ANOTHER New Tab page, so it is pressed only when no page is
-    # showing (e.g. a real tab holds the pane). At boot the button can arrive with the dock's
-    # chrome after this probe, so the press waits with the page budget rather than skipping.
-    if workspace.query_selector(f"{_NEW_TAB_PAGE_SELECTOR}:visible") is None:
-        workspace.click(_NEW_TAB_ADD_BUTTON_SELECTOR, timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
-    # A background New Tab page keeps an identical tile hidden in the DOM, and an unscoped
-    # wait pins to the first match in DOM order whether or not it can ever become visible.
-    visible_tile_selector = f"{_NEW_TAB_PAGE_SELECTOR}:visible {tile_selector}"
-    workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
-    workspace.click(visible_tile_selector)
+    """Run an app action from the New Tab page's tile, opening the page first when none is showing."""
+    # A visible add button means its group has no New Tab page; in every other state (a dock
+    # the shell has not filled yet, a page whose tiles have not rendered) the tile grows in on
+    # its own, and the add button is hidden the moment the page is there.
+    if workspace.query_selector(f"{_NEW_TAB_ADD_BUTTON_SELECTOR}:visible") is not None:
+        workspace.click(_NEW_TAB_ADD_BUTTON_SELECTOR)
+    workspace.wait_for_selector(tile_selector, state="visible", timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
+    workspace.click(tile_selector)
 
 
 def open_terminal_from_new_tab(workspace: Page | Frame) -> None:

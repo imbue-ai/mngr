@@ -1273,26 +1273,6 @@ def test_build_readiness_hooks_config_has_hook(hook_name: str, expected_substrin
         )
 
 
-def test_build_readiness_hooks_config_ends_an_api_error_turn_the_same_way_as_a_normal_one() -> None:
-    """StopFailure must run exactly what Stop runs.
-
-    Stop and StopFailure are Claude Code's two mutually exclusive turn-end
-    paths: a turn that died on an API error (a usage limit, a rate limit, a
-    prompt too long) goes to StopFailure and returns before the Stop pass ever
-    runs. Registering only Stop leaves the 'active' marker UserPromptSubmit
-    created stranded, so the agent reports RUNNING -- not WAITING -- until its
-    claude process restarts, and nothing else clears it: the usage-limit
-    selector fires no PermissionRequest, and Claude Code suppresses the
-    idle_prompt notification while a dialog is on screen.
-    """
-    config = build_readiness_hooks_config()
-
-    stop_commands = [h["command"] for h in config["hooks"]["Stop"][0]["hooks"] if h["type"] == "command"]
-    failure_commands = [h["command"] for h in config["hooks"]["StopFailure"][0]["hooks"] if h["type"] == "command"]
-    assert stop_commands
-    assert failure_commands == stop_commands
-
-
 def test_build_readiness_hooks_config_has_notification_idle_hook() -> None:
     """build_readiness_hooks_config should include Notification idle_prompt hook that removes active and permissions_waiting files."""
     config = build_readiness_hooks_config()

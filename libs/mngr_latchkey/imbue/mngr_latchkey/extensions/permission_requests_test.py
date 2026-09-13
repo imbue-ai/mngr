@@ -169,12 +169,6 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> bool:
     return False
 
 
-# Where the extension puts the desktop client's own permissions file, which is
-# the one caller allowed to file a request against a different file. Kept in
-# step with ``ADMIN_PERMISSIONS_FILE`` in the extension.
-_ADMIN_PERMISSIONS_RELATIVE_PATH: Final[str] = "mngr_latchkey/latchkey_admin_permissions.json"
-
-
 @pytest.fixture
 def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, None]:
     """Spawn the Node driver pointed at a fresh LATCHKEY_DIRECTORY + target path.
@@ -182,10 +176,6 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
     Yields ``(base_url, latchkey_directory, permissions_config_path)`` so
     tests can both hit the HTTP endpoints and inspect the on-disk
     files the extension created.
-
-    The context is an ordinary caller's own permissions file -- an agent's, in
-    production. ``node_extension_as_desktop_client`` is the same driver with
-    the admin context instead.
     """
     assert _NODE_BINARY is not None
     latchkey_directory = tmp_path / "latchkey"
@@ -217,48 +207,6 @@ def node_extension(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, No
         base_url = f"http://127.0.0.1:{port}"
         assert _wait_for_port("127.0.0.1", port)
         yield base_url, latchkey_directory, permissions_config_path
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5.0)
-
-
-@pytest.fixture
-def node_extension_as_desktop_client(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, None]:
-    """The same driver, with the context the desktop client runs under.
-
-    That context is what ``resolveTarget`` checks before honouring a ``target``
-    in the request body, so it is the only way to exercise the allowed half of
-    that rule.
-    """
-    assert _NODE_BINARY is not None
-    latchkey_directory = tmp_path / "latchkey"
-    latchkey_directory.mkdir()
-    admin_permissions_path = latchkey_directory / _ADMIN_PERMISSIONS_RELATIVE_PATH
-    admin_permissions_path.parent.mkdir(parents=True, exist_ok=True)
-    script = _build_node_driver_script()
-    process = subprocess.Popen(
-        [_NODE_BINARY, "--input-type=module", "-e", script],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env={
-            "LATCHKEY_DIRECTORY": str(latchkey_directory),
-            "TEST_PERMISSIONS_CONFIG_PATH": str(admin_permissions_path),
-            "PATH": "/usr/bin:/bin",
-            "HOME": "/home/example",
-            "TMPDIR": "/tmp",
-        },
-        text=True,
-    )
-    try:
-        port = _wait_for_node_port(process)
-        base_url = f"http://127.0.0.1:{port}"
-        assert _wait_for_port("127.0.0.1", port)
-        yield base_url, latchkey_directory, admin_permissions_path
     finally:
         process.terminate()
         try:
@@ -1086,77 +1034,6 @@ def test_post_creates_workspace_request_without_target(
     # An omitted target normalizes to null in the persisted payload.
     assert parsed["payload"]["target_workspace_id"] is None
     assert parsed["payload"]["permissions"] == ["minds-workspaces-read", "minds-workspaces-create"]
-
-
-def test_post_refuses_a_target_from_a_caller_that_is_not_the_desktop_client(
-    node_extension: tuple[str, Path, Path],
-) -> None:
-    """The one check standing between an agent and another workspace's permissions.
-
-    ``target`` names the permissions file an approved request writes into.
-    Without the refusal, any caller could name any file -- so an agent could
-    file a request against the permissions of a workspace that is not its own,
-    approve it, and grant itself whatever it asked for there. The context this
-    fixture runs under is an ordinary caller's own file, which is what an
-    agent's is.
-    """
-    base_url, _latchkey_directory, _permissions_config_path = node_extension
-
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        {
-            "agent_id": _VALID_AGENT_ID,
-            "rationale": "reaching for somebody else's permissions file",
-            "type": "workspace",
-            "payload": {"permissions": ["minds-workspaces-read"]},
-            "target": "/home/example/somebody-elses-permissions.json",
-        },
-    )
-
-    assert status == 403, body
-    assert "only the desktop client" in json.loads(body)["error"]
-
-
-def test_post_honours_a_target_from_the_desktop_client(
-    node_extension_as_desktop_client: tuple[str, Path, Path],
-) -> None:
-    """The allowed half of the same rule, which nothing else covers."""
-    base_url, latchkey_directory, _admin_permissions_path = node_extension_as_desktop_client
-    requested_target = latchkey_directory / "hosts" / "host-0123456789abcdef" / "latchkey_permissions.json"
-
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        {
-            "agent_id": _VALID_AGENT_ID,
-            "rationale": "sharing a folder on a workspace's behalf",
-            "type": "workspace",
-            "payload": {"permissions": ["minds-workspaces-read"]},
-            "target": str(requested_target),
-        },
-    )
-
-    assert status == 201, body
-    assert json.loads(body)["target"] == str(requested_target)
-
-
-def test_post_refuses_a_target_that_is_not_an_absolute_path(
-    node_extension_as_desktop_client: tuple[str, Path, Path],
-) -> None:
-    """Even the desktop client names a file, not something to be resolved later."""
-    base_url, *_ = node_extension_as_desktop_client
-
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        {
-            "agent_id": _VALID_AGENT_ID,
-            "rationale": "relative target",
-            "type": "workspace",
-            "payload": {"permissions": ["minds-workspaces-read"]},
-            "target": "relative/permissions.json",
-        },
-    )
-
-    assert status == 400, body
 
 
 def test_post_accepts_all_python_workspace_verbs(node_extension: tuple[str, Path, Path]) -> None:

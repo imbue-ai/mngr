@@ -554,13 +554,13 @@ describe("InboxModel", () => {
     expect(model.isApproveAllowed()).toBe(true);
   });
 
-  it("blocks approval when Mind cannot work out which credentials to ask for", async () => {
+  it("blocks approval when Minds cannot work out which credentials to ask for", async () => {
     const model = makeModel({
       "GET /ui/api/inbox/evt-a/detail": () =>
         jsonResponse({
           detail: {
             ...MANUAL_DETAIL,
-            manual_credentials: { parameters: [], message: "Mind cannot work out which credentials to ask for" },
+            manual_credentials: { parameters: [], message: "Minds cannot work out which credentials to ask for" },
           },
         }),
     });
@@ -986,7 +986,7 @@ describe("InboxModel custom-service requests", () => {
   it("renders the credential form the server asks for, and blocks Approve until it is filled", async () => {
     const prompt: ManualCredentialsPrompt = {
       parameters: [{ name: "token", label: "Token" }],
-      message: "api.example.com has no browser sign-in, so Mind needs its credentials.",
+      message: "api.example.com has no browser sign-in, so Minds needs its credentials.",
     };
     const model = await openCustomService({
       "POST /requests/evt-a/grant": () =>

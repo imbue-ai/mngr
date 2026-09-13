@@ -2,12 +2,8 @@
 #
 # wait_for_stop_hook.sh
 #
-# A Claude Code Stop and StopFailure hook that waits for all other stop hooks
-# to finish, then runs post-completion actions before marking the agent
-# inactive. Both events run it because they are the two mutually exclusive
-# turn-end paths: Claude Code routes a turn that died on an API error (a usage
-# limit, a rate limit) to StopFailure and returns before the Stop pass, so an
-# agent whose turn ended that way would otherwise never be marked inactive.
+# A Claude Code Stop hook that waits for all other stop hooks to finish,
+# then runs post-completion actions before marking the agent inactive.
 #
 # Phases:
 #   1. Wait for all other stop hooks that were running at the start of the
@@ -142,7 +138,6 @@ mark_inactive() {
         mngr_common_transcript_flush "$flush_lock_timeout"
     fi
     rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
-    date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since"
     mkdir -p "$MNGR_HOST_DIR/events/mngr/activity"
     local extra=""
     if [ -n "$reason" ]; then

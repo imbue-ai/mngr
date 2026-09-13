@@ -1,5 +1,6 @@
 """Detection: version comparison, the tri-state, and how the composed state is assembled."""
 
+import json
 import threading
 from collections.abc import Callable
 from collections.abc import Mapping
@@ -15,7 +16,6 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
-from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
@@ -375,7 +375,7 @@ class _VersionReadingMngrCaller(MngrCaller):
         # no marker, and the read discards ``describe``'s exit code.
         lines = [self.marker_subject_by_agent.get(agent_id_str), self.version_by_agent.get(agent_id_str)]
         stdout = "".join(f"{line}\n" for line in lines if line is not None)
-        return MngrCallResult(returncode=0, stdout=exec_json_envelope(stdout))
+        return MngrCallResult(returncode=0, stdout=json.dumps({"results": [{"stdout": stdout}]}))
 
     @property
     def read_agent_ids(self) -> list[str]:

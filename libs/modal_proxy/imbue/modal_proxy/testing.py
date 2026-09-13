@@ -22,14 +22,12 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
-from imbue.imbue_common.model_update import to_update
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
 from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
-from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
@@ -93,29 +91,14 @@ class FakeFunction(FunctionInterface):
 class FakeImage(ImageInterface):
     """Lightweight no-op image for testing."""
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     image_id: str = Field(description="Unique identifier for this image")
-    build_failure_message: str | None = Field(
-        default=None, description="If set, build() fails with this message instead of succeeding"
-    )
-    build_logs: str = Field(default="", description="Build output that fetch_build_logs() reports")
-    streamed_build_logs: str = Field(
-        default="",
-        # Kept apart from build_logs so a fake can pose the case this exists to model:
-        # Modal streamed nothing, yet still has the log if asked.
-        description="Build output that build() streams into streaming_capture_buffer",
-    )
-    streaming_capture_buffer: StringIO | None = Field(
-        default=None, description="Where build() streams streamed_build_logs, if anywhere"
-    )
 
     def get_object_id(self) -> str:
         return self.image_id
 
     def apt_install(self, *packages: str) -> "ImageInterface":
         # No-op -- packages are already installed in the test environment
-        return self._derive(self.image_id)
+        return FakeImage(image_id=self.image_id)
 
     def dockerfile_commands(
         self,
@@ -125,24 +108,11 @@ class FakeImage(ImageInterface):
         secrets: Sequence[SecretInterface] = (),
     ) -> "ImageInterface":
         # No-op -- return a new image with a fresh ID to simulate layer caching
-        return self._derive(f"img-{uuid.uuid4().hex}")
+        return FakeImage(image_id=f"img-{uuid.uuid4().hex}")
 
     def build(self, app: AppInterface) -> None:
-        if self.streaming_capture_buffer is not None:
-            self.streaming_capture_buffer.write(self.streamed_build_logs)
-        if self.build_failure_message is not None:
-            raise ModalProxyImageBuildError(self.build_failure_message)
-
-    def fetch_build_logs(self) -> str:
-        return self.build_logs
-
-    def _derive(self, image_id: str) -> "FakeImage":
-        """Make the next layer.
-
-        Only the last layer of a chain is ever built, so whatever a test
-        configured has to reach it.
-        """
-        return self.model_copy_update(to_update(self.field_ref().image_id, image_id))
+        # No-op -- images are not real in the test environment
+        pass
 
 
 class FakeVolume(VolumeInterface):

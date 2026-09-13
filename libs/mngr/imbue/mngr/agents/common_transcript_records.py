@@ -246,6 +246,7 @@ OLD_FORMAT_STREAM_EXPLANATION: Final[str] = (
     "cutover, and old-format streams are not supported."
 )
 
+
 CommonTranscriptRecord = Annotated[
     HeaderRecord | StepRecord | ObservationRecord,
     Field(discriminator="type"),

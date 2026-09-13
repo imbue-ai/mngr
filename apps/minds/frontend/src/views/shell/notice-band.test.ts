@@ -310,7 +310,7 @@ describe("noticeBandFor, an update run", () => {
   });
 
   it("lets the apply speak over the machine's own health, because it explains it", () => {
-    // Mind took those services down itself; "Lost connection" there misreads
+    // Minds took those services down itself; "Lost connection" there misreads
     // its own work.
     expect(noticeBandFor("stuck", "healthy", true, { updateRunPhase: "applying" })?.key).toBe(
       "workspace-update-applying",
@@ -388,42 +388,6 @@ describe("noticeBandFor, an update run", () => {
       "workspace-update-preparing",
     );
     expect(noticeBandFor("healthy", "blocked", true, { updateRunPhase: "applying" })?.key).toBe("discovery-blocked");
-  });
-});
-
-describe("noticeBandFor, a machine stopped on purpose", () => {
-  it("says a held machine is under maintenance, and keeps the recovery notices off a machine stopped on purpose", () => {
-    const held = noticeBandFor("stuck", "healthy", true, { liveness: "STOPPED", stopKind: "maintenance" });
-    expect(held?.key).toBe("workspace-maintenance");
-    expect(held?.variant).toBe("info");
-    expect(held?.message).toBe("This machine is undergoing maintenance and will be back shortly.");
-    expect(held?.action).toBeNull();
-    // Discovery death still outranks it: the band names the loss of every machine.
-    expect(noticeBandFor("stuck", "blocked", true, { liveness: "STOPPED", stopKind: "maintenance" })?.key).toBe(
-      "discovery-blocked",
-    );
-    // Any stop someone asked for (an owner on another device, a drain) is
-    // expectedly unreachable: the machine's health readings are withheld.
-    for (const liveness of ["STOPPED", "STOPPING", "STARTING"]) {
-      expect(noticeBandFor("stuck", "healthy", true, { liveness, stopKind: "owner" })).toBeNull();
-      expect(noticeBandFor("recovery_failed", "healthy", true, { liveness, stopKind: "" })).toBeNull();
-    }
-    // A running machine that stops answering is still reported.
-    expect(noticeBandFor("stuck", "healthy", true, { liveness: "RUNNING", stopKind: "" })?.key).toBe("workspace-recovering");
-    // Once the operator's start is under way the machine is no longer held:
-    // neither the maintenance band nor a recovery notice is shown for it.
-    expect(noticeBandFor("stuck", "healthy", true, { liveness: "STARTING", stopKind: "maintenance" })).toBeNull();
-  });
-
-  it("keeps a device block off the user's own restart through the connector's states", () => {
-    // The bounce runs STOPPING -> STOPPED -> STARTING; a device block must not
-    // displace a recovery it explains nothing about, so no band is raised over
-    // any of the three (the bounce is read from the unmasked health).
-    for (const liveness of ["STOPPED", "STOPPING", "STARTING"]) {
-      expect(
-        noticeBandFor("recovering", "healthy", true, { liveness, recoveryKind: "restart", deviceEnvironment: "OFFLINE" }),
-      ).toBeNull();
-    }
   });
 });
 

@@ -1,18 +1,20 @@
 This is the primary flow for how a user would create a workspace for the first time:
 
-1. User starts the desktop client. The loading screen plays the intro on the install's first launch (the lockup, two typed lines, the lockup parking in the titlebar) while the backend comes up.
-2. Once the backend is ready and the install has never been taken past onboarding, the app lands on the start flow: a chat that asks "Wait.. what is honest software?", answers itself, and offers "Sounds great, let's continue".
-3. The chat asks where the first workspace should run: Imbue Cloud (recommended) or Custom, with "I already have one (log in)" for a returning user, who signs in and lands on their workspace list.
-4. Imbue Cloud asks for an Imbue account (sign-up or sign-in in the system browser) unless one is signed in, then creates the workspace with the remote preset. Custom opens the full create form (name, compute, backups, region, repository, branch) as a modal.
-5. Submitting a create lands on the creation page, in the normal app frame: the settings the user chose as their own message, "Setting up your workspace", reading material behind chevron toggles for the wait, and a loading box with the progress bar, the stage caption, and the expandable log. The desktop client clones the repository (if a URL) and runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` (the agent id is read back from the `created` JSONL event rather than pre-generated).
-6. When creation completes, "Your workspace is ready." appears and the workspace's color washes over the window, revealing the workspace's own interface.
+1. User starts the desktop client: `minds run`
+2. The server prints a one-time login URL to the terminal
+3. User visits the login URL to authenticate (sets a global session cookie)
+4. Since no workspaces exist, the landing page shows a creation form with fields for workspace name, git repository URL (or local path), branch, and launch mode (DOCKER/LIMA/VULTR/AWS/IMBUE_CLOUD/MODAL)
+5. User fills in the form and clicks Create
+6. The desktop client clones the repository to a temp directory (if a URL) or uses the local path directly, and runs `mngr create system-services@<host> --new-host --no-connect --label workspace_display_name=<name> --label is_primary=true --template main --template <mode>` (the agent id is read back from the `created` JSONL event rather than pre-generated).
+7. While creating, the user sees a progress page that polls for status
+8. When creation completes, the user is redirected to their workspace's web interface at `/agents/<agent-id>/web/`
 
-For subsequent launches:
-- The loading screen opens on the parked mark and status line; no intro plays.
-- If the user has workspaces (or has completed onboarding), they land on the home page listing every workspace, or on their restored windows.
+For subsequent visits:
+- If the user has exactly one known agent, they are automatically redirected to it
+- If they have multiple agents, they see a listing page with links to each
 
-Creating additional workspaces:
-- Users press Create on the home page, fill in the form, and land on the same creation page without the preceding conversation.
-- Programmatic creation is available via `POST /api/v1/workspaces`, polling `GET /api/v1/workspaces/operations/create/{operation_id}` for progress.
+Creating additional agents:
+- Users can visit `/create` to create another workspace
+- Programmatic creation is available via `POST /api/create-agent` with `{"git_url": "..."}`, polling `GET /api/create-agent/{agent_id}/status` for progress
 
 The point of this whole flow is to make it as easy as possible for users to get a workspace running.

@@ -223,15 +223,6 @@ def on_agent_destroyed(agent: AgentInterface, host: OnlineHostInterface) -> None
     """
 
 
-@hookspec
-def on_before_send_message(agent: AgentInterface, host: OnlineHostInterface, message: str) -> None:
-    """[experimental] Called before delivering an interactive message to an agent.
-
-    Plugins can use this hook to perform pre-message actions such as context
-    compaction or logging.
-    """
-
-
 class OptionStackItem(FrozenModel):
     """Specification for a CLI option that plugins can register.
 

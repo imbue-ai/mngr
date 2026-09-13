@@ -47,7 +47,7 @@ function manualCredentialsMessage(model: InboxModel, message: string): m.Childre
 
 /** One labeled input per value the service's credential command needs, plus the
  * account name when a new account has to be named. The command itself is never
- * shown: Mind runs it, so it is not something the user has to know about. */
+ * shown: Minds runs it, so it is not something the user has to know about. */
 function manualCredentialsForm(model: InboxModel): m.Children {
   const prompt = model.manualCredentialsPrompt();
   if (prompt === null) return null;
@@ -93,7 +93,7 @@ function manualCredentialsForm(model: InboxModel): m.Children {
                 model.manualAccountName = (event.target as HTMLInputElement).value;
               },
             }),
-            m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Mind."),
+            m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Minds."),
           ])
         : null,
     ],
@@ -122,7 +122,7 @@ export function PermissionsShell(): m.Component<PermissionsShellAttrs> {
     view(vnode) {
       const { model, headerLabel, mark, rationale, account, progressLabel, body } = vnode.attrs;
       const approveLabel = vnode.attrs.approveLabel ?? "Approve";
-      // A credential form with no inputs is a dead end (Mind cannot work out
+      // A credential form with no inputs is a dead end (Minds cannot work out
       // what to ask for), so Approve goes away entirely.
       const manualPrompt = model.manualCredentialsPrompt();
       const isApproveHidden = manualPrompt !== null && manualPrompt.parameters.length === 0;

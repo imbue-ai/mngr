@@ -1,1 +1,0 @@
-Test-only: the two raw-capture rotation tests in `_spawn_test.py` now wait for the detached fake `ensure-browser` child to finish before returning, so the child no longer trips the leaked-process check at teardown (a flake seen in CI).

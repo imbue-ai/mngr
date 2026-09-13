@@ -120,7 +120,9 @@ def ssh_host_factory(
         yield create_ssh_host
 
 
+# =============================================================================
 # Run Shell Command Tests
+# =============================================================================
 
 
 def test_run_simple_command(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -198,7 +200,9 @@ def test_run_command_local_from_worker_thread(
     assert output.stdout == "from_worker"
 
 
+# =============================================================================
 # Read File Tests (Bytes)
+# =============================================================================
 
 
 def test_read_file_returns_bytes(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -218,7 +222,9 @@ def test_read_nonexistent_file_raises(host_with_temp_dir: tuple[Host, Path]) -> 
         host.read_file(Path("/nonexistent/file/path/12345.txt"))
 
 
+# =============================================================================
 # Write File Tests (Bytes)
+# =============================================================================
 
 
 def test_write_file_accepts_bytes(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -246,7 +252,9 @@ def test_write_file_with_mode(host_with_temp_dir: tuple[Host, Path]) -> None:
     assert file_stat.st_mode & stat.S_IXUSR
 
 
+# =============================================================================
 # Read Text File Tests
+# =============================================================================
 
 
 def test_read_text_file_returns_string(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -268,7 +276,9 @@ def test_read_text_file_with_unicode(host_with_temp_dir: tuple[Host, Path]) -> N
     assert "Hello World" in content
 
 
+# =============================================================================
 # Write Text File Tests
+# =============================================================================
 
 
 def test_write_text_file_accepts_string(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -297,7 +307,9 @@ def test_write_text_file_with_mode(host_with_temp_dir: tuple[Host, Path]) -> Non
     assert file_stat.st_mode & stat.S_IXUSR
 
 
+# =============================================================================
 # Activity Configuration Tests
+# =============================================================================
 
 
 def test_get_default_activity_config(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -329,7 +341,9 @@ def test_set_and_get_activity_config(host_with_temp_dir: tuple[Host, Path]) -> N
     assert retrieved.idle_timeout_seconds == 7200
 
 
+# =============================================================================
 # Activity Time Tests
+# =============================================================================
 
 
 def test_record_boot_activity(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -383,7 +397,9 @@ def test_get_activity_content(host_with_temp_dir: tuple[Host, Path]) -> None:
     assert "host_id" in data
 
 
+# =============================================================================
 # Cooperative Locking Tests
+# =============================================================================
 
 
 def test_acquire_and_release_lock(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -532,7 +548,9 @@ def test_remote_lock_cooperatively_releases_lock_on_success(
     assert host.is_lock_held() is False
 
 
+# =============================================================================
 # Certified Data Tests
+# =============================================================================
 
 
 def test_get_empty_certified_data(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -559,7 +577,9 @@ def test_get_nonexistent_plugin_data(host_with_temp_dir: tuple[Host, Path]) -> N
     assert data == {}
 
 
+# =============================================================================
 # Environment Variable Tests
+# =============================================================================
 
 
 def test_get_empty_env_vars(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -603,7 +623,9 @@ def test_get_nonexistent_env_var(host_with_temp_dir: tuple[Host, Path]) -> None:
     assert value is None
 
 
+# =============================================================================
 # Plugin State Files Tests
+# =============================================================================
 
 
 def test_set_and_get_plugin_state_file(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -631,7 +653,9 @@ def test_list_nonexistent_plugin_files(host_with_temp_dir: tuple[Host, Path]) ->
     assert files == []
 
 
+# =============================================================================
 # Host State Tests
+# =============================================================================
 
 
 def test_local_host_always_running(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -687,7 +711,9 @@ def test_reads_bounded_for_clamps_a_slow_command(host_with_temp_dir: tuple[Host,
     assert not result.success
 
 
+# =============================================================================
 # Idle Detection Tests
+# =============================================================================
 
 
 def test_get_idle_seconds_with_boot_activity(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -710,7 +736,9 @@ def test_get_idle_seconds_after_boot_activity(host_with_temp_dir: tuple[Host, Pa
     assert 0 <= idle < 10
 
 
+# =============================================================================
 # Agent Creation and Start Tests
+# =============================================================================
 
 
 @pytest.mark.tmux
@@ -868,7 +896,9 @@ def test_start_agent_runs_command_too_long_to_type_into_the_pane(
         assert host.read_text_file(script_path) == agent_command + "\n"
 
 
+# =============================================================================
 # Agent Start/Stop Process Tests
+# =============================================================================
 
 
 def _collect_pane_pids(host: Host, session_name: str) -> list[str]:
@@ -1599,7 +1629,9 @@ def test_start_agent_starts_process_activity_monitor(
         host.stop_agents([agent.id])
 
 
+# =============================================================================
 # Additional Commands Tests
+# =============================================================================
 
 
 def test_additional_commands_stored_in_agent_data(
@@ -1751,7 +1783,9 @@ def test_start_agent_additional_windows_run_commands(
         host.stop_agents([agent.id])
 
 
+# =============================================================================
 # Provision Agent Tests
+# =============================================================================
 
 
 def test_provision_agent_create_directories(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -2010,7 +2044,9 @@ def test_provision_agent_order_of_operations(host_with_temp_dir: tuple[Host, Pat
     assert log_file.read_text() == "uploaded\n"
 
 
+# =============================================================================
 # Helper Functions for Provision Tests
+# =============================================================================
 
 
 def _create_minimal_agent(host: Host, temp_dir: Path, work_dir: Path | None = None) -> AgentInterface:
@@ -2035,7 +2071,9 @@ def _create_minimal_agent(host: Host, temp_dir: Path, work_dir: Path | None = No
 # section in claude_agent_test.py.
 
 
+# =============================================================================
 # File Transfer Tests (create_agent_work_dir and helpers)
+# =============================================================================
 
 
 def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
@@ -2647,7 +2685,9 @@ def test_create_work_dir_git_mirror_from_remote_source_to_local_target(
     assert log_result.stdout.strip() != ""
 
 
+# =============================================================================
 # Agent Environment Variable Tests
+# =============================================================================
 
 
 def test_provision_agent_writes_env_vars_to_file(host_with_temp_dir: tuple[Host, Path]) -> None:
@@ -2835,6 +2875,7 @@ def test_start_agent_has_access_to_env_vars(
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(25)
 def test_new_tmux_window_inherits_env_vars(
     temp_host_dir: Path,
     per_host_dir: Path,
@@ -3442,7 +3483,9 @@ def test_create_work_dir_cross_host_generates_unique_paths(
     assert (work_dir_2 / "file.txt").read_text() == "content"
 
 
+# =============================================================================
 # Agent Type Provisioning Integration Tests
+# =============================================================================
 
 
 def test_provision_agent_applies_agent_type_provisioning_fields(

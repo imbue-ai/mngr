@@ -35,6 +35,8 @@ from imbue.mngr.utils.testing import wait_for_agent_session
 
 
 @pytest.mark.tmux
+# real agent setup/teardown occasionally exceeds the 10s default.
+@pytest.mark.timeout(30)
 def test_cli_create_via_subprocess(
     temp_work_dir: Path,
     temp_host_dir: Path,
@@ -925,7 +927,9 @@ ensure_clean = false
     assert "existing" in result.output
 
 
+# =============================================================================
 # Tests for ensure-clean behavior with explicit base branch
+# =============================================================================
 
 
 def test_ensure_clean_rejects_dirty_worktree_by_default(
@@ -1060,7 +1064,9 @@ def test_ensure_clean_skipped_with_explicit_base_branch_git_mirror_mode(
         wait_for_agent_session(session_name)
 
 
+# =============================================================================
 # Tests for --transfer flag validation
+# =============================================================================
 
 
 def test_transfer_rsync_rejected_for_git_repo(

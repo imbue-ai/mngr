@@ -8,7 +8,6 @@ import { UiChannelClient } from "./channel/client";
 import { electronBridge } from "./electron-bridge";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { setPendingHelpLaunch } from "./models/help";
-import { onboardingProgress } from "./models/onboarding";
 import {
   NotificationsUiController,
   setReviewGestureContext,
@@ -46,9 +45,6 @@ function main(): void {
           accent: "",
           isMac: electronBridge.isMacPlatform,
           mngrForwardOrigin: "",
-          // No bootstrap means no server verdict; treat the install as past
-          // onboarding so a bare page never bounces to the start flow.
-          isOnboardingComplete: true,
         },
         // No inline bootstrap means no version to compare; null disables the
         // mismatch reload instead of guaranteeing one on the first hello.
@@ -58,7 +54,6 @@ function main(): void {
   const shell = new ShellState(bootContext.stores);
   shell.isMac = bootContext.seed.isMac;
   shell.mngrForwardOrigin = bootContext.seed.mngrForwardOrigin;
-  onboardingProgress.seed(bootContext.seed.isOnboardingComplete);
 
   // Arrival behavior for the notification feed (toasts, dock badge, the OS
   // hint); the store itself stays a dumb wire mirror.
@@ -250,8 +245,9 @@ function main(): void {
   const bootParams = new URLSearchParams(window.location.search);
   const webLoginMessage = consumeWebLoginParams(bootParams);
   if (webLoginMessage !== null) {
-    // The boot params are one-shot: consumed here so a later reload of the
-    // same URL does not restart the flow.
+    // The boot params are one-shot: the Electron shell reloads every window
+    // on auth_success (keeping the URL), so they must be consumed here or the
+    // post-sign-in reload would immediately restart the flow.
     const query = bootParams.toString();
     history.replaceState(
       null,

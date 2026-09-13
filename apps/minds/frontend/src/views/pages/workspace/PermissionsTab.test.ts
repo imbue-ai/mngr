@@ -5,14 +5,12 @@ import {
   BROWSER_SIGN_IN,
   awsAvailable,
   credentialsSignIn,
-  pathSync,
   permissionsView,
-  sharedPath,
   slackConnection,
 } from "../../../models/workspacePermissions.testing";
 import type { UiWorkspacePermissions } from "../../../generated/ui";
 import { OPTIONS_TABS, WorkspaceOptionsModel, toOptionsTab } from "../../../models/workspaceOptions";
-import { ADD_SHARED_PATH_ROW_KEY, PermissionsModel } from "../../../models/workspacePermissions";
+import { PermissionsModel } from "../../../models/workspacePermissions";
 import { classifyRoute } from "../../shell/classify";
 import { PermissionsTab } from "./PermissionsTab";
 import { OptionsPanel } from "./OptionsPanel";
@@ -684,7 +682,7 @@ describe("PermissionsTab add connection and self panels", () => {
     );
     const connect = withAttr(root, "data-perm-connect")[0];
     expect(attrsOf(connect).disabled).toBe(true);
-    expect(String(attrsOf(connect).title)).toContain("Mind can't work out which credentials AWS needs");
+    expect(String(attrsOf(connect).title)).toContain("Minds can't work out which credentials AWS needs");
   });
 
   it("says so when every service already has an account", async () => {
@@ -692,6 +690,31 @@ describe("PermissionsTab add connection and self panels", () => {
       requestedSection: "add-connection",
     });
     expect(allText(root)).toContain("Every available service already has an account connected.");
+  });
+
+  it("renders shared paths as self toggles and posts only the permission", async () => {
+    const { root, requests } = await render(
+      permissionsView({
+        file_sharing_toggles: [
+          {
+            permission: "path-1",
+            label: "/Users/me/notes",
+            detail: "read + write",
+            description: "",
+            is_granted: true,
+            can_enable: true,
+          },
+        ],
+      }),
+      { requestedSection: "local-files" },
+    );
+    expect(allText(root)).toContain("/Users/me/notes");
+    (attrsOf(switches(root)[0]).onclick as () => void)();
+    await settle();
+    expect(requests[1]).toEqual({
+      url: `/ui/api/workspaces/${AGENT_ID}/permissions/self-toggle`,
+      body: { permission: "path-1", enabled: false },
+    });
   });
 
   it("disables a revoked grant whose schema is gone, explaining why", async () => {
@@ -891,433 +914,5 @@ describe("permissions tab registration", () => {
     const permissionsPane = collectVnodes(root).find((node) => node.tag === PermissionsTab);
     expect(permissionsPane).toBeDefined();
     expect(attrsOf(permissionsPane as AnyVnode).workspaceName).toBe("");
-  });
-});
-
-describe("PermissionsTab shared paths", () => {
-  function renderLocalFiles(
-    view: UiWorkspacePermissions,
-    options: Parameters<typeof render>[1] = {},
-  ): Promise<RenderResult> {
-    return render(view, { ...options, requestedSection: "local-files" });
-  }
-
-  const pathRows = (node: unknown): AnyVnode[] => withAttr(node, "data-shared-path");
-  const syncBoxes = (node: unknown): AnyVnode[] => withAttr(node, "data-sync-path");
-  const accessSelects = (node: unknown): AnyVnode[] => withAttr(node, "data-access-path");
-  const syncPanels = (node: unknown): AnyVnode[] => withAttr(node, "data-sync-detail");
-  const removeButtons = (node: unknown): AnyVnode[] => withAttr(node, "data-remove-path");
-  const conflictSelects = (node: unknown): AnyVnode[] => withAttr(node, "data-conflict-path");
-
-  it("spins while a change of access is on its way to the machine", async () => {
-    // Every other control in the pane does this; these two did not, which read
-    // as the change having landed the moment it was clicked. The write is not
-    // done until the workspace's own machine has taken it, so it has not.
-    // A no-op to begin with rather than null: it is only ever replaced inside
-    // the promise executor, which the compiler cannot see run.
-    let releaseWrite: () => void = () => {};
-    const { root, rerender, remove, model } = await render(
-      permissionsView({ shared_paths: [sharedPath()] }),
-      {
-        requestedSection: "local-files",
-        respond: (url) =>
-          url.endsWith("/shared-path")
-            ? new Promise((resolve) => {
-                releaseWrite = () => resolve({ ok: true, status: 200, body: permissionsView() });
-              })
-            : null,
-      },
-    );
-    expect(spinners(root)).toHaveLength(0);
-
-    // Changing the access: the round trip that writes the new grant.
-    const accessWrite = model.setSharedPath("/home/me/notes", "WRITE");
-    await settle();
-    const duringAccess = rerender();
-    expect(spinners(duringAccess)).toHaveLength(1);
-    expect(attrsOf(accessSelects(duringAccess)[0]).disabled).toBe(true);
-    // And looks it. A bare `<select disabled>` stops responding but goes on
-    // looking exactly as it did, which reads as a click that failed to land.
-    expect(classesOf(accessSelects(duringAccess)[0])).toContain("disabled:opacity-40");
-    releaseWrite();
-    await accessWrite;
-
-    // Adding a path makes the same write under its own busy key, since it has
-    // no row to spin on until the write comes back with one. Not asserted on
-    // the buttons here: they are drawn only in the desktop app, and this suite
-    // renders to vnodes with no DOM, so `electronBridge.isDesktop` is false
-    // and the whole affordance is absent. The key is what the buttons read.
-    const addWrite = model.addSharedPath("/home/me/other");
-    await settle();
-    expect(model.isRowBusy(ADD_SHARED_PATH_ROW_KEY)).toBe(true);
-    releaseWrite();
-    await addWrite;
-    expect(model.isRowBusy(ADD_SHARED_PATH_ROW_KEY)).toBe(false);
-
-    remove();
-  });
-
-  it("gives every shared path an access dropdown and a remove button", async () => {
-    const { root, remove } = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
-    expect(pathRows(root)).toHaveLength(1);
-    expect(accessSelects(root)).toHaveLength(1);
-    expect(removeButtons(root)).toHaveLength(1);
-    const text = allText(root);
-    expect(text).toContain("~/notes");
-    expect(text).toContain("Agents on this machine may");
-    expect(text).toContain("Revoke access");
-    remove();
-  });
-
-  it("says on the remove button when removing would take files with it", async () => {
-    // The copy goes with the grant, and this is the only place that can be
-    // said in every case -- a path whose copy is gone draws no notice at all.
-    const noCopy = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
-    expect(allText(noCopy.root)).not.toContain("remove copy");
-    noCopy.remove();
-
-    const running = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ activity: "ACTIVE" }) })] }),
-    );
-    expect(allText(running.root)).toContain("Revoke access and remove copy");
-    running.remove();
-
-    const setAside = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [sharedPath({ sync: pathSync({ state: "STOPPED", activity: "INACTIVE" }) })],
-      }),
-    );
-    expect(allText(setAside.root)).toContain("Revoke access and remove copy");
-    setAside.remove();
-
-    const discarded = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [sharedPath({ sync: pathSync({ state: "STOPPED", activity: "DISCARDED" }) })],
-      }),
-    );
-    expect(allText(discarded.root)).not.toContain("remove copy");
-    discarded.remove();
-  });
-
-  it("says what syncing buys, in the terms the user cares about", async () => {
-    // "Keep in sync" said nothing about why anyone would want it.
-    const { root, remove } = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
-    const text = allText(root);
-    expect(text).toContain("Keep a synchronized copy on the machine");
-    expect(text).toContain("when Minds is not running or your computer is offline");
-    remove();
-  });
-
-  it("offers the clash rule only to a sync that can actually have a clash", async () => {
-    // Only a two-way sync can, and only read-and-write access makes it two-way.
-    const readOnly = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "READ", sync: pathSync() })] }),
-    );
-    expect(syncPanels(readOnly.root)).toHaveLength(1);
-    expect(conflictSelects(readOnly.root)).toHaveLength(0);
-    readOnly.remove();
-
-    const readWrite = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "WRITE", sync: pathSync() })] }),
-    );
-    expect(conflictSelects(readWrite.root)).toHaveLength(1);
-    readWrite.remove();
-  });
-
-  it("never hides the status of a sync the user believes is on", async () => {
-    // A folder the user still wants synced, with nothing running, is the app
-    // saying one thing and doing another -- which is UNKNOWN, not STOPPED, and
-    // must not be silent the way a settled-off row is.
-    const believedOn = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [sharedPath({ sync: pathSync({ state: "UNKNOWN", activity: "ACTIVE" }) })],
-      }),
-    );
-    expect(allText(believedOn.root)).toContain("Not running");
-    believedOn.remove();
-  });
-
-  it("offers to try a failed sync again, and says why it failed", async () => {
-    const failed = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [
-          sharedPath({ sync: pathSync({ state: "FAILED", activity: "ACTIVE", message: "machine is asleep" }) }),
-        ],
-      }),
-    );
-    const text = allText(failed.root);
-    expect(text).toContain("machine is asleep");
-    expect(text).toContain("Try again");
-    expect(withAttr(failed.root, "data-sync-retry-path")).toHaveLength(1);
-    failed.remove();
-
-    // Nothing to retry on a sync that is merely working.
-    const running = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync() })] }),
-    );
-    expect(withAttr(running.root, "data-sync-retry-path")).toHaveLength(0);
-    running.remove();
-  });
-
-  it("badges work in flight and says nothing at all about a sync that is simply off", async () => {
-    // The unticked checkbox already says the sync is off; a "Stopped" badge
-    // beside it only asks the reader to reconcile the two.
-    const stopped = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state: "STOPPED", activity: "INACTIVE" }) })] }),
-    );
-    expect(allText(stopped.root)).not.toContain("Stopped");
-    stopped.remove();
-
-    const restarting = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state: "RESTARTING" }) })] }),
-    );
-    expect(allText(restarting.root)).toContain("Restarting");
-    restarting.remove();
-
-    const stopping = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state: "DEACTIVATING" }) })] }),
-    );
-    expect(allText(stopping.root)).toContain("Stopping");
-    stopping.remove();
-  });
-
-  it("warns about another workspace's sync only while this folder is syncing", async () => {
-    // It describes what two running syncs do to each other, which is not yet
-    // true of a folder whose copy is not being kept.
-    const warning = "This folder is also synced with another workspace.";
-    const synced = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [sharedPath({ sync: pathSync(), sync_overlap_warning: warning })],
-      }),
-    );
-    expect(allText(synced.root)).toContain(warning);
-    synced.remove();
-
-    const off = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync_overlap_warning: warning })] }),
-    );
-    expect(allText(off.root)).not.toContain(warning);
-    off.remove();
-  });
-
-  it("states which way changes travel, from the access rather than as a second choice", async () => {
-    const readOnly = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "READ", sync: pathSync() })] }),
-    );
-    expect(allText(readOnly.root)).toContain("changes from your computer to this machine in one direction");
-    readOnly.remove();
-
-    const readWrite = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "WRITE", sync: pathSync() })] }),
-    );
-    expect(allText(readWrite.root)).toContain("in both directions");
-    readWrite.remove();
-  });
-
-  it("offers a way in for a file and for a folder, and names the other route", async () => {
-    // The pickers only exist in the desktop shell, so the buttons only do.
-    const surface = globalThis as unknown as { window?: { mindsNative?: unknown } };
-    const restore = surface.window;
-    surface.window = { mindsNative: {} };
-    const { root, remove } = await renderLocalFiles(permissionsView());
-    const text = allText(root);
-    expect(text).toContain("Add file");
-    expect(text).toContain("Add folder");
-    expect(text).toContain("Or tell an agent to request access");
-    remove();
-    surface.window = restore;
-  });
-
-  it("greys out syncing for a folder that cannot have it, and says why", async () => {
-    // The reason comes from the server, which answers it with the same checks
-    // the click would have been refused by -- so the row can never grey out a
-    // folder that would have worked, or offer one that would not.
-    const { root, remove } = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [
-          sharedPath({
-            sync_unavailable_reason: "Only folders can be synced, and /home/me/notes is a file.",
-          }),
-        ],
-      }),
-    );
-
-    // Still there, so the row reads the same as every other; just not usable.
-    expect(syncBoxes(root)).toHaveLength(1);
-    expect(attrsOf(syncBoxes(root)[0]).disabled).toBe(true);
-    const text = allText(root);
-    expect(text).toContain("Only folders can be synced");
-    // The reason stands in for the explanation rather than sitting beside it.
-    expect(text).not.toContain("agents can continue to access");
-    remove();
-  });
-
-  it("offers syncing normally when nothing stands in the way", async () => {
-    const { root, remove } = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
-    expect(attrsOf(syncBoxes(root)[0]).disabled).toBeFalsy();
-    expect(allText(root)).toContain("agents can continue to access");
-    remove();
-  });
-
-  it("shows turning arrows only while bytes move, and a check once they have", async () => {
-    const iconNames = (node: unknown): string[] =>
-      collectVnodes(node)
-        .map((vnode) => attrsOf(vnode).name)
-        .filter((name): name is string => typeof name === "string");
-
-    const moving = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state: "SYNCING" }) })] }),
-    );
-    expect(allText(moving.root)).toContain("Syncing");
-    expect(iconNames(moving.root)).toContain("arrows-sync");
-    moving.remove();
-
-    const settled = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state: "SYNCED" }) })] }),
-    );
-    expect(allText(settled.root)).toContain("Synced");
-    expect(iconNames(settled.root)).toContain("badge-check");
-    expect(iconNames(settled.root)).not.toContain("arrows-sync");
-    settled.remove();
-  });
-
-  it("says how far through a transfer is, from unison's own count", async () => {
-    const { root, remove } = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [
-          sharedPath({
-            sync: pathSync({ state: "SYNCING", bytes_done: 12 * 1024 ** 2, bytes_total: 17 * 1024 ** 2 }),
-          }),
-        ],
-      }),
-    );
-    expect(allText(root)).toContain("12.0 MB of 17.0 MB");
-    remove();
-  });
-
-  it("says only that it is syncing when unison gave no count", async () => {
-    const { root, remove } = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state: "SYNCING" }) })] }),
-    );
-    const text = allText(root);
-    expect(text).toContain("Syncing");
-    expect(text).not.toContain(" of ");
-    remove();
-  });
-
-  it("hides the sync settings until syncing is on", async () => {
-    const off = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
-    expect(conflictSelects(off.root)).toHaveLength(0);
-    expect(conflictSelects(off.root)).toHaveLength(0);
-    off.remove();
-
-    // A clash is only possible when the agent may write, which is the same
-    // condition that makes the sync two-way.
-    const readOnly = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "READ", sync: pathSync() })] }),
-    );
-    expect(conflictSelects(readOnly.root)).toHaveLength(0);
-    readOnly.remove();
-
-    const on = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ access: "WRITE", sync: pathSync() })] }),
-    );
-    expect(conflictSelects(on.root)).toHaveLength(1);
-    on.remove();
-  });
-
-  it("offers to delete the copy the machine kept when syncing was turned off", async () => {
-    const setAside = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "STOPPED" }) })],
-      }),
-    );
-    const text = allText(setAside.root);
-    expect(text).toContain("A copy is still on the machine");
-    expect(text).toContain("Remove copy");
-    // Not the settings: those belong to a sync that is running.
-    expect(conflictSelects(setAside.root)).toHaveLength(0);
-    // Quieter than the row's own Remove, which takes the whole path away:
-    // two filled reds in one card read as two equal warnings.
-    const discard = withAttr(setAside.root, "data-discard-copy-path")[0];
-    expect(attrsOf(discard).variant).toBe("danger-soft");
-    expect(attrsOf(removeButtons(setAside.root)[0]).variant).toBe("danger");
-    setAside.remove();
-  });
-
-  it("offers nothing to delete once the copy is gone, or while the sync is running", async () => {
-    const discarded = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [sharedPath({ sync: pathSync({ activity: "DISCARDED", state: "STOPPED" }) })],
-      }),
-    );
-    expect(allText(discarded.root)).not.toContain("Remove copy");
-    discarded.remove();
-
-    const running = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync() })] }),
-    );
-    expect(allText(running.root)).not.toContain("Remove copy");
-    running.remove();
-  });
-
-  it("drops the clash question from a one-way sync, which cannot have one", async () => {
-    const { root, remove } = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ direction: "TO_WORKSPACE" }) })] }),
-    );
-    expect(conflictSelects(root)).toHaveLength(0);
-    remove();
-  });
-
-  it("offers no sync control at all when this build cannot run one", async () => {
-    const { root, remove } = await renderLocalFiles(
-      permissionsView({ shared_paths: [sharedPath()], is_sync_supported: false }),
-    );
-    expect(pathRows(root)).toHaveLength(1);
-    expect(syncBoxes(root)).toHaveLength(0);
-    expect(allText(root)).not.toContain("Keep a copy on the machine");
-    remove();
-  });
-
-  it("says why a sync failed, and leaves its switch where the user set it", async () => {
-    const { root, remove } = await renderLocalFiles(
-      permissionsView({
-        shared_paths: [
-          sharedPath({ sync: pathSync({ state: "FAILED", message: "Agent directory does not exist: /w/notes" }) }),
-        ],
-      }),
-    );
-    const text = allText(pathRows(root)[0]);
-    expect(text).toContain("Failed");
-    expect(text).toContain("Agent directory does not exist");
-    // The user still wants this folder synced; the failure is news about it,
-    // not a reason to move the switch they set.
-    expect(syncBoxes(root)[0].attrs?.checked).toBe(true);
-    remove();
-  });
-
-  it("posts the removal when Remove is pressed", async () => {
-    const row = sharedPath();
-    const { root, requests, remove } = await renderLocalFiles(permissionsView({ shared_paths: [row] }));
-    (removeButtons(root)[0].attrs?.onclick as () => void)();
-    await settle();
-    expect(requests[requests.length - 1]).toEqual({
-      url: `/ui/api/workspaces/${AGENT_ID}/permissions/shared-path-remove`,
-      body: { path: row.path },
-    });
-    remove();
-  });
-
-  it("posts the path when its sync switch is flipped on", async () => {
-    const row = sharedPath();
-    const { root, requests, remove } = await renderLocalFiles(permissionsView({ shared_paths: [row] }));
-    const onchange = syncBoxes(root)[0].attrs?.onchange as (event: Event) => void;
-    onchange({ target: { checked: true } } as unknown as Event);
-    await settle();
-    expect(requests[requests.length - 1]).toEqual({
-      url: `/ui/api/workspaces/${AGENT_ID}/folder-syncs/toggle`,
-      body: { path: row.path, enabled: true, conflict: "NEWER" },
-    });
-    remove();
   });
 });

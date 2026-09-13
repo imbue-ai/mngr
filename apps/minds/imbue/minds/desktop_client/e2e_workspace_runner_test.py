@@ -13,7 +13,6 @@ from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttem
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
 from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_CHAT_TILE_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_TAB_ADD_BUTTON_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_TAB_PAGE_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_TERMINAL_TILE_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _chat_frame
@@ -288,11 +287,9 @@ def test_chat_frame_raises_when_no_chat_opens_in_time() -> None:
 
 
 class _FakeNewTabWorkspace(_FakeWorkspaceFrame):
-    """A workspace frame under the many-New-Tabs shell contract.
+    """A workspace frame whose New Tab page may or may not be showing.
 
-    As in the shell, the dockview add button is always shown and every press opens ANOTHER
-    New Tab page, which becomes its pane's visible tab; a background New Tab page keeps its
-    tiles hidden in the DOM, so only a tile wait scoped to a visible page can succeed.
+    As in the shell, the dockview add button is visible only while no New Tab page is showing.
     Records the selectors clicked; the chat frame appears among the children only after the
     New Chat tile is pressed, the way the shell docks it.
     """
@@ -304,21 +301,15 @@ class _FakeNewTabWorkspace(_FakeWorkspaceFrame):
         self.clicked: list[str] = []
 
     def query_selector(self, selector: str) -> object | None:
-        if selector == f"{_NEW_TAB_PAGE_SELECTOR}:visible":
-            return object() if self._is_new_tab_showing else None
-        if selector == f"{_NEW_TAB_ADD_BUTTON_SELECTOR}:visible":
-            return object()
-        return None
+        is_add_button_visible = not self._is_new_tab_showing
+        return object() if is_add_button_visible and selector == f"{_NEW_TAB_ADD_BUTTON_SELECTOR}:visible" else None
 
     def wait_for_selector(self, selector: str, state: str, timeout: float) -> None:
-        if not selector.startswith(f"{_NEW_TAB_PAGE_SELECTOR}:visible ") or not self._is_new_tab_showing:
-            raise PlaywrightTimeoutError(f"no visible New Tab page carries a tile matching {selector!r}")
+        pass
 
-    def click(self, selector: str, timeout: float | None = None) -> None:
+    def click(self, selector: str) -> None:
         self.clicked.append(selector)
-        if selector == _NEW_TAB_ADD_BUTTON_SELECTOR:
-            self._is_new_tab_showing = True
-        if selector == f"{_NEW_TAB_PAGE_SELECTOR}:visible {_NEW_CHAT_TILE_SELECTOR}":
+        if selector == _NEW_CHAT_TILE_SELECTOR:
             self._child_frame_lists = [[self._chat]]
 
 
@@ -333,37 +324,24 @@ class _FakeTerminalNewTabWorkspace(_FakeNewTabWorkspace):
         self.waited_for.append(selector)
 
 
-_VISIBLE_NEW_CHAT_TILE_SELECTOR = f"{_NEW_TAB_PAGE_SELECTOR}:visible {_NEW_CHAT_TILE_SELECTOR}"
-_VISIBLE_NEW_TERMINAL_TILE_SELECTOR = f"{_NEW_TAB_PAGE_SELECTOR}:visible {_NEW_TERMINAL_TILE_SELECTOR}"
-
-
 def test_open_terminal_presses_the_terminal_tile_and_waits_for_its_frame() -> None:
     workspace = _FakeTerminalNewTabWorkspace(is_new_tab_showing=True)
     open_terminal_from_new_tab(cast(Frame, workspace))
-    assert workspace.clicked == [_VISIBLE_NEW_TERMINAL_TILE_SELECTOR]
-    assert workspace.waited_for == [_VISIBLE_NEW_TERMINAL_TILE_SELECTOR, _TERMINAL_IFRAME_SELECTOR]
+    assert workspace.clicked == [_NEW_TERMINAL_TILE_SELECTOR]
+    assert workspace.waited_for == [_NEW_TERMINAL_TILE_SELECTOR, _TERMINAL_IFRAME_SELECTOR]
 
 
 def test_open_terminal_opens_a_new_tab_page_first_when_none_is_showing() -> None:
     workspace = _FakeTerminalNewTabWorkspace(is_new_tab_showing=False)
     open_terminal_from_new_tab(cast(Frame, workspace))
-    assert workspace.clicked == [_NEW_TAB_ADD_BUTTON_SELECTOR, _VISIBLE_NEW_TERMINAL_TILE_SELECTOR]
+    assert workspace.clicked == [_NEW_TAB_ADD_BUTTON_SELECTOR, _NEW_TERMINAL_TILE_SELECTOR]
 
 
 def test_start_new_chat_presses_the_tile_and_returns_the_chat_frame_it_docks() -> None:
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeNewTabWorkspace(is_new_tab_showing=True, chat=chat)
     assert start_new_chat_from_new_tab(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_VISIBLE_NEW_CHAT_TILE_SELECTOR]
-
-
-def test_start_new_chat_leaves_the_add_button_alone_while_a_new_tab_page_is_showing() -> None:
-    # Pressing the add button here would open ANOTHER New Tab page and leave the showing
-    # page's identical tile hidden first in the DOM -- the deterministic MIND-285 failure.
-    chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeNewTabWorkspace(is_new_tab_showing=True, chat=chat)
-    start_new_chat_from_new_tab(cast(Frame, workspace), timeout_seconds=5)
-    assert _NEW_TAB_ADD_BUTTON_SELECTOR not in workspace.clicked
+    assert workspace.clicked == [_NEW_CHAT_TILE_SELECTOR]
 
 
 def test_start_new_chat_opens_a_new_tab_page_first_when_none_is_showing() -> None:
@@ -372,4 +350,4 @@ def test_start_new_chat_opens_a_new_tab_page_first_when_none_is_showing() -> Non
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeNewTabWorkspace(is_new_tab_showing=False, chat=chat)
     assert start_new_chat_from_new_tab(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_NEW_TAB_ADD_BUTTON_SELECTOR, _VISIBLE_NEW_CHAT_TILE_SELECTOR]
+    assert workspace.clicked == [_NEW_TAB_ADD_BUTTON_SELECTOR, _NEW_CHAT_TILE_SELECTOR]

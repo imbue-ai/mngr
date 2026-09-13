@@ -13,6 +13,7 @@ from imbue.mngr.utils.testing import tmux_session_exists
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_start_restart_running_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -40,6 +41,7 @@ def test_start_restart_running_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_start_restart_stopped_agent(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -77,6 +79,7 @@ def test_start_restart_stopped_agent(
 
 
 @pytest.mark.tmux
+@pytest.mark.timeout(30)
 def test_start_reports_the_host_as_not_started_when_it_was_already_online(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,

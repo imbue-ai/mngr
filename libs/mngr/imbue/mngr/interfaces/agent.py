@@ -19,7 +19,6 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.live_output import LiveOutputReader
@@ -775,46 +774,6 @@ def require_interactive_agent(agent: AgentInterface[Any]) -> InteractiveAgentMix
         raise SendMessageError(
             str(agent.name), f"agent type '{agent.agent_type}' does not accept interactive messages"
         )
-    return agent
-
-
-class HasCompactionMixin(ABC):
-    """Mixin for agent types that support context compaction.
-
-    Context compaction reduces or summarizes past conversation turns so the agent
-    can stay within model context limits and benefit from fresh prompt cache windows.
-    Harnesses implement this mixin to expose their compaction command/API, their
-    model's prompt cache TTL (in minutes), and (optionally) turn prompt token counts.
-    """
-
-    @abstractmethod
-    def request_compaction(self, instructions: str | None = None) -> None:
-        """Request the agent to perform context compaction.
-
-        Some agents support passing additional free-form instructions to the
-        compaction command. Agents that support additional compaction instructions
-        will pass the instructions string on if provided, while agents that don't
-        support it will silently ignore it.
-        """
-        ...
-
-    def get_cache_ttl_minutes(self) -> int | None:
-        """Return the context cache TTL in minutes for the agent's current model/harness, or None if unknown."""
-        return None
-
-    def get_context_tokens(self) -> int | None:
-        """Return the total prompt context token count from the agent's most recent turn, or None if unknown/unsupported."""
-        return None
-
-    def get_idle_since(self) -> datetime | None:
-        """Return the UTC timestamp when the agent last became idle, or None if actively running/unknown."""
-        return None
-
-
-def require_compaction_agent(agent: AgentInterface[Any]) -> HasCompactionMixin:
-    """Return ``agent`` narrowed to :class:`HasCompactionMixin`, or raise if it does not support compaction."""
-    if not isinstance(agent, HasCompactionMixin):
-        raise MngrError(f"Agent '{agent.name}' of type '{agent.agent_type}' does not support context compaction")
     return agent
 
 

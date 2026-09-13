@@ -105,7 +105,7 @@ describe("the Updates panel", () => {
       expect(text).toContain("You're ahead of Stable and will get updates when it catches up.");
       expect(text).not.toContain("not receiving updates");
       expect(text).not.toContain("Switch to alpha");
-      expect(text).toContain("You're on Mind 0.4.30.");
+      expect(text).toContain("You're on Minds 0.4.30.");
     });
   });
 
@@ -134,7 +134,7 @@ describe("the Updates panel", () => {
       [
         "an artifact waiting to be installed",
         { type: "update-downloaded", version: "0.5.0" },
-        "Mind 0.5.0 is downloaded. Restart to install.",
+        "Minds 0.5.0 is downloaded. Restart to install.",
       ],
       [
         "a transfer in flight",
@@ -255,7 +255,7 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const text = panelText(updatesModel({}));
 
-      expect(text).toContain("You're on Mind 0.4.30.");
+      expect(text).toContain("You're on Minds 0.4.30.");
       expect(text).toContain("You're up to date with Stable.");
     });
   });
@@ -353,7 +353,7 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const text = panelText(updatesModel({ updateState: staged, pendingChannelSwitch }));
 
-      expect(text).toContain("Mind 0.5.0 is already downloaded and will still install when you restart");
+      expect(text).toContain("Minds 0.5.0 is already downloaded and will still install when you restart");
       expect(text).toContain("you will stay on it until Stable passes it");
       // With nothing staged there is nothing to warn about, so the sentence must
       // not be unconditional.
@@ -377,7 +377,7 @@ describe("the Updates panel", () => {
         updatesModel({ updateState: staged, pendingChannelSwitch: { channel: "stable", targetVersion: "0.4.12" } }),
       );
 
-      expect(text).toContain("Mind 0.5.0 is already downloaded");
+      expect(text).toContain("Minds 0.5.0 is already downloaded");
     });
   });
 

@@ -154,23 +154,6 @@ outages. Failures that retrying cannot fix -- trust material missing
 on this computer, a rejected key, a malformed file -- are logged at `ERROR`
 immediately.
 
-A remote host that is restored onto new coordinates by anyone other than this
-computer (an operator migration, a start from another device, a watchdog
-re-drive) keeps its host id while its VM, address and ports all change. The
-supervisor follows it within one discovery cycle: the container endpoint
-discovery reports each cycle is compared against the one the host's gateway
-route was resolved for, and a change drops the cached route, refreshes the
-provider's host listing, removes the desktop-to-VPS tunnel to the old endpoint,
-and re-runs the (idempotent) VPS gateway provisioning, since the recreated VM's
-tmpfs holds no gateway secrets. A desktop-to-VPS tunnel failure also stops the
-cached route being reused, so a move the comparison did not see still
-re-resolves on the next cycle instead of streaking against a dead endpoint; the
-route stays cached as the comparison's baseline, since a migration usually
-announces itself as exactly this failure before discovery reports the new
-coordinates. A failure of this computer's own end of the tunnel (trust material
-missing on disk, a socket it could not bind) says nothing about the host and
-keeps the route in use.
-
 ## Error reporting (Sentry)
 
 `mngr latchkey forward` can report errors to Sentry. It is **off by default** and

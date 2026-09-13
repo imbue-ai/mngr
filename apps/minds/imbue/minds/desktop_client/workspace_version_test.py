@@ -1,31 +1,20 @@
-import subprocess
+import json
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Final
 
-import pytest
 from pydantic import Field
 from pydantic import PrivateAttr
 
-from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
-from imbue.minds.desktop_client.testing import exec_json_envelope
-from imbue.minds.desktop_client.workspace_version import _GIT_DESCRIBE_ARGS
-from imbue.minds.desktop_client.workspace_version import _GIT_UPDATE_SELF_ARGS
 from imbue.minds.desktop_client.workspace_version import parse_git_describe
 from imbue.minds.desktop_client.workspace_version import parse_update_self_ref
 from imbue.minds.desktop_client.workspace_version import parse_upgrade_merges
 from imbue.minds.desktop_client.workspace_version import read_workspace_current_version
 from imbue.minds.desktop_client.workspace_version import read_workspace_git_version
-from imbue.minds.testing import run_git_for_backup_test
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
-
-# The release the published template was cut from: tagged in the official
-# repo, reachable from the workspace's HEAD, never present in its clone.
-_BASE_TAG: Final[str] = "minds-v0.4.1"
 
 
 class _GitAnsweringCaller(MngrCaller):
@@ -42,7 +31,7 @@ class _GitAnsweringCaller(MngrCaller):
         cwd: Path | None = None,
     ) -> MngrCallResult:
         self._git_commands.append(argv[3])
-        return MngrCallResult(returncode=0, stdout=exec_json_envelope(self.stdout))
+        return MngrCallResult(returncode=0, stdout=json.dumps({"results": [{"stdout": self.stdout}]}))
 
     @property
     def git_commands(self) -> list[str]:
@@ -86,7 +75,7 @@ def test_the_update_self_marker_outranks_the_tag() -> None:
 
 
 def test_the_marker_and_the_tag_are_read_in_one_exec() -> None:
-    """Both git reads ride one ``mngr exec``."""
+    """Both git reads ride one ``mngr exec``, and a tagless clone must not fail it: ``describe`` is allowed to fail."""
     caller = _GitAnsweringCaller(stdout="minds-v0.4.1\n")
 
     read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
@@ -95,6 +84,7 @@ def test_the_marker_and_the_tag_are_read_in_one_exec() -> None:
     (command,) = caller.git_commands
     assert "--grep" in command
     assert "describe" in command
+    assert command.endswith("|| true")
 
 
 def test_a_workspace_with_no_marker_falls_back_to_the_tag() -> None:
@@ -194,7 +184,7 @@ def test_version_read_exec_never_starts_a_stopped_host() -> None:
         assert "--no-start" in argv
         assert "--" not in argv
         assert str(agent_id) in argv
-        git_commands = [token for token in argv if "git " in token]
+        git_commands = [token for token in argv if token.startswith("git ")]
         assert len(git_commands) == 1
 
 
@@ -203,244 +193,7 @@ def test_version_read_parses_the_json_exec_envelope() -> None:
     own stdout must be extracted from it (raw human-format stdout would carry
     mngr's trailing ``Command succeeded on agent <name>`` status line).
     """
-    envelope = exec_json_envelope("minds-v1.2.3\n")
+    envelope = json.dumps({"results": [{"stdout": "minds-v1.2.3\n"}]})
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
     version = read_workspace_git_version(agent_id=AgentId.generate(), mngr_caller=caller)
     assert version.current_minds_version == "minds-v1.2.3"
-
-
-class _LocalGitCaller(MngrCaller):
-    """Runs the version read's git command for real, in a local repo, the way a workspace's shell would.
-
-    The command reaches ``sh`` -- the shell every host runs an ``mngr exec``
-    command under, and a POSIX one rather than bash in a workspace container --
-    verbatim except for the official template URL, which is repointed at a local
-    repo so the tag fetch never leaves the machine. The shell's exit code and
-    stderr are recorded here because the read returns neither -- it answers with
-    the parsed stdout alone, having spent the exit code on its own failure check
-    and the stderr on a debug line.
-    """
-
-    repo: Path = Field(description="Repo the command runs in, standing in for the workspace's checkout")
-    official_url: str = Field(description="What the official template URL is rewritten to")
-    _shell_returncodes: list[int] = PrivateAttr(default_factory=list)
-    _shell_stderrs: list[str] = PrivateAttr(default_factory=list)
-
-    def call(
-        self,
-        argv: Sequence[str],
-        timeout: float | None = None,
-        env_overrides: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> MngrCallResult:
-        command = argv[3]
-        assert OFFICIAL_REMOTE_URL in command, f"nothing to repoint at a local repo in: {command}"
-        result = subprocess.run(
-            ["sh", "-c", command.replace(OFFICIAL_REMOTE_URL, self.official_url)],
-            cwd=self.repo,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-        self._shell_returncodes.append(result.returncode)
-        self._shell_stderrs.append(result.stderr)
-        return MngrCallResult(
-            returncode=result.returncode,
-            stdout=exec_json_envelope(result.stdout, stderr=result.stderr),
-        )
-
-    @property
-    def shell_returncodes(self) -> list[int]:
-        return self._shell_returncodes
-
-    @property
-    def shell_stderrs(self) -> list[str]:
-        return self._shell_stderrs
-
-
-def _make_published_template_workspace(tmp_path: Path) -> tuple[Path, Path]:
-    """Build the git shape publishing a template produces; return (workspace clone, official repo).
-
-    Mirrors publish-template: the base commit is tagged in the official
-    template repo, the published repo receives only the snapshot commit on top
-    of it, pushed as ``<sha>:refs/heads/main`` with no tags, and the workspace
-    is a clone of that -- the base's whole history, none of its tags. The tree
-    carries ``system/config/parent.toml``, which is what marks it as descended
-    from the template (a published template keeps it).
-    """
-    official = tmp_path / "official.git"
-    published = tmp_path / "published.git"
-    for bare in (official, published):
-        # -b main: the clone below checks out whatever the published repo's HEAD
-        # names, and an inherited ``init.defaultBranch`` names a branch the push
-        # never creates.
-        subprocess.run(
-            ["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True, capture_output=True, timeout=60
-        )
-    template = tmp_path / "template"
-    template.mkdir()
-    subprocess.run(["git", "init", "-q", "-b", "main", str(template)], check=True, capture_output=True, timeout=60)
-    (template / "file.txt").write_text("base\n")
-    parent_toml = template / "system" / "config" / "parent.toml"
-    parent_toml.parent.mkdir(parents=True)
-    parent_toml.write_text('url = "https://github.com/imbue-ai/default-workspace-template.git"\nbranch = "main"\n')
-    run_git_for_backup_test(template, "add", "-A")
-    run_git_for_backup_test(template, "commit", "-q", "-m", "base commit")
-    run_git_for_backup_test(template, "tag", _BASE_TAG)
-    run_git_for_backup_test(template, "push", "-q", str(official), "main", "--tags")
-    (template / "file.txt").write_text("snapshot\n")
-    run_git_for_backup_test(template, "add", "-A")
-    run_git_for_backup_test(template, "commit", "-q", "-m", "Initial workspace commit")
-    snapshot_sha = run_git_for_backup_test(template, "rev-parse", "HEAD").strip()
-    run_git_for_backup_test(template, "push", "-q", str(published), f"{snapshot_sha}:refs/heads/main")
-    workspace = tmp_path / "workspace"
-    subprocess.run(["git", "clone", "-q", str(published), str(workspace)], check=True, capture_output=True, timeout=60)
-    return workspace, official
-
-
-def _local_minds_tags(repo: Path) -> list[str]:
-    return run_git_for_backup_test(repo, "tag", "-l", "minds-v*").split()
-
-
-def test_a_published_template_clone_has_nothing_to_read_before_the_fetch(tmp_path: Path) -> None:
-    """Control: the marker log and the describe -- all the command was before the fetch -- both answer nothing.
-
-    This is the "Version unknown" a workspace created from a published template
-    is stuck at without the fetch.
-    """
-    workspace, _official = _make_published_template_workspace(tmp_path)
-
-    marker = subprocess.run(
-        _GIT_UPDATE_SELF_ARGS, cwd=workspace, capture_output=True, text=True, check=True, timeout=60
-    )
-    describe = subprocess.run(
-        _GIT_DESCRIBE_ARGS, cwd=workspace, capture_output=True, text=True, check=False, timeout=60
-    )
-
-    assert marker.stdout.strip() == ""
-    assert describe.returncode != 0
-    assert describe.stdout.strip() == ""
-
-
-@pytest.mark.witnesses("workspace-updates.version-recovered-from-the-template", partial="the version read only")
-def test_a_published_template_clone_reads_its_base_tag(tmp_path: Path) -> None:
-    """The whole point: one version read fetches the release tags and the clone describes as its base."""
-    workspace, official = _make_published_template_workspace(tmp_path)
-    caller = _LocalGitCaller(repo=workspace, official_url=str(official))
-
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version == _BASE_TAG
-    assert _local_minds_tags(workspace) == [_BASE_TAG]
-
-
-def test_the_tag_fetch_repoints_an_official_remote_left_pointing_elsewhere(tmp_path: Path) -> None:
-    """minds owns the ``official`` remote name here as it does in the backup scripts: a stale one is repointed."""
-    workspace, official = _make_published_template_workspace(tmp_path)
-    run_git_for_backup_test(workspace, "remote", "add", "official", str(tmp_path / "somewhere-else"))
-    caller = _LocalGitCaller(repo=workspace, official_url=str(official))
-
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version == _BASE_TAG
-    assert run_git_for_backup_test(workspace, "remote", "get-url", "official").strip() == str(official)
-
-
-def test_the_tag_fetch_stops_once_the_tag_is_local(tmp_path: Path) -> None:
-    """A second read answers from the clone: the sweep pays for the fetch only while there is no version.
-
-    ``FETCH_HEAD`` is the evidence -- every fetch writes it, so removing it
-    after the first read and finding it still gone after the second means no
-    second fetch was made.
-    """
-    workspace, official = _make_published_template_workspace(tmp_path)
-    caller = _LocalGitCaller(repo=workspace, official_url=str(official))
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == _BASE_TAG
-    fetch_head = workspace / ".git" / "FETCH_HEAD"
-    assert fetch_head.exists()
-    fetch_head.unlink()
-
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == _BASE_TAG
-
-    assert not fetch_head.exists()
-
-
-def test_a_workspace_with_an_update_self_marker_never_fetches(tmp_path: Path) -> None:
-    """The marker outranks the tag, so a workspace that has one has nothing to gain from the fetch."""
-    workspace, official = _make_published_template_workspace(tmp_path)
-    run_git_for_backup_test(
-        workspace, "commit", "-q", "--allow-empty", "-m", "update-self: merge upstream template (minds-v0.5.0)"
-    )
-    caller = _LocalGitCaller(repo=workspace, official_url=str(official))
-
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version == "minds-v0.5.0"
-    assert _local_minds_tags(workspace) == []
-
-
-def test_a_workspace_that_cannot_reach_the_official_template_reads_nothing_and_still_exits_clean(
-    tmp_path: Path,
-) -> None:
-    """An offline workspace costs the read its attempt and nothing else: no version, no failed exec.
-
-    The fetch's complaint must survive that clean exit: it is all that tells a
-    read that could not reach the template from one with nothing to report.
-    """
-    unreachable_url = str(tmp_path / "not-a-repo.git")
-    workspace, _official = _make_published_template_workspace(tmp_path)
-    caller = _LocalGitCaller(repo=workspace, official_url=unreachable_url)
-
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version is None
-    assert caller.shell_returncodes == [0]
-    (stderr,) = caller.shell_stderrs
-    assert unreachable_url in stderr
-
-
-@pytest.mark.witnesses("workspace-updates.version-not-recovered-for-an-unrelated-workspace")
-def test_a_workspace_that_is_not_template_derived_never_fetches(tmp_path: Path) -> None:
-    """A tree with no ``parent.toml`` is not the template's, so the read leaves its git alone.
-
-    Measured against the real template before this guard existed: a repo
-    sharing no history with it still took 70 MB of objects, after which
-    ``describe`` answered nothing. ``parent.toml`` -- the template's own record
-    of where the tree came from -- is the cheap local stand-in for "could a
-    release tag ever describe this". It is deliberately conservative: this
-    fixture's repo *would* have described after a fetch, and is skipped anyway.
-    """
-    workspace, official = _make_published_template_workspace(tmp_path)
-    run_git_for_backup_test(workspace, "rm", "-q", "system/config/parent.toml")
-    run_git_for_backup_test(workspace, "commit", "-q", "-m", "a repo of the user's own")
-    caller = _LocalGitCaller(repo=workspace, official_url=str(official))
-
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version is None
-    assert _local_minds_tags(workspace) == []
-    # The other half of leaving its git alone: the guard is ahead of the
-    # ``official``-remote write, the read's one other side effect.
-    assert run_git_for_backup_test(workspace, "remote").split() == ["origin"]
-    assert caller.shell_returncodes == [0]
-
-
-def test_a_shallow_workspace_never_fetches(tmp_path: Path) -> None:
-    """In a shallow clone the tags would land and ``describe`` still could not relate them to HEAD."""
-    workspace, official = _make_published_template_workspace(tmp_path)
-    shallow = tmp_path / "shallow"
-    subprocess.run(
-        ["git", "clone", "-q", "--depth", "1", workspace.as_uri(), str(shallow)],
-        check=True,
-        capture_output=True,
-        timeout=60,
-    )
-    assert run_git_for_backup_test(shallow, "rev-parse", "--is-shallow-repository").strip() == "true"
-    caller = _LocalGitCaller(repo=shallow, official_url=str(official))
-
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version is None
-    assert _local_minds_tags(shallow) == []
-    assert caller.shell_returncodes == [0]

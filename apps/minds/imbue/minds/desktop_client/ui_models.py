@@ -34,11 +34,6 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
-from imbue.minds.desktop_client.folder_sync import FolderSyncState
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
-from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
-from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
@@ -54,7 +49,7 @@ from imbue.minds.desktop_client.update_status import UpdateVerdict
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 22
+UI_SCHEMA_VERSION: int = 9
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -102,13 +97,6 @@ class UiWorkspaceEntry(FrozenModel):
     liveness: str = Field(
         default="", description="RUNNING / STOPPED / STOPPING / STARTING / UNKNOWN when supports_shutdown, else empty"
     )
-    stop_kind: str = Field(
-        default="",
-        description=(
-            "Why a cloud machine's current stop happened: owner / maintenance / idle / suspension, 'unknown' for a "
-            "kind this build does not recognize, empty while running or when not known"
-        ),
-    )
     account: str = Field(default="", description="Owning account email, when known")
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"
@@ -133,14 +121,6 @@ class UiWorkspaceEntry(FrozenModel):
             "device; empty for live rows"
         ),
     )
-    key_state: str = Field(
-        default="",
-        description=(
-            "For a live cloud row this device holds no SSH key for (so it cannot open the machine): 'locked' "
-            "when the synced key needs the master password here, 'syncing' when the account is unlocked and "
-            "the key has not arrived yet, 'unavailable' when no key can reach this device; empty otherwise"
-        ),
-    )
 
 
 class UiHelloMessage(FrozenModel):
@@ -158,13 +138,6 @@ class UiWorkspacesMessage(FrozenModel):
         description="Every visible workspace/create/remote row, in display order"
     )
     destroying_agent_ids: tuple[str, ...] = Field(description="Agent ids with an in-flight or failed destroy")
-    # Carried for the frame diff, not for the SPA: a destroy that fails after its row has
-    # already left the list changes nothing else here, so without this the frame is byte
-    # identical, the publisher's per-type dedup suppresses it, and the landing page never
-    # refetches the extras that carry the orphaned failed destroy.
-    failed_destroy_agent_ids: tuple[str, ...] = Field(
-        default=(), description="The subset of destroying_agent_ids whose destroy failed"
-    )
     restorable_workspace_ids: tuple[str, ...] = Field(
         description="Agent ids AND host ids that window restore may target (both coordinates, see UiWorkspaceEntry)"
     )
@@ -531,9 +504,6 @@ class UiBootstrapSeed(FrozenModel):
     accent: str = Field(description="Initial accent color (avoids neutral->accent pop-in)")
     is_mac: bool = Field(description="Whether the client platform is macOS (traffic-light padding etc.)")
     mngr_forward_origin: str = Field(description="Bare origin of the mngr forward plugin for /goto/ URLs")
-    is_onboarding_complete: bool = Field(
-        description="Whether this install is past the first-run start flow (drives the home page's /start redirect)"
-    )
 
 
 class UiBootstrap(FrozenModel):
@@ -625,116 +595,6 @@ class UiAvailableConnection(FrozenModel):
     sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
 
 
-class UiPathSync(FrozenModel):
-    """What Minds knows about syncing one shared path.
-
-    Present whenever the path has ever been synced, not only while a sync is
-    running: ``activity`` is what says which. ``state`` describes the running
-    process and is only meaningful while ``activity`` is ACTIVE.
-    """
-
-    activity: FolderSyncActivity = Field(
-        default=FolderSyncActivity.ACTIVE,
-        description="ACTIVE, INACTIVE (copy set aside on the machine), or DISCARDED (copy deleted)",
-    )
-    state: FolderSyncState = Field(description="How far along the sync is; see FolderSyncState")
-    message: str = Field(description="Why it failed, when it did; empty otherwise")
-    direction: FolderSyncDirection = Field(description="Which way changes move")
-    conflict: FolderSyncConflict = Field(description="Which side wins a clash; ignored unless direction is BOTH")
-    workspace_path: str = Field(description="Where it lands on the machine, under its home directory")
-    bytes_done: int = Field(default=0, description="Bytes carried across so far in the transfer running now")
-    bytes_total: int = Field(default=0, description="Bytes that transfer set out to carry; 0 when none is running")
-
-
-class UiFolderSyncRow(FrozenModel):
-    """One shared path's sync half, for the poll that watches a running sync."""
-
-    path: str = Field(description="The shared path on this computer, which identifies the row")
-    sync: UiPathSync | None = Field(default=None, description="Its sync, or null when it has never been synced")
-    overlap_warning: str = Field(
-        default="",
-        description="The row's ``sync_overlap_warning``, so the poll keeps it current as other workspaces change",
-    )
-
-
-class UiFolderSyncs(FrozenModel):
-    """The payload of GET .../folder-syncs.
-
-    Deliberately not the whole permissions view. What a running sync reports
-    lives in this computer's own memory -- the ``mngr pair`` subprocess tells it
-    -- whereas the rest of that view is the workspace machine's policy, read
-    over SSH. Polling the two together made a 2-second timer drive a
-    1.2-second round trip to the VPS.
-    """
-
-    rows: tuple[UiFolderSyncRow, ...] = Field(default=(), description="One entry per shared path that has a sync")
-
-
-class UiSharedPath(FrozenModel):
-    """One row of Local files: a path on this computer an agent may reach.
-
-    One row per path, not per granted permission name. A path held at both
-    access modes is still one thing the user shared, and ``access`` says which
-    of them the row is showing.
-    """
-
-    path: str = Field(description="Absolute path on this computer; the row's identity")
-    path_label: str = Field(description="The same path with the home directory written as ``~``")
-    access: FileSharingAccess = Field(description="READ (read-only) or WRITE (read and write)")
-    sync: UiPathSync | None = Field(default=None, description="The live sync on this path, when there is one")
-    sync_overlap_warning: str = Field(
-        default="",
-        description="Why syncing this folder overlaps another workspace's sync; empty when it does not",
-    )
-    sync_unavailable_reason: str = Field(
-        default="",
-        description="Why this path cannot be synced at all; empty when it can. Greys out the option",
-    )
-
-
-class UiSharedPathRequest(FrozenModel):
-    """Body of POST /ui/api/workspaces/<agent_id>/permissions/shared-path.
-
-    Adds a path, or changes the access on one already shared; the two are the
-    same write, since granting an access mode is all either does.
-    """
-
-    path: str = Field(description="Absolute path to share; ``~`` and ``~/...`` are expanded")
-    access: FileSharingAccess = Field(description="The access mode the agent should end up holding")
-
-
-class UiFolderSyncDiscardCopyRequest(FrozenModel):
-    """Body of POST /ui/api/workspaces/<agent_id>/folder-syncs/discard-copy."""
-
-    path: str = Field(description="The shared path whose set-aside copy should be deleted")
-
-
-class UiSharedPathRemoveRequest(FrozenModel):
-    """Body of POST /ui/api/workspaces/<agent_id>/permissions/shared-path-remove."""
-
-    path: str = Field(description="The path to stop sharing, at every access mode")
-
-
-class UiFolderSyncRetryRequest(FrozenModel):
-    """Body of POST /ui/api/workspaces/<agent_id>/folder-syncs/retry."""
-
-    path: str = Field(description="The shared folder whose failed sync should be tried again")
-
-
-class UiFolderSyncToggleRequest(FrozenModel):
-    """Body of POST /ui/api/workspaces/<agent_id>/folder-syncs/toggle.
-
-    Names the shared path rather than the permission: the sync is keyed by the
-    path on disk, and the permission name is only one of the places it appears.
-    """
-
-    path: str = Field(description="The shared path whose sync is being turned on or off")
-    enabled: bool = Field(description="Whether the path should be synced")
-    conflict: FolderSyncConflict = Field(
-        default=FolderSyncConflict.NEWER, description="Which side wins a clash in a two-way sync"
-    )
-
-
 class UiSelfPermissionToggle(FrozenModel):
     """One ``latchkey-self`` toggle row (a shared path, or a cross-workspace verb)."""
 
@@ -770,15 +630,12 @@ class UiWorkspacePermissions(FrozenModel):
     available_connections: tuple[UiAvailableConnection, ...] = Field(
         description="Catalog services with no account yet"
     )
-    shared_paths: tuple[UiSharedPath, ...] = Field(default=(), description="Local files rows, one per shared path")
+    file_sharing_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Local files (shared path) rows")
     workspace_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Other machines (verb) rows")
     waiting_requests: tuple[UiWaitingPermissionRequest, ...] = Field(
         description="Pending permission requests from this workspace, oldest first"
     )
     permissions_unavailable: bool = Field(description="True when the permissions could not be loaded at all")
-    is_sync_supported: bool = Field(
-        default=False, description="False when this build cannot keep a shared path in sync at all"
-    )
     is_credential_store_shared: bool = Field(
         description=(
             "True when this machine's credentials are this computer's, shared by every local machine, "
@@ -901,12 +758,4 @@ class UiWireSchema(FrozenModel):
     connector_revoke_all: UiConnectorRevokeAllRequest = Field(description="connector-revoke-all request body")
     connector_disconnect: UiConnectorDisconnectRequest = Field(description="connector-disconnect request body")
     connect_credentials: UiConnectCredentialsRequest = Field(description="connect-credentials request body")
-    folder_sync_toggle: UiFolderSyncToggleRequest = Field(description="folder-syncs/toggle request body")
-    folder_sync_retry: UiFolderSyncRetryRequest = Field(description="folder-syncs/retry request body")
-    shared_path: UiSharedPathRequest = Field(description="shared-path request body")
-    shared_path_remove: UiSharedPathRemoveRequest = Field(description="shared-path-remove request body")
-    folder_sync_discard_copy: UiFolderSyncDiscardCopyRequest = Field(
-        description="folder-syncs/discard-copy request body"
-    )
-    folder_syncs: UiFolderSyncs = Field(description="folder-syncs poll payload")
     permission_grant_group: UiPermissionGrantGroup = Field(description="one grant-dialog permission group")

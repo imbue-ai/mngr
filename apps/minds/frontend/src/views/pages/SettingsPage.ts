@@ -1,4 +1,4 @@
-// The app-level ("Mind") settings page: Connectors, Local files, Machines
+// The app-level ("Minds") settings page: Connectors, Local files, Machines
 // (delegation), Error reporting, Updates, and Master password. Port of
 // templates/pages/Settings.jinja + AppSettingsSections.jinja +
 // static/app_settings.js.

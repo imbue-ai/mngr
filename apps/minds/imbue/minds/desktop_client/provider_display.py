@@ -42,13 +42,6 @@ def friendly_provider_label(provider_name: str | None) -> str:
         return f"{label} ({slug})" if slug else label
     if provider_name == _AWS_PROVIDER_PREFIX or provider_name.startswith(f"{_AWS_PROVIDER_PREFIX}-"):
         return "AWS"
-    if is_imbue_cloud_provider_name(provider_name):
+    if provider_name == _IMBUE_CLOUD_PROVIDER_PREFIX or provider_name.startswith(f"{_IMBUE_CLOUD_PROVIDER_PREFIX}_"):
         return "Imbue Cloud"
     return _EXACT_PROVIDER_LABELS.get(provider_name, provider_name)
-
-
-def is_imbue_cloud_provider_name(provider_name: str) -> bool:
-    """Whether a provider instance name is one of the imbue_cloud (remote workspace) providers."""
-    return provider_name == _IMBUE_CLOUD_PROVIDER_PREFIX or provider_name.startswith(
-        f"{_IMBUE_CLOUD_PROVIDER_PREFIX}_"
-    )

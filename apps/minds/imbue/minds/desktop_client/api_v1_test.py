@@ -61,7 +61,6 @@ from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
-from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
@@ -187,7 +186,6 @@ def _client_with_agent_creator(
     resolver: BackendResolverInterface | None = None,
     agent_creator: AgentCreator | None = None,
     session_store: MultiAccountSessionStore | None = None,
-    minds_config: MindsConfig | None = None,
 ) -> FlaskClient:
     """Build a test client whose ``/api/v1`` create route has an ``AgentCreator`` wired.
 
@@ -215,7 +213,6 @@ def _client_with_agent_creator(
         session_store=session_store,
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
-        minds_config=minds_config,
     )
     return app.test_client()
 
@@ -2189,70 +2186,6 @@ def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> No
     assert any("share.env" in " ".join(argv) for argv in recorded)
 
 
-def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) -> None:
-    # The Share tab builds every link as https://<label>.<domain>/ (the bare
-    # domain does not route), so the document carries the label per share
-    # target: the shell and the apps, never interface services.
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
-    client = _sharing_client(
-        tmp_path,
-        agent_id,
-        cli,
-        service_logs={
-            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
-            + make_service_log("web", "http://localhost:8001", "web-w3b1")
-            + make_service_log("terminal", "http://localhost:8002", "terminal-t3rm")
-        },
-    )
-
-    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
-
-    assert response.status_code == 200
-    assert json.loads(response.data)["service_labels"] == {
-        "system_interface": "system_interface-shl1",
-        "web": "web-w3b1",
-    }
-
-
-def test_machine_sharing_status_reports_no_labels_before_the_registrations_arrive(tmp_path: Path) -> None:
-    # Right after app start the workspace's service registrations have not
-    # reached this client yet: the document says so (no labels) instead of
-    # letting a client guess a link from the bare domain.
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
-
-    assert response.status_code == 200
-    body = json.loads(response.data)
-    assert body["enabled"] is True
-    assert body["service_labels"] == {}
-
-
-def test_machine_sharing_put_reports_the_share_target_labels(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
-    client = _sharing_client(
-        tmp_path,
-        agent_id,
-        cli,
-        service_logs={
-            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
-        },
-    )
-
-    response = client.put(
-        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
-        headers=_auth_header(),
-        json={"workspace": {"emails": ["viewer@example.com"], "email_domains": []}},
-    )
-
-    assert response.status_code == 200
-    assert json.loads(response.data)["service_labels"] == {"system_interface": "system_interface-shl1"}
-
-
 def test_machine_sharing_put_on_active_share_updates_grants_without_rotation(tmp_path: Path) -> None:
     agent_id = AgentId()
     # The probe reports materials present with no existing document, so the
@@ -2387,14 +2320,7 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    # The labels ride the poll so a Share tab opened before they were known
-    # can build the link from the same value the probe used.
-    assert json.loads(response.data) == {
-        "ready": True,
-        "cert_not_after": None,
-        "last_tunnel_login_at": None,
-        "service_labels": {"system_interface": "system_interface-shl1"},
-    }
+    assert json.loads(response.data) == {"ready": True, "cert_not_after": None, "last_tunnel_login_at": None}
     # It probed the shell LABEL origin, never the bare machine domain.
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
 
@@ -2448,7 +2374,6 @@ def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: 
         "ready": False,
         "cert_not_after": "2027-01-01 00:00:00+00:00",
         "last_tunnel_login_at": "2026-08-13 12:00:00+00:00",
-        "service_labels": {},
     }
 
 
@@ -2459,12 +2384,7 @@ def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> No
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {
-        "ready": False,
-        "cert_not_after": None,
-        "last_tunnel_login_at": None,
-        "service_labels": {},
-    }
+    assert json.loads(response.data) == {"ready": False, "cert_not_after": None, "last_tunnel_login_at": None}
 
 
 def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None:
@@ -2474,12 +2394,7 @@ def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path)
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {
-        "ready": False,
-        "cert_not_after": None,
-        "last_tunnel_login_at": None,
-        "service_labels": {},
-    }
+    assert json.loads(response.data) == {"ready": False, "cert_not_after": None, "last_tunnel_login_at": None}
 
 
 # -- Workspace recovery: health probe + restart --
@@ -2736,26 +2651,6 @@ def test_restart_operation_status_reports_registry_record(tmp_path: Path) -> Non
     done = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
     assert done["is_done"] is True
     assert done["status"] == "DONE"
-    assert done["warning"] is None
-
-
-def test_restart_operation_status_reports_a_declined_start_as_neither_done_nor_failed(tmp_path: Path) -> None:
-    # A start the connector refused as an operator hold: the record is DECLINED
-    # with the refusal as its warning, so the frontend shows the sentence
-    # without reading the machine as answering (is_done) or the recovery as
-    # failed (error).
-    agent_id = AgentId()
-    client = _client_with_workspace(tmp_path, agent_id)
-    registry = get_state(client.application).workspace_operation_registry
-    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
-    registry.decline(agent_id, "This machine is undergoing maintenance and will be back shortly.")
-
-    body = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
-
-    assert body["status"] == "DECLINED"
-    assert body["is_done"] is False
-    assert body["error"] is None
-    assert body["warning"] == "This machine is undergoing maintenance and will be back shortly."
 
 
 def test_restart_operation_status_hides_backup_operation_records(tmp_path: Path) -> None:
@@ -3522,33 +3417,6 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
-
-
-def test_create_workspace_marks_onboarding_complete(
-    tmp_path: Path,
-    root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
-) -> None:
-    # Starting any create is the point past which the first-run start flow is no
-    # longer useful, so the front door records it for every surface.
-    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
-    client = _client_with_agent_creator(
-        tmp_path,
-        root_concurrency_group,
-        notification_dispatcher,
-        agent_creator=creator,
-        minds_config=minds_config,
-    )
-
-    response = client.post(
-        "/api/v1/workspaces",
-        headers=_auth_header(),
-        json={"git_url": "https://example/repo", "host_name": "first-ever-workspace"},
-    )
-
-    assert response.status_code == 202
-    assert minds_config.get_is_onboarding_complete() is True
 
 
 # The stderr an `mngr exec` run really produced against a healthy pre-declutter

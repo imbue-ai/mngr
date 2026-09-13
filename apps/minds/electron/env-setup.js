@@ -12,7 +12,7 @@ const paths = require('./paths');
  *
  * Returns a promise that resolves on success or rejects with error details.
  */
-function runEnvSetup(onProgress, onLogLine = () => {}) {
+function runEnvSetup(onProgress) {
   if (paths.isDev()) {
     onProgress('Dev mode -- using monorepo environment');
     return Promise.resolve();
@@ -105,7 +105,6 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
-        onLogLine(trimmed);
 
         if (trimmed.includes('Installing')) {
           onProgress('Installing packages...');
@@ -120,11 +119,7 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
     });
 
     child.stdout.on('data', (data) => {
-      const text = data.toString();
-      processOutput += text;
-      for (const line of text.split('\n')) {
-        if (line.trim()) onLogLine(line.trim());
-      }
+      processOutput += data.toString();
     });
 
     child.on('error', (err) => {

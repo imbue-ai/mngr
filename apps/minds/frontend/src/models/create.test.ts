@@ -1,7 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { jsonResponse } from "../testing";
-import { MindLivenessTracker, hostNameFormatError, progressForElapsed, submitCreateRequest } from "./create";
-import { OnboardingProgress } from "./onboarding";
+import { MindLivenessTracker, hostNameFormatError, progressForElapsed } from "./create";
 
 describe("hostNameFormatError", () => {
   it("accepts empty (auto-named) and plain names", () => {
@@ -72,47 +70,5 @@ describe("MindLivenessTracker", () => {
     );
     await tracker.stop("agent-2");
     expect(tracker.displayedLiveness("agent-2", "RUNNING")).toBe("RUNNING");
-  });
-});
-
-describe("submitCreateRequest", () => {
-  function progressSeededIncomplete(): OnboardingProgress {
-    const progress = new OnboardingProgress();
-    progress.seed(false);
-    return progress;
-  }
-
-  it("posts the body to the create front door and completes onboarding locally on a 202", async () => {
-    const progress = progressSeededIncomplete();
-    const calls: Array<{ url: string; body: unknown }> = [];
-    const result = await submitCreateRequest(
-      { git_url: "https://example/repo" },
-      (url, init) => {
-        calls.push({ url, body: JSON.parse(String(init?.body)) });
-        return Promise.resolve(jsonResponse({ operation_id: "create-attempt-1" }, 202));
-      },
-      progress,
-    );
-    expect(calls).toEqual([{ url: "/api/v1/workspaces", body: { git_url: "https://example/repo" } }]);
-    expect(result).toEqual({ status: 202, data: { operation_id: "create-attempt-1" } });
-    expect(progress.isComplete).toBe(true);
-  });
-
-  it("leaves onboarding incomplete when the front door refuses", async () => {
-    const progress = progressSeededIncomplete();
-    const result = await submitCreateRequest(
-      {},
-      () => Promise.resolve(jsonResponse({ error: "no capacity" }, 409)),
-      progress,
-    );
-    expect(result.status).toBe(409);
-    expect(progress.isComplete).toBe(false);
-  });
-
-  it("reports status 0 when the server cannot be reached", async () => {
-    const progress = progressSeededIncomplete();
-    const result = await submitCreateRequest({}, () => Promise.reject(new Error("offline")), progress);
-    expect(result).toEqual({ status: 0, data: {} });
-    expect(progress.isComplete).toBe(false);
   });
 });

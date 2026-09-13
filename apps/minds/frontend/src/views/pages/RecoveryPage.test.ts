@@ -4,22 +4,10 @@ import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
 import { ShellState } from "../shell/shell-state";
 import { RecoveryPage } from "./RecoveryPage";
-import {
-  RecoveryModel,
-  type LifecycleDeps,
-  type RecoveryInfo,
-} from "../../models/backups";
-import {
-  attrsOf,
-  collectText,
-  collectVnodes,
-  workspacesMessage,
-  type AnyVnode,
-} from "../../testing";
-import { MAINTENANCE_MESSAGE } from "./landing-controls";
+import { RecoveryModel, type LifecycleDeps, type RecoveryInfo } from "../../models/backups";
+import { attrsOf, collectVnodes } from "../../testing";
 
-const RECOVERY_ROUTE =
-  "/agents/agent-aa11/recovery?return_to=%2Fgoto%2Fhost-bb22%2F&intent=start";
+const RECOVERY_ROUTE = "/agents/agent-aa11/recovery?return_to=%2Fgoto%2Fhost-bb22%2F&intent=start";
 const RETURN_TO = "/goto/host-bb22/";
 
 /** Deps that answer nothing and schedule nothing: these tests drive a state the
@@ -50,7 +38,6 @@ const ANSWERING: RecoveryInfo = {
 };
 
 type UpdateVnode = Parameters<NonNullable<typeof RecoveryPage.onupdate>>[0];
-type InitVnode = Parameters<NonNullable<typeof RecoveryPage.oninit>>[0];
 type RecoveryState = UpdateVnode["state"];
 
 interface PageOverrides {
@@ -60,21 +47,13 @@ interface PageOverrides {
 
 /** The page as a click-through left it: a model holding one reading of the
  * machine, and the destination the click-through carried. */
-function pageShowing(
-  info: RecoveryInfo | null,
-  overrides: PageOverrides = {},
-): UpdateVnode {
-  const model = Object.assign(
-    new RecoveryModel("agent-aa11", IDLE_DEPS),
-    { info },
-    overrides.model ?? {},
-  );
+function pageShowing(info: RecoveryInfo | null, overrides: PageOverrides = {}): UpdateVnode {
+  const model = Object.assign(new RecoveryModel("agent-aa11", IDLE_DEPS), { info }, overrides.model ?? {});
   const state: RecoveryState = {
     model,
     returnTo: RETURN_TO,
     hasReturned: false,
     isDispatchSettled: true,
-    heldMessage: null,
     ...overrides.state,
   };
   return { state } as UpdateVnode;
@@ -96,26 +75,12 @@ function runUpdate(vnode: UpdateVnode): void {
   (RecoveryPage.onupdate as (v: UpdateVnode) => void)(vnode);
 }
 
-/** What the page puts on screen for the state it holds. */
-function render(vnode: UpdateVnode): m.Vnode {
-  return (RecoveryPage.view as (v: UpdateVnode) => m.Vnode)(vnode);
-}
-
-/** The recovery panel in a rendered page, found by the panel's own id so the
- * search does not depend on how deep the page wraps it. */
-function findPanel(rendered: m.Vnode): AnyVnode | undefined {
-  return collectVnodes(rendered).find(
-    (node) => typeof attrsOf(node).panelId === "string",
-  );
-}
-
-/** The attrs the page hands the recovery panel. */
-function panelAttrs(vnode: UpdateVnode): {
-  onEnterMachine?: (() => void) | null;
-} {
-  const panel = findPanel(render(vnode));
-  if (panel === undefined)
-    throw new Error("the page rendered no recovery panel");
+/** The attrs the page hands the recovery panel, found by the panel's own id so
+ * the search does not depend on how deep the page wraps it. */
+function panelAttrs(vnode: UpdateVnode): { onEnterMachine?: (() => void) | null } {
+  const rendered = (RecoveryPage.view as (v: UpdateVnode) => m.Vnode)(vnode);
+  const panel = collectVnodes(rendered).find((node) => typeof attrsOf(node).panelId === "string");
+  if (panel === undefined) throw new Error("the page rendered no recovery panel");
   return attrsOf(panel) as { onEnterMachine?: (() => void) | null };
 }
 
@@ -131,9 +96,7 @@ describe("recovery page return", () => {
     // is needed here" on a surface with no way into the machine it is talking
     // about, and the reader has to go Home and back in by hand.
     const { routeSets } = withShell();
-    const vnode = pageShowing(ANSWERING, {
-      model: { recoveryError: "Start step of host restart failed" },
-    });
+    const vnode = pageShowing(ANSWERING, { model: { recoveryError: "Start step of host restart failed" } });
 
     runUpdate(vnode);
 
@@ -238,112 +201,8 @@ describe("recovery page exit button", () => {
     // The reason the card has no exit anywhere else: before the machine
     // answers, this button would name a destination known not to work.
     withShell();
-    expect(
-      panelAttrs(pageShowing({ ...ANSWERING, health: "stuck" })).onEnterMachine,
-    ).toBeNull();
-    expect(
-      panelAttrs(pageShowing({ ...ANSWERING, is_host_offline: true }))
-        .onEnterMachine,
-    ).toBeNull();
-    expect(
-      panelAttrs(pageShowing(ANSWERING, { model: { isRecoveryRunning: true } }))
-        .onEnterMachine,
-    ).toBeNull();
-  });
-});
-
-describe("recovery page held machine", () => {
-  it("says the machine is under maintenance instead of offering the recovery panel", () => {
-    // ?intent=start on a machine an operator holds: the start would only be
-    // refused, so the page shows the connector's own sentence and dispatches
-    // nothing (oninit settles the dispatch without one).
-    withShell();
-    const held = pageShowing(
-      { ...ANSWERING, is_host_offline: true },
-      { state: { heldMessage: MAINTENANCE_MESSAGE } },
-    );
-    const rendered = render(held);
-
-    const text = collectText(rendered).join(" ");
-    expect(text).toContain("Machine maintenance");
-    expect(text).toContain(MAINTENANCE_MESSAGE);
-    expect(findPanel(rendered)).toBeUndefined();
-  });
-
-  it("hands the page back to the recovery panel once the held machine answers", () => {
-    // The operator's start landed while the reader was parked here: the
-    // maintenance sentence is stale and the panel offers the machine.
-    withShell();
-    const back = pageShowing(ANSWERING, {
-      state: { heldMessage: MAINTENANCE_MESSAGE },
-    });
-    const rendered = render(back);
-
-    expect(collectText(rendered).join(" ")).not.toContain(
-      "Machine maintenance",
-    );
-    expect(findPanel(rendered)).toBeDefined();
-  });
-});
-
-/** Open the page the way a machines-list click-through does: the route names
- * the machine and the intent, the store holds the machine's entry with the
- * given stop kind, and the model's network calls are stubbed out. */
-async function initPageOn(
-  intent: string,
-  stopKind: string,
-): Promise<{
-  state: InitVnode["state"];
-  dispatch: ReturnType<typeof vi.spyOn>;
-}> {
-  const { shell } = withShell();
-  const base = workspacesMessage().workspaces[0];
-  shell.stores.workspaces.applyWorkspacesMessage(
-    workspacesMessage({
-      workspaces: [{ ...base, liveness: "STOPPED", stop_kind: stopKind }],
-    }),
-  );
-  const params: Record<string, string> = {
-    agentId: "agent-aa11",
-    intent,
-    return_to: RETURN_TO,
-  };
-  vi.spyOn(m.route, "param").mockImplementation(((key: string) =>
-    params[key]) as typeof m.route.param);
-  vi.spyOn(RecoveryModel.prototype, "load").mockResolvedValue(undefined);
-  const dispatch = vi
-    .spyOn(RecoveryModel.prototype, "dispatchRecovery")
-    .mockResolvedValue(undefined);
-  const vnode = { state: {} } as InitVnode;
-  (RecoveryPage.oninit as (v: InitVnode) => void)(vnode);
-  await vi.waitFor(() => expect(vnode.state.isDispatchSettled).toBe(true));
-  return { state: vnode.state, dispatch };
-}
-
-describe("recovery page click-through on a held machine", () => {
-  it("dispatches no start for a machine an operator holds, and says so", async () => {
-    // ?intent=start on a maintenance-held machine: the connector would only
-    // refuse it, so the page shows the connector's sentence instead of asking.
-    const { state, dispatch } = await initPageOn("start", "maintenance");
-
-    expect(state.heldMessage).toBe(MAINTENANCE_MESSAGE);
-    expect(dispatch).not.toHaveBeenCalled();
-  });
-
-  it("starts an idle-stopped machine, which is the owner's to start", async () => {
-    const { state, dispatch } = await initPageOn("start", "idle");
-
-    expect(state.heldMessage).toBeNull();
-    expect(dispatch).toHaveBeenCalledWith("start");
-  });
-
-  it("holds only the start: a restart of the held machine is dispatched as asked", async () => {
-    // The hold gates the idempotent start a click into a stopped machine asks
-    // for; the full bounce is the user's explicit request, and the connector
-    // answers it in its own words.
-    const { state, dispatch } = await initPageOn("restart", "maintenance");
-
-    expect(state.heldMessage).toBeNull();
-    expect(dispatch).toHaveBeenCalledWith("restart");
+    expect(panelAttrs(pageShowing({ ...ANSWERING, health: "stuck" })).onEnterMachine).toBeNull();
+    expect(panelAttrs(pageShowing({ ...ANSWERING, is_host_offline: true })).onEnterMachine).toBeNull();
+    expect(panelAttrs(pageShowing(ANSWERING, { model: { isRecoveryRunning: true } })).onEnterMachine).toBeNull();
   });
 });

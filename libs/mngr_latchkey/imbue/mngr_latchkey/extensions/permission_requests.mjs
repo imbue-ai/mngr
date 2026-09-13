@@ -402,10 +402,6 @@ function buildAccountScopeSchema(scope, account) {
 // set; the scope just identifies which rule list the permission
 // belongs to.
 const FILE_SHARING_PROXY_PATH_PREFIX = '/minds-api-proxy/api/v1/files';
-
-// The desktop client's own permissions file, inside the latchkey directory.
-// Kept in step with ``store.py``'s ``_ADMIN_PERMISSIONS_FILENAME``.
-const ADMIN_PERMISSIONS_FILE = 'latchkey_admin_permissions.json';
 const FILE_SHARING_SCOPE_NAME = 'latchkey-self';
 const FILE_SHARING_PERMISSION_PREFIX = 'minds-file-server-';
 
@@ -1240,16 +1236,7 @@ async function parsePermissionRequestBody(request) {
   if (parsed.payload === undefined) {
     throw new InvalidRequestBodyError("field 'payload' is required.");
   }
-  // ``target`` names the permissions.json the approved effect is written into.
-  // Optional, and only the desktop client may set it (see ``resolveTarget``);
-  // everyone else gets their own file, which is what the context already says.
-  if (parsed.target !== undefined) {
-    ensureNonEmptyString('', 'target', parsed.target);
-    if (!parsed.target.startsWith('/')) {
-      throw new InvalidRequestBodyError(`field 'target' must be an absolute path; got '${parsed.target}'.`);
-    }
-  }
-  ensureNoExtraneousFields('', ['agent_id', 'rationale', 'type', 'payload', 'target'], parsed);
+  ensureNoExtraneousFields('', ['agent_id', 'rationale', 'type', 'payload'], parsed);
   let payload;
   switch (parsed.type) {
     case REQUEST_TYPE_PREDEFINED:
@@ -1277,7 +1264,6 @@ async function parsePermissionRequestBody(request) {
     rationale: parsed.rationale,
     type: parsed.type,
     payload,
-    target: parsed.target,
   };
 }
 
@@ -1915,40 +1901,6 @@ function generateRequestId() {
  * but we double-check the shape so a misconfigured context surfaces as
  * a 500 rather than a confusing write failure later on.
  */
-/**
- * The desktop client's own permissions file. It is the one caller allowed to
- * file a request against *another* file (see ``resolveTarget``): it is the
- * program the user drives, and it already administers every one of these
- * files. An agent's context names its own workspace's file and so never
- * matches, which is what stops one workspace granting itself access through
- * another's.
- */
-function adminPermissionsPath() {
-  return join(resolveLatchkeyDirectory(), 'mngr_latchkey', ADMIN_PERMISSIONS_FILE);
-}
-
-/**
- * Where an approved request's effect will be written.
- *
- * Normally the caller's own permissions file, which is what an agent asking
- * for something means. The desktop client asks on a *workspace's* behalf --
- * the user shared a path from its UI -- so it may name the file explicitly;
- * it must be absolute, and only the desktop client may do it.
- */
-function resolveTarget(context, requestedTarget) {
-  const callerTarget = requireTargetFromContext(context);
-  if (requestedTarget === undefined) {
-    return callerTarget;
-  }
-  if (resolve(callerTarget) !== resolve(adminPermissionsPath())) {
-    throw new PermissionRequestsExtensionError(
-      403,
-      "only the desktop client may file a permission request against another permissions file.",
-    );
-  }
-  return requestedTarget;
-}
-
 function requireTargetFromContext(context) {
   if (
     typeof context !== 'object' ||
@@ -1963,7 +1915,7 @@ function requireTargetFromContext(context) {
 
 async function handleCreateRequest(request, response, context) {
   const body = await parsePermissionRequestBody(request);
-  const target = resolveTarget(context, body.target);
+  const target = requireTargetFromContext(context);
   const effect = computeEffect(body.type, body.payload);
   // Loop on the astronomically rare UUID collision so we never overwrite
   // an existing pending request.

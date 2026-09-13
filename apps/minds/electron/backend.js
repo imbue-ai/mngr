@@ -221,7 +221,7 @@ function logBundledGitVersion(gitRoot) {
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
  */
-function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStarted, onLogLine = () => {}) {
+function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStarted) {
   return new Promise((resolve, reject) => {
     let isResolved = false;
 
@@ -245,7 +245,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // unchanged.
       const logStream = createRotatingLogStream({ filePath: logFile });
 
-      onProgress('Starting Mind...');
+      onProgress('Starting Minds...');
 
       let uvBin, args, cwd, env;
 
@@ -494,8 +494,11 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         // still writes the raw text, keeping the interactive console untouched.
         for (const line of stderrSplitter.push(text)) {
           logStream.write(formatTimestampedLine(line));
-          // The loading document's log, so a cold launch does not look frozen.
-          if (!isResolved && line.trim()) onLogLine(line.trim());
+        }
+        if (!isResolved) {
+          // Surface uv's freshest progress line on the splash so cold launch doesn't look frozen.
+          const latest = text.split('\n').map(l => l.trim()).filter(Boolean).pop();
+          if (latest) onProgress(latest);
         }
         if (paths.isDev()) {
           try {

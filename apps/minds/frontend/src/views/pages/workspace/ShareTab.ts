@@ -257,48 +257,31 @@ function renderEditor(
               class: "flex items-center gap-2 flex-wrap",
             },
             [
-              url
-                ? m(
-                    "button",
-                    {
-                      id: "ws-share-url-btn",
-                      type: "button",
-                      class:
-                        "inline-flex items-center gap-2 max-w-full rounded-full border border-default " +
-                        "bg-fill-subtle px-3 py-1.5 type-body font-mono text-primary cursor-pointer " +
-                        "hover:bg-fill-hover transition-colors",
-                      style: local.isCopyConfirmed
-                        ? "border-color: var(--c-success); background-color: var(--c-success-surface);"
-                        : "",
-                      "aria-label": "Copy the share link",
-                      onclick: () => void copyShareUrl(share, local),
-                    },
-                    [
-                      m("span", { id: "ws-share-url", class: "truncate" }, url),
-                      m(Icon16, {
-                        name: local.isCopyConfirmed ? "check" : "copy",
-                        extra: local.isCopyConfirmed
-                          ? "shrink-0 text-primary"
-                          : "shrink-0 text-tertiary",
-                      }),
-                    ],
-                  )
-                : // The link is https://<label>.<domain>/ and only that origin
-                  // routes, so until the target's label is known there is no
-                  // link that could work -- show the wait, never a guess.
-                  m(
-                    "span",
-                    {
-                      id: "ws-share-url-pending",
-                      class:
-                        "inline-flex items-center gap-2 max-w-full rounded-full border border-subtle " +
-                        "bg-fill-subtle px-3 py-1.5 type-body text-tertiary",
-                    },
-                    [
-                      m(Spinner, { size: "sm", extra: "shrink-0" }),
-                      "Preparing the share link...",
-                    ],
-                  ),
+              m(
+                "button",
+                {
+                  id: "ws-share-url-btn",
+                  type: "button",
+                  class:
+                    "inline-flex items-center gap-2 max-w-full rounded-full border border-default " +
+                    "bg-fill-subtle px-3 py-1.5 type-body font-mono text-primary cursor-pointer " +
+                    "hover:bg-fill-hover transition-colors",
+                  style: local.isCopyConfirmed
+                    ? "border-color: var(--c-success); background-color: var(--c-success-surface);"
+                    : "",
+                  "aria-label": "Copy the share link",
+                  onclick: () => void copyShareUrl(share, local),
+                },
+                [
+                  m("span", { id: "ws-share-url", class: "truncate" }, url),
+                  m(Icon16, {
+                    name: local.isCopyConfirmed ? "check" : "copy",
+                    extra: local.isCopyConfirmed
+                      ? "shrink-0 text-primary"
+                      : "shrink-0 text-tertiary",
+                  }),
+                ],
+              ),
               m(
                 Button,
                 {
@@ -342,18 +325,6 @@ function renderEditor(
               ),
               renderProvisioningChecklist(share),
             ]),
-          )
-        : null,
-      share.isAwaitingLabel(target) &&
-      !share.isAwaitingLink(target) &&
-      !isDisabling
-        ? m(
-            "p",
-            {
-              id: "ws-share-label-pending",
-              class: "mt-2 type-helper text-tertiary",
-            },
-            "Waiting for the machine to report this link's address. This usually takes a few seconds after the app starts.",
           )
         : null,
     ]),

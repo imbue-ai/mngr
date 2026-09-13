@@ -1,0 +1,59 @@
+{#-
+  mngr_claude variant of the packaged behavior-mapper prompt (libs/mngr_tmr's
+  behavior_mapper.j2). Purely additive: it extends the packaged template and
+  fills its two block slots, so the mapper contract lives in exactly one
+  place (same pattern as apps/minds/tmr/behaviors_mapper.j2). Passed via
+  --mapper-prompt to `mngr tmr-behaviors --root libs/mngr_claude/behaviors`.
+-#}
+{% extends "behavior_mapper.j2" %}
+
+{% block project_guidance %}
+You are working on the tests for the mngr_claude plugin (`libs/mngr_claude/`),
+which wraps Claude Code sessions as mngr agents. The behaviors in this corpus
+are observable only by driving a REAL Claude Code process, so their witnesses
+are end-to-end release tests:
+
+- Follow the existing pattern in
+  `imbue/mngr_claude/test_claude_agent_e2e.py` (see
+  `test_claude_bang_prefix_does_not_strand_agent_in_shell_mode`): marks
+  `@pytest.mark.release` + `@pytest.mark.tmux` + `@pytest.mark.rsync` +
+  `@pytest.mark.timeout(1500)`, a profile class with an
+  `unavailable_reason()` guard that skips cleanly when the host cannot run
+  the test, and pane-capture/poll helpers for observing the agent.
+- A witness must assert what a CLIENT observes -- the conversation content
+  and the agent's readiness for the next message -- never mngr's terminal
+  internals. Readiness is observed via the `❯` input prompt, as the existing
+  helpers do.
+- Pure in-process logic (message classification, evidence probes) belongs in
+  the colocated `*_test.py` unit tests next to the module under test; only
+  agent-observable behavior goes in the e2e file.
+- Read `libs/mngr_claude/imbue/mngr_claude/conftest.py` and the surrounding
+  tests before writing new setup; reuse their fixtures and idioms. Never use
+  unittest.mock or monkeypatch.setattr.
+
+Requirements for this run, stated once and binding on every unit:
+
+- GENERATE tests: no unit in your task may be left unwitnessed because you
+  chose not to write the test. An unwitnessed unit means a CREATE_TEST change.
+- Aim for TOTAL coverage: drive every unit to the FULL verdict. Claim
+  PARTIAL_STEADY only for residue that is untestable in kind (universally
+  quantified interleavings, cross-process properties), never because a test
+  is expensive or slow to run -- these e2e tests are slow by nature and that
+  is expected.
+- When the implementation diverges from the behavior, fix the IMPLEMENTATION
+  (FIX_IMPL). When a test asserts something the behavior does not say, fix
+  the TEST (FIX_TEST). The behavior is the arbiter, always. Note: the corpus
+  branch deliberately leaves the bang-message desync unfixed -- a red witness
+  is expected to exist, and landing the fix is in scope for this run.
+{% endblock %}
+
+{% block infra_blockers %}
+These witnesses need a real `claude` CLI on PATH, tmux, and rsync on the
+host, plus working Claude credentials. Each e2e test may take many minutes
+(the pattern allows up to 1500s); run only the node ids you touch, and prefer
+running them one at a time rather than under xdist parallelism. If `claude`
+or its credentials are absent from THIS environment, record the blocker
+instead of faking the agent. Never stand up substitutes for Claude Code
+itself -- a witness that does not drive a real Claude Code process is not a
+witness of this corpus's behavior.
+{% endblock %}

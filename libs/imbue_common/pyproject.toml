@@ -31,13 +31,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["inline-snapshot>=0.13"]
-# What a downstream test suite needs to use the test library this wheel ships
-# (imbue.imbue_common.ratchet_testing, imbue.imbue_common.pytest_utils).
-testing = [
-    "import-linter>=2.0",
-    "inline-snapshot>=0.13",
-    "pytest>=9.0",
-]
 
 [project.urls]
 Homepage = "https://github.com/imbue-ai/mngr"
@@ -49,7 +42,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]
-exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/conftest_hooks.py"]
+exclude = ["*_test.py", "test_*.py", "**/conftest.py", "**/testing.py", "**/conftest_hooks.py", "**/pytest_utils.py"]
 
 # Shared pytest settings (markers, filterwarnings, coverage report config)
 # are centralized in:

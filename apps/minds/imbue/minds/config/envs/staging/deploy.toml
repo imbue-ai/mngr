@@ -18,62 +18,13 @@ services = [
     "sharing",
     "storage",
     "sentry",
-    "ssh-ca",
 ]
-
-# The tier's SSH certificate authority (imbue-ai/mngr-internal#850): the public
-# half of the Vault ``minds-staging-ssh`` mount's CA, which every gen-2 box, slice VM,
-# and workspace container trusts for management SSH instead of a static key.
-# Read with
-#   vault read -field=public_key minds-staging-ssh/config/ca
-# (the mount was created by the imbue-ai/vault terraform on 2026-09-09; the key
-# was committed on 2026-09-13 for the staging gen-2 bring-up). Rotating the CA
-# means re-prepping every gen-2 box and re-baking every slice on the tier
-# before updating this value (see docs/deploy/setup/vault.md).
-[ssh_ca]
-public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIImy5mn5Tp2Ofq17LQVNhlq2Ldyb5NQSyvLagAMKx7rq minds-staging-ssh-ca"
-
-# The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
-# whose static IPs the box `:22` lockdown allowlists; runbook:
-# apps/minds/docs/deploy/gen2-management-plane.md). Every value here is PUBLIC.
-# The staging overlay is 10.96.0.0/16 (MANAGEMENT_OVERLAY_CIDR_BY_TIER):
-# operators 10.96.0.2 - 10.96.0.254, boxes from 10.96.1.1 upward (assigned at
-# `minds-admin server prep`). The `:22` lockdown lands on a gen-2 box only when
-# [management_plane.modal_proxy] is configured; gen-1 boxes are never locked.
-[management_plane.wireguard]
-listen_port = 51820
-
-# Josh's operator key. The private half lives on Josh's dev box at
-# ~/.mindsadmin/staging/wireguard.key (generated 2026-09-13).
-[[management_plane.wireguard.operators]]
-name = "josh"
-public_key = "nDHMg2pb4j8/CIxK6fSzhA9rxa5noN77kTeU2baLjF4="
-address = "10.96.0.2"
-
-# The tier's Modal Proxy: created 2026-09-13 in the minds-staging Modal
-# workspace's 'main' environment, in Modal's us-east region (next to Modal's
-# default us-east request routing and the Virginia boxes).
-[management_plane.modal_proxy]
-proxy_name = "mind-connector-east"
-environment_name = "main"
-static_ips = ["98.90.51.49"]
 
 [lifecycle]
 creates_resources = false
 modal_env_strategy = "SHARED"
 writes_local_state = false
 tracks_generation = true
-
-# Workspace stop/start knob stamped over the Vault ``storage`` entry at deploy
-# time: how long a stopped workspace's halted VM lingers on its box for an
-# instant restart in place before the retention finalize frees the slot. The
-# window is a latency optimization only (the durable artifact is verified
-# before the row reaches stopped), so ten minutes covers the stop-then-restart
-# and restart-for-resize flows without pinning a slot per stopped workspace for
-# the connector's default hour, or holding a drained box for an hour before it
-# can be repaved.
-[storage]
-stop_retention_seconds = 600
 
 [min_containers]
 # Keep one container of each app warm so the desktop client never pays
@@ -100,8 +51,6 @@ max_buckets = 5
 max_total_bucket_gb = 25
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
-max_active_machine_units = 8
-max_total_machine_disk_gb = 140
 
 [plans.explorer]
 max_remote_workspaces = 2
@@ -110,8 +59,6 @@ max_buckets = 5
 max_total_bucket_gb = 50
 monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
-max_active_machine_units = 16
-max_total_machine_disk_gb = 280
 
 [plans.ally]
 max_remote_workspaces = 10
@@ -120,18 +67,15 @@ max_buckets = 20
 max_total_bucket_gb = 500
 monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
-max_active_machine_units = 80
-max_total_machine_disk_gb = 1400
 
 # Enable web workspace creation (the hosted chrome's POST /hosts/claim).
 # Deliberately unadvertised for now: only people who know the /web URL use it.
-# No explicit pins: the template repo defaults to the canonical
-# default-workspace-template repo and the ref to the app's pinned release tag
+# No explicit pins: the template repo/ref default to the canonical
+# default-workspace-template repo and the app's pinned release tag
 # (FALLBACK_BRANCH in imbue/minds/build_info.py), so the web pin advances with
-# each release automatically -- the same tag the pool is re-baked from. This
-# tier publishes no update feed, so that deploy-time ref IS the live pin here
-# (production's comes from the feed's `<channel>-web.json`). Deploy-time env vars
-# MINDS_WEB_TEMPLATE_REPO / MINDS_WEB_TEMPLATE_REF override for one-off deploys.
+# each release automatically -- the same tag the pool is re-baked from.
+# Deploy-time env vars MINDS_WEB_TEMPLATE_REPO / MINDS_WEB_TEMPLATE_REF
+# override for one-off deploys.
 [web_workspaces]
 
 # User-facing custom-domain origin layout (sharing redesign): the hosted

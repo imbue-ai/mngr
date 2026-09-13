@@ -24,7 +24,7 @@ export interface AppStores {
 
 export interface BootContext {
   stores: AppStores;
-  seed: { accent: string; isMac: boolean; mngrForwardOrigin: string; isOnboardingComplete: boolean };
+  seed: { accent: string; isMac: boolean; mngrForwardOrigin: string };
   schemaVersion: number;
 }
 
@@ -55,7 +55,6 @@ export function bootFromBootstrap(bootstrap: UiBootstrap): BootContext {
       accent: bootstrap.seed.accent,
       isMac: bootstrap.seed.is_mac,
       mngrForwardOrigin: bootstrap.seed.mngr_forward_origin,
-      isOnboardingComplete: bootstrap.seed.is_onboarding_complete,
     },
     schemaVersion: bootstrap.schema_version,
   };

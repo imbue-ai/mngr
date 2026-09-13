@@ -33,17 +33,9 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.mngr.api.list import build_agent_cel_context
-from imbue.mngr.api.preservation import ManifestReadStatus
-from imbue.mngr.api.preservation import PreservationManifest
-from imbue.mngr.api.preservation import PreservationOutcome
-from imbue.mngr.api.preservation import PreservedAgentIdentity
 from imbue.mngr.api.preservation import PreservedItem
-from imbue.mngr.api.preservation import PreservedItemResult
-from imbue.mngr.api.preservation import get_local_preserved_agent_dir_for_host
+from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.api.preservation import preserve_agent_data
-from imbue.mngr.api.preservation import read_preservation_manifest
-from imbue.mngr.api.preservation import read_preservation_manifest_result
-from imbue.mngr.api.preservation import write_preservation_manifest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.interfaces.data_types import FileType
@@ -52,10 +44,8 @@ from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
-from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostId
-from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import compile_cel_filters
@@ -66,11 +56,10 @@ from imbue.mngr_usage.data_types import USAGE_DIR_NAME
 # can reconstruct enough of an AgentDetails to evaluate filters.
 _DATA_JSON_FILENAME = "data.json"
 
-# Legacy archives store host metadata in this sidecar; new archives use the
-# shared preservation manifest.
-# CLEANUP: drop this name and the manifest-less branch of discover_preserved_agents that
-# reads it once no local preserved/ directory still holds an archive written before the
-# manifest existed -- this sidecar is no longer written, so it goes as old archives age out.
+# Sidecar written into the preserved agent dir alongside the mirrored state-dir
+# layout. data.json does not record which provider/host the agent ran on
+# (provider is implied by where the live host dir lived), so we capture it at
+# preserve time -- it's what host-scoped filters (--provider / --local) need.
 _PRESERVED_META_FILENAME = "mngr_usage_meta.json"
 
 
@@ -119,9 +108,9 @@ def preserve_agent_usage(
     agent_name: AgentName,
     agent_id: AgentId,
     *,
-    provider_name: ProviderInstanceName,
-    host_id: HostId,
-    host_name: HostName,
+    provider_name: str,
+    host_id: str,
+    host_name: str,
     mngr_ctx: MngrContext,
 ) -> None:
     """Preserve one agent's usage events (and data.json) before its state dir is deleted.
@@ -136,94 +125,17 @@ def preserve_agent_usage(
         return
     items.append(PreservedItem(rel_path=_DATA_JSON_FILENAME, kind=FileType.FILE))
 
-    dest_root = get_local_preserved_agent_dir_for_host(mngr_ctx, agent_name, agent_id, host_id)
+    dest_root = get_local_preserved_agent_dir(mngr_ctx, agent_name, agent_id)
     with log_span("Preserving usage data for agent {}", agent_name):
-        results = preserve_agent_data(items, source, agent_state_dir, dest_root, mngr_ctx)
-        _write_core_manifest(
-            dest_root,
-            agent_name=agent_name,
-            agent_id=agent_id,
-            provider_name=provider_name,
-            host_id=host_id,
-            host_name=host_name,
-            results=results,
-        )
+        preserve_agent_data(items, source, agent_state_dir, dest_root, mngr_ctx)
+        _write_preserved_meta(dest_root, provider_name=provider_name, host_id=host_id, host_name=host_name)
 
 
-def _write_core_manifest(
-    dest_root: Path,
-    *,
-    agent_name: AgentName,
-    agent_id: AgentId,
-    provider_name: ProviderInstanceName,
-    host_id: HostId,
-    host_name: HostName,
-    results: tuple[PreservedItemResult, ...],
-) -> None:
-    """Add current usage outcomes without deriving identity from stale ``data.json`` bytes."""
-    is_data_copied = any(
-        result.rel_path == _DATA_JSON_FILENAME and result.outcome == PreservationOutcome.COPIED for result in results
-    )
-    identity = (
-        _identity_from_copied_data(dest_root, provider_name=provider_name, host_id=host_id, host_name=host_name)
-        if is_data_copied
-        else _existing_same_instance_identity(dest_root, agent_id=agent_id, host_id=host_id)
-    )
-    if identity is None:
-        return
-    if identity.agent_id != agent_id or identity.host_id != host_id:
-        logger.warning(
-            "Refusing to write usage preservation outcomes for {}: archive identity is {}@{}",
-            agent_name,
-            identity.agent_id,
-            identity.host_id,
-        )
-        return
-    write_preservation_manifest(dest_root, PreservationManifest(identity=identity, items=results))
-
-
-def _identity_from_copied_data(
-    dest_root: Path,
-    *,
-    provider_name: ProviderInstanceName,
-    host_id: HostId,
-    host_name: HostName,
-) -> PreservedAgentIdentity | None:
-    """Build identity only when the caller established that this attempt copied ``data.json``."""
-    data = _read_json_file(dest_root / _DATA_JSON_FILENAME)
-    if data is None:
-        return None
-    try:
-        return PreservedAgentIdentity(
-            host_id=host_id,
-            host_name=host_name,
-            provider_name=provider_name,
-            agent_id=AgentId(str(data["id"])),
-            agent_name=AgentName(str(data["name"])),
-            agent_type=AgentTypeName(str(data["type"])),
-            labels=dict(data.get("labels", {})),
-        )
-    except (KeyError, TypeError, ValueError) as e:
-        # Without an identity nothing is written, and the archive stops being discoverable at
-        # all, so a data.json we cannot read has to be visible rather than silently dropped.
-        logger.warning("Ignoring unusable preserved data.json in {}: {}", dest_root, e)
-        return None
-
-
-def _existing_same_instance_identity(
-    dest_root: Path,
-    *,
-    agent_id: AgentId,
-    host_id: HostId,
-) -> PreservedAgentIdentity | None:
-    """Return identity from a valid existing manifest only when its concrete instance matches."""
-    manifest = read_preservation_manifest(dest_root)
-    if manifest is None:
-        return None
-    identity = manifest.identity
-    if identity.agent_id != agent_id or identity.host_id != host_id:
-        return None
-    return identity
+def _write_preserved_meta(dest_root: Path, *, provider_name: str, host_id: str, host_name: str) -> None:
+    """Write the host-metadata sidecar into the preserved agent dir."""
+    dest_root.mkdir(parents=True, exist_ok=True)
+    meta = {"provider_name": provider_name, "host_id": host_id, "host_name": host_name}
+    (dest_root / _PRESERVED_META_FILENAME).write_text(json.dumps(meta, indent=2) + "\n")
 
 
 # =============================================================================
@@ -279,31 +191,6 @@ def _agent_details_from_preserved(data: dict[str, Any], meta: dict[str, Any]) ->
     return build_agent_details_from_offline_ref(ref, host_details)
 
 
-def _declares_usage(manifest: PreservationManifest) -> bool:
-    """Return whether the manifest records an attempted usage-directory preservation."""
-    return any(_is_usage_dir_rel_path(Path(result.rel_path)) for result in manifest.items)
-
-
-def _is_usage_dir_rel_path(rel_path: Path) -> bool:
-    """Whether a preserved item is one agent type's usage directory: ``events/<type>/usage``."""
-    parts = rel_path.parts
-    return len(parts) == 3 and parts[0] == EVENTS_DIR_NAME and parts[2] == USAGE_DIR_NAME
-
-
-def _manifest_filter_data(identity: PreservedAgentIdentity, data: dict[str, Any] | None) -> dict[str, Any]:
-    """Combine optional detailed agent data with the manifest's authoritative identity fields."""
-    combined = {} if data is None else dict(data)
-    combined.update(
-        {
-            "id": str(identity.agent_id),
-            "name": str(identity.agent_name),
-            "type": str(identity.agent_type),
-            "labels": identity.labels,
-        }
-    )
-    return combined
-
-
 def _passes_filters(
     details: AgentDetails,
     compiled_include: Sequence[Any],
@@ -334,10 +221,12 @@ def discover_preserved_agents(
     ``gather_usage_snapshots`` / ``list_agents`` take); they're compiled here
     once and evaluated against each preserved agent's reconstructed context.
 
-    New archives are identified by usage-directory outcomes in the shared
-    manifest. Archives without a manifest use the legacy usage sidecar.
-    When any filter is active, preserved ``data.json`` supplies fields outside
-    the manifest identity; an agent that cannot be reconstructed is skipped.
+    Each candidate dir must carry the usage sidecar this module writes; dirs
+    preserved by other plugins (e.g. ``mngr_claude`` session preservation) but
+    with no usage data are skipped. When any filter is active, an agent whose
+    ``data.json`` cannot be reconstructed into an :class:`AgentDetails` is
+    skipped (we cannot verify it matches); with no filters, all preserved
+    usage-bearing agents are returned.
     """
     local_host_dir = Path(mngr_ctx.config.default_host_dir).expanduser()
     preserved_root = local_host_dir / "preserved"
@@ -350,43 +239,17 @@ def discover_preserved_agents(
     for agent_dir in sorted(preserved_root.iterdir()):
         if not agent_dir.is_dir():
             continue
-        manifest_result = read_preservation_manifest_result(agent_dir, raise_on_io_error=False)
-        if manifest_result.status == ManifestReadStatus.UNUSABLE:
-            # A manifest that is there but unusable leaves the archive out entirely: falling
-            # back to the legacy sidecars would answer with data the manifest supersedes.
+        meta = _read_json_file(agent_dir / _PRESERVED_META_FILENAME)
+        if meta is None:
+            # No usage sidecar -> not preserved by this plugin (or no usage data).
             continue
-        if manifest_result.manifest is not None:
-            if not _declares_usage(manifest_result.manifest):
-                continue
-            identity = manifest_result.manifest.identity
-            data = _manifest_filter_data(identity, _read_json_file(agent_dir / _DATA_JSON_FILENAME))
-            meta = {
-                "provider_name": str(identity.provider_name),
-                "host_id": str(identity.host_id),
-                "host_name": str(identity.host_name),
-            }
-            agent_id = identity.agent_id
-            agent_name = identity.agent_name
-        else:
-            # CLEANUP: remove this branch with the rest of the pre-manifest archive support
-            # (see _PRESERVED_META_FILENAME).
-            meta = _read_json_file(agent_dir / _PRESERVED_META_FILENAME)
-            if meta is None:
-                # No usage sidecar -> not preserved by this plugin (or no usage data).
-                continue
-            data = _read_json_file(agent_dir / _DATA_JSON_FILENAME)
-            if data is None or "id" not in data or "name" not in data:
-                logger.debug("Skipping preserved dir {} with missing/invalid data.json", agent_dir)
-                continue
-            try:
-                agent_id = AgentId(str(data["id"]))
-                agent_name = AgentName(str(data["name"]))
-            except ValueError as e:
-                logger.debug("Skipping preserved dir {} whose data.json names no usable agent: {}", agent_dir, e)
-                continue
+        data = _read_json_file(agent_dir / _DATA_JSON_FILENAME)
+        if data is None or "id" not in data or "name" not in data:
+            logger.debug("Skipping preserved dir {} with missing/invalid data.json", agent_dir)
+            continue
         if has_filters:
             details = _agent_details_from_preserved(data, meta)
             if details is None or not _passes_filters(details, compiled_include, compiled_exclude, provider_names):
                 continue
-        refs.append(PreservedAgentRef(agent_id=str(agent_id), agent_name=str(agent_name), preserved_dir=agent_dir))
+        refs.append(PreservedAgentRef(agent_id=str(data["id"]), agent_name=str(data["name"]), preserved_dir=agent_dir))
     return refs

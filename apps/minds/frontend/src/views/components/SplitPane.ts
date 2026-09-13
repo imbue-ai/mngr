@@ -1,7 +1,7 @@
 // The two-column pane: a list of sections on the left, the selected section's
 // panel on the right, each column scrolling on its own so the list stays in
 // view however far down the panel you read. Shared by the workspace options
-// panes (Permissions, Share machine, Machine settings) and the app-level Mind
+// panes (Permissions, Share machine, Machine settings) and the app-level Minds
 // settings modal.
 //
 // The pane deliberately does NOT scroll as a whole -- one scroller around both

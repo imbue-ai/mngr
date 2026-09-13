@@ -23,14 +23,12 @@ from __future__ import annotations
 import importlib.resources
 import json
 import os
-import select
 import shutil
 import signal
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
-from typing import Final
 from uuid import uuid4
 
 import pytest
@@ -53,14 +51,9 @@ from imbue.mngr_claude.resources.testing import write_raw_transcript
 # pass lands well inside this budget; it is generous only to survive a loaded CI box.
 _WATCHER_CONVERSION_TIMEOUT = 30.0
 _WATCHER_POLL_INTERVAL = 0.2
-# The watcher is SIGKILLed, so it normally exits at once; this only caps the wait if
-# something is badly wrong.
+# The watcher spends nearly all its time in `sleep`, which defers the SIGTERM until
+# the current sleep returns.
 _WATCHER_EXIT_TIMEOUT = 15.0
-# The stand-in child in test_stopping_a_watcher_kills_the_converter_that_outlived_it sleeps
-# far longer than the test waits for its process group to empty, so the test can pass only
-# because stop_watcher killed the child, not because the child finished on its own.
-_STANDIN_WATCHER_LIFETIME_SECONDS: Final[int] = 60
-_GROUP_EXIT_PROOF_TIMEOUT_SECONDS: Final[float] = 5.0
 
 # -- Helpers --
 
@@ -173,28 +166,30 @@ class ScriptRunner:
         )
 
     def stop_watcher(self, watcher: subprocess.Popen[bytes]) -> None:
-        """Stop a watcher started by ``start_watcher``, plus any converter it was running.
+        """Stop a watcher started by ``start_watcher`` (SIGTERM, then SIGKILL).
 
-        The watcher's bash process runs the converter as a child, and ``start_watcher``
-        put both in their own process group so one signal reaches both. The converter is
-        bash's child, not the test's, so the test cannot wait on it, and waiting on bash
-        alone does not show whether the converter is still mid-conversion and using the
-        convert lock. SIGKILL to the whole group settles that: it cannot be caught or
-        ignored, so nothing in the group runs any further code, and the lock directory
-        can then be deleted. SIGTERM would do the same job only while nothing in the
-        group handles it.
-
-        The kill must come before the wait. Waiting reaps bash and frees its pid for
-        reuse, and that pid is also the process group id, so a ``killpg`` after the wait
-        could hit an unrelated group.
+        Kills the whole process group: a SIGTERM to the bash parent alone can
+        land while its converter child holds the convert lock, and bash dies
+        without releasing it -- the next single-pass then waits out the 30s lock
+        timeout instead of converting. With the group dead, any leftover lock
+        dir is orphaned and safe to clear.
         """
-        # start_new_session made the watcher a process group leader, so its pid is the pgid.
+        self._signal_watcher_group(watcher, signal.SIGTERM)
         try:
-            os.killpg(watcher.pid, signal.SIGKILL)
+            watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self._signal_watcher_group(watcher, signal.SIGKILL)
+            watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
+        shutil.rmtree(self.lock_dir, ignore_errors=True)
+
+    @staticmethod
+    def _signal_watcher_group(watcher: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+        # start_new_session makes the watcher its own group leader, so its pid
+        # is the pgid. The group may already be gone.
+        try:
+            os.killpg(watcher.pid, sig)
         except ProcessLookupError:
             pass
-        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
-        shutil.rmtree(self.lock_dir, ignore_errors=True)
 
 
 # -- Tests --
@@ -719,10 +714,6 @@ def test_daemon_pass_defers_the_open_trailing_inference(tmp_path: Path, stub_mng
     assert [s["message"] for s in runner.get_steps("agent")] == ["working"]
 
 
-# Known flake (MIND-263): the turn-end flush below is killed by its own 10s subprocess
-# budget, against a script whose contended-lock path was measured at 60.76s. Retried while
-# that stays open; the mismatch itself is not fixed.
-@pytest.mark.flaky
 @pytest.mark.timeout(60)
 def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub_mngr_log_sh: str) -> None:
     """The real poll loop must hold back the inference claude is still writing.
@@ -759,45 +750,6 @@ def test_running_watcher_defers_the_open_trailing_inference(tmp_path: Path, stub
     result = runner.run_single_pass()
     assert result.returncode == 0, f"stderr: {result.stderr}"
     assert [s["message"] for s in runner.get_steps("agent")] == ["closed", "still writing"]
-
-
-def test_stopping_a_watcher_kills_the_converter_that_outlived_it(tmp_path: Path, stub_mngr_log_sh: str) -> None:
-    """Once ``stop_watcher`` returns, nothing in the watcher's process group may still be running.
-
-    The watcher is stood in for by a parent that exits at once, leaving behind a child
-    that ignores SIGTERM. The child models a converter that outlives the watcher's bash
-    and is still running when the lock directory is deleted. The old SIGTERM-based
-    ``stop_watcher`` relied on that never happening, so this test fails against it.
-
-    The child inherits the parent's stdout pipe, and nothing outside the group holds its
-    write end, so the pipe reaches EOF only once the whole group has exited. That is the
-    check used here rather than polling a pid, because a pid can be reused by an unrelated
-    process once its owner is reaped.
-    """
-    runner = ScriptRunner(tmp_path, stub_mngr_log_sh)
-    holder = tmp_path / "declines_sigterm.sh"
-    holder.write_text(f'trap "" TERM\necho ready\nsleep {_STANDIN_WATCHER_LIFETIME_SECONDS}\n')
-    # The parent backgrounds the holder and exits at once, so the holder is the only
-    # process left in the group.
-    watcher = subprocess.Popen(
-        ["bash", "-c", f'bash "{holder}" &'],
-        stdout=subprocess.PIPE,
-        start_new_session=True,
-    )
-    try:
-        assert watcher.stdout is not None
-        assert watcher.stdout.readline() == b"ready\n", "the stand-in holder never started"
-
-        runner.stop_watcher(watcher)
-
-        readable, _, _ = select.select([watcher.stdout], [], [], _GROUP_EXIT_PROOF_TIMEOUT_SECONDS)
-        assert readable, (
-            "the watcher's stdout never reached EOF, so a process in its group outlived "
-            "stop_watcher and could still be holding the convert lock that was just cleared"
-        )
-    finally:
-        watcher.kill()
-        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
 
 
 def test_held_lock_skips_pass(tmp_path: Path, stub_mngr_log_sh: str) -> None:

@@ -885,12 +885,6 @@ def make_local_host_of_class(
     )
 
 
-def record_host_name(host: Host, name: str) -> None:
-    """Stamp the host record's name the way the provider that built a host dir does."""
-    recorded = host.get_certified_data()
-    host.set_certified_data(recorded.model_copy_update(to_update(recorded.field_ref().host_name, name)))
-
-
 def make_local_provider(
     host_dir: Path,
     config: MngrConfig,

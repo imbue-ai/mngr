@@ -1,6 +1,6 @@
-// Playwright config for end-to-end UI tests against Mind.app.
+// Playwright config for end-to-end UI tests against minds.app.
 //
-// We target the installed `/Applications/Mind.app` by default so tests
+// We target the installed `/Applications/Minds.app` by default so tests
 // exercise the same signed bundle a user would run. Override via the
 // MINDS_APP_PATH env var when iterating on a dev build or a downloaded
 // pre-release artifact.
@@ -14,7 +14,7 @@ const path = require('path');
 
 module.exports = {
   testDir: '.',
-  // One worker only -- Mind.app's Electron singleton + the bundled
+  // One worker only -- minds.app's Electron singleton + the bundled
   // mngr-forward port grabbing don't tolerate parallel instances.
   workers: 1,
   fullyParallel: false,
