@@ -1,15 +1,15 @@
 """The resolution nudge shared by the latchkey permission handlers.
 
-Both sibling handlers in this package (:mod:`.predefined` and
-:mod:`.file_sharing`) notify the waiting agent on resolution through a
-:class:`~imbue.minds.utils.mngr_caller.MngrCaller`. The request's ``agent_id`` is
-the CHAT the request belongs to (the workspace template's chat-agent split,
-``docs/system/blueprint/chat-agent-split/`` there): a chat can move to a new
-agent, so the nudge goes to the chat app inside the workspace, which delivers
-it to whichever agent the chat runs on now, with a direct ``mngr message`` as
-the backoff for a workspace whose template predates that script. The class
-lives alongside the handlers rather than inside either so neither sibling has
-to import from the other.
+Every permission handler in this package notifies the waiting agent on
+resolution through a :class:`~imbue.minds.utils.mngr_caller.MngrCaller` (the
+shared epilogue in :mod:`.resolution` calls :meth:`MngrMessageSender.send`).
+The request's ``agent_id`` is the CHAT the request belongs to (the workspace
+template's chat-agent split, ``docs/system/blueprint/chat-agent-split/`` there):
+a chat can move to a new agent, so the nudge goes to the chat app inside the
+workspace, which delivers it to whichever agent the chat runs on now, with a
+direct ``mngr message`` as the backoff for a workspace whose template predates
+that script. The class lives alongside the handlers rather than inside any one
+of them so no handler has to import from another.
 """
 
 import json
