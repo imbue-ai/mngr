@@ -141,7 +141,9 @@ def test_deliver_goes_through_the_chats_own_chat_app_first(root_concurrency_grou
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
 
     assert sender.deliver("agent-chat", "hello") is True
-    assert caller.calls == [["exec", "agent-chat", "python3 system/scripts/message_chat.py agent-chat -m hello"]]
+    assert caller.calls == [
+        ["exec", "agent-chat", "python3 system/scripts/message_chat.py agent-chat -m hello", "--no-start"]
+    ]
 
 
 def test_message_chat_argv_is_one_agent_and_one_shell_command_to_mngr_exec() -> None:

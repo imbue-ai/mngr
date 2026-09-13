@@ -103,9 +103,10 @@ def message_chat_argv(chat_id: str, text: str) -> list[str]:
 
     ``mngr exec`` takes every positional but the last as an agent and the last as ONE shell
     command string, so the script invocation is shell-quoted into a single argument; the
-    notice text carries spaces and parentheses.
+    notice text carries spaces and parentheses. ``--no-start``: a verdict for a stopped
+    workspace waits for it to come up (the caller retries) rather than booting it.
     """
-    return ["exec", chat_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text])]
+    return ["exec", chat_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]), "--no-start"]
 
 
 # What python prints when the workspace has no messaging script (a template from before it).
