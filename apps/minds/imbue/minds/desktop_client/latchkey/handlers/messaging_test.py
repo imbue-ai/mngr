@@ -164,14 +164,18 @@ def test_message_chat_argv_is_one_agent_and_one_shell_command_to_mngr_exec() -> 
     ]
 
 
+def test_is_message_chat_unavailable_only_for_pythons_missing_script_complaint() -> None:
+    assert is_message_chat_unavailable(_SCRIPT_MISSING_STDERR) is True
+    assert is_message_chat_unavailable("the chat app refused: the chat is moving to another agent") is False
+
+
 def test_deliver_falls_back_to_mngr_message_only_when_the_workspace_has_no_script(
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    delivered_stdout = '{"event": "message_sent", "agent": "assistant", "message": "ok"}\n'
     caller = _ScriptedMngrCaller(
         results=(
             MngrCallResult(returncode=1, stderr=_SCRIPT_MISSING_STDERR),
-            MngrCallResult(returncode=0, stdout=delivered_stdout),
+            MngrCallResult(returncode=0, stdout=_DELIVERED_STDOUT),
         )
     )
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
@@ -181,8 +185,6 @@ def test_deliver_falls_back_to_mngr_message_only_when_the_workspace_has_no_scrip
         message_chat_argv("assistant", "hello"),
         ["message", "--format", "jsonl", "-m", "hello", "--", "assistant"],
     ]
-    assert is_message_chat_unavailable(_SCRIPT_MISSING_STDERR) is True
-    assert is_message_chat_unavailable("the chat app refused: the chat is moving to another agent") is False
 
 
 def test_deliver_false_when_the_chat_app_refuses_and_never_sends_around_it(
