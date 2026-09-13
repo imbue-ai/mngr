@@ -89,9 +89,9 @@ def _recorded_mngr_argvs(handler: LatchkeyPermissionGrantHandler) -> list[list[s
 
 
 def _wait_for_recorded_mngr_argvs(handler: LatchkeyPermissionGrantHandler, timeout: float = 5.0) -> list[list[str]]:
-    """Wait for the handler's background ``mngr message`` to run, then return its argv."""
+    """Wait for the handler's background ``mngr exec`` nudge to run, then return its argv."""
     caller = _recorded_caller(handler)
-    assert caller.called_event.wait(timeout), "background mngr message send did not run"
+    assert caller.called_event.wait(timeout), "background mngr exec nudge did not run"
     return caller.calls
 
 
