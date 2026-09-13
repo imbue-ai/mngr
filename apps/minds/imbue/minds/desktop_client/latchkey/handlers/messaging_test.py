@@ -1,3 +1,4 @@
+import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +14,7 @@ from imbue.minds.desktop_client.latchkey.handlers.messaging import stdout_report
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.primitives import AgentId
 
 
@@ -139,9 +141,25 @@ def test_deliver_goes_through_the_chats_own_chat_app_first(root_concurrency_grou
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
 
     assert sender.deliver("agent-chat", "hello") is True
-    assert caller.calls == [message_chat_argv("agent-chat", "hello")]
-    assert caller.calls[0][:3] == ["exec", "agent-chat", "--"]
-    assert caller.calls[0][-3:] == ["agent-chat", "-m", "hello"]
+    assert caller.calls == [["exec", "agent-chat", "python3 system/scripts/message_chat.py agent-chat -m hello"]]
+
+
+def test_message_chat_argv_is_one_agent_and_one_shell_command_to_mngr_exec() -> None:
+    """``mngr exec`` takes one shell string as the command after the agents, so the script
+    invocation must be quoted into a single argument or the notice text is run as the command
+    and the other tokens are taken for agent names."""
+    notice = format_resolution_notice("Your request for Slack was granted.", "evt-abc123", RequestStatus.GRANTED)
+    argv = message_chat_argv("agent-chat", notice)
+
+    context = exec_command.make_context("mngr exec", argv[1:])
+    assert context.params["agents"] == ("agent-chat",)
+    assert shlex.split(context.params["command_arg"]) == [
+        "python3",
+        "system/scripts/message_chat.py",
+        "agent-chat",
+        "-m",
+        notice,
+    ]
 
 
 def test_deliver_falls_back_to_mngr_message_only_when_the_workspace_has_no_script(

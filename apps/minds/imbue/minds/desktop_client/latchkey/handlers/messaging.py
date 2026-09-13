@@ -13,6 +13,7 @@ to import from the other.
 """
 
 import json
+import shlex
 from typing import Final
 
 from loguru import logger
@@ -99,8 +100,12 @@ def message_chat_argv(chat_id: str, text: str) -> list[str]:
     and runs the script from the workspace root, where the script finds the chat app and
     posts to its send route by chat id. The chat app delivers to the chat's active agent,
     or holds the message while the chat moves to a new one.
+
+    ``mngr exec`` takes every positional but the last as an agent and the last as ONE shell
+    command string, so the script invocation is shell-quoted into a single argument; the
+    notice text carries spaces and parentheses.
     """
-    return ["exec", chat_id, "--", "python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]
+    return ["exec", chat_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text])]
 
 
 # What python prints when the workspace has no messaging script (a template from before it).
