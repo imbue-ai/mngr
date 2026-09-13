@@ -1,10 +1,15 @@
-"""``mngr message`` helper shared by the latchkey permission handlers.
+"""The resolution nudge shared by the latchkey permission handlers.
 
 Both sibling handlers in this package (:mod:`.predefined` and
-:mod:`.file_sharing`) notify the waiting agent on resolution by
-running ``mngr message`` through a :class:`~imbue.minds.utils.mngr_caller.MngrCaller`.
-The class lives alongside them rather than inside either handler module
-so neither sibling has to import from the other.
+:mod:`.file_sharing`) notify the waiting agent on resolution through a
+:class:`~imbue.minds.utils.mngr_caller.MngrCaller`. The request's ``agent_id`` is
+the CHAT the request belongs to (the workspace template's chat-agent split,
+``docs/system/blueprint/chat-agent-split/`` there): a chat can move to a new
+agent, so the nudge goes to the chat app inside the workspace, which delivers
+it to whichever agent the chat runs on now, with a direct ``mngr message`` as
+the backoff for a workspace whose template predates that script. The class
+lives alongside the handlers rather than inside either so neither sibling has
+to import from the other.
 """
 
 import json
@@ -22,6 +27,13 @@ from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
 _MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
+# The chat app's send route blocks through the harness's paste-and-confirm, and the
+# script retries a not-ready chat app for half a minute before giving up.
+_MESSAGE_CHAT_TIMEOUT_SECONDS: Final[float] = 90.0
+
+# The in-workspace script that messages a chat by id through the chat app; relative to the
+# workspace repo root, which is the cwd ``mngr exec`` gives every command there.
+MESSAGE_CHAT_SCRIPT: Final[str] = "system/scripts/message_chat.py"
 
 # Backoff ramp for :meth:`MngrMessageSender.send`; after it, retries continue
 # at the final interval until delivery or app shutdown, so a workspace that
@@ -79,14 +91,47 @@ def stdout_reports_message_delivered(stdout: str) -> bool:
     return False
 
 
+@pure
+def message_chat_argv(chat_id: str, text: str) -> list[str]:
+    """The ``mngr exec`` that messages a chat through its workspace's chat app.
+
+    ``mngr exec <chat id>`` resolves the chat's first agent (the chat id IS that agent's id)
+    and runs the script from the workspace root, where the script finds the chat app and
+    posts to its send route by chat id. The chat app delivers to the chat's active agent,
+    or holds the message while the chat moves to a new one.
+    """
+    return ["exec", chat_id, "--", "python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]
+
+
+# What python prints when the workspace has no messaging script (a template from before it).
+_SCRIPT_MISSING_MARKERS: Final[tuple[str, ...]] = ("can't open file", "No such file or directory")
+
+
+@pure
+def is_message_chat_unavailable(stderr: str) -> bool:
+    """Whether a failed ``mngr exec`` of the chat script failed for want of the script rather than by its verdict.
+
+    ``mngr exec`` folds every failure into exit 1, so the script's own verdict (refused, or
+    blocked on a dialog) and a missing script look alike by code; only the missing script has
+    python's complaint on stderr. A refusal is never second-guessed with a direct send: while
+    a chat moves to a new agent the chat app holds the message for it, and a send around the
+    app would land on the agent the chat is leaving.
+    """
+    return any(marker in stderr for marker in _SCRIPT_MISSING_MARKERS)
+
+
 class MngrMessageSender(MutableModel):
-    """Wrapper around ``mngr message <agent-id> <text>``.
+    """Delivers a resolution notice to the chat a permission request belongs to.
+
+    The chat app inside the workspace is tried first (``message_chat_argv``), so a chat that
+    moved to another agent still hears its verdict; ``mngr message <agent-id> <text>`` is the
+    backoff for a workspace without the script.
 
     Failures are logged at warning level but never raised: the response
     event has already been written, so an undelivered nudge is recoverable
     (the agent will eventually wake up on its own).
 
-    Each ``mngr message`` runs through a :class:`MngrCaller`, which hands the CLI
+    Each call runs through a :class:`MngrCaller`, which hands the CLI
     to a pre-warmed, single-use ``mngr`` process rather than spawning (and
     importing) a brand-new interpreter -- avoiding the multi-second
     interpreter+import startup cost. Production passes the shared, pre-warmed
@@ -166,7 +211,29 @@ class MngrMessageSender(MutableModel):
         return False
 
     def deliver(self, target: str, text: str) -> bool:
-        """Send a message and return whether the TARGET agent actually received it.
+        """Deliver the notice to the chat ``target`` names and return whether it landed.
+
+        The chat app is tried first: ``mngr exec`` on the chat's first agent runs the
+        workspace's messaging script, and exit 0 is the chat app's word that the message was
+        delivered or queued. Only when the script is not there to run (an older workspace)
+        does the direct ``mngr message`` run; any other failure is retried by the caller.
+        """
+        exec_result = self.mngr_caller.call(message_chat_argv(target, text), timeout=_MESSAGE_CHAT_TIMEOUT_SECONDS)
+        if exec_result.returncode == 0:
+            return True
+        if not is_message_chat_unavailable(exec_result.stderr):
+            logger.debug(
+                "the chat app of target {} did not take the message (exit {}); stderr: {}",
+                target,
+                exec_result.returncode,
+                exec_result.stderr.strip(),
+            )
+            return False
+        logger.debug("target {} has no chat app script to message through; falling back to mngr message", target)
+        return self._deliver_through_mngr_message(target, text)
+
+    def _deliver_through_mngr_message(self, target: str, text: str) -> bool:
+        """Send with ``mngr message`` and return whether the TARGET agent actually received it.
 
         ``target`` is matched by ``mngr message`` against agent ids and names,
         so a caller can address an agent by its host name before its canonical
