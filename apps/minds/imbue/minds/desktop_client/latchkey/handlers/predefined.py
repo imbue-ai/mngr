@@ -8,7 +8,7 @@ the account + per-permission dialog, probing credential status, running
 ``latchkey_permissions.json`` via the gateway extension, queueing the
 credential and the rule for the workspace's own machine (as one
 request, carried in the background) when it has one, appending the
-response event, and notifying the waiting agent via ``mngr message``.
+response event, and nudging the request's chat with the verdict (:mod:`.messaging`).
 
 Grants are *per account*: the dialog always resolves to exactly one
 latchkey account (an existing one or a freshly signed-in one) and the
@@ -158,7 +158,7 @@ class GrantResult(FrozenModel):
     message: str = Field(
         description=(
             "Plain-text user/agent-facing message. For ``GRANTED`` it has "
-            "already been delivered to the agent via ``mngr message``; for "
+            "already been sent to the request's chat as the resolution nudge; for "
             "``FAILED`` and ``NEEDS_MANUAL_CREDENTIALS`` it is shown only to the user "
             "(the request stays pending, so the agent is not notified)."
         ),
@@ -491,7 +491,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
 
     * ``latchkey_permissions.json`` reflects the new rule.
     * A ``GRANTED`` response event has been appended for ``request_event_id``.
-    * ``mngr message`` has been attempted (failures logged).
+    * The resolution nudge has been attempted (failures logged).
 
     When ``grant`` returns ``GrantOutcome.FAILED``:
 
@@ -499,7 +499,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
       fresh Approve click can retry. A failed approval is a transient
       failure, not a denial -- it is surfaced to the user in the dialog
       rather than recorded as a resolution.
-    * No ``mngr message`` has been sent (the agent stays blocked, waiting).
+    * No resolution nudge has been sent (the agent stays blocked, waiting).
     * When the failure was the sign-in (the browser flow -- including the
       one-off ``latchkey auth browser-prepare`` step -- did not complete),
       ``latchkey_permissions.json`` is unchanged. When it was recording the
@@ -518,7 +518,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
       user can fill in the returned credential form and click Approve
       again (the Approve that carries the values runs the command and,
       if the credentials check out, grants).
-    * No ``mngr message`` has been sent.
+    * No resolution nudge has been sent.
 
     ``deny`` writes a ``DENIED`` response and notifies; nothing else.
     """
@@ -531,7 +531,9 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             "``services.json`` data file that ships with mngr_latchkey."
         ),
     )
-    mngr_message_sender: MngrMessageSender = Field(description="Sends mngr message to the waiting agent.")
+    mngr_message_sender: MngrMessageSender = Field(
+        description="Nudges the request's chat with the verdict on resolution (see :mod:`.messaging`).",
+    )
     gateway_client: LatchkeyGatewayClient = Field(
         description=(
             "HTTP client used to apply permission grants and remove pending requests through the "
@@ -567,7 +569,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         per-host (every agent on the host shares one
         ``latchkey_permissions.json``) so the grant updates the file at
         :func:`permissions_path_for_host`. ``agent_id`` is still needed
-        for the response event and the ``mngr message`` nudge.
+        for the response event and the resolution nudge.
 
         ``service_info`` is the catalog entry resolved from the request's
         ``scope`` schema (e.g. ``slack-api`` -> ``ServicePermissionInfo``
@@ -596,7 +598,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         change would be lost outright.
 
         The resolve epilogue durably records and indexes the verdict;
-        ``message`` is surfaced to both the agent (via ``mngr message``)
+        ``message`` is surfaced to both the agent (via the resolution nudge)
         and the dialog UI.
         """
         if not granted_permissions:

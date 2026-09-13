@@ -5,8 +5,8 @@ This module is one of the two sibling handlers under
 flow for *file-sharing* permission requests: rendering the yes/no
 dialog for a single absolute file path, calling the gateway's
 ``permission-requests`` extension to approve or drop the request,
-appending the response event, and notifying the waiting agent via
-``mngr message``.
+appending the response event, and nudging the request's chat with the
+verdict (:mod:`.messaging`).
 
 A file-sharing permission request asks the user to grant the agent
 access to a single absolute file path on the desktop host, served
@@ -185,7 +185,7 @@ class FileSharingGrantHandler(RequestEventHandler):
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(
-        description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
+        description="Nudges the request's chat with the verdict on resolution (see :mod:`.messaging`).",
     )
     latchkey: Latchkey = Field(
         description="Latchkey wrapper used to repair a host's missing canonical permissions file at grant time.",

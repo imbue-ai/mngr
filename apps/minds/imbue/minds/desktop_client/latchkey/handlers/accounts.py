@@ -65,7 +65,7 @@ class AccountsPermissionGrantHandler(RequestEventHandler):
     Thin, like the file-sharing sibling: it renders the yes/no dialog, asks the
     gateway to approve (no override -- the effect is fixed) or delete the pending
     request via :class:`LatchkeyGatewayClient`, writes the response event, and
-    notifies the waiting agent via ``mngr message``.
+    nudges the request's chat with the verdict (:mod:`.messaging`).
     """
 
     data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
@@ -80,7 +80,7 @@ class AccountsPermissionGrantHandler(RequestEventHandler):
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(
-        description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
+        description="Nudges the request's chat with the verdict on resolution (see :mod:`.messaging`).",
     )
     push_permissions_to_machine: Callable[[str], None] = Field(
         description=(

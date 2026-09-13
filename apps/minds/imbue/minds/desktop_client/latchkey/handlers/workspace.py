@@ -109,8 +109,8 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
     gateway's ``POST /permission-requests/approve/<id>`` endpoint (sending the
     user's dialog choices as an override body so the gateway recomputes and
     splices the effect into the requesting agent's per-host permissions file),
-    writes the response event, and notifies the waiting agent via
-    ``mngr message``. Denial drops the pending record via ``DELETE``.
+    writes the response event, and nudges the request's chat with the
+    verdict (:mod:`.messaging`). Denial drops the pending record via ``DELETE``.
     """
 
     data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
@@ -124,7 +124,7 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(
-        description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
+        description="Nudges the request's chat with the verdict on resolution (see :mod:`.messaging`).",
     )
     push_permissions_to_machine: Callable[[str], None] = Field(
         description=(

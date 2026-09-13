@@ -123,10 +123,13 @@ second gateway URL or a different agent skill.
    5. On success, appends a `GRANTED` response event to
       `~/.minds/events/requests/events.jsonl`. (A `FAILED` approval writes
       no response event and leaves the request pending; see step 6.2.)
-   6. On a `GRANTED` outcome, sends the agent a plain-English `mngr message`
+   6. On a `GRANTED` outcome, sends the request's chat a plain-English notice
       describing the decision (with the request's id embedded, so the chat
       harness can pair the notice with the right card); the agent wakes up
-      and decides whether to retry. Delivery is retried with backoff for as
+      and decides whether to retry. The notice goes through the workspace's
+      chat app, so a chat that has moved to a new agent still hears it; a
+      direct `mngr message` to the agent is the backoff for a workspace whose
+      template has no chat-messaging script. Delivery is retried with backoff for as
       long as the app runs, so a nudge for a stopped workspace lands when
       that workspace next comes up; the in-chat card does not depend on it
       (see step 8). A `FAILED` or manual-credentials outcome leaves the
@@ -813,8 +816,9 @@ Agents are expected to:
   and `rationale`) -- or, for a domain the catalog has no service for, a
   `custom-service` request naming the domain (see [Creating a connection an
   agent asks for](#creating-a-connection-an-agent-asks-for)).
-* Stop the turn and wait. The agent will receive an `mngr message` from
-  the desktop with the decision and can decide whether to retry.
+* Stop the turn and wait. The agent will receive a message from the
+  desktop (through the workspace's chat app) with the decision and can
+  decide whether to retry.
 
 The detection-and-wait logic for Claude Code lives in the
 `default-workspace-template` repository's latchkey skill, not in this

@@ -222,7 +222,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
         ),
     )
     mngr_message_sender: MngrMessageSender = Field(
-        description="Sends ``mngr message`` nudges to the waiting agent on resolution.",
+        description="Nudges the request's chat with the verdict on resolution (see :mod:`.messaging`).",
     )
     carry_grant_to_machine: Callable[[str, str, str], None] = Field(
         description=(
