@@ -146,6 +146,7 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
 from imbue.minds.desktop_client.sharing_handler import EmptyGrantsError
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
@@ -153,7 +154,7 @@ from imbue.minds.desktop_client.sharing_handler import enable_sharing
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
-from imbue.minds.desktop_client.sharing_handler import resolve_share_probe_host
+from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
@@ -2734,8 +2735,16 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         region=_optional_str(document, "region"),
         last_tunnel_login_at=_optional_str(document, "last_tunnel_login_at"),
         cert_not_after=_optional_str(document, "cert_not_after"),
+        service_labels=_service_labels(document),
         grants=grants,
     )
+
+
+def _service_labels(document: dict[str, object]) -> dict[str, str]:
+    raw_labels = document.get("service_labels")
+    if not isinstance(raw_labels, dict):
+        return {}
+    return {str(name): str(label) for name, label in raw_labels.items() if label}
 
 
 def _sharing_host_for_workspace(workspace_id: str) -> str | None:
@@ -2881,7 +2890,8 @@ def _machine_sharing_readiness_core(host_id: str) -> SharingReadinessResponse:
     machine, never from caller input. Besides the end-to-end ``ready`` bit,
     the response carries the connector's per-step provisioning signals
     (certificate issuance, tunnel liveness stamp) so the UI can show which
-    step a still-provisioning share is on.
+    step a still-provisioning share is on, and the current origin label per
+    share target, from which the UI builds every link.
     """
     state = get_state()
     http_client = state.http_client
@@ -2900,12 +2910,17 @@ def _machine_sharing_readiness_core(host_id: str) -> SharingReadinessResponse:
         return SharingReadinessResponse(ready=False)
     # Probe the shell's routable label origin, not the bare machine domain
     # (which does not route on a share). Not-ready until the shell label is known.
-    probe_host = resolve_share_probe_host(state.backend_resolver, state.session_store, host_id, share.workspace_domain)
+    service_labels = resolve_share_target_labels_for_host(state.backend_resolver, state.session_store, host_id)
+    shell_label = service_labels.get(WHOLE_MACHINE_SERVICE)
+    probe_host = f"{shell_label}.{share.workspace_domain}" if shell_label else None
     is_ready = probe_host is not None and probe_share_readiness(http_client, probe_host)
+    # The labels ride every poll so a Share tab opened before the workspace's
+    # registrations reached this client learns them without re-fetching anything.
     return SharingReadinessResponse(
         ready=is_ready,
         cert_not_after=share.cert_not_after,
         last_tunnel_login_at=share.last_tunnel_login_at,
+        service_labels=service_labels,
     )
 
 

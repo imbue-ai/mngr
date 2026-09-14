@@ -109,7 +109,7 @@ def test_parse_service_log_records_parses_valid_jsonl() -> None:
     assert isinstance(records[0], ServiceLogRecord)
     assert records[0].service == ServiceName("web")
     assert records[0].url == "http://127.0.0.1:9100"
-    # No ``label`` in the row -> empty, so callers fall back to the service name.
+    # No ``label`` in the row -> empty: a legacy row with no share link.
     assert records[0].label == ""
 
 
@@ -1363,8 +1363,8 @@ def test_mngr_cli_resolver_exposes_per_service_origin_labels() -> None:
         {"terminal": "http://127.0.0.1:9100", "web": "http://127.0.0.1:9200"},
         {"terminal": "terminal-x7k9q2w1"},
     )
-    # A service with a label is exposed; one with none (``web``) is omitted so
-    # callers fall back to the service name.
+    # A service with a label is exposed; one with none (``web``) is omitted
+    # (it has no share link).
     assert resolver.list_service_labels_for_agent(_AGENT_A) == {ServiceName("terminal"): "terminal-x7k9q2w1"}
 
 

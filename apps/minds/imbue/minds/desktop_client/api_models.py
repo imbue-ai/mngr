@@ -622,6 +622,14 @@ class SharingReadinessResponse(FrozenModel):
             "(it persists across re-shares, so its mere presence is not enough)."
         ),
     )
+    service_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Public origin label per share target, as currently known from the workspace's service "
+            "registrations (the share link of a target is https://<label>.<workspace_domain>/). A target "
+            "absent here has no link yet; clients must show a pending state, never a bare-domain URL."
+        ),
+    )
 
 
 class MachineSharingResponse(FrozenModel):
@@ -630,10 +638,24 @@ class MachineSharingResponse(FrozenModel):
     host_id: str = Field(description="The machine's host coordinate (host-<hex>)")
     enabled: bool = Field(description="Whether the machine is currently shared")
     workspace_domain: str | None = Field(default=None, description="The share's public domain")
-    url: str | None = Field(default=None, description="The share's public URL (https://<workspace_domain>/)")
+    url: str | None = Field(
+        default=None,
+        description=(
+            "The share's base URL (https://<workspace_domain>/). The bare domain itself does not route: a "
+            "target's link is https://<service_labels[target]>.<workspace_domain>/"
+        ),
+    )
     region: str | None = Field(default=None, description="Relay region code")
     last_tunnel_login_at: str | None = Field(default=None, description="Last relay tunnel connect stamp")
     cert_not_after: str | None = Field(default=None, description="Expiry of the share's TLS certificate")
+    service_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Public origin label per share target, as currently known from the workspace's service "
+            "registrations. A target absent here has no link yet (its registration has not reached this "
+            "client); clients must show a pending state for it, never a bare-domain URL."
+        ),
+    )
     grants: SharingGrantsDocument | None = Field(
         default=SharingGrantsDocument(),
         description=(
