@@ -43,7 +43,8 @@ Key concepts in the minds system:
   Its `workspace_display_name` label holds the workspace's human-readable name (the normalized slug is the host's name).
   Hidden from the UI agent list and protected against direct destroy.
 
-- **chat agent**: a user-facing mngr agent created on demand in a workspace, one per chat tab.
+- **chat**: a user-facing conversation in a workspace, one per chat tab: a sequence of agent transcripts run by one agent at a time (the template's `docs/system/blueprint/chat-agent-split/`). Its id is its first agent's id, and every agent the chat app creates for it carries that id as `MINDS_CHAT_ID`. Today every chat runs on exactly one agent.
+- **chat agent**: the mngr agent a chat currently runs on, created on demand in a workspace by the chat app; the phrase names the agent, never the chat.
   Created with `--transfer none`, so it shares the primary agent's work_dir, and bound on its create to one signed-in provider account under `~/.minds/accounts/` (an `--env CLAUDE_CONFIG_DIR=<account dir>` for claude). A create that names no account gets the workspace's default one from `.mngr/settings.local.toml`, which the workspace's chat app writes; with no account signed in the create is refused, since `~/.claude` holds no credential.
   Bootstrap seeds the first one on initial container boot; the count grows and shrinks with the user's workload, and is not capped.
 
