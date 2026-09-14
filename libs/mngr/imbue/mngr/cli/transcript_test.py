@@ -8,6 +8,11 @@ import tomlkit
 from click.testing import CliRunner
 
 from imbue.mngr.agents.data_types.atif.trajectory import Trajectory
+from imbue.mngr.api.preservation import PRESERVATION_MANIFEST_FILENAME
+from imbue.mngr.api.preservation import PreservationManifest
+from imbue.mngr.api.preservation import PreservationOutcome
+from imbue.mngr.api.preservation import PreservedAgentIdentity
+from imbue.mngr.api.preservation import PreservedItemResult
 from imbue.mngr.cli.testing import LEGACY_SAMPLE_TRANSCRIPT_EVENTS
 from imbue.mngr.cli.testing import SAMPLE_ATIF_STREAM_EVENTS
 from imbue.mngr.cli.testing import create_agent_with_events_dir
@@ -23,14 +28,58 @@ from imbue.mngr.cli.transcript import _render_content
 from imbue.mngr.cli.transcript import transcript
 from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.primitives import AgentAddress
+from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.toml_config import load_config_file_tomlkit
 from imbue.mngr.utils.toml_config import save_config_file
 
 _DEFAULT_TARGET = AgentAddress(agent=AgentName("my-agent"))
+
+
+def _write_preserved_transcript(
+    host_dir: Path,
+    *,
+    agent_name: str,
+    agent_id: str,
+    events: list[dict[str, Any]],
+    labels: dict[str, str] | None = None,
+    host_id: str = "host-00000000000000000000000000000001",
+    host_name: str = "localhost",
+    provider_name: str = "local",
+    outcome: PreservationOutcome = PreservationOutcome.COPIED,
+) -> None:
+    """Write a manifest-backed archive whose common transcript has the requested outcome."""
+    archive = host_dir / "preserved" / f"{agent_name}--{agent_id}"
+    transcript_dir = archive / "events" / "claude" / "common_transcript"
+    transcript_dir.mkdir(parents=True)
+    write_common_transcript_events(transcript_dir, events)
+    manifest = PreservationManifest(
+        identity=PreservedAgentIdentity(
+            host_id=HostId(host_id),
+            host_name=HostName(host_name),
+            provider_name=ProviderInstanceName(provider_name),
+            agent_id=AgentId(agent_id),
+            agent_name=AgentName(agent_name),
+            agent_type=AgentTypeName("claude"),
+            labels=labels or {},
+        ),
+        items=(
+            PreservedItemResult(
+                rel_path="events/claude/common_transcript",
+                kind=FileType.DIRECTORY,
+                outcome=outcome,
+            ),
+        ),
+    )
+    (archive / PRESERVATION_MANIFEST_FILENAME).write_text(manifest.model_dump_json(indent=2))
 
 
 def _make_transcript_opts(
@@ -53,6 +102,8 @@ def _make_transcript_opts(
         head=head,
         output=None,
         full=False,
+        preserved=False,
+        preserved_only=False,
     )
 
 
@@ -300,6 +351,346 @@ def test_transcript_cli_reads_json_format(
     assert len(parsed) == len(SAMPLE_ATIF_STREAM_EVENTS)
 
 
+def test_transcript_cli_atif_keeps_live_data_when_archive_storage_is_unreadable(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+    tmp_path: Path,
+) -> None:
+    agent_id, _ = create_agent_with_sample_transcript(local_provider.host_dir, agent_name="live-with-broken-archive")
+    (local_provider.host_dir / "preserved").write_text("not a directory")
+    log_path = tmp_path / "transcript.log"
+
+    result = cli_runner.invoke(
+        transcript,
+        ["live-with-broken-archive", "--preserved", "--format", "atif", "--log-file", str(log_path)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate_json(result.stdout)
+    assert str(trajectory.trajectory_id) == str(agent_id)
+    assert trajectory.steps[-1].message == "World"
+    assert "Could not discover preserved subagents" in log_path.read_text()
+
+
+def test_transcript_cli_preserved_reports_unreadable_archive_storage(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    archive_root = local_provider.host_dir / "preserved"
+    archive_root.write_text("not a directory")
+
+    result = cli_runner.invoke(transcript, ["destroyed", "--preserved"], obj=plugin_manager)
+
+    assert result.exit_code != 0
+    assert str(archive_root) in result.output
+    assert "No preserved agent archive matches" not in result.output
+
+
+def test_transcript_cli_preserved_exact_id_ignores_an_id_shaped_name(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    agent_id = "agent-00000000000000000000000000000041"
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="id-target",
+        agent_id=agent_id,
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+    )
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name=agent_id,
+        agent_id="agent-00000000000000000000000000000042",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+    )
+
+    result = cli_runner.invoke(transcript, [agent_id, "--preserved", "--format", "atif"], obj=plugin_manager)
+
+    assert result.exit_code == 0, result.output
+    assert str(Trajectory.model_validate_json(result.stdout).trajectory_id) == agent_id
+
+
+def test_transcript_cli_reads_destroyed_agent_from_preserved_archive(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    agent_id = "agent-00000000000000000000000000000011"
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="destroyed-transcript-test",
+        agent_id=agent_id,
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["destroyed-transcript-test", "--preserved", "--format", "json"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [event["type"] for event in json.loads(result.stdout)] == ["header", "step", "step", "observation"]
+
+
+@pytest.mark.parametrize("target", ["qualified-preserved@other.modal", "qualified-preserved@origin.local"])
+def test_transcript_cli_preserved_host_qualifier_rejects_wrong_origin(
+    target: str,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="qualified-preserved",
+        agent_id="agent-00000000000000000000000000000013",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        host_name="origin",
+        provider_name="modal",
+    )
+
+    result = cli_runner.invoke(transcript, [target, "--preserved"], obj=plugin_manager)
+
+    assert result.exit_code != 0
+    assert "No preserved agent archive matches" in result.output
+
+
+def test_transcript_cli_preserved_host_qualifier_matches_origin(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="qualified-preserved",
+        agent_id="agent-00000000000000000000000000000014",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        host_name="origin",
+        provider_name="modal",
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["qualified-preserved@origin.modal", "--preserved", "--format", "json"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(json.loads(result.stdout)) == len(SAMPLE_ATIF_STREAM_EVENTS)
+
+
+def test_transcript_cli_without_preserved_keeps_live_discovery_semantics(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="explicit-preserved-test",
+        agent_id="agent-00000000000000000000000000000012",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+    )
+
+    result = cli_runner.invoke(transcript, ["explicit-preserved-test"], obj=plugin_manager)
+
+    assert result.exit_code != 0
+    assert "could not find agent" in result.output.lower()
+
+
+@pytest.mark.parametrize("output_format", ["json", "atif"])
+def test_transcript_cli_preserved_prefers_live_agent(
+    output_format: str,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    live_agent_id, _ = create_agent_with_sample_transcript(local_provider.host_dir, agent_name="live-preferred")
+    archived_events = [
+        dict(event, message="archived") if event.get("type") == "step" else event
+        for event in SAMPLE_ATIF_STREAM_EVENTS
+    ]
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="live-preferred",
+        agent_id="agent-00000000000000000000000000000051",
+        events=archived_events,
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["live-preferred", "--preserved", "--format", output_format],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    if output_format == "atif":
+        assert str(Trajectory.model_validate_json(result.stdout).trajectory_id) == str(live_agent_id)
+    else:
+        assert [event.get("message") for event in json.loads(result.stdout) if event.get("type") == "step"] == [
+            "Hello",
+            "World",
+        ]
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("output_format", ["json", "atif"])
+def test_transcript_cli_preserved_only_bypasses_live_discovery(
+    output_format: str,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="archive-preferred")
+    archived_events = [
+        dict(event, message="archived") if event.get("type") == "step" else event
+        for event in SAMPLE_ATIF_STREAM_EVENTS
+    ]
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="archive-preferred",
+        agent_id="agent-00000000000000000000000000000052",
+        events=archived_events,
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["archive-preferred", "--preserved-only", "--format", output_format],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    if output_format == "atif":
+        assert str(Trajectory.model_validate_json(result.stdout).trajectory_id).endswith("52")
+    else:
+        assert {event.get("message") for event in json.loads(result.stdout) if event.get("type") == "step"} == {
+            "archived"
+        }
+    assert "Warning: reading preserved transcript snapshot for 'archive-preferred'" in result.stderr
+    assert " from " in result.stderr
+    assert "; it is not live." in result.stderr
+
+
+@pytest.mark.parametrize("output_format", ["json", "atif"])
+def test_transcript_cli_preserved_does_not_hide_live_transcript_failure(
+    output_format: str,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    create_agent_with_events_dir(
+        local_provider.host_dir,
+        agent_name="broken-live",
+        events_source="claude/common_transcript",
+        agent_type="claude",
+    )
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="broken-live",
+        agent_id="agent-00000000000000000000000000000053",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["broken-live", "--preserved", "--format", output_format],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Warning: reading preserved transcript snapshot" not in result.stderr
+
+
+def test_transcript_cli_preserved_only_conflicts_with_explicit_no_preserved(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+) -> None:
+    result = cli_runner.invoke(
+        transcript,
+        ["agent", "--preserved-only", "--no-preserved"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Cannot specify both --preserved-only and --no-preserved" in result.output
+
+
+def test_transcript_cli_preserved_name_requires_unambiguous_archive(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    for suffix in ("31", "32"):
+        _write_preserved_transcript(
+            local_provider.host_dir,
+            agent_name="ambiguous-preserved-test",
+            agent_id=f"agent-000000000000000000000000000000{suffix}",
+            events=SAMPLE_ATIF_STREAM_EVENTS,
+            host_id=f"host-000000000000000000000000000000{suffix}",
+        )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["ambiguous-preserved-test", "--preserved"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Multiple preserved agent archives match" in result.output
+
+
+def test_transcript_cli_preserved_missing_common_reports_raw_path(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    agent_name = "raw-only-preserved-test"
+    agent_id = "agent-00000000000000000000000000000033"
+    archive = local_provider.host_dir / "preserved" / f"{agent_name}--{agent_id}"
+    raw_dir = archive / "logs" / "claude_transcript"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "session.jsonl").write_text("{}\n")
+    manifest = PreservationManifest(
+        identity=PreservedAgentIdentity(
+            host_id=local_provider.host_id,
+            host_name=HostName("localhost"),
+            provider_name=ProviderInstanceName("local"),
+            agent_id=AgentId(agent_id),
+            agent_name=AgentName(agent_name),
+            agent_type=AgentTypeName("claude"),
+        ),
+        items=(
+            PreservedItemResult(
+                rel_path="events/claude/common_transcript",
+                kind=FileType.DIRECTORY,
+                outcome=PreservationOutcome.MISSING,
+            ),
+        ),
+    )
+    (archive / PRESERVATION_MANIFEST_FILENAME).write_text(manifest.model_dump_json(indent=2))
+
+    result = cli_runner.invoke(transcript, [agent_name, "--preserved"], obj=plugin_manager)
+
+    assert result.exit_code != 0
+    assert "preservation result: events/claude/common_transcript=missing" in result.output
+    assert str(raw_dir) in result.output
+
+
 def test_transcript_cli_filters_by_role(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -399,7 +790,9 @@ def test_transcript_cli_applies_head(
     assert json.loads(lines[1])["message"] == "msg-1"
 
 
+@pytest.mark.parametrize("preserved", [False, True])
 def test_transcript_cli_rejects_agent_type_without_mixin(
+    preserved: bool,
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     local_provider,
@@ -410,18 +803,29 @@ def test_transcript_cli_rejects_agent_type_without_mixin(
     The default 'generic' agent_type maps to the BaseAgent default class, which
     does not implement the mixin -- the CLI must fail with a clear error
     naming the agent and its type, rather than a misleading 'no transcript yet' message.
+
+    An unsupported type is a live agent that was found, so --preserved must report it rather
+    than answering from an archive that happens to share the name: only a target live discovery
+    conclusively did not find licenses the fallback.
     """
     create_agent_with_events_dir(local_provider.host_dir, agent_name="no-transcript-agent")
-
-    result = cli_runner.invoke(
-        transcript,
-        ["no-transcript-agent"],
-        obj=plugin_manager,
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="no-transcript-agent",
+        agent_id="agent-00000000000000000000000000000061",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
     )
+
+    args = ["no-transcript-agent"]
+    if preserved:
+        args.append("--preserved")
+    result = cli_runner.invoke(transcript, args, obj=plugin_manager)
+
     assert result.exit_code != 0
     assert "no-transcript-agent" in result.output
     assert "generic" in result.output
     assert "does not produce a common transcript" in result.output
+    assert "Warning: reading preserved transcript snapshot" not in result.stderr
 
 
 def test_transcript_cli_missing_events_file_for_supporting_type_gives_clear_error(
@@ -577,6 +981,268 @@ def test_transcript_cli_atif_writes_output_file(
     assert result.exit_code == 0, result.output
     trajectory = Trajectory.model_validate(json.loads(output_path.read_text()))
     assert len(trajectory.steps) == 2
+
+
+def test_transcript_cli_atif_builds_destroyed_parent_and_preserved_child(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    parent_id = "agent-00000000000000000000000000000021"
+    child_id = "agent-00000000000000000000000000000022"
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="destroyed-parent",
+        agent_id=parent_id,
+        events=_make_parent_stream_delegating_to("toolu_preserved_child"),
+    )
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="destroyed-child",
+        agent_id=child_id,
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        labels={
+            "mngr_claude_subagent_proxy_parent_id": parent_id,
+            "mngr_claude_subagent_proxy_tool_use_id": "toolu_preserved_child",
+        },
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["destroyed-parent", "--preserved", "--format", "atif"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate(json.loads(result.stdout))
+    assert trajectory.subagent_trajectories is not None
+    assert str(trajectory.subagent_trajectories[0].trajectory_id) == child_id
+
+
+def test_transcript_cli_atif_skips_all_ambiguous_preserved_children(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+    tmp_path: Path,
+) -> None:
+    parent_id = "agent-00000000000000000000000000000025"
+    tool_use_id = "toolu_ambiguous_children"
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="ambiguous-child-parent",
+        agent_id=parent_id,
+        events=_make_parent_stream_delegating_to(tool_use_id),
+    )
+    for suffix in ("26", "27"):
+        _write_preserved_transcript(
+            local_provider.host_dir,
+            agent_name=f"ambiguous-child-{suffix}",
+            agent_id=f"agent-000000000000000000000000000000{suffix}",
+            events=SAMPLE_ATIF_STREAM_EVENTS,
+            labels={
+                "mngr_claude_subagent_proxy_parent_id": parent_id,
+                "mngr_claude_subagent_proxy_tool_use_id": tool_use_id,
+            },
+        )
+
+    log_path = tmp_path / "transcript.log"
+    result = cli_runner.invoke(
+        transcript,
+        [
+            "ambiguous-child-parent",
+            "--preserved",
+            "--format",
+            "atif",
+            "--log-file",
+            str(log_path),
+        ],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate(json.loads(result.stdout))
+    assert trajectory.subagent_trajectories is None
+    log_text = log_path.read_text()
+    assert "Skipped all preserved subagents" in log_text
+    assert tool_use_id in log_text
+
+
+def test_transcript_cli_atif_ignores_failed_candidate_when_one_preserved_child_is_viable(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+    tmp_path: Path,
+) -> None:
+    parent_id = "agent-00000000000000000000000000000043"
+    valid_child_id = "agent-00000000000000000000000000000044"
+    tool_use_id = "toolu_one_viable_child"
+    labels = {
+        "mngr_claude_subagent_proxy_parent_id": parent_id,
+        "mngr_claude_subagent_proxy_tool_use_id": tool_use_id,
+    }
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="one-viable-parent",
+        agent_id=parent_id,
+        events=_make_parent_stream_delegating_to(tool_use_id),
+    )
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="viable-child",
+        agent_id=valid_child_id,
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        labels=labels,
+    )
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="failed-child",
+        agent_id="agent-00000000000000000000000000000045",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        labels=labels,
+        outcome=PreservationOutcome.ERROR,
+    )
+    log_path = tmp_path / "transcript.log"
+
+    result = cli_runner.invoke(
+        transcript,
+        ["one-viable-parent", "--preserved", "--format", "atif", "--log-file", str(log_path)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate_json(result.stdout)
+    assert trajectory.subagent_trajectories is not None
+    assert [str(child.trajectory_id) for child in trajectory.subagent_trajectories] == [valid_child_id]
+    log_text = log_path.read_text()
+    assert "Skipped preserved subagent 'failed-child'" in log_text
+    assert "events/claude/common_transcript=error" in log_text
+
+
+@pytest.mark.parametrize("preserved", [False, True])
+def test_transcript_cli_atif_live_parent_respects_preserved_child_policy(
+    preserved: bool,
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    parent_id, parent_events_dir = create_agent_with_events_dir(
+        local_provider.host_dir,
+        agent_name="live-parent-preserved-child",
+        events_source="claude/common_transcript",
+        agent_type="claude",
+    )
+    write_common_transcript_events(parent_events_dir, _make_parent_stream_delegating_to("toolu_destroyed_child"))
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="destroyed-child-of-live-parent",
+        agent_id="agent-00000000000000000000000000000023",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        labels={
+            "mngr_claude_subagent_proxy_parent_id": str(parent_id),
+            "mngr_claude_subagent_proxy_tool_use_id": "toolu_destroyed_child",
+        },
+        host_id=str(local_provider.host_id),
+    )
+
+    args = ["live-parent-preserved-child", "--format", "atif"]
+    if preserved:
+        args.append("--preserved")
+    result = cli_runner.invoke(transcript, args, obj=plugin_manager)
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate(json.loads(result.output))
+    if preserved:
+        assert trajectory.subagent_trajectories is not None
+        assert str(trajectory.subagent_trajectories[0].trajectory_id).endswith("23")
+    else:
+        assert trajectory.subagent_trajectories is None
+
+
+def test_transcript_cli_atif_does_not_embed_preserved_child_from_another_host(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    parent_id, parent_events_dir = create_agent_with_events_dir(
+        local_provider.host_dir,
+        agent_name="host-isolated-live-parent",
+        events_source="claude/common_transcript",
+        agent_type="claude",
+    )
+    write_common_transcript_events(parent_events_dir, _make_parent_stream_delegating_to("toolu_other_host"))
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="same-id-label-other-host-child",
+        agent_id="agent-00000000000000000000000000000024",
+        events=SAMPLE_ATIF_STREAM_EVENTS,
+        labels={
+            "mngr_claude_subagent_proxy_parent_id": str(parent_id),
+            "mngr_claude_subagent_proxy_tool_use_id": "toolu_other_host",
+        },
+        host_id="host-00000000000000000000000000000099",
+    )
+
+    result = cli_runner.invoke(
+        transcript,
+        ["host-isolated-live-parent", "--preserved", "--format", "atif"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate(json.loads(result.output))
+    assert trajectory.subagent_trajectories is None
+
+
+def test_transcript_cli_atif_stops_at_preserved_archives_that_claim_each_other(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+    tmp_path: Path,
+) -> None:
+    """Archive labels are destruction-time snapshots that nothing reconciles, so they can form a cycle."""
+    first_id = "agent-00000000000000000000000000000062"
+    second_id = "agent-00000000000000000000000000000063"
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="cycle-first",
+        agent_id=first_id,
+        events=_make_parent_stream_delegating_to("toolu_cycle_second"),
+        labels={
+            "mngr_claude_subagent_proxy_parent_id": second_id,
+            "mngr_claude_subagent_proxy_tool_use_id": "toolu_cycle_first",
+        },
+    )
+    _write_preserved_transcript(
+        local_provider.host_dir,
+        agent_name="cycle-second",
+        agent_id=second_id,
+        events=_make_parent_stream_delegating_to("toolu_cycle_first"),
+        labels={
+            "mngr_claude_subagent_proxy_parent_id": first_id,
+            "mngr_claude_subagent_proxy_tool_use_id": "toolu_cycle_second",
+        },
+    )
+    log_path = tmp_path / "transcript.log"
+
+    result = cli_runner.invoke(
+        transcript,
+        ["cycle-first", "--preserved", "--format", "atif", "--log-file", str(log_path)],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate(json.loads(result.stdout))
+    assert trajectory.subagent_trajectories is not None
+    assert [str(child.trajectory_id) for child in trajectory.subagent_trajectories] == [second_id]
+    log_text = log_path.read_text()
+    assert "Skipped preserved subagent 'cycle-first' for tool call 'toolu_cycle_first'" in log_text
+    assert "it is already an ancestor of this trajectory" in log_text
 
 
 def test_transcript_cli_atif_rejects_old_format_stream(
@@ -762,6 +1428,23 @@ def test_transcript_cli_atif_rejects_host_target(
 
     assert result.exit_code != 0
     assert "requires an agent target" in result.output
+
+
+def test_transcript_cli_preserved_only_rejects_host_target(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """Archives are addressed per agent, so a whole-host target has no snapshot to read."""
+    result = cli_runner.invoke(
+        transcript,
+        ["@some-host", "--preserved-only"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code != 0
+    assert "Preserved transcript lookup requires an agent target" in result.output
 
 
 def test_transcript_cli_atif_honors_a_config_default_format(

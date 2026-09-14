@@ -8,27 +8,41 @@ from typing import assert_never
 import click
 from click_option_group import optgroup
 from loguru import logger
+from pydantic import Field
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.agents.common_transcript_records import LEGACY_RECORD_TYPE_NAMES
 from imbue.mngr.agents.common_transcript_records import OLD_FORMAT_STREAM_EXPLANATION
 from imbue.mngr.api.events import read_common_transcript_content
 from imbue.mngr.api.events import resolve_events_target
 from imbue.mngr.api.find import find_one_agent
+from imbue.mngr.api.preservation import PreservedAgentArchive
+from imbue.mngr.api.preservation import discover_preserved_agent_archives
 from imbue.mngr.api.trajectory import build_trajectory_for_agent
+from imbue.mngr.api.trajectory import build_trajectory_for_preserved_agent
+from imbue.mngr.api.trajectory import find_one_preserved_archive
+from imbue.mngr.api.trajectory import read_preserved_common_transcript
 from imbue.mngr.cli.address_params import AGENT_OR_HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
+from imbue.mngr.cli.common_opts import is_param_explicit
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
 from imbue.mngr.cli.help_formatter import add_pager_help_option
+from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
+from imbue.mngr.errors import AgentNameNotFoundError
+from imbue.mngr.errors import AgentNotFoundError
+from imbue.mngr.errors import HostNameNotFoundError
 from imbue.mngr.errors import MngrError
+from imbue.mngr.errors import NoMatchingHostsError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentOrHostAddress
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 
@@ -42,6 +56,17 @@ class TranscriptCliOptions(CommonCliOptions):
     head: int | None
     output: str | None
     full: bool
+    preserved: bool
+    preserved_only: bool
+
+
+class PreservedTranscriptTarget(FrozenModel):
+    """A resolved preserved archive, with the listing it was resolved from."""
+
+    archive: PreservedAgentArchive = Field(description="The archive the requested agent resolved to")
+    archives: tuple[PreservedAgentArchive, ...] = Field(
+        description="Every caller-local archive the same discovery walk found"
+    )
 
 
 # The transcript-specific --format value that emits a full ATIF trajectory document
@@ -276,9 +301,20 @@ def _emit_transcript(
             assert_never(unreachable)
 
 
-def _emit_atif_document(target: AgentAddress, output_path: str | None, mngr_ctx: MngrContext) -> None:
+def _emit_atif_document(
+    target: AgentAddress,
+    output_path: str | None,
+    mngr_ctx: MngrContext,
+    *,
+    preserved_target: PreservedTranscriptTarget | None,
+    include_preserved: bool,
+) -> None:
     """Build the agent's stream into a full ATIF document and write it out."""
-    build_result = build_trajectory_for_agent(target, mngr_ctx)
+    build_result = (
+        build_trajectory_for_preserved_agent(preserved_target.archive, preserved_target.archives)
+        if preserved_target is not None
+        else build_trajectory_for_agent(target, mngr_ctx, include_preserved=include_preserved)
+    )
     for warning in build_result.warnings:
         logger.warning("Trajectory build: {}", warning)
     document_json = json.dumps(build_result.trajectory.to_json_dict(), indent=2) + "\n"
@@ -291,6 +327,42 @@ def _emit_atif_document(target: AgentAddress, output_path: str | None, mngr_ctx:
     except OSError as e:
         raise UserInputError(f"Could not write the ATIF document to '{output_path}': {e}") from e
     logger.info("Wrote ATIF trajectory to {}", output_path)
+
+
+def _warn_preserved_snapshot(archive: PreservedAgentArchive) -> None:
+    """Warn that an archive is a destruction-time snapshot rather than a live stream."""
+    timestamp = f" from {archive.manifest.preserved_at.isoformat()}" if archive.manifest is not None else ""
+    write_stderr_line(
+        f"Warning: reading preserved transcript snapshot for '{archive.agent_name}' at {archive.path}{timestamp}; "
+        "it is not live."
+    )
+
+
+def _is_missing_live_target(error: MngrError) -> bool:
+    """Return whether live discovery conclusively found no matching target."""
+    return isinstance(
+        error,
+        (AgentNameNotFoundError, AgentNotFoundError, HostNameNotFoundError, NoMatchingHostsError),
+    )
+
+
+def _find_preserved_target(address: AgentOrHostAddress, mngr_ctx: MngrContext) -> PreservedTranscriptTarget:
+    """Resolve an agent target against caller-local preservation archives, in one walk.
+
+    The whole listing is kept alongside the resolved archive because building an ATIF
+    document embeds the agent's preserved children from it, and resolving twice could
+    answer with two different archives.
+    """
+    match address:
+        case AgentAddress() as preserved_address:
+            archives = discover_preserved_agent_archives(Path(mngr_ctx.config.default_host_dir).expanduser())
+            archive = find_one_preserved_archive(preserved_address, archives)
+        case HostAddress():
+            raise UserInputError("Preserved transcript lookup requires an agent target (not a host)")
+        case _ as unreachable:
+            assert_never(unreachable)
+    _warn_preserved_snapshot(archive)
+    return PreservedTranscriptTarget(archive=archive, archives=tuple(archives))
 
 
 @click.command(name="transcript")
@@ -313,6 +385,17 @@ def _emit_atif_document(target: AgentAddress, output_path: str | None, mngr_ctx:
     type=click.IntRange(min=1),
     default=None,
     help="Show only the first N transcript events",
+)
+@optgroup.option(
+    "--preserved/--no-preserved",
+    default=False,
+    help="Include caller-local preserved data: a destroyed agent when no live one matches, and (with --format atif) a live agent's destroyed subagents",
+)
+@optgroup.option(
+    "--preserved-only",
+    is_flag=True,
+    default=False,
+    help="Read only caller-local preserved data, without live discovery",
 )
 @optgroup.option(
     "--output",
@@ -339,6 +422,8 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 
     if opts.head is not None and opts.tail is not None:
         raise UserInputError("Cannot specify both --head and --tail")
+    if opts.preserved_only and not opts.preserved and is_param_explicit(ctx, "preserved"):
+        raise UserInputError("Cannot specify both --preserved-only and --no-preserved")
 
     # --format atif emits a whole document rather than a rendered event list, so the
     # rendering flags do not apply to it and --output applies to nothing else.
@@ -353,28 +438,47 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
         atif_target = opts.target
     if atif_target is None and opts.output is not None:
         raise UserInputError("--output is only supported with --format atif")
-
-    # Fail fast with a clear error when the agent type does not produce a common transcript.
-    _assert_agent_type_supports_transcripts(opts.target, mngr_ctx)
+    preserved_target: PreservedTranscriptTarget | None = None
+    if opts.preserved_only:
+        preserved_target = _find_preserved_target(opts.target, mngr_ctx)
+    else:
+        try:
+            _assert_agent_type_supports_transcripts(opts.target, mngr_ctx)
+        except MngrError as error:
+            if not opts.preserved or not _is_missing_live_target(error):
+                raise
+            preserved_target = _find_preserved_target(opts.target, mngr_ctx)
 
     if atif_target is not None:
-        _emit_atif_document(atif_target, opts.output, mngr_ctx)
+        _emit_atif_document(
+            atif_target,
+            opts.output,
+            mngr_ctx,
+            preserved_target=preserved_target,
+            include_preserved=opts.preserved,
+        )
         return
 
-    # Resolve the target agent
-    target = resolve_events_target(
-        address=opts.target,
-        mngr_ctx=mngr_ctx,
-    )
+    if preserved_target is not None:
+        event_path, content = read_preserved_common_transcript(preserved_target.archive)
+        event_file_name = str(event_path)
+        target_display_name = f"preserved agent '{preserved_target.archive.agent_name}'"
+    else:
+        # Resolve the target agent
+        target = resolve_events_target(
+            address=opts.target,
+            mngr_ctx=mngr_ctx,
+        )
 
-    # Read the transcript file
-    event_file_name, content = read_common_transcript_content(target)
+        # Read the transcript file
+        event_file_name, content = read_common_transcript_content(target)
+        target_display_name = target.display_name
 
     # Parse and filter events
     all_events = _parse_transcript_events(
         content,
         roles=opts.role,
-        source_description=f"transcript file '{event_file_name}' for {target.display_name}",
+        source_description=f"transcript file '{event_file_name}' for {target_display_name}",
     )
 
     # The stream header is container framing, not conversation content, so human
@@ -399,13 +503,23 @@ def transcript(ctx: click.Context, **kwargs: Any) -> None:
 CommandHelpMetadata(
     key="transcript",
     one_line_description="View the message transcript for an agent",
-    synopsis="mngr transcript TARGET [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]",
+    synopsis="mngr transcript TARGET [--preserved|--preserved-only] [--role ROLE] [--tail N] [--head N] [--full] [--format human|json|jsonl|atif] [--output PATH]",
     arguments_description="- `TARGET`: Agent name or ID whose transcript to view",
     description="""View the common transcript for an agent. The transcript contains
 user turns, agent turns, and tool results in a common, agent-agnostic format.
 
 The command automatically finds the correct transcript file regardless
 of the agent type (e.g. claude, codex).
+
+Pass --preserved to fall back to a destroyed agent in the preservation
+archives when no live agent matches. With --format atif it also reaches
+destroyed subagents of an agent that IS live, so a document built for a live
+parent embeds the children it delegated to that no longer exist. Pass
+--preserved-only to skip live discovery. The archives are under the caller's
+local mngr host directory. Preserved agents can be selected by name or id; use
+the id (or a host qualifier, for archives that recorded their origin host)
+when names are ambiguous. The preserved snapshot reflects the bytes available
+at destruction time and is not a live or automatically refreshed stream.
 
 Use --role to filter by message role (user, agent, system, tool). This
 option is repeatable to include multiple roles.
@@ -430,6 +544,8 @@ Use --format to control output:
         ("Output as JSONL for piping", "mngr transcript my-agent --format jsonl"),
         ("Output as JSON", "mngr transcript my-agent --format json"),
         ("Build a full ATIF trajectory document", "mngr transcript my-agent --format atif"),
+        ("Include a destroyed agent", "mngr transcript my-agent --preserved"),
+        ("Read only a preserved snapshot", "mngr transcript my-agent --preserved-only"),
     ),
     see_also=(
         ("event", "View all events from an agent or host"),

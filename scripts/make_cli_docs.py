@@ -68,6 +68,7 @@ PRIMARY_COMMANDS = {
 }
 SECONDARY_COMMANDS = {
     "ask",
+    "autocompact",
     "aws",
     "azure",
     "behaviors",

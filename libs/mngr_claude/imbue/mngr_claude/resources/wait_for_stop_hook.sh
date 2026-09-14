@@ -138,6 +138,7 @@ mark_inactive() {
         mngr_common_transcript_flush "$flush_lock_timeout"
     fi
     rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+    date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since"
     mkdir -p "$MNGR_HOST_DIR/events/mngr/activity"
     local extra=""
     if [ -n "$reason" ]; then

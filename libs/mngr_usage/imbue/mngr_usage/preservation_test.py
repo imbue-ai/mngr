@@ -15,6 +15,11 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 
+from imbue.mngr.api.preservation import PRESERVATION_MANIFEST_FILENAME
+from imbue.mngr.api.preservation import PreservationManifest
+from imbue.mngr.api.preservation import PreservationOutcome
+from imbue.mngr.api.preservation import PreservedAgentIdentity
+from imbue.mngr.api.preservation import PreservedItemResult
 from imbue.mngr.api.preservation import get_local_preserved_agent_dir
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.common import get_agent_state_dir_path
@@ -22,17 +27,24 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_usage.api import _merge_preserved_events
 from imbue.mngr_usage.api import gather_usage_snapshots
 from imbue.mngr_usage.api import parse_usage_events
 from imbue.mngr_usage.data_types import UsageEvent
+from imbue.mngr_usage.preservation import _write_core_manifest
 from imbue.mngr_usage.preservation import discover_preserved_agents
 from imbue.mngr_usage.preservation import preserve_agent_usage
 
-_TEST_HOST_ID = "host-" + "0" * 32
+_TEST_HOST_ID = HostId("host-" + "0" * 32)
 
 
 def _make_offline_host_with_volume(
@@ -117,12 +129,45 @@ def _plant_preserved_agent(
     return dest
 
 
+def _identity(agent_id: AgentId, name: str, *, labels: dict[str, str] | None = None) -> PreservedAgentIdentity:
+    """The provenance a preserved archive records, on the one host these tests destroy from."""
+    return PreservedAgentIdentity(
+        host_id=_TEST_HOST_ID,
+        host_name=HostName("host1"),
+        provider_name=ProviderInstanceName("local"),
+        agent_id=agent_id,
+        agent_name=AgentName(name),
+        agent_type=AgentTypeName("claude"),
+        labels=labels or {},
+    )
+
+
+def _usage_item(
+    outcome: PreservationOutcome = PreservationOutcome.COPIED, error: str | None = None
+) -> PreservedItemResult:
+    """One copy attempt's result for the usage directory that makes an archive usage-bearing."""
+    return PreservedItemResult(rel_path="events/claude/usage", kind=FileType.DIRECTORY, outcome=outcome, error=error)
+
+
+def _data_item(
+    outcome: PreservationOutcome = PreservationOutcome.COPIED, error: str | None = None
+) -> PreservedItemResult:
+    """One copy attempt's result for the data.json the usage reader reconstructs filters from."""
+    return PreservedItemResult(rel_path="data.json", kind=FileType.FILE, outcome=outcome, error=error)
+
+
+def _write_manifest(dest: Path, identity: PreservedAgentIdentity, *items: PreservedItemResult) -> None:
+    (dest / PRESERVATION_MANIFEST_FILENAME).write_text(
+        PreservationManifest(identity=identity, items=items).model_dump_json()
+    )
+
+
 # =============================================================================
 # Write side
 # =============================================================================
 
 
-def test_preserve_agent_usage_copies_events_and_data_json_and_meta(
+def test_preserve_agent_usage_copies_events_and_data_json_and_writes_manifest(
     local_provider: LocalProviderInstance, temp_mngr_ctx: MngrContext
 ) -> None:
     agent_id = AgentId.generate()
@@ -135,9 +180,9 @@ def test_preserve_agent_usage_copies_events_and_data_json_and_meta(
         get_agent_state_dir_path(host.host_dir, agent_id),
         agent_name,
         agent_id,
-        provider_name="local",
+        provider_name=ProviderInstanceName("local"),
         host_id=_TEST_HOST_ID,
-        host_name="host1",
+        host_name=HostName("host1"),
         mngr_ctx=temp_mngr_ctx,
     )
 
@@ -146,8 +191,14 @@ def test_preserve_agent_usage_copies_events_and_data_json_and_meta(
     assert preserved_events.exists()
     assert len(preserved_events.read_text().splitlines()) == 2
     assert (dest / "data.json").exists()
-    meta = json.loads((dest / "mngr_usage_meta.json").read_text())
-    assert meta == {"provider_name": "local", "host_id": _TEST_HOST_ID, "host_name": "host1"}
+    assert not (dest / "mngr_usage_meta.json").exists()
+    manifest = PreservationManifest.model_validate_json((dest / PRESERVATION_MANIFEST_FILENAME).read_text())
+    assert manifest.identity.provider_name == "local"
+    assert manifest.identity.host_id == _TEST_HOST_ID
+    assert {(item.rel_path, item.outcome) for item in manifest.items} == {
+        ("data.json", "copied"),
+        ("events/claude/usage", "copied"),
+    }
 
 
 def test_preserve_agent_usage_is_noop_without_usage_events(
@@ -166,13 +217,75 @@ def test_preserve_agent_usage_is_noop_without_usage_events(
         get_agent_state_dir_path(host.host_dir, agent_id),
         agent_name,
         agent_id,
-        provider_name="local",
+        provider_name=ProviderInstanceName("local"),
         host_id=_TEST_HOST_ID,
-        host_name="host1",
+        host_name=HostName("host1"),
         mngr_ctx=temp_mngr_ctx,
     )
 
     assert not get_local_preserved_agent_dir(temp_mngr_ctx, agent_name, agent_id).exists()
+
+
+def test_usage_manifest_does_not_read_stale_data_after_copy_error(tmp_path: Path) -> None:
+    stale_id = AgentId.generate()
+    (tmp_path / "data.json").write_text(json.dumps(_data_json(stale_id, "stale-agent")))
+
+    _write_core_manifest(
+        tmp_path,
+        agent_name=AgentName("expected-agent"),
+        agent_id=AgentId.generate(),
+        provider_name=ProviderInstanceName("local"),
+        host_id=_TEST_HOST_ID,
+        host_name=HostName("host1"),
+        results=(_data_item(PreservationOutcome.ERROR, "read failed"),),
+    )
+
+    assert not (tmp_path / PRESERVATION_MANIFEST_FILENAME).exists()
+
+
+def test_usage_manifest_reports_a_preserved_data_json_it_cannot_use(tmp_path: Path) -> None:
+    """An unreadable data.json leaves the archive undiscoverable, so it must not be silent."""
+    (tmp_path / "data.json").write_text(json.dumps({"name": "nameless", "type": "claude"}))
+
+    with allow_warnings(match="Ignoring unusable preserved data.json"):
+        _write_core_manifest(
+            tmp_path,
+            agent_name=AgentName("nameless"),
+            agent_id=AgentId.generate(),
+            provider_name=ProviderInstanceName("local"),
+            host_id=_TEST_HOST_ID,
+            host_name=HostName("host1"),
+            results=(_data_item(),),
+        )
+
+    assert not (tmp_path / PRESERVATION_MANIFEST_FILENAME).exists()
+
+
+def test_usage_manifest_records_retry_failure_with_trusted_existing_identity(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    identity = _identity(agent_id, "retry-agent")
+    _write_manifest(tmp_path, identity, _data_item(), _usage_item())
+    (tmp_path / "data.json").write_text(json.dumps(_data_json(AgentId.generate(), "stale-agent")))
+
+    _write_core_manifest(
+        tmp_path,
+        agent_name=identity.agent_name,
+        agent_id=agent_id,
+        provider_name=ProviderInstanceName("local"),
+        host_id=_TEST_HOST_ID,
+        host_name=HostName("host1"),
+        results=(
+            _data_item(PreservationOutcome.ERROR, "read failed"),
+            _usage_item(PreservationOutcome.ERROR, "copy failed"),
+        ),
+    )
+
+    manifest = PreservationManifest.model_validate_json((tmp_path / PRESERVATION_MANIFEST_FILENAME).read_text())
+    assert manifest.identity == identity
+    assert {(item.rel_path, item.outcome, item.error) for item in manifest.items} == {
+        ("data.json", PreservationOutcome.ERROR, "read failed"),
+        ("events/claude/usage", PreservationOutcome.ERROR, "copy failed"),
+    }
 
 
 # =============================================================================
@@ -185,6 +298,54 @@ def test_discover_preserved_agents_returns_usage_bearing_dirs(temp_mngr_ctx: Mng
     _plant_preserved_agent(temp_mngr_ctx, agent_id, "a1")
     refs = discover_preserved_agents(temp_mngr_ctx)
     assert [r.agent_id for r in refs] == [str(agent_id)]
+
+
+def test_discover_preserved_agents_uses_manifest_without_legacy_files(temp_mngr_ctx: MngrContext) -> None:
+    agent_id = AgentId.generate()
+    dest = _plant_preserved_agent(temp_mngr_ctx, agent_id, "manifest-agent", write_meta=False)
+    (dest / "data.json").unlink()
+    _write_manifest(dest, _identity(agent_id, "manifest-agent"), _usage_item())
+
+    refs = discover_preserved_agents(temp_mngr_ctx)
+
+    assert [(ref.agent_id, ref.agent_name) for ref in refs] == [(str(agent_id), "manifest-agent")]
+
+
+def test_discover_preserved_agents_keeps_prior_usage_after_failed_retry(temp_mngr_ctx: MngrContext) -> None:
+    agent_id = AgentId.generate()
+    dest = _plant_preserved_agent(temp_mngr_ctx, agent_id, "retry-agent", write_meta=False)
+    _write_manifest(dest, _identity(agent_id, "retry-agent"), _usage_item(PreservationOutcome.ERROR, "retry failed"))
+
+    refs = discover_preserved_agents(temp_mngr_ctx)
+
+    assert [ref.agent_id for ref in refs] == [str(agent_id)]
+
+
+def test_discover_manifest_identity_overrides_stale_data_for_filters(temp_mngr_ctx: MngrContext) -> None:
+    agent_id = AgentId.generate()
+    stale_id = AgentId.generate()
+    dest = _plant_preserved_agent(temp_mngr_ctx, stale_id, "stale", provider_name="modal", project="stale")
+    _write_manifest(dest, _identity(agent_id, "current", labels={"project": "current"}), _usage_item())
+
+    refs = discover_preserved_agents(
+        temp_mngr_ctx,
+        provider_names=("local",),
+        include_filters=('labels.project == "current"',),
+    )
+
+    assert [(ref.agent_id, ref.agent_name) for ref in refs] == [(str(agent_id), "current")]
+
+
+def test_discover_preserved_agents_skips_an_unusable_manifest_instead_of_falling_back(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A bad manifest supersedes the legacy sidecars, so the archive is left out entirely."""
+    agent_id = AgentId.generate()
+    dest = _plant_preserved_agent(temp_mngr_ctx, agent_id, "unusable-manifest")
+    (dest / PRESERVATION_MANIFEST_FILENAME).write_text("not json")
+
+    with allow_warnings(match="Ignoring invalid preservation manifest"):
+        assert discover_preserved_agents(temp_mngr_ctx) == []
 
 
 def test_discover_skips_dir_without_usage_meta(temp_mngr_ctx: MngrContext) -> None:

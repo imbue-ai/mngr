@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Final
+from typing import Self
 from typing import TypeVar
 from typing import assert_never
 
@@ -21,6 +22,7 @@ import pydantic
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.common_transcript_records import CommonTranscriptRecord
 from imbue.mngr.agents.common_transcript_records import HeaderRecord
@@ -75,6 +77,10 @@ class TrajectoryBuildResult(FrozenModel):
     warnings: tuple[str, ...] = Field(
         description="Non-fatal merge problems (unmatched observation results, skipped or still-pending subagents)"
     )
+
+    def prepend_warnings(self, warnings: Sequence[str]) -> Self:
+        """Add enclosing discovery warnings ahead of this result's build warnings."""
+        return self.model_copy_update(to_update(self.field_ref().warnings, tuple(warnings) + self.warnings))
 
 
 def parse_stream_content(content: str, source_description: str) -> tuple[CommonTranscriptRecord, ...]:

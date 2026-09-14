@@ -37,6 +37,7 @@ from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -296,6 +297,13 @@ AGENT_CAPABILITIES: Final[tuple[AgentCapability, ...]] = (
         description="Emits token/cost usage that `mngr usage` aggregates (via a sibling `mngr_<harness>_usage` plugin). Wanted so the agent's spend is visible.",
         detection_kind=CapabilityDetectionKind.USAGE_SOURCE,
         scope=CapabilityScope.CLI_BACKED_ONLY,
+    ),
+    AgentCapability(
+        key="compaction",
+        description="Supports manually triggering context compaction for active context management.",
+        detection_kind=CapabilityDetectionKind.CLASS_MIXIN,
+        scope=CapabilityScope.INTERACTIVE_ONLY,
+        mixin=HasCompactionMixin,
     ),
     # The headless-output row is kept last: it applies only to headless agent variants.
     AgentCapability(
