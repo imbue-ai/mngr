@@ -80,6 +80,10 @@ class NoMatchingHostsError(UserInputError):
     exit_code = EXIT_CODE_TARGET_NOT_FOUND
 
 
+class HostNameNotFoundError(UserInputError):
+    """Raised when a host name matches no host that discovery can see."""
+
+
 class ParseSpecError(MngrError, ValueError):
     """Raised when parsing a specification string fails."""
 
@@ -235,6 +239,10 @@ class AgentNotFoundError(AgentError):
     def __init__(self, agent_identifier: str) -> None:
         self.agent_identifier = agent_identifier
         super().__init__(f"Agent not found: {agent_identifier}")
+
+
+class AgentNameNotFoundError(UserInputError):
+    """Raised when an agent name matches no agent that discovery can see."""
 
 
 class AgentIdNotFoundError(AgentNotFoundError):

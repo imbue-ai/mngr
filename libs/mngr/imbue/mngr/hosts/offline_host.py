@@ -132,6 +132,10 @@ class BaseHost(HostInterface):
             return self.host_dir_override
         return self.provider_instance.host_dir
 
+    def get_provider_name(self) -> ProviderInstanceName:
+        """Get the name of the provider instance managing this host."""
+        return self.provider_instance.name
+
     # =========================================================================
     # Activity Configuration
     # =========================================================================

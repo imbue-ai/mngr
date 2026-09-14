@@ -30,6 +30,7 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_usage import hookspecs as usage_hookspecs
 from imbue.mngr_usage.cli import usage
 from imbue.mngr_usage.data_types import UsagePluginConfig
@@ -70,7 +71,7 @@ def _preserve_destroyed_agent_usage(
     host: HostInterface,
     agent_name: AgentName,
     agent_id: AgentId,
-    provider_name: str,
+    provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
 ) -> None:
     """Preserve one destroyed agent's usage events, capturing its host metadata.
@@ -86,8 +87,8 @@ def _preserve_destroyed_agent_usage(
             agent_name,
             agent_id,
             provider_name=provider_name,
-            host_id=str(host.id),
-            host_name=str(host.get_name()),
+            host_id=host.id,
+            host_name=host.get_name(),
             mngr_ctx=mngr_ctx,
         )
     except (MngrError, OSError) as e:
@@ -101,27 +102,13 @@ def on_before_agent_destroy(agent: AgentInterface, host: OnlineHostInterface) ->
     Agent-agnostic: fires for every agent type, but :func:`preserve_agent_usage`
     is a no-op for agents that wrote no usage events, so only usage writers (e.g.
     Claude agents via ``mngr_claude_usage``) actually produce a preserved copy.
-    ``provider_name`` is read from the agent's discovery record (the only place
-    that carries it without reaching into a concrete host implementation).
-
-    Best-effort: a failure resolving the provider or preserving is logged and
-    swallowed -- this hook must never raise, since a raise aborts the destroy.
+    Best-effort: a preservation failure is logged and swallowed -- this hook
+    must never raise, since a raise aborts the destroy.
     """
     mngr_ctx = agent.mngr_ctx
     if not _is_preserve_on_destroy_enabled(mngr_ctx):
         return
-    try:
-        provider_name = next(
-            (str(ref.provider_name) for ref in host.discover_agents() if ref.agent_id == agent.id),
-            None,
-        )
-    except (MngrError, OSError) as e:
-        logger.warning("Could not discover agents to preserve usage for {}: {}", agent.id, e)
-        return
-    if provider_name is None:
-        logger.debug("Could not resolve provider for agent {}; skipping usage preservation", agent.id)
-        return
-    _preserve_destroyed_agent_usage(host, host, agent.name, agent.id, provider_name, mngr_ctx)
+    _preserve_destroyed_agent_usage(host, host, agent.name, agent.id, host.get_provider_name(), mngr_ctx)
 
 
 @hookimpl
@@ -148,7 +135,7 @@ def on_before_host_destroy(host: HostInterface, mngr_ctx: MngrContext) -> None:
         logger.warning("Could not discover agents on host {} to preserve usage: {}", host.id, e)
         return
     for ref in refs:
-        _preserve_destroyed_agent_usage(host, host, ref.agent_name, ref.agent_id, str(ref.provider_name), mngr_ctx)
+        _preserve_destroyed_agent_usage(host, host, ref.agent_name, ref.agent_id, ref.provider_name, mngr_ctx)
 
 
 @hookimpl

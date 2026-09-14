@@ -10,6 +10,7 @@ from imbue.mngr.agents.common_transcript_records import CommonTranscriptRecord
 from imbue.mngr.agents.data_types.atif.trajectory import Trajectory
 from imbue.mngr.agents.trajectory_build import EmbeddedSubagent
 from imbue.mngr.agents.trajectory_build import MNGR_SUBAGENT_KIND
+from imbue.mngr.agents.trajectory_build import TrajectoryBuildResult
 from imbue.mngr.agents.trajectory_build import TrajectoryEnrichment
 from imbue.mngr.agents.trajectory_build import build_trajectory_from_records
 from imbue.mngr.agents.trajectory_build import parse_stream_content
@@ -432,3 +433,17 @@ def test_subagent_with_no_result_yet_is_embedded_with_a_pending_marker() -> None
     assert pending_result.subagent_trajectory_ref is not None
     assert pending_result.subagent_trajectory_ref[0].trajectory_id == "child-pending"
     assert Trajectory.model_validate(trajectory.to_json_dict()) == trajectory
+
+
+def test_prepend_warnings_preserves_extended_result_fields() -> None:
+    class ExtendedResult(TrajectoryBuildResult):
+        provenance: str
+
+    records = _parse([_header(), _user_step("u1", "2026-06-09T12:00:00Z", "hello")])
+    built = build_trajectory_from_records(records, _make_enrichment(), {})
+    result = ExtendedResult(trajectory=built.trajectory, warnings=("inner",), provenance="archive")
+    updated = result.prepend_warnings(("outer",))
+    assert updated.warnings == ("outer", "inner")
+    assert updated.provenance == "archive"
+    assert updated.trajectory is result.trajectory
+    assert result.warnings == ("inner",)
