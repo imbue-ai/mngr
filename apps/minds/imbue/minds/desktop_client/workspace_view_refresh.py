@@ -27,6 +27,13 @@ and holding it would be unbounded in a way the remote case is not: the release
 is the network coming back, which for a remote machine is the same event it
 needed anyway, and for an on-device one may never come at all.
 
+A laptop that sleeps inside the settle is the same transition again: a timed
+wait can return the instant the machine is back, which is when the interface is
+coming up. So a wake opens a settle window of its own, which both holds a
+refresh raised in the seconds after the lid opens and supersedes the window a
+sleeping worker was waiting out; that worker establishes the wake for itself
+when its wait returns, and stands down for the window the wake opened.
+
 This narrows the window rather than closing it: the settle is a guess about how
 long an interface takes to stop flapping, and a reload issued after it can still
 lose a race. What makes a lost reload recoverable is the embedder noticing that
@@ -36,6 +43,7 @@ module's.
 
 import threading
 import time
+from datetime import datetime
 from typing import Final
 
 from loguru import logger
@@ -50,6 +58,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
+from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.workspace_recovery import is_network_dependent_workspace
@@ -74,9 +83,11 @@ class WorkspaceViewRefresher(MutableModel):
     it, so it also covers a machine that came back some other way: a cold boot
     that finished on its own, or the user starting a machine they had stopped.
 
-    Constructed without a detector, it publishes every refresh immediately --
-    the behaviour without any environment signals at all, and the same
-    convention the unattended-recovery gate uses.
+    Constructed without a detector and without a sleep tracker, it publishes
+    every refresh immediately -- the behaviour without any environment signals
+    at all, and the same convention the unattended-recovery gate uses. Either
+    one alone can open a window and so hold a refresh, through the callback
+    registered with it (:meth:`on_connectivity_recovered`, :meth:`on_wake`).
     """
 
     publisher: UiStatePublisher = Field(
@@ -98,6 +109,14 @@ class WorkspaceViewRefresher(MutableModel):
             "transition can be held until the transition is over. None publishes unconditionally."
         ),
     )
+    sleep_tracker: SleepTracker | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Ticked when a settle's wait returns, so a wake this device slept through is recorded "
+            "then rather than at the heartbeat loop's next tick. None trusts the wait."
+        ),
+    )
     concurrency_group: ConcurrencyGroup = Field(
         frozen=True, description="Parent group for the worker that waits out the settle."
     )
@@ -114,11 +133,14 @@ class WorkspaceViewRefresher(MutableModel):
     # right now, not a history.
     _held_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _held_agent_ids: set[str] = PrivateAttr(default_factory=set)
-    # When connectivity was last seen to come back, so a refresh arriving just
+    # When the settle window was last opened, so a refresh arriving just
     # *after* the recovery edge is held too. The two edges are independent and
     # land in either order: in the incident this was written for the health edge
     # came 0.2s first, and nothing makes that the ordering.
-    _recovered_at_monotonic: float | None = PrivateAttr(default=None)
+    _settle_opened_at_monotonic: float | None = PrivateAttr(default=None)
+    # Bumped every time a window is opened, so a worker whose window has been
+    # superseded can stand down: the newer window has a worker of its own.
+    _settle_generation: int = PrivateAttr(default=0)
 
     def __call__(self, agent_id: AgentId) -> None:
         if not self._is_refresh_held(agent_id):
@@ -135,8 +157,23 @@ class WorkspaceViewRefresher(MutableModel):
         if not self._is_refresh_held(agent_id):
             self._publish_held()
 
+    def on_wake(self, wake_at: datetime) -> None:
+        """Start a settle window at a wake (registered as the sleep tracker's wake callback).
+
+        The reading after a wake is UNKNOWN, which holds nothing on its own, so
+        without this a machine whose recovery lands in the seconds after the lid
+        opens would be reloaded into the interface coming up. ``wake_at``
+        matches the callback signature and is not read: the window runs from
+        now, which is the later of the two and so the safer.
+        """
+        self._open_settle_window()
+
     def on_connectivity_recovered(self) -> None:
-        """Start the settle window (registered as the detector's recovery callback).
+        """Start the settle window (registered as the detector's recovery callback)."""
+        self._open_settle_window()
+
+    def _open_settle_window(self) -> None:
+        """Open (or re-open) the window and spawn the worker that ends it.
 
         Spawned unconditionally rather than only when something is held: a
         machine whose own recovery edge lands *during* the window is held by
@@ -144,11 +181,11 @@ class WorkspaceViewRefresher(MutableModel):
         window is opened before the spawn for the same reason, so a refresh
         arriving between the two is caught by the worker that does exist.
         """
-        with self._held_lock:
-            self._recovered_at_monotonic = time.monotonic()
+        generation = self._arm_settle()
         try:
             self.concurrency_group.start_new_thread(
                 target=self._publish_held_after_settle,
+                args=(generation,),
                 name="workspace-view-refresh-settle",
                 daemon=True,
                 is_checked=False,
@@ -162,7 +199,7 @@ class WorkspaceViewRefresher(MutableModel):
             self._publish_held_without_a_settle()
 
     def _publish_held_without_a_settle(self) -> None:
-        """Close the settle window, then publish. For a recovery whose worker never started.
+        """Close the settle window, then publish. For a window whose worker never started.
 
         The window has to go with the worker that would have ended it. A window
         left open holds every refresh raised inside it, and the drain that
@@ -172,15 +209,29 @@ class WorkspaceViewRefresher(MutableModel):
         device whose network is now fine is never.
         """
         with self._held_lock:
-            self._recovered_at_monotonic = None
+            self._settle_opened_at_monotonic = None
         self._publish_held()
 
-    def _publish_held_after_settle(self) -> None:
+    def _arm_settle(self) -> int:
+        """Open a fresh window from now, and answer with its generation."""
+        with self._held_lock:
+            self._settle_opened_at_monotonic = time.monotonic()
+            self._settle_generation += 1
+            return self._settle_generation
+
+    def _publish_held_after_settle(self, generation: int) -> None:
         """Worker body: wait out the settle, then publish whatever accumulated during it.
 
         Waits on the group's shutdown event rather than sleeping, so a quit
         inside the window exits at once -- and drops the held refreshes with it,
         which is correct: there is no window left to repaint.
+
+        A wait the device slept through is not a settle that was waited out: it
+        returns at the wake, into the interface transition the settle exists to
+        outlast. The worker ticks the sleep tracker itself, because its wait can
+        return before the heartbeat loop's next tick records that wake; the wake
+        callback then opens the replacement window, and this worker stands down
+        for it below.
 
         The condition is re-read at the end rather than assumed from the start.
         An interface that came back and went again inside the window -- a wifi
@@ -189,12 +240,17 @@ class WorkspaceViewRefresher(MutableModel):
         holds, which is the blank frame this module exists to prevent. Nothing
         is stranded by declining: a reading that still blocks is one the detector
         is still watching, so the next recovery arms another worker, and a
-        settle window newer than this one exists only because a newer recovery
-        already did.
+        window newer than this one has a worker of its own.
         """
         if self.concurrency_group.shutdown_event.wait(timeout=self.settle_seconds):
             return
-        if self._is_network_settling():
+        if self.sleep_tracker is not None:
+            self.sleep_tracker.record_heartbeat()
+        with self._held_lock:
+            is_superseded = self._settle_generation != generation
+        if is_superseded:
+            return
+        if self._is_device_blocked():
             return
         self._publish_held()
 
@@ -225,21 +281,22 @@ class WorkspaceViewRefresher(MutableModel):
         """Whether a refresh published right now would be aimed at a transitioning network.
 
         True while a *confirmed* device-level block is in force, and for the
-        settle interval after one lifts. An UNKNOWN reading -- none taken yet, or
-        one a wake invalidated -- yields ``EnvironmentBlock.NONE`` and so holds
-        nothing, which is the module-wide rule for a reading that knows nothing.
+        settle interval after a window was opened -- by a block lifting or by a
+        wake. An UNKNOWN reading -- none taken yet, or one a wake invalidated --
+        yields ``EnvironmentBlock.NONE`` and so holds nothing on its own, which
+        is the module-wide rule for a reading that knows nothing; the wake that
+        blanked it is what opens the window instead.
         """
+        if self._is_device_blocked():
+            return True
+        with self._held_lock:
+            opened_at = self._settle_opened_at_monotonic
+        if opened_at is None:
+            return False
+        return (time.monotonic() - opened_at) < self.settle_seconds
+
+    def _is_device_blocked(self) -> bool:
         detector = self.connectivity_detector
         if detector is None:
             return False
-        if detector.get_reading().environment_block is not EnvironmentBlock.NONE:
-            return True
-        with self._held_lock:
-            recovered_at = self._recovered_at_monotonic
-        if recovered_at is None:
-            return False
-        # Monotonic freezes across a macOS sleep, so a window straddling one
-        # reads as shorter than it was. The consequence is a refresh held for up
-        # to one settle longer than needed, which is the safe direction: this
-        # can delay a repaint, never publish one early.
-        return (time.monotonic() - recovered_at) < self.settle_seconds
+        return detector.get_reading().environment_block is not EnvironmentBlock.NONE

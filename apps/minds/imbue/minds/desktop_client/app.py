@@ -2208,6 +2208,7 @@ def create_desktop_client(
     mngr_caller: MngrCaller | None = None,
     sync_scheduler: WorkspaceSyncScheduler | None = None,
     connectivity_detector: ConnectivityDetector | None = None,
+    sleep_tracker: SleepTracker | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2417,18 +2418,22 @@ def create_desktop_client(
         _health_tracker_for_ui.add_on_change_callback(_publish_ui_health_edge)
 
         if root_concurrency_group is not None:
-            # Both edges feed the refresher: the health one raises a refresh, and
-            # the connectivity one is what releases a refresh raised at a moment
-            # the reload it asks for could not have survived.
+            # Three edges feed the refresher: the health one raises a refresh,
+            # and the connectivity one and the wake each open the window that
+            # holds a refresh raised at a moment the reload it asks for could
+            # not have survived.
             workspace_view_refresher = WorkspaceViewRefresher(
                 publisher=ui_publisher,
                 backend_resolver=backend_resolver,
                 connectivity_detector=connectivity_detector,
+                sleep_tracker=sleep_tracker,
                 concurrency_group=root_concurrency_group,
             )
             _health_tracker_for_ui.add_on_recovery_callback(workspace_view_refresher)
             if connectivity_detector is not None:
                 connectivity_detector.add_on_recovery_callback(workspace_view_refresher.on_connectivity_recovered)
+            if sleep_tracker is not None:
+                sleep_tracker.add_on_wake_callback(workspace_view_refresher.on_wake)
             # The tracker fires its on-change callbacks before its stuck-edge ones,
             # so the band is already showing STUCK by the time this dispatches.
             assert unattended_recovery_dispatcher is not None, "built above from the same tracker and group"

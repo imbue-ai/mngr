@@ -177,9 +177,10 @@ class SleepTracker(MutableModel):
         whichever loop's tick happened to close the gap: the heartbeat loop, or
         one of the consumers that establishes the wake for itself rather than
         race the heartbeat for it (the discovery watchdog, the system-interface
-        health probe). So keep them fast for the reason that survives whichever
-        it was -- what a slow callback delays is that loop's own next act, which
-        may be a stall verdict or a pass of the loop that adjudicates STUCK.
+        health probe, the view-refresh settle worker). So keep them fast for the
+        reason that survives whichever it was -- what a slow callback delays is
+        that loop's own next act, which may be a stall verdict or a pass of the
+        loop that adjudicates STUCK.
         """
         with self._lock:
             self._on_wake_callbacks.append(callback)
