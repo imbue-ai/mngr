@@ -88,7 +88,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Version of the upstream ``latchkey`` CLI to install on the VPS.
-LATCHKEY_VERSION: Final[str] = "3.11.1"
+LATCHKEY_VERSION: Final[str] = "3.13.0"
 
 # datalib release the VPS fetches the "dispatch curl" + Chrome-impersonating
 # curl from (``curl-<triple>.tar.gz``). The gateway runs the dispatch curl as
