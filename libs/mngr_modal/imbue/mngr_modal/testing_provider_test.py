@@ -9,15 +9,19 @@ import contextlib
 import json
 import subprocess
 import sys
+from collections.abc import Generator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
 from pathlib import Path
+from typing import Final
 from uuid import uuid4
 
 import pytest
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
@@ -57,6 +61,7 @@ from imbue.mngr_modal.backend import _exit_modal_app_context
 from imbue.mngr_modal.backend import _lookup_persistent_app_with_env_retry
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
+from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import HOST_VOLUME_INFIX
 from imbue.mngr_modal.instance import HostRecord
@@ -66,6 +71,7 @@ from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
+from imbue.mngr_modal.instance import _SANDBOX_CREATE_ATTEMPT_COUNT
 from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
 from imbue.mngr_modal.instance import _build_modal_volumes
@@ -84,15 +90,21 @@ from imbue.mngr_modal.volume import ModalVolume
 from imbue.mngr_modal.volume import _proxy_file_entry_type_to_volume_file_type
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
+from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.interface import AppInterface
+from imbue.modal_proxy.interface import ExecOutput
+from imbue.modal_proxy.interface import ExecProcess
 from imbue.modal_proxy.interface import FunctionInterface
+from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
+from imbue.modal_proxy.testing import FakeExecOutput
 from imbue.modal_proxy.testing import FakeModalInterface
+from imbue.modal_proxy.testing import FakeSandbox
 from imbue.modal_proxy.testing import FakeVolume
 
 
@@ -3002,3 +3014,196 @@ def test_build_listing_script_uses_host_dir() -> None:
     script = build_listing_collection_script("/custom/host/dir", "test-prefix-")
     assert "/custom/host/dir" in script
     assert "test-prefix-" in script
+
+
+# Dead-on-arrival sandbox tests
+
+
+# 128 + SIGKILL: what Modal reports for every command queued against a sandbox
+# whose container died, and for the sandbox's own exit code.
+_MODAL_SIGKILL_EXIT_CODE: Final[int] = 137
+
+
+class _SigkilledExecProcess(ExecProcess):
+    """The process handle Modal hands back for a command queued against a dead sandbox."""
+
+    def get_stdout(self) -> ExecOutput:
+        return FakeExecOutput(output_text="")
+
+    def wait(self) -> int:
+        return _MODAL_SIGKILL_EXIT_CODE
+
+
+class _DeadOnArrivalSandbox(FakeSandbox):
+    """A sandbox Modal killed before its container ran anything.
+
+    Unlike a terminated ``FakeSandbox``, exec still hands back a process: real Modal
+    accepts the command and only then reports it SIGKILLed, with no output at all.
+    """
+
+    def exec(
+        self,
+        *args: str,
+        stdout: StreamType = StreamType.PIPE,
+        stderr: StreamType = StreamType.PIPE,
+    ) -> ExecProcess:
+        return _SigkilledExecProcess()
+
+    def poll(self) -> int | None:
+        return _MODAL_SIGKILL_EXIT_CODE
+
+
+# Unique marker so an assertion on this output cannot pass on some other command's stdout.
+_COMMAND_FAILURE_OUTPUT: Final[str] = "bring-up-output-38471"
+
+
+class _FailedExecProcess(ExecProcess):
+    """A command that ran and exited non-zero, with output to show for it."""
+
+    def get_stdout(self) -> ExecOutput:
+        return FakeExecOutput(output_text=_COMMAND_FAILURE_OUTPUT)
+
+    def wait(self) -> int:
+        return 3
+
+
+class _CommandFailingSandbox(FakeSandbox):
+    """A live sandbox whose command genuinely failed: non-zero exit, output, still running."""
+
+    def exec(
+        self,
+        *args: str,
+        stdout: StreamType = StreamType.PIPE,
+        stderr: StreamType = StreamType.PIPE,
+    ) -> ExecProcess:
+        return _FailedExecProcess()
+
+    def poll(self) -> int | None:
+        return None
+
+
+class _DeadOnArrivalFakeModalInterface(FakeModalInterface):
+    """A Modal whose first ``dead_on_arrival_count`` sandboxes die before running anything."""
+
+    dead_on_arrival_count: int = Field(description="How many of the first sandboxes to hand back dead")
+
+    _dead_sandboxes: list[_DeadOnArrivalSandbox] = PrivateAttr(default_factory=list)
+
+    def sandbox_create(
+        self,
+        *,
+        image: ImageInterface,
+        app: AppInterface,
+        timeout: int,
+        cpu: float,
+        memory: int,
+        unencrypted_ports: Sequence[int] = (),
+        gpu: str | None = None,
+        region: str | None = None,
+        cidr_allowlist: Sequence[str] | None = None,
+        volumes: Mapping[str, VolumeInterface] | None = None,
+        experimental_options: Mapping[str, bool] | None = None,
+    ) -> SandboxInterface:
+        if len(self._dead_sandboxes) < self.dead_on_arrival_count:
+            dead_sandbox = _DeadOnArrivalSandbox(sandbox_id=f"sb-dead-{uuid4().hex}")
+            self._dead_sandboxes.append(dead_sandbox)
+            return dead_sandbox
+        return super().sandbox_create(
+            image=image,
+            app=app,
+            timeout=timeout,
+            cpu=cpu,
+            memory=memory,
+            unencrypted_ports=unencrypted_ports,
+            gpu=gpu,
+            region=region,
+            cidr_allowlist=cidr_allowlist,
+            volumes=volumes,
+            experimental_options=experimental_options,
+        )
+
+
+@contextlib.contextmanager
+def _provider_whose_first_sandboxes_die(
+    mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+    dead_on_arrival_count: int,
+) -> Generator[tuple[ModalProviderInstance, _DeadOnArrivalFakeModalInterface], None, None]:
+    root = tmp_path / f"modal_testing_{uuid4().hex}"
+    root.mkdir(parents=True, exist_ok=True)
+    modal_interface = _DeadOnArrivalFakeModalInterface(
+        root_dir=root, concurrency_group=cg, dead_on_arrival_count=dead_on_arrival_count
+    )
+    try:
+        yield make_testing_provider(mngr_ctx, modal_interface), modal_interface
+    finally:
+        modal_interface.cleanup()
+
+
+def _request_running_sandbox(provider: ModalProviderInstance) -> SandboxInterface:
+    return provider._create_running_sandbox(
+        image=provider._modal_interface.image_debian_slim(),
+        app=provider._get_modal_app(),
+        config=SandboxConfig(),
+        volumes={},
+    )
+
+
+def test_create_running_sandbox_replaces_a_sandbox_that_died_before_running_a_command(
+    temp_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """A sandbox Modal killed on the way up is discarded and replaced, not handed to bring-up."""
+    with _provider_whose_first_sandboxes_die(temp_mngr_ctx, tmp_path, cg, dead_on_arrival_count=1) as (
+        provider,
+        modal_interface,
+    ):
+        sandbox = _request_running_sandbox(provider)
+
+        assert sandbox.poll() is None
+        (dead_sandbox,) = modal_interface._dead_sandboxes
+        assert sandbox.get_object_id() != dead_sandbox.get_object_id()
+        assert dead_sandbox._is_terminated, "the discarded sandbox must be terminated so it does not linger"
+
+
+def test_create_running_sandbox_raises_a_dead_sandbox_error_when_every_attempt_dies(
+    temp_mngr_ctx: MngrContext, tmp_path: Path, cg: ConcurrencyGroup
+) -> None:
+    """When no sandbox ever runs a command, the error names that -- not some bring-up step."""
+    with _provider_whose_first_sandboxes_die(temp_mngr_ctx, tmp_path, cg, dead_on_arrival_count=100) as (
+        provider,
+        modal_interface,
+    ):
+        with pytest.raises(ModalSandboxDiedMngrError) as exc_info:
+            _request_running_sandbox(provider)
+
+        assert "died before it ran a single command" in str(exc_info.value)
+        assert len(modal_interface._dead_sandboxes) == _SANDBOX_CREATE_ATTEMPT_COUNT
+
+
+def test_check_and_install_packages_blames_the_dead_sandbox_rather_than_the_packages(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """A SIGKILL from a dead sandbox says nothing about apt, so it must not be reported as an install failure."""
+    dead_sandbox = _DeadOnArrivalSandbox(sandbox_id=f"sb-dead-{uuid4().hex}")
+
+    with pytest.raises(ModalSandboxDiedMngrError) as exc_info:
+        testing_provider._check_and_install_packages(dead_sandbox)
+
+    assert dead_sandbox.get_object_id() in str(exc_info.value)
+    assert str(_MODAL_SIGKILL_EXIT_CODE) in str(exc_info.value)
+    assert "install required packages" in str(exc_info.value)
+
+
+def test_bring_up_command_still_blames_the_command_when_the_sandbox_is_alive(
+    testing_provider: ModalProviderInstance,
+) -> None:
+    """A live sandbox failing a command is a command failure, and keeps its own message and output."""
+    sandbox = _CommandFailingSandbox(sandbox_id=f"sb-alive-{uuid4().hex}")
+
+    with pytest.raises(MngrError) as exc_info:
+        testing_provider._run_bring_up_command(sandbox, "does-not-matter", "do the thing")
+
+    assert not isinstance(exc_info.value, ModalSandboxDiedMngrError)
+    assert "Failed to do the thing (exit code 3)" in str(exc_info.value)
+    assert _COMMAND_FAILURE_OUTPUT in str(exc_info.value)
