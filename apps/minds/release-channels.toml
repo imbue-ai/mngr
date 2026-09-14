@@ -43,3 +43,26 @@ build_id = "260909wnd3gb4z1"
 version = "0.5.2"
 fallback_branch = "minds-v0.5.2"
 rollout_percentage = 100
+
+# Which default-workspace-template tag browser-created workspaces pin to, per
+# channel. The hosted web chrome's create (the connector's POST /hosts/claim)
+# leases a pool host baked at exactly this tag and has no rebuild fallback, so
+# the pool must be baked at a tag BEFORE an entry names it
+# (apps/minds/docs/deploy/ops/pool-hosts.md).
+#
+# Independent of the desktop entries above on purpose: the web client has no
+# ToDesktop build, so a web-only template fix moves this pin ahead of (or
+# behind) the desktop on its own. Published as `<channel>-web.json`; the
+# connector reads it on every web create (cached about a minute), so moving the
+# pin is a merge of this file, never a connector deploy. Which channel a web
+# user is on is their own choice, in the web chrome's Settings (default
+# stable). The publish refuses a tag that is not on the template remote.
+
+[web_channels.stable]
+template_ref = "minds-v0.5.2"
+
+[web_channels.beta]
+template_ref = "minds-v0.5.2"
+
+[web_channels.alpha]
+template_ref = "minds-v0.5.2"

@@ -95,12 +95,13 @@ max_total_machine_disk_gb = 1400
 
 # Enable web workspace creation (the hosted chrome's POST /hosts/claim).
 # Deliberately unadvertised for now: only people who know the /web URL use it.
-# No explicit pins: the template repo/ref default to the canonical
-# default-workspace-template repo and the app's pinned release tag
+# No explicit pins: the template repo defaults to the canonical
+# default-workspace-template repo and the ref to the app's pinned release tag
 # (FALLBACK_BRANCH in imbue/minds/build_info.py), so the web pin advances with
-# each release automatically -- the same tag the pool is re-baked from.
-# Deploy-time env vars MINDS_WEB_TEMPLATE_REPO / MINDS_WEB_TEMPLATE_REF
-# override for one-off deploys.
+# each release automatically -- the same tag the pool is re-baked from. This
+# tier publishes no update feed, so that deploy-time ref IS the live pin here
+# (production's comes from the feed's `<channel>-web.json`). Deploy-time env vars
+# MINDS_WEB_TEMPLATE_REPO / MINDS_WEB_TEMPLATE_REF override for one-off deploys.
 [web_workspaces]
 
 # User-facing custom-domain origin layout (sharing redesign): the hosted

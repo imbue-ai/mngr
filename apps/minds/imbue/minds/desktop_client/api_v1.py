@@ -1108,7 +1108,8 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         return _json_field_error(backup_error, "backup_api_key_env")
 
     # For imbue_cloud compute the lease needs the resolved template version
-    # (the latest semver tag when no branch was given), matching the form path.
+    # (with no branch given: the app's pinned release tag for the default
+    # template, else the repo's newest release tag), matching the form path.
     branch_or_tag = branch
     if launch_mode is LaunchMode.IMBUE_CLOUD and not branch_or_tag:
         branch_or_tag = resolve_template_version(git_url, branch, parent_cg=agent_creator.root_concurrency_group)

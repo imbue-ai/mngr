@@ -418,12 +418,15 @@ class WebWorkspacesConfig(FrozenModel):
 
     There is deliberately no ``template_ref`` field: a committed ref pin
     silently goes stale the moment the pool is re-baked at a newer version
-    (a dev tier shipped exactly that bug). Shared tiers (staging /
-    production) always track the app's pinned release tag
-    (``FALLBACK_BRANCH``) -- the same tag the pool is re-baked from -- and
-    dev-tier deploys must state the ref explicitly via the
-    ``MINDS_WEB_TEMPLATE_REF`` env var (which also overrides the default on
-    every other tier). ``MINDS_WEB_TEMPLATE_REPO`` likewise overrides
+    (a dev tier shipped exactly that bug). On a tier with an update feed the
+    live ref is the release channel's ``<channel>-web.json``
+    (``[web_channels.*]`` in ``apps/minds/release-channels.toml``), read by
+    the connector on every web create; the deploy pushes only a fallback ref
+    for when that file cannot be read, which shared tiers take from the app's
+    pinned release tag (``FALLBACK_BRANCH``) and dev-tier deploys must state
+    explicitly via the ``MINDS_WEB_TEMPLATE_REF`` env var (which also
+    overrides the default on every other tier). Tiers with no feed run on
+    that fallback outright. ``MINDS_WEB_TEMPLATE_REPO`` likewise overrides
     ``template_repo`` at deploy time.
     """
 

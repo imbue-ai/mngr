@@ -166,6 +166,8 @@ max_total_machine_disk_gb = 1400
 # dev-tier deploy must instead state the ref explicitly, matching what the
 # dev pool is baked at (see `just pool-bake-from-worktree` / `pool-bake`):
 #   MINDS_WEB_TEMPLATE_REF=<branch-or-tag> uv run minds-admin env deploy
+# Dev envs publish no update feed, so this deploy-time ref is the live pin
+# (production's comes from the feed's `<channel>-web.json`).
 [web_workspaces]
 template_repo = "github.com/imbue-ai/default-workspace-template"
 

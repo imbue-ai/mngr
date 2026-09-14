@@ -46,6 +46,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.backend_resolver import SYSTEM_SERVICES_AGENT_NAME
@@ -74,6 +75,8 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.skill_chat import USER_CREATED_LABEL
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_url
+from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -1355,7 +1358,48 @@ def _remote_host_env_flags() -> list[str]:
     ]
 
 
-_SEMVER_TAG_PATTERN: Final[re.Pattern[str]] = re.compile(r"^refs/tags/(v\d+\.\d+\.\d+)$")
+# The two release-tag schemes a template repo may carry: the ``minds-v*`` tags
+# every minds release cuts, and plain ``v*`` semver tags. When both exist the
+# ``minds-v*`` scheme wins outright -- the plain tags on the default template
+# predate it and are older than the in-place update floor, so "latest" across
+# both schemes would pick a template no current app can run.
+_RELEASE_TAG_SCHEMES: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"^refs/tags/(minds-v(\d+)\.(\d+)\.(\d+))$"),
+    re.compile(r"^refs/tags/(v(\d+)\.(\d+)\.(\d+))$"),
+)
+
+
+@pure
+def _normalized_repo_url(url: str) -> str:
+    return url.strip().lower().rstrip("/").removesuffix(".git")
+
+
+def is_default_workspace_template_url(git_url: str) -> bool:
+    """Whether the create targets the default template repo (modulo a trailing ``.git`` or slash)."""
+    return _normalized_repo_url(git_url) == _normalized_repo_url(default_workspace_git_url())
+
+
+@pure
+def latest_release_tag_from_ls_remote_output(ls_remote_stdout: str) -> str | None:
+    """The newest release tag named in ``git ls-remote --tags`` output, or None when it names none.
+
+    Newest by scheme first (``minds-v*`` over plain ``v*``), then by version.
+    """
+    ranked: list[tuple[int, int, int, int, str]] = []
+    for line in ls_remote_stdout.strip().splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) < 2:
+            continue
+        ref = parts[1].strip()
+        for scheme_rank, pattern in enumerate(_RELEASE_TAG_SCHEMES):
+            match = pattern.match(ref)
+            if match is not None:
+                tag, major, minor, patch = match.groups()
+                ranked.append((-scheme_rank, int(major), int(minor), int(patch), tag))
+                break
+    if not ranked:
+        return None
+    return max(ranked)[4]
 
 
 def resolve_template_version(
@@ -1366,12 +1410,18 @@ def resolve_template_version(
 ) -> str:
     """Resolve the template version to use when leasing a host.
 
-    If branch is non-empty, the branch name is the version (dev workflow).
-    If branch is empty, uses ``git ls-remote --tags`` to find the latest
-    semver tag (e.g. ``v1.2.3``). Falls back to ``"main"`` if no tags found.
+    A non-empty branch is the version as given (the dev workflow). With no
+    branch, the default template resolves to this app's own pinned release
+    tag -- the tag the pool is baked at and the ceiling ``update-self``
+    honors -- so an empty Version field can never ask for a template newer or
+    older than the app. Any other repo resolves to its newest release tag via
+    ``git ls-remote --tags`` (``minds-v*`` preferred over plain ``v*``),
+    falling back to ``"main"`` when it carries none.
     """
     if branch:
         return branch
+    if is_default_workspace_template_url(git_url):
+        return default_workspace_template_ref()
 
     cg = _make_child_cg("git-ls-remote-tags", parent_cg)
     with cg:
@@ -1384,25 +1434,11 @@ def resolve_template_version(
         logger.warning("git ls-remote --tags failed for {}, falling back to 'main'", git_url)
         return "main"
 
-    tags: list[tuple[int, int, int, str]] = []
-    for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) < 2:
-            continue
-        ref = parts[1].strip()
-        match = _SEMVER_TAG_PATTERN.match(ref)
-        if match:
-            tag = match.group(1)
-            version_parts = tag[1:].split(".")
-            tags.append((int(version_parts[0]), int(version_parts[1]), int(version_parts[2]), tag))
-
-    if not tags:
-        logger.debug("No semver tags found for {}, falling back to 'main'", git_url)
+    latest = latest_release_tag_from_ls_remote_output(result.stdout)
+    if latest is None:
+        logger.debug("No release tags found for {}, falling back to 'main'", git_url)
         return "main"
-
-    tags.sort(reverse=True)
-    latest = tags[0][3]
-    logger.debug("Resolved latest semver tag for {}: {}", git_url, latest)
+    logger.debug("Resolved latest release tag for {}: {}", git_url, latest)
     return latest
 
 
