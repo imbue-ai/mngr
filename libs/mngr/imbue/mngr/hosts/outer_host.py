@@ -466,6 +466,31 @@ def _prepend_env_exports(command: str, env: Mapping[str, str] | None) -> str:
     return f"{exports} {command}"
 
 
+def _build_replay_safe_rename_command(source_path: Path, destination_path: Path) -> str:
+    """Build the rename half of an atomic write so that re-running it is harmless.
+
+    The rename goes out through ``execute_idempotent_command``, which retries on
+    a transient SSH error and cannot tell "the command never ran" apart from
+    "the command ran but its result was lost on the way back", so it has to
+    survive a replay of a run that succeeded. The source name is unique to one
+    write and nothing else consumes it, so its absence means this very rename
+    already completed. Losing the destination as well means something outside
+    this write removed both, which stays an error.
+    """
+    quoted_source = shlex.quote(str(source_path))
+    quoted_destination = shlex.quote(str(destination_path))
+    return "\n".join(
+        (
+            f"if [ -e {quoted_source} ]; then",
+            f"  mv -f {quoted_source} {quoted_destination}",
+            f"elif [ ! -e {quoted_destination} ]; then",
+            f"  echo 'neither the staged file nor its destination exists:' {quoted_source} {quoted_destination} >&2",
+            "  exit 1",
+            "fi",
+        )
+    )
+
+
 class OuterHost(OuterHostInterface):
     """A minimal, agent-less host backed by a pyinfra connector.
 
@@ -1282,8 +1307,8 @@ class OuterHost(OuterHostInterface):
 
         ``mode`` is an octal string (e.g. ``"0755"``) applied to the final path. With
         ``is_atomic`` the bytes land in a sibling temp file that is renamed over ``path``
-        once complete, so a reader never sees a half-written file; the mode is applied
-        after that rename either way.
+        once complete, so a reader never sees a half-written file; the mode goes on
+        before that rename, so the file is never published without it.
         """
         if is_atomic:
             write_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
@@ -1296,7 +1321,7 @@ class OuterHost(OuterHostInterface):
             self._write_file_remote(path, write_path, content, mode)
 
     def _write_file_local(self, path: Path, write_path: Path, content: bytes, mode: str | None) -> None:
-        """Write, rename, and chmod straight through the local filesystem.
+        """Write, chmod, and rename straight through the local filesystem.
 
         Every step the remote path delegates to a shell command is a direct filesystem
         call here. Spawning a shell to chmod a file this process just wrote costs more
@@ -1307,22 +1332,22 @@ class OuterHost(OuterHostInterface):
         except FileNotFoundError:
             write_path.parent.mkdir(parents=True, exist_ok=True)
             write_path.write_bytes(content)
+        if mode is not None:
+            write_path.chmod(int(mode, 8))
         if write_path != path:
             # The temp file is a sibling of its destination, so this is a same-filesystem
             # rename: atomic, and it replaces any existing file.
             os.replace(write_path, path)
-        if mode is not None:
-            path.chmod(int(mode, 8))
 
     def _write_file_remote(self, path: Path, write_path: Path, content: bytes, mode: str | None) -> None:
-        """Write, rename, and chmod over the connection, via SFTP plus shell commands."""
+        """Write, chmod, and rename over the connection, via SFTP plus shell commands."""
         try:
             is_success = self._put_file(io.BytesIO(content), str(write_path))
         except IOError:
             is_success = False
         if not is_success:
             parent_dir = str(write_path.parent)
-            result = self.execute_idempotent_command(f"mkdir -p '{parent_dir}'")
+            result = self.execute_idempotent_command(f"mkdir -p {shlex.quote(parent_dir)}")
             if not result.success:
                 raise MngrError(
                     f"Failed to create parent directory '{parent_dir}' on outer host {self.id} because: {result.stderr}"
@@ -1330,14 +1355,17 @@ class OuterHost(OuterHostInterface):
             is_success = self._put_file(io.BytesIO(content), str(write_path))
             if not is_success:
                 raise MngrError(f"Failed to write file '{str(write_path)}' on outer host {self.id}'")
+        # The mode goes on before the rename, so an atomic write publishes the
+        # file already carrying it rather than leaving it at the umask default
+        # (commonly world-readable) until a second round-trip lands.
+        if mode is not None:
+            self.execute_idempotent_command(f"chmod {shlex.quote(mode)} {shlex.quote(str(write_path))}")
         if write_path != path:
-            result = self.execute_idempotent_command(f"mv '{str(write_path)}' '{str(path)}'")
+            result = self.execute_idempotent_command(_build_replay_safe_rename_command(write_path, path))
             if not result.success:
                 raise MngrError(
                     f"Failed to move temp file to final location on outer host {self.id} because: {result.stderr}"
                 )
-        if mode is not None:
-            self.execute_idempotent_command(f"chmod {mode} '{str(path)}'")
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file and return its contents as a string."""

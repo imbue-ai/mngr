@@ -1,5 +1,6 @@
 import json
 import re
+import stat
 from pathlib import Path
 from typing import cast
 
@@ -7,6 +8,7 @@ import pytest
 from packaging.version import Version
 from pydantic import SecretStr
 
+from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
@@ -15,6 +17,7 @@ from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
+from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
@@ -37,7 +40,10 @@ from imbue.mngr_latchkey.remote.provisioning import _CURL_STAGED_SUFFIX
 from imbue.mngr_latchkey.remote.provisioning import _CURL_VERSION_STAMP_PATH
 from imbue.mngr_latchkey.remote.provisioning import _GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.provisioning import _MINIMUM_NODE_MAJOR_VERSION
+from imbue.mngr_latchkey.remote.provisioning import _REMOTE_EXTENSIONS_DIR_NAME
+from imbue.mngr_latchkey.remote.provisioning import _REMOTE_EXTENSION_CANDIDATE_SUFFIX
 from imbue.mngr_latchkey.remote.provisioning import _TUNNEL_PROGRAM_NAME
+from imbue.mngr_latchkey.remote.provisioning import _build_extension_install_script
 from imbue.mngr_latchkey.remote.provisioning import _build_supervisor_program_config
 from imbue.mngr_latchkey.remote.provisioning import _ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote.provisioning import _ensure_latchkey_gateway_reachable_from_container
@@ -1026,3 +1032,79 @@ def test_sync_permissions_refuses_a_policy_it_cannot_read_rather_than_storing_it
         sync_permissions(outer, latchkey_directory, host_id, _REMOTE_DIR)
 
     assert local_path.read_text() == _GRANTED_HERE
+
+
+def _staged_extension_paths(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Lay out an empty extensions directory and return it with its destination and staged paths."""
+    extensions_dir = tmp_path / _REMOTE_EXTENSIONS_DIR_NAME
+    extensions_dir.mkdir()
+    destination = extensions_dir / REMOTE_GATEWAY_EXTENSION_FILENAME
+    candidate = destination.with_name(destination.name + _REMOTE_EXTENSION_CANDIDATE_SUFFIX)
+    return extensions_dir, destination, candidate
+
+
+def test_extension_install_script_installs_the_staged_extension(local_outer_host: OuterHost, tmp_path: Path) -> None:
+    """The staged extension is moved into place with the restrictive remote file mode."""
+    extensions_dir, destination, candidate = _staged_extension_paths(tmp_path)
+    candidate.write_text("export default 'staged';\n")
+
+    result = local_outer_host.execute_idempotent_command(
+        _build_extension_install_script(extensions_dir, candidate, destination)
+    )
+
+    assert result.success
+    assert destination.read_text() == "export default 'staged';\n"
+    assert not candidate.exists()
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_replaying_the_extension_install_succeeds_after_it_already_installed(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """The retry that a lost SSH response triggers must not fail an install that already landed.
+
+    ``execute_idempotent_command`` re-runs its command after a transient SSH
+    error, including when the far side had in fact completed it, so running the
+    install twice stands in for that replay.
+    """
+    extensions_dir, destination, candidate = _staged_extension_paths(tmp_path)
+    candidate.write_text("export default 'staged';\n")
+    script = _build_extension_install_script(extensions_dir, candidate, destination)
+
+    assert local_outer_host.execute_idempotent_command(script).success
+    replayed = local_outer_host.execute_idempotent_command(script)
+
+    assert replayed.success
+    assert destination.read_text() == "export default 'staged';\n"
+
+
+def test_replaying_the_extension_install_succeeds_after_it_discarded_an_identical_candidate(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """A replay of the up-to-date branch is a no-op too, and leaves the installed copy alone."""
+    extensions_dir, destination, candidate = _staged_extension_paths(tmp_path)
+    destination.write_text("export default 'installed';\n")
+    candidate.write_text("export default 'installed';\n")
+    script = _build_extension_install_script(extensions_dir, candidate, destination)
+
+    assert local_outer_host.execute_idempotent_command(script).success
+    assert not candidate.exists()
+    replayed = local_outer_host.execute_idempotent_command(script)
+
+    assert replayed.success
+    assert destination.read_text() == "export default 'installed';\n"
+
+
+def test_extension_install_script_fails_when_the_candidate_and_destination_are_both_gone(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """A staged extension that vanished without landing is reported, not passed off as a success."""
+    extensions_dir, destination, candidate = _staged_extension_paths(tmp_path)
+
+    result = local_outer_host.execute_idempotent_command(
+        _build_extension_install_script(extensions_dir, candidate, destination)
+    )
+
+    assert not result.success
+    assert str(destination) in result.stderr
+    assert not destination.exists()

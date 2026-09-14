@@ -677,6 +677,41 @@ def _ensure_remote_latchkey_config(
     host.write_file(config_path, content.encode("utf-8"), mode=REMOTE_FILE_MODE, is_atomic=True)
 
 
+def _build_extension_install_script(extensions_dir: Path, candidate_path: Path, destination_path: Path) -> str:
+    """Build the compare-and-swap that installs a staged extension, safe to re-run.
+
+    This goes out through ``execute_idempotent_command``, which retries on a
+    transient SSH error without being able to tell whether the command already
+    ran on the far side, so it has to survive a replay of a run that succeeded.
+    A replay has to skip the swap rather than re-attempt it: ``cmp -s`` against
+    a staged file that is no longer there exits non-zero and so reads as
+    "differs", which would drive the replay into a rename with no source.
+    Losing the destination too means something outside this install removed
+    both, which stays an error.
+    """
+    quoted_extensions_dir = shlex.quote(str(extensions_dir))
+    quoted_candidate = shlex.quote(str(candidate_path))
+    quoted_destination = shlex.quote(str(destination_path))
+    return "\n".join(
+        (
+            "set -e",
+            f"mkdir -p {quoted_extensions_dir}",
+            f"chmod 700 {quoted_extensions_dir}",
+            f"if [ -e {quoted_candidate} ]; then",
+            f"  if [ ! -f {quoted_destination} ] || ! cmp -s {quoted_candidate} {quoted_destination}; then",
+            f"    mv -f {quoted_candidate} {quoted_destination}",
+            f"    chmod {REMOTE_FILE_MODE} {quoted_destination}",
+            "  else",
+            f"    rm -f {quoted_candidate}",
+            "  fi",
+            f"elif [ ! -e {quoted_destination} ]; then",
+            f"  echo 'neither the staged extension nor its destination exists:' {quoted_candidate} {quoted_destination} >&2",
+            "  exit 1",
+            "fi",
+        )
+    )
+
+
 def _ensure_remote_gateway_extension(host: OuterHostInterface, remote_dir: Path) -> None:
     """Install the VPS-only desktop-gateway proxy.
 
@@ -689,22 +724,7 @@ def _ensure_remote_gateway_extension(host: OuterHostInterface, remote_dir: Path)
     content = bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME).encode("utf-8")
     host.write_file(candidate, content, mode=REMOTE_FILE_MODE, is_atomic=True)
 
-    extensions_dir_q = shlex.quote(str(extensions_dir))
-    destination_q = shlex.quote(str(destination))
-    candidate_q = shlex.quote(str(candidate))
-    script = "\n".join(
-        (
-            "set -e",
-            f"mkdir -p {extensions_dir_q}",
-            f"chmod 700 {extensions_dir_q}",
-            f"if [ ! -f {destination_q} ] || ! cmp -s {candidate_q} {destination_q}; then",
-            f"  mv {candidate_q} {destination_q}",
-            f"  chmod {REMOTE_FILE_MODE} {destination_q}",
-            "else",
-            f"  rm -f {candidate_q}",
-            "fi",
-        )
-    )
+    script = _build_extension_install_script(extensions_dir, candidate, destination)
     result = host.execute_idempotent_command(script, timeout_seconds=REMOTE_COMMAND_TIMEOUT_SECONDS)
     if not result.success:
         raise RemoteGatewayError(

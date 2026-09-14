@@ -1,13 +1,16 @@
 """Unit tests for OuterHost and the outer-host accessors."""
 
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from typing import cast
+from uuid import uuid4
 
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
+from pydantic import Field
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
@@ -18,14 +21,15 @@ from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
+from imbue.mngr.hosts.outer_host import _build_replay_safe_rename_command
 from imbue.mngr.hosts.outer_host import _connect_pyinfra_host_retrying_transient_handshake_failures
 from imbue.mngr.hosts.outer_host import _is_remote_directory
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
-from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
+from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -33,15 +37,9 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 
 
-def test_outer_host_satisfies_outer_host_interface(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_satisfies_outer_host_interface(local_outer_host: OuterHost) -> None:
     """A constructed OuterHost is an instance of OuterHostInterface."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    assert isinstance(outer, OuterHostInterface)
+    assert isinstance(local_outer_host, OuterHostInterface)
 
 
 def test_ensure_connected_wraps_paramiko_value_error(temp_mngr_ctx: MngrContext) -> None:
@@ -99,37 +97,19 @@ def test_prepend_env_exports_quotes_values_with_shell_metacharacters() -> None:
     assert result == "export 'TOK=a b;rm -rf /' && run"
 
 
-def test_outer_host_local_is_local(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_local_is_local(local_outer_host: OuterHost) -> None:
     """An OuterHost wrapping a local pyinfra connector reports is_local=True."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    assert outer.is_local is True
+    assert local_outer_host.is_local is True
 
 
-def test_outer_host_local_get_ssh_connection_info_is_none(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_local_get_ssh_connection_info_is_none(local_outer_host: OuterHost) -> None:
     """Local OuterHost has no SSH connection info."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    assert outer.get_ssh_connection_info() is None
+    assert local_outer_host.get_ssh_connection_info() is None
 
 
-def test_outer_host_local_get_ssh_known_hosts_path_is_none(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_local_get_ssh_known_hosts_path_is_none(local_outer_host: OuterHost) -> None:
     """Local OuterHost has no host key to pin."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    assert outer.get_ssh_known_hosts_path() is None
+    assert local_outer_host.get_ssh_known_hosts_path() is None
 
 
 def test_outer_host_remote_get_ssh_known_hosts_path_reads_the_connector_host_data(
@@ -174,41 +154,29 @@ def test_outer_host_remote_get_ssh_known_hosts_path_treats_dev_null_as_unpinned(
     assert outer.get_ssh_known_hosts_path() is None
 
 
-def test_outer_host_local_executes_command(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_local_executes_command(local_outer_host: OuterHost) -> None:
     """A local OuterHost can run a shell command and capture stdout."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = outer.execute_idempotent_command("echo hello-from-outer")
+    result = local_outer_host.execute_idempotent_command("echo hello-from-outer")
     assert result.success
     assert "hello-from-outer" in result.stdout
 
 
-def test_outer_host_list_directory_local(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+def test_outer_host_list_directory_local(local_outer_host: OuterHost, tmp_path: Path) -> None:
     """list_directory on a local OuterHost reports entries with absolute paths and types."""
     root = tmp_path / "tree"
     (root / "sub").mkdir(parents=True)
     (root / "sub" / "nested.txt").write_text("n")
     (root / "top.txt").write_text("t")
 
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(create_local_pyinfra_host()),
-        mngr_ctx=temp_mngr_ctx,
-    )
-
     # Non-recursive: only the immediate children.
-    shallow = {entry.path: entry.file_type for entry in outer.list_directory(root)}
+    shallow = {entry.path: entry.file_type for entry in local_outer_host.list_directory(root)}
     assert shallow == {
         str(root / "sub"): FileType.DIRECTORY,
         str(root / "top.txt"): FileType.FILE,
     }
 
     # Recursive: descends into subdirectories and reports the full tree with types.
-    deep = {entry.path: entry.file_type for entry in outer.list_directory(root, recursive=True)}
+    deep = {entry.path: entry.file_type for entry in local_outer_host.list_directory(root, recursive=True)}
     assert deep == {
         str(root / "sub"): FileType.DIRECTORY,
         str(root / "sub" / "nested.txt"): FileType.FILE,
@@ -216,18 +184,18 @@ def test_outer_host_list_directory_local(temp_mngr_ctx: MngrContext, tmp_path: P
     }
 
     # A local host surfaces a mode string for each entry.
-    perms_by_path = {entry.path: entry.permissions for entry in outer.list_directory(root)}
+    perms_by_path = {entry.path: entry.permissions for entry in local_outer_host.list_directory(root)}
     top_perms = perms_by_path[str(root / "top.txt")]
     sub_perms = perms_by_path[str(root / "sub")]
     assert top_perms is not None and top_perms.startswith("-")
     assert sub_perms is not None and sub_perms.startswith("d")
 
     # A missing directory yields an empty list rather than raising.
-    assert outer.list_directory(root / "does-not-exist") == []
+    assert local_outer_host.list_directory(root / "does-not-exist") == []
 
 
 def test_outer_host_list_directory_local_symlink_classified_as_symlink(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
+    local_outer_host: OuterHost, tmp_path: Path
 ) -> None:
     """A symlink is classified as SYMLINK (lstat semantics) and not descended into.
 
@@ -239,13 +207,7 @@ def test_outer_host_list_directory_local_symlink_classified_as_symlink(
     (root / "real_dir").mkdir(parents=True)
     (root / "link").symlink_to(root / "real_dir")
 
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(create_local_pyinfra_host()),
-        mngr_ctx=temp_mngr_ctx,
-    )
-
-    entries = {entry.path: entry for entry in outer.list_directory(root)}
+    entries = {entry.path: entry for entry in local_outer_host.list_directory(root)}
     assert entries[str(root / "real_dir")].file_type == FileType.DIRECTORY
     assert entries[str(root / "link")].file_type == FileType.SYMLINK
     # The symlink's mode string starts with 'l'.
@@ -253,7 +215,7 @@ def test_outer_host_list_directory_local_symlink_classified_as_symlink(
     assert link_perms is not None and link_perms.startswith("l")
 
     # Recursing does not follow the symlink (no entries appear under it).
-    deep_paths = {entry.path for entry in outer.list_directory(root, recursive=True)}
+    deep_paths = {entry.path for entry in local_outer_host.list_directory(root, recursive=True)}
     assert not any(p.startswith(str(root / "link") + "/") for p in deep_paths)
 
 
@@ -338,15 +300,9 @@ def test_host_is_outer_host_interface() -> None:
     assert issubclass(Host, OuterHostInterface)
 
 
-def test_outer_host_get_name_strips_at_prefix(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_get_name_strips_at_prefix(local_outer_host: OuterHost) -> None:
     """OuterHost.get_name strips the leading '@' that pyinfra uses for local connectors."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    name = outer.get_name()
+    name = local_outer_host.get_name()
     assert not str(name).startswith("@")
     assert str(name) == "local"
 
@@ -368,16 +324,10 @@ def test_create_ssh_pyinfra_host_no_key_set() -> None:
     assert pyinfra_host.data.get("ssh_key") is None
 
 
-def test_outer_host_streaming_local_calls_on_line_per_line(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_streaming_local_calls_on_line_per_line(local_outer_host: OuterHost) -> None:
     """execute_streaming_command on a local OuterHost calls on_line for each output line."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[str] = []
-    result = outer.execute_streaming_command(
+    result = local_outer_host.execute_streaming_command(
         "printf 'one\\ntwo\\nthree\\n'",
         received.append,
     )
@@ -388,16 +338,10 @@ def test_outer_host_streaming_local_calls_on_line_per_line(temp_mngr_ctx: MngrCo
     assert "three" in result.stdout
 
 
-def test_outer_host_streaming_local_captures_failure(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_streaming_local_captures_failure(local_outer_host: OuterHost) -> None:
     """execute_streaming_command surfaces non-zero exit codes via CommandResult.success."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[str] = []
-    result = outer.execute_streaming_command(
+    result = local_outer_host.execute_streaming_command(
         "echo before-fail; exit 7",
         received.append,
     )
@@ -405,16 +349,10 @@ def test_outer_host_streaming_local_captures_failure(temp_mngr_ctx: MngrContext)
     assert "before-fail" in received
 
 
-def test_outer_host_streaming_local_streams_stderr(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_streaming_local_streams_stderr(local_outer_host: OuterHost) -> None:
     """stderr lines also reach on_line and end up on the result.stderr field."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[str] = []
-    result = outer.execute_streaming_command(
+    result = local_outer_host.execute_streaming_command(
         "echo to-stdout; echo to-stderr 1>&2",
         received.append,
     )
@@ -425,16 +363,10 @@ def test_outer_host_streaming_local_streams_stderr(temp_mngr_ctx: MngrContext) -
     assert "to-stderr" in result.stderr
 
 
-def test_outer_host_stateful_streaming_calls_on_output_per_line(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_stateful_streaming_calls_on_output_per_line(local_outer_host: OuterHost) -> None:
     """execute_stateful_command with on_output streams each stdout line (is_stdout=True) live."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[tuple[str, bool]] = []
-    result = outer.execute_stateful_command(
+    result = local_outer_host.execute_stateful_command(
         "printf 'one\\ntwo\\nthree\\n'",
         on_output=lambda line, is_stdout: received.append((line, is_stdout)),
     )
@@ -445,16 +377,10 @@ def test_outer_host_stateful_streaming_calls_on_output_per_line(temp_mngr_ctx: M
     assert "three" in result.stdout
 
 
-def test_outer_host_stateful_streaming_distinguishes_stdout_and_stderr(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_stateful_streaming_distinguishes_stdout_and_stderr(local_outer_host: OuterHost) -> None:
     """The on_output is_stdout flag separates the two streams (defeated by the old buffered path)."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[tuple[str, bool]] = []
-    result = outer.execute_stateful_command(
+    result = local_outer_host.execute_stateful_command(
         "echo to-stdout; echo to-stderr 1>&2",
         on_output=lambda line, is_stdout: received.append((line, is_stdout)),
     )
@@ -465,16 +391,10 @@ def test_outer_host_stateful_streaming_distinguishes_stdout_and_stderr(temp_mngr
     assert "to-stderr" in result.stderr
 
 
-def test_outer_host_stateful_streaming_honors_cwd(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
+def test_outer_host_stateful_streaming_honors_cwd(local_outer_host: OuterHost, tmp_path: Path) -> None:
     """The streaming stateful path runs in the requested cwd."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[str] = []
-    result = outer.execute_stateful_command(
+    result = local_outer_host.execute_stateful_command(
         "pwd",
         cwd=tmp_path,
         on_output=lambda line, _is_stdout: received.append(line),
@@ -485,16 +405,10 @@ def test_outer_host_stateful_streaming_honors_cwd(temp_mngr_ctx: MngrContext, tm
     assert Path(received[0]).resolve() == tmp_path.resolve()
 
 
-def test_outer_host_stateful_streaming_surfaces_failure(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_stateful_streaming_surfaces_failure(local_outer_host: OuterHost) -> None:
     """A non-zero exit is reported via CommandResult.success on the streaming path."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
     received: list[str] = []
-    result = outer.execute_stateful_command(
+    result = local_outer_host.execute_stateful_command(
         "echo before-fail; exit 7",
         on_output=lambda line, _is_stdout: received.append(line),
     )
@@ -502,15 +416,9 @@ def test_outer_host_stateful_streaming_surfaces_failure(temp_mngr_ctx: MngrConte
     assert "before-fail" in received
 
 
-def test_outer_host_stateful_without_on_output_still_returns_result(temp_mngr_ctx: MngrContext) -> None:
+def test_outer_host_stateful_without_on_output_still_returns_result(local_outer_host: OuterHost) -> None:
     """Without on_output the stateful path keeps its non-streaming behavior (delegates to idempotent)."""
-    pyinfra_host = create_local_pyinfra_host()
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(pyinfra_host),
-        mngr_ctx=temp_mngr_ctx,
-    )
-    result = outer.execute_stateful_command("echo hello-buffered")
+    result = local_outer_host.execute_stateful_command("echo hello-buffered")
     assert result.success
     assert "hello-buffered" in result.stdout
 
@@ -668,20 +576,14 @@ def test_run_shell_command_reconnects_after_the_peer_resets_the_connection(temp_
     assert fake.disconnect_call_count == 1
 
 
-def test_a_reset_that_outlives_the_retries_is_translated_not_raw(temp_mngr_ctx: MngrContext) -> None:
+def test_a_reset_that_outlives_the_retries_is_translated_not_raw(local_outer_host: OuterHost) -> None:
     """A reset that survives the retry budget leaves as a domain error, not a paramiko traceback.
 
     Exercised at the translation boundary rather than through the retry, which
     would spend its real ~10s backoff to reach the same assertion.
     """
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(create_local_pyinfra_host()),
-        mngr_ctx=temp_mngr_ctx,
-    )
-
     with pytest.raises(HostConnectionError, match="closed"):
-        with outer._translate_ssh_errors(failed="failed", closed="closed", timed_out="timed out"):
+        with local_outer_host._translate_ssh_errors(failed="failed", closed="closed", timed_out="timed out"):
             raise ConnectionResetError(54, "Connection reset by peer")
 
 
@@ -903,25 +805,200 @@ class _FakeSftpSetupTransport:
         return self.channel
 
 
-def test_create_sftp_client_closes_the_channel_when_setup_fails(temp_mngr_ctx: MngrContext) -> None:
+def test_create_sftp_client_closes_the_channel_when_setup_fails(local_outer_host: OuterHost) -> None:
     """A channel whose SFTP setup fails after the open is closed, not leaked.
 
     The setup steps after ``open_session`` (the subsystem request, version
     negotiation) can raise; without the cleanup the opened channel would linger
     on the shared transport across every transient retry.
     """
-    outer = OuterHost(
-        id=HostId.generate(),
-        connector=PyinfraConnector(create_local_pyinfra_host()),
-        mngr_ctx=temp_mngr_ctx,
-    )
     channel = _FakeSftpSetupChannel()
     transport = _FakeSftpSetupTransport(channel)
 
     with pytest.raises(SSHException, match="channel request failed"):
-        outer._create_sftp_client(cast(Any, transport))
+        local_outer_host._create_sftp_client(cast(Any, transport))
 
     assert channel.is_closed is True
+
+
+def test_atomic_write_file_replaces_the_destination_and_leaves_no_staged_file(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """An atomic write lands the new content and cleans up after itself."""
+    config_dir = tmp_path / "latchkey"
+    config_dir.mkdir()
+    destination = config_dir / "config.json"
+    destination.write_bytes(b"stale")
+
+    local_outer_host.write_file(destination, b"fresh", is_atomic=True)
+
+    assert destination.read_bytes() == b"fresh"
+    assert [entry.name for entry in config_dir.iterdir()] == [destination.name]
+
+
+def test_atomic_write_file_applies_the_mode_to_the_file_it_publishes(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """The mode goes on the staged file, so it has to survive the rename onto the destination."""
+    destination = tmp_path / "secret.json"
+
+    local_outer_host.write_file(destination, b"secret", mode="0600", is_atomic=True)
+
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_remote_atomic_write_quotes_paths_containing_shell_metacharacters(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """Spaces and quotes in a path must break neither the rename nor the chmod that complete the write.
+
+    Only the remote half of the write builds shell commands, so it is the half
+    that has to quote; running it against the local connector exercises those
+    commands without needing a second machine.
+    """
+    destination = tmp_path / "dir with space" / "con'fig.json"
+    staged = destination.parent / f".{destination.name}.{uuid4().hex}.tmp"
+
+    local_outer_host._write_file_remote(destination, staged, b"fresh", "0600")
+
+    assert destination.read_bytes() == b"fresh"
+    assert [entry.name for entry in destination.parent.iterdir()] == [destination.name]
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_replaying_the_atomic_rename_succeeds_once_the_staged_file_is_consumed(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """The retry that a lost SSH response triggers must not fail a write that already landed.
+
+    ``execute_idempotent_command`` re-runs its command after a transient SSH
+    error, including when the far side had in fact completed it, so running the
+    rename twice stands in for that replay.
+    """
+    destination = tmp_path / "config.json"
+    destination.write_bytes(b"stale")
+    staged = tmp_path / f".{destination.name}.{uuid4().hex}.tmp"
+    staged.write_bytes(b"fresh")
+    command = _build_replay_safe_rename_command(staged, destination)
+
+    assert local_outer_host.execute_idempotent_command(command).success
+    replayed = local_outer_host.execute_idempotent_command(command)
+
+    assert replayed.success
+    assert destination.read_bytes() == b"fresh"
+    assert not staged.exists()
+
+
+def test_atomic_rename_fails_when_the_staged_file_and_the_destination_are_both_gone(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """A staged file that vanished without landing is reported, not passed off as a success."""
+    destination = tmp_path / "config.json"
+    staged = tmp_path / f".{destination.name}.{uuid4().hex}.tmp"
+
+    result = local_outer_host.execute_idempotent_command(_build_replay_safe_rename_command(staged, destination))
+
+    assert not result.success
+    assert str(destination) in result.stderr
+    assert not destination.exists()
+
+
+def test_remote_write_does_not_let_the_mode_smuggle_a_second_command_into_the_chmod(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """``mngr file put --mode`` is an unvalidated user string, so it must reach chmod as one argument."""
+    destination = tmp_path / "secret.json"
+    smuggled = tmp_path / "smuggled"
+
+    local_outer_host._write_file_remote(destination, destination, b"secret", f"0600 {destination}; touch {smuggled}")
+
+    assert not smuggled.exists()
+
+
+class _ModeWatchingOuterHost(OuterHost):
+    """An OuterHost that records ``watched_path``'s mode after every command that finds it present.
+
+    Lets a test see the permissions a file actually had while it existed, rather
+    than only the ones it ends up with.
+    """
+
+    watched_path: Path = Field(description="The path whose mode is sampled after each command")
+    observed_modes: list[int] = Field(default_factory=list, description="Modes seen, in order")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        result = super().execute_idempotent_command(
+            command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds
+        )
+        if self.watched_path.exists():
+            self.observed_modes.append(stat.S_IMODE(self.watched_path.stat().st_mode))
+        return result
+
+
+def test_remote_atomic_write_never_publishes_the_file_without_its_mode(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """A secret arrives at its published path already carrying its mode, not a round-trip later."""
+    destination = tmp_path / "secret.json"
+    staged = tmp_path / f".{destination.name}.{uuid4().hex}.tmp"
+    host = _ModeWatchingOuterHost(
+        id=local_outer_host.id,
+        connector=local_outer_host.connector,
+        mngr_ctx=local_outer_host.mngr_ctx,
+        watched_path=destination,
+    )
+
+    host._write_file_remote(destination, staged, b"secret", "0600")
+
+    assert host.observed_modes == [0o600]
+
+
+class _ReplayingOuterHost(OuterHost):
+    """An OuterHost that runs every idempotent command twice and reports the second run.
+
+    Stands in for the retry ``@retry_on_transient_ssh_error`` performs when the
+    first run's response is lost on the way back: the far side has already done
+    the work, and the command runs again anyway.
+    """
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        super().execute_idempotent_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
+        return super().execute_idempotent_command(
+            command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds
+        )
+
+
+def test_remote_atomic_write_survives_a_replay_of_every_command_it_issues(
+    local_outer_host: OuterHost, tmp_path: Path
+) -> None:
+    """The write itself, not just the rename it builds, has to come through the SSH retry."""
+    config_dir = tmp_path / "latchkey"
+    config_dir.mkdir()
+    destination = config_dir / "config.json"
+    destination.write_bytes(b"stale")
+    staged = config_dir / f".{destination.name}.{uuid4().hex}.tmp"
+    host = _ReplayingOuterHost(
+        id=local_outer_host.id, connector=local_outer_host.connector, mngr_ctx=local_outer_host.mngr_ctx
+    )
+
+    host._write_file_remote(destination, staged, b"fresh", "0600")
+
+    assert destination.read_bytes() == b"fresh"
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert [entry.name for entry in config_dir.iterdir()] == [destination.name]
 
 
 class _FakeStatSftp:
