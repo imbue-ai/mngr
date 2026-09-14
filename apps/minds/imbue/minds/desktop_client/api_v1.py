@@ -1592,6 +1592,7 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
         status=str(recovery_record.status),
         is_done=recovery_record.status == WorkspaceOperationStatus.DONE,
         error=recovery_record.error,
+        warning=recovery_record.warning,
     )
 
 

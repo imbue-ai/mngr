@@ -391,6 +391,55 @@ def test_show_machine_parses_the_sizes_payload_and_records_the_argv() -> None:
     assert caller.calls[0][:3] == ["imbue_cloud", "machines", "show"]
 
 
+def test_list_machines_parses_the_account_listing_with_its_stop_kinds() -> None:
+    payload = [
+        {"host_db_id": "row-1", "host_id": "host-" + "a" * 32, "host_name": "sunny", "status": "stopped"},
+        {
+            "host_db_id": "row-2",
+            "host_id": "host-" + "b" * 32,
+            "host_name": "held",
+            "status": "stopped",
+            "stop_kind": "maintenance",
+        },
+    ]
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    machines = cli.list_machines("owner@example.com")
+
+    assert [(machine.host_id, machine.stop_kind) for machine in machines] == [
+        ("host-" + "a" * 32, None),
+        ("host-" + "b" * 32, "maintenance"),
+    ]
+    assert caller.calls[0][:4] == ["imbue_cloud", "machines", "show", "--account"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_detail"),
+    [
+        ({"machines": []}, "listing: Input should be a valid list"),
+        (
+            [
+                {"host_db_id": "row-1", "host_id": "host-" + "a" * 32, "host_name": "sunny", "status": "stopped"},
+                "held",
+            ],
+            "1: Input should be a valid dictionary",
+        ),
+        ([{"host_db_id": "row-1", "host_id": "host-" + "a" * 32, "status": "stopped"}], "0.host_name: Field required"),
+    ],
+)
+def test_list_machines_raises_rather_than_reading_an_unexpected_shape_as_an_empty_account(
+    payload: object, expected_detail: str
+) -> None:
+    # The stop-kind tracker keeps a hold it could not re-read only when the
+    # listing raises; an empty (or shortened) list would clear it.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudCliError, match=expected_detail):
+        cli.list_machines("owner@example.com")
+
+
 def test_show_machine_returns_none_when_the_invocation_fails() -> None:
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout="", stderr="NotFound"))
     cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)

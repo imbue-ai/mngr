@@ -2651,6 +2651,26 @@ def test_restart_operation_status_reports_registry_record(tmp_path: Path) -> Non
     done = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
     assert done["is_done"] is True
     assert done["status"] == "DONE"
+    assert done["warning"] is None
+
+
+def test_restart_operation_status_reports_a_declined_start_as_neither_done_nor_failed(tmp_path: Path) -> None:
+    # A start the connector refused as an operator hold: the record is DECLINED
+    # with the refusal as its warning, so the frontend shows the sentence
+    # without reading the machine as answering (is_done) or the recovery as
+    # failed (error).
+    agent_id = AgentId()
+    client = _client_with_workspace(tmp_path, agent_id)
+    registry = get_state(client.application).workspace_operation_registry
+    registry.start(agent_id, WorkspaceOperationKind.RECOVERY, datetime.now(timezone.utc))
+    registry.decline(agent_id, "This machine is undergoing maintenance and will be back shortly.")
+
+    body = json.loads(client.get(f"/api/v1/workspaces/operations/restart/{agent_id}", headers=_auth_header()).data)
+
+    assert body["status"] == "DECLINED"
+    assert body["is_done"] is False
+    assert body["error"] is None
+    assert body["warning"] == "This machine is undergoing maintenance and will be back shortly."
 
 
 def test_restart_operation_status_hides_backup_operation_records(tmp_path: Path) -> None:

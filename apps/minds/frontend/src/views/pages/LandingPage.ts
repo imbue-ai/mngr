@@ -9,7 +9,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { LandingExtras, MindLiveness } from "../../models/create";
-import { MIND_LIVENESS_LABELS, MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
+import { MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { UiProviderEntry } from "../../generated/ui";
 import { Button, ButtonLink } from "../components/Button";
@@ -24,9 +24,11 @@ import {
   isMachineStateKnown,
   keyStateChipFor,
   lifecycleConfirmation,
+  livenessBadgeLabelFor,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
+  rowClickActionFor,
 } from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
@@ -212,9 +214,9 @@ export const LandingPage: m.ClosureComponent = () => {
     });
   }
 
-  function livenessBadge(liveness: MindLiveness): m.Children {
+  function livenessBadge(liveness: MindLiveness, stopKind: string): m.Children {
     if (liveness === "RUNNING") return null;
-    const label = MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
+    const label = livenessBadgeLabelFor(liveness, stopKind);
     const tone =
       liveness === "STOPPING" || liveness === "STARTING"
         ? "bg-warning/15 text-warning"
@@ -427,10 +429,15 @@ export const LandingPage: m.ClosureComponent = () => {
         : ("UNKNOWN" as MindLiveness);
     const controls = mindControlsFor(entry, liveness, discoveryHealth);
     const providerLabel = entry.provider_label ?? "";
-    // A cloud machine this device holds no key for cannot be entered, so the
-    // row is not clickable and says why in place of an open that would hang.
+    // A row whose click would go nowhere (a cloud machine this device holds no
+    // key for, a stop an operator holds) is not clickable; the chip or the
+    // badge says why in place of an open that would hang. Decided by the same
+    // rule the click runs, so the two cannot disagree.
     const keyChip = keyStateChipFor(entry.key_state ?? "");
-    const isOpenable = keyChip === null;
+    const isHealthy = stores.health.statusFor(entry.id) === "healthy";
+    const isOpenable =
+      rowClickActionFor(entry, state.tracker.displayedLiveness(entry.id, entry.liveness ?? ""), isHealthy) !==
+      "blocked";
     const row = m(
       Card,
       {
@@ -439,7 +446,7 @@ export const LandingPage: m.ClosureComponent = () => {
         extra: `accent-spine relative overflow-hidden ${isOpenable ? "cursor-pointer" : "cursor-default"}`,
         style: `--workspace-accent: ${entry.accent};`,
         "data-agent-id": entry.id,
-        onclick: () => rowClick(entry),
+        onclick: isOpenable ? () => rowClick(entry) : undefined,
       },
       [
         m("span", { class: "flex-1 min-w-0 truncate font-semibold text-primary pl-1" }, entry.name),
@@ -456,7 +463,7 @@ export const LandingPage: m.ClosureComponent = () => {
             ),
         // Slot for the backup badge (T4 wires the backup-status data source).
         m("span", { class: "landing-backup-badge hidden" }),
-        (entry.supports_shutdown ?? false) ? livenessBadge(liveness) : null,
+        (entry.supports_shutdown ?? false) ? livenessBadge(liveness, entry.stop_kind ?? "") : null,
         healthBadge(entry, liveness),
         updateBadge(entry),
         backupsButton(entry, liveness),

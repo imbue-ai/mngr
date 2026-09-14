@@ -51,7 +51,9 @@ from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -74,6 +76,7 @@ from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 
 
@@ -1570,11 +1573,12 @@ def test_no_host_record_at_any_candidate_is_an_error() -> None:
 
 
 def _make_workspace_info(
-    status: str, with_placement: bool = True, transition_error: str | None = None
+    status: str, with_placement: bool = True, transition_error: str | None = None, stop_kind: str | None = None
 ) -> WorkspaceInfo:
     return WorkspaceInfo(
         host_db_id=LeaseDbId("00000000-0000-0000-0000-0000000000aa"),
         status=WorkspaceStatus(status),
+        stop_kind=WorkspaceStopKind(stop_kind) if stop_kind is not None else None,
         vps_address="10.0.0.9" if with_placement else None,
         ssh_port=22000 if with_placement else None,
         ssh_user="root",
@@ -1700,6 +1704,37 @@ def test_advance_workspace_start_requests_the_start_once_the_stop_lands() -> Non
     assert outcome_after_stop is None
     assert client_after_stop.start_request_count == 1
     assert state.is_start_requested is True
+
+
+@pytest.mark.parametrize("held_kind", ["maintenance", "suspension"])
+@pytest.mark.parametrize("status", ["stopping", "stopped"])
+def test_advance_workspace_start_refuses_a_held_stop_without_asking(held_kind: str, status: str) -> None:
+    # An operator hold is not the owner's to end: the poll refuses at once,
+    # with the connector's own sentence, instead of waiting out the stop or
+    # requesting a start the server would refuse anyway.
+    state = _WorkspaceStartPollState()
+    outcome, client = _advance_once(_make_workspace_info(status, with_placement=False, stop_kind=held_kind), state)
+    assert isinstance(outcome, ImbueCloudWorkspaceHeldError)
+    assert str(outcome).startswith(WORKSPACE_HELD_MESSAGE)
+    assert client.start_request_count == 0
+
+
+def test_advance_workspace_start_treats_an_unknown_stop_kind_as_not_actionable() -> None:
+    outcome, client = _advance_once(
+        _make_workspace_info("stopped", with_placement=False, stop_kind="quarantine"), _WorkspaceStartPollState()
+    )
+    assert isinstance(outcome, UnrecognizedWorkspaceStatusError)
+    assert client.start_request_count == 0
+
+
+@pytest.mark.parametrize("startable_kind", [None, "owner", "idle"])
+def test_advance_workspace_start_requests_the_start_for_the_owners_own_stops(startable_kind: str | None) -> None:
+    state = _WorkspaceStartPollState()
+    outcome, client = _advance_once(
+        _make_workspace_info("stopped", with_placement=False, stop_kind=startable_kind), state
+    )
+    assert outcome is None
+    assert client.start_request_count == 1
 
 
 def test_advance_workspace_start_surfaces_an_old_connector_bounce_to_stopping() -> None:

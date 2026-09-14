@@ -58,6 +58,9 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
+from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
+from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.primitives import MAX_SUPPORTED_BOX_GENERATION
 from imbue.mngr_imbue_cloud.wire import parse_wire_entries
@@ -85,6 +88,7 @@ from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 KEY_OP_TIMEOUT_SECONDS = 90.0
@@ -250,6 +254,19 @@ class ImbueCloudConnectorClient(MutableModel):
             raise ImbueCloudAccountSuspendedError(
                 str(detail.get("message", "This account is suspended. Contact support@imbue.com."))
             )
+
+    def _raise_if_workspace_held(self, response: httpx.Response) -> None:
+        """Raise the typed hold error when a 409 carries the connector's ``workspace_under_maintenance`` detail.
+
+        The owner start's mapping only: the admin start answers the same detail
+        for a parked row, but to the operator that is a plain connector refusal
+        (the user-facing sentence is not theirs to show).
+        """
+        if response.status_code != 409:
+            return
+        detail = _detail_dict_from_response(response)
+        if detail is not None and detail.get("code") == "workspace_under_maintenance":
+            raise ImbueCloudWorkspaceHeldError(str(detail.get("message", "")))
 
     def _raise_if_grant_budget_exhausted(self, response: httpx.Response) -> None:
         """Raise the typed grant-budget error when a 403 carries the connector's structured detail."""
@@ -713,21 +730,10 @@ class ImbueCloudConnectorClient(MutableModel):
     # ------------------------------------------------------------------
 
     def _check_workspaces_supported(self, response: httpx.Response) -> None:
-        # An old connector has no /workspaces routes; FastAPI answers its
-        # fixed 404 "Not Found" (or 405 "Method Not Allowed" for a method
-        # mismatch). Surface that as its own type so callers can fall back to
-        # the deprecated leased-only /hosts listing. A modern connector's own
-        # 404 carries a specific detail (e.g. "No such workspace" when the
-        # row was released concurrently) and must fall through to the normal
-        # error mapping instead of masquerading as a missing endpoint.
-        if response.status_code not in (404, 405):
-            return
-        try:
-            body = response.json()
-        except ValueError:
-            body = None
-        detail = body.get("detail") if isinstance(body, dict) else None
-        if detail is None or detail in ("Not Found", "Method Not Allowed"):
+        # An old connector has no /workspaces routes. Surface that as its own
+        # type so callers can fall back to the deprecated leased-only /hosts
+        # listing.
+        if _is_route_not_served(response):
             raise WorkspacesEndpointUnavailableError(
                 "This connector does not serve /workspaces yet; redeploy it (Imbue-internal: `minds-admin env deploy`) "
                 "or fall back to the leased-only listing."
@@ -799,6 +805,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         self._check_workspaces_supported(response)
         self._raise_if_quota_exceeded(response)
+        self._raise_if_workspace_held(response)
         body = self._check(response, ImbueCloudConnectorError)
         return WorkspaceStatus(str(body.get("status", "")))
 
@@ -829,20 +836,12 @@ class ImbueCloudConnectorClient(MutableModel):
             json=body,
             timeout=self.timeout_seconds,
         )
-        # An old connector has no /machines routes: FastAPI's fixed 404 "Not
-        # Found" (a modern connector's own 404 carries "No such machine" and
-        # falls through to the normal error mapping).
-        if response.status_code in (404, 405):
-            try:
-                missing_body = response.json()
-            except ValueError:
-                missing_body = None
-            missing_detail = missing_body.get("detail") if isinstance(missing_body, dict) else None
-            if missing_detail is None or missing_detail in ("Not Found", "Method Not Allowed"):
-                raise ImbueCloudConnectorError(
-                    "This connector does not serve machine resizing yet; redeploy it "
-                    "(Imbue-internal: `minds-admin env deploy`)."
-                )
+        # An old connector has no /machines routes.
+        if _is_route_not_served(response):
+            raise ImbueCloudConnectorError(
+                "This connector does not serve machine resizing yet; redeploy it "
+                "(Imbue-internal: `minds-admin env deploy`)."
+            )
         self._raise_if_quota_exceeded(response)
         return self._check(response, ImbueCloudConnectorError)
 
@@ -1384,15 +1383,51 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         return self._check(response, ImbueCloudConnectorError)
 
-    def admin_stop_workspace(self, admin_api_key: SecretStr, host_db_id: str) -> dict[str, Any]:
-        """Operator force-stop of one workspace (idempotent, like the owner stop)."""
+    def admin_stop_workspace(
+        self, admin_api_key: SecretStr, host_db_id: str, kind: WorkspaceStopKind
+    ) -> dict[str, Any]:
+        """Operator force-stop of one workspace with the given stop kind (idempotent on the transition).
+
+        ``kind`` is ``maintenance`` (an operator hold), ``idle`` (the user may
+        start it) or ``suspension``; a row already stopping or stopped takes
+        the kind without a new transition.
+        """
         response = self._send(
             "POST",
             self._url(f"/admin/workspaces/{host_db_id}/stop"),
             exc_cls=ImbueCloudConnectorError,
             headers=self._bearer(admin_api_key),
+            json={"kind": kind.value},
             timeout=self.timeout_seconds,
         )
+        return self._check(response, ImbueCloudConnectorError)
+
+    def admin_set_workspace_stop_kind(
+        self, admin_api_key: SecretStr, host_db_id: str, kind: WorkspaceStopKind
+    ) -> dict[str, Any]:
+        """Change the kind of a stopping or stopped workspace's stop.
+
+        Raises ``WorkspaceStopKindRouteUnavailableError`` against a connector
+        that predates stop kinds (it has no such route) and
+        ``WorkspaceHasNoStopError`` for a workspace that is not stopping or
+        stopped (the connector's 409: nothing to describe). Both are the
+        answers a caller probing the connector for stop-kind support reads.
+        """
+        response = self._send(
+            "POST",
+            self._url(f"/admin/workspaces/{host_db_id}/stop-kind"),
+            exc_cls=ImbueCloudConnectorError,
+            headers=self._bearer(admin_api_key),
+            json={"kind": kind.value},
+            timeout=self.timeout_seconds,
+        )
+        if _is_route_not_served(response):
+            raise WorkspaceStopKindRouteUnavailableError(
+                "This connector does not serve workspace stop kinds yet (migration 042); redeploy it "
+                "(Imbue-internal: `minds-admin env deploy`)."
+            )
+        if response.status_code == 409:
+            raise WorkspaceHasNoStopError(_detail_from_response(response))
         return self._check(response, ImbueCloudConnectorError)
 
     def admin_run_r2_sweep(self, admin_api_key: SecretStr, email: str | None) -> dict[str, Any]:
@@ -1693,6 +1728,26 @@ def create_litellm_key_rotating_on_exists(
         budget_duration=budget_duration,
         metadata=metadata,
     )
+
+
+def _is_route_not_served(response: httpx.Response) -> bool:
+    """Whether ``response`` is FastAPI's fixed answer for a route this connector does not have.
+
+    An older connector answers an unknown path with 404 "Not Found" (or 405
+    "Method Not Allowed" for a method mismatch) and no other detail. A modern
+    connector's own 404 carries a specific detail (e.g. "No such workspace"
+    when the row was released concurrently) and is not this shape, so it
+    falls through to the caller's normal error mapping instead of
+    masquerading as a missing endpoint.
+    """
+    if response.status_code not in (404, 405):
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return detail is None or detail in ("Not Found", "Method Not Allowed")
 
 
 def _detail_from_response(response: httpx.Response) -> str:

@@ -37,6 +37,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
+from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
@@ -114,6 +115,13 @@ class DesktopClientState(MutableModel):
         description=(
             "Edge-driven publisher deriving+diffing chrome state onto the channel; wired by "
             "create_desktop_client (None only for apps constructed without it, e.g. minimal tests)"
+        ),
+    )
+    machine_stop_kind_tracker: MachineStopKindTracker | None = Field(
+        default=None,
+        description=(
+            "Reads why each stopped cloud machine is stopped from the connector, for the list and the "
+            "recovery gate; its background loop is stopped at shutdown (None in minimal tests)"
         ),
     )
     client_env_config: ClientEnvConfig | None = Field(

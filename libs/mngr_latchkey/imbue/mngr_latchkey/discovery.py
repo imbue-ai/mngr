@@ -81,11 +81,36 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 TRANSIENT_FAILURE_REPORT_THRESHOLD: Final[int] = 10
 
 
+class _ContainerEndpoint(FrozenModel):
+    """The address discovery reports for a workspace's container sshd: its host and port."""
+
+    host: str = Field(description="Hostname or address the container's sshd is reached at")
+    port: int = Field(description="Port the container's sshd is reached on")
+
+    @classmethod
+    def from_ssh_info(cls, ssh_info: RemoteSSHInfo) -> "_ContainerEndpoint":
+        return cls(host=ssh_info.host, port=ssh_info.port)
+
+
 class _GatewayRoute(FrozenModel):
     """Successfully-resolved gateway route for one host."""
 
     outer_ssh_info: RemoteSSHInfo | None = Field(
         description="Remote outer-host SSH endpoint, or None when the workspace uses the desktop gateway directly"
+    )
+    container_endpoint: _ContainerEndpoint = Field(
+        description=(
+            "The container endpoint discovery reported when this route was resolved. A later cycle reporting "
+            "a different endpoint means the workspace was restored onto new coordinates and the route is stale."
+        )
+    )
+    is_stale: bool = Field(
+        default=False,
+        description=(
+            "Whether a later failure to reach the outer endpoint cast doubt on this resolution. A stale route is "
+            "not reused (the next cycle re-resolves it) but stays cached, so its endpoints still identify a move "
+            "of the host and the tunnel to its outer endpoint."
+        ),
     )
 
 
@@ -135,6 +160,16 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
         if is_transient_ssh_error(link):
             return True
     return False
+
+
+@pure
+def _is_local_tunnel_setup_failure(error: BaseException) -> bool:
+    """Whether a tunnel failure was raised against this device's own end (``SSHTunnelPhase.LOCAL_SETUP``).
+
+    Such a failure says nothing about where the host is; every other shape is at
+    least possibly evidence that the host is no longer where we think.
+    """
+    return isinstance(error, SSHTunnelError) and error.phase is SSHTunnelPhase.LOCAL_SETUP
 
 
 class LatchkeyDiscoveryHandler(MutableModel):
@@ -189,13 +224,17 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # skip re-provisioning an already-provisioned host rather than re-running it
     # every cycle. The desktop reads and edits a machine's credentials and
     # policy on demand, so nothing else here depends on the record; a supervisor
-    # restart clears this and re-provisions. A failed pass is *not* recorded
-    # here, so it retries on the next cycle.
+    # restart clears this and re-provisions, as does the host stopping or moving
+    # to new coordinates. A failed pass is *not* recorded here, so it retries on
+    # the next cycle.
     _provisioned_hosts: set[str] = PrivateAttr(default_factory=set)
     _remote_hosts_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # Successful route resolutions are static for a host and can be reused on
-    # every discovery cycle. Failures are deliberately absent so the next cycle
-    # retries once a late lease/provider record becomes visible.
+    # Successful route resolutions are reused on every discovery cycle for as
+    # long as discovery keeps reporting the container endpoint they were
+    # resolved for (see ``_forget_route_if_host_moved``) and the tunnel to their
+    # outer endpoint keeps working (see ``_mark_gateway_route_stale``). Failures are
+    # deliberately absent so the next cycle retries once a late lease/provider
+    # record becomes visible.
     _gateway_route_by_host_id: dict[str, _GatewayRoute] = PrivateAttr(default_factory=dict)
     # host_ids already warned about an unresolvable gateway route, so the warning
     # is emitted once per host rather than on every discovery cycle.
@@ -294,7 +333,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
         instance_key = AgentInstanceKey.build(agent_id, host_id)
         is_pending_handed_off = False
         try:
-            route = self._resolve_gateway_route(host_id, provider_name)
+            self._forget_route_if_host_moved(host_id, provider_name, ssh_info, host_side_port)
+            route = self._resolve_gateway_route(host_id, provider_name, ssh_info)
             if route is None:
                 # Unresolved (not cached, so the next cycle retries). We wire
                 # *nothing*: an unresolved route means we do not know which
@@ -313,6 +353,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     host_id,
                     route.outer_ssh_info,
                     host_side_port,
+                    provider_name,
                 )
                 is_pending_handed_off = self._maybe_dispatch_remote_gateway_provisioning(
                     agent_id, host_id, ssh_info, provider_name
@@ -343,6 +384,100 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 "Removed a stale desktop->container latchkey tunnel for agent {} on host {}",
                 agent_id,
                 host_id,
+            )
+
+    def _forget_route_if_host_moved(
+        self, host_id: HostId, provider_name: str, ssh_info: RemoteSSHInfo, host_side_port: int
+    ) -> None:
+        """Drop the route, VPS tunnel and provisioned marker of a host whose container endpoint discovery now reports elsewhere.
+
+        A workspace restored onto new coordinates by anyone other than this
+        client -- an operator migration, a start from another device, a
+        watchdog re-drive -- keeps its host id while its VM, address and ports
+        all change. The ``ssh_info`` discovery hands over each cycle is derived
+        from the connector's current coordinates, so it is the one signal that
+        is already correct after such a move; the cached route, the provider's
+        own lease listing, the desktop-to-VPS tunnel and the provisioned marker
+        all still describe the old VM. The route is re-resolved on this same
+        cycle by ``_resolve_gateway_route`` (against a refreshed listing), the
+        tunnel to the old outer endpoint is removed by its exact key so the
+        health-check loop stops re-dialing a dead address, and the provisioned
+        marker is forgotten because the recreated VM's tmpfs holds no gateway
+        secrets, so one fresh idempotent provisioning pass is needed.
+        """
+        host_id_str = str(host_id)
+        current_endpoint = _ContainerEndpoint.from_ssh_info(ssh_info)
+        with self._remote_hosts_lock:
+            cached = self._gateway_route_by_host_id.get(host_id_str)
+        if cached is None or cached.container_endpoint == current_endpoint:
+            return
+        self._refresh_provider_listing(host_id, provider_name)
+        with self._remote_hosts_lock:
+            # Only the route compared against is dropped, so a fresh route
+            # another worker cached meanwhile stays, with the provisioning pass
+            # it may already have recorded.
+            is_winner = self._gateway_route_by_host_id.get(host_id_str) is cached
+            if is_winner:
+                del self._gateway_route_by_host_id[host_id_str]
+                self._provisioned_hosts.discard(host_id_str)
+        if not is_winner:
+            # The worker that retired the route also removed its tunnel; doing
+            # it again here could tear down the one it has since dialed.
+            return
+        logger.info(
+            "Detected host {} moving from {}:{} to {}:{}; re-resolving its latchkey gateway route{}",
+            host_id,
+            cached.container_endpoint.host,
+            cached.container_endpoint.port,
+            current_endpoint.host,
+            current_endpoint.port,
+            "" if cached.outer_ssh_info is None else " and re-provisioning its VPS gateway",
+        )
+        if cached.outer_ssh_info is not None and self.tunnel_manager.remove_reverse_tunnel(
+            cached.outer_ssh_info, host_side_port
+        ):
+            logger.debug(
+                "Removed the desktop->VPS latchkey tunnel to the previous outer endpoint {}:{} of host {}",
+                cached.outer_ssh_info.host,
+                cached.outer_ssh_info.port,
+                host_id,
+            )
+
+    def _mark_gateway_route_stale(self, host_id: HostId, provider_name: str) -> None:
+        """Mark a host's cached route stale so the next cycle re-resolves it, on a refreshed provider listing.
+
+        The route stays cached rather than being deleted: it is the baseline
+        ``_forget_route_if_host_moved`` compares against, and a move often
+        announces itself as exactly this failure first (the old VM stops
+        answering before discovery reports the new coordinates).
+        """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            cached = self._gateway_route_by_host_id.get(host_id_str)
+        if cached is None or cached.is_stale:
+            return
+        self._refresh_provider_listing(host_id, provider_name)
+        with self._remote_hosts_lock:
+            # Only the route that failed is marked, so a fresh route another
+            # worker cached meanwhile stays.
+            if self._gateway_route_by_host_id.get(host_id_str) is cached:
+                self._gateway_route_by_host_id[host_id_str] = cached.model_copy_update(
+                    to_update(cached.field_ref().is_stale, True)
+                )
+
+    def _refresh_provider_listing(self, host_id: HostId, provider_name: str) -> None:
+        """Make the provider re-read its host listing before a host's route is retired.
+
+        Done *before* the route stops being reused: the other agents on this
+        host have their own workers in this same cycle, and one that re-resolves
+        the instant the route is retired must see the host's current
+        coordinates rather than re-cache the old outer endpoint.
+        """
+        try:
+            self._provider_for_route(provider_name).reset_caches()
+        except (MngrError, OSError) as e:
+            logger.debug(
+                "Could not reset provider {}'s caches while retiring host {}'s route: {}", provider_name, host_id, e
             )
 
     def _tear_down_stopped_agent(self, agent_id: AgentId, host_id: HostId) -> None:
@@ -403,6 +538,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         host_id: HostId,
         outer_ssh_info: RemoteSSHInfo,
         host_side_port: int,
+        provider_name: str,
     ) -> None:
         """Expose the desktop gateway on the VPS loopback for the proxy extension.
 
@@ -410,6 +546,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
         main agent. Tagging the tunnel with that agent instance preserves the
         normal destruction behavior: stopping or destroying the agent tears
         down the now-unused desktop-to-VPS tunnel.
+
+        A failure to reach the outer endpoint also marks the host's cached
+        route stale, so the next cycle asks the provider for the host's
+        coordinates afresh instead of retrying an endpoint that may no longer
+        exist. A failure of this device's own end
+        (``_is_local_tunnel_setup_failure``) keeps the route: it says nothing
+        about where the host is, and it persists, so re-resolving would re-list
+        the provider's hosts every cycle.
         """
         try:
             self.tunnel_manager.setup_reverse_tunnel(
@@ -419,6 +563,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 agent_id=AgentInstanceKey.build(agent_id, host_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
+            if not _is_local_tunnel_setup_failure(e):
+                self._mark_gateway_route_stale(host_id, provider_name)
             self._record_wiring_step_failure(
                 host_id,
                 _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL,
@@ -548,12 +694,16 @@ class LatchkeyDiscoveryHandler(MutableModel):
             return False
         return True
 
-    def _resolve_gateway_route(self, host_id: HostId, provider_name: str) -> _GatewayRoute | None:
+    def _resolve_gateway_route(
+        self, host_id: HostId, provider_name: str, ssh_info: RemoteSSHInfo
+    ) -> _GatewayRoute | None:
         """Resolve whether the host uses the desktop or VPS gateway.
 
         Returns ``None`` when the answer is not knowable *yet*; that is never
         cached, so the next discovery cycle retries. Only answers derived from an
-        opened outer host are cached, since those are static for the host: the
+        opened outer host are cached, since those hold for as long as the host
+        stays at the container endpoint ``ssh_info`` names and its outer keeps
+        answering (a route a tunnel failure marked stale is re-resolved too): the
         provider has no outer at all (modal, local, ssh, docker-over-tcp), its
         outer is this very machine, or it is a genuinely remote VPS.
 
@@ -570,13 +720,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
         host_id_str = str(host_id)
         with self._remote_hosts_lock:
             cached = self._gateway_route_by_host_id.get(host_id_str)
-        if cached is not None:
+        if cached is not None and not cached.is_stale:
             return cached
 
         try:
             provider = self._provider_for_route(provider_name)
             try:
-                route = self._resolve_route_via_provider(provider, host_id)
+                route = self._resolve_route_via_provider(provider, host_id, ssh_info)
             except HostNotFoundError:
                 # This supervisor holds one long-lived provider instance, and
                 # some providers cache their whole host/lease listing on it with
@@ -592,7 +742,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     provider_name,
                 )
                 provider.reset_caches()
-                route = self._resolve_route_via_provider(provider, host_id)
+                route = self._resolve_route_via_provider(provider, host_id, ssh_info)
             if route is None:
                 return None
         except (MngrError, OSError) as e:
@@ -614,12 +764,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
         return get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
 
     def _resolve_route_via_provider(
-        self, provider: ProviderInstanceInterface, host_id: HostId
+        self, provider: ProviderInstanceInterface, host_id: HostId, ssh_info: RemoteSSHInfo
     ) -> _GatewayRoute | None:
         """Resolve the route from an opened outer host, or ``None`` if it has no SSH endpoint."""
+        container_endpoint = _ContainerEndpoint.from_ssh_info(ssh_info)
         with provider.outer_host_for(host_id) as outer:
             if outer is None or outer.is_local:
-                return _GatewayRoute(outer_ssh_info=None)
+                return _GatewayRoute(outer_ssh_info=None, container_endpoint=container_endpoint)
             connection_info = outer.get_ssh_connection_info()
             if connection_info is None:
                 return None
@@ -631,7 +782,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     port=port,
                     key_path=key_path,
                     known_hosts_path=outer.get_ssh_known_hosts_path(),
-                )
+                ),
+                container_endpoint=container_endpoint,
             )
 
     def reload_provider_config(self) -> None:

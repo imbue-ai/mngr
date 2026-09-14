@@ -339,9 +339,10 @@ class StorageDeployConfig(FrozenModel):
             "Seconds a stopped workspace's halted VM lingers on its box for instant "
             "restart-in-place before the retention finalize frees the slot. Stamped as "
             "``WORKSPACE_STOP_RETENTION_SECONDS`` over the Vault entry at deploy time; "
-            "unset defers to the Vault value (or the connector's 3600s default). ci/dev "
-            "set this low so stop/start tests finish in minutes rather than waiting out "
-            "an hour-long window."
+            "unset defers to the Vault value (or the connector's 3600s default). Every tier "
+            "sets it: staging/production 600s (the window is a latency optimization only, "
+            "and an hour pinned a slot per stopped workspace and held drained boxes), ci/dev "
+            "lower still so stop/start tests finish in minutes."
         ),
     )
 

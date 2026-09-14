@@ -149,12 +149,34 @@ def test_management_plane_loader_rejects_an_operator_outside_the_tier_operator_b
         _assert_operators_inside_tier_operator_block(config, "dev", Path("deploy.toml"))
 
 
-@pytest.mark.parametrize("tier", ["staging", "production", "ci"])
-def test_committed_deploy_tomls_have_no_management_plane_until_the_tier_brings_one_up(tier: str) -> None:
-    # Pinned so the day a tier commits its [management_plane] table (operator
-    # peers + the Modal Proxy whose IPs the box :22 lockdown allowlists) the
-    # bringup runbook, not an accident, is what flips this.
-    assert load_deploy_config(tier).management_plane is None
+def test_committed_ci_deploy_toml_has_no_management_plane() -> None:
+    # The ci tier's gen-2 boxes stay open on purpose (no Modal Proxy, no :22
+    # lockdown); pinned so a [management_plane] table there is deliberate.
+    assert load_deploy_config("ci").management_plane is None
+
+
+@pytest.mark.parametrize(
+    ("tier", "static_ip"),
+    [
+        ("staging", "98.90.51.49"),
+        ("production", "52.206.40.121"),
+    ],
+)
+def test_committed_shared_tier_deploy_toml_carries_its_management_plane(tier: str, static_ip: str) -> None:
+    # Both shared tiers' proxies were created on 2026-09-13 (Modal us-east) and
+    # every gen-2 box on the tier allowlists exactly these addresses on :22, so
+    # an edit here changes who can reach the fleet's management sshd.
+    config = load_deploy_config(tier).management_plane
+
+    assert config is not None
+    assert int(config.wireguard.listen_port) == 51820
+    assert len(config.wireguard.operators) >= 1
+    operator_block = management_overlay_for_tier(tier).operator_block
+    assert all(operator.address in operator_block for operator in config.wireguard.operators)
+    assert config.modal_proxy is not None
+    assert str(config.modal_proxy.proxy_name) == "mind-connector-east"
+    assert str(config.modal_proxy.environment_name) == "main"
+    assert [str(ip) for ip in config.modal_proxy.static_ips] == [static_ip]
 
 
 def test_committed_dev_deploy_toml_carries_the_activated_management_plane() -> None:
@@ -183,11 +205,10 @@ def test_ssh_ca_config_accepts_an_openssh_public_key_line_and_rejects_junk() -> 
         SshCaConfig(public_key=NonEmptyStr("not-a-key"))
 
 
-@pytest.mark.parametrize("tier", ["staging", "production"])
-def test_committed_deploy_tomls_have_no_ssh_ca_until_the_tier_brings_one_up(tier: str) -> None:
-    # Pinned so the day a tier commits its CA the bringup checklist (not an
+def test_committed_production_deploy_toml_has_no_ssh_ca_until_the_tier_brings_one_up() -> None:
+    # Pinned so the day production commits its CA the bringup checklist (not an
     # accident) is what flips this; until then gen-2 prep and bakes refuse.
-    assert load_deploy_config(tier).ssh_ca is None
+    assert load_deploy_config("production").ssh_ca is None
 
 
 @pytest.mark.parametrize(
@@ -195,12 +216,13 @@ def test_committed_deploy_tomls_have_no_ssh_ca_until_the_tier_brings_one_up(tier
     [
         ("dev", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDn/NBtT5XWAmOSPj2S6kXsvEPAoORm1x3ZSkRIX+XW"),
         ("ci", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO1I1Y1NYn86jMrvCxLkIoMq7nXCNiMgxf6Am1BtCUCO"),
+        ("staging", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIImy5mn5Tp2Ofq17LQVNhlq2Ldyb5NQSyvLagAMKx7rq"),
     ],
 )
 def test_committed_deploy_toml_carries_the_tier_ca_from_its_vault_mount(tier: str, ca_key: str) -> None:
-    # These tiers' CAs were brought up on 2026-09-09; every gen-2 box, VM, and
-    # container on the tier pins exactly this key, so an edit here is a CA
-    # rotation, and the two tiers must never share a key.
+    # dev and ci brought their CAs up on 2026-09-09, staging on 2026-09-13; every
+    # gen-2 box, VM, and container on the tier pins exactly this key, so an edit
+    # here is a CA rotation, and no two tiers may share a key.
     ssh_ca = load_deploy_config(tier).ssh_ca
     assert ssh_ca is not None
     assert str(ssh_ca.public_key).startswith(ca_key)

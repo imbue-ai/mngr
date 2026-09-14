@@ -108,6 +108,10 @@ def desktop_client_runtime(state: DesktopClientState, is_externally_managed_clie
         # receive edge-driven state updates for the process lifetime.
         if state.ui_publisher is not None:
             state.ui_publisher.start(state.root_concurrency_group)
+        # And the stop-kind reader behind the "Maintenance" badge, on the
+        # same lifetime.
+        if state.machine_stop_kind_tracker is not None:
+            state.machine_stop_kind_tracker.start(state.root_concurrency_group)
     try:
         yield
     finally:
@@ -129,6 +133,8 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # connected after the signal-path shutdown (both calls are idempotent).
     if state.ui_publisher is not None:
         state.ui_publisher.stop()
+    if state.machine_stop_kind_tracker is not None:
+        state.machine_stop_kind_tracker.stop()
     state.ui_channel_broadcaster.shutdown()
     if not is_externally_managed_client and state.http_client is not None:
         state.http_client.close()

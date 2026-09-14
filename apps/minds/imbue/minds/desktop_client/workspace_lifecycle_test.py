@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -15,6 +17,8 @@ from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_lifecycle import _lead_with_error_lines
 from imbue.minds.desktop_client.workspace_lifecycle import perform_mind_host_action
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
 
 
 def test_lead_with_error_lines_puts_the_verdict_ahead_of_the_warnings() -> None:
@@ -82,6 +86,15 @@ def _fake_mngr(tmp_path: Path) -> str:
 def _failing_mngr(tmp_path: Path) -> str:
     """A stub ``mngr`` whose subcommand fails the way a refused stop does."""
     return write_stub_mngr(tmp_path, "failing_mngr", 'echo "ERROR: could not stop the host" >&2\nexit 1')
+
+
+def _held_mngr(tmp_path: Path) -> str:
+    """A stub ``mngr`` whose start the connector refused as an operator hold."""
+    return write_stub_mngr(
+        tmp_path,
+        "held_mngr",
+        f'echo "WARNING: some other host is unreachable" >&2\necho "ERROR: {WORKSPACE_HELD_MESSAGE}" >&2\nexit 1',
+    )
 
 
 def _resolver_for_one_machine() -> tuple[AgentId, MngrCliBackendResolver]:
@@ -236,3 +249,26 @@ def test_a_stop_that_failed_leaves_the_machine_healing_itself(tmp_path: Path) ->
 
     assert outcome.is_successful is False
     assert tracker.is_unattended_recovery_suppressed(workspace_agent) is False
+
+
+@pytest.mark.witnesses(
+    "machine-lifecycle.held-start-refused-plainly",
+    partial="witnesses the settings page's Start answering with the sentence alone; the shown sentence is witnessed by the SPA's own suite",
+)
+def test_a_start_the_connector_refuses_as_a_hold_answers_with_the_connectors_sentence(tmp_path: Path) -> None:
+    """An operator's hold is not a failure of the machine or of this device.
+
+    The reason is the connector's sentence alone (not mngr's reordered stderr),
+    nothing is logged above info, and the machine is marked as stopped on
+    purpose so the unattended dispatch leaves it alone too; the host was still
+    not started, so the outcome is not a success.
+    """
+    tracker = SystemInterfaceHealthTracker()
+
+    with capture_loguru(level="WARNING") as log_output:
+        workspace_agent, outcome = _perform(MindHostAction.START, tracker, tmp_path, mngr_binary=_held_mngr(tmp_path))
+
+    assert outcome.is_successful is False
+    assert outcome.failure_reason == WORKSPACE_HELD_MESSAGE
+    assert tracker.is_unattended_recovery_suppressed(workspace_agent) is True
+    assert log_output.getvalue() == ""

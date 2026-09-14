@@ -74,26 +74,34 @@ export function recoveryHeading(
  * describing one episode two ways, which is the disagreement this whole
  * decomposition exists to end, at the shortest range it can happen.
  */
-export function recoveryBusyActionLabel(isHostOffline: boolean, recoveryKind: RecoveryKind | null): string {
+export function recoveryBusyActionLabel(
+  isHostOffline: boolean,
+  recoveryKind: RecoveryKind | null,
+): string {
   if (isHostOffline) return "Starting...";
   if (recoveryKind === "restart") return "Restarting...";
   return "Reconnecting...";
 }
 
 /** What the heading's state means, and what the button below it costs. */
-export function recoverySubheading(health: string, isHostOffline: boolean): string {
+export function recoverySubheading(
+  health: string,
+  isHostOffline: boolean,
+): string {
   if (health === "recovery_failed") {
     return (
       "This machine stopped responding and needs to be restarted. " +
       "In progress work will be interrupted, but saved data will not be lost."
     );
   }
-  if (isHostOffline) return "This machine is stopped. Starting it again will bring your work back.";
+  if (isHostOffline)
+    return "This machine is stopped. Starting it again will bring your work back.";
   // The outcome, stated once. This is the whole report -- the heading names the
   // condition and this says there is nothing left to do about it -- rather than
   // a separate success notice repeating it beside a heading that has to be kept
   // in step with it by hand.
-  if (health === "healthy") return "This machine is answering again. Nothing further is needed here.";
+  if (health === "healthy")
+    return "This machine is answering again. Nothing further is needed here.";
   // Still checking. The restart is offered all the same -- a surface the user
   // opened on purpose never withholds the action -- but the copy does not urge
   // it, because the machine may well come back without one.
@@ -132,8 +140,12 @@ const BACKEND_UNREACHABLE_EXPLANATION =
  * works, because otherwise it reads as the app being wrong about a connection
  * the user can see is fine.
  */
-const ENVIRONMENT_BLOCKED_EXPLANATION: Record<Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">, string> = {
-  OFFLINE: "This device has no network connection. Minds will reconnect to your machine as soon as it does.",
+const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
+  Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">,
+  string
+> = {
+  OFFLINE:
+    "This device has no network connection. Minds will reconnect to your machine as soon as it does.",
   SSH_BLOCKED:
     "This network blocks the connection Minds uses to reach your machines (SSH). " +
     "Your browser works, but Minds can't get through. Try another network or a VPN.",
@@ -156,7 +168,8 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<Exclude<EnvironmentCondition, "NON
  */
 const DEVICE_CANNOT_CONNECT_CONDITION =
   "This machine may be running normally — the connection failed on this device, before reaching it.";
-const DEVICE_CANNOT_CONNECT_REMEDY = "Restarting Minds rebuilds the connection.";
+const DEVICE_CANNOT_CONNECT_REMEDY =
+  "Restarting Minds rebuilds the connection.";
 
 /**
  * The heading both device-scoped verdicts carry.
@@ -209,7 +222,11 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
   let isDeviceErrorOpen = false;
   return {
     view(vnode) {
-      const { model, isSelfDismissing = false, onEnterMachine = null } = vnode.attrs;
+      const {
+        model,
+        isSelfDismissing = false,
+        onEnterMachine = null,
+      } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
       // On a surface that dismisses itself, a finished recovery is still
@@ -223,7 +240,8 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // line. The click flips isRecoveryRunning at once while info.health only
       // moves on the next poll, so reading health alone would drop a running
       // recovery's spinner and log lines for a poll interval.
-      const isBusy = model.isRecoveryRunning || isSettling || info.health === "recovering";
+      const isBusy =
+        model.isRecoveryRunning || isSettling || info.health === "recovering";
       // A recovery dispatched from here knows which it is from the click,
       // before the tracker has caught up and can answer -- and that window is
       // exactly when the user is looking at the card they just clicked. One
@@ -241,8 +259,11 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // explanation the user needs, so it does not hide it. The route answers
       // NONE for a machine on this device, whose outage a dead network cannot
       // explain, and UNKNOWN while nothing has been measured.
-      const isNarratingUserBounce = (isBusy && recoveryKind === "restart") || isSettling;
-      const environment: EnvironmentCondition = isNarratingUserBounce ? "NONE" : info.device_environment;
+      const isNarratingUserBounce =
+        (isBusy && recoveryKind === "restart") || isSettling;
+      const environment: EnvironmentCondition = isNarratingUserBounce
+        ? "NONE"
+        : info.device_environment;
       // This device having no usable network outranks everything below,
       // including the backend verdict, because it explains those too: a laptop
       // that cannot reach the network cannot reach the provider either, so the
@@ -254,13 +275,36 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // its own: the machine answering clears it, and so does connectivity
       // coming back -- which also runs the start that was withheld. On a dead
       // network only the second of those can happen.
-      if (environment !== "NONE" && environment !== "UNKNOWN" && info.health !== "healthy") {
+      if (
+        environment !== "NONE" &&
+        environment !== "UNKNOWN" &&
+        info.health !== "healthy"
+      ) {
         return m("div", { class: "flex flex-col gap-3" }, [
-          m("div", { class: "type-heading pr-10" }, deviceScopedHeading(info.workspace_name)),
-          m("p", { class: "type-helper text-tertiary" }, ENVIRONMENT_BLOCKED_EXPLANATION[environment]),
+          m(
+            "div",
+            { class: "type-heading pr-10" },
+            deviceScopedHeading(info.workspace_name),
+          ),
+          m(
+            "p",
+            { class: "type-helper text-tertiary" },
+            ENVIRONMENT_BLOCKED_EXPLANATION[environment],
+          ),
           m("div", { class: "flex items-center gap-2" }, [
-            m("span", { class: "type-label text-secondary" }, "Waiting for network…"),
-            m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
+            m(
+              "span",
+              { class: "type-label text-secondary" },
+              "Waiting for network…",
+            ),
+            m(
+              Button,
+              {
+                variant: "secondary",
+                onclick: () => reportProblem(info.agent_id),
+              },
+              "Report a problem",
+            ),
           ]),
         ]);
       }
@@ -281,7 +325,11 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // wake the provider's poll errored because the laptop was asleep, and
       // naming the provider on the strength of no measurement is the wrong
       // headline. The card's ordinary states below still describe the wait.
-      if (info.is_backend_unreachable && info.health !== "healthy" && environment !== "UNKNOWN") {
+      if (
+        info.is_backend_unreachable &&
+        info.health !== "healthy" &&
+        environment !== "UNKNOWN"
+      ) {
         return m("div", { class: "flex flex-col gap-3" }, [
           // Both halves of the verdict: which machine is affected, and why. The
           // card can be opened from a list or a stale tab, so the machine it
@@ -291,12 +339,25 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             { class: "type-heading pr-10" },
             `${info.workspace_name} unreachable: Can't connect to ${info.provider_label}`,
           ),
-          m("p", { class: "type-helper text-tertiary" }, BACKEND_UNREACHABLE_EXPLANATION),
-          info.unreachable_reason ? m(Notice, { variant: "error" }, info.unreachable_reason) : null,
+          m(
+            "p",
+            { class: "type-helper text-tertiary" },
+            BACKEND_UNREACHABLE_EXPLANATION,
+          ),
+          info.unreachable_reason
+            ? m(Notice, { variant: "error" }, info.unreachable_reason)
+            : null,
           m(
             "div",
             { class: "flex items-center gap-2" },
-            m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
+            m(
+              Button,
+              {
+                variant: "secondary",
+                onclick: () => reportProblem(info.agent_id),
+              },
+              "Report a problem",
+            ),
           ),
         ]);
       }
@@ -313,10 +374,18 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
       // unmeasured: the copy's claim is a failure on a network that works, and
       // nothing has measured that yet -- the band withholds its line for the
       // same state.
-      if (info.is_device_cannot_connect && info.health !== "healthy" && environment !== "UNKNOWN") {
+      if (
+        info.is_device_cannot_connect &&
+        info.health !== "healthy" &&
+        environment !== "UNKNOWN"
+      ) {
         const isRestartAppAvailable = electronBridge.isDesktop;
         return m("div", { class: "flex flex-col gap-3" }, [
-          m("div", { class: "type-heading pr-10" }, deviceScopedHeading(info.workspace_name)),
+          m(
+            "div",
+            { class: "type-heading pr-10" },
+            deviceScopedHeading(info.workspace_name),
+          ),
           m(
             "p",
             { class: "type-helper text-tertiary" },
@@ -330,9 +399,23 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             // No Restart Machine: bouncing a machine that is probably fine
             // would interrupt real work without touching the actual fault.
             isRestartAppAvailable
-              ? m(Button, { variant: "primary", onclick: () => electronBridge.restartApp() }, "Restart Minds")
+              ? m(
+                  Button,
+                  {
+                    variant: "primary",
+                    onclick: () => electronBridge.restartApp(),
+                  },
+                  "Restart Minds",
+                )
               : null,
-            m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
+            m(
+              Button,
+              {
+                variant: "secondary",
+                onclick: () => reportProblem(info.agent_id),
+              },
+              "Report a problem",
+            ),
           ),
           info.device_error_detail
             ? m(
@@ -354,18 +437,39 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         m("div", { class: "flex flex-col gap-2" }, [
           m("div", { class: "flex items-center gap-2 type-heading pr-10" }, [
             isBusy ? m(Spinner, { size: "sm" }) : null,
-            m("span", recoveryHeading(info.workspace_name, health, info.is_host_offline, recoveryKind)),
+            m(
+              "span",
+              recoveryHeading(
+                info.workspace_name,
+                health,
+                info.is_host_offline,
+                recoveryKind,
+              ),
+            ),
           ]),
           isBusy
             ? null
-            : m("p", { class: "type-helper text-tertiary" }, recoverySubheading(health, info.is_host_offline)),
+            : m(
+                "p",
+                { class: "type-helper text-tertiary" },
+                recoverySubheading(health, info.is_host_offline),
+              ),
         ]),
+        model.recoveryNotice !== null
+          ? m(Notice, { variant: "info" }, model.recoveryNotice)
+          : null,
         m("div", { class: "flex items-center gap-2" }, [
           // Offered only over a machine that is answering, and first when it
           // is: the reader came here because they wanted the machine, and on a
           // card saying nothing further is needed, restarting it is no longer
           // the thing to do.
-          onEnterMachine === null ? null : m(Button, { variant: "primary", onclick: onEnterMachine }, "Open machine"),
+          onEnterMachine === null
+            ? null
+            : m(
+                Button,
+                { variant: "primary", onclick: onEnterMachine },
+                "Open machine",
+              ),
           m(
             Button,
             {
@@ -373,9 +477,18 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
               disabled: isBusy,
               onclick: () => void model.dispatchRecovery(),
             },
-            isBusy ? recoveryBusyActionLabel(info.is_host_offline, recoveryKind) : "Restart Machine",
+            isBusy
+              ? recoveryBusyActionLabel(info.is_host_offline, recoveryKind)
+              : "Restart Machine",
           ),
-          m(Button, { variant: "secondary", onclick: () => reportProblem(info.agent_id) }, "Report a problem"),
+          m(
+            Button,
+            {
+              variant: "secondary",
+              onclick: () => reportProblem(info.agent_id),
+            },
+            "Report a problem",
+          ),
         ]),
         model.logLines.length > 0
           ? m(
@@ -426,7 +539,14 @@ function Disclosure(): m.Component<DisclosureAttrs> {
             onclick: onToggle,
           },
           [
-            m("span", { class: "inline-block w-3 text-tertiary", "aria-hidden": "true" }, isOpen ? "⌄" : "›"),
+            m(
+              "span",
+              {
+                class: "inline-block w-3 text-tertiary",
+                "aria-hidden": "true",
+              },
+              isOpen ? "⌄" : "›",
+            ),
             label,
           ],
         ),
@@ -454,7 +574,9 @@ function Disclosure(): m.Component<DisclosureAttrs> {
  * unattended start that failed before this card opened is the tracker's
  * alone.
  */
-export function RecoveryTroubleshooting(): m.Component<{ model: RecoveryModel }> {
+export function RecoveryTroubleshooting(): m.Component<{
+  model: RecoveryModel;
+}> {
   let openSection: "errors" | "ssh" | null = null;
   return {
     view(vnode) {
@@ -462,7 +584,11 @@ export function RecoveryTroubleshooting(): m.Component<{ model: RecoveryModel }>
       const info = model.info;
       if (info === null) return null;
       const errors = [
-        ...new Set([model.recoveryError, info.health_error].filter((error): error is string => Boolean(error))),
+        ...new Set(
+          [model.recoveryError, info.health_error].filter(
+            (error): error is string => Boolean(error),
+          ),
+        ),
       ];
       const isSshOffered = Boolean(info.ssh_command);
       if (errors.length === 0 && !isSshOffered) return null;
