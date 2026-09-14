@@ -21,6 +21,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROB
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_RESTORE_SCRIPT
 from imbue.minds.desktop_client.backup_workspace_scripts import CHECK_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
+from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_NAME
 from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
 from imbue.minds.desktop_client.backup_workspace_scripts import RESTORE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MARKER
@@ -143,10 +144,12 @@ def _running_chat_agents_json(repo: Path) -> str:
 # --- marker/command plumbing ---
 
 
-def test_module_official_url_constant_matches_the_script_default() -> None:
-    # The module-level constant (used for display / docs) and the default baked
-    # into the script preamble must never drift apart.
+def test_the_module_official_remote_constants_match_the_script_defaults() -> None:
+    # The module-level constants (used for display / docs, and by the desktop
+    # client's version read) and the values baked into the script preamble must
+    # never drift apart.
     assert f'DEFAULT_OFFICIAL_REMOTE_URL = "{OFFICIAL_REMOTE_URL}"' in BACKUP_CHECK_SCRIPT
+    assert f'OFFICIAL_REMOTE_NAME = "{OFFICIAL_REMOTE_NAME}"' in BACKUP_CHECK_SCRIPT
 
 
 def test_update_and_restore_scripts_sync_with_all_packages() -> None:
