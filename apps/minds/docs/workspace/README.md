@@ -7,7 +7,7 @@ A "workspace" is a persistent mngr agent created from a template repository. The
 The template repository (e.g. [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) contains:
 
 - `.mngr/settings.toml` -- mngr configuration: agent types, create templates, environment variables
-- `system/supervisord.conf` -- the apps' and background services' `[program:*]` sections, supervised by supervisord
+- `system/supervisord.conf` (+ `system/supervisord.conf.d/`, if the template splits them out) -- the apps' and background services' `[program:*]` sections, supervised by supervisord
 - `system/Dockerfile` -- container image definition
 - `CLAUDE.md` -- instructions for the Claude agent
 - `.agents/skills/` -- skills available to the agent
@@ -41,19 +41,25 @@ command=terminal-app
 directory=/home/user/workspace
 autostart=true
 autorestart=true
-
-[program:share-gateway]
-command=uv run share-gateway
-directory=/home/user/workspace
-autostart=true
-autorestart=true
-
-[program:app-watcher]
-command=uv run app-watcher
-directory=/home/user/workspace
-autostart=true
-autorestart=true
 ```
+
+A template may instead put each program in its own file and pull them in with an
+`[include]` glob, so that adding or removing one never edits a file another piece of
+work owns:
+
+```ini
+# system/supervisord.conf
+[include]
+files = supervisord.conf.d/*.conf
+```
+
+This config is also read from outside the workspace -- the evals evidence capture
+joins each registered app to the program that registered it by scanning these
+blocks -- and such a reader works against either shape only if it reads the
+drop-ins too: `configparser` does not follow `[include]`, and that is a supervisord
+feature rather than a configparser one. The drop-in directory is fixed at
+`system/supervisord.conf.d/` by the template's own layout test, so read it by
+name.
 
 ### data/.state/apps.toml
 

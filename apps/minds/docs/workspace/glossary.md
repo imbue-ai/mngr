@@ -74,7 +74,7 @@ Key concepts in the minds system:
 
 - **bootstrap**: `uv run bootstrap`, the process that runs first-boot setup inside each agent container and then execs `supervisord -n` to launch the apps and background services.
 
-- **supervisord**: the process-control system running inside each agent container that supervises the apps and background services, each declared as a `[program:*]` section in `supervisord.conf` (logs under `/var/log/supervisor`).
+- **supervisord**: the process-control system running inside each agent container that supervises the apps and background services, each declared as a `[program:*]` section in `supervisord.conf` -- or, where a template splits them out, in its own file pulled in by that config's `[include]` glob (logs under `/var/log/supervisor`).
   Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
 
 - **app watcher**: a background service that monitors `data/.state/apps.toml` and writes service events to `events/services/events.jsonl` so the desktop client can discover an agent's apps.
