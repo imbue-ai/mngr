@@ -1520,8 +1520,8 @@ class _RaisingDetailProviderInstance(MockProviderInstance):
 class _MismatchedProviderInstance(MockProviderInstance):
     """Provider that returns hosts whose provider_name differs from self.name.
 
-    Used to exercise the ProviderInstanceNotFoundError path in
-    _list_agents_batch (lines 271-279).
+    Listing cannot map such a host back to a configured provider, so it
+    raises ProviderInstanceNotFoundError.
     """
 
     def discover_hosts_and_agents(
@@ -1944,9 +1944,6 @@ def test_list_agents_abort_mode_propagates_top_level_mngr_error(
         )
 
 
-# Lines 235-237: OSError when writing full discovery snapshot
-
-
 def test_maybe_write_provider_discovery_snapshots_logs_warning_on_oserror(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -1987,9 +1984,8 @@ def test_maybe_write_provider_discovery_snapshots_emits_ssh_host_info(
 ) -> None:
     """_maybe_write_provider_discovery_snapshots emits SSH info for hosts that have it.
 
-    When an agent's host has SSH connection info, the snapshot write should
-    also call emit_host_ssh_info (line 235). The events file must contain
-    both the DISCOVERY_FULL and the SSH info events.
+    The details land in the events file beside the per-provider discovery
+    record, never the whole-fleet snapshot it replaced.
     """
     ssh_info = SSHInfo(
         user="ubuntu",
@@ -2023,9 +2019,6 @@ def test_maybe_write_provider_discovery_snapshots_emits_ssh_host_info(
     assert "DISCOVERY_PROVIDER" in content
     assert "DISCOVERY_FULL" not in content
     assert "ssh-agent" in content
-
-
-# Lines 271-279: ProviderInstanceNotFoundError in batch mode
 
 
 def test_list_agents_batch_continue_mode_handles_mismatched_provider_name(
@@ -2081,9 +2074,6 @@ def test_list_agents_batch_abort_mode_raises_for_mismatched_provider_name(
     finally:
         del _backend_registry[_MISMATCHED_BACKEND_NAME]
         del _provider_config_registry[_MISMATCHED_BACKEND_NAME]
-
-
-# Lines 348-385: Provider-level MngrError in streaming mode
 
 
 def _make_raising_provider_ctx(temp_mngr_ctx: MngrContext) -> MngrContext:
@@ -2262,9 +2252,6 @@ def test_list_agents_batch_abort_mode_silently_skips_empty_provider(
         del _provider_config_registry[_EMPTY_BACKEND_NAME]
 
 
-# Lines 396-405: Error differentiation in _handle_listing_error
-
-
 def test_handle_listing_error_continue_with_discovered_agent_creates_agent_error() -> None:
     """_handle_listing_error creates AgentErrorInfo when the source is a DiscoveredAgent."""
     host_id = HostId.generate()
@@ -2371,9 +2358,6 @@ def test_handle_listing_error_abort_mode_raises() -> None:
         )
 
     assert result.errors == []
-
-
-# Lines 416-430: CEL filter application in _collect_and_emit_details_for_host
 
 
 def _make_offline_test_provider(
@@ -2615,9 +2599,6 @@ def test_collect_and_emit_details_for_host_no_filter_adds_all_agents(
     )
 
     assert len(result.agents) == 3
-
-
-# Lines 446-463: Host-level error handling in _process_host_with_error_handling
 
 
 @pytest.mark.allow_warnings(match=r"Error processing host")
