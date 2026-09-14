@@ -142,7 +142,8 @@ def connect_app_server_transport(socket_path: Path) -> WebsocketAppServerTranspo
     ``permessage-deflate`` extension during the HTTP upgrade and closes the
     connection, so a compressed handshake never completes.
     """
-    connection = unix_connect(str(socket_path), uri=_WEBSOCKET_URI, compression=None)
+    # The local daemon returns whole thread histories, which can exceed the default 1 MiB limit.
+    connection = unix_connect(str(socket_path), uri=_WEBSOCKET_URI, compression=None, max_size=None)
     return WebsocketAppServerTransport(connection=connection)
 
 
