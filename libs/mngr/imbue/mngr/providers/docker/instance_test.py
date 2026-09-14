@@ -2,6 +2,8 @@ import hashlib
 import json
 from datetime import datetime
 from datetime import timezone
+from ipaddress import IPv4Address
+from ipaddress import IPv6Address
 from pathlib import Path
 from typing import cast
 
@@ -44,10 +46,11 @@ from imbue.mngr.providers.docker.instance import LABEL_HOST_NAME
 from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import _get_docker_context_host
-from imbue.mngr.providers.docker.instance import _get_ssh_host_from_docker_config
 from imbue.mngr.providers.docker.instance import _is_gvisor_runtime_rootfs_ephemeral
 from imbue.mngr.providers.docker.instance import build_container_labels
+from imbue.mngr.providers.docker.instance import build_ssh_publish_spec
 from imbue.mngr.providers.docker.instance import parse_container_labels
+from imbue.mngr.providers.docker.instance import ssh_host_for_docker_config
 from imbue.mngr.providers.docker.instance import verify_engine_version_supports_volume_subpath
 from imbue.mngr.providers.docker.testing import make_docker_provider
 from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
@@ -280,27 +283,6 @@ def test_parse_container_labels_handles_invalid_tags_json() -> None:
 
 
 # =========================================================================
-# SSH Host Resolution
-# =========================================================================
-
-
-def test_get_ssh_host_local_docker_empty_string() -> None:
-    assert _get_ssh_host_from_docker_config("") == "127.0.0.1"
-
-
-def test_get_ssh_host_local_docker_unix_socket() -> None:
-    assert _get_ssh_host_from_docker_config("unix:///var/run/docker.sock") == "127.0.0.1"
-
-
-def test_get_ssh_host_remote_docker_ssh() -> None:
-    assert _get_ssh_host_from_docker_config("ssh://user@myserver") == "myserver"
-
-
-def test_get_ssh_host_remote_docker_tcp() -> None:
-    assert _get_ssh_host_from_docker_config("tcp://192.168.1.100:2376") == "192.168.1.100"
-
-
-# =========================================================================
 # Docker Context Host Resolution
 # =========================================================================
 
@@ -367,7 +349,7 @@ def test_build_docker_run_command_includes_mandatory_flags(temp_mngr_ctx: MngrCo
     assert "-d" in cmd
     assert "--name" in cmd
     assert "test-container" in cmd
-    assert f":{CONTAINER_SSH_PORT}" in cmd
+    assert f"127.0.0.1::{CONTAINER_SSH_PORT}" in cmd
     assert "debian:bookworm-slim" in cmd
 
 
@@ -413,13 +395,73 @@ def test_build_docker_run_command_entrypoint_at_end(temp_mngr_ctx: MngrContext) 
     assert cmd[image_idx + 1] == "-c"
 
 
-def _make_docker_provider_with_runtime(mngr_ctx: MngrContext, docker_runtime: str | None) -> DockerProviderInstance:
-    config = DockerProviderConfig(isolate_host_volumes=False, docker_runtime=docker_runtime)
+def _make_docker_provider_with_config(mngr_ctx: MngrContext, config: DockerProviderConfig) -> DockerProviderInstance:
     return DockerProviderInstance(
         name=ProviderInstanceName("test-docker"),
         host_dir=Path("/mngr"),
         mngr_ctx=mngr_ctx,
         config=config,
+    )
+
+
+def _published_ssh_spec(cmd: list[str]) -> str:
+    """Return the value of the single `-p` flag in a rendered docker run argv."""
+    publish_indices = [i for i, arg in enumerate(cmd) if arg == "-p"]
+    assert len(publish_indices) == 1
+    return cmd[publish_indices[0] + 1]
+
+
+@pytest.mark.parametrize(
+    ("host", "ssh_bind_address", "expected_spec"),
+    [
+        ("", None, f"127.0.0.1::{CONTAINER_SSH_PORT}"),
+        ("unix:///var/run/docker.sock", None, f"127.0.0.1::{CONTAINER_SSH_PORT}"),
+        ("ssh://user@myserver", None, f":{CONTAINER_SSH_PORT}"),
+        ("tcp://192.168.1.100:2376", None, f":{CONTAINER_SSH_PORT}"),
+        ("", IPv4Address("0.0.0.0"), f"0.0.0.0::{CONTAINER_SSH_PORT}"),
+        ("ssh://user@myserver", IPv4Address("10.0.0.5"), f"10.0.0.5::{CONTAINER_SSH_PORT}"),
+        ("ssh://user@myserver", IPv6Address("2001:db8::5"), f"[2001:db8::5]::{CONTAINER_SSH_PORT}"),
+    ],
+)
+def test_build_ssh_publish_spec(
+    host: str, ssh_bind_address: IPv4Address | IPv6Address | None, expected_spec: str
+) -> None:
+    config = DockerProviderConfig(isolate_host_volumes=False, host=host, ssh_bind_address=ssh_bind_address)
+    assert build_ssh_publish_spec(config) == expected_spec
+
+
+@pytest.mark.parametrize(
+    ("host", "ssh_bind_address", "expected_ssh_host"),
+    [
+        ("", None, "127.0.0.1"),
+        ("", IPv4Address("0.0.0.0"), "127.0.0.1"),
+        ("", IPv4Address("127.0.0.1"), "127.0.0.1"),
+        ("", IPv4Address("192.168.1.5"), "192.168.1.5"),
+        ("unix:///var/run/docker.sock", IPv4Address("10.0.0.5"), "10.0.0.5"),
+        ("ssh://user@myserver", None, "myserver"),
+        ("ssh://user@myserver", IPv4Address("10.0.0.5"), "myserver"),
+    ],
+)
+def test_ssh_host_for_docker_config_follows_bind_address_only_for_local_daemon(
+    host: str, ssh_bind_address: IPv4Address | None, expected_ssh_host: str
+) -> None:
+    config = DockerProviderConfig(isolate_host_volumes=False, host=host, ssh_bind_address=ssh_bind_address)
+    assert ssh_host_for_docker_config(config) == expected_ssh_host
+
+
+def test_get_ssh_host_matches_explicit_local_bind_address(temp_mngr_ctx: MngrContext) -> None:
+    """A local container published on one LAN interface must be reached on that interface, not on loopback."""
+    provider = _make_docker_provider_with_config(
+        temp_mngr_ctx, DockerProviderConfig(isolate_host_volumes=False, ssh_bind_address=IPv4Address("192.168.1.5"))
+    )
+    cmd = provider._build_docker_run_command(image="my-image", container_name="test", labels={}, start_args=())
+    assert _published_ssh_spec(cmd) == f"192.168.1.5::{CONTAINER_SSH_PORT}"
+    assert provider._get_ssh_host() == "192.168.1.5"
+
+
+def _make_docker_provider_with_runtime(mngr_ctx: MngrContext, docker_runtime: str | None) -> DockerProviderInstance:
+    return _make_docker_provider_with_config(
+        mngr_ctx, DockerProviderConfig(isolate_host_volumes=False, docker_runtime=docker_runtime)
     )
 
 
