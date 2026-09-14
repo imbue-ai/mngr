@@ -20,7 +20,7 @@ Each workspace runs its own system interface (the `system-interface` CLI, source
 
 Inside each agent's Docker container:
 - **Claude Code** runs as the main agent process in tmux window 0
-- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
+- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`, or in the drop-in files its `[include]` glob pulls in (logs under `/var/log/supervisor`)
 - Apps register their ports via `system/scripts/forward_port.py` into `data/.state/apps.toml`
 - An **app watcher** service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for discovery
 - A **share-gateway** service watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled
