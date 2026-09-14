@@ -269,6 +269,29 @@ class ImbueCloudRecordFormatTooNewError(ImbueCloudSyncError):
     """
 
 
+# The connector's refusal of an owner start of a machine an operator holds
+# (``code: workspace_under_maintenance``). The message leads with this sentence
+# so an embedder that runs ``mngr start`` as a subprocess (the minds desktop)
+# can recognize the refusal in stderr, the way it matches mngr's
+# HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE.
+WORKSPACE_HELD_MESSAGE = "This machine is undergoing maintenance and will be back shortly."
+
+
+class ImbueCloudWorkspaceHeldError(ImbueCloudError):
+    """Raised when a start targets a workspace whose stop an operator holds (maintenance or suspension).
+
+    Deterministic for the owner: only an operator start ends the hold, so
+    callers show the message rather than retrying.
+    """
+
+    def __init__(self, message: str) -> None:
+        detail = message.strip()
+        if not detail or detail.startswith(WORKSPACE_HELD_MESSAGE):
+            super().__init__(detail or WORKSPACE_HELD_MESSAGE)
+        else:
+            super().__init__(f"{WORKSPACE_HELD_MESSAGE} ({detail})")
+
+
 class UnrecognizedWorkspaceStatusError(ImbueCloudError):
     """Raised when a state-changing operation targets a workspace whose status this client cannot interpret.
 
@@ -281,6 +304,14 @@ class UnrecognizedWorkspaceStatusError(ImbueCloudError):
 
 class WorkspacesEndpointUnavailableError(ImbueCloudConnectorError):
     """Raised when the connector predates the /workspaces lifecycle endpoints."""
+
+
+class WorkspaceStopKindRouteUnavailableError(ImbueCloudConnectorError):
+    """Raised when the connector predates the workspace stop-kind route (migration 042 and its routes)."""
+
+
+class WorkspaceHasNoStopError(ImbueCloudConnectorError):
+    """Raised when a stop-kind change targets a workspace that is not stopping or stopped (the connector's 409)."""
 
 
 class WorkspaceStartFailedError(ImbueCloudError):

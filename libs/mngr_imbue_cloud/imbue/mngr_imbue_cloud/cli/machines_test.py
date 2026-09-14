@@ -8,6 +8,7 @@ from imbue.mngr_imbue_cloud.cli.machines import machines
 from imbue.mngr_imbue_cloud.primitives import LeaseDbId
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 
 _HOST_ID = "host-" + "a" * 32
 
@@ -19,10 +20,12 @@ def _make_workspace(
     target_memory_units: int | None = None,
     disk_gb: int | None = 28,
     target_disk_gb: int | None = None,
+    stop_kind: WorkspaceStopKind | None = None,
 ) -> WorkspaceInfo:
     return WorkspaceInfo(
         host_db_id=LeaseDbId("11111111-2222-3333-4444-555555555555"),
-        status=WorkspaceStatus.RUNNING,
+        status=WorkspaceStatus.RUNNING if stop_kind is None else WorkspaceStatus.STOPPED,
+        stop_kind=stop_kind,
         agent_id="agent-" + "b" * 32,
         host_id=host_id,
         host_name=host_name,
@@ -71,6 +74,13 @@ def test_find_machine_by_ref_matches_host_id_db_id_and_name() -> None:
     assert _find_machine_by_ref(workspaces, "11111111-2222-3333-4444-555555555555") is entry
     assert _find_machine_by_ref(workspaces, "my-workspace") is entry
     assert _find_machine_by_ref(workspaces, "host-" + "f" * 32) is None
+
+
+def test_machine_display_payload_carries_the_stop_kind_when_the_server_sent_one() -> None:
+    running = _machine_display_payload(_make_workspace())
+    assert running["stop_kind"] is None
+    held = _machine_display_payload(_make_workspace(stop_kind=WorkspaceStopKind.MAINTENANCE))
+    assert held["stop_kind"] == "maintenance"
 
 
 def test_machine_display_payload_flags_a_pending_restart() -> None:

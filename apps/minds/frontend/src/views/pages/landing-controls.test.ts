@@ -5,6 +5,7 @@ import {
   isMachineStateKnown,
   keyStateChipFor,
   lifecycleConfirmation,
+  livenessBadgeLabelFor,
   mindControlsFor,
   remoteLocationBadgeFor,
   remoteStateChipFor,
@@ -24,6 +25,20 @@ describe("mindControlsFor", () => {
       isStartShown: false,
       isStopShown: true,
     });
+  });
+
+  it("withholds Start from a machine an operator is holding, or whose stop kind this build does not know", () => {
+    for (const stopKind of ["maintenance", "suspension", "unknown"]) {
+      expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy")).toEqual({
+        isStartShown: false,
+        isStopShown: false,
+      });
+    }
+    for (const stopKind of ["", "owner", "idle"]) {
+      expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy").isStartShown).toBe(
+        true,
+      );
+    }
   });
 
   it("offers neither when the liveness is unknown or transitioning", () => {
@@ -87,6 +102,25 @@ describe("rowClickActionFor", () => {
     expect(rowClickActionFor({ supports_shutdown: true }, "RUNNING", true)).toBe("enter");
     expect(rowClickActionFor({ supports_shutdown: false }, "STOPPED", true)).toBe("enter");
     expect(rowClickActionFor({}, "UNKNOWN", true)).toBe("enter");
+  });
+
+  it("blocks the row of a held machine and routes an idle-stopped one to the start", () => {
+    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPED", true)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPING", false)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "unknown" }, "STOPPED", true)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "idle" }, "STOPPED", true)).toBe("recover-start");
+    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "RUNNING", true)).toBe("enter");
+  });
+});
+
+describe("livenessBadgeLabelFor", () => {
+  it("says Maintenance for a held machine that is stopped or stopping, and the lifecycle label otherwise", () => {
+    expect(livenessBadgeLabelFor("STOPPED", "maintenance")).toBe("Maintenance");
+    expect(livenessBadgeLabelFor("STOPPING", "maintenance")).toBe("Maintenance");
+    expect(livenessBadgeLabelFor("STARTING", "maintenance")).toBe("Starting…");
+    expect(livenessBadgeLabelFor("STOPPED", "idle")).toBe("Stopped");
+    expect(livenessBadgeLabelFor("STOPPED", "")).toBe("Stopped");
+    expect(livenessBadgeLabelFor("WEIRD", "")).toBe("Status unknown");
   });
 });
 

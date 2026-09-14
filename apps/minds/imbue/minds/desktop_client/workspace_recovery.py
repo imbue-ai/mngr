@@ -74,6 +74,7 @@ from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
+from imbue.minds.desktop_client.machine_stop_kinds import CONNECTOR_OWNED_WORKSPACE_STATUSES
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
@@ -96,6 +97,8 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 # Stand-in provider name for the "Can't connect to ..." headline, for a provider
 # discovery has not named yet (or does not recognise).
@@ -1048,6 +1051,17 @@ class UnattendedRecoveryDispatcher(MutableModel):
             "is the behaviour without any environment signals at all."
         ),
     )
+    read_cloud_lifecycle: Callable[[AgentId], WorkspaceStatus | None] | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "A live read of a cloud workspace's connector lifecycle status (None when it cannot be read). "
+            "A machine the connector reports stopping, stopped or starting is down because someone asked "
+            "for that -- an owner on another device, an operator, a migration -- and is never started "
+            "here; discovery's cadence can lag the STUCK edge, so the reading is taken live. None (no "
+            "reader) dispatches as before."
+        ),
+    )
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -1086,24 +1100,24 @@ class UnattendedRecoveryDispatcher(MutableModel):
         # again here would undo an action they just took, with no window open
         # to explain why it came back.
         if self.tracker.is_unattended_recovery_suppressed(agent_id):
-            logger.info("Not auto-starting {}: it was stopped from inside the app", agent_id)
+            logger.info("Not auto-starting {}: it was stopped on purpose", agent_id)
             return
         # An update's apply takes the services down on purpose; the veto reads the
         # workspace's run record over exec, so it goes ahead of the connectivity gate.
         if self._is_dispatch_declined(agent_id):
             return
-        detector = self.connectivity_detector
-        if detector is None or not is_network_dependent_workspace(self.backend_resolver, agent_id):
+        if not is_network_dependent_workspace(self.backend_resolver, agent_id):
             self._dispatch(agent_id)
             return
-        # The reading this needs takes seconds to establish, and this call is on
-        # the probe loop's thread. Hand the whole decision to a worker, along
-        # with the detector it is to consult -- which is what keeps "the gate
-        # ran with nothing to ask" out of the worker's reach entirely.
+        # The readings this needs (the connector's word on the machine, then
+        # the device's condition) take seconds, and this call is on the probe
+        # loop's thread, so the whole decision goes to a worker. The detector
+        # travels as an argument so the worker asks a real one or none, never
+        # a field that changed under it.
         try:
             self.concurrency_group.start_new_thread(
-                target=self._dispatch_once_connectivity_is_known,
-                args=(agent_id, detector),
+                target=self._dispatch_once_gates_pass,
+                args=(agent_id, self.connectivity_detector),
                 name=f"unattended-recovery-gate-{agent_id}",
                 daemon=True,
                 is_checked=False,
@@ -1132,21 +1146,88 @@ class UnattendedRecoveryDispatcher(MutableModel):
                 return False
         return self.should_decline_dispatch is not None and self.should_decline_dispatch(agent_id)
 
+    def _dispatch_once_gates_pass(self, agent_id: AgentId, detector: ConnectivityDetector | None) -> None:
+        """Worker body for a network-dependent machine: the connector's word first, then the device's condition."""
+        if self.read_cloud_lifecycle is not None:
+            if self._is_stop_requested_elsewhere(agent_id):
+                return
+            # The read took seconds, in which the machine can have answered
+            # again or been stopped from inside the app.
+            if not self._is_start_still_due(agent_id, "gated start"):
+                return
+        if detector is None:
+            self._dispatch(agent_id)
+            return
+        self._dispatch_once_connectivity_is_known(agent_id, detector)
+
+    def _is_start_still_due(self, agent_id: AgentId, start_description: str) -> bool:
+        """Re-read, after a wait, the conditions an unattended start was dispatched on.
+
+        A stop or a destroy marks the machine *before* its own command runs,
+        precisely so a dispatch cannot undo it, and a destroy takes no
+        operation slot for the dispatch to lose; a machine a recovery has
+        already claimed is being handled by whatever claimed it. An update's
+        apply owns the machine for its duration: dropped rather than owed,
+        because the stuck edge already armed the apply window, and its expiry
+        is what still restarts a machine that really died.
+        """
+        if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
+            logger.info("Dropping the {} of {}: it is no longer stuck", start_description, agent_id)
+            return False
+        if self.tracker.is_unattended_recovery_suppressed(agent_id):
+            logger.info("Dropping the {} of {}: it was stopped on purpose", start_description, agent_id)
+            return False
+        if self._is_dispatch_declined(agent_id):
+            logger.info("Dropping the {} of {}: its update's apply owns the machine", start_description, agent_id)
+            return False
+        return True
+
+    def _is_stop_requested_elsewhere(self, agent_id: AgentId) -> bool:
+        """Whether the connector says this machine is down because someone asked for that.
+
+        Read live rather than from discovery: the STUCK edge fires seconds into
+        an outage, while discovery reports the connector's state once a poll.
+        A machine in a connector-owned lifecycle state is marked the way an
+        in-app stop marks it, so nothing here starts it until a probe finds it
+        answering again; a reading that cannot be taken changes nothing (the
+        connector itself refuses to start a machine an operator holds).
+        """
+        if self.read_cloud_lifecycle is None:
+            return False
+        try:
+            status = self.read_cloud_lifecycle(agent_id)
+        # The same fence as the connectivity probe's, for the same reason: a
+        # reading that could not be taken is no evidence, and this worker is
+        # the one dispatch this edge gets.
+        except (MindError, MngrError, OSError, RuntimeError, ValueError) as exc:
+            logger.opt(exception=exc).warning(
+                "The connector's lifecycle read for {} failed; dispatching as though its stop were not requested: {}",
+                agent_id,
+                exc,
+            )
+            return False
+        if status not in CONNECTOR_OWNED_WORKSPACE_STATUSES:
+            return False
+        logger.info(
+            "Not auto-starting {}: its stop was requested (the connector reports it {})",
+            agent_id,
+            status.value,
+        )
+        self.tracker.suppress_unattended_recovery(agent_id)
+        return True
+
     def _dispatch_once_connectivity_is_known(self, agent_id: AgentId, detector: ConnectivityDetector) -> None:
         """Worker body: probe the device, then either dispatch or record the start as owed.
 
         The detector is handed in rather than read off the field, so the reading
-        is always a real one: a caller with none dispatched inline and never
-        spawned this.
+        is always a real one: the gate worker calls this only with a detector
+        to consult, and dispatches directly when it has none.
 
         The reading costs seconds, and the machine can move out from under them,
-        so both conditions are read here rather than trusted from before the
-        probe -- the same two, in the same order, that
+        so the dispatch conditions are re-read here rather than trusted from
+        before the probe -- the same ones, in the same order, that
         :meth:`on_connectivity_recovered` re-reads before it dispatches an owed
-        start. A stop or a destroy marks the machine *before* its own command
-        runs, precisely so this dispatch cannot undo it, and a destroy takes no
-        operation slot for the dispatch to lose; a machine a recovery has already
-        claimed is being handled by whatever claimed it.
+        start (:meth:`_is_start_still_due`).
         """
         try:
             block = detector.probe_now(max_reuse_age_seconds=_GATE_READING_REUSE_SECONDS).environment_block
@@ -1171,16 +1252,7 @@ class UnattendedRecoveryDispatcher(MutableModel):
                 exc,
             )
             block = EnvironmentBlock.NONE
-        if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
-            logger.info("Dropping the gated start of {}: it is no longer stuck", agent_id)
-            return
-        if self.tracker.is_unattended_recovery_suppressed(agent_id):
-            logger.info("Dropping the gated start of {}: it was stopped from inside the app", agent_id)
-            return
-        # Dropped rather than owed: the stuck edge already armed the apply
-        # window, and its expiry is what still restarts a machine that really died.
-        if self._is_dispatch_declined(agent_id):
-            logger.info("Dropping the gated start of {}: its update's apply owns the machine", agent_id)
+        if not self._is_start_still_due(agent_id, "gated start"):
             return
         if block is EnvironmentBlock.NONE:
             self._dispatch(agent_id)
@@ -1246,14 +1318,9 @@ class UnattendedRecoveryDispatcher(MutableModel):
 
     def _release_owed_start(self, agent_id: AgentId) -> None:
         """Start one owed machine, if it still needs and may take a start."""
-        if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
-            logger.info("Dropping the owed start of {}: it is no longer stuck", agent_id)
+        if not self._is_start_still_due(agent_id, "owed start"):
             return
-        if self.tracker.is_unattended_recovery_suppressed(agent_id):
-            logger.info("Dropping the owed start of {}: it was stopped from inside the app", agent_id)
-            return
-        if self._is_dispatch_declined(agent_id):
-            logger.info("Dropping the owed start of {}: its update's apply owns the machine", agent_id)
+        if self._is_stop_requested_elsewhere(agent_id):
             return
         self._dispatch(agent_id)
 
@@ -1395,6 +1462,22 @@ def run_host_recovery_sequence(
             timeout_seconds=HOST_START_TIMEOUT_SECONDS,
         )
     except MngrCommandError as exc:
+        if WORKSPACE_HELD_MESSAGE in str(exc):
+            # An operator holds this machine's stop (a migration, a suspension):
+            # not a failure of the machine or of this device, and nothing a retry
+            # here can change -- and not a success either, since nothing started
+            # (a DONE operation reads as the machine answering to the recovery
+            # page, which would then enter the stopped machine). STUCK rather
+            # than RECOVERING because the probe loop stands off a RECOVERING
+            # agent and this worker was the readiness probe that would have
+            # settled it; as STUCK, the loop's first 200 after the operator's
+            # start makes it HEALTHY and clears the mark.
+            logger.info("Host recovery of {} ended: {}", workspace_agent_id, WORKSPACE_HELD_MESSAGE)
+            registry.append_log(workspace_agent_id, WORKSPACE_HELD_MESSAGE)
+            registry.decline(workspace_agent_id, WORKSPACE_HELD_MESSAGE)
+            tracker.suppress_unattended_recovery(workspace_agent_id)
+            tracker.mark_stuck(workspace_agent_id)
+            return
         _report_recovery_step_failure(
             "Start",
             exc,

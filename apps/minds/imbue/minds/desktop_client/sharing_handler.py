@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
+from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
@@ -254,9 +255,7 @@ def _is_imbue_cloud_agent(backend_resolver: BackendResolverInterface, agent_id: 
     """Whether the agent runs on an imbue_cloud (leased pool host) provider instance."""
     display_info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = display_info.provider_name if display_info is not None else None
-    if not provider_name:
-        return False
-    return provider_name == "imbue_cloud" or provider_name.startswith("imbue_cloud_")
+    return provider_name is not None and is_imbue_cloud_provider_name(provider_name)
 
 
 def enable_sharing(

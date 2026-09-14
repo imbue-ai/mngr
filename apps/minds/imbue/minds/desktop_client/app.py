@@ -75,6 +75,7 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
@@ -1181,6 +1182,9 @@ def _build_workspace_list(
     # (see ``_visible_create_attempt_rows``). A parameter -- not read from the app
     # state here -- so this builder stays callable outside a request context.
     create_attempt_rows: Sequence[CreateAttemptRow] | None = None,
+    # Why each stopped cloud machine is stopped (host id -> kind), from the
+    # stop-kind tracker; None (or an absent host) leaves the entry's kind empty.
+    stop_kind_by_host_id: Mapping[str, str] | None = None,
 ) -> list[dict[str, str]]:
     """Build a JSON-serializable list of workspaces from the backend resolver.
 
@@ -1259,6 +1263,9 @@ def _build_workspace_list(
         if liveness is not None:
             entry["supports_shutdown"] = "true"
             entry["liveness"] = liveness.value
+            stop_kind = stop_kind_by_host_id.get(entry["host_id"]) if stop_kind_by_host_id is not None else None
+            if stop_kind is not None:
+                entry["stop_kind"] = stop_kind
         if session_store is not None:
             account = session_store.get_account_for_workspace(str(aid))
             if account is not None:
@@ -1670,6 +1677,7 @@ def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspac
         is_network_dependent=entry.get("is_network_dependent", "true") == "true",
         supports_shutdown=entry.get("supports_shutdown") == "true",
         liveness=entry.get("liveness", ""),
+        stop_kind=entry.get("stop_kind", ""),
         account=entry.get("account", ""),
         create_attempt_state=entry.get("create_attempt_state", ""),
         is_remote=entry.get("is_remote") == "true",
@@ -1700,6 +1708,7 @@ def _derive_ui_workspaces_message(
     backend_resolver: BackendResolverInterface,
     session_store: MultiAccountSessionStore | None,
     paths: InstallationPaths | None,
+    machine_stop_kind_tracker: MachineStopKindTracker | None,
 ) -> UiWorkspacesMessage:
     with app.app_context():
         rows = _build_workspace_list(
@@ -1707,6 +1716,9 @@ def _derive_ui_workspaces_message(
             session_store,
             tracker=get_state().system_interface_health_tracker,
             create_attempt_rows=_visible_create_attempt_rows(backend_resolver),
+            stop_kind_by_host_id=(
+                machine_stop_kind_tracker.stop_kind_by_host_id() if machine_stop_kind_tracker is not None else None
+            ),
         )
         restorable_ids = [str(aid) for aid in backend_resolver.list_restorable_workspace_ids()] + [
             str(hid) for hid in backend_resolver.list_restorable_workspace_host_ids()
@@ -1863,9 +1875,16 @@ class _LegacyUiStateDeriver(MutableModel):
     connectivity_detector: ConnectivityDetector | None = Field(
         frozen=True, description="This device's own connectivity condition"
     )
+    machine_stop_kind_tracker: MachineStopKindTracker | None = Field(
+        default=None,
+        frozen=True,
+        description="Why each stopped cloud machine is stopped, for the list's badge and band",
+    )
 
     def derive_workspaces(self) -> UiWorkspacesMessage:
-        return _derive_ui_workspaces_message(self.flask_app, self.backend_resolver, self.session_store, self.paths)
+        return _derive_ui_workspaces_message(
+            self.flask_app, self.backend_resolver, self.session_store, self.paths, self.machine_stop_kind_tracker
+        )
 
     def derive_accounts(self) -> UiAccountsMessage:
         return _derive_ui_accounts_message(self.flask_app, self.session_store)
@@ -2101,6 +2120,7 @@ def _create_ui_state_publisher(
     workspace_update_service: WorkspaceUpdateService | None,
     minds_config: MindsConfig | None,
     connectivity_detector: ConnectivityDetector | None,
+    machine_stop_kind_tracker: MachineStopKindTracker | None,
 ) -> UiStatePublisher:
     """Build the channel publisher from the same derivation helpers the legacy SSE uses."""
     deriver = _LegacyUiStateDeriver(
@@ -2113,6 +2133,7 @@ def _create_ui_state_publisher(
         workspace_update_service=workspace_update_service,
         minds_config=minds_config,
         connectivity_detector=connectivity_detector,
+        machine_stop_kind_tracker=machine_stop_kind_tracker,
     )
     return UiStatePublisher(
         broadcaster=broadcaster,
@@ -2254,6 +2275,14 @@ def create_desktop_client(
     ui_channel_broadcaster = UiChannelBroadcaster()
     resolved_mngr_host_dir = mngr_host_dir if mngr_host_dir is not None else Path.home() / ".mngr"
     workspace_operation_registry = InMemoryWorkspaceOperationRegistry()
+    # Why each stopped cloud machine is stopped, read from the connector: the
+    # badge and band decorate the state discovery reports with it, and the
+    # unattended dispatch asks it live before starting a machine.
+    machine_stop_kind_tracker = MachineStopKindTracker(
+        backend_resolver=backend_resolver,
+        session_store=session_store,
+        imbue_cloud_cli=imbue_cloud_cli,
+    )
     # Registered on the tracker's stuck edge below, once the state it reads
     # exists; built here because the update machinery's apply window hands an
     # expired window back to it.
@@ -2268,6 +2297,7 @@ def create_desktop_client(
             mngr_forward_port=mngr_forward_port,
             mngr_forward_preauth_cookie=mngr_forward_preauth_cookie,
             connectivity_detector=connectivity_detector,
+            read_cloud_lifecycle=machine_stop_kind_tracker.read_lifecycle,
             # An update's apply takes the services down on purpose; only the
             # apply window can tell that from a wedge.
             should_decline_dispatch=lambda agent_id: _is_recovery_declined_by_an_update(app, agent_id),
@@ -2303,7 +2333,10 @@ def create_desktop_client(
         workspace_update_service=workspace_update_service,
         minds_config=minds_config,
         connectivity_detector=connectivity_detector,
+        machine_stop_kind_tracker=machine_stop_kind_tracker,
     )
+    # The publisher exists only now; the tracker's changes re-derive the list through it.
+    machine_stop_kind_tracker.on_change = ui_publisher.notify_change
 
     # The durable notification feed behind the channel's notifications frame,
     # reconciled by the notifications derive on every publish tick. Its OS
@@ -2349,6 +2382,7 @@ def create_desktop_client(
         sync_scheduler=sync_scheduler,
         ui_channel_broadcaster=ui_channel_broadcaster,
         ui_publisher=ui_publisher,
+        machine_stop_kind_tracker=machine_stop_kind_tracker,
         notification_feed=notification_feed,
         workspace_operation_registry=workspace_operation_registry,
         workspace_update_service=workspace_update_service,
@@ -2362,6 +2396,9 @@ def create_desktop_client(
     # directly by their producers via publish_one_shot.
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.add_on_change_callback(ui_publisher.notify_change)
+        # A cloud machine leaving RUNNING is the moment its kind starts to
+        # matter; the wake lists it at once rather than a poll later.
+        backend_resolver.add_on_change_callback(machine_stop_kind_tracker.request_refresh)
     if system_interface_health_tracker is not None:
         _health_tracker_for_ui = system_interface_health_tracker
 

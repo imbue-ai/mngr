@@ -111,7 +111,7 @@ tracks_generation = false
 # deploy time. Dev envs keep the retention window (halted local VM held for
 # instant restart-in-place before the slot is freed) short so stop/start
 # iteration and the opt-in release test see the retention finalize land in
-# minutes; production/staging keep the default hour.
+# minutes; production/staging use ten minutes.
 [storage]
 stop_retention_seconds = 300
 

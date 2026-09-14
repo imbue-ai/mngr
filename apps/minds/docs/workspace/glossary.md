@@ -111,3 +111,7 @@ Key concepts in the minds system:
   After adoption, host-key trust flows only through the user's synced workspace records; the connector is trusted exactly once, at lease handoff. The pins are bound to an address and port, and the machine changes ports on every restore (driven by this client, an operator, a rollback, or another device), so the client remembers the endpoints it last pinned and moves the pins to the connector's current endpoints before every connection, with no network round trip.
   Idempotent and marker-driven; a served key that matches neither the pins nor an in-flight rotation is refused, never re-trusted.
   See `libs/mngr_imbue_cloud/README.md` ("Adoption and key rotation") and [the lost-device runbook](../deploy/reference/lost-device-runbook.md).
+
+- **stop kind**: why a remote (imbue_cloud) machine's current stop happened, recorded by the connector beside its lifecycle status and cleared by every start (`specs/workspace-stop-kinds.md`).
+  `owner` (the user's own stop, from any device) and `idle` (an operator stop to free capacity) are the owner's to end with Start; `maintenance` (an operator hold, such as the gen-2 migration) and `suspension` (the account suspend fan-out) are not -- a held machine offers no Start control (a `maintenance` hold is named "Maintenance" by its badge; a `suspension` reads as plain "Stopped"), and the connector refuses owner starts of it.
+  A kind this build does not recognize is treated as a hold (shown but not actionable).

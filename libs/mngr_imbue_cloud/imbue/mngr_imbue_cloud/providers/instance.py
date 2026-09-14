@@ -128,8 +128,10 @@ from imbue.mngr_imbue_cloud.errors import FastPathUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartTimeoutError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
@@ -159,6 +161,8 @@ from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
+from imbue.mngr_imbue_cloud.workspace_lifecycle import is_owner_startable
 from imbue.mngr_vps.container_setup import docker_inspect_running
 from imbue.mngr_vps.container_setup import start_container_sshd
 from imbue.mngr_vps.host_setup import apply_host_setup_on_outer
@@ -434,11 +438,25 @@ def _advance_workspace_start(
     Requests the start itself the moment the host is startable: a
     still-``stopping`` host is waited out first (the connector refuses
     starts mid-stop; the stop lands on ``stopped`` once its upload verifies).
+    A stop that is not the owner's to end (``maintenance``, ``suspension``)
+    is refused at once with ``ImbueCloudWorkspaceHeldError``, and a kind this
+    client does not recognize with the unrecognized-state error, without
+    waiting or requesting.
     """
     current = client.get_workspace(token_provider(), host_db_id)
     state.last_observed_status = current.status
     if current.transition_error:
         state.last_transition_error = current.transition_error
+    # A stop an operator holds is not the owner's to end, from the moment the
+    # stop is requested: refuse before waiting or asking, with the sentence
+    # the connector itself would answer (a kind this client does not know is
+    # treated as a hold, and gets the update remedy).
+    if current.status in (WorkspaceStatus.STOPPING, WorkspaceStatus.STOPPED) and not is_owner_startable(
+        current.stop_kind
+    ):
+        if current.stop_kind is WorkspaceStopKind.UNKNOWN:
+            return _unrecognized_workspace_status_error(host_id)
+        return ImbueCloudWorkspaceHeldError(WORKSPACE_HELD_MESSAGE)
     match current.status:
         case WorkspaceStatus.RUNNING:
             return current
@@ -2514,8 +2532,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         keys under the (possibly new) address/ports. A workspace still
         ``stopping`` is waited out first (the connector refuses starts
         mid-stop; its upload usually verifies within minutes) and the start
-        is requested the moment it lands on ``stopped``. A start that lands
-        back on ``stopped`` with a recorded error raises
+        is requested the moment it lands on ``stopped``. A stop an operator
+        holds (``maintenance``, ``suspension``) is refused at once with
+        ``ImbueCloudWorkspaceHeldError``: only an operator start ends it. A
+        start that lands back on ``stopped`` with a recorded error raises
         ``WorkspaceStartFailedError`` (e.g. "no capacity available right now,
         try again later"); the artifact is untouched and the start can simply
         be retried.

@@ -1,7 +1,8 @@
 // The Machines-list row rules, extracted from LandingPage's row renderer so
 // they are a testable pure decision: Start is offered only for a
-// shutdown-capable machine that is STOPPED, Stop only for one that is
-// RUNNING, and neither during transitions or when the liveness is unknown.
+// shutdown-capable machine that is STOPPED and whose stop is the owner's to
+// end (its stop kind is owner-startable), Stop only for one that is RUNNING,
+// and neither during transitions or when the liveness is unknown.
 //
 // A dead discovery consumer makes every row's data stale at once. Nothing is
 // arriving to correct it, so the row stops claiming to know a state and stops
@@ -11,10 +12,37 @@
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { DiscoveryHealth, RecoveryKind, WorkspaceHealth } from "../../models/health";
 import type { MindLiveness } from "../../models/create";
+import { MIND_LIVENESS_LABELS } from "../../models/create";
 
 export interface MindControls {
   isStartShown: boolean;
   isStopShown: boolean;
+}
+
+/** The stop kinds whose stop is the owner's to end. "" is a running machine, a
+ * stop recorded before the connector had kinds, or a kind not yet read; a kind
+ * this build does not know ("unknown") is a hold: shown, not actionable. */
+export function isOwnerStartableStopKind(stopKind: string): boolean {
+  return stopKind === "" || stopKind === "owner" || stopKind === "idle";
+}
+
+/** The sentence a held machine's surfaces show; the connector answers a
+ * refused start with the same words, so the two never disagree. */
+export const MAINTENANCE_MESSAGE = "This machine is undergoing maintenance and will be back shortly.";
+
+/** What the liveness badge says: the lifecycle label, except that a machine an
+ * operator is holding says so instead of "Stopped" (the badge is the one
+ * place the row explains why Start is missing). */
+export function livenessBadgeLabelFor(liveness: string, stopKind: string): string {
+  if (isMaintenanceHold(liveness, stopKind)) return "Maintenance";
+  return MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
+}
+
+/** Whether a machine is stopped, or on its way there, under an operator's
+ * maintenance hold: the one hold the badge and the notice band name (the other
+ * holds read as a plain "Stopped"). */
+export function isMaintenanceHold(liveness: string, stopKind: string): boolean {
+  return stopKind === "maintenance" && (liveness === "STOPPED" || liveness === "STOPPING");
 }
 
 /** Whether the app has any current reading of a machine's state at all. */
@@ -23,13 +51,13 @@ export function isMachineStateKnown(discoveryHealth: DiscoveryHealth): boolean {
 }
 
 export function mindControlsFor(
-  entry: Pick<UiWorkspaceEntry, "supports_shutdown">,
+  entry: Pick<UiWorkspaceEntry, "supports_shutdown" | "stop_kind">,
   liveness: MindLiveness,
   discoveryHealth: DiscoveryHealth,
 ): MindControls {
   const isShutdownSupported = (entry.supports_shutdown ?? false) && isMachineStateKnown(discoveryHealth);
   return {
-    isStartShown: isShutdownSupported && liveness === "STOPPED",
+    isStartShown: isShutdownSupported && liveness === "STOPPED" && isOwnerStartableStopKind(entry.stop_kind ?? ""),
     isStopShown: isShutdownSupported && liveness === "RUNNING",
   };
 }
@@ -53,15 +81,17 @@ export function lifecycleConfirmation(action: "stop" | "restart", name: string, 
 }
 
 /** What clicking a machines-list row should do, as a testable pure decision.
- * "blocked" is a cloud machine this device holds no SSH key for: nothing on
- * the far side would answer, so the row explains itself with a chip instead. */
+ * "blocked" is a row whose click could go nowhere, so the row is not
+ * clickable: a cloud machine this device holds no SSH key for (nothing on the
+ * far side would answer; its chip says so), or a stop an operator holds (no
+ * Start is offered; a maintenance hold is named by the badge). */
 export type RowClickAction = "enter" | "recover" | "recover-start" | "blocked";
 
-// ``liveness`` is a plain string (only the "STOPPED" comparison matters) so
-// callers without a MindLivenessTracker (e.g. CreateTemplatePage) can pass
-// the entry's raw liveness field directly.
+// ``liveness`` is a plain string (only equality against the lifecycle names
+// matters) so callers without a MindLivenessTracker (e.g. CreateTemplatePage)
+// can pass the entry's raw liveness field directly.
 export function rowClickActionFor(
-  entry: Pick<UiWorkspaceEntry, "supports_shutdown" | "key_state">,
+  entry: Pick<UiWorkspaceEntry, "supports_shutdown" | "key_state" | "stop_kind">,
   liveness: string,
   isHealthy: boolean,
 ): RowClickAction {
@@ -69,6 +99,12 @@ export function rowClickActionFor(
   // precisely because this device cannot connect to it, and recovery could
   // not change that.
   if ((entry.key_state ?? "") !== "") return "blocked";
+  // A stop an operator holds is not the owner's to end, so a click has
+  // nowhere useful to go: no Start is offered, and a maintenance hold is
+  // named by the badge (the other holds read as plain "Stopped").
+  const isStoppedOnPurposeByOthers =
+    (liveness === "STOPPED" || liveness === "STOPPING") && !isOwnerStartableStopKind(entry.stop_kind ?? "");
+  if (isStoppedOnPurposeByOthers) return "blocked";
   if (!isHealthy) return "recover";
   if ((entry.supports_shutdown ?? false) && liveness === "STOPPED") {
     // A stopped container cannot be entered: go straight to Recovery, which

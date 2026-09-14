@@ -9,6 +9,7 @@ Feature: Remote-compatibility invariants
   @unknown-enum-values-not-actionable
   Rule: An enumerated wire value the client does not recognize degrades to "shown but not actionable"
     A workspace whose lifecycle status is unrecognized is displayed with its state unknown; state-changing operations on it are refused with a message naming the remedy (update the app), and it is never treated as absent, stopped, or destroyed.
+    A workspace whose stop kind is unrecognized is likewise shown stopped but not actionable: no Start is offered, the app dispatches no start of it, and a start run through mngr is refused with the same remedy (machine-lifecycle.unknown-stop-kind-not-actionable).
 
     @unknown-status-start-refused
     Example: Starting a workspace in an unrecognized state is refused with the update remedy

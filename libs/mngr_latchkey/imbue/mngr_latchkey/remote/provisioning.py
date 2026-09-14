@@ -49,6 +49,7 @@ from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
+from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
 from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
@@ -61,13 +62,18 @@ from imbue.mngr_latchkey.remote._machine import DESKTOP_PERMISSIONS_OVERRIDE_FIL
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_TIMEOUT_SECONDS
-from imbue.mngr_latchkey.remote._machine import REMOTE_FILE_MODE
+
+# Re-exported (the redundant aliases mark them as such): the mode every latchkey
+# file on the machine is written with and the machine's tmpfs secrets directory
+# -- what a consumer that moves a machine's latchkey state wholesale (the gen-1
+# -> gen-2 migrate) rewrites and recreates.
+from imbue.mngr_latchkey.remote._machine import REMOTE_FILE_MODE as REMOTE_FILE_MODE
 
 # Re-exported (the redundant alias marks it as such): consumers outside this
 # plugin read the gateway's logs under this directory.
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME as REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_TIMEOUT_SECONDS
-from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
+from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR as TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote._machine import read_machine_gateway_password_from_secrets_dir
 from imbue.mngr_latchkey.remote._machine import read_machine_key_from_secrets_dir
 
@@ -164,7 +170,7 @@ _SLOW_INSTALL_WARNING_THRESHOLD_SECONDS: Final[float] = 90.0
 # local per-host file is named ``latchkey_permissions.json``; on the VPS it
 # becomes the gateway's single ``permissions.json``.
 _REMOTE_PERMISSIONS_FILENAME: Final[str] = PERMISSIONS_CONFIG_FILENAME
-_REMOTE_EXTENSIONS_DIR_NAME: Final[str] = "extensions"
+REMOTE_EXTENSIONS_DIR_NAME: Final[str] = "extensions"
 _REMOTE_EXTENSION_CANDIDATE_SUFFIX: Final[str] = ".candidate"
 
 # Filenames (under the remote ``$HOME/.latchkey`` directory) for the
@@ -187,7 +193,7 @@ _LEGACY_GATEWAY_CMDLINE_MARKER: Final[str] = "gateway"
 # Filename (under the remote ``$HOME/.latchkey`` directory) for the gateway's
 # supervisord launch wrapper. The wrapper is not secret (it only references the
 # secret file *paths*), so it lives on the normal disk.
-_GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
+GATEWAY_RUN_SCRIPT_FILENAME: Final[str] = "gateway_run.sh"
 
 # Filesystem types (as reported by ``stat -f -c %T``) we accept as RAM-backed
 # for the secrets directory. Anything else means the key would land on disk.
@@ -196,11 +202,11 @@ _RAM_BACKED_FILESYSTEM_TYPES: Final[frozenset[str]] = frozenset({"tmpfs", "ramfs
 # supervisord drop-in program directory (the distro ``supervisor`` package's
 # ``supervisord.conf`` includes ``conf.d/*.conf``) and the program names /
 # config filenames for the gateway and the reverse tunnel.
-_SUPERVISOR_CONFD_DIR: Final[Path] = Path("/etc/supervisor/conf.d")
-_GATEWAY_PROGRAM_NAME: Final[str] = "latchkey-gateway"
-_TUNNEL_PROGRAM_NAME: Final[str] = "latchkey-tunnel"
-_GATEWAY_CONF_FILENAME: Final[str] = f"{_GATEWAY_PROGRAM_NAME}.conf"
-_TUNNEL_CONF_FILENAME: Final[str] = f"{_TUNNEL_PROGRAM_NAME}.conf"
+SUPERVISOR_CONFD_DIR: Final[Path] = Path("/etc/supervisor/conf.d")
+GATEWAY_PROGRAM_NAME: Final[str] = "latchkey-gateway"
+TUNNEL_PROGRAM_NAME: Final[str] = "latchkey-tunnel"
+GATEWAY_CONF_FILENAME: Final[str] = f"{GATEWAY_PROGRAM_NAME}.conf"
+TUNNEL_CONF_FILENAME: Final[str] = f"{TUNNEL_PROGRAM_NAME}.conf"
 
 # Absolute paths to the interpreters/binaries named in supervisord ``command=``
 # lines. supervisord resolves a program via its *own* PATH (not the program's
@@ -241,7 +247,40 @@ _SSH_CONNECT_TIMEOUT_SECONDS: Final[int] = 15
 # Filename of the ad-hoc private key generated on the VPS for the
 # outer-host -> container SSH used by the reverse tunnel. Lives under the
 # remote ``$HOME/.latchkey`` directory; the matching ``.pub`` sits beside it.
-_CONTAINER_TUNNEL_KEY_FILENAME: Final[str] = "container_tunnel_key"
+CONTAINER_TUNNEL_KEY_FILENAME: Final[str] = "container_tunnel_key"
+
+# The machine-owned latchkey state, by where it lives, for a consumer that moves
+# a machine's state onto a fresh VM: the files provisioning and the gateway
+# keep under ``$HOME/.latchkey`` (the ``extensions/`` directory is listed by
+# the consumer since its content is whatever this build bundles), the
+# supervisord drop-ins, and the four tmpfs secrets. An allow-list rather than
+# the directory's listing on purpose: the logs stay behind, the files the
+# desktop mirrors onto the machine (``_mirror.SHARED_WITH_DESKTOP_FILENAMES``)
+# are re-supplied by its next pass, and a pre-supervisord build's PID files
+# must not reach a VM where the legacy teardown kills whatever PID they name.
+# CLEANUP: remove with the minds-admin cutover migrate in phase 6 of
+# blueprint/slice-fleet-cutover, once no gen-1 row exists on any tier.
+MACHINE_LATCHKEY_DISK_FILENAMES: Final[tuple[str, ...]] = (
+    CREDENTIALS_STORE_FILENAME,
+    CONFIG_FILENAME,
+    PERMISSIONS_CONFIG_FILENAME,
+    UPSTREAM_DATA_FORMAT_VERSION_FILENAME,
+    CONTAINER_TUNNEL_KEY_FILENAME,
+    f"{CONTAINER_TUNNEL_KEY_FILENAME}.pub",
+    GATEWAY_RUN_SCRIPT_FILENAME,
+)
+MACHINE_LATCHKEY_SUPERVISOR_CONF_FILENAMES: Final[tuple[str, ...]] = (GATEWAY_CONF_FILENAME, TUNNEL_CONF_FILENAME)
+MACHINE_LATCHKEY_TMPFS_FILENAMES: Final[tuple[str, ...]] = (
+    GATEWAY_ENCRYPTION_KEY_FILENAME,
+    GATEWAY_LISTEN_PASSWORD_FILENAME,
+    DESKTOP_GATEWAY_PASSWORD_FILENAME,
+    DESKTOP_PERMISSIONS_OVERRIDE_FILENAME,
+)
+# The machine's own pair: what ``gateway_run.sh`` refuses to start without.
+MACHINE_LATCHKEY_GATEWAY_REQUIRED_TMPFS_FILENAMES: Final[tuple[str, ...]] = (
+    GATEWAY_ENCRYPTION_KEY_FILENAME,
+    GATEWAY_LISTEN_PASSWORD_FILENAME,
+)
 
 # Docker label key every mngr container carries, valued with the host id. Used
 # to locate an agent's container on the VPS by host id. Must match the
@@ -406,13 +445,13 @@ def _build_ensure_installed_script(
             # changed. ``|| true`` covers hosts where the program is not
             # registered yet (first provisioning) -- the normal
             # reread/update/start later in provisioning brings it up.
-            f"  supervisorctl restart {_GATEWAY_PROGRAM_NAME} || true",
+            f"  supervisorctl restart {GATEWAY_PROGRAM_NAME} || true",
             "fi",
         )
     )
 
 
-def _ensure_latchkey_installed(host: OuterHostInterface) -> None:
+def ensure_latchkey_installed(host: OuterHostInterface) -> None:
     """Ensure curl, Node.js, supervisor, and the pinned latchkey CLI are installed on the VPS.
 
     Idempotent: each component is installed only when missing, or -- for
@@ -574,7 +613,7 @@ def _build_supervisor_program_config(program_name: str, command: str, log_path: 
     )
 
 
-def _reload_supervisor_programs(
+def reload_supervisor_programs(
     host: OuterHostInterface,
     host_name: str,
     program_name: str,
@@ -607,7 +646,7 @@ def _reload_supervisor_programs(
         )
 
 
-def _ensure_ram_backed_secrets_dir(host: OuterHostInterface, host_name: str) -> None:
+def ensure_ram_backed_secrets_dir(host: OuterHostInterface, host_name: str) -> None:
     """Create the tmpfs secrets directory (0700) and verify it is genuinely RAM-backed.
 
     The gateway's encryption key must never land on a disk-backed filesystem, so
@@ -718,7 +757,7 @@ def _ensure_remote_gateway_extension(host: OuterHostInterface, remote_dir: Path)
     The caller restarts the gateway after writing all wrapper inputs, so the new
     extension and any updated secrets take effect together.
     """
-    extensions_dir = remote_dir / _REMOTE_EXTENSIONS_DIR_NAME
+    extensions_dir = remote_dir / REMOTE_EXTENSIONS_DIR_NAME
     destination = extensions_dir / REMOTE_GATEWAY_EXTENSION_FILENAME
     candidate = destination.with_name(destination.name + _REMOTE_EXTENSION_CANDIDATE_SUFFIX)
     content = bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME).encode("utf-8")
@@ -861,14 +900,14 @@ def _ensure_latchkey_gateway_running(
     password_file_path = TMPFS_SECRETS_DIR / GATEWAY_LISTEN_PASSWORD_FILENAME
     desktop_password_file_path = TMPFS_SECRETS_DIR / DESKTOP_GATEWAY_PASSWORD_FILENAME
     desktop_permissions_override_file_path = TMPFS_SECRETS_DIR / DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
-    run_script_path = remote_dir / _GATEWAY_RUN_SCRIPT_FILENAME
+    run_script_path = remote_dir / GATEWAY_RUN_SCRIPT_FILENAME
     log_path = remote_dir / REMOTE_GATEWAY_LOG_FILENAME
-    conf_path = _SUPERVISOR_CONFD_DIR / _GATEWAY_CONF_FILENAME
+    conf_path = SUPERVISOR_CONFD_DIR / GATEWAY_CONF_FILENAME
     host_name = host.get_name()
 
     # Create + verify the RAM-backed secrets dir before writing the key, so we
     # never persist it to a disk filesystem if tmpfs is unexpectedly absent.
-    _ensure_ram_backed_secrets_dir(host, host_name)
+    ensure_ram_backed_secrets_dir(host, host_name)
 
     # Write this package's config.json state before the gateway starts: the
     # confusing built-in services (e.g. ``notion``) stay hidden, and the custom
@@ -908,11 +947,11 @@ def _ensure_latchkey_gateway_running(
     # Write the supervisord program config, then reread/update/start to apply it.
     command = f"{_SH_BINARY_PATH} {shlex.quote(str(run_script_path))}"
     conf = _build_supervisor_program_config(
-        _GATEWAY_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_GATEWAY_START_RETRIES
+        GATEWAY_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_GATEWAY_START_RETRIES
     )
     with log_span("Ensuring latchkey gateway is running on VPS {} (port {})", host_name, OUTER_PORT):
         host.write_file(conf_path, conf.encode("utf-8"), mode=REMOTE_FILE_MODE, is_atomic=True)
-        _reload_supervisor_programs(host, host_name, _GATEWAY_PROGRAM_NAME, restart=True)
+        reload_supervisor_programs(host, host_name, GATEWAY_PROGRAM_NAME, restart=True)
 
 
 def _build_reverse_tunnel_ssh_command(
@@ -1005,9 +1044,9 @@ def _ensure_latchkey_gateway_reachable_from_container(
         outer_port=OUTER_PORT,
     )
     log_path = resolve_remote_latchkey_directory(host) / REMOTE_TUNNEL_LOG_FILENAME
-    conf_path = _SUPERVISOR_CONFD_DIR / _TUNNEL_CONF_FILENAME
+    conf_path = SUPERVISOR_CONFD_DIR / TUNNEL_CONF_FILENAME
     conf = _build_supervisor_program_config(
-        _TUNNEL_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_TUNNEL_START_RETRIES
+        TUNNEL_PROGRAM_NAME, command, str(log_path), _SUPERVISOR_TUNNEL_START_RETRIES
     )
     host_name = host.get_name()
     with log_span(
@@ -1017,7 +1056,7 @@ def _ensure_latchkey_gateway_reachable_from_container(
         OUTER_PORT,
     ):
         host.write_file(conf_path, conf.encode("utf-8"), mode=REMOTE_FILE_MODE, is_atomic=True)
-        _reload_supervisor_programs(host, host_name, _TUNNEL_PROGRAM_NAME)
+        reload_supervisor_programs(host, host_name, TUNNEL_PROGRAM_NAME)
 
 
 def _build_container_tunnel_keypair_script(
@@ -1078,7 +1117,7 @@ def _ensure_container_tunnel_keypair(
     a no-op. Raises :class:`RemoteGatewayError` if key generation or
     authorization fails.
     """
-    key_path = resolve_remote_latchkey_directory(host) / _CONTAINER_TUNNEL_KEY_FILENAME
+    key_path = resolve_remote_latchkey_directory(host) / CONTAINER_TUNNEL_KEY_FILENAME
     script = _build_container_tunnel_keypair_script(
         key_path=key_path,
         container_name=container_name,
@@ -1447,7 +1486,7 @@ def provision_remote_gateway(
     # provider converges on the one exec channel. A failure here fails the whole
     # provisioning pass, which is retried on the next discovery cycle.
     provision_owner_exec_vm(host, host_id)
-    _ensure_latchkey_installed(host)
+    ensure_latchkey_installed(host)
     # Tear down any pre-supervisord (nohup + PID-file) gateway/tunnel first: an
     # old build's processes still hold OUTER_PORT and the container's forward
     # bind, which would make the new supervisord programs fail to start.

@@ -64,7 +64,9 @@ class FakeDeps implements LifecycleDeps {
   async getJson(url: string): Promise<unknown | null> {
     this.getUrls.push(url);
     if (url.includes("/backup-check")) {
-      return this.checkResponses.length > 0 ? this.checkResponses.shift()! : null;
+      return this.checkResponses.length > 0
+        ? this.checkResponses.shift()!
+        : null;
     }
     if (url.includes("/recovery-info")) {
       if (this.isRecoveryInfoHeld) {
@@ -72,14 +74,21 @@ class FakeDeps implements LifecycleDeps {
           this.heldRecoveryInfo = resolve;
         });
       }
-      return this.recoveryInfoResponses.length > 0 ? this.recoveryInfoResponses.shift()! : null;
+      return this.recoveryInfoResponses.length > 0
+        ? this.recoveryInfoResponses.shift()!
+        : null;
     }
     return this.getResponses.length > 0 ? this.getResponses.shift()! : null;
   }
 
-  async postJson(url: string, body: unknown): Promise<{ status: number; json: unknown | null }> {
+  async postJson(
+    url: string,
+    body: unknown,
+  ): Promise<{ status: number; json: unknown | null }> {
     this.postCalls.push({ url, body });
-    return this.postResponses.length > 0 ? this.postResponses.shift()! : { status: 500, json: null };
+    return this.postResponses.length > 0
+      ? this.postResponses.shift()!
+      : { status: 500, json: null };
   }
 
   async deleteResource(url: string): Promise<number> {
@@ -133,14 +142,21 @@ describe("restoredFromLabel", () => {
     expect(restoredFromLabel(undefined)).toBeNull();
     expect(restoredFromLabel(["hourly"])).toBeNull();
     expect(restoredFromLabel(["restored"])).toBe("Restored");
-    const withLineage = restoredFromLabel(["restored", "restored-from:2026-01-02T03:04:05Z"]);
+    const withLineage = restoredFromLabel([
+      "restored",
+      "restored-from:2026-01-02T03:04:05Z",
+    ]);
     expect(withLineage).toContain("Restored from ");
   });
 });
 
 describe("failure classification", () => {
   it("keys the failure-specific retries on the worker's wording", () => {
-    expect(isSafetySnapshotFailure("the pre-restore safety snapshot failed: disk full")).toBe(true);
+    expect(
+      isSafetySnapshotFailure(
+        "the pre-restore safety snapshot failed: disk full",
+      ),
+    ).toBe(true);
     expect(isSafetySnapshotFailure("something else")).toBe(false);
     expect(isChatGateFailure("cannot determine running chats")).toBe(true);
     expect(isChatGateFailure("Could not probe the machine")).toBe(true);
@@ -155,15 +171,25 @@ describe("BackupHistoryModel", () => {
 
     deps.getResponses.push({ is_configured: false });
     await model.loadPage();
-    expect(model.statusMessage).toBe("Backups are turned off for this machine.");
+    expect(model.statusMessage).toBe(
+      "Backups are turned off for this machine.",
+    );
 
     deps.getResponses.push({ is_configured: true, snapshots_error: "boom" });
     await model.loadPage();
-    expect(model.statusMessage).toBe("Couldn't load your backup history right now.");
+    expect(model.statusMessage).toBe(
+      "Couldn't load your backup history right now.",
+    );
 
-    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 0 });
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_total: 0,
+    });
     await model.loadPage();
-    expect(model.statusMessage).toBe("No backups yet. The first backup runs within the hour.");
+    expect(model.statusMessage).toBe(
+      "No backups yet. The first backup runs within the hour.",
+    );
 
     deps.getResponses.push({
       is_configured: true,
@@ -180,7 +206,11 @@ describe("BackupHistoryModel", () => {
   it("pages by the fixed page size and gates Restore on the OFFLINE verdict", async () => {
     const deps = new FakeDeps();
     const model = new BackupHistoryModel("agent-11", deps);
-    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 40 });
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_total: 40,
+    });
     model.goOlder();
     await settle();
     expect(model.offset).toBe(BACKUP_HISTORY_PAGE_SIZE);
@@ -196,7 +226,10 @@ describe("BackupOperationController", () => {
   it("surfaces a non-202 dispatch as an error without entering the running state", async () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
-    deps.postResponses.push({ status: 409, json: { error: "already running" } });
+    deps.postResponses.push({
+      status: 409,
+      json: { error: "already running" },
+    });
 
     controller.dispatch("/x", {}, { label: "Working..." });
     await settle();
@@ -214,7 +247,11 @@ describe("BackupOperationController", () => {
     };
     deps.postResponses.push({ status: 202, json: null });
 
-    controller.startRestore({ snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" }, "5 days ago", {});
+    controller.startRestore(
+      { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
+      "5 days ago",
+      {},
+    );
     expect(controller.isRunning).toBe(true);
     expect(controller.isRestore).toBe(true);
     expect(controller.restoringSnapshotId).toBe("snap-1");
@@ -231,11 +268,17 @@ describe("BackupOperationController", () => {
     await settle();
     expect(controller.isCancellable).toBe(true);
 
-    deps.getResponses.push({ status: "DONE", kind: "backup_restore", is_done: true });
+    deps.getResponses.push({
+      status: "DONE",
+      kind: "backup_restore",
+      is_done: true,
+    });
     deps.runScheduled();
     await settle();
     expect(controller.isRunning).toBe(false);
-    expect(controller.successMessage).toContain("Machine restored to the backup from 5 days ago");
+    expect(controller.successMessage).toContain(
+      "Machine restored to the backup from 5 days ago",
+    );
     expect(successCount).toBe(1);
   });
 
@@ -243,14 +286,20 @@ describe("BackupOperationController", () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
     deps.postResponses.push({ status: 202, json: null });
-    controller.startRestore({ snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" }, "", {});
+    controller.startRestore(
+      { snapshot_id: "snap-1", time: "2026-01-01T00:00:00Z" },
+      "",
+      {},
+    );
     await settle();
 
     deps.getResponses.push({ status: "FAILED", blocked_chats: ["main"] });
     deps.runScheduled();
     await settle();
 
-    expect(controller.errorMessage).toContain("Chats are running in this machine (main)");
+    expect(controller.errorMessage).toContain(
+      "Chats are running in this machine (main)",
+    );
     expect(controller.isStopChatsRetryOffered).toBe(true);
 
     // The retry re-dispatches the same restore with stop_chats flipped on.
@@ -277,7 +326,10 @@ describe("BackupOperationController", () => {
     expect(controller.isRestore).toBe(true);
     expect(controller.restoringSnapshotId).toBe("snap-9");
 
-    deps.getResponses.push({ status: "FAILED", error: "pre-restore safety snapshot failed" });
+    deps.getResponses.push({
+      status: "FAILED",
+      error: "pre-restore safety snapshot failed",
+    });
     deps.runScheduled();
     await settle();
     // No dispatch context: the safety-skip retry must NOT be offered.
@@ -294,14 +346,20 @@ describe("BackupOperationController", () => {
 
     // Every poll answers null (FakeDeps with no queued responses): the
     // controller keeps polling until the bound, then declares the poll lost.
-    for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < MAX_CONSECUTIVE_POLL_FAILURES;
+      attempt += 1
+    ) {
       expect(controller.isRunning).toBe(true);
       deps.runScheduled();
       await settle();
     }
 
     expect(controller.isRunning).toBe(false);
-    expect(controller.errorMessage).toContain("Lost contact with the backup operation");
+    expect(controller.errorMessage).toContain(
+      "Lost contact with the backup operation",
+    );
     expect(deps.scheduled).toHaveLength(0);
   });
 
@@ -327,14 +385,20 @@ describe("BackupOperationController", () => {
     const deps = new FakeDeps();
     const controller = new BackupOperationController("agent-11", deps);
     deps.postResponses.push({ status: 202, json: null });
-    controller.dispatch("/x", {}, { label: "Updating...", isCancellable: true });
+    controller.dispatch(
+      "/x",
+      {},
+      { label: "Updating...", isCancellable: true },
+    );
     await settle();
 
     deps.getResponses.push({ status: "CANCELLED", kind: "backup_update" });
     deps.runScheduled();
     await settle();
 
-    expect(controller.cancelledMessage).toBe("Update cancelled. Nothing was changed.");
+    expect(controller.cancelledMessage).toBe(
+      "Update cancelled. Nothing was changed.",
+    );
     expect(controller.errorMessage).toBeNull();
   });
 });
@@ -367,7 +431,11 @@ describe("DestroyingModel", () => {
     model.start();
     await settle();
 
-    for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < MAX_CONSECUTIVE_POLL_FAILURES;
+      attempt += 1
+    ) {
       deps.runScheduled();
       await settle();
     }
@@ -399,7 +467,10 @@ describe("DestroyingModel", () => {
     model.start();
     await settle();
 
-    deps.postResponses.push({ status: 409, json: { error: "another destroy is already running" } });
+    deps.postResponses.push({
+      status: 409,
+      json: { error: "another destroy is already running" },
+    });
     await model.retry();
     expect(model.status).toBe("failed");
     expect(model.retryErrorMessage).toBe("another destroy is already running");
@@ -448,11 +519,19 @@ describe("RecoveryModel", () => {
     expect(model.info?.workspace_name).toBe("my-machine");
     expect(model.agentId).toBe("agent-33");
 
-    deps.postResponses.push({ status: 202, json: { operation_id: "agent-33", kind: "restart" } });
+    deps.postResponses.push({
+      status: 202,
+      json: { operation_id: "agent-33", kind: "restart" },
+    });
     await model.dispatchRecovery();
     expect(model.isRecoveryRunning).toBe(true);
-    expect(deps.postCalls[0].url).toContain("/api/v1/workspaces/agent-33/restart");
-    expect(deps.postCalls[0].body).toEqual({ scope: "host", start_only: false });
+    expect(deps.postCalls[0].url).toContain(
+      "/api/v1/workspaces/agent-33/restart",
+    );
+    expect(deps.postCalls[0].body).toEqual({
+      scope: "host",
+      start_only: false,
+    });
 
     deps.getResponses.push({ status: "DONE", is_done: true });
     deps.runScheduled();
@@ -467,17 +546,61 @@ describe("RecoveryModel", () => {
     deps.recoveryInfoResponses.push(info);
     await model.load();
 
-    deps.postResponses.push({ status: 409, json: { error: "another operation is running" } });
+    deps.postResponses.push({
+      status: 409,
+      json: { error: "another operation is running" },
+    });
     await model.dispatchRecovery();
     expect(model.isRecoveryRunning).toBe(false);
     expect(model.recoveryError).toBe("another operation is running");
 
     deps.postResponses.push({ status: 202, json: null });
     await model.dispatchRecovery();
-    deps.getResponses.push({ status: "FAILED", is_done: false, error: "host did not come back" });
+    deps.getResponses.push({
+      status: "FAILED",
+      is_done: false,
+      error: "host did not come back",
+    });
     deps.runScheduled();
     await settle();
     expect(model.recoveryError).toBe("host did not come back");
+  });
+
+  it("reads a declined start as neither a success nor a failure", async () => {
+    // The connector refused the start because an operator holds the machine:
+    // nothing changed, so the machine is not answering (no success the page
+    // could leave on) and nothing failed (no error card). The reason is shown.
+    const deps = new FakeDeps();
+    const model = new RecoveryModel("agent-33", deps);
+    deps.recoveryInfoResponses.push(info);
+    await model.load();
+    deps.postResponses.push({ status: 202, json: null });
+    await model.dispatchRecovery("start");
+
+    deps.getResponses.push({
+      status: "DECLINED",
+      is_done: false,
+      warning: "This machine is undergoing maintenance.",
+    });
+    deps.runScheduled();
+    await settle();
+
+    expect(model.isRecoveryRunning).toBe(false);
+    expect(model.isRecoverySucceeded).toBe(false);
+    expect(model.recoveryError).toBeNull();
+    expect(model.recoveryNotice).toBe(
+      "This machine is undergoing maintenance.",
+    );
+
+    // Once the operator's start brings the machine back, the notice is stale.
+    deps.recoveryInfoResponses.push({
+      ...info,
+      health: "healthy",
+      is_host_offline: false,
+    });
+    deps.runScheduled();
+    await settle();
+    expect(model.recoveryNotice).toBeNull();
   });
 
   it("bounds consecutive failed restart-status polls like the sibling pollers", async () => {
@@ -491,7 +614,11 @@ describe("RecoveryModel", () => {
     // Every status poll answers null (no queued responses): the model keeps
     // polling until the bound, then surfaces a lost-contact error instead of
     // pinning "Restarting..." forever.
-    for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < MAX_CONSECUTIVE_POLL_FAILURES;
+      attempt += 1
+    ) {
       expect(model.isRecoveryRunning).toBe(true);
       deps.runScheduled();
       await settle();
@@ -504,7 +631,8 @@ describe("RecoveryModel", () => {
     // asking about itself forever. The card's own state poll is a separate
     // loop and outlives it, so counting pending callbacks would not tell the
     // two apart.
-    const restartPolls = () => deps.getUrls.filter((url) => url.includes("/operations/restart/")).length;
+    const restartPolls = () =>
+      deps.getUrls.filter((url) => url.includes("/operations/restart/")).length;
     const pollsBefore = restartPolls();
     deps.runScheduled();
     await settle();
@@ -518,7 +646,11 @@ describe("RecoveryModel", () => {
     await model.load();
     deps.postResponses.push({ status: 202, json: null });
     await model.dispatchRecovery();
-    for (let attempt = 0; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < MAX_CONSECUTIVE_POLL_FAILURES;
+      attempt += 1
+    ) {
       deps.runScheduled();
       await settle();
     }
@@ -577,7 +709,9 @@ describe("RecoveryModel", () => {
 
     expect(model.info?.is_backend_unreachable).toBe(true);
     expect(model.info?.provider_label).toBe("Docker");
-    expect(model.info?.unreachable_reason).toBe("Cannot connect to the Docker daemon");
+    expect(model.info?.unreachable_reason).toBe(
+      "Cannot connect to the Docker daemon",
+    );
   });
 
   it("keeps the last good state when a poll cannot be read, and keeps polling", async () => {
@@ -743,15 +877,20 @@ describe("RecoveryModel", () => {
 
     deps.postResponses.push({ status: 202, json: null });
     await model.dispatchRecovery("start");
-    expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: true });
+    expect(deps.postCalls.at(-1)?.body).toEqual({
+      scope: "host",
+      start_only: true,
+    });
 
     model.isRecoveryRunning = false;
     deps.postResponses.push({ status: 202, json: null });
     await model.dispatchRecovery();
-    expect(deps.postCalls.at(-1)?.body).toEqual({ scope: "host", start_only: false });
+    expect(deps.postCalls.at(-1)?.body).toEqual({
+      scope: "host",
+      start_only: false,
+    });
   });
 });
-
 
 describe("BackupSettingsModel", () => {
   it("keeps the fast snapshot half readable when the slow check half never answers", async () => {
@@ -787,20 +926,39 @@ describe("BackupSettingsModel", () => {
     expect(model.statusLine).toBe("Backups are turned off for this machine.");
     expect(model.emptyHistoryMessage).toContain("Backups are turned off");
 
-    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_error: "restic snapshots timed out" });
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_error: "restic snapshots timed out",
+    });
     await model.loadSnapshots();
     expect(model.statusLine).toBe("Backup status unknown.");
-    expect(model.emptyHistoryMessage).toBe("Couldn't load your backup history right now.");
+    expect(model.emptyHistoryMessage).toBe(
+      "Couldn't load your backup history right now.",
+    );
 
-    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 0, is_backing_up: true });
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_total: 0,
+      is_backing_up: true,
+    });
     await model.loadSnapshots();
     expect(model.statusLine).toBe("Backing up now...");
-    expect(model.emptyHistoryMessage).toContain("first backup will appear shortly");
+    expect(model.emptyHistoryMessage).toContain(
+      "first backup will appear shortly",
+    );
 
-    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 0 });
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_total: 0,
+    });
     await model.loadSnapshots();
     expect(model.statusLine).toBe("No successful backup yet.");
-    expect(model.emptyHistoryMessage).toBe("No backups yet. The first backup runs within the hour.");
+    expect(model.emptyHistoryMessage).toBe(
+      "No backups yet. The first backup runs within the hour.",
+    );
   });
 
   it("does not read a listing route that never answered as backups being turned off", async () => {
@@ -812,7 +970,9 @@ describe("BackupSettingsModel", () => {
     await model.loadSnapshots();
 
     expect(model.statusLine).toBe("Backup status unknown.");
-    expect(model.emptyHistoryMessage).toBe("Couldn't load your backup history right now.");
+    expect(model.emptyHistoryMessage).toBe(
+      "Couldn't load your backup history right now.",
+    );
   });
 
   it("turns each reported problem into guidance, and keeps the check's own detail", async () => {
@@ -832,7 +992,9 @@ describe("BackupSettingsModel", () => {
     expect(model.problemLines[1]).toContain("is not running");
     // A problem code this build has no words for still reaches the reader.
     expect(model.problemLines[2]).toBe("SOMETHING_NEW");
-    expect(model.problemLines[3]).toBe("installed minds-v0.4.1, minimum minds-v0.5.0");
+    expect(model.problemLines[3]).toBe(
+      "installed minds-v0.4.1, minimum minds-v0.5.0",
+    );
     expect(model.versionLine).toBe(
       "Installed backup service: minds-v0.4.1 / minimum required: minds-v0.5.0 / update installs: minds-v0.5.2",
     );
@@ -842,7 +1004,10 @@ describe("BackupSettingsModel", () => {
     const deps = new FakeDeps();
     const model = new BackupSettingsModel("agent-11", deps);
 
-    deps.checkResponses.push({ check_state: "OK", is_verification_enabled: true });
+    deps.checkResponses.push({
+      check_state: "OK",
+      is_verification_enabled: true,
+    });
     await model.loadCheck();
     // Idempotent: resetting a wedged service is what it is for, so a machine
     // with nothing wrong still gets the button.
@@ -862,32 +1027,46 @@ describe("BackupSettingsModel", () => {
   it("re-reads the verdict after a verification write, and reports a write that failed", async () => {
     const deps = new FakeDeps();
     const model = new BackupSettingsModel("agent-11", deps);
-    deps.checkResponses.push({ check_state: "OK", is_verification_enabled: true });
+    deps.checkResponses.push({
+      check_state: "OK",
+      is_verification_enabled: true,
+    });
     await model.loadCheck();
     expect(model.isVerificationEnabled).toBe(true);
 
     deps.postResponses.push({ status: 200, json: null });
-    deps.checkResponses.push({ check_state: "DISABLED", is_verification_enabled: false });
+    deps.checkResponses.push({
+      check_state: "DISABLED",
+      is_verification_enabled: false,
+    });
     await model.toggleVerification();
 
     expect(deps.postCalls[0].url).toContain("/backup-service/verification");
     expect(deps.postCalls[0].body).toEqual({ enabled: false });
     // The fresh verdict, not an optimistic flip: the re-check is what decides.
     expect(model.isVerificationEnabled).toBe(false);
-    expect(model.checkLine).toBe("Backup service verification is disabled for this machine.");
+    expect(model.checkLine).toBe(
+      "Backup service verification is disabled for this machine.",
+    );
     expect(model.isVerificationPending).toBe(false);
     expect(model.verificationError).toBeNull();
 
     deps.postResponses.push({ status: 500, json: null });
     await model.toggleVerification();
-    expect(model.verificationError).toBe("Could not change the verification setting. Try again.");
+    expect(model.verificationError).toBe(
+      "Could not change the verification setting. Try again.",
+    );
     expect(model.isVerificationPending).toBe(false);
   });
 
   it("does not adopt a read that lands after the group was closed", async () => {
     const deps = new FakeDeps();
     const model = new BackupSettingsModel("agent-11", deps);
-    deps.getResponses.push({ is_configured: true, snapshots: [], snapshots_total: 3 });
+    deps.getResponses.push({
+      is_configured: true,
+      snapshots: [],
+      snapshots_total: 3,
+    });
     const inFlight = model.loadSnapshots();
     model.stop();
     await inFlight;
@@ -904,10 +1083,16 @@ describe("the backup settings actions", () => {
     controller.startUpdate();
     await settle();
 
-    expect(deps.postCalls[0].url).toBe("/api/v1/workspaces/agent-11/backup-service/update");
+    expect(deps.postCalls[0].url).toBe(
+      "/api/v1/workspaces/agent-11/backup-service/update",
+    );
     expect(deps.postCalls[0].body).toEqual({ stop_chats: false });
 
-    deps.getResponses.push({ status: "FAILED", kind: "backup_update", blocked_chats: ["review"] });
+    deps.getResponses.push({
+      status: "FAILED",
+      kind: "backup_update",
+      blocked_chats: ["review"],
+    });
     await controller.pollOnce();
     expect(controller.isStopChatsRetryOffered).toBe(true);
 
@@ -924,7 +1109,9 @@ describe("the backup settings actions", () => {
     deps.postResponses.push({ status: 202, json: null });
     controller.startStorageChange("API_KEY", "RESTIC_REPOSITORY=s3:example\n");
     await settle();
-    expect(deps.postCalls[0].url).toBe("/api/v1/workspaces/agent-11/backup-service/configure");
+    expect(deps.postCalls[0].url).toBe(
+      "/api/v1/workspaces/agent-11/backup-service/configure",
+    );
     expect(deps.postCalls[0].body).toEqual({
       backup_provider: "API_KEY",
       api_key_env: "RESTIC_REPOSITORY=s3:example\n",
@@ -933,7 +1120,9 @@ describe("the backup settings actions", () => {
     deps.postResponses.push({ status: 202, json: null });
     controller.startStorageChange("NONE", "");
     await settle();
-    expect(deps.postCalls[1].url).toBe("/api/v1/workspaces/agent-11/backup-service/disable");
+    expect(deps.postCalls[1].url).toBe(
+      "/api/v1/workspaces/agent-11/backup-service/disable",
+    );
     expect(deps.postCalls[1].body).toEqual({});
   });
 });

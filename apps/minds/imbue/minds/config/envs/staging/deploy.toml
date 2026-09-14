@@ -24,26 +24,56 @@ services = [
 # The tier's SSH certificate authority (imbue-ai/mngr-internal#850): the public
 # half of the Vault ``minds-staging-ssh`` mount's CA, which every gen-2 box, slice VM,
 # and workspace container trusts for management SSH instead of a static key.
-# Read it after the Vault bring-up (imbue-ai/vault terraform) with
+# Read with
 #   vault read -field=public_key minds-staging-ssh/config/ca
-# and commit it here. Until this block exists, gen-2 box prep and slice bakes
-# on the tier refuse.
-# [ssh_ca]
-# public_key = "ssh-ed25519 AAAA... minds-staging-ssh-ca"
+# (the mount was created by the imbue-ai/vault terraform on 2026-09-09; the key
+# was committed on 2026-09-13 for the staging gen-2 bring-up). Rotating the CA
+# means re-prepping every gen-2 box and re-baking every slice on the tier
+# before updating this value (see docs/deploy/setup/vault.md).
+[ssh_ca]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIImy5mn5Tp2Ofq17LQVNhlq2Ldyb5NQSyvLagAMKx7rq minds-staging-ssh-ca"
 
 # The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
 # whose static IPs the box `:22` lockdown allowlists; runbook:
-# apps/minds/docs/deploy/gen2-management-plane.md). Absent until the tier's
-# management-plane bring-up; see the dev tier's deploy.toml for the schema.
-# [management_plane.wireguard]
-# [[management_plane.wireguard.operators]]
-# [management_plane.modal_proxy]
+# apps/minds/docs/deploy/gen2-management-plane.md). Every value here is PUBLIC.
+# The staging overlay is 10.96.0.0/16 (MANAGEMENT_OVERLAY_CIDR_BY_TIER):
+# operators 10.96.0.2 - 10.96.0.254, boxes from 10.96.1.1 upward (assigned at
+# `minds-admin server prep`). The `:22` lockdown lands on a gen-2 box only when
+# [management_plane.modal_proxy] is configured; gen-1 boxes are never locked.
+[management_plane.wireguard]
+listen_port = 51820
+
+# Josh's operator key. The private half lives on Josh's dev box at
+# ~/.mindsadmin/staging/wireguard.key (generated 2026-09-13).
+[[management_plane.wireguard.operators]]
+name = "josh"
+public_key = "nDHMg2pb4j8/CIxK6fSzhA9rxa5noN77kTeU2baLjF4="
+address = "10.96.0.2"
+
+# The tier's Modal Proxy: created 2026-09-13 in the minds-staging Modal
+# workspace's 'main' environment, in Modal's us-east region (next to Modal's
+# default us-east request routing and the Virginia boxes).
+[management_plane.modal_proxy]
+proxy_name = "mind-connector-east"
+environment_name = "main"
+static_ips = ["98.90.51.49"]
 
 [lifecycle]
 creates_resources = false
 modal_env_strategy = "SHARED"
 writes_local_state = false
 tracks_generation = true
+
+# Workspace stop/start knob stamped over the Vault ``storage`` entry at deploy
+# time: how long a stopped workspace's halted VM lingers on its box for an
+# instant restart in place before the retention finalize frees the slot. The
+# window is a latency optimization only (the durable artifact is verified
+# before the row reaches stopped), so ten minutes covers the stop-then-restart
+# and restart-for-resize flows without pinning a slot per stopped workspace for
+# the connector's default hour, or holding a drained box for an hour before it
+# can be repaved.
+[storage]
+stop_retention_seconds = 600
 
 [min_containers]
 # Keep one container of each app warm so the desktop client never pays

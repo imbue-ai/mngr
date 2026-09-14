@@ -29,6 +29,8 @@ from pydantic import AnyUrl
 from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
+from pydantic import TypeAdapter
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -211,11 +213,17 @@ class MachineSizeCliInfo(WireModel):
     host_id: str
     host_name: str
     status: str
+    # Why the machine's current stop happened (owner / maintenance / idle /
+    # suspension), None while running or against a connector without kinds.
+    stop_kind: str | None = None
     memory_units: int | None = None
     target_memory_units: int | None = None
     disk_gb: int | None = None
     target_disk_gb: int | None = None
     is_restart_needed_to_apply: bool = False
+
+
+_MACHINES_LISTING_ADAPTER: Final = TypeAdapter(list[MachineSizeCliInfo])
 
 
 class LiteLLMKeyMaterial(WireModel):
@@ -649,6 +657,25 @@ class ImbueCloudCli(MutableModel):
             return None
         return MachineSizeCliInfo.model_validate(body)
 
+    def list_machines(self, account: str) -> list[MachineSizeCliInfo]:
+        """Every machine of one account with its lifecycle status, sizes and stop kind.
+
+        The stop-kind tracker's one round trip per account: the machines list
+        is the connector's full lifecycle listing, so it names stopped machines
+        discovery only knows by their state. A CLI failure raises
+        :class:`ImbueCloudCliError` rather than reading as an empty account, so
+        the tracker can keep what it last read instead of forgetting a hold.
+        """
+        result = self._run(["machines", "show", "--account", account], cg_name="imbue-cloud-machines-list")
+        body = self._expect_success(result, "machines show")
+        # Not an empty account: a listing of unknown shape, or one with an
+        # entry that is not a machine, must not read as "no machine is held"
+        # and clear the tracker's kinds.
+        try:
+            return _MACHINES_LISTING_ADAPTER.validate_python(body)
+        except ValidationError as exc:
+            raise _machines_listing_shape_error(result.stdout, exc) from exc
+
     def release_host(self, account: str, host_db_id: str) -> bool:
         result = self._run(
             ["hosts", "release", host_db_id, "--account", account],
@@ -1014,6 +1041,17 @@ class ImbueCloudCli(MutableModel):
             ["sync", "bundle", "delete", "--account", account], cg_name="imbue-cloud-sync-bundle-delete"
         )
         self._expect_success(result, "sync bundle delete")
+
+
+def _machines_listing_shape_error(stdout: str, exc: ValidationError) -> ImbueCloudCliError:
+    """The error for a successful ``machines show`` whose output is not a list of machine objects."""
+    detail = "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or 'listing'}: {error['msg']}" for error in exc.errors()
+    )
+    shape_exc = ImbueCloudCliError(f"machines show: expected a list of machine objects ({detail})")
+    shape_exc.exit_code = 0
+    shape_exc.stdout = stdout
+    return shape_exc
 
 
 def _parse_conflict_stored(stderr: str) -> dict[str, Any] | None:

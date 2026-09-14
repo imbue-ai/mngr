@@ -39,11 +39,30 @@ services = [
 
 # The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
 # whose static IPs the box `:22` lockdown allowlists; runbook:
-# apps/minds/docs/deploy/gen2-management-plane.md). Absent until the tier's
-# management-plane bring-up; see the dev tier's deploy.toml for the schema.
-# [management_plane.wireguard]
-# [[management_plane.wireguard.operators]]
-# [management_plane.modal_proxy]
+# apps/minds/docs/deploy/gen2-management-plane.md). Every value here is PUBLIC.
+# The production overlay is 10.64.0.0/11 (MANAGEMENT_OVERLAY_CIDR_BY_TIER):
+# operators 10.64.0.2 - 10.64.0.254, boxes from 10.64.1.1 upward (assigned at
+# `minds-admin server prep`). The `:22` lockdown lands on a gen-2 box only when
+# [management_plane.modal_proxy] is configured; gen-1 boxes are never locked.
+# Committed ahead of the production connector deploy that will attach the
+# proxy; no production box is gen-2 yet, so nothing is locked down until the
+# first gen-2 prep there.
+[management_plane.wireguard]
+listen_port = 51820
+
+# Josh's operator key. The private half lives on Josh's dev box at
+# ~/.mindsadmin/production/wireguard.key (generated 2026-09-13).
+[[management_plane.wireguard.operators]]
+name = "josh"
+public_key = "sKtd/fSa3DfKcluRhv3ial/nShb4MUiKOfvGkmkyrWU="
+address = "10.64.0.2"
+
+# The tier's Modal Proxy: created 2026-09-13 in the minds-production Modal
+# workspace's 'main' environment, in Modal's us-east region.
+[management_plane.modal_proxy]
+proxy_name = "mind-connector-east"
+environment_name = "main"
+static_ips = ["52.206.40.121"]
 
 # Tier-shape flags consumed by `minds-admin env deploy` / `destroy`. Production
 # tracks generation for parity with staging (production destroy is hard-
@@ -54,6 +73,17 @@ creates_resources = false
 modal_env_strategy = "SHARED"
 writes_local_state = false
 tracks_generation = true
+
+# Workspace stop/start knob stamped over the Vault ``storage`` entry at deploy
+# time: how long a stopped workspace's halted VM lingers on its box for an
+# instant restart in place before the retention finalize frees the slot. The
+# window is a latency optimization only (the durable artifact is verified
+# before the row reaches stopped), so ten minutes covers the stop-then-restart
+# and restart-for-resize flows without pinning a slot per stopped workspace for
+# the connector's default hour, or holding a drained box for an hour before it
+# can be repaved. Takes effect at the next production connector deploy.
+[storage]
+stop_retention_seconds = 600
 
 # Per-app warm-pool sizes. Keep one container of each app alive so the
 # desktop client never pays a cold-boot penalty on auth / lease /

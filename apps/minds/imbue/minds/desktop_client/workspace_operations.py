@@ -64,6 +64,11 @@ class WorkspaceOperationStatus(UpperCaseStrEnum):
     # mutated. Terminal like FAILED, but not an error -- the UI renders it as
     # a neutral notice.
     CANCELLED = auto()
+    # The far side refused the operation before anything was mutated (an
+    # operator holds the machine a start targets). Terminal like CANCELLED and
+    # not an error; the reason rides in ``warning`` and the UI shows it as a
+    # notice rather than treating the operation as either succeeded or failed.
+    DECLINED = auto()
 
 
 class WorkspaceOperationRecord(FrozenModel):
@@ -77,7 +82,7 @@ class WorkspaceOperationRecord(FrozenModel):
         default=None,
         description=(
             "Non-fatal caveat attached to a DONE operation (e.g. the restore succeeded but its chained "
-            "backup-service update failed), else None"
+            "backup-service update failed), or the reason a DECLINED operation was refused; else None"
         ),
     )
     started_at: datetime = Field(description="When the operation was registered")
@@ -141,6 +146,10 @@ class WorkspaceOperationRegistryInterface(MutableModel, ABC):
     @abstractmethod
     def cancel(self, agent_id: AgentId) -> None:
         """Mark the operation CANCELLED (a user cancel honored before any mutation) and end its log stream."""
+
+    @abstractmethod
+    def decline(self, agent_id: AgentId, reason: str) -> None:
+        """Mark the operation DECLINED (the far side refused it before any mutation) and end its log stream."""
 
     @abstractmethod
     def get(self, agent_id: AgentId) -> WorkspaceOperationRecord | None:
@@ -257,6 +266,9 @@ class InMemoryWorkspaceOperationRegistry(WorkspaceOperationRegistryInterface):
 
     def cancel(self, agent_id: AgentId) -> None:
         self._finish(agent_id, WorkspaceOperationStatus.CANCELLED, error=None, warning=None)
+
+    def decline(self, agent_id: AgentId, reason: str) -> None:
+        self._finish(agent_id, WorkspaceOperationStatus.DECLINED, error=None, warning=reason)
 
     def _finish(
         self, agent_id: AgentId, status: WorkspaceOperationStatus, error: str | None, warning: str | None

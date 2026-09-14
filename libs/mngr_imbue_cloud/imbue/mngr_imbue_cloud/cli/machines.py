@@ -46,6 +46,7 @@ def _machine_display_payload(entry: WorkspaceInfo) -> dict[str, Any]:
         "host_id": entry.host_id,
         "host_name": entry.host_name,
         "status": entry.status.value.lower(),
+        "stop_kind": entry.stop_kind.value.lower() if entry.stop_kind is not None else None,
         "memory_units": entry.memory_units,
         "target_memory_units": entry.target_memory_units,
         "disk_gb": entry.disk_gb,

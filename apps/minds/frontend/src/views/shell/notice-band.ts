@@ -11,6 +11,7 @@
 
 import type { DiscoveryHealth, EnvironmentCondition, RecoveryKind, WorkspaceHealth } from "../../models/health";
 import type { StandingUpdateNotice, UpdateRunOutcome, UpdateRunPhase } from "../../models/updates";
+import { MAINTENANCE_MESSAGE, isMaintenanceHold } from "../pages/landing-controls";
 
 /** What an action asks the shell to do. The views bind these; the decision
  * itself stays free of routing and IPC. */
@@ -30,6 +31,7 @@ export interface NoticePayload {
     | "environment-blocked"
     | "workspace-recovering"
     | "workspace-restart-failed"
+    | "workspace-maintenance"
     | "workspace-update-preparing"
     | "workspace-update-applying"
     | "workspace-update-waiting"
@@ -102,6 +104,12 @@ export interface NoticeBandContext {
   isWorkspaceNetworkDependent?: boolean;
   /** This one connection failed on this device, on a network that works. */
   isDeviceCannotConnect?: boolean;
+  /** The machine's lifecycle liveness (RUNNING / STOPPED / STOPPING / STARTING /
+   * UNKNOWN), "" when the machine's host cannot be stopped from minds. */
+  liveness?: string;
+  /** Why the machine's current stop happened (owner / maintenance / idle /
+   * suspension / unknown), "" while running or when not known. */
+  stopKind?: string;
   /** Which part of an update run owns this machine right now. */
   updateRunPhase?: UpdateRunPhase;
   /** The run's own line naming what it is waiting on, when it recorded a
@@ -136,9 +144,16 @@ export interface NoticeBandContext {
  * An update's apply step ranks above the machine's own health (it explains it)
  * but below this device's own condition (it does not); the rest of a run ranks
  * below all of them.
+ *
+ * A machine in a connector-owned lifecycle state (stopping, stopped, starting)
+ * is expectedly unreachable, so its health reading is masked to healthy before
+ * any of the above is consulted. When that stop is an operator's maintenance
+ * hold, the band says so instead -- ranked right after discovery death, above
+ * this device's own condition: the machine is down because someone asked for
+ * that, whatever this device's network is doing.
  */
 export function noticeBandFor(
-  workspaceHealth: WorkspaceHealth,
+  reportedWorkspaceHealth: WorkspaceHealth,
   discoveryHealth: DiscoveryHealth,
   isWorkspaceDisplayed: boolean,
   context: NoticeBandContext = {},
@@ -150,6 +165,8 @@ export function noticeBandFor(
     recoveryKind = null,
     isWorkspaceNetworkDependent = true,
     isDeviceCannotConnect = false,
+    liveness = "",
+    stopKind = "",
     updateRunPhase = "none",
     updateHoldDetail = null,
     updateRunOutcome = "none",
@@ -157,6 +174,12 @@ export function noticeBandFor(
   } = context;
   if (!isWorkspaceDisplayed) return null;
   if (discoveryHealth === "blocked") return discoveryBlockedNotice(isRestartAppAvailable);
+  // The machines list withholds a health badge on the same rule.
+  const isStoppedOnPurpose = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
+  if (isMaintenanceHold(liveness, stopKind)) {
+    return { key: "workspace-maintenance", variant: "info", message: MAINTENANCE_MESSAGE, action: null };
+  }
+  const workspaceHealth: WorkspaceHealth = isStoppedOnPurpose ? "healthy" : reportedWorkspaceHealth;
   // This device's own condition outranks the backend's for the same reason
   // discovery death outranks both: it explains them. A laptop with no network
   // cannot reach the provider either, so its poll errors too -- naming the
@@ -176,7 +199,9 @@ export function noticeBandFor(
   // explains nothing about its outage. Displacing its recovery notice would
   // blame the network for a machine the network cannot touch, and send the
   // user to a card for a recovery that would have worked.
-  const isUserBounceRunning = workspaceHealth === "recovering" && recoveryKind === "restart";
+  // Read from the reported health: the bounce runs through the connector's
+  // own states, whose masking above would otherwise hide it here.
+  const isUserBounceRunning = reportedWorkspaceHealth === "recovering" && recoveryKind === "restart";
   const condition: EnvironmentCondition =
     isUserBounceRunning || !isWorkspaceNetworkDependent ? "NONE" : deviceEnvironment;
   // The apply outranks the machine's own health because it explains it: the

@@ -121,8 +121,15 @@ class RestartOperationStatusResponse(FrozenModel):
     operation_id: str = Field(description="The workspace agent id being recovered")
     kind: str = Field(description="Always 'restart'")
     status: str = Field(description="Raw operation status")
-    is_done: bool = Field(description="Whether the operation has finished")
+    is_done: bool = Field(description="Whether the operation finished successfully (status DONE)")
     error: str | None = Field(default=None, description="Failure message, when the operation failed")
+    warning: str | None = Field(
+        default=None,
+        description=(
+            "A DONE operation's non-fatal caveat, or the reason a DECLINED one was refused before it mutated "
+            "anything (an operator holds the machine); None otherwise"
+        ),
+    )
 
 
 class BackupOperationStatusResponse(FrozenModel):

@@ -97,6 +97,13 @@ class UiWorkspaceEntry(FrozenModel):
     liveness: str = Field(
         default="", description="RUNNING / STOPPED / STOPPING / STARTING / UNKNOWN when supports_shutdown, else empty"
     )
+    stop_kind: str = Field(
+        default="",
+        description=(
+            "Why a cloud machine's current stop happened: owner / maintenance / idle / suspension, 'unknown' for a "
+            "kind this build does not recognize, empty while running or when not known"
+        ),
+    )
     account: str = Field(default="", description="Owning account email, when known")
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"

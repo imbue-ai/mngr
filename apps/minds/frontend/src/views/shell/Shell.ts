@@ -373,6 +373,8 @@ export function Shell(): m.Component<ShellAttrs> {
           // wifi off. A row we have no entry for keeps the conservative default.
           isWorkspaceNetworkDependent: entry?.is_network_dependent ?? true,
           isDeviceCannotConnect: entry?.is_device_cannot_connect ?? false,
+          liveness: entry?.liveness ?? "",
+          stopKind: entry?.stop_kind ?? "",
           updateRunPhase: updatePhase,
           updateHoldDetail: published?.is_hold_recorded ? (published.hold_detail ?? "") : null,
           updateRunOutcome: updateOutcome,
