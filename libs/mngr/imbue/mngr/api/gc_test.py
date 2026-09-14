@@ -1751,7 +1751,6 @@ def test_gc_volumes_skips_destroyed_host_volumes(temp_host_dir: Path, temp_mngr_
     """gc_volumes treats volumes of DESTROYED hosts as orphaned.
 
     A DESTROYED host's volumes have no active owner and should be cleaned up.
-    The DESTROYED host is skipped in the active-volume-id loop (line 430).
     """
     destroyed_host_id = HostId("host-00000000000000000000000000000002")
     active_host_id = HostId("host-00000000000000000000000000000003")

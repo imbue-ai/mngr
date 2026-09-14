@@ -43,9 +43,9 @@ from imbue.mngr.config.key_resolver import set_at_path
 from imbue.mngr.config.overlay_merge import build_settings_narrowing_message
 from imbue.mngr.config.overlay_merge import suffix_remediation
 from imbue.mngr.config.plugin_registry import get_plugin_config_class
+from imbue.mngr.config.pre_readers import derive_project_config_dir
 from imbue.mngr.config.pre_readers import read_config_layers
 from imbue.mngr.config.pre_readers import read_disabled_plugins
-from imbue.mngr.config.pre_readers import resolve_project_config_dir
 from imbue.mngr.config.pre_readers import try_load_toml
 from imbue.mngr.config.provider_config_registry import get_provider_config_class
 from imbue.mngr.config.provider_config_registry import list_registered_provider_backend_names
@@ -208,14 +208,18 @@ def load_config(
     if strict is None:
         strict = resolve_strict_from_env()
 
+    # Resolve the cwd's git worktree root once, up here: both the config layers below and
+    # the MngrContext returned at the end need it, and it costs a git subprocess.
+    project_root = find_git_worktree_root(start=None, cg=concurrency_group)
+
     # Read the user/project/local config layers (in precedence order) through
     # read_config_layers -- the single chokepoint that applies the pytest config
     # guard -- so a real (non-test) config can never be loaded here during a test
-    # run. The project root is resolved from the cwd's git worktree root (or
-    # MNGR_PROJECT_CONFIG_DIR). Each layer carries its resolved path and its
+    # run. The project config dir comes from MNGR_PROJECT_CONFIG_DIR, else the project
+    # root just resolved. Each layer carries its resolved path and its
     # ``config set --scope`` value so narrowing diagnostics can name the actual
     # file rather than an opaque layer label.
-    project_config_dir = resolve_project_config_dir(root_name, concurrency_group)
+    project_config_dir = derive_project_config_dir(root_name, project_root)
     loaded_layers = read_config_layers(profile_dir, project_config_dir)
 
     # Merge config files in precedence order (user, project, local). Narrowing
@@ -349,12 +353,9 @@ def load_config(
     # Validate and apply defaults using normal constructor
     final_config = MngrConfig.model_validate(config_dict)
 
-    # Resolve project root for use as cwd in pre-command scripts.
-    # Note: MNGR_PROJECT_CONFIG_DIR is NOT used here because it points to the config
-    # directory (containing settings.toml), not the project root.
-    project_root = find_git_worktree_root(start=None, cg=concurrency_group)
-
-    # Return MngrContext containing both config and plugin manager
+    # Return MngrContext containing both config and plugin manager. project_root is the cwd
+    # for pre-command scripts; MNGR_PROJECT_CONFIG_DIR does not stand in for it, because
+    # that points at the config directory (containing settings.toml), not the project root.
     return MngrContext(
         config=final_config,
         pm=pm,
@@ -395,9 +396,7 @@ def get_or_create_profile_dir(base_dir: Path) -> Path:
     return profile_dir
 
 
-# =============================================================================
 # Config Loading
-# =============================================================================
 
 
 def _assigned_paths(parsed_layer: MngrConfig) -> list[str]:
@@ -1163,9 +1162,7 @@ def parse_config(
     return MngrConfig.model_construct(**kwargs)
 
 
-# =============================================================================
 # Environment Variable Overrides
-# =============================================================================
 
 
 def _env_segments_to_key_path(segments: list[str]) -> list[str]:

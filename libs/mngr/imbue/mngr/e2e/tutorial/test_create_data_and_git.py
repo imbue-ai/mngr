@@ -551,7 +551,6 @@ def test_create_git_mirror_with_existing_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(60)
 def test_create_with_transfer_none(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can run the agent in-place (directly in your source directory) without any transfer:

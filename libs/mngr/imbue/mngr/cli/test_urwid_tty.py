@@ -92,7 +92,6 @@ def _run_in_tmux_and_capture(
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
-@pytest.mark.timeout(30)
 def test_kqueue_tty_registration_with_piped_stdin(
     tmp_path: Path,
     _isolate_tmux_server: None,
@@ -116,7 +115,6 @@ def test_kqueue_tty_registration_with_piped_stdin(
 
 @pytest.mark.acceptance
 @pytest.mark.tmux
-@pytest.mark.timeout(30)
 def test_kqueue_tty_registration_with_direct_stdin(
     tmp_path: Path,
     _isolate_tmux_server: None,

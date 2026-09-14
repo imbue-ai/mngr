@@ -402,11 +402,15 @@ export const CreatePage: m.ClosureComponent = () => {
         ]),
         m("div", [
           m(FormLabel, { target: "branch" }, "Branch"),
-          m("p", { class: "mb-1 type-helper text-tertiary" }, "Leave empty for latest version"),
+          m(
+            "p",
+            { class: "mb-1 type-helper text-tertiary" },
+            "Defaults to the template version this app was released with",
+          ),
           m(TextInput, {
             id: "branch",
             name: "branch",
-            placeholder: "latest tag",
+            placeholder: "this app's version",
             value: model.branch,
             oninput: (event: InputEvent) => {
               model.branch = (event.target as HTMLInputElement).value;

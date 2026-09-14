@@ -538,7 +538,6 @@ def test_create_with_quiet_output(e2e: E2eSession) -> None:
 # in-process gRPC SDK inside the spawned `mngr` subprocess, which the resource
 # guard cannot track. With the mark, the guard's NEVER_INVOKED check fails the
 # test; without it there is no tracked Modal usage, so no violation.
-@pytest.mark.timeout(60)
 def test_create_copy(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can create a full copy (an independent git mirror) instead of a worktree:

@@ -39,6 +39,7 @@ import os
 import signal
 import sys
 import time
+from collections.abc import Collection
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -56,7 +57,6 @@ from imbue.resource_guards.resource_guards import register_guarded_resource_mark
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
-# ---------------------------------------------------------------------------
 # Cache importlib.metadata.entry_points() to avoid repeated filesystem scans.
 #
 # On slow filesystems (e.g., 9p with dcache=0), each entry_points() call takes
@@ -67,7 +67,6 @@ from imbue.resource_guards.resource_guards import stop_resource_guards
 # Since installed packages don't change during a test run, we cache results at
 # module import time. Each xdist worker is a separate process, so a simple
 # in-process dict is sufficient (no cross-process coordination needed).
-# ---------------------------------------------------------------------------
 
 _original_entry_points = importlib.metadata.entry_points
 _entry_points_cache: dict[
@@ -115,13 +114,11 @@ _LOCK_DEADLINE_GRACE_SECONDS: Final[float] = 60.0
 _registered: bool = False
 
 
-# ---------------------------------------------------------------------------
 # Shared defaults -- the single source of truth for markers, filterwarnings,
 # and coverage report settings that are common across all projects.
 # Per-project pyproject.toml files still contain addopts (CLI args like -n,
 # --timeout, --cov, etc.) and coverage.run settings (parallel, concurrency,
 # omit) because those must be parsed before hooks run.
-# ---------------------------------------------------------------------------
 
 _SHARED_MARKERS: Final[list[str]] = [
     "acceptance: marks tests as requiring network access, Modal credentials, etc. These are required to pass in CI",
@@ -133,6 +130,19 @@ _SHARED_MARKERS: Final[list[str]] = [
 
 # Additional markers registered by projects via register_marker().
 _registered_markers: list[str] = []
+
+# Per-class test budgets, keyed by marker. A test carrying one of these markers drives a
+# real external resource -- a real tmux server, real subprocesses -- rather than running
+# in-process Python, so it costs wall time the repo's global ``--timeout`` was never sized
+# for. Each entry gives that class its own budget, applied at collection to any member
+# that does not declare a timeout of its own.
+#
+# tmux=60: sized from the class's cost on the CI runners themselves, read off an offload
+# junit report rather than a developer machine, where an uncontended run already puts the
+# slowest member near 7s. The remaining headroom is for the parallel contention CI runs
+# under. Revise an entry by re-measuring its class on CI, never by adding a per-test
+# decorator -- decorating them one at a time is exactly what this table replaces.
+_MARKER_TIMEOUT_SECONDS: Final[dict[str, int]] = {"tmux": 60}
 
 
 def register_marker(marker_line: str) -> None:
@@ -171,9 +181,7 @@ _SHARED_COVERAGE_EXCLUDE_LINES: Final[list[str]] = [
 ]
 
 
-# ---------------------------------------------------------------------------
 # Helper functions
-# ---------------------------------------------------------------------------
 
 
 def _is_xdist_worker() -> bool:
@@ -481,9 +489,7 @@ def _configure_shared_coverage_defaults(config: pytest.Config) -> None:
     cov.config.html_dir = "htmlcov"
 
 
-# ---------------------------------------------------------------------------
 # Pytest hook implementations (prefixed with _ to avoid accidental discovery)
-# ---------------------------------------------------------------------------
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -698,11 +704,20 @@ def _pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    """Filter collected test items to only include those matching the active test profile.
+    """Apply the shared collection-time policies: profile filtering, then class budgets.
+
+    Runs with tryfirst=True so that downstream hooks (e.g. pytest-split) only see the
+    filtered set.
+    """
+    _deselect_items_outside_active_profile(config, items)
+    _apply_marker_class_timeouts(config, items)
+
+
+def _deselect_items_outside_active_profile(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keep only the items matching the active test profile.
 
     When a test profile is active (set during pytest_configure), items whose file paths
-    do not fall under any of the profile's testpaths are deselected. This runs with
-    tryfirst=True so that downstream hooks (e.g. pytest-split) only see the filtered set.
+    do not fall under any of the profile's testpaths are deselected.
     """
     profile: ScopedProfile | None = getattr(config, "_test_profile", None)
     if profile is None:
@@ -722,6 +737,43 @@ def _pytest_collection_modifyitems(
     if deselected:
         config.hook.pytest_deselected(items=deselected)
         items[:] = selected
+
+
+def _resolve_marker_class_timeout(
+    marker_names: Collection[str],
+    has_explicit_timeout: bool,
+    global_timeout: float | None,
+) -> int | None:
+    """The class budget a test with these markers needs, or None to leave it alone.
+
+    A test declaring its own ``@pytest.mark.timeout`` is left alone: that decorator is how
+    a test says it differs from its class, and it keeps winning. The class budget is also
+    declined when the run's global ``--timeout`` is already at least as generous, so
+    ``pytest --timeout=300`` while debugging is not silently clamped back down. A test in
+    two classes at once takes the most generous of them.
+    """
+    if has_explicit_timeout:
+        return None
+    budgets = [seconds for name in marker_names if (seconds := _MARKER_TIMEOUT_SECONDS.get(name)) is not None]
+    if not budgets:
+        return None
+    budget = max(budgets)
+    if global_timeout is not None and global_timeout >= budget:
+        return None
+    return budget
+
+
+def _apply_marker_class_timeouts(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Give each test in a real-resource class (see _MARKER_TIMEOUT_SECONDS) its budget."""
+    global_timeout = config.getoption("timeout", default=None)
+    for item in items:
+        budget = _resolve_marker_class_timeout(
+            marker_names=[marker.name for marker in item.iter_markers()],
+            has_explicit_timeout=item.get_closest_marker("timeout") is not None,
+            global_timeout=global_timeout,
+        )
+        if budget is not None:
+            item.add_marker(pytest.mark.timeout(budget))
 
 
 def _pytest_collection_finish(session: pytest.Session) -> None:
@@ -922,9 +974,7 @@ def _print_test_durations_for_ci(
     _print_lock_message(f"Test durations saved to: {output_file}")
 
 
-# ---------------------------------------------------------------------------
 # Fixtures
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -938,9 +988,7 @@ def _set_junit_test_id(request: pytest.FixtureRequest, record_xml_attribute) -> 
     record_xml_attribute("name", test_id)
 
 
-# ---------------------------------------------------------------------------
 # Registration
-# ---------------------------------------------------------------------------
 
 
 def register_conftest_hooks(namespace: dict) -> None:
