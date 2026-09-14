@@ -726,6 +726,34 @@ _PLAIN_TUPLE_FIELDS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _normalize_submodel_fields_for_construct(
+    raw_config: dict[str, Any],
+    config_class: type[BaseModel],
+    *,
+    prefix: str,
+) -> dict[str, Any]:
+    """Coerce nested dicts to their declared BaseModel field instances before model_construct.
+
+    This ensures that sub-model fields (such as ContextCompactionConfig) are real
+    BaseModel instances with their own model_fields_set populated, so that
+    merge_models_via_overlay detects them as submodels and merges them properly.
+    """
+    result = dict(raw_config)
+    for field_name, value in raw_config.items():
+        if not isinstance(value, dict):
+            continue
+        field_info = config_class.model_fields.get(field_name)
+        if field_info is None:
+            continue
+        annotation = field_info.annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            try:
+                result[field_name] = annotation.model_validate(value)
+            except ValidationError as e:
+                raise ConfigParseError(f"Invalid config for '{prefix}.{field_name}': {e}") from e
+    return result
+
+
 def _normalize_tuple_fields_for_construct(raw_config: dict[str, Any]) -> dict[str, Any]:
     """Normalize tuple fields from str or list to tuple before model_construct (which bypasses validators).
 
@@ -875,6 +903,11 @@ def _parse_agent_types(
             extra_hint=extra_hint,
         )
         normalized_config = _normalize_tuple_fields_for_construct(cleaned_config)
+        normalized_config = _normalize_submodel_fields_for_construct(
+            normalized_config,
+            config_class,
+            prefix=f"agent_types.{name}",
+        )
         # Persist the alias-resolved parent_type so downstream resolution sees
         # the canonical type rather than the alias the user wrote.
         if parent_type is not None:

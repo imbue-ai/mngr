@@ -385,6 +385,7 @@ def _send_message_to_agent(
             return
 
     try:
+        agent.mngr_ctx.pm.hook.on_before_send_message(agent=agent, host=host, message=message_content)
         with log_span("Delivering to agent {}", agent_name):
             deliver(agent, message_content)
         with result_lock:
