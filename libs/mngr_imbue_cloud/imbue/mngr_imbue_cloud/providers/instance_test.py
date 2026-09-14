@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Event
+from threading import Lock
 from typing import Any
 from typing import cast
 
@@ -18,6 +19,7 @@ import pytest
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
+from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -814,23 +816,40 @@ class _MultiHostDiscoveryProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     A host missing from ``_raw_by_host_id`` simulates an outer-SSH failure for
     that host (returns ``(None, ..., False)``, the same shape a real unreachable
     box produces). ``_delay_seconds`` simulates each host's outer-SSH round trip
-    taking real wall time, for the wall-clock-bound test below.
+    taking real wall time, so the per-host checks overlap when they run in
+    parallel; ``_max_in_flight`` records the most checks ever in progress at
+    once, which a sequential loop can never push above one.
     """
 
     _leases: list[LeasedHostInfo] = []
     _raw_by_host_id: dict[HostId, Mapping[str, Any]] = {}
     _delay_seconds: float = 0.0
+    _in_flight_lock: Lock = PrivateAttr(default_factory=Lock)
+    _in_flight_count: int = 0
+    _max_in_flight: int = 0
 
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
         return list(self._leases)
 
+    @contextmanager
+    def _tracking_in_flight(self) -> Iterator[None]:
+        with self._in_flight_lock:
+            self._in_flight_count += 1
+            self._max_in_flight = max(self._max_in_flight, self._in_flight_count)
+        try:
+            yield
+        finally:
+            with self._in_flight_lock:
+                self._in_flight_count -= 1
+
     def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
-        if self._delay_seconds:
-            # An Event that nothing ever sets, waited on with a timeout, blocks the
-            # calling thread for the timeout -- the codebase's idiom for a bounded
-            # wait in a test (see mngr_caller_test.py) instead of a bare time.sleep.
-            Event().wait(timeout=self._delay_seconds)
-        raw = self._raw_by_host_id.get(HostId(lease.host_id))
+        with self._tracking_in_flight():
+            if self._delay_seconds:
+                # An Event that nothing ever sets, waited on with a timeout, blocks the
+                # calling thread for the timeout -- the codebase's idiom for a bounded
+                # wait in a test (see mngr_caller_test.py) instead of a bare time.sleep.
+                Event().wait(timeout=self._delay_seconds)
+            raw = self._raw_by_host_id.get(HostId(lease.host_id))
         if raw is None:
             return None, "simulated outer SSH failure", False
         return dict(raw), None, False
@@ -845,19 +864,24 @@ def _running_raw() -> dict[str, Any]:
 
 
 # this tests: IF 6 hosts each take 0.4s to check
-# THEN: the whole call takes about 0.4s, not 2.4s -- they run at the same time, not one after another
+# THEN: several of those checks are in progress at the same moment, and the whole
+# call finishes well before the 2.4s a one-after-another loop would need
 def test_discover_hosts_and_agents_fans_out_across_hosts_in_parallel(temp_mngr_ctx: MngrContext) -> None:
-    """N leased hosts finish in about one host's delay, not N times that.
+    """N leased hosts are checked concurrently, not one after another.
 
     This is the property a sequential per-host loop was missing (MIND-230):
     wall time scaled with fleet size until, on a 13-workspace account, it broke
     every 30-second-budgeted caller of this discovery path. This test fails
     against the old sequential implementation and should keep failing if a
     future change accidentally reverts to it.
+
+    Concurrency is asserted from the overlap the provider stub observes (a
+    sequential loop never has two checks in flight) rather than from a tight
+    wall-clock bound, which a loaded CI sandbox can miss by staggering the
+    fan-out's thread starts.
     """
     host_count = 6
     per_host_delay_seconds = 0.4
-    margin_multiplier = 3
     leases = [_make_lease(HostId.generate()) for _ in range(host_count)]
     provider = _MultiHostDiscoveryProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
@@ -872,11 +896,10 @@ def test_discover_hosts_and_agents_fans_out_across_hosts_in_parallel(temp_mngr_c
     elapsed_seconds = time.monotonic() - started_at
 
     assert len(agents_by_host) == host_count
-    # Sequential would take host_count * per_host_delay_seconds (2.4s here).
-    # The threshold (3x one host's delay, under the pytest-timeout module's
-    # 10s default) leaves generous room for CI scheduling noise while still
-    # failing hard against a regression to the sequential loop.
-    assert elapsed_seconds < per_host_delay_seconds * margin_multiplier, (
+    assert provider._max_in_flight > 1, "the per-host checks never overlapped -- looks sequential, not parallel"
+    # A sequential loop cannot finish before host_count * per_host_delay_seconds
+    # (2.4s here) regardless of load, so this bound only ever fails a regression.
+    assert elapsed_seconds < host_count * per_host_delay_seconds, (
         f"took {elapsed_seconds:.2f}s for {host_count} hosts at {per_host_delay_seconds}s each -- "
         "looks sequential, not parallel"
     )

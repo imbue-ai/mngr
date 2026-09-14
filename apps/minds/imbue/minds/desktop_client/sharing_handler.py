@@ -39,6 +39,8 @@ from imbue.minds.desktop_client.share_materials_injection import probe_share_sta
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
+from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
+from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.mngr.primitives import AgentId
@@ -285,6 +287,7 @@ def enable_sharing(
     session_store = get_state().session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
+    service_labels = resolve_share_target_labels(backend_resolver, agent_id)
     # Resolved here (a request-context caller) rather than deep inside the
     # share flow, so the same helper can serve the post-create enabler, which
     # runs off a request context and must be handed the config explicitly.
@@ -297,15 +300,8 @@ def enable_sharing(
         account_email,
         require_client_env_config(),
         is_cloud_row=_is_imbue_cloud_agent(backend_resolver, agent_id),
-        entry_label=_resolve_entry_label(backend_resolver, agent_id),
+        service_labels=service_labels,
     )
-
-
-def _resolve_entry_label(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str | None:
-    """The workspace shell's origin label, recorded server-side as the chrome's entry origin."""
-    labels = backend_resolver.list_service_labels_for_agent(agent_id)
-    shell_label = next((label for name, label in labels.items() if str(name) == _SHELL_SERVICE_NAME), None)
-    return shell_label or None
 
 
 def _enable_sharing_with_cli(
@@ -324,7 +320,11 @@ def _enable_sharing_with_cli(
     # latency measurement, whose desktop-proximity signal is only meaningful
     # for a workspace that runs on this machine.
     is_cloud_row: bool,
-    entry_label: str | None = None,
+    # The label per share target as known right now. The shell's is recorded
+    # server-side as the share's entry origin, and the whole map rides the
+    # returned document so the Share tab builds links from the same labels the
+    # connector was told about, or shows a pending state for the ones it lacks.
+    service_labels: Mapping[str, str],
 ) -> dict[str, Any]:
     grants_toml = render_grants_toml(workspace_grants, service_grants)
 
@@ -382,7 +382,7 @@ def _enable_sharing_with_cli(
                 provision_share_files_in_agent(agent_id, grants_toml, account_email, None, cli.mngr_caller)
             except ShareInjectionError as exc:
                 raise SharingError(str(exc)) from exc
-            return _share_status_document(host_id, existing, workspace_grants, service_grants)
+            return _share_status_document(host_id, existing, workspace_grants, service_grants, service_labels)
 
     # Local shares with no materials in the workspace pick the relay by
     # measured latency from here (the workspace runs on this machine, so the
@@ -397,7 +397,10 @@ def _enable_sharing_with_cli(
         share = cli.create_share(
             account=account_email,
             host_id=host_id,
-            entry_label=entry_label,
+            # The chrome can only enter the workspace at <label>.<domain> (the
+            # bare domain is unrouted on the relay); None when the shell has
+            # not registered yet.
+            entry_label=service_labels.get(WHOLE_MACHINE_SERVICE),
             preferred_region=preferred_region,
             workspace_id=str(agent_id),
         )
@@ -425,7 +428,7 @@ def _enable_sharing_with_cli(
         provision_share_files_in_agent(agent_id, grants_toml, account_email, share_env_text, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
-    return _share_status_document(host_id, share, workspace_grants, service_grants)
+    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels)
 
 
 def enable_web_access_for_workspace(
@@ -451,6 +454,7 @@ def enable_web_access_for_workspace(
     """
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
     owner_grants = {"emails": [account_email], "email_domains": []}
+    service_labels = resolve_share_target_labels(backend_resolver, agent_id)
     _enable_sharing_with_cli(
         host_id,
         agent_id,
@@ -460,10 +464,7 @@ def enable_web_access_for_workspace(
         account_email,
         client_env_config,
         is_cloud_row=is_cloud_row,
-        # The chrome can only enter the workspace at <label>.<domain> (the
-        # bare domain is unrouted on the relay), so record the shell label
-        # like the settings-page enable does; None when not registered yet.
-        entry_label=_resolve_entry_label(backend_resolver, agent_id),
+        service_labels=service_labels,
     )
 
 
@@ -472,15 +473,19 @@ def _share_status_document(
     share: ShareCliInfo,
     workspace_grants: dict[str, list[str]],
     service_grants: dict[str, dict[str, list[str]]],
+    service_labels: Mapping[str, str],
 ) -> dict[str, Any]:
     return {
         "host_id": host_id,
         "enabled": share.state == "active",
         "workspace_domain": share.workspace_domain,
+        # The bare domain is deliberately unrouted on a share; a target's link
+        # is https://<service_labels[target]>.<workspace_domain>/.
         "url": f"https://{share.workspace_domain}/" if share.workspace_domain else None,
         "region": share.region,
         "last_tunnel_login_at": share.last_tunnel_login_at,
         "cert_not_after": share.cert_not_after,
+        "service_labels": dict(service_labels),
         "grants": {"workspace": workspace_grants, "services": service_grants},
     }
 
@@ -529,7 +534,11 @@ def get_sharing(
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
 ) -> dict[str, Any]:
-    """Return the machine's sharing document: enabled/domain/status + the grants read from the workspace."""
+    """Return the machine's sharing document: enabled/domain/status + the grants read from the workspace.
+
+    The document also carries the current origin label per share target, from
+    which the Share tab builds every link (a target absent from it has no link yet).
+    """
     empty_grants: dict[str, list[str]] = {"emails": [], "email_domains": []}
     disabled: dict[str, Any] = {
         "host_id": host_id,
@@ -539,6 +548,7 @@ def get_sharing(
         "region": None,
         "last_tunnel_login_at": None,
         "cert_not_after": None,
+        "service_labels": {},
         "grants": {"workspace": empty_grants, "services": {}},
     }
     share = get_active_share(host_id, backend_resolver, cli, session_store)
@@ -553,22 +563,49 @@ def get_sharing(
     # Enable/edit from that state would replace a policy nobody ever saw.
     try:
         agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
-        grants_toml_text = read_share_grants_from_agent(agent_id, cli.mngr_caller)
-    except (SharingError, ShareInjectionError) as exc:
+    except SharingError as exc:
         logger.debug("Sharing grants read: {}", exc)
-        document = _share_status_document(host_id, share, empty_grants, {})
-        document["grants"] = None
-        return document
+        return _unknown_grants_document(host_id, share, {})
+    service_labels = resolve_share_target_labels(backend_resolver, agent_id)
+    try:
+        grants_toml_text = read_share_grants_from_agent(agent_id, cli.mngr_caller)
+    except ShareInjectionError as exc:
+        logger.debug("Sharing grants read: {}", exc)
+        return _unknown_grants_document(host_id, share, service_labels)
     parsed_grants = _parse_grants_toml(grants_toml_text) if grants_toml_text else (empty_grants, {})
     if parsed_grants is None:
         # Malformed reads back as UNKNOWN (grants: null), the same as a read
         # that never landed: the pane then blocks edits instead of rendering
         # an empty policy that the next save would publish over the real one.
-        document = _share_status_document(host_id, share, empty_grants, {})
-        document["grants"] = None
-        return document
+        return _unknown_grants_document(host_id, share, service_labels)
     workspace_grants, service_grants = parsed_grants
-    return _share_status_document(host_id, share, workspace_grants, service_grants)
+    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels)
+
+
+def _unknown_grants_document(host_id: str, share: ShareCliInfo, service_labels: Mapping[str, str]) -> dict[str, Any]:
+    """The active share's document with ``grants: None``: the grants could not be read (not "empty")."""
+    document = _share_status_document(host_id, share, {"emails": [], "email_domains": []}, {}, service_labels)
+    document["grants"] = None
+    return document
+
+
+def resolve_share_target_labels_for_host(
+    backend_resolver: BackendResolverInterface,
+    session_store: MultiAccountSessionStore | None,
+    host_id: str,
+) -> dict[str, str]:
+    """The label per share target of the machine's workspace; empty when the machine is unknown.
+
+    Empty means no target has a link that can be shown yet (the workspace's
+    service registrations have not reached this client, or the machine is not
+    discovered at all), never that the share is unlabeled.
+    """
+    try:
+        agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+    except SharingError as exc:
+        logger.debug("Cannot resolve share target labels for {}: {}", host_id, exc)
+        return {}
+    return resolve_share_target_labels(backend_resolver, agent_id)
 
 
 def get_active_share_cached(
@@ -665,36 +702,6 @@ def delete_share_for_host(cli: ImbueCloudCli | None, account_email: str, host_id
             cli.delete_share(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
         logger.warning("Failed to delete the machine share for {}: {}", host_id, exc)
-
-
-# The workspace shell service; its label origin is the routable entry point of
-# a whole-machine share (the bare machine domain does not route on a share).
-_SHELL_SERVICE_NAME: Final[str] = "system_interface"
-
-
-def resolve_share_probe_host(
-    backend_resolver: BackendResolverInterface,
-    session_store: MultiAccountSessionStore | None,
-    host_id: str,
-    workspace_domain: str,
-) -> str | None:
-    """The routable origin host to probe for share readiness: the shell's label origin.
-
-    Returns ``<system_interface label>.<workspace_domain>``, or None when the
-    machine or its shell label is not known yet (so the share is not ready to
-    probe). The bare workspace domain is never probeable -- it does not route on
-    a share (only explicit ``<label>.<domain>`` origins are claimed on the relay
-    and served by caddy).
-    """
-    try:
-        agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
-    except SharingError as exc:
-        logger.debug("Cannot resolve a share probe host for {} yet: {}", host_id, exc)
-        return None
-    shell_label = _resolve_entry_label(backend_resolver, agent_id)
-    if shell_label is None:
-        return None
-    return f"{shell_label}.{workspace_domain}"
 
 
 def probe_share_readiness(http_client: httpx.Client, probe_host: str) -> bool:

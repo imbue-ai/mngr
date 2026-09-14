@@ -2186,6 +2186,70 @@ def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> No
     assert any("share.env" in " ".join(argv) for argv in recorded)
 
 
+def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) -> None:
+    # The Share tab builds every link as https://<label>.<domain>/ (the bare
+    # domain does not route), so the document carries the label per share
+    # target: the shell and the apps, never interface services.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        service_logs={
+            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+            + make_service_log("web", "http://localhost:8001", "web-w3b1")
+            + make_service_log("terminal", "http://localhost:8002", "terminal-t3rm")
+        },
+    )
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["service_labels"] == {
+        "system_interface": "system_interface-shl1",
+        "web": "web-w3b1",
+    }
+
+
+def test_machine_sharing_status_reports_no_labels_before_the_registrations_arrive(tmp_path: Path) -> None:
+    # Right after app start the workspace's service registrations have not
+    # reached this client yet: the document says so (no labels) instead of
+    # letting a client guess a link from the bare domain.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_GrantsReadCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing", headers=_auth_header())
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["enabled"] is True
+    assert body["service_labels"] == {}
+
+
+def test_machine_sharing_put_reports_the_share_target_labels(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        service_logs={
+            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+        },
+    )
+
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"emails": ["viewer@example.com"], "email_domains": []}},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["service_labels"] == {"system_interface": "system_interface-shl1"}
+
+
 def test_machine_sharing_put_on_active_share_updates_grants_without_rotation(tmp_path: Path) -> None:
     agent_id = AgentId()
     # The probe reports materials present with no existing document, so the
@@ -2320,7 +2384,14 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": True, "cert_not_after": None, "last_tunnel_login_at": None}
+    # The labels ride the poll so a Share tab opened before they were known
+    # can build the link from the same value the probe used.
+    assert json.loads(response.data) == {
+        "ready": True,
+        "cert_not_after": None,
+        "last_tunnel_login_at": None,
+        "service_labels": {"system_interface": "system_interface-shl1"},
+    }
     # It probed the shell LABEL origin, never the bare machine domain.
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
 
@@ -2374,6 +2445,7 @@ def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: 
         "ready": False,
         "cert_not_after": "2027-01-01 00:00:00+00:00",
         "last_tunnel_login_at": "2026-08-13 12:00:00+00:00",
+        "service_labels": {},
     }
 
 
@@ -2384,7 +2456,12 @@ def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> No
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": False, "cert_not_after": None, "last_tunnel_login_at": None}
+    assert json.loads(response.data) == {
+        "ready": False,
+        "cert_not_after": None,
+        "last_tunnel_login_at": None,
+        "service_labels": {},
+    }
 
 
 def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path) -> None:
@@ -2394,7 +2471,12 @@ def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path)
     response = client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header())
 
     assert response.status_code == 200
-    assert json.loads(response.data) == {"ready": False, "cert_not_after": None, "last_tunnel_login_at": None}
+    assert json.loads(response.data) == {
+        "ready": False,
+        "cert_not_after": None,
+        "last_tunnel_login_at": None,
+        "service_labels": {},
+    }
 
 
 # -- Workspace recovery: health probe + restart --

@@ -11,14 +11,14 @@ client-side; name/color/account are pass-throughs to mngr labels guarded by
 mngr's own host/agent locks, so there is no minds-owned version to If-Match).
 
 The small context helpers here are the successors of ``app.py``'s private
-``_build_workspace_context`` family and ``templates.py``'s share-target
-splitters, both deleted with the legacy pages; this module is their single
-home.
+``_build_workspace_context`` family, deleted with the legacy pages. The
+share-target splitting and label resolution live in ``share_targets.py``,
+shared with the sharing routes so every surface builds share links from one
+label map.
 """
 
 import json
 import re
-from collections.abc import Sequence
 from typing import Final
 
 from flask import Blueprint
@@ -32,28 +32,14 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
+from imbue.minds.desktop_client.share_targets import split_share_targets
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.mngr.primitives import AgentId
-
-# The share target that grants the whole machine (the shell service).
-WHOLE_MACHINE_SERVICE: Final[str] = "system_interface"
-
-# Interfaces the workspace is built out of (or internal infrastructure) rather
-# than apps built on top of it: excluded from the per-app share targets (the
-# whole machine remains the deliberate way to grant everything). ``owner-exec``
-# is the internal SSH-equivalent exec channel (authorized by request signatures
-# against authorized_keys, never a share grant), so it must never be offered as
-# a per-app share target.
-_NON_APP_SHARE_SERVICES: Final[frozenset[str]] = frozenset(
-    {"chat", "chats", "terminal", "terminals", "browser", "browsers", "owner-exec"}
-)
-
-# A per-app share link is a real origin, so only DNS-label-safe names qualify.
-_DNS_SAFE_SERVICE_NAME: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # App icons are SVG markup authored inside the workspace -- untrusted content
 # headed for the trusted shell's DOM. This is the server-side backstop
@@ -143,34 +129,6 @@ class WorkspaceMachineSizeData(FrozenModel):
     )
 
 
-@pure
-def split_share_targets(servers: Sequence[str]) -> tuple[list[str], str]:
-    """Split a workspace's services into per-app share targets and the whole-machine one.
-
-    The whole-machine entry is always offered; interface services and names
-    that cannot be a hostname label are excluded from the per-app list (they
-    stay reachable through a whole-machine share).
-    """
-    app_services = [
-        str(service)
-        for service in servers
-        if str(service) != WHOLE_MACHINE_SERVICE
-        and str(service).lower() not in _NON_APP_SHARE_SERVICES
-        and _DNS_SAFE_SERVICE_NAME.match(str(service)) is not None
-        and not str(service).startswith(("host-", "agent-"))
-    ]
-    return app_services, WHOLE_MACHINE_SERVICE
-
-
-@pure
-def share_target_labels(app_services: Sequence[str], service_labels: dict[str, str]) -> dict[str, str]:
-    """The origin-label map for the rendered share targets (services without a label are omitted)."""
-    target_labels = {service: service_labels[service] for service in app_services if service in service_labels}
-    if WHOLE_MACHINE_SERVICE in service_labels:
-        target_labels[WHOLE_MACHINE_SERVICE] = service_labels[WHOLE_MACHINE_SERVICE]
-    return target_labels
-
-
 def _recorded_workspace_name(session_store: MultiAccountSessionStore | None, agent_id: str) -> str:
     """The record-kept display name for a workspace discovery does not know (prefer active records)."""
     record_store = session_store.record_store if session_store else None
@@ -244,10 +202,6 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
     stored_color = backend_resolver.get_workspace_color(parsed_agent_id)
 
     services = [str(service) for service in backend_resolver.list_services_for_agent(parsed_agent_id)]
-    labels = {
-        str(service): label
-        for service, label in backend_resolver.list_service_labels_for_agent(parsed_agent_id).items()
-    }
     icons = {
         str(service): icon for service, icon in backend_resolver.list_service_icons_for_agent(parsed_agent_id).items()
     }
@@ -269,7 +223,7 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         current_account=_account_entry(current_account) if current_account else None,
         accounts=tuple(_account_entry(account) for account in accounts),
         app_services=tuple(app_services),
-        service_labels=share_target_labels(app_services, labels),
+        service_labels=resolve_share_target_labels(backend_resolver, parsed_agent_id),
         service_icons=service_icons,
         whole_service=whole_service,
     )

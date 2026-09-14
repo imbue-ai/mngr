@@ -13,11 +13,8 @@ from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
-from imbue.minds.desktop_client.ui_api_options import WHOLE_MACHINE_SERVICE
 from imbue.minds.desktop_client.ui_api_options import _workspace_host_coordinate_for_options
 from imbue.minds.desktop_client.ui_api_options import accepted_service_icon
-from imbue.minds.desktop_client.ui_api_options import share_target_labels
-from imbue.minds.desktop_client.ui_api_options import split_share_targets
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.mngr.primitives import AgentId
@@ -135,26 +132,6 @@ def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
     assert data["is_leased_imbue_cloud"] is True
     # No stored color label: the default is reported.
     assert data["color"] == DEFAULT_WORKSPACE_COLOR
-
-
-def test_split_share_targets_filters_interfaces_and_non_dns_names() -> None:
-    # owner-exec is the internal SSH-equivalent exec channel (authorized by
-    # request signatures, never a share grant); like the chat/terminal/browser
-    # interfaces it must never be offered as a per-app share target.
-    app_services, whole = split_share_targets(
-        ["system_interface", "web", "Terminal", "chats", "owner-exec", "bad_name", "host-abc", "my-app"]
-    )
-
-    assert whole == WHOLE_MACHINE_SERVICE
-    assert app_services == ["web", "my-app"]
-
-
-def test_share_target_labels_cover_targets_and_shell_only() -> None:
-    labels = share_target_labels(
-        ["web"], {"web": "web-r4nd", "system_interface": "shell-r4nd", "unrendered": "u-r4nd"}
-    )
-
-    assert labels == {"web": "web-r4nd", "system_interface": "shell-r4nd"}
 
 
 def test_options_data_serves_only_gate_passing_app_icons(tmp_path: Path) -> None:
