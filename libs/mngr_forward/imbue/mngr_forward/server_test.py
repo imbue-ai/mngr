@@ -184,6 +184,10 @@ def http2_app_setup(tmp_path: Path) -> Iterator[tuple[TestClient, FileAuthStore,
 
 
 @pytest.mark.witnesses("authentication.signed-out-home")
+@pytest.mark.witnesses(
+    "no-data-without-session",
+    partial="witnesses only that a signed-out bare-origin request observes no agent data (which agents the proxy knows about); the 'any byte of any backend response' facet and the every-surface/interleaving quantifier stay open",
+)
 def test_bare_origin_unauthenticated_returns_login_page(
     app_setup: tuple[TestClient, FileAuthStore, ForwardResolver],
 ) -> None:
@@ -268,10 +272,11 @@ def test_authenticate_consumes_otp_and_sets_cookie(
     assert response.status_code == 307
     assert response.headers["location"] == "/"
     assert MNGR_FORWARD_SESSION_COOKIE_NAME in response.cookies
-    # Code is single-use: re-presenting the now-spent code is refused (403) and
-    # establishes no session -- the refusal must not hand out a session cookie.
+    # Code is single-use: re-presenting the now-spent code is refused (the step
+    # leaves the exact status open) and establishes no session -- the refusal
+    # must not hand out a session cookie.
     response2 = client.get(f"/authenticate?one_time_code={code}")
-    assert response2.status_code == 403
+    assert response2.status_code >= 400
     assert MNGR_FORWARD_SESSION_COOKIE_NAME not in response2.cookies
     assert "set-cookie" not in response2.headers
 
@@ -665,10 +670,6 @@ def test_bare_origin_html_navigation_redirects_to_shell_label(tmp_path: Path) ->
     )
 
 
-@pytest.mark.witnesses(
-    "forwarding.default-service-redirect",
-    partial="covers only the 'non-HTML served unchanged' clause; the redirect is in test_bare_origin_html_navigation_redirects_to_shell_label",
-)
 def test_bare_origin_non_html_does_not_redirect(tmp_path: Path) -> None:
     """A non-HTML request to the bare origin (e.g. the readiness probe) is served
     by the shell directly rather than redirected, so probes are unaffected."""
@@ -1562,10 +1563,6 @@ def test_subdomain_forward_routes_loopback_without_tunnel_to_recovery(
     assert payload["reason"] == "CONNECT_ERROR"
 
 
-@pytest.mark.witnesses(
-    "forwarding.never-serves-host-loopback",
-    partial="witnesses the operator opt-in escape hatch only, not the default refusal across every request and connection",
-)
 def test_subdomain_forward_allows_loopback_fallback_when_opted_in(tmp_path: Path) -> None:
     """``allow_host_loopback=True`` (the legacy DEV-mode escape hatch) restores the old fallback path."""
     preauth = "opaque-preauth-cookie-value"
@@ -2922,8 +2919,10 @@ def test_event_stream_ends_when_the_backend_connection_is_lost_midstream(tmp_pat
 
 
 @pytest.mark.witnesses("forwarding.service-origin")
-def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
-    """A ``<service>.agent-<hex>.localhost`` origin forwards to that service's registered URL."""
+@pytest.mark.parametrize("host_suffix", ["localhost", "localhost:8421"])
+def test_service_origin_routes_to_named_service_backend(tmp_path: Path, host_suffix: str) -> None:
+    """A ``<service>.agent-<hex>.localhost`` origin -- with or without a port -- forwards to
+    that service's registered URL."""
     instance_key = _make_test_instance_key()
     preauth = "preauth-service-origin"
     app, _auth_store, resolver = _make_forward_app(tmp_path, preauth_cookie_value=preauth)
@@ -2940,13 +2939,14 @@ def test_service_origin_routes_to_named_service_backend(tmp_path: Path) -> None:
         captured.append(request)
         return httpx.Response(200, content=b"ok")
 
-    mock_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
-
-    with TestClient(app, base_url=_agent_origin("terminal"), follow_redirects=False) as client:
-        app.state.http_client = mock_client
+    with TestClient(app, follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/ws-info",
-            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"},
+            headers={
+                "host": f"terminal.{_TEST_AGENT_ID}.{host_suffix}",
+                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
+            },
         )
 
     assert response.status_code == 200
@@ -3233,6 +3233,10 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
 
 
 @pytest.mark.witnesses("forwarding.ws-relay")
+@pytest.mark.witnesses(
+    "credential-not-forwarded",
+    partial="witnesses the WebSocket handshake path (which forwards no client headers at all); the HTTP path and the every-request quantifier are witnessed/open elsewhere",
+)
 def test_ws_relay_forwards_path_query_subprotocol_and_messages_both_ways(tmp_path: Path) -> None:
     """An authenticated WebSocket is connected through to the backend and relayed both ways.
 
@@ -3247,9 +3251,13 @@ def test_ws_relay_forwards_path_query_subprotocol_and_messages_both_ways(tmp_pat
     - closing the client leg closes the backend leg too.
     """
     backend_closed = threading.Event()
+    forwarded_cookie_headers: list[str] = []
 
     def backend_handler(connection: ServerConnection) -> None:
         assert connection.request is not None
+        # Capture the handshake's Cookie header(s) so the test can assert the
+        # proxy's session credential never reaches the backend.
+        forwarded_cookie_headers.extend(connection.request.headers.get_all("Cookie"))
         # Echo the request target back first so the client can assert the
         # backend was reached at the same path and query, then mirror every
         # message (preserving text vs binary) to prove both-directions relay.
@@ -3287,6 +3295,10 @@ def test_ws_relay_forwards_path_query_subprotocol_and_messages_both_ways(tmp_pat
                 # Binary relayed unchanged, client -> backend -> client.
                 session.send_bytes(b"\x00\x01\x02")
                 assert session.receive_bytes() == b"\x00\x01\x02"
+            # credential-not-forwarded: the client authenticated with the session
+            # cookie, but the backend handshake carries no mngr_forward session
+            # cookie -- code behind the agent origin never sees the credential.
+            assert all(MNGR_FORWARD_SESSION_COOKIE_NAME not in header for header in forwarded_cookie_headers)
             # Closing the client leg (on context exit) closes the backend leg too.
             assert backend_closed.wait(timeout=10)
     finally:
@@ -4451,6 +4463,7 @@ def test_bridge_destination_survives_the_bridge(tmp_path: Path) -> None:
             cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: bare_session},
         )
         redemption = urlsplit(hop1.headers["location"])
+        assert redemption.netloc == f"{_TEST_AGENT_ID}.localhost:18421"
         hop2 = client.get(f"/_subdomain_auth?{redemption.query}", headers={"host": redemption.netloc})
     assert hop2.status_code == 302
     assert hop2.headers["location"] == "/some/page"
