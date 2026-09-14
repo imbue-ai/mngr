@@ -1,16 +1,59 @@
 from functools import cache
+from ipaddress import IPv4Address
+from ipaddress import IPv6Address
 from pathlib import Path
+from typing import Final
+from urllib.parse import urlparse
 
 from loguru import logger
 from pydantic import Field
 from pydantic import model_validator
 
+from imbue.imbue_common.pure import pure
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
+
+# The SSH endpoint mngr connects to for containers on a local Docker daemon.
+LOCAL_DOCKER_SSH_HOST: Final[str] = "127.0.0.1"
+
+
+@pure
+def ssh_host_for_docker_daemon(docker_host_url: str) -> str:
+    """Return the hostname mngr SSHes to for containers on the daemon at `docker_host_url`.
+
+    A local daemon (empty string or a unix socket) publishes container ports on
+    the local machine, so the endpoint is loopback. A remote daemon (ssh:// or
+    tcp://) publishes them on the daemon's own machine, so the endpoint is the
+    hostname from the URL.
+    """
+    if not docker_host_url or docker_host_url.startswith("unix://"):
+        return LOCAL_DOCKER_SSH_HOST
+    parsed = urlparse(docker_host_url)
+    if parsed.hostname:
+        return parsed.hostname
+    return LOCAL_DOCKER_SSH_HOST
+
+
+@pure
+def is_docker_daemon_local(docker_host_url: str) -> bool:
+    """Whether containers on the daemon at `docker_host_url` are reached over loopback.
+
+    True for an empty URL, a unix:// socket, and a tcp:// URL addressed at 127.0.0.1;
+    the daemon then publishes container ports on this machine.
+    """
+    return ssh_host_for_docker_daemon(docker_host_url) == LOCAL_DOCKER_SSH_HOST
+
+
+@pure
+def format_docker_publish_address(address: IPv4Address | IPv6Address) -> str:
+    """Render an IP as `docker run -p` expects it: IPv6 literals are bracketed."""
+    if isinstance(address, IPv6Address):
+        return f"[{address}]"
+    return str(address)
 
 
 @cache
@@ -64,6 +107,22 @@ class DockerProviderConfig(ProviderInstanceConfig):
     default_start_args: tuple[str, ...] = Field(
         default=(),
         description="Default docker run arguments applied to all containers (e.g., '--cpus=2', '--memory=4g')",
+    )
+    ssh_bind_address: IPv4Address | IPv6Address | None = Field(
+        default=None,
+        description=(
+            "Host IP address that each container's published SSH port binds to "
+            "(`docker run -p <address>::22`). When None (the default), containers on a "
+            "local daemon (empty `host` or a unix:// socket) publish sshd on 127.0.0.1 only, "
+            "so it is not reachable from the machine's LAN, while containers on a remote "
+            "daemon (an ssh:// or tcp:// `host`) publish on all of the daemon host's "
+            "interfaces, since mngr reaches them via the daemon's hostname. Set explicitly "
+            "to override either way, e.g. '0.0.0.0' to expose local containers to the LAN. "
+            "On a local daemon mngr then connects to that address (a wildcard bind is reached "
+            "via 127.0.0.1), so it must be IPv4; a loopback address is rejected for a remote "
+            "daemon because mngr could not reach the container. Existing containers keep the "
+            "bind they were created with."
+        ),
     )
     docker_runtime: str | None = Field(
         default=None,
@@ -156,6 +215,33 @@ class DockerProviderConfig(ProviderInstanceConfig):
             raise DockerConfigValidationError(
                 f"host_dir ({effective_host_dir}) must be a path strictly inside "
                 f"volume_mount_path ({self.volume_mount_path}) so mngr data persists on the volume"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_ssh_bind_address_reachable(self) -> "DockerProviderConfig":
+        """Reject a bind that mngr's own SSH connection could never reach.
+
+        A local daemon's containers are probed and reached over IPv4, so an IPv6 bind there
+        is unreachable. A remote daemon is reached via its hostname, so a loopback bind on
+        the daemon host is unreachable.
+        """
+        if self.ssh_bind_address is None:
+            return self
+        if is_docker_daemon_local(self.host):
+            if isinstance(self.ssh_bind_address, IPv6Address):
+                raise DockerConfigValidationError(
+                    f"ssh_bind_address={self.ssh_bind_address} is an IPv6 address, but mngr connects to "
+                    f"containers on a local Docker daemon (host={self.host!r}) over IPv4. Use an IPv4 address "
+                    "(e.g. 127.0.0.1, a LAN address, or 0.0.0.0 for all interfaces)."
+                )
+            return self
+        if self.ssh_bind_address.is_loopback:
+            raise DockerConfigValidationError(
+                f"ssh_bind_address={self.ssh_bind_address} is a loopback address, but host={self.host!r} is a "
+                f"remote Docker daemon: mngr connects to containers via {ssh_host_for_docker_daemon(self.host)!r}, "
+                "which cannot reach a port bound to loopback on the daemon host. Leave ssh_bind_address unset "
+                "or bind a non-loopback address."
             )
         return self
 
