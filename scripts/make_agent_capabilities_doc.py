@@ -61,12 +61,15 @@ _USAGE_PLUGIN_SUFFIX: Final[str] = "_usage"
 _USAGE_SOURCE_HOOK: Final[str] = "aggregate_usage_source"
 
 # Agent types excluded from the matrix: task-specialized skill variants that reuse a
-# parent agent's class wholesale (only injecting a SKILL.md), plus mngr-proxy-child (an
-# internal proxy, not a user-facing port). They are not distinct enough to warrant their
+# parent agent's class wholesale (only injecting a SKILL.md), mngr-proxy-child (an
+# internal proxy, not a user-facing port), and witness-claude (claude with the unattended
+# defaults `mngr witness` needs). They are not distinct enough to warrant their
 # own column -- a reader wants the parent's row. (headless_claude is deliberately NOT here:
 # it runs `claude --print` with genuinely different logic, so its capabilities can
 # legitimately diverge from claude's and are worth showing.)
-_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset({"code-guardian", "fixme-fairy", "mngr-proxy-child"})
+_NON_MATRIX_AGENT_TYPES: Final[frozenset[str]] = frozenset(
+    {"code-guardian", "fixme-fairy", "mngr-proxy-child", "witness-claude"}
+)
 
 # The fixed left-to-right column order for the matrix: the primary Claude ports first,
 # then the other CLI ports, with the thin shell-command runners last. Every registered

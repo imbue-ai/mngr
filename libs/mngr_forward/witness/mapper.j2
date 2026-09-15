@@ -1,0 +1,36 @@
+{#-
+  mngr_forward variant of the packaged witness mapper prompt
+  (libs/mngr_witness/imbue/mngr_witness/prompt_assets/mapper.j2): it fills
+  only the project-fact blocks. Discovered positionally by
+  `mngr witness --root libs/mngr_forward/behaviors`.
+-#}
+{% extends "mapper.j2" %}
+
+{% block project_guidance -%}
+You are working on the tests for `mngr forward` (`libs/mngr_forward/`), the
+proxy that serves each agent at its own `agent-<hex>.localhost` origin behind
+a one-time-code session. Its behaviors are observable at the HTTP and
+WebSocket surface, so witness them in process wherever that surface reaches:
+
+- Default to `starlette.testclient.TestClient` against the FastAPI app, the
+  idiom `imbue/mngr_forward/server_test.py` already uses. Where a path needs
+  real network I/O, that file stands up a backend on loopback (real HTTP and
+  real `ws_serve` WebSocket servers) rather than reaching outside the test
+  process; follow that.
+- New witnesses live under `libs/mngr_forward/imbue/mngr_forward/witnesses/`,
+  in the module named under "Where tests go"; the existing witnesses in
+  `server_test.py`, `auth_test.py`, and `cookie_test.py` are adopted where
+  they are.
+- Read `libs/mngr_forward/conftest.py` and `imbue/mngr_forward/testing.py`
+  before writing new setup, and reuse what is there. Never use unittest.mock
+  or monkeypatch.setattr.
+{%- endblock %}
+
+{% block infra_blockers -%}
+These witnesses run against the proxy's own ASGI app and, where a real socket
+is unavoidable, against listeners the test starts on loopback. They need no
+cloud credentials, no external services, and no remote host. If a unit
+appears to require one, that is a signal you are reaching past the observable
+surface: reread the unit and find the claim you can make at the app boundary
+before recording a blocker.
+{%- endblock %}

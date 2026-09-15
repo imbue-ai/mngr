@@ -399,7 +399,7 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
     ``original_minds_version`` (the create-time label) is always returned.
     ``current_minds_version`` and ``upgrade_merges`` are read from the
     workspace's own git via ``mngr exec`` and are best-effort: an offline
-    workspace (or one whose git lacks ``minds-v*`` tags) reports ``null`` /
+    workspace (or one whose git has no version to report) reports ``null`` /
     ``[]`` for them.
     """
     parsed_id = AgentId(agent_id)

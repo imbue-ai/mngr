@@ -701,10 +701,11 @@ def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
 @pytest.mark.docker
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
-# The Electron sign-in click intermittently times out (playwright Frame.click,
-# 30s) while the page is still settling; the flow passes on re-run. Retried
-# while the timing is investigated -- the marker routes it into the retrying
-# offload group.
+# Drives a real Electron app end-to-end (launch, CDP attach, create flow, chooser
+# sign-in, chat), and individual steps have intermittently timed out under CI load
+# (the sign-in Frame.click, and the 240s wait for the agent's reply); the marker
+# routes the test into the retrying offload group. A genuine break still surfaces
+# by failing every retry, as MIND-285's New Tab regression did.
 @pytest.mark.flaky
 def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     tmp_path: Path,

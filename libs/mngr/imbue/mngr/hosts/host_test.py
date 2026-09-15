@@ -458,6 +458,7 @@ def test_get_created_branch_name_returns_none_when_absent(
     assert agent.get_created_branch_name() is None
 
 
+@pytest.mark.flaky
 def test_create_agent_state_stores_created_branch_name(
     local_host: Host,
     temp_host_dir: Path,

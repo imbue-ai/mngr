@@ -793,6 +793,7 @@ def run(
         discovery_health_watchdog=discovery_health_watchdog,
         mngr_caller=mngr_caller,
         connectivity_detector=connectivity_detector,
+        sleep_tracker=sleep_tracker,
         sync_scheduler=sync_scheduler,
     )
 

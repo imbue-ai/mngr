@@ -94,11 +94,11 @@ SECONDARY_COMMANDS = {
     "schedule",
     "snapshot",
     "tmr",
-    "tmr-behaviors",
     "transcript",
     "tutor",
     "robinhood",
     "usage",
+    "witness",
     "wait",
     "notify",
 }

@@ -13,6 +13,10 @@ class ModalSandboxTimeoutMngrError(ModalMngrError):
     """Raised when a Modal sandbox fails to come online in time."""
 
 
+class ModalSandboxDiedMngrError(ModalMngrError):
+    """Raised when the Modal sandbox a command was running in is no longer alive."""
+
+
 class ModalCliOutputError(ModalMngrError, ValueError):
     """Raised when a `modal ... list --json` payload does not carry the keys we read.
 

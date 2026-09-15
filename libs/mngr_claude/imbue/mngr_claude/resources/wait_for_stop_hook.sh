@@ -2,8 +2,12 @@
 #
 # wait_for_stop_hook.sh
 #
-# A Claude Code Stop hook that waits for all other stop hooks to finish,
-# then runs post-completion actions before marking the agent inactive.
+# A Claude Code Stop and StopFailure hook that waits for all other stop hooks
+# to finish, then runs post-completion actions before marking the agent
+# inactive. Both events run it because they are the two mutually exclusive
+# turn-end paths: Claude Code routes a turn that died on an API error (a usage
+# limit, a rate limit) to StopFailure and returns before the Stop pass, so an
+# agent whose turn ended that way would otherwise never be marked inactive.
 #
 # Phases:
 #   1. Wait for all other stop hooks that were running at the start of the

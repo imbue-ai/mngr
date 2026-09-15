@@ -8,9 +8,15 @@ onlyBuiltDependencies:
 # install` without --frozen-lockfile, `pnpm add`, `pnpm update`); frozen
 # installs replay the existing lockfile unaffected.
 minimumReleaseAge: 20160
+# latchkey pins playwright to an exact version, so a latchkey bump inside
+# playwright's cooldown window makes ToDesktop's build fail: its agents run
+# `pnpm install --no-frozen-lockfile`, which re-resolves and refuses the
+# too-new playwright even though the lockfile already carries it.
 minimumReleaseAgeExclude:
   - latchkey
   - "@imbue-ai/detent"
+  - playwright
+  - playwright-core
 
 # ToDesktop builds every platform target from one host, but pnpm (like
 # npm) only installs optional deps matching the build host's

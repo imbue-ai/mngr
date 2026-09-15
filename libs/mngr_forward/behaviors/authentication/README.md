@@ -1,6 +1,6 @@
 # Authentication
 
-Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
 This area covers the bare origin's own surface: signing in with a one-time code, the session that sign-in establishes, the pre-authorized paths an embedding host uses to skip the code flow, the bare-origin home page, and the goto bridge that carries one session onto every agent origin.
 The Rules in the corpus root's `invariants.feature` bind all of it.

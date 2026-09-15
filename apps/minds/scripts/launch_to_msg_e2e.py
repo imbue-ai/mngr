@@ -185,12 +185,12 @@ FOLLOWUP_W2_EXPECT = "bong"
 
 CREATE_TIMEOUT = 900
 REPLY_TIMEOUT = 480
-# A fresh workspace lands on the New Tab page with no chat. The dockview add button opens a
-# New Tab page and is shown only in a group without one; the page's tile runs the chat app's
-# ``new``. The shell opens the first New Tab page once its app list has arrived and renders
-# the tiles from that list, so both can still be on their way when the dockview is first
-# visible. The chat's page then renders in its own frame at the chat app's origin, whose URL
-# path is the chat's agent id.
+# A fresh workspace lands on the New Tab page with no chat; the page's tile runs the chat
+# app's ``new``. The shell opens the first New Tab page once its app list has arrived and
+# renders the tiles from that list, so the page and its tiles can still be on their way
+# when the dockview is first visible. The chat's page then renders in its own frame at the
+# chat app's origin, whose URL path is the chat's agent id.
+NEW_TAB_PAGE_SELECTOR = ".new-tab-launcher"
 NEW_CHAT_TILE_SELECTOR = '.new-tab-launcher-tile[data-launch="chat:new"]'
 NEW_TAB_ADD_BUTTON_SELECTOR = "button.dockview-add-tab-button"
 NEW_CHAT_FRAME_TIMEOUT = 60
@@ -926,13 +926,16 @@ def start_new_chat_from_new_tab(workspace: Frame, *, label: str) -> Frame:
     Mirrors ``e2e_workspace_runner.start_new_chat_from_new_tab``; this script stays free of
     package imports.
     """
-    # A visible add button means its group has no New Tab page; in every other state (a dock
-    # the shell has not filled yet, a page whose tiles have not rendered) the tile grows in on
-    # its own, and the add button is hidden the moment the page is there.
-    if workspace.query_selector(f"{NEW_TAB_ADD_BUTTON_SELECTOR}:visible") is not None:
-        workspace.click(NEW_TAB_ADD_BUTTON_SELECTOR)
-    workspace.wait_for_selector(NEW_CHAT_TILE_SELECTOR, state="visible", timeout=NEW_CHAT_FRAME_TIMEOUT * 1000)
-    workspace.click(NEW_CHAT_TILE_SELECTOR)
+    # The add button always opens ANOTHER New Tab page, so it is pressed only when no page is
+    # showing (e.g. a real tab holds the pane). At boot the button can arrive with the dock's
+    # chrome after this probe, so the press waits with the page budget rather than skipping.
+    if workspace.query_selector(f"{NEW_TAB_PAGE_SELECTOR}:visible") is None:
+        workspace.click(NEW_TAB_ADD_BUTTON_SELECTOR, timeout=NEW_CHAT_FRAME_TIMEOUT * 1000)
+    # A background New Tab page keeps an identical tile hidden in the DOM, and an unscoped
+    # wait pins to the first match in DOM order whether or not it can ever become visible.
+    visible_tile_selector = f"{NEW_TAB_PAGE_SELECTOR}:visible {NEW_CHAT_TILE_SELECTOR}"
+    workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=NEW_CHAT_FRAME_TIMEOUT * 1000)
+    workspace.click(visible_tile_selector)
     logger.info("[{}] started a new chat from the New Tab page", label)
     return wait_for_chat_frame(workspace, label=label)
 
