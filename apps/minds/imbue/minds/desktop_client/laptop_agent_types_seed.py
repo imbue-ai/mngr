@@ -2,7 +2,7 @@
 
 mngr's project-config discovery is cwd-based: from any cwd that isn't
 inside a git worktree containing `.mngr/settings.toml`, the workspace's
-`[agent_types.X]` definitions are invisible. minds.app spawns `mngr forward`,
+`[agent_types.X]` definitions are invisible. Mind.app spawns `mngr forward`,
 `mngr list` and `mngr message` with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE
 workspace's `[agent_types.X]` blocks (which live at
 `/home/user/workspace/.mngr/settings.toml` inside the workspace container, with the
@@ -61,7 +61,7 @@ _WORKSPACE_AGENT_TYPE_SEEDS: Final[tuple[tuple[str, str, str], ...]] = (
 _PYTEST_OPT_IN_LINE = "is_allowed_in_pytest = true\n"
 
 _SEED_HEADER = """
-# Seeded by minds.app at startup so laptop-side mngr (cwd=$HOME) can resolve the
+# Seeded by Mind.app at startup so laptop-side mngr (cwd=$HOME) can resolve the
 # DEFAULT_WORKSPACE_TEMPLATE workspace's own agent types without needing to load
 # the workspace's `.mngr/settings.toml` (which lives inside the workspace container
 # at /home/user/workspace/.mngr/ and on the laptop only in ephemeral mngr-create

@@ -436,7 +436,7 @@ def _render_spa_index_html(bootstrap: UiBootstrap) -> str:
         "  <head>\n"
         '    <meta charset="utf-8">\n'
         '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        "    <title>minds</title>\n"
+        "    <title>Mind</title>\n"
         f"    <script>window.__MINDS_BOOTSTRAP__ = {bootstrap_json};</script>\n"
         '    <script src="/_static/embed_contract.js"></script>\n'
         f"    {entry_tags}\n"

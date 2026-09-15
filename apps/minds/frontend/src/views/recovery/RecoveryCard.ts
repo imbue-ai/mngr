@@ -106,7 +106,7 @@ export function recoverySubheading(
   // opened on purpose never withholds the action -- but the copy does not urge
   // it, because the machine may well come back without one.
   return (
-    "Minds is still checking what's wrong. This machine may come back on its own. " +
+    "Mind is still checking what's wrong. This machine may come back on its own. " +
     "Restarting it will interrupt any work in progress."
   );
 }
@@ -120,7 +120,7 @@ export function recoverySubheading(
  * hand-author a sentence per provider failure mode.
  */
 const BACKEND_UNREACHABLE_EXPLANATION =
-  "This issue may be transient. Minds will reconnect you to your machine as soon as it can be reached again.";
+  "This issue may be transient. Mind will reconnect you to your machine as soon as it can be reached again.";
 
 /**
  * What this device's own condition means for the machine, and what to do.
@@ -145,10 +145,10 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
   string
 > = {
   OFFLINE:
-    "This device has no network connection. Minds will reconnect to your machine as soon as it does.",
+    "This device has no network connection. Mind will reconnect to your machine as soon as it does.",
   SSH_BLOCKED:
-    "This network blocks the connection Minds uses to reach your machines (SSH). " +
-    "Your browser works, but Minds can't get through. Try another network or a VPN.",
+    "This network blocks the connection Mind uses to reach your machines (SSH). " +
+    "Your browser works, but Mind can't get through. Try another network or a VPN.",
 };
 
 /**
@@ -169,7 +169,7 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
 const DEVICE_CANNOT_CONNECT_CONDITION =
   "This machine may be running normally — the connection failed on this device, before reaching it.";
 const DEVICE_CANNOT_CONNECT_REMEDY =
-  "Restarting Minds rebuilds the connection.";
+  "Restarting Mind rebuilds the connection.";
 
 /**
  * The heading both device-scoped verdicts carry.
@@ -405,7 +405,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
                     variant: "primary",
                     onclick: () => electronBridge.restartApp(),
                   },
-                  "Restart Minds",
+                  "Restart Mind",
                 )
               : null,
             m(

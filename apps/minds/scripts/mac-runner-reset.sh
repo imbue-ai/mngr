@@ -16,20 +16,20 @@ set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
-log "asking Minds to quit"
-osascript -e 'tell application "Minds" to quit' 2>/dev/null || true
+log "asking Mind to quit"
+osascript -e 'tell application "Mind" to quit' 2>/dev/null || true
 for _ in 1 2 3 4 5; do
-  pids=$(pgrep -f '/Applications/minds.app/Contents/' || true)
+  pids=$(pgrep -f '/Applications/Minds?\.app/Contents/' || true)
   [[ -z "$pids" ]] && break
   sleep 1
 done
-pids=$(pgrep -f '/Applications/minds.app/Contents/' || true)
+pids=$(pgrep -f '/Applications/Minds?\.app/Contents/' || true)
 for pid in $pids; do
   log "force-kill straggler $pid"
   kill -9 "$pid" 2>/dev/null || true
 done
 
-BUNDLED_LIMACTL="/Applications/Minds.app/Contents/Resources/lima/bin/limactl"
+BUNDLED_LIMACTL="/Applications/Mind.app/Contents/Resources/lima/bin/limactl"
 LIMACTL=""
 if [[ -x "$BUNDLED_LIMACTL" ]]; then
   LIMACTL="$BUNDLED_LIMACTL"
@@ -103,7 +103,7 @@ log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # scripts that no longer exist.
 rm -f /tmp/minds-electron.log 2>/dev/null || true
 
-log "removing ~/.minds and /Applications/minds.app"
+log "removing ~/.minds and /Applications/Mind.app"
 # `rm -rf` can race against a not-yet-fully-dead Minds backend process that
 # is still writing to ~/.minds/Cache or ~/.minds/Code Cache. Retry a few
 # times with a short backoff before giving up.
@@ -118,7 +118,7 @@ for attempt in 1 2 3 4 5; do
     rm -rf "$HOME/.minds" || true
   fi
 done
-sudo rm -rf /Applications/minds.app
+sudo rm -rf /Applications/Mind.app /Applications/Minds.app
 
 URL="${1:-}"
 
@@ -143,8 +143,8 @@ if [[ -e "$HOME/.minds" ]]; then
   log "ERROR: ~/.minds survived cleanup"
   cleanup_failed=1
 fi
-if [[ -z "$URL" && -e /Applications/minds.app ]]; then
-  log "ERROR: /Applications/minds.app survived cleanup"
+if [[ -z "$URL" && -e /Applications/Mind.app ]]; then
+  log "ERROR: /Applications/Mind.app survived cleanup"
   cleanup_failed=1
 fi
 if [[ "$cleanup_failed" -ne 0 ]]; then
@@ -159,15 +159,15 @@ if [[ -n "$URL" ]]; then
   # Install must fail loud: a run must never proceed against a stale app.
   curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
   unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
-  sudo mv "$TMP/minds.app" /Applications/minds.app || { log "ERROR: app install (mv) failed"; exit 1; }
+  sudo mv "$TMP/Mind.app" /Applications/Mind.app || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
   # delete with "Operation not permitted"; we only care about the top-level
   # quarantine bit so Gatekeeper lets the app launch. Per-file failures
   # inside signed frameworks are harmless.
-  sudo xattr -dr com.apple.quarantine /Applications/minds.app 2>/dev/null || true
-  sudo xattr -d com.apple.quarantine /Applications/minds.app 2>/dev/null || true
-  version=$(defaults read /Applications/minds.app/Contents/Info.plist CFBundleShortVersionString)
-  build=$(defaults read /Applications/minds.app/Contents/Info.plist CFBundleVersion)
+  sudo xattr -dr com.apple.quarantine /Applications/Mind.app 2>/dev/null || true
+  sudo xattr -d com.apple.quarantine /Applications/Mind.app 2>/dev/null || true
+  version=$(defaults read /Applications/Mind.app/Contents/Info.plist CFBundleShortVersionString)
+  build=$(defaults read /Applications/Mind.app/Contents/Info.plist CFBundleVersion)
   log "installed $version ($build)"
 fi
 

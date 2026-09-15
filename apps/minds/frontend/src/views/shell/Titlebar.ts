@@ -101,7 +101,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
             },
             [
               m(Icon16, { name: "home" }),
-              m("span", { class: "type-label" }, "Minds"),
+              m("span", { class: "type-label" }, "Mind"),
             ],
           ),
           m(
@@ -387,7 +387,7 @@ function notificationsBell(
         tone: "muted",
         // relative for the badge's own absolute positioning.
         extra: "relative " + popupHiddenClass,
-        // The switch, not a bare open: a CENTERED app modal (Minds settings,
+        // The switch, not a bare open: a CENTERED app modal (Mind settings,
         // Accounts) leaves this button reachable, and the feed's backdrop
         // draws under a later-DOM modal's at the same z -- so the modal must
         // be put away first or the feed raises beneath it, dimmed and

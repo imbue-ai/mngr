@@ -1,4 +1,4 @@
-"""End-to-end manual-trigger test for minds.app launch -> first message
+"""End-to-end manual-trigger test for Mind.app launch -> first message
 -> slack permission flow. ONE Python script that replaces:
 
   apps/minds/scripts/launch-and-verify.sh
@@ -12,7 +12,7 @@ Invoked from .github/workflows/minds-launch-to-msg.yml as the single
 test step. NOT a pytest test (no markers, no collection).
 
 Flow:
-  1. Launch minds.app via Playwright Electron, UI auth via
+  1. Launch Mind.app via Playwright Electron, UI auth via
      /authenticate?one_time_code=... (minted on disk)
   2. Workspace 1 (W1): click Create, fill form with HOST_NAME, wait for
      agent DONE, send first message ("pong"), wait for reply (screenshots
@@ -84,7 +84,7 @@ from typing import Any
 from loguru import logger
 
 # Playwright-Python has no Electron binding (only Node has _electron.launch).
-# Attach via CDP instead: launch minds.app ourselves with
+# Attach via CDP instead: launch Mind.app ourselves with
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
 from playwright.sync_api import BrowserContext
@@ -116,7 +116,7 @@ class E2EFailure(Exception):
 
 # --- knobs (override via env) ---
 
-MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Minds.app/Contents/MacOS/Minds"))
+MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Mind.app/Contents/MacOS/Mind"))
 
 
 def _bundled_root_name() -> str:
@@ -169,7 +169,7 @@ HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
 HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
 # WORKSPACE_COUNT=1 (default) preserves the single-workspace flow for local
 # repro; CI sets =2 to drive the second workspace + cross-workspace follow-up
-# pings as an end-to-end isolation check on the same minds.app session.
+# pings as an end-to-end isolation check on the same Mind.app session.
 WORKSPACE_COUNT = int(os.environ.get("WORKSPACE_COUNT", "1"))
 
 FIRST_PROMPT = "Reply with exactly the four characters: pong"
@@ -250,7 +250,7 @@ def _activate_minds() -> None:
     """Bring the Minds window forward before snapping so screencapture
     sees the app, not just the wallpaper. Best-effort; silent on failure."""
     subprocess.run(
-        ["osascript", "-e", 'tell application "Minds" to activate'],
+        ["osascript", "-e", 'tell application "Mind" to activate'],
         check=False,
         capture_output=True,
         timeout=5,
@@ -617,7 +617,7 @@ def latchkey_clear_slack() -> None:
     )
 
 
-# --- minds.app launcher + auth ---
+# --- Mind.app launcher + auth ---
 
 
 def wait_backend_url(since_offset: int = 0) -> str:
@@ -666,7 +666,7 @@ def _sleep(seconds: float) -> None:
 
 
 def _free_port() -> int:
-    """Reserve an ephemeral port for minds.app's CDP endpoint."""
+    """Reserve an ephemeral port for Mind.app's CDP endpoint."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
@@ -688,7 +688,7 @@ def _wait_cdp(port: int, timeout: float = 60.0) -> str:
 
 
 def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
-    """Answer the "Help improve Minds" consent screen if it is up. True if dismissed.
+    """Answer the "Help improve Mind" consent screen if it is up. True if dismissed.
 
     The SPA consent screen (ConsentPage) takes over the page while
     ``error_reporting_consent_given`` is False, which it always is on a wiped
@@ -1419,9 +1419,9 @@ def pre_run_sweep() -> None:
     The sweep is idempotent and safe to call when there's nothing to clean.
     """
     logger.info("=== pre-run runner sweep ===")
-    # mac-runner-reset.sh already kills every /Applications/Minds.app/...
+    # mac-runner-reset.sh already kills every /Applications/Mind.app/...
     # process, wipes ~/.minds, and removes the .app entirely BEFORE we run.
-    # So orphan mngr forward / mngr event / Minds.app processes can't exist
+    # So orphan mngr forward / mngr event / Mind.app processes can't exist
     # by the time we get here. The state below is what mac-runner-reset.sh
     # does NOT cover: host-side mocking residue and a stray caffeinate.
     revert_etc_hosts()
@@ -1449,7 +1449,7 @@ def pre_run_sweep() -> None:
 
 def run_e2e() -> int:
     # Idempotent reset before any state mutation. Anything we leak (socat
-    # holding :443, /etc/hosts entry, orphan Minds.app/mngr children,
+    # holding :443, /etc/hosts entry, orphan Mind.app/mngr children,
     # latchkey creds, /tmp scratch dirs) is reverted here on the *next*
     # run's startup, so a mid-run crash never biases the following run.
     # The post-run teardown blocks below still handle the success path.
@@ -1472,7 +1472,7 @@ def run_e2e() -> int:
     ca_bundle = ensure_combined_cert_bundle(cert)
     logger.info("brew curl: {}; ca_bundle: {}", brew_curl, ca_bundle)
 
-    # 1. Launch minds.app ourselves with --remote-debugging-port so Playwright
+    # 1. Launch Mind.app ourselves with --remote-debugging-port so Playwright
     # can attach via CDP. Use a free port to avoid clashes.
     cdp_port = _free_port()
     env = {
@@ -1533,7 +1533,7 @@ def run_e2e() -> int:
         win.goto(origin + "/")
         snap_page(win, "02-home-after-auth")
 
-        # The post-login "Help improve Minds" error-reporting consent screen
+        # The post-login "Help improve Mind" error-reporting consent screen
         # (the SPA ConsentPage, shown while error_reporting_consent_given is False --
         # always here, since the runner's ~/.minds is wiped each run) sits on
         # the home page until answered. Dismiss it once via Continue; the
@@ -1846,7 +1846,7 @@ def run_e2e() -> int:
 
         # 10-14. Second workspace + cross-workspace follow-up. Drives a
         # FRESH host (HOST_NAME_2) through create + first-message on the
-        # same minds.app session, then navigates back to W1's chat URL and
+        # same Mind.app session, then navigates back to W1's chat URL and
         # to W2's chat URL in turn, sending a unique-token follow-up to
         # each. Proves: state isolation between workspaces, both agents
         # survive cross-workspace navigation, mngr_forward + latchkey
@@ -2124,7 +2124,7 @@ def run_e2e() -> int:
                 # mngr's lima provider shells out to ``limactl list --json``
                 # without going through the bundled-binary env vars (those
                 # are minds-side ergonomics). The packaged binary's PATH
-                # doesn't include /Applications/Minds.app/.../Resources/lima/bin,
+                # doesn't include /Applications/Mind.app/.../Resources/lima/bin,
                 # so we prepend it here -- otherwise the discovery hits
                 # "No such file or directory: 'limactl'" and the agents
                 # array comes back empty even though the host_dir has W1.
@@ -2143,7 +2143,7 @@ def run_e2e() -> int:
                 # discovered by providers that DID work, which is what we
                 # actually check. So: parse stdout regardless of exit code;
                 # only fail if the JSON itself is unusable.
-                # Run from $HOME, exactly as minds.app spawns mngr (see
+                # Run from $HOME, exactly as Mind.app spawns mngr (see
                 # forward_cli.py and laptop_agent_types_seed.py). mngr's project
                 # config is discovered by walking up from cwd to a git worktree
                 # root and reading `<root>/.mngr/settings.toml`. Without this the
@@ -2179,7 +2179,7 @@ def run_e2e() -> int:
                 # lifecycle keeps a metadata record for ``destroyed_host_
                 # persisted_seconds`` after destroy completes (so historical
                 # state survives) -- so W2's agent stays in the data.json /
-                # mngr list for a grace period even though minds.app's
+                # mngr list for a grace period even though Mind.app's
                 # discovery has already dropped its landing-page tile.
                 # Iter 5's home-page screenshot 20 is the canonical proof
                 # that destroy reached the user-visible state; this CLI

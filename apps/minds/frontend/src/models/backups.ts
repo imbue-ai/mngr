@@ -627,7 +627,7 @@ const BACKUP_PROBLEM_LABELS: Record<string, string> = {
   SERVICE_NOT_RUNNING:
     'The backup software in this machine is not running. Click "Update backup software" to restart it.',
   UNVERIFIABLE:
-    'Minds could not check on this machine\'s backups. Click "Update backup software" to reset them.',
+    'Mind could not check on this machine\'s backups. Click "Update backup software" to reset them.',
   BACKUPS_STALE:
     'This machine has not backed up recently even though it is running. Click "Update backup software" to fix this.',
 };

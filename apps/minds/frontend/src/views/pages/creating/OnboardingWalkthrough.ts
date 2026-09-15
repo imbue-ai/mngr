@@ -63,7 +63,7 @@ interface StepCopy {
 
 const STEP_COPY: Record<number, StepCopy> = {
   1: {
-    headline: "Minds is your personal AI operating system.",
+    headline: "Mind is your personal AI operating system.",
     body: "Learn your way around while your machine sets up.",
   },
   2: {

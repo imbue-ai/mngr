@@ -25,7 +25,7 @@ from imbue.mngr.primitives import AgentId
 @pytest.mark.witnesses(
     "home-page.consent-gate",
     partial="witnesses the server consent signal (needs_error_reporting_consent) and its "
-    "one-time persistence that drive the gate; the SPA rendering the 'Help improve Minds' "
+    "one-time persistence that drive the gate; the SPA rendering the 'Help improve Mind' "
     "screen is a frontend concern outside the Python witnessing surface",
 )
 def test_consent_gate_is_asked_once_then_never_again(tmp_path: Path) -> None:

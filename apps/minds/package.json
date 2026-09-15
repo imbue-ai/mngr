@@ -1,8 +1,8 @@
 {
   "name": "minds",
-  "productName": "Minds",
+  "productName": "Mind",
   "version": "0.6.1",
-  "description": "Minds - Self-improving, persistent AI agents",
+  "description": "Mind - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
   "main": "electron/main.js",

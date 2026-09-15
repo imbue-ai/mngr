@@ -274,7 +274,7 @@ def _handle_authenticate() -> Response:
         html = build_error_page_html(
             title="Sign-in failed",
             message="This login code is invalid or has already been used. "
-            "Find the login URL printed where the minds app is running and open that full link.",
+            "Find the login URL printed where the Mind app is running and open that full link.",
         )
         return make_html_response(content=html, status_code=403)
 

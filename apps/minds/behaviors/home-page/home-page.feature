@@ -6,7 +6,7 @@ Feature: Home page routing
   Scenario: The consent question is asked once, right after a session is authenticated
     Given an authenticated user who has never answered the error-reporting consent question
     When they visit "/"
-    Then they see the "Help improve Minds" consent screen instead of the home page's normal content
+    Then they see the "Help improve Mind" consent screen instead of the home page's normal content
     When they answer the consent question
     Then no later visit to "/" ever shows the consent screen again
 

@@ -42,7 +42,7 @@ function WelcomePageComponent(): m.Component {
     view() {
       return m("div", { class: "min-h-full flex items-center justify-center" }, [
         m("div", { class: "max-w-sm w-full px-6 text-center" }, [
-          m("h1", { class: "type-heading-lg text-primary mb-2" }, "Welcome to Minds"),
+          m("h1", { class: "type-heading-lg text-primary mb-2" }, "Welcome to Mind"),
           m("p", { class: "text-secondary type-body mb-8" }, "Run persistent, autonomous AI agents."),
           m(
             Button,

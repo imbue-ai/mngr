@@ -15,7 +15,7 @@ _UPDATE_COMMAND: Final[str] = "/update-self"
 # Names the target and that the user already confirmed it, but no flag or step: the skill
 # re-points itself at the target version's own copy of its flow, so the mechanism may differ.
 _OVERRIDE_NOTE_TEMPLATE: Final[str] = (
-    "The user chose a specific version in the Minds app: update this workspace to {target}. "
+    "The user chose a specific version in the Mind app: update this workspace to {target}. "
     "This is their explicit override, chosen knowing it may be newer than the app or not a "
     "release. Treat it as their confirmation of the target; do not ask them to confirm it again."
 )
@@ -26,7 +26,7 @@ _OVERRIDE_NOTE_TEMPLATE: Final[str] = (
 # that made the flow unattended.
 _NO_BACKUP_NOTE: Final[str] = (
     "This workspace has no backups configured, so this update has no restore point to fall back "
-    "on. The Minds app said so before the user started it, and they chose to go ahead without "
+    "on. The Mind app said so before the user started it, and they chose to go ahead without "
     "one. Treat that as their go-ahead; do not stop to ask them about the missing backup."
 )
 

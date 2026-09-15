@@ -685,7 +685,7 @@ describe("Shell app-overlay card chrome", () => {
     return attrsOf(overlay as AnyVnode);
   }
 
-  it("hands Minds settings a bounded column instead of a scrolling card body", () => {
+  it("hands Mind settings a bounded column instead of a scrolling card body", () => {
     // Its pane scrolls its own two columns; a scroller here would take the
     // section list down with the panel, which is the bug it exists to prevent.
     const bodyClass = String(overlayAttrsAt("/settings").bodyClass);
@@ -757,7 +757,7 @@ describe("Shell notice band wiring", () => {
   });
 
   it.each([
-    ["reading it as out of date raises the version band", false, "This machine is running an older version of Minds."],
+    ["reading it as out of date raises the version band", false, "This machine is running an older version of Mind."],
     [
       "a run in flight replaces that with what the run is doing",
       true,

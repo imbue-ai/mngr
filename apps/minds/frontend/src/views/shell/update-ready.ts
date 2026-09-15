@@ -43,7 +43,7 @@ export function watchUpdateStatus(onChange: () => void): void {
     // installer as it landed and installs on the next restart either way.
     if (status.type === "checking" || status.type === "error") return;
     // `version` is optional on the shared status shape; without one, offer
-    // nothing rather than a card reading "Minds undefined is ready".
+    // nothing rather than a card reading "Mind undefined is ready".
     readyVersion =
       status.type === "update-downloaded" && status.version !== undefined ? status.version : null;
     onChange();

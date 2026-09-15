@@ -216,7 +216,7 @@ describe("RecoveryCardBody", () => {
     // copy simply does not urge it.
     const text = renderCard({ ...UNRESPONSIVE, health: "stuck" });
     expect(text).toContain("my-machine isn't responding yet.");
-    expect(text).toContain("Minds is still checking what's wrong.");
+    expect(text).toContain("Mind is still checking what's wrong.");
     expect(text).toContain("Restart Machine");
   });
 
@@ -234,7 +234,7 @@ describe("RecoveryCardBody", () => {
 
     expect(text).toContain("my-machine unreachable: Can't connect to Docker");
     expect(text).toContain(
-      "Minds will reconnect you to your machine as soon as it can be reached again.",
+      "Mind will reconnect you to your machine as soon as it can be reached again.",
     );
     expect(text).toContain(
       "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
@@ -274,7 +274,7 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain("Can't connect to my-machine from this device");
     expect(text).toContain("This device has no network connection.");
     expect(text).toContain(
-      "Minds will reconnect to your machine as soon as it does.",
+      "Mind will reconnect to your machine as soon as it does.",
     );
     expect(text).toContain("Waiting for network");
     expect(text).not.toContain("Restart Machine");
@@ -291,7 +291,7 @@ describe("RecoveryCardBody", () => {
     });
 
     expect(text).toContain(
-      "This network blocks the connection Minds uses to reach your machines (SSH).",
+      "This network blocks the connection Mind uses to reach your machines (SSH).",
     );
     expect(text).toContain("Try another network or a VPN.");
     expect(text).not.toContain("This device has no network connection.");
@@ -524,7 +524,7 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain(
       "the connection failed on this device, before reaching it",
     );
-    expect(text).toContain("Restart Minds");
+    expect(text).toContain("Restart Mind");
     expect(text).toContain(
       "No known_hosts file at /keys/known_hosts; refusing to connect",
     );
@@ -552,8 +552,8 @@ describe("RecoveryCardBody", () => {
       "No known_hosts file at /keys/known_hosts; refusing to connect",
     );
     expect(text).toContain("Report a problem");
-    expect(text).not.toContain("Restart Minds");
-    expect(text).not.toContain("Restarting Minds rebuilds the connection");
+    expect(text).not.toContain("Restart Mind");
+    expect(text).not.toContain("Restarting Mind rebuilds the connection");
   });
 
   it("outranks the restart episode's own account of the machine", () => {
@@ -599,7 +599,7 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain("my-machine is responding again.");
     expect(text).toContain("This machine is answering again.");
     expect(text).not.toContain("isn't responding yet");
-    expect(text).not.toContain("Minds is still checking what's wrong.");
+    expect(text).not.toContain("Mind is still checking what's wrong.");
   });
 
   it("keeps reporting the restart as running on a card that is about to dismiss itself", () => {

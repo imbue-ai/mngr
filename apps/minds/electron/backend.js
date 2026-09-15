@@ -245,7 +245,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // unchanged.
       const logStream = createRotatingLogStream({ filePath: logFile });
 
-      onProgress('Starting Minds...');
+      onProgress('Starting Mind...');
 
       let uvBin, args, cwd, env;
 

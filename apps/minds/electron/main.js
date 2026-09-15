@@ -15,6 +15,7 @@ const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink')
 const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('./surface-routing');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 const updater = require('./updater');
+const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -310,9 +311,9 @@ function computeTitleFor(bundle) {
   if (agentId) {
     const ws = workspaceList.find((w) => sameWorkspaceId(w.id, agentId));
     const name = ws ? (ws.name || ws.id) : null;
-    return name ? `${name} — Minds` : 'Minds';
+    return name ? `${name} — Mind` : 'Mind';
   }
-  return 'Minds';
+  return 'Mind';
 }
 
 function updateOsTitle(bundle) {
@@ -380,7 +381,7 @@ function buildBundleWindowOptions() {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: 'Minds',
+    title: 'Mind',
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#ffffff',
@@ -467,7 +468,7 @@ function wireBundleWindowEvents(bundle) {
 
   win.on('close', (event) => {
     // Off macOS, closing the LAST window quits the app; route that close
-    // through the quit sequence so the local-mind shutdown prompt appears
+    // through the quit sequence so the workspace shutdown prompt appears
     // BEFORE the window disappears. If the user cancels, the window stays open.
     // On macOS the app keeps running with no windows, so the last close is an
     // ordinary window close and the prompt fires only on an explicit Quit.
@@ -1224,13 +1225,13 @@ ipcMain.on('shell-event', (event, evt) => {
   }
 });
 
-const MIND_HTTP_TIMEOUT_MS = 10000;
-const MIND_COMMAND_TIMEOUT_MS = 150000;
+const WORKSPACE_HTTP_TIMEOUT_MS = 10000;
+const WORKSPACE_COMMAND_TIMEOUT_MS = 150000;
 
-function getRunningMinds() {
+function getRunningWorkspaces() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
-      console.warn('[mind-shutdown] no backend URL; cannot list running minds');
+      console.warn('[workspace-shutdown] no backend URL; cannot list running workspaces');
       resolve({ ok: false, running: [] });
       return;
     }
@@ -1238,7 +1239,7 @@ function getRunningMinds() {
     try {
       req = net.request({ url: backendBaseUrl + '/api/v1/desktop/running-workspaces', method: 'GET', useSessionCookies: true });
     } catch (e) {
-      console.warn('[mind-shutdown] failed to construct running-minds request:', e);
+      console.warn('[workspace-shutdown] failed to construct running-workspaces request:', e);
       resolve({ ok: false, running: [] });
       return;
     }
@@ -1247,13 +1248,13 @@ function getRunningMinds() {
     let statusOk = false;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     const timer = setTimeout(() => {
-      console.warn(`[mind-shutdown] running-minds request timed out after ${MIND_HTTP_TIMEOUT_MS}ms`);
+      console.warn(`[workspace-shutdown] running-workspaces request timed out after ${WORKSPACE_HTTP_TIMEOUT_MS}ms`);
       try { req.abort(); } catch { /* noop */ }
       settle({ ok: false, running: [] });
-    }, MIND_HTTP_TIMEOUT_MS);
+    }, WORKSPACE_HTTP_TIMEOUT_MS);
     req.on('response', (response) => {
       statusOk = response.statusCode < 400;
-      if (!statusOk) console.warn(`[mind-shutdown] running-minds returned HTTP ${response.statusCode}`);
+      if (!statusOk) console.warn(`[workspace-shutdown] running-workspaces returned HTTP ${response.statusCode}`);
       response.on('data', (chunk) => { body += chunk.toString(); });
       response.on('end', () => {
         clearTimeout(timer);
@@ -1262,21 +1263,21 @@ function getRunningMinds() {
           const parsed = JSON.parse(body);
           settle({ ok: true, running: Array.isArray(parsed.running) ? parsed.running : [] });
         } catch (e) {
-          console.warn('[mind-shutdown] failed to parse running-minds response:', e);
+          console.warn('[workspace-shutdown] failed to parse running-workspaces response:', e);
           settle({ ok: false, running: [] });
         }
       });
-      response.on('error', (err) => { console.warn('[mind-shutdown] running-minds response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+      response.on('error', (err) => { console.warn('[workspace-shutdown] running-workspaces response error:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
     });
-    req.on('error', (err) => { console.warn('[mind-shutdown] running-minds request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
+    req.on('error', (err) => { console.warn('[workspace-shutdown] running-workspaces request failed:', err); clearTimeout(timer); settle({ ok: false, running: [] }); });
     req.end();
   });
 }
 
-function postStopMinds(agentIds) {
+function postStopWorkspaceHosts(agentIds) {
   return new Promise((resolve) => {
     if (!backendBaseUrl || !agentIds || agentIds.length === 0) {
-      console.warn('[mind-shutdown] no backend URL or no agent ids; cannot bulk-stop minds');
+      console.warn('[workspace-shutdown] no backend URL or no agent ids; cannot bulk-stop workspaces');
       resolve({ ok: false, stillRunning: [] });
       return;
     }
@@ -1285,7 +1286,7 @@ function postStopMinds(agentIds) {
     try {
       req = net.request({ url: `${backendBaseUrl}/api/v1/desktop/stop-hosts?${query}`, method: 'POST', useSessionCookies: true });
     } catch (e) {
-      console.warn('[mind-shutdown] failed to construct bulk-stop request:', e);
+      console.warn('[workspace-shutdown] failed to construct bulk-stop request:', e);
       resolve({ ok: false, stillRunning: [] });
       return;
     }
@@ -1294,13 +1295,13 @@ function postStopMinds(agentIds) {
     let statusOk = false;
     const settle = (value) => { if (!settled) { settled = true; resolve(value); } };
     const timer = setTimeout(() => {
-      console.warn(`[mind-shutdown] bulk-stop request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      console.warn(`[workspace-shutdown] bulk-stop request timed out after ${WORKSPACE_COMMAND_TIMEOUT_MS}ms`);
       try { req.abort(); } catch { /* noop */ }
       settle({ ok: false, stillRunning: [] });
-    }, MIND_COMMAND_TIMEOUT_MS);
+    }, WORKSPACE_COMMAND_TIMEOUT_MS);
     req.on('response', (response) => {
       statusOk = response.statusCode < 400;
-      if (!statusOk) console.warn(`[mind-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
+      if (!statusOk) console.warn(`[workspace-shutdown] bulk-stop returned HTTP ${response.statusCode}`);
       response.on('data', (chunk) => { body += chunk.toString(); });
       response.on('end', () => {
         clearTimeout(timer);
@@ -1309,13 +1310,13 @@ function postStopMinds(agentIds) {
           const parsed = JSON.parse(body);
           settle({ ok: true, stillRunning: Array.isArray(parsed.still_running) ? parsed.still_running : [] });
         } catch (e) {
-          console.warn('[mind-shutdown] failed to parse bulk-stop response:', e);
+          console.warn('[workspace-shutdown] failed to parse bulk-stop response:', e);
           settle({ ok: false, stillRunning: [] });
         }
       });
-      response.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+      response.on('error', (err) => { console.warn('[workspace-shutdown] bulk-stop response error:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
     });
-    req.on('error', (err) => { console.warn('[mind-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
+    req.on('error', (err) => { console.warn('[workspace-shutdown] bulk-stop request failed:', err); clearTimeout(timer); settle({ ok: false, stillRunning: [] }); });
     req.end();
   });
 }
@@ -1323,7 +1324,7 @@ function postStopMinds(agentIds) {
 function postStopStateContainer() {
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
-      console.warn('[mind-shutdown] no backend URL; cannot stop state container');
+      console.warn('[workspace-shutdown] no backend URL; cannot stop state container');
       resolve();
       return;
     }
@@ -1331,48 +1332,48 @@ function postStopStateContainer() {
     try {
       req = net.request({ url: backendBaseUrl + '/api/v1/desktop/state-container/stop', method: 'POST', useSessionCookies: true });
     } catch (e) {
-      console.warn('[mind-shutdown] failed to construct stop-state-container request:', e);
+      console.warn('[workspace-shutdown] failed to construct stop-state-container request:', e);
       resolve();
       return;
     }
     let settled = false;
     const settle = () => { if (!settled) { settled = true; resolve(); } };
     const timer = setTimeout(() => {
-      console.warn(`[mind-shutdown] stop-state-container request timed out after ${MIND_COMMAND_TIMEOUT_MS}ms`);
+      console.warn(`[workspace-shutdown] stop-state-container request timed out after ${WORKSPACE_COMMAND_TIMEOUT_MS}ms`);
       try { req.abort(); } catch { /* noop */ }
       settle();
-    }, MIND_COMMAND_TIMEOUT_MS);
+    }, WORKSPACE_COMMAND_TIMEOUT_MS);
     req.on('response', (response) => {
-      if (response.statusCode >= 400) console.warn(`[mind-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
+      if (response.statusCode >= 400) console.warn(`[workspace-shutdown] stop-state-container returned HTTP ${response.statusCode}`);
       response.on('data', () => {});
       response.on('end', () => { clearTimeout(timer); settle(); });
-      response.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
+      response.on('error', (err) => { console.warn('[workspace-shutdown] stop-state-container response error:', err); clearTimeout(timer); settle(); });
     });
-    req.on('error', (err) => { console.warn('[mind-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
+    req.on('error', (err) => { console.warn('[workspace-shutdown] stop-state-container request failed:', err); clearTimeout(timer); settle(); });
     req.end();
   });
 }
 
-async function stopAllMindsThenDecide(running) {
+async function stopAllWorkspacesThenDecide(running) {
   let remaining = running;
   while (true) {
-    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 mind…' : `Stopping ${remaining.length} minds…`);
-    const stopIds = remaining.map((mind) => mind.id);
-    console.log('[mind-shutdown] posting bulk stop for', JSON.stringify(stopIds));
-    const { ok, stillRunning } = await postStopMinds(stopIds);
-    console.log(`[mind-shutdown] bulk stop result: ok=${ok} stillRunning=${JSON.stringify(stillRunning)}`);
+    updateQuittingStatus(remaining.length === 1 ? 'Stopping 1 workspace…' : `Stopping ${remaining.length} workspaces…`);
+    const stopIds = remaining.map((workspace) => workspace.id);
+    console.log('[workspace-shutdown] posting bulk stop for', JSON.stringify(stopIds));
+    const { ok, stillRunning } = await postStopWorkspaceHosts(stopIds);
+    console.log(`[workspace-shutdown] bulk stop result: ok=${ok} stillRunning=${JSON.stringify(stillRunning)}`);
     if (ok && stillRunning.length === 0) {
       await postStopStateContainer();
       return true;
     }
     const blocked = stillRunning.length > 0 ? stillRunning : remaining;
-    const names = blocked.map((mind) => mind.name).join(', ');
+    const names = blocked.map((workspace) => workspace.name).join(', ');
     const { response } = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel quit', 'Quit anyway', 'Retry'],
       defaultId: 2,
       cancelId: 0,
-      message: blocked.length === 1 ? 'A mind could not be stopped' : 'Some minds could not be stopped',
+      message: blocked.length === 1 ? 'A workspace could not be stopped' : 'Some workspaces could not be stopped',
       detail: `${names}\n\nRetry stopping them, quit anyway (they keep running and using resources), or cancel and stay open.`,
     });
     if (response === 0) return false;
@@ -1381,38 +1382,38 @@ async function stopAllMindsThenDecide(running) {
   }
 }
 
-async function promptMindShutdown() {
+async function promptWorkspaceShutdown() {
   if (!getBackendProcess() || !backendBaseUrl) return { proceed: true, stop: false, running: [] };
-  const { ok, running } = await getRunningMinds();
+  const { ok, running } = await getRunningWorkspaces();
   if (!ok) {
     const { response } = await dialog.showMessageBox({
       type: 'warning',
       buttons: ['Cancel', 'Quit anyway'],
       defaultId: 1,
       cancelId: 0,
-      message: 'Could not check for running minds',
-      detail: 'Any local minds still running would keep using your computer\'s resources. '
+      message: 'Could not check for running workspaces',
+      detail: 'Any workspaces still running on this computer would keep using its resources. '
         + 'Quit anyway (they may keep running in the background), or cancel and stay open.',
     });
     if (response === 0) return { proceed: false, stop: false, running: [] };
     return { proceed: true, stop: false, running: [] };
   }
-  console.log('[mind-shutdown] prompt: running minds =', JSON.stringify(running));
+  console.log('[workspace-shutdown] prompt: running workspaces =', JSON.stringify(running));
   if (running.length === 0) return { proceed: true, stop: false, running: [] };
-  const names = running.map((mind) => mind.name).join(', ');
+  const names = running.map((workspace) => workspace.name).join(', ');
   const { response } = await dialog.showMessageBox({
     type: 'question',
     buttons: ['Cancel', 'Leave running', 'Shut down all'],
     defaultId: 2,
     cancelId: 0,
     message: running.length === 1
-      ? '1 local mind is still running'
-      : `${running.length} local minds are still running`,
+      ? '1 workspace is still running on this computer'
+      : `${running.length} workspaces are still running on this computer`,
     detail: `${names}\n\nLeaving them running keeps using your computer's resources. `
       + 'Shutting them down stops their agents and makes their services inaccessible '
       + '(your data is preserved and you can start them again).',
   });
-  console.log(`[mind-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
+  console.log(`[workspace-shutdown] prompt: user chose ${['Cancel', 'Leave running', 'Shut down all'][response]} (response=${response})`);
   if (response === 0) return { proceed: false, stop: false, running: [] };
   if (response === 1) return { proceed: true, stop: false, running: [] };
   return { proceed: true, stop: true, running };
@@ -1538,6 +1539,13 @@ async function onReady() {
     restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
   }
   updater.init({ onStatus: broadcastUpdateStatus });
+  // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the "Mind"
+  // rename has been on stable long enough for installs to have launched once.
+  // A dev run shares the machine with an installed app, whose directories these
+  // would be. Deferred so the delete cannot hold up the first window.
+  if (app.isPackaged) {
+    setImmediate(removeLegacyNameDirs);
+  }
   await runStartupSequence(initialBundle);
 }
 
@@ -1575,7 +1583,7 @@ function installApplicationMenu() {
   appMenuInstalled = true;
   const template = [
     {
-      label: app.name || 'Minds',
+      label: app.name || 'Mind',
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -1796,7 +1804,7 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
 }
 
 async function startBackendWithRetry() {
-  broadcastStatusToLoadingWindows('Starting Minds...');
+  broadcastStatusToLoadingWindows('Starting Mind...');
 
   try {
     const { loginUrl, port } = await startBackend(
@@ -1876,13 +1884,13 @@ async function startBackendWithRetry() {
         // screen and its Retry instead of a fresh window loaded at the dead
         // port -- whose own Reload button only re-loads that same dead port.
         showErrorInAllWindows(
-          'Minds stopped unexpectedly',
+          'Mind stopped unexpectedly',
           readLastLogLines(50) || `Process exited with code ${code}`,
         );
       });
     }
   } catch (err) {
-    showErrorInAllWindows('Failed to start Minds', err.message);
+    showErrorInAllWindows('Failed to start Mind', err.message);
   }
 }
 
@@ -2290,14 +2298,14 @@ async function runQuitSequence() {
   let plan = { proceed: true, stop: false, running: [] };
   try {
     if (!isHeadlessQuit) {
-      plan = await promptMindShutdown();
+      plan = await promptWorkspaceShutdown();
       if (!plan.proceed) {
         isQuitSequenceRunning = false;
         return;
       }
     }
   } catch (err) {
-    console.warn('[lifecycle] local-mind shutdown prompt failed, quitting anyway:', err);
+    console.warn('[lifecycle] workspace shutdown prompt failed, quitting anyway:', err);
     plan = { proceed: true, stop: false, running: [] };
   }
 
@@ -2309,9 +2317,9 @@ async function runQuitSequence() {
   if (plan.stop && plan.running.length > 0) {
     let shouldProceed = true;
     try {
-      shouldProceed = await stopAllMindsThenDecide(plan.running);
+      shouldProceed = await stopAllWorkspacesThenDecide(plan.running);
     } catch (err) {
-      console.warn('[lifecycle] stopping local minds failed, quitting anyway:', err);
+      console.warn('[lifecycle] stopping workspaces failed, quitting anyway:', err);
     }
     if (!shouldProceed) {
       isShuttingDown = false;

@@ -14,7 +14,7 @@ Deciding where a just-signed-in user lands is specified here (`post-login-destin
 ## How the routing works
 
 Once a session is authenticated, a background process discovers the user's workspaces; "initial workspace discovery" is its first complete pass.
-Before anything else, the one-time "Help improve Minds" consent screen is shown once per installation, overriding the normal home content until it is answered.
+Before anything else, the one-time "Help improve Mind" consent screen is shown once per installation, overriding the normal home content until it is answered.
 While initial discovery is still running, "/" shows a self-refreshing progress page.
 After it finishes, "/" lists the user's workspaces if they have any, or shows the new-workspace form if they have none -- optionally pre-filled from a deep link.
 The progress page names the unit by the corpus's workspace-vs-agent convention: its user-facing string reads "Discovering workspaces".

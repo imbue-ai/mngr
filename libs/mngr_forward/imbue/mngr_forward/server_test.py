@@ -1312,7 +1312,7 @@ def test_subdomain_unauthenticated_html_redirects_to_goto_bridge(tmp_path: Path)
     """A stale subdomain cookie must redirect to /goto/<id>/ on the bare
     origin, not the bare landing page.
 
-    Background: the host app (minds.app) regenerates its signing key on
+    Background: the host app (Mind.app) regenerates its signing key on
     every restart, so any pre-existing per-subdomain session cookie
     fails verification after a quit/reopen. Previously the unauthenticated
     HTML response 302-redirected to ``localhost:<port>/``, dumping the

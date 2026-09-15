@@ -1,5 +1,5 @@
 // The shared modal scaffold used by every Shell overlay (the workspace options
-// panel and the app-level request popup / Minds settings / Accounts / Get help
+// panel and the app-level request popup / Mind settings / Accounts / Get help
 // modals): a dim click-away backdrop calling onDismiss. Callers render the card
 // or panel as children, so the backdrop geometry lives in one place.
 //
