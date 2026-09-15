@@ -38,6 +38,8 @@ UNPUBLISHED_PACKAGES: Final[frozenset[str]] = frozenset(
         # Behavior corpus tooling; internal for now. Intended to publish once the corpus
         # model stabilizes, so spun-out repos can dev-depend on it to tend their own corpora.
         "imbue-mngr-behaviors",
+        # Behavior-corpus witness pipeline (`mngr witness`); internal tooling.
+        "imbue-mngr-witness",
         # End-to-end test helper used only by mngr's own test suite (not an mngr plugin).
         "skitwright",
         # Deploy-time conventions shared by our internal Modal apps (remote_service_connector,

@@ -435,7 +435,7 @@ def test_list_command_defaults_to_continue_on_error() -> None:
     """The default `--on-error` mode is `continue`, not `abort`.
 
     Under `abort` a single unreachable provider empties `mngr list --format json`
-    and breaks callers like `tmr-behaviors --reintegrate`; the partial-listing
+    and breaks callers like `mngr tmr --reintegrate`; the partial-listing
     behavior the `continue` default selects is covered by the CONTINUE-mode tests
     in api/list_test.py.
     """

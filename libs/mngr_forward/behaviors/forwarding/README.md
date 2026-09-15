@@ -1,6 +1,6 @@
 # Forwarding
 
-Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
 This area covers the agent-origin request path: how the Host header routes a request to an agent and its services, how HTTP requests and WebSocket connections are byte-forwarded to a backend, and what a client observes when a backend cannot answer.
 

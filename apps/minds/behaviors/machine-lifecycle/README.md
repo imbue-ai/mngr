@@ -1,6 +1,6 @@
 # Machine lifecycle
 
-Understanding this behavior corpus calls for the tmr-behaviors skill; consult it when reading this file.
+Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
 This folder specifies what the desktop client does about a remote (imbue cloud) machine that is not running because someone asked for that: the owner from another device, an operator, or the account's suspension.
 The lifecycle vocabulary (running, stopping, stopped, starting) and *stop kind* are defined in the [workspace glossary](../../docs/workspace/glossary.md); the design is [`specs/workspace-stop-kinds.md`](../../../../specs/workspace-stop-kinds.md).

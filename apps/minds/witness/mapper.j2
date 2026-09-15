@@ -1,17 +1,15 @@
 {#-
-  Minds variant of the packaged behavior-mapper prompt (libs/mngr_tmr's
-  behavior_mapper.j2). Unlike the docstring-TMR variant (mapper.j2, a
-  self-contained fork because its delta was subtractive), this variant is
-  purely additive: it extends the packaged template and fills its two
-  block slots, so the mapper contract lives in exactly one place. Passed
-  via --mapper-prompt by the `tmr-behaviors-minds` recipe in private.just.
+  Minds variant of the packaged witness mapper prompt
+  (libs/mngr_witness/imbue/mngr_witness/prompt_assets/mapper.j2): it fills
+  only the project-fact blocks. Discovered positionally by
+  `mngr witness --root apps/minds/behaviors`.
 -#}
-{% extends "behavior_mapper.j2" %}
+{% extends "mapper.j2" %}
 
-{% block project_guidance %}
+{% block project_guidance -%}
 You are working on the tests for the minds app (`apps/minds/`), the desktop
-client for managing mngr agents. Place each new witnessing test by the
-repo's test taxonomy (see style_guide.md):
+client for managing mngr agents. Place each witnessing test by the repo's
+test taxonomy (see style_guide.md):
 
 - Default to an integration test: a `test_*.py` file in the source package
   folder, no pytest mark, no live network. Most behavior scenarios (HTTP-level
@@ -28,9 +26,9 @@ repo's test taxonomy (see style_guide.md):
   from `testing.py` files; read them before writing new setup. Match the
   surrounding tests' idioms, and never use unittest.mock or
   monkeypatch.setattr.
-{% endblock %}
+{%- endblock %}
 
-{% block infra_blockers %}
+{% block infra_blockers -%}
 Minds-specific capability limits to recognize (these are shared blockers,
 not things to hack around locally): many minds tests need infrastructure a
 single test cannot stand up -- a Docker daemon and a pre-baked workspace
@@ -39,4 +37,4 @@ mints its own; `minds_services` needs a shared one), or secrets (an
 `ANTHROPIC_API_KEY`, imbue_cloud login, Modal deploy tokens, litellm keys).
 If a witnessing test would need such setup and it is absent from THIS
 environment, record the blocker instead of faking the behavior.
-{% endblock %}
+{%- endblock %}
