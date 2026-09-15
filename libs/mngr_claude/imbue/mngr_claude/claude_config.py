@@ -794,7 +794,7 @@ _CLAIM_MAIN_PID: Final[str] = (
 # Marker file (in ``$MNGR_AGENT_STATE_DIR``) present while claude is blocked on a dialog --
 # a tool-approval prompt or an AskUserQuestion. The ``PermissionRequest`` hook touches it;
 # ``PostToolUse``/``PostToolUseFailure`` clear it once the tool resolves, and the idle,
-# ``Stop``, ``UserPromptSubmit`` and startup hooks clear any stranded marker. This name is
+# ``Stop``, ``StopFailure``, ``UserPromptSubmit`` and startup hooks clear any stranded marker. This name is
 # also a literal in the hook shell snippets below; keep the two in sync.
 PERMISSIONS_WAITING_FILENAME: Final[str] = "permissions_waiting"
 
@@ -873,6 +873,15 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success,
       and invokes notify_user best-effort), and finally removes 'active' and
       'permissions_waiting' and emits an activity event
+    - StopFailure: the same script as Stop. Claude Code ends a turn that died on
+      an API error -- a usage limit, a rate limit, a prompt too long, a tool call
+      it could not parse -- through StopFailure, returning before it reaches the
+      Stop pass at all. Stop alone therefore leaves the 'active' marker
+      UserPromptSubmit created stranded, and the agent reports RUNNING until its
+      claude process restarts. Running the same script (rather than the bare
+      marker-clearing snippet) keeps the transcript flush ahead of the cleared
+      marker, so a consumer woken by the turn-end signal sees the error message
+      that ended the turn.
 
     File semantics:
     - session_started: Claude Code session has started (for initial message timing)
@@ -1050,6 +1059,17 @@ def build_readiness_hooks_config() -> dict[str, Any]:
                 }
             ],
             "Stop": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": MAIN_SESSION_ONLY_GUARD
+                            + 'bash "$MNGR_AGENT_STATE_DIR/commands/wait_for_stop_hook.sh"',
+                        },
+                    ],
+                }
+            ],
+            "StopFailure": [
                 {
                     "hooks": [
                         {
