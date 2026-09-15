@@ -1096,25 +1096,41 @@ def test_wait_for_ready_signal_skips_establish_when_root_already_persisted(
 
 
 _HOOK_TRUST_SCREEN = "  Hooks need review\n  8 hooks are new or changed.\n  2. Trust all and continue\n"
-_COMPOSER_SCREEN = "  OpenAI Codex (v0.147.0)\n  model: gpt-5.5   /model to change\n"
+_COMPOSER_SCREEN = (
+    "  OpenAI Codex (v0.147.0)\n  model: gpt-5.5   /model to change\n"
+    "› Ask Codex to do anything\n  gpt-5.5 default · ~/workspace\n"
+)
+# What the TUI shows between the keypress and its resume finishing: the trust screen is gone,
+# the composer is not up yet.
+_RESUMING_SCREEN = "  OpenAI Codex (v0.147.0)\n"
 
 
-def test_clear_hook_trust_prompt_selects_trust_all_when_prompt_is_showing(
+def test_clear_hook_trust_prompt_selects_trust_all_and_waits_for_the_tui_to_attach(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
-    """When the --remote TUI shows "Hooks need review", mngr selects "Trust all and continue".
+    """When the --remote TUI shows "Hooks need review", mngr selects "Trust all and continue", then waits
+    for the TUI to attach before the create sends its initial message.
 
-    Until this is cleared the daemon's hooks stay untrusted and never fire (safety guards + the
-    session-pointer recorder), on typed OR programmatic turns -- so the create-time clear is what
-    makes the workspace hooks actually run.
+    Until the screen is cleared the daemon's hooks stay untrusted and never fire (safety guards +
+    the session-pointer recorder), on typed OR programmatic turns -- so the create-time clear is what
+    makes the workspace hooks actually run. And the freed TUI's ``thread/resume`` rebuilds the idle
+    root thread, aborting any turn started meanwhile, so the clear returns only once the composer is
+    up (the resume is over), not the moment the keypress went out.
     """
     sent: list[str] = []
+    # The pane after the keypress: still resuming for two polls, then the composer.
+    panes_after_keypress = [_RESUMING_SCREEN, _RESUMING_SCREEN, _COMPOSER_SCREEN]
+    seen_after_keypress: list[str] = []
 
     class _Agent(CodexAgent):
         def capture_pane_content(
             self, include_scrollback: bool = False, window: "int | str | None" = None
         ) -> str | None:
-            return _HOOK_TRUST_SCREEN
+            if not sent:
+                return _HOOK_TRUST_SCREEN
+            pane = panes_after_keypress[min(len(seen_after_keypress), len(panes_after_keypress) - 1)]
+            seen_after_keypress.append(pane)
+            return pane
 
         def _send_hook_trust_keypress(self) -> None:
             sent.append("trust")
@@ -1122,6 +1138,24 @@ def test_clear_hook_trust_prompt_selects_trust_all_when_prompt_is_showing(
     agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     agent._clear_hook_trust_prompt()
     assert sent == ["trust"]
+    # The clear outlasted the resume: it kept reading the pane until the composer showed.
+    assert seen_after_keypress == panes_after_keypress
+
+
+def test_wait_for_tui_attached_gives_up_after_the_timeout_without_raising(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A TUI that never shows its composer does not hang the create: the wait is bounded and the
+    initial message goes out as it did before the wait existed."""
+
+    class _Agent(CodexAgent):
+        def capture_pane_content(
+            self, include_scrollback: bool = False, window: "int | str | None" = None
+        ) -> str | None:
+            return _RESUMING_SCREEN
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent._wait_for_tui_attached(timeout=0.3)
 
 
 def test_is_on_hook_trust_prompt_detects_only_the_trust_screen(
@@ -1142,6 +1176,11 @@ def test_is_on_hook_trust_prompt_detects_only_the_trust_screen(
     assert _agent_with_pane(_HOOK_TRUST_SCREEN)._is_on_hook_trust_prompt() is True
     assert _agent_with_pane(_COMPOSER_SCREEN)._is_on_hook_trust_prompt() is False
     assert _agent_with_pane(None)._is_on_hook_trust_prompt() is False
+    # The attach detector is the mirror image: only the composer, with the trust screen gone.
+    assert _agent_with_pane(_COMPOSER_SCREEN)._is_tui_attached() is True
+    assert _agent_with_pane(_HOOK_TRUST_SCREEN)._is_tui_attached() is False
+    assert _agent_with_pane(_RESUMING_SCREEN)._is_tui_attached() is False
+    assert _agent_with_pane(None)._is_tui_attached() is False
 
 
 def test_app_server_client_version_is_a_nonempty_string() -> None:
