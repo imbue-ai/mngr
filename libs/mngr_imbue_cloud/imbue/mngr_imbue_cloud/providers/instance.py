@@ -1677,7 +1677,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         (which re-bootstraps the container's SSH). Returning an online ``Host``
         unconditionally -- as this did before -- makes the start command skip
         ``start_host`` and SSH straight into the dead container, leaving a
-        stopped leased mind unrecoverable.
+        stopped leased host unrecoverable.
         """
         for entry in self._list_leased_hosts_cached():
             is_match = (isinstance(host, HostId) and entry.host_id == str(host)) or (
@@ -2473,13 +2473,13 @@ class ImbueCloudProvider(BaseProviderInstance):
     ) -> Host:
         """Start the previously-stopped docker container, relaunch its sshd, and return the Host.
 
-        A bare ``docker start`` is not enough to bring a leased mind back: the
+        A bare ``docker start`` is not enough to bring a leased host back: the
         in-container sshd is launched via ``docker exec`` (the container's CMD is
         just a sleep), so the sshd *process* does not survive the stop. The
         container filesystem -- including the per-host authorized key and the
         served host key -- is preserved across a ``docker stop``/``docker
         start``, so only sshd needs re-establishing; without it the subsequent
-        ``mngr start`` SSH into the container hangs until timeout and the mind is
+        ``mngr start`` SSH into the container hangs until timeout and the host is
         left dead and UI-unrecoverable. So, over the outer root SSH (which works
         independently of the container's sshd), we relaunch sshd and wait for it
         to accept connections.
@@ -2512,7 +2512,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             # The container's CMD is just a sleep, so a freshly started container
             # is not running sshd (it is launched via ``docker exec``, never the
             # entrypoint); launch it. Otherwise the wait below (and the later
-            # ``mngr start`` SSH) would hang until timeout and the mind would be
+            # ``mngr start`` SSH) would hang until timeout and the host would be
             # unrecoverable.
             start_container_sshd(outer, container_id)
             self._wait_for_container_sshd(leased)

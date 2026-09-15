@@ -55,7 +55,7 @@ const NOTIFICATION_STYLE_OPTIONS: {
     value: "os",
     label: "System notifications",
     description:
-      "Banners from your operating system, even when Minds is in the background.",
+      "Banners from your operating system, even when Mind is in the background.",
   },
   {
     value: "both",
@@ -320,7 +320,7 @@ function machineUpdatesSection(model: SettingsModel): m.Children {
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "When you schedule an update for a machine, Minds runs it inside this window. A machine that " +
+      "When you schedule an update for a machine, Mind runs it inside this window. A machine that " +
         "isn't reachable or has agents working in it when the window comes is skipped and tried again " +
         "in the next one.",
     ),
@@ -461,7 +461,7 @@ function updateStatusLine(model: SettingsModel): m.Children {
     return m(Notice, { variant: "warn" }, `Update check failed: ${status.message}`);
   }
   if (status.type === "update-downloaded") {
-    return m(Notice, { variant: "info" }, `Minds ${status.version} is downloaded. Restart to install.`);
+    return m(Notice, { variant: "info" }, `Mind ${status.version} is downloaded. Restart to install.`);
   }
   return null;
 }
@@ -548,7 +548,7 @@ function channelSwitchDialog(model: SettingsModel): m.Children {
         ? m(
             "p",
             { class: "type-body text-secondary mb-3" },
-            `Minds ${stagedVersion} is already downloaded and will still install when you ` +
+            `Mind ${stagedVersion} is already downloaded and will still install when you ` +
               `restart -- you will stay on it until ${label} passes it.`,
           )
         : null,
@@ -703,7 +703,7 @@ function updatesPanel(model: SettingsModel): m.Children {
   const concealed = visible.filter((channel) => channel.name === INTERNAL_CHANNEL);
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Updates"),
-    m("p", { class: "type-body text-secondary" }, `You're on Minds ${state.currentVersion}.`),
+    m("p", { class: "type-body text-secondary" }, `You're on Mind ${state.currentVersion}.`),
     updateStandingLine(model),
     updateStatusLine(model),
     ...listed.map((channel) => channelRow(model, state, channel)),

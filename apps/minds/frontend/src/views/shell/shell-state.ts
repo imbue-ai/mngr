@@ -342,7 +342,7 @@ export class ShellState {
     return true;
   }
 
-  /** Dismiss an open app-level modal (the request popup, Minds settings,
+  /** Dismiss an open app-level modal (the request popup, Mind settings,
    * Accounts, Get help), returning to the surface it was opened over, and
    * report whether there was one. Prefers history so the opener (Home, Create,
    * the workspace, or its options panel) is restored exactly; falls back to
@@ -822,7 +822,7 @@ export class ShellState {
    * Nothing raises itself while the discovery consumer is dead: every machine
    * reads unhealthy then, and the card's actions all route through the forward
    * that consumer feeds, so it would offer "Restart Machine" over a band
-   * correctly saying only restarting Minds can help.
+   * correctly saying only restarting Mind can help.
    *
    * A card the user opened stays up when the machine answers -- they asked to
    * be there, and it gets to tell them how it ended.

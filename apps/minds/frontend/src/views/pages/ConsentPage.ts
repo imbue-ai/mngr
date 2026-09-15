@@ -24,11 +24,11 @@ function ConsentPageComponent(): m.Component {
     view() {
       return m("div", { class: "min-h-full flex items-center justify-center" }, [
         m("div", { class: "max-w-md w-full px-6" }, [
-          m("h1", { class: "type-heading-lg text-primary mb-2" }, "Help improve Minds"),
+          m("h1", { class: "type-heading-lg text-primary mb-2" }, "Help improve Mind"),
           m(
             "p",
             { class: "text-secondary type-body mb-4" },
-            "While Minds is in its pre-release phase it defaults to reporting errors and sharing logs with Imbue when things go wrong.",
+            "While Mind is in its pre-release phase it defaults to reporting errors and sharing logs with Imbue when things go wrong.",
           ),
           m(
             "p",

@@ -417,7 +417,7 @@ function captureManualReport({ message, details }) {
   return (
     Sentry.captureEvent(
       {
-        message: message || 'Minds app error (manual report)',
+        message: message || 'Mind app error (manual report)',
         level: 'error',
         tags: { manually_submitted: 'true' },
         extra: { details: details || '', basics },

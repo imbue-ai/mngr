@@ -23,7 +23,7 @@ export type DiscoveryHealth = "healthy" | "reconnecting" | "blocked";
 /**
  * Why a machine cannot be reached, when the answer is about this device rather
  * than about the machine: it has no network at all, or it is on a network that
- * blocks the connection Minds uses (SSH).
+ * blocks the connection Mind uses (SSH).
  *
  * Carried alongside the health state rather than replacing it. The machine
  * really is unreachable -- what this adds is that the machine is not the thing

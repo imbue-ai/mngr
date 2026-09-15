@@ -1,4 +1,4 @@
-// Layer-0 smoke: confirm minds.app launches to a usable state.
+// Layer-0 smoke: confirm Mind.app launches to a usable state.
 //
 // A successful launch can land on any of the SPA's cold-start routes:
 //   - the machines list / home (a runner with prior auth state, like a

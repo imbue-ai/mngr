@@ -1,6 +1,6 @@
-"""Serve a self-describing OpenAPI document for the gateway-reachable Minds API.
+"""Serve a self-describing OpenAPI document for the gateway-reachable Mind API.
 
-``GET /api/schema`` returns an OpenAPI 3.1 document describing every Minds API
+``GET /api/schema`` returns an OpenAPI 3.1 document describing every Mind API
 route an agent can reach through the latchkey ``minds-api-proxy`` gateway -- i.e.
 everything under ``/api/v*`` *except* the cookie-only ``/desktop`` namespace and
 the WebDAV ``/files`` mount, which agents cannot reach (so listing them would
@@ -86,7 +86,7 @@ from imbue.minds.desktop_client.responses import make_response
 API_SCHEMA_PATH: Final[str] = "/api/schema"
 
 _OPENAPI_VERSION: Final[str] = "3.1.0"
-_API_TITLE: Final[str] = "Minds desktop client API"
+_API_TITLE: Final[str] = "Mind desktop client API"
 _API_VERSION: Final[str] = "1.0"
 
 # HTTP methods Flask adds automatically that are not part of the documented API.
@@ -360,7 +360,7 @@ def build_openapi_document(
             "title": _API_TITLE,
             "version": _API_VERSION,
             "description": (
-                "The Minds desktop client REST API reachable by in-workspace agents through the "
+                "The Mind desktop client REST API reachable by in-workspace agents through the "
                 "latchkey minds-api-proxy gateway. Every route accepts either the gateway-injected "
                 "bearer key or the desktop session cookie."
             ),
@@ -385,7 +385,7 @@ def _extract_url_rules() -> list[tuple[str, frozenset[str], Sequence[str], str]]
 
 @require_api_or_cookie_auth
 def _handle_api_schema() -> Response:
-    """Return the OpenAPI 3.1 document for the gateway-reachable Minds API."""
+    """Return the OpenAPI 3.1 document for the gateway-reachable Mind API."""
     document = build_openapi_document(_extract_url_rules(), dict(current_app.view_functions))
     return make_response(content=json.dumps(document), media_type="application/json")
 

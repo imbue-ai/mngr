@@ -499,14 +499,14 @@ class CustomServiceGrantHandler(RequestEventHandler):
             return UiManualCredentialsPrompt(
                 parameters=(),
                 message=(
-                    f"{domain} has no browser sign-in, and Minds cannot work out which credentials to "
+                    f"{domain} has no browser sign-in, and Mind cannot work out which credentials to "
                     "ask for. It has to be connected some other way."
                 ),
             )
         return UiManualCredentialsPrompt(
             parameters=parsed.parameters,
             message=(
-                f"{domain} has no browser sign-in, so Minds needs its credentials. Get them from the "
+                f"{domain} has no browser sign-in, so Mind needs its credentials. Get them from the "
                 "provider and fill them in -- Approve stores them and creates the connection."
             ),
         )

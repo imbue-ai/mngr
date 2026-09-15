@@ -682,7 +682,7 @@ describe("PermissionsTab add connection and self panels", () => {
     );
     const connect = withAttr(root, "data-perm-connect")[0];
     expect(attrsOf(connect).disabled).toBe(true);
-    expect(String(attrsOf(connect).title)).toContain("Minds can't work out which credentials AWS needs");
+    expect(String(attrsOf(connect).title)).toContain("Mind can't work out which credentials AWS needs");
   });
 
   it("says so when every service already has an account", async () => {

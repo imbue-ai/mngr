@@ -572,7 +572,7 @@ describe("ShellState.switchToNotifications", () => {
   });
 
   it("puts a centered app modal away first, so the feed never raises beneath its backdrop", () => {
-    // The titlebar's real bell stays painted under Minds settings / Accounts
+    // The titlebar's real bell stays painted under Mind settings / Accounts
     // (no raised strip covers it there), and the feed's backdrop draws under
     // a later-DOM modal's at the same z -- so the bell's click must put the
     // modal away, not float the feed beneath it.
@@ -1074,7 +1074,7 @@ describe("recovery card openness", () => {
   });
 
   it("drops the card for an app modal that left the machine behind", () => {
-    // Minds settings opened from Home carries no ?workspace, so nothing of the
+    // Mind settings opened from Home carries no ?workspace, so nothing of the
     // machine is on screen and the card has nothing to sit over.
     displaying(shell, AGENT);
     shell.openRecoveryModal(AGENT);

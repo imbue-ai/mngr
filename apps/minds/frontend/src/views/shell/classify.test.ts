@@ -88,7 +88,7 @@ describe("classifyRoute", () => {
   });
 
   it("treats app modals as their opener's context, not a standalone page", () => {
-    // Minds settings / Accounts / Get help / inbox opened from Home -> home context.
+    // Mind settings / Accounts / Get help / inbox opened from Home -> home context.
     expect(classifyRoute("/settings").kind).toBe("home");
     expect(classifyRoute("/accounts").kind).toBe("home");
     expect(classifyRoute("/help").kind).toBe("home");

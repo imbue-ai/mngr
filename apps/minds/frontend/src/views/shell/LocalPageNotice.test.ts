@@ -24,7 +24,7 @@ function noticeFor(environment: EnvironmentCondition): string {
 
 describe("LocalPageNotice", () => {
   it("names the device's condition on a page that has no band to carry it", () => {
-    // A hub page is where a user who opened Minds on a dead network actually
+    // A hub page is where a user who opened Mind on a dead network actually
     // is, and it has no machine behind it -- so the app-level reading is the
     // only thing that can speak, and this component's one line is what hands it
     // over. The copy selection itself is notice-band.ts's own business.

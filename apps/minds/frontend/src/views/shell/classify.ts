@@ -73,7 +73,7 @@ export function isWorkspaceOverlayPath(path: string): boolean {
 }
 
 /** App-level modal routes the Shell floats as a centered overlay over the
- * surface they were opened from (Minds settings, Accounts, Get help, the
+ * surface they were opened from (Mind settings, Accounts, Get help, the
  * request-review popup, and the AI-keys mint dialog)
  * instead of a full breadcrumbed page. The AI-keys mint dialog is
  * workspace-triggered ("Sign in with Imbue" inside a machine) and floats over
@@ -167,7 +167,7 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
     return pageContext("New machine");
   }
   if (isAppOverlayPath(path)) {
-    // Minds settings / Accounts / Get help / the request popup / the AI-keys
+    // Mind settings / Accounts / Get help / the request popup / the AI-keys
     // mint dialog float as a centered modal over the surface they were opened
     // from; the titlebar keeps that surface's context (the workspace behind Get
     // help / the popup / AI-keys, else Home) rather than a standalone page.

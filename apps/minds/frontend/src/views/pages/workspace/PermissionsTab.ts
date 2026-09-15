@@ -90,7 +90,7 @@ function isLockedByAnotherWrite(model: PermissionsModel, rowKey: string): boolea
  * told us nothing about the credentials it takes, so there is nothing to ask
  * for. Shown on hover, in place of a button that could only fail. */
 function unconnectableTitle(displayName: string): string {
-  return `Minds can't work out which credentials ${displayName} needs, so it has to be connected another way.`;
+  return `Mind can't work out which credentials ${displayName} needs, so it has to be connected another way.`;
 }
 
 export interface PermissionsTabAttrs {
@@ -784,7 +784,7 @@ function renderCatalogAction(
 
 /** The credential form for a service with no browser sign-in: one input per
  * value its own command asks for, plus a name for the account when the service
- * already has one. The command itself is never shown -- Minds runs it, so it is
+ * already has one. The command itself is never shown -- Mind runs it, so it is
  * not something the user has to know about. */
 function renderCredentialForm(
   model: PermissionsModel,
@@ -807,7 +807,7 @@ function renderCredentialForm(
       m(
         "p",
         { class: "type-body text-secondary" },
-        `${service.display_name} can't be signed in to through a browser, so Minds needs its ` +
+        `${service.display_name} can't be signed in to through a browser, so Mind needs its ` +
           "credentials. Get them from the provider and fill them in — they are stored on this computer.",
       ),
       ...signIn.credential_parameters.map((parameter) =>
@@ -836,7 +836,7 @@ function renderCredentialForm(
                 model.credentialAccountName = (event.target as HTMLInputElement).value;
               },
             }),
-            m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Minds."),
+            m("span", { class: "type-helper text-tertiary" }, "How this account is labelled in Mind."),
           ])
         : null,
       model.credentialErrorMessage

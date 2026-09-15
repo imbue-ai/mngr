@@ -24,7 +24,7 @@ describe("the update-ready card", () => {
       ),
     );
 
-    expect(text).toContain("Minds 0.4.2 is ready");
+    expect(text).toContain("Mind 0.4.2 is ready");
     expect(text).toContain("Installs when you restart");
   });
 

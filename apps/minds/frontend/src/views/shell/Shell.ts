@@ -112,7 +112,7 @@ function anchoredOverlayAttrs(
   };
 }
 
-/** Per-route sizing for a CENTERED app modal. Minds settings takes a definite
+/** Per-route sizing for a CENTERED app modal. Mind settings takes a definite
  * height -- its two columns scroll within it, and a card that resized itself
  * per section would move the section list out from under the cursor -- capped
  * to the window by the same min() the others' max uses. Accounts is a short
@@ -125,7 +125,7 @@ function appOverlayCardClass(path: string): string {
   return "w-[460px] min-h-0";
 }
 
-/** How the card holds its body. Minds settings is a two-column pane that
+/** How the card holds its body. Mind settings is a two-column pane that
  * scrolls its own columns -- a scroller here would take its section list down
  * with the panel -- so it gets a height-bounded column instead, the same shape
  * the docked options card gives its panes. Every other overlay is a single

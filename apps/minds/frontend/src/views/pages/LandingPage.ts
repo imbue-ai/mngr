@@ -839,7 +839,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
               onclick: () => m.route.set("/settings"),
             },
-            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Minds Settings")],
+            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Mind Settings")],
           ),
           m(
             "button",

@@ -3780,9 +3780,7 @@ def run_kanpan(
             frame,
             palette=PALETTE + mark_palette_entries,
             unhandled_input=input_handler,
-            # urwid annotates input_filter as taking list[str] but delivers mouse
-            # events to it as tuples, the way it does for unhandled_input.
-            input_filter=_KanpanInputFilter(state=state),  # ty: ignore[invalid-argument-type]
+            input_filter=_KanpanInputFilter(state=state),
             screen=screen,
         )
         state.loop = loop

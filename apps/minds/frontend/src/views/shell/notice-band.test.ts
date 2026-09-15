@@ -310,7 +310,7 @@ describe("noticeBandFor, an update run", () => {
   });
 
   it("lets the apply speak over the machine's own health, because it explains it", () => {
-    // Minds took those services down itself; "Lost connection" there misreads
+    // Mind took those services down itself; "Lost connection" there misreads
     // its own work.
     expect(noticeBandFor("stuck", "healthy", true, { updateRunPhase: "applying" })?.key).toBe(
       "workspace-update-applying",

@@ -89,7 +89,7 @@ is the only thing that runs them.
   models and views, rendered without a DOM through the `renderRoot` helper in
   `frontend/src/testing.ts`. Run alone via `pnpm -C frontend test`.
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`):
-  - `macos-launch.spec.js` -- launches the installed `/Applications/Minds.app`
+  - `macos-launch.spec.js` -- launches the installed `/Applications/Mind.app`
     via the `mindsApp` fixture. **The only JS spec** (wired into CI in
     `minds-launch-to-msg.yml`). The legacy renderer-contract specs were
     deleted with the pre-SPA shell scripts they drove.

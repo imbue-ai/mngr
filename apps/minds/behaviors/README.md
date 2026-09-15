@@ -1,4 +1,4 @@
-# Minds behavior corpus
+# Mind behavior corpus
 
 Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 

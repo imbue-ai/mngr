@@ -1477,12 +1477,12 @@ _PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
 _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
     rule_name="minds references in mngr-level code",
     rule_description=(
-        "mngr-level code must not reference minds, default-workspace-template, or the "
+        "mngr-level code must not reference Mind, default-workspace-template, or the "
         "/home/user/workspace container path -- those are higher-level concerns layered on top "
         "of mngr (see specs/machine-workspace-naming/decisions.md). Describe the behavior "
         "generically (e.g. 'a caller may...') instead of naming the higher-level product."
     ),
-    pattern_string=r"(?i)\bminds\b|default[-_]workspace[-_]template|/home/user/workspace",
+    pattern_string=r"(?i)\bminds?\b|default[-_]workspace[-_]template|/home/user/workspace",
 )
 
 
@@ -1507,4 +1507,4 @@ def test_prevent_workspace_vocabulary_in_mngr_level_code() -> None:
 def test_prevent_minds_references_in_mngr_level_code() -> None:
     """Keep minds / default-workspace-template references out of mngr-level code (count may only fall)."""
     chunks = _mngr_level_terminology_chunks(_PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE)
-    assert len(chunks) <= snapshot(324), _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))
+    assert len(chunks) <= snapshot(317), _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))

@@ -61,8 +61,8 @@ export function mindsGraphic(key: string): m.Children {
     "div",
     { key, id: "gfx-minds", class: "gfx flex flex-col items-center gap-2", "data-tooltip": "The app you are in now. It runs on your computer." },
     [
-      m("svg", { viewBox: "0 0 1024 1024", class: "w-40 h-40 rounded-xl", "aria-label": "minds" }, m("use", { href: "#minds-mark" })),
-      m("span", { class: "type-helper text-tertiary" }, "minds"),
+      m("svg", { viewBox: "0 0 1024 1024", class: "w-40 h-40 rounded-xl", "aria-label": "Mind" }, m("use", { href: "#minds-mark" })),
+      m("span", { class: "type-helper text-tertiary" }, "Mind"),
     ],
   );
 }
