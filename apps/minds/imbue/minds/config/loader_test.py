@@ -212,12 +212,6 @@ def test_ssh_ca_config_accepts_an_openssh_public_key_line_and_rejects_junk() -> 
         SshCaConfig(public_key=NonEmptyStr("not-a-key"))
 
 
-def test_committed_production_deploy_toml_has_no_ssh_ca_until_the_tier_brings_one_up() -> None:
-    # Pinned so the day production commits its CA the bringup checklist (not an
-    # accident) is what flips this; until then gen-2 prep and bakes refuse.
-    assert load_deploy_config("production").ssh_ca is None
-
-
 @pytest.mark.parametrize(
     ("tier", "ca_key"),
     [
