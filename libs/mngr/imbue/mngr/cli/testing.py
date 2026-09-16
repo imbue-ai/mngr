@@ -245,6 +245,29 @@ def create_agent_with_sample_transcript(
     return agent_id, events_dir
 
 
+def create_agent_with_rotated_sample_transcript(
+    per_host_dir: Path,
+    agent_name: str,
+) -> tuple[AgentId, Path]:
+    """Create an agent whose SAMPLE_ATIF_STREAM_EVENTS stream has rotated mid-conversation.
+
+    Rotation renames the stream file and opens an empty one, so the rotated segment holds
+    the header and the turns written before the rename and the current file starts at the
+    agent's reply. Returns (agent_id, events_dir).
+    """
+    agent_id, events_dir = create_agent_with_events_dir(
+        per_host_dir,
+        agent_name=agent_name,
+        events_source="claude/common_transcript",
+        agent_type="claude",
+    )
+    (events_dir / "events.jsonl.20260101000000000000").write_text(
+        "".join(json.dumps(event) + "\n" for event in SAMPLE_ATIF_STREAM_EVENTS[:2])
+    )
+    write_common_transcript_events(events_dir, SAMPLE_ATIF_STREAM_EVENTS[2:])
+    return agent_id, events_dir
+
+
 def write_stub_claude_cli(bin_dir: Path, installed_plugin_ids: Sequence[str]) -> Path:
     """Write a fast stub ``claude`` executable into ``bin_dir`` and return its path.
 

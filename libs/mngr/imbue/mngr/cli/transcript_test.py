@@ -16,6 +16,7 @@ from imbue.mngr.api.preservation import PreservedItemResult
 from imbue.mngr.cli.testing import LEGACY_SAMPLE_TRANSCRIPT_EVENTS
 from imbue.mngr.cli.testing import SAMPLE_ATIF_STREAM_EVENTS
 from imbue.mngr.cli.testing import create_agent_with_events_dir
+from imbue.mngr.cli.testing import create_agent_with_rotated_sample_transcript
 from imbue.mngr.cli.testing import create_agent_with_sample_transcript
 from imbue.mngr.cli.testing import write_common_transcript_events
 from imbue.mngr.cli.transcript import TranscriptCliOptions
@@ -330,6 +331,30 @@ def test_transcript_cli_reads_jsonl_format(
     parsed = json.loads(lines[1])
     assert parsed["type"] == "step"
     assert parsed["message"] == "Hello"
+
+
+def test_transcript_cli_reads_a_conversation_whose_stream_has_rotated(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """Rotation splits a long conversation across files, and it is one conversation.
+
+    The rotated segments hold the older turns, so reading only the current file
+    emits the tail of a conversation as though it were the whole of it.
+    """
+    create_agent_with_rotated_sample_transcript(local_provider.host_dir, agent_name="transcript-rotated-test")
+
+    result = cli_runner.invoke(
+        transcript,
+        ["transcript-rotated-test", "--format", "jsonl"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    emitted_event_ids = [json.loads(line)["event_id"] for line in result.stdout.splitlines() if line.strip()]
+    assert emitted_event_ids == [event["event_id"] for event in SAMPLE_ATIF_STREAM_EVENTS]
 
 
 def test_transcript_cli_reads_json_format(
@@ -958,6 +983,33 @@ def test_transcript_cli_builds_atif_document(
     agent_step = trajectory.steps[1]
     assert agent_step.observation is not None
     assert agent_step.observation.results[0].source_call_id == "call_1"
+
+
+def test_transcript_cli_builds_an_atif_document_from_a_rotated_stream(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """Rotation leaves the header in the oldest segment, and the builder demands it first.
+
+    Rotation renames the stream file and opens an empty one, so the current file
+    of a stream that has rotated starts mid-conversation. A build that read only
+    that file rejected the whole trajectory as pre-ATIF rather than rendering it.
+    """
+    create_agent_with_rotated_sample_transcript(local_provider.host_dir, agent_name="transcript-atif-rotated-test")
+
+    result = cli_runner.invoke(
+        transcript,
+        ["transcript-atif-rotated-test", "--format", "atif"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    trajectory = Trajectory.model_validate(json.loads(result.output))
+    # The user turn comes from the rotated segment and the agent turn from the current file.
+    assert [(step.source, step.message) for step in trajectory.steps] == [("user", "Hello"), ("agent", "World")]
+    assert trajectory.steps[1].observation is not None
 
 
 def test_transcript_cli_atif_writes_output_file(

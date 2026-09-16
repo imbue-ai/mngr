@@ -524,6 +524,14 @@ _SIGWINCH_MODE_NUDGE: Final[str] = "nudge"
 _AGENT_LAUNCH_SCRIPT_NAME: Final[str] = "launch_agent.sh"
 
 
+def parse_certified_host_data(data_path: Path, content: str) -> CertifiedHostData:
+    """Parse the contents of a host's data.json, read from ``data_path``."""
+    try:
+        return CertifiedHostData(**json.loads(content))
+    except ValidationError as e:
+        raise HostDataSchemaError(str(data_path), str(e)) from e
+
+
 class Host(OuterHost, BaseHost, OnlineHostInterface):
     """Host implementation that proxies operations through a pyinfra connector.
 
@@ -1247,8 +1255,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         data_path = self.host_dir / "data.json"
         try:
             content = self.read_text_file(data_path)
-            data = json.loads(content)
-            return CertifiedHostData(**data)
+            return parse_certified_host_data(data_path, content)
         except FileNotFoundError:
             now = datetime.now(timezone.utc)
             # FIXME: this is suss--we should probably just explode if data.json is missing
@@ -1261,8 +1268,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 created_at=now,
                 updated_at=now,
             )
-        except ValidationError as e:
-            raise HostDataSchemaError(str(data_path), str(e)) from e
 
     def set_certified_data(self, data: CertifiedHostData) -> None:
         """Save certified data to data.json and notify the provider."""
