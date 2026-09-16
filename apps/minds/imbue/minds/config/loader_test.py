@@ -13,6 +13,7 @@ from imbue.minds.config.data_types import management_overlay_for_tier
 from imbue.minds.config.loader import EnvConfigError
 from imbue.minds.config.loader import _assert_operators_inside_tier_operator_block
 from imbue.minds.config.loader import bundled_client_config_path_or_none
+from imbue.minds.config.loader import committed_deploy_config_tiers
 from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import per_env_secret_services
@@ -91,6 +92,12 @@ def test_deploy_config_secrets_match_canonical_per_env_services(tier: str) -> No
     """
     config = load_deploy_config(tier)
     assert set(config.secrets.services) == set(per_env_secret_services())
+
+
+def test_committed_deploy_config_tiers_lists_only_the_directories_with_a_deploy_toml() -> None:
+    # ``ci-snapshot/`` (client.toml only) and ``_bundled/`` sit alongside the
+    # tiers under envs/ and must not be reported as tiers.
+    assert committed_deploy_config_tiers() == ["ci", "dev", "production", "staging"]
 
 
 def test_load_deploy_config_unknown_tier_raises() -> None:

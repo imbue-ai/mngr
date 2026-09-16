@@ -283,6 +283,9 @@ def test_spawn_rotates_an_oversized_raw_capture_and_prunes_old_rotations(
         log_path.with_name(f"{log_path.name}.{suffix}").write_text("old")
 
     spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
+    # The detached child is done once its sentinel lands; returning before that
+    # leaves it running into the leak check at teardown.
+    assert _wait_for_text_in_file(log_path, _CHILD_STDOUT_SENTINEL)
 
     rotation_names = sorted(path.name for path in log_path.parent.glob(f"{log_path.name}.*"))
     assert len(rotation_names) == _MAX_RAW_CAPTURE_ROTATIONS
@@ -303,6 +306,7 @@ def test_spawn_leaves_a_small_raw_capture_in_place(tmp_path: Path, monkeypatch: 
     log_path.write_text("previous run output\n")
 
     spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
+    assert _wait_for_text_in_file(log_path, _CHILD_STDOUT_SENTINEL)
 
     assert list(log_path.parent.glob(f"{log_path.name}.*")) == []
     assert "previous run output" in log_path.read_text()
