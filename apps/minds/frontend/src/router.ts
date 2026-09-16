@@ -28,7 +28,7 @@ import { InboxPage } from "./views/pages/InboxPage";
 import { LandingPage } from "./views/pages/LandingPage";
 import { RecoveryPage } from "./views/pages/RecoveryPage";
 import { SettingsPage } from "./views/pages/SettingsPage";
-import { WelcomePage } from "./views/pages/WelcomePage";
+import { StartPage } from "./views/pages/StartPage";
 import { WorkspaceBackupsPage } from "./views/pages/WorkspaceBackupsPage";
 import { WorkspaceOptionsPage } from "./views/pages/WorkspaceOptionsPage";
 import { WorkspaceSettingsRedirect } from "./views/pages/WorkspaceSettingsRedirect";
@@ -66,7 +66,10 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   { path: "/destroying/:agentId", component: DestroyingPage },
   { path: "/agents/:agentId/recovery", component: RecoveryPage },
   { path: "/help", component: HelpPage },
-  { path: "/welcome", component: WelcomePage },
+  // The first-run start flow, landed on by Electron's startup router (and the
+  // home page's own redirect in plain-browser mode) while onboarding is
+  // incomplete and no workspace exists.
+  { path: "/start", component: StartPage },
   { path: "/consent", component: ConsentPage },
   { path: "/_dev/styleguide", component: DevStyleguide },
 ];

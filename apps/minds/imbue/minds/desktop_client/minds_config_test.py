@@ -21,6 +21,15 @@ def test_default_values_when_no_file(tmp_path: Path) -> None:
     assert config.get_report_unexpected_errors() is True
 
 
+def test_onboarding_complete_defaults_false_and_round_trips(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_is_onboarding_complete() is False
+    config.set_is_onboarding_complete(True)
+    assert config.get_is_onboarding_complete() is True
+    # Persisted to the file, not held in memory: a second store reads it back.
+    assert _make_config(tmp_path).get_is_onboarding_complete() is True
+
+
 def test_set_and_get_default_account_id(tmp_path: Path) -> None:
     """Setting and getting default_account_id works correctly."""
     config = _make_config(tmp_path)

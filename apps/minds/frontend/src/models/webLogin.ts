@@ -151,7 +151,7 @@ export class WebLoginModel {
   }
 }
 
-// One shared flow for the whole window: every entry point (welcome page,
+// One shared flow for the whole window: every entry point (the start flow,
 // accounts page, create flow, the Electron auth_required nudge) drives this
 // instance, and the Shell renders its modal.
 export const webLogin = new WebLoginModel();
@@ -163,7 +163,7 @@ export const webLogin = new WebLoginModel();
  * code in index.ts) or as a shell-navigate IPC into a live SPA (consumed by
  * navigateExternalUrl). Both must strip the params from the URL they act on:
  * a leftover ``web-login=1`` would spuriously restart the flow on the
- * window's next full reload (e.g. the auth_success reload).
+ * window's next full reload.
  *
  * Deletes the params from ``params`` in place; returns the (possibly empty)
  * message when the sign-in was requested, or null when it was not.

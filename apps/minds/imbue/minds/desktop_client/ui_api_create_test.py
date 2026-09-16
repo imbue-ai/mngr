@@ -275,26 +275,28 @@ def test_create_attempt_detail_reports_an_in_flight_record_without_a_live_thread
     assert payload["record"]["error"] is None
 
 
-# -- Live-attempt detail: the onboarding walkthrough's context (is_remote,
-# -- expected_duration_seconds, onboarding_services) --
+# Live-attempt detail: the creation page's facts (is_remote, expected duration,
+# and the settings the attempt was submitted with).
 
 
-def test_create_attempt_detail_carries_the_onboarding_walkthrough_context_for_a_live_attempt(
+def test_create_attempt_detail_carries_the_request_summary_for_a_live_attempt(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    """A live (in-flight) attempt's detail carries what the walkthrough needs.
+    """A live (in-flight) attempt's detail restates the settings it was submitted with.
 
     Pointing at a nonexistent local path (the same pattern agent_creator_test.py
     uses) fails fast in the background thread, but the attempt is genuinely
     live -- tracked by get_create_attempt_info -- for the brief window this
-    test reads it in, same as the create form's own in-flight polling would.
+    test reads it in, same as the creation page's own polling would.
     """
     client, _store, creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
     create_attempt_id = creator.start_create_attempt(
-        "file:///nonexistent-repo-for-onboarding-context-test",
-        host_name="onboarding-context-test",
+        "file:///nonexistent-repo-for-request-summary-test",
+        host_name="request-summary-test",
+        display_name="Request Summary Test",
+        branch="v9.9.9-summary",
         launch_mode=LaunchMode.DOCKER,
     )
 
@@ -304,13 +306,42 @@ def test_create_attempt_detail_carries_the_onboarding_walkthrough_context_for_a_
     payload = json.loads(response.get_data(as_text=True))
     assert payload["kind"] == "live"
     live = payload["live"]
-    # DOCKER is a local launch mode, so the machine step's copy and graphic
-    # should be the local (not cloud) variant.
     assert live["is_remote"] is False
     assert live["expected_duration_seconds"] > 0
-    # The bundled latchkey services catalog backs the app-cloud icon wheel;
-    # every entry carries an inlined (data: URI) icon and a display name.
-    assert len(live["onboarding_services"]) > 0
-    for service in live["onboarding_services"]:
-        assert service["icon"].startswith("data:image/")
-        assert service["name"]
+    assert live["workspace_name"] == "Request Summary Test"
+    assert live["request"] == {
+        "display_name": "Request Summary Test",
+        "launch_mode": "DOCKER",
+        "cloud_account": "",
+        "backup_provider": "CONFIGURE_LATER",
+        "region": "",
+        "instance_type": "",
+        "repository": "file:///nonexistent-repo-for-request-summary-test",
+        "branch": "v9.9.9-summary",
+    }
+
+
+def test_create_attempt_detail_carries_the_request_summary_for_a_record(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(
+        _record(create_attempt_id, PendingCreateAttemptState.FAILED, error="boom", instance_type="t3.large")
+    )
+
+    response = client.get(f"/ui/api/create/attempts/{create_attempt_id}")
+
+    payload = json.loads(response.get_data(as_text=True))
+    assert payload["record"]["request"] == {
+        "display_name": "Row Test Name",
+        "launch_mode": "LIMA",
+        "cloud_account": "",
+        "backup_provider": "CONFIGURE_LATER",
+        "region": "",
+        "instance_type": "t3.large",
+        "repository": "https://example.com/some-repo.git",
+        "branch": "feature-branch-7",
+    }

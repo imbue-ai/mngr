@@ -123,6 +123,15 @@ class FakeImbueCloudCli(ImbueCloudCli):
     is_resend_suppressed: bool = Field(
         default=False, description="When True, auth_resend_verification reports the server cooldown (sent=False)"
     )
+    verified_emails: set[str] = Field(
+        default_factory=set, description="Accounts auth_is_email_verified reports as verified"
+    )
+    is_verified_checks: list[str] = Field(
+        default_factory=list, description="Every email auth_is_email_verified was called with, in order"
+    )
+    is_verified_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, auth_is_email_verified raises it instead of answering"
+    )
     set_plan_calls: list[tuple[str, str]] = Field(
         default_factory=list, description="(account email, plan) for every set_account_plan call, in order"
     )
@@ -138,6 +147,12 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def auth_resend_verification(self, account: str) -> bool:
         self.resent_verification_emails.append(account)
         return not self.is_resend_suppressed
+
+    def auth_is_email_verified(self, account: str) -> bool:
+        self.is_verified_checks.append(account)
+        if self.is_verified_error_to_raise is not None:
+            raise self.is_verified_error_to_raise
+        return account in self.verified_emails
 
     def set_account_plan(self, account: str, plan: str) -> dict[str, Any]:
         self.set_plan_calls.append((account, plan))

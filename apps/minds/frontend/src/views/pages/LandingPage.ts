@@ -10,6 +10,7 @@ import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { LandingExtras, MindLiveness } from "../../models/create";
 import { MindLivenessTracker, fetchLandingExtras, recoveryRoute } from "../../models/create";
+import { onboardingProgress } from "../../models/onboarding";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import type { UiProviderEntry } from "../../generated/ui";
 import { Button, ButtonLink } from "../components/Button";
@@ -68,6 +69,21 @@ interface LandingState {
   dismissedNoteKeys: Set<string>;
   /** Which bulk press is held for the go-ahead-without-backups confirmation. */
   bulkNoBackupConfirm: "now" | "schedule" | null;
+}
+
+/**
+ * An install that has never been taken past the start flow, with discovery
+ * finished and nothing found, belongs on the start flow. Electron's startup
+ * router lands there itself; this is the same rule for a plain browser, and
+ * for a window that reaches home before the flow has completed.
+ */
+export function shouldRedirectToStartFlow(
+  isOnboardingComplete: boolean,
+  hasRows: boolean,
+  extras: LandingExtras | null,
+): boolean {
+  if (isOnboardingComplete || hasRows || extras === null) return false;
+  return extras.is_discovery_complete && !extras.has_restorable_workspaces;
 }
 
 function loadExtras(state: LandingState): void {
@@ -691,10 +707,23 @@ export const LandingPage: m.ClosureComponent = () => {
     ]);
   }
 
+  // Every input (the extras landing, the workspace list, the onboarding copy)
+  // arrives with a redraw, so the hook sees each change; view() stays free of
+  // navigation.
+  function redirectToStartFlowIfDue(): void {
+    const hasRows = getAppContext().stores.workspaces.workspaces.length > 0;
+    if (shouldRedirectToStartFlow(onboardingProgress.isComplete, hasRows, state.extras)) {
+      m.route.set("/start");
+    }
+  }
+
   return {
     oninit() {
       loadExtras(state);
       state.unsubscribe = getAppContext().stores.workspaces.onChanged(() => loadExtras(state));
+    },
+    onupdate() {
+      redirectToStartFlowIfDue();
     },
     onremove() {
       state.unsubscribe?.();

@@ -605,14 +605,19 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-auth-resend-verification",
         )
         body = self._expect_success(result, "auth resend-verification")
-        sent = body.get("sent") if isinstance(body, dict) else None
-        if not isinstance(sent, bool):
-            # A missing/non-bool ``sent`` is a broken plugin contract; raising
-            # (rather than defaulting to False) keeps the UI from claiming an
-            # email "was sent recently" when nothing of the sort is known.
-            shape = f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
-            raise ImbueCloudCliError(f"Malformed auth resend-verification output: expected a 'sent' bool, got {shape}")
-        return sent
+        # A missing/non-bool ``sent`` is a broken plugin contract; raising
+        # (rather than defaulting to False) keeps the UI from claiming an
+        # email "was sent recently" when nothing of the sort is known.
+        return _expect_bool_field(body, "sent", "auth resend-verification")
+
+    def auth_is_email_verified(self, account: str) -> bool:
+        """Whether ``account``'s email is verified; a plain status query, safe to poll."""
+        result = self._run(
+            ["auth", "is-verified", "--account", account],
+            cg_name="imbue-cloud-auth-is-verified",
+        )
+        body = self._expect_success(result, "auth is-verified")
+        return _expect_bool_field(body, "verified", "auth is-verified")
 
     # ------------------------------------------------------------------
     # Hosts (list / release)
@@ -803,7 +808,7 @@ class ImbueCloudCli(MutableModel):
             # Describe only the body's shape, never its contents: a well-formed
             # body carries the relay token, which must not leak into an error
             # message that reaches logs and the sharing UI.
-            shape = f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
+            shape = _describe_body_shape(body)
             raise ImbueCloudCliError(f"Malformed shares create output: expected a share object, got {shape}")
         return ShareCliInfo.model_validate({"state": "active", **body})
 
@@ -1126,6 +1131,21 @@ def _parse_auth_failure_body(stderr: str) -> dict[str, Any] | None:
     if body is None or body.get("error_class") != _AUTH_FAILED_ERROR_CLASS:
         return None
     return body
+
+
+def _describe_body_shape(body: Any) -> str:
+    """Name only a body's shape, never its contents, which may carry a token."""
+    return f"dict with keys {sorted(body)}" if isinstance(body, dict) else type(body).__name__
+
+
+def _expect_bool_field(body: Any, key: str, command_repr: str) -> bool:
+    """The bool at ``key`` of a dict body; anything else is a broken plugin contract."""
+    value = body.get(key) if isinstance(body, dict) else None
+    if not isinstance(value, bool):
+        raise ImbueCloudCliError(
+            f"Malformed {command_repr} output: expected a '{key}' bool, got {_describe_body_shape(body)}"
+        )
+    return value
 
 
 def _parse_stdout_json(stdout: str, command_repr: str) -> Any:

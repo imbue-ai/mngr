@@ -1,22 +1,42 @@
-// The /creating/<create_attempt_id> page: live progress for an in-flight
-// create (status polling + the op-log SSE, which stays SSE by decision), the
-// failure view with recognized-error guidance, the onboarding walkthrough
-// that plays while the machine sets up (port of Creating.jinja + onboarding.js,
-// see ./creating/OnboardingWalkthrough.ts), and the record-backed detail for
-// attempts with no live thread (interrupted: retry/discard; failed: error +
-// persisted log tail + dismiss). Port of creating.js + create_attempt_record.js.
+// The creation page (/creating/<create_attempt_id>): a create attempt's
+// progress, told as the tail of a conversation. A user turn restates the
+// settings the attempt was submitted with, the agent says it is setting the
+// workspace up, and a loading box tracks the real attempt (status polling +
+// the op-log SSE). Reached from the start flow in
+// the same session, the flow's transcript renders above; reached any other
+// way (the create form, a reload), the page holds only these turns.
+//
+// When the attempt is ready the wash carries the app into the workspace; a
+// failure or an interrupted record becomes an agent turn with Retry and
+// Dismiss / Discard, the retry reopening the create form as a modal prefilled
+// from the attempt's record.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import type { CreateAttemptDetail, LiveCreateAttemptDetail } from "../../models/create";
+import type { CreateAttemptDetail, CreateAttemptRequestSummary, LiveCreateAttemptDetail } from "../../models/create";
 import { CreateAttemptWatcher, fetchCreateAttemptDetail, progressForElapsed } from "../../models/create";
+import {
+  INTERRUPTED_LINE,
+  READY_LINE,
+  SETUP_LINE,
+  SETUP_SECTIONS,
+  failureLine,
+  summaryLines,
+} from "../../models/creationTranscript";
+import { FLOW_OPTIONS_GAP_MS, FLOW_THINK_MS, startFlow, streamDurationMs } from "../../models/startFlow";
+import { wash } from "../../models/wash";
 import { Button } from "../components/Button";
-import { PageContainer } from "../components/Layout";
+import { Link } from "../components/Link";
 import { Notice } from "../components/Notice";
+import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
-import { OnboardingWalkthrough } from "./creating/OnboardingWalkthrough";
+import { createFormModal } from "./CreatePage";
+import { TRANSCRIPT_COLUMN_CLASS, agentTurn, answerRow, disclosureList, scrollAnchor, userTurn } from "./start/transcript";
+import { transcriptTurns } from "./StartPage";
 
 const DEFAULT_EXPECTED_DURATION_SECONDS = 60;
+/** How long the ready line is left alone before the wash starts. */
+const READY_HOLD_MS = 900;
 
 interface CreatingState {
   createAttemptId: string;
@@ -31,11 +51,17 @@ interface CreatingState {
   stageText: string;
   logLines: string[];
   isLogOpen: boolean;
+  /** The reading material's sections the reader has opened. */
+  openSectionIds: Set<string>;
   isActionPending: boolean;
+  isRetryFormOpen: boolean;
   progressTimer: ReturnType<typeof setInterval> | null;
+  washTimer: ReturnType<typeof setTimeout> | null;
+  /** The start-flow transcript this create came out of, if this window's flow submitted it. */
+  isFromStartFlow: boolean;
 }
 
-function enterWorkspaceFromRedirect(redirectUrl: string): void {
+export function enterWorkspaceFromRedirect(redirectUrl: string): void {
   // redirect_url is the /goto/<workspace-id>/ URL; the shell resolves either
   // coordinate, so extract the id and enter in-app.
   const match = redirectUrl.match(/\/goto\/((?:agent|host)-[a-f0-9]+)\//i);
@@ -46,9 +72,45 @@ function enterWorkspaceFromRedirect(redirectUrl: string): void {
   }
 }
 
-export const CreatingPage: m.ClosureComponent = () => {
-  const state: CreatingState = {
-    createAttemptId: "",
+function isReducedMotion(): boolean {
+  return typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
+ * The agent turn that reports a failed attempt. It keeps the ids the Electron
+ * e2e workspace runner (desktop_client/e2e_workspace_runner.py) polls to fail
+ * a create fast and to read the cause: `#failure-view` and `#error-message`.
+ */
+export function failureTurn(workspaceName: string, error: string, isInstant: boolean): m.Children {
+  return agentTurn({
+    key: "creation-failed",
+    id: "failure-view",
+    textId: "error-message",
+    text: failureLine(workspaceName, error),
+    startAtMs: FLOW_THINK_MS,
+    isInstant,
+  });
+}
+
+/** The recognized-error guidance under a failure, when the error kind has some. */
+export function failureGuidance(errorKind: string): m.Children {
+  if (errorKind === "GITHUB_AUTH_REQUIRED") {
+    return m(Notice, { key: "creation-guidance", id: "github-auth-help", extra: "max-w-[calc(100%-100px)]" }, [
+      "This repository looks private. Install the GitHub app or use a repository URL that includes ",
+      "credentials, then retry.",
+    ]);
+  }
+  if (errorKind === "GIT_AUTH_REQUIRED") {
+    return m(Notice, { key: "creation-guidance", id: "git-auth-help", extra: "max-w-[calc(100%-100px)]" }, [
+      "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
+    ]);
+  }
+  return null;
+}
+
+function freshState(createAttemptId: string): CreatingState {
+  return {
+    createAttemptId,
     detail: null,
     watcher: null,
     startedAtMs: Date.now(),
@@ -60,18 +122,71 @@ export const CreatingPage: m.ClosureComponent = () => {
     stageText: "",
     logLines: [],
     isLogOpen: false,
+    openSectionIds: new Set<string>(),
     isActionPending: false,
+    isRetryFormOpen: false,
     progressTimer: null,
+    washTimer: null,
+    isFromStartFlow: startFlow.submittedCreateAttemptId === createAttemptId,
   };
+}
+
+function attemptIdOf(vnode: m.Vnode): string {
+  return (vnode.attrs as { agentId?: string }).agentId ?? "";
+}
+
+export const CreatingPage: m.ClosureComponent = () => {
+  // Reassigned per attempt: the router keeps this instance across
+  // /creating/<a> -> /creating/<b> (the retry's route change), so every helper
+  // reads the variable rather than a captured object.
+  let state: CreatingState = freshState("");
+
+  // Where the wash grows from: the loading box's accent blob, measured at the
+  // moment the wash starts (the transcript scrolls as it grows, so an earlier
+  // measurement would name where the box was).
+  function washOrigin(): { x: number; y: number } {
+    const blob = document.getElementById("creating-blob");
+    if (blob === null) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    const rect = blob.getBoundingClientRect();
+    return {
+      x: Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth),
+      y: Math.min(Math.max(rect.top + rect.height / 2, 0), window.innerHeight),
+    };
+  }
+
+  function enter(): void {
+    if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
+  }
+
+  // The ready line gets its moment, then the workspace's color takes the
+  // window and the shell enters the workspace while the cover is whole.
+  function scheduleEntry(): void {
+    const readyDelayMs = FLOW_THINK_MS + streamDurationMs(READY_LINE) + READY_HOLD_MS;
+    state.washTimer = setTimeout(() => {
+      state.washTimer = null;
+      if (isReducedMotion()) {
+        enter();
+        return;
+      }
+      const accent = accentForAttempt();
+      wash.start(accent, washOrigin(), { width: window.innerWidth, height: window.innerHeight }, enter);
+    }, readyDelayMs);
+  }
+
+  function accentForAttempt(): string {
+    const cached = getAppContext().stores.workspaces.accentEntry(state.createAttemptId);
+    return cached?.accent ?? "#000000";
+  }
 
   function startWatching(): void {
     state.watcher = new CreateAttemptWatcher(state.createAttemptId, {
-      // The walkthrough owns entry from here (diving into whatever picture
-      // is on screen on its way, or going straight in from the tips step);
-      // it reads isReady off this same state on its next render.
       onDone(redirectUrl) {
+        // A poll already in flight when the interval was cleared can report
+        // the same DONE again; the ready turn and the wash happen once.
+        if (state.isDone) return;
         state.isDone = true;
         state.redirectUrl = redirectUrl;
+        scheduleEntry();
       },
       onFailed(error, errorKind) {
         state.isFailed = true;
@@ -117,78 +232,47 @@ export const CreatingPage: m.ClosureComponent = () => {
       });
   }
 
-  function failureView(
-    workspaceName: string,
-    logTail: string[] | null,
-    errorText: string,
-    errorKind: string,
-  ): m.Children {
-    return m("div", { id: "failure-view", class: "flex flex-col gap-4 max-w-[640px] mx-auto pt-12" }, [
-      m("h1", { class: "type-heading text-primary" }, `Could not create ${workspaceName || "the machine"}`),
-      m(Notice, { variant: "error" }, m("span", { id: "error-message" }, errorText || "unknown error")),
-      errorKind === "GITHUB_AUTH_REQUIRED"
-        ? m(Notice, { id: "github-auth-help" }, [
-            "This repository looks private. Install the GitHub app or use a repository URL that includes ",
-            "credentials, then retry.",
-          ])
-        : null,
-      errorKind === "GIT_AUTH_REQUIRED"
-        ? m(Notice, { id: "git-auth-help" }, [
-            "This git host rejected anonymous access. Use a repository URL that includes credentials, then retry.",
-          ])
-        : null,
-      logTail !== null && logTail.length > 0
-        ? m(
-            "pre",
-            { class: "type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto" },
-            logTail.join("\n"),
-          )
-        : null,
-      m("div", { class: "flex gap-3" }, [
-        m(
-          Button,
-          {
-            variant: "secondary",
-            onclick: () => m.route.set(`/create?retry=${encodeURIComponent(state.createAttemptId)}`),
-          },
-          "Retry",
-        ),
-        m(
-          Button,
-          {
-            variant: "danger",
-            id: "create-attempt-dismiss-btn",
-            disabled: state.isActionPending,
-            onclick: dismissAttempt,
-          },
-          "Dismiss",
-        ),
-      ]),
-    ]);
+  /** The user turn restating the settings; the reload path rebuilds it from the record. */
+  function summaryTurn(request: CreateAttemptRequestSummary, isInstant: boolean): m.Children {
+    return userTurn({ key: "creation-summary", delayMs: 0, isInstant, text: summaryLines(request).join("\n") });
   }
 
-  function progressView(workspaceName: string, live: LiveCreateAttemptDetail | null): m.Children {
+  function loadingBox(workspaceName: string, live: LiveCreateAttemptDetail | null, arriveAtMs: number): m.Children {
     const elapsedSeconds = (Date.now() - state.startedAtMs) / 1000;
     const expectedDurationSeconds = live?.expected_duration_seconds ?? DEFAULT_EXPECTED_DURATION_SECONDS;
     const percent = state.isDone ? 100 : Math.min(99.5, progressForElapsed(elapsedSeconds, expectedDurationSeconds));
-    return [
-      // The progress block keeps its natural height; the walkthrough below it
-      // takes whatever is left (see the root's column comment).
-      m("div", { id: "progress-view", class: "shrink-0 flex flex-col gap-4 max-w-[640px] mx-auto" }, [
-        m("h1", { class: "type-heading text-primary text-center" }, `Setting up ${workspaceName || "your machine"}`),
+    return m(
+      "div",
+      {
+        key: "creation-box",
+        id: "creating-box",
+        class: "start-chat-in mt-5 w-full rounded-lg border border-default bg-surface-primary p-4",
+        style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
+      },
+      [
+        m("div", { class: "type-section text-tertiary" }, "Setting up"),
+        m("div", { class: "mt-2 flex items-center gap-2" }, [
+          m("span", {
+            id: "creating-blob",
+            class: "creating-blob inline-block h-5 w-5 shrink-0",
+            style: `background-color: ${accentForAttempt()};`,
+            "aria-hidden": "true",
+          }),
+          m("span", { class: "font-semibold" }, workspaceName || "your workspace"),
+        ]),
         m(
           "div",
-          { class: "h-1.5 bg-fill-subtle rounded-full overflow-hidden" },
+          { class: "mt-3 h-1.5 bg-fill-subtle rounded-full overflow-hidden" },
           m("div", {
             id: "bar-fill",
-            class: "h-full rounded-full bg-accent transition-[width] duration-300 ease-out",
+            class: "h-full rounded-full transition-[width] duration-300 ease-out",
             style: `width: ${percent.toFixed(1)}%`,
           }),
         ),
-        m("p", { id: "stage", class: "type-helper text-secondary text-center min-h-5" }, state.stageText),
+        m("p", { id: "stage", class: "mt-2 type-helper text-secondary min-h-5" }, state.stageText),
         m(
           "div",
-          { class: "text-center" },
+          { class: "mt-1" },
           m(
             Button,
             {
@@ -206,11 +290,7 @@ export const CreatingPage: m.ClosureComponent = () => {
               "pre",
               {
                 id: "logs",
-                // A share of the window rather than a fixed height: this panel
-                // is the biggest claim on a budget the whole column has to fit
-                // inside, and how much there is to claim depends on how tall
-                // the window is. The walkthrough gives up the difference.
-                class: "type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto",
+                class: "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-[22vh] overflow-y-auto",
                 onupdate: (vnode) => {
                   const element = vnode.dom as HTMLElement;
                   element.scrollTop = element.scrollHeight;
@@ -219,97 +299,186 @@ export const CreatingPage: m.ClosureComponent = () => {
               state.logLines.join("\n"),
             )
           : null,
-      ]),
-      m(OnboardingWalkthrough, {
-        isRemote: live?.is_remote ?? false,
-        onboardingServices: live?.onboarding_services ?? [],
-        isReady: state.isDone,
-        onEnter: () => {
-          if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
+      ],
+    );
+  }
+
+  function retryForm(): m.Children {
+    if (!state.isRetryFormOpen) return null;
+    return createFormModal({
+      key: "creating-retry-form",
+      id: "creating-retry-form",
+      onClose: () => {
+        state.isRetryFormOpen = false;
+      },
+      retryId: state.createAttemptId,
+      onSubmitted: (operationId: string) => {
+        state.isRetryFormOpen = false;
+        m.route.set(`/creating/${operationId}`);
+      },
+    });
+  }
+
+  /** Retry / Dismiss (a failed attempt) or Retry / Discard (an interrupted one). */
+  function recoveryButtons(secondLabel: string, onSecond: () => void): m.Children {
+    return answerRow({
+      key: "creation-recovery",
+      delayMs: FLOW_THINK_MS,
+      buttons: [
+        {
+          id: "recover-second",
+          label: secondLabel,
+          isEmphasized: false,
+          onPress: () => {
+            if (!state.isActionPending) onSecond();
+          },
         },
-      }),
+        {
+          id: "retry",
+          label: "Retry",
+          isEmphasized: true,
+          onPress: () => {
+            state.isRetryFormOpen = true;
+          },
+        },
+      ],
+    });
+  }
+
+  /** The failure turn, followed by the recognized-error guidance when the error kind has some. */
+  function failureTurns(workspaceName: string, error: string, errorKind: string, isInstant: boolean): m.Children[] {
+    const guidance = failureGuidance(errorKind);
+    return [failureTurn(workspaceName, error, isInstant), ...(guidance !== null ? [guidance] : [])];
+  }
+
+  /** A record-backed attempt with no live thread: the failure with its log tail, or the interrupted notice. */
+  function recordTurns(record: NonNullable<CreateAttemptDetail["record"]>): m.Children[] {
+    if (record.state === "failed") {
+      const turns = failureTurns(record.workspace_name, record.error ?? "unknown error", record.error_kind ?? "", true);
+      if (record.log_tail.length > 0) {
+        turns.push(
+          m(
+            "pre",
+            { key: "creation-log-tail", class: "mt-3 type-helper font-mono bg-fill-subtle rounded-md p-3 max-h-64 overflow-y-auto max-w-[calc(100%-100px)]" },
+            record.log_tail.join("\n"),
+          ),
+        );
+      }
+      turns.push(recoveryButtons("Dismiss", dismissAttempt));
+      return turns;
+    }
+    return [
+      agentTurn({ key: "creation-interrupted", text: INTERRUPTED_LINE, startAtMs: FLOW_THINK_MS, isInstant: true }),
+      recoveryButtons("Discard", discardAttempt),
     ];
   }
 
-  function recordView(detail: CreateAttemptDetail): m.Children {
-    const record = detail.record;
-    if (record === null) return null;
-    if (record.state === "failed") {
-      // Derive the error from the record here rather than writing component
-      // state during render (view code must stay side-effect free).
-      return failureView(record.workspace_name, record.log_tail, record.error ?? "unknown error", record.error_kind ?? "");
+  /** The reading material under the setup line: each section opens on a chevron and ends in a link out. */
+  function setupGuide(arriveAtMs: number, isInstant: boolean): m.Children {
+    return disclosureList({
+      key: "creation-guide",
+      startAtMs: 0,
+      isInstant,
+      arriveAtMs: isInstant ? undefined : arriveAtMs,
+      points: SETUP_SECTIONS,
+      openIds: state.openSectionIds,
+      onToggle: (id) => {
+        if (state.openSectionIds.has(id)) state.openSectionIds.delete(id);
+        else state.openSectionIds.add(id);
+      },
+      detailFor: (section) => [
+        m("p", section.detail),
+        m("p", { class: "mt-1" }, m(Link, { href: section.href, target: "_blank", rel: "noopener" }, section.linkLabel)),
+      ],
+    });
+  }
+
+  /** A live attempt: the setup line, then either the live failure or the reading material and the loading box (and the ready line). */
+  function liveTurns(live: LiveCreateAttemptDetail | null, workspaceName: string, isInstant: boolean): m.Children[] {
+    const setupAt = isInstant ? 0 : FLOW_THINK_MS;
+    const turns: m.Children[] = [agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: setupAt, isInstant })];
+    if (state.isFailed) {
+      turns.push(...failureTurns(workspaceName, state.errorText, state.errorKind, false));
+      turns.push(recoveryButtons("Dismiss", dismissAttempt));
+      return turns;
     }
-    return m("div", { class: "flex flex-col gap-4 max-w-[640px] mx-auto pt-12" }, [
-      m("h1", { class: "type-heading text-primary" }, `${record.workspace_name} was interrupted`),
-      m(Notice, { variant: "warn" }, [
-        "The app closed while this machine was being created. You can retry the create (pre-filled with the ",
-        "same settings) or discard the leftover partial machine.",
-      ]),
-      m("div", { class: "flex gap-3" }, [
-        m(
-          Button,
-          {
-            variant: "primary",
-            disabled: state.isActionPending,
-            onclick: () => m.route.set(`/create?retry=${encodeURIComponent(state.createAttemptId)}`),
-          },
-          "Retry",
-        ),
-        m(Button, { variant: "danger", disabled: state.isActionPending, onclick: discardAttempt }, "Discard"),
-      ]),
-    ]);
+    const guideAt = isInstant ? 0 : setupAt + streamDurationMs(SETUP_LINE) + FLOW_OPTIONS_GAP_MS;
+    turns.push(setupGuide(guideAt, isInstant));
+    const boxAt = isInstant ? 0 : guideAt + FLOW_OPTIONS_GAP_MS * 2;
+    turns.push(loadingBox(workspaceName, live, boxAt));
+    if (state.isDone) {
+      turns.push(agentTurn({ key: "creation-ready", text: READY_LINE, startAtMs: FLOW_THINK_MS }));
+    }
+    return turns;
+  }
+
+  function creationTurns(detail: CreateAttemptDetail): m.Children[] {
+    const isInstant = detail.kind === "record" || !state.isFromStartFlow;
+    const request = detail.kind === "record" ? detail.record?.request : detail.live?.request;
+    const workspaceName = (detail.kind === "record" ? detail.record?.workspace_name : detail.live?.workspace_name) ?? "";
+    const summary = request !== undefined && request !== null ? [summaryTurn(request, isInstant)] : [];
+    if (detail.kind === "record" && detail.record !== null) return [...summary, ...recordTurns(detail.record)];
+    return [...summary, ...liveTurns(detail.live, workspaceName, isInstant)];
+  }
+
+  function stopWatching(): void {
+    state.watcher?.stop();
+    if (state.progressTimer !== null) clearInterval(state.progressTimer);
+    if (state.washTimer !== null) clearTimeout(state.washTimer);
+  }
+
+  /** Show `createAttemptId`: fresh state, its detail, and (for a live attempt) the watcher. */
+  function loadAttempt(createAttemptId: string): void {
+    stopWatching();
+    const own = freshState(createAttemptId);
+    state = own;
+    fetchCreateAttemptDetail(createAttemptId)
+      .then((detail) => {
+        // A later attempt took the page over while this read was in flight.
+        if (state !== own) return;
+        own.detail = detail;
+        if (detail.kind === "live") {
+          startWatching();
+        } else if (detail.kind === "gone") {
+          m.route.set("/");
+        }
+        m.redraw();
+      })
+      .catch(() => {
+        if (state !== own) return;
+        own.detail = { kind: "gone", live: null, record: null };
+        m.route.set("/");
+      });
   }
 
   return {
     oninit(vnode) {
-      state.createAttemptId = (vnode.attrs as { agentId?: string }).agentId ?? "";
-      fetchCreateAttemptDetail(state.createAttemptId)
-        .then((detail) => {
-          state.detail = detail;
-          if (detail.kind === "live") {
-            startWatching();
-          } else if (detail.kind === "gone") {
-            m.route.set("/");
-          }
-          m.redraw();
-        })
-        .catch(() => {
-          state.detail = { kind: "gone", live: null, record: null };
-          m.route.set("/");
-        });
+      loadAttempt(attemptIdOf(vnode));
+    },
+    onbeforeupdate(vnode) {
+      const createAttemptId = attemptIdOf(vnode);
+      if (createAttemptId !== state.createAttemptId) loadAttempt(createAttemptId);
     },
     onremove() {
-      state.watcher?.stop();
-      if (state.progressTimer !== null) clearInterval(state.progressTimer);
+      stopWatching();
     },
     view() {
       const detail = state.detail;
-      if (detail !== null && detail.kind !== "record" && !state.isFailed) {
-        // The walkthrough is laid out to fit the window rather than to scroll:
-        // this column is exactly as tall as the scroll card it sits in, the
-        // progress block above takes its natural height, and #onboarding takes
-        // what is left -- scaling the illustration into whatever that comes to
-        // (see OnboardingWalkthrough). Opening the logs is just another claim
-        // on the same budget: the picture gets smaller, the page does not grow.
-        return m(
-          "div",
-          {
-            id: "creating",
-            "data-agent-id": state.createAttemptId,
-            class: "h-full flex flex-col gap-4 px-6 py-6",
-          },
-          progressView(detail.live?.workspace_name ?? "", detail.live),
-        );
+      if (detail === null) {
+        return m(PageContainer, { id: "creating", "data-agent-id": state.createAttemptId }, [
+          m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" })),
+        ]);
       }
-      // The failure and interrupted-record views are ordinary pages: they hold
-      // as much text as the create produced, so they scroll if they are tall.
-      return m(PageContainer, { id: "creating", "data-agent-id": state.createAttemptId }, [
-        detail === null
-          ? m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" }))
-          : detail.kind === "record"
-            ? recordView(detail)
-            : failureView(detail.live?.workspace_name ?? "", null, state.errorText, state.errorKind),
-      ]);
+      const prelude = state.isFromStartFlow
+        ? transcriptTurns(startFlow.state.entries, { isInstant: true, isPressable: false })
+        : [];
+      return m(
+        "div",
+        { id: "creating", "data-agent-id": state.createAttemptId, class: TRANSCRIPT_COLUMN_CLASS },
+        // Every child is keyed: Mithril rejects a fragment that mixes keyed
+        // vnodes with holes, so the modal is appended only while it is open.
+        [...prelude, ...creationTurns(detail), scrollAnchor(), ...(state.isRetryFormOpen ? [retryForm()] : [])],
+      );
     },
   };
 };

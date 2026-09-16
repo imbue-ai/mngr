@@ -14,9 +14,10 @@ renders:
   the ``workspaces`` channel message (destroy run/failed statuses,
   locked-account emails for the sync-unlock banner, and the
   discovery-completeness flag driving the empty-state choice).
-- ``GET /ui/api/create/attempts/<create_attempt_id>`` -- the Creating page's
-  detail: the live in-flight attempt, the record-backed interrupted/failed
-  view, or "gone".
+- ``GET /ui/api/create/attempts/<create_attempt_id>`` -- the creation page's
+  detail: the live in-flight attempt or the record-backed interrupted/failed
+  view (both carrying the attempt's persisted request so the page can restate
+  the chosen settings after a reload), or "gone".
 
 Some small derivations here (suggested color, locked emails, destroy statuses)
 mirror private helpers in ``app.py``; importing them would be circular
@@ -37,8 +38,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
-from imbue.minds.desktop_client.onboarding_services import list_onboarding_services
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
+from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
@@ -70,7 +71,6 @@ from imbue.minds.primitives import DEFAULT_GCP_ZONE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
-from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
 # The cloud modes are bring-your-own-key-account only; they never appear as
 # plain compute options in the form (each configured account is its own row).
@@ -146,23 +146,27 @@ class LandingExtrasResponse(FrozenModel):
     has_restorable_workspaces: bool = Field(description="Whether the last-good topology knows any workspace")
 
 
-class OnboardingCloudApp(FrozenModel):
-    """One app in the onboarding walkthrough's app-cloud icon wheel."""
+class CreateAttemptRequestSummary(FrozenModel):
+    """The settings a create attempt was submitted with, as the creation page restates them."""
 
-    icon: str = Field(description="The app's brand icon, inlined as a data: URI")
-    name: str = Field(description="Display name")
+    display_name: str = Field(description="Human-readable workspace name")
+    launch_mode: str = Field(description="Compute launch mode value")
+    cloud_account: str = Field(description="Bring-your-own-key account block name, empty for a plain mode")
+    backup_provider: str = Field(description="Backup provider value")
+    region: str = Field(description="Region, empty when the mode has none")
+    instance_type: str = Field(description="Machine size, empty when the mode has none")
+    repository: str = Field(description="Template repository URL or local path")
+    branch: str = Field(description="Requested branch/tag, empty for the repo default")
 
 
 class LiveCreateAttemptDetail(FrozenModel):
-    """The Creating page's live-attempt facts (status itself is polled from /api/v1)."""
+    """The creation page's live-attempt facts (status itself is polled from /api/v1)."""
 
     workspace_name: str = Field(description="Display name for the header")
     provider_label: str = Field(description="Friendly compute-provider label")
-    is_remote: bool = Field(description="Whether the machine runs in the cloud (drives walkthrough copy + graphics)")
+    is_remote: bool = Field(description="Whether the machine runs in the cloud")
     expected_duration_seconds: float = Field(description="Expected create duration for the progress bar's easing")
-    onboarding_services: tuple[OnboardingCloudApp, ...] = Field(
-        description="Apps for the walkthrough's app-cloud icon wheel, icons pre-inlined"
-    )
+    request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
 
 
 class RecordCreateAttemptDetail(FrozenModel):
@@ -174,6 +178,7 @@ class RecordCreateAttemptDetail(FrozenModel):
     error_kind: str | None = Field(default=None, description="Machine-readable failure classification")
     log_tail: tuple[str, ...] = Field(default=(), description="Persisted tail of the create log")
     provider_label: str = Field(default="", description="Friendly compute-provider label")
+    request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
 
 
 class CreateAttemptDetailResponse(FrozenModel):
@@ -353,6 +358,19 @@ def _handle_landing_extras() -> Response:
     return _json_response(response)
 
 
+def _request_summary(request_record: PendingCreateAttemptRequest) -> CreateAttemptRequestSummary:
+    return CreateAttemptRequestSummary(
+        display_name=request_record.display_name or request_record.host_name,
+        launch_mode=request_record.launch_mode.value,
+        cloud_account=request_record.cloud_account,
+        backup_provider=request_record.backup_provider.value,
+        region=request_record.region,
+        instance_type=request_record.instance_type,
+        repository=request_record.repo_source,
+        branch=request_record.branch,
+    )
+
+
 def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
     if not is_ui_request_authenticated():
         return _unauthenticated_response()
@@ -366,19 +384,29 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
     info = agent_creator.get_create_attempt_info(parsed_id)
     record = _read_pending_record(create_attempt_id)
     if info is not None:
-        display_name = ""
-        if record is not None and record.request.display_name:
-            display_name = record.request.display_name
+        # The record is written before the create subprocess is spawned, so a
+        # live attempt normally has one; a creator without a store (minimal
+        # tests) falls back to the facts the live info carries.
+        request_summary = (
+            _request_summary(record.request)
+            if record is not None
+            else CreateAttemptRequestSummary(
+                display_name=info.host_name or create_attempt_id,
+                launch_mode=info.launch_mode.value,
+                cloud_account="",
+                backup_provider="",
+                region="",
+                instance_type="",
+                repository="",
+                branch="",
+            )
+        )
         live = LiveCreateAttemptDetail(
-            workspace_name=display_name or info.host_name or create_attempt_id,
+            workspace_name=request_summary.display_name,
             provider_label=friendly_provider_label(record.provider_instance_name if record else None),
             is_remote=info.launch_mode is LaunchMode.IMBUE_CLOUD,
             expected_duration_seconds=expected_create_attempt_duration_seconds(info.launch_mode),
-            onboarding_services=tuple(
-                OnboardingCloudApp(icon=service.icon_data_uri, name=service.display_name)
-                for service in list_onboarding_services(ServicesCatalog())
-                if service.icon_data_uri is not None
-            ),
+            request=request_summary,
         )
         return _json_response(CreateAttemptDetailResponse(kind="live", live=live))
     if record is None or record.state is PendingCreateAttemptState.DONE:
@@ -390,6 +418,7 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
         error_kind=record.error_kind,
         log_tail=record.log_tail,
         provider_label=friendly_provider_label(record.provider_instance_name or None),
+        request=_request_summary(record.request),
     )
     return _json_response(CreateAttemptDetailResponse(kind="record", record=record_detail))
 

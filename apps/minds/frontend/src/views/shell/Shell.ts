@@ -33,6 +33,7 @@ import { openReviewRoute } from "../../models/notificationsUi";
 import { SidebarMenu } from "./SidebarMenu";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
+import { Wash } from "./Wash";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
 import {
@@ -444,9 +445,12 @@ export function Shell(): m.Component<ShellAttrs> {
               onClose: () => shell.closeUpdateModal(),
             })
           : null,
-        // The browser sign-in waiting modal: any page (welcome, accounts,
-        // create) can trigger it through the shared webLogin model.
+        // The browser sign-in waiting modal: any page (the start flow,
+        // accounts, create) can trigger it through the shared webLogin model.
         m(WebLoginModal),
+        // The creation page's crossing into the workspace; it outlives that
+        // page's route, so the shell owns it.
+        m(Wash),
         isReconnecting
           ? m(
               "div",

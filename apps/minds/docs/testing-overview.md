@@ -51,7 +51,6 @@ run. By area:
 | `test_aws_workspace_release.py::test_aws_workspace_runs_in_runsc_container_on_ec2` | `release`, `timeout(900)`, skip unless AWS creds + `MNGR_AWS_RELEASE_TESTS=1` | Provisions a real EC2 instance, asserts the agent runs in a runsc/gVisor container. Costs money. |
 | `test_snapshot_resume.py` (10 tests) | each `minds_snapshot_resume` + `docker` (+ `rsync` on the electron test) + per-test `timeout` | Most assert against a Modal-snapshot sandbox (pre-baked, stopped DEFAULT_WORKSPACE_TEMPLATE workspace container): resume sanity checks, the backup-update chat gate against a live LLM-backed chat, the backup-service check/update/force-update converge loop (real supervisord + `official`-remote tag fetch from GitHub), the backup enable / env-repair / destination-change flow (real minds-side restic provisioning + `mngr exec` injection; installs a pinned restic on the sandbox host when the image lacks the bundled one), and the in-place backup restore (the real restore worker + workspace script: pinned-restic install, safety snapshot, sync restore, services back). `test_create_workspace_and_sign_in_via_modal_then_chat_via_electron` reuses the snapshot image's warm Electron/Playwright/Xvfb toolchain to drive the real Electron app: it creates a fresh local Docker DEFAULT_WORKSPACE_TEMPLATE workspace (which boots with no AI credentials and lands on its New Tab page), starts a chat from that page's tile, signs in through the provider chooser in the chat's own frame (the Anthropic API-key path) with a raw API key (needs `ANTHROPIC_API_KEY`), sends the chat a message, and asserts the agent replies, then `mngr destroy`s in `finally`. Shares its driver with `desktop_client/e2e_workspace_runner.py`. Only via `just test-offload-minds-snapshot` (or `just minds-test-electron` locally). See 1.5. |
 | `test_sse_redirect.py::test_sse_redirect_on_done` | `release` | Werkzeug server + Playwright; verifies the creating-page SSE stream delivers `done` and the JS redirects. No Docker/agent. |
-| `test_creating_page_layout.py` (2 tests) | `release` | Werkzeug server + Playwright; verifies the creating page fits the window (no scrollbar) at the Electron default size, an intermediate one, and the minimum, with the log panel closed and open -- and that opening the logs shrinks the walkthrough's illustration rather than the page. No Docker/agent. Skips unless the frontend bundle has been built (`pnpm build` in `apps/minds/frontend`), which an editable install does not do. |
 | `imbue/minds/test_claude_version_alignment.py::test_claude_code_version_matches_default_workspace_template_pin` | `release` | Checks the Claude Code CLI pin matches the DEFAULT_WORKSPACE_TEMPLATE pin. |
 
 ### 1.3 Deployment-test suites (`deployment_tests/`)
@@ -82,9 +81,9 @@ Both suites below run from `just test-minds-js`, wired into CI as the
 is the only thing that runs them.
 
 - **Node unit** (`test/unit/*.test.js`): `node --test` suites for the pure
-  Electron-shell helpers (startup routing, surface routing, deeplinks, session
-  persistence, log handling, the embed contract, release channels). Run alone via
-  `pnpm test:unit`.
+  Electron-shell helpers (startup routing, the loading document's intro
+  schedule, surface routing, deeplinks, session persistence, log handling, the
+  embed contract, release channels). Run alone via `pnpm test:unit`.
 - **Frontend unit** (`frontend/src/**/*.test.ts`): vitest suites for the SPA's
   models and views, rendered without a DOM through the `renderRoot` helper in
   `frontend/src/testing.ts`. Run alone via `pnpm -C frontend test`.

@@ -219,7 +219,7 @@ SPA_ROUTE_SLUGS: Final[tuple[tuple[str, str], ...]] = (
     ("/accounts", "accounts"),
     ("/workspaces/destroyed", "workspaces_destroyed"),
     ("/help", "help"),
-    ("/welcome", "welcome"),
+    ("/start", "start"),
     ("/_dev/styleguide", "dev_styleguide"),
 )
 
@@ -413,7 +413,13 @@ def _build_spa_fixture_bootstrap() -> UiBootstrap:
         # capture. Flip it to see the two environment states.
         environment=UiEnvironmentMessage(state=EnvironmentBlock.NONE),
     )
-    seed = UiBootstrapSeed(accent="#7c9885", is_mac=True, mngr_forward_origin="https://localhost:8421")
+    # A completed install: the captures are of the app proper, not the first run.
+    seed = UiBootstrapSeed(
+        accent="#7c9885",
+        is_mac=True,
+        mngr_forward_origin="https://localhost:8421",
+        is_onboarding_complete=True,
+    )
     return UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=snapshot)
 
 

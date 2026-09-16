@@ -1201,27 +1201,6 @@ def test_set_default_account(tmp_path: Path) -> None:
     assert config.get_default_account_id() == "user-default-123"
 
 
-# -- welcome-splash skip tests --
-
-
-def test_welcome_skip_redirects_to_login_when_unauthenticated(tmp_path: Path) -> None:
-    client, _ = _create_test_client_with_stores(tmp_path)
-    response = client.get("/welcome/skip", follow_redirects=False)
-    assert response.status_code == 302
-    assert response.headers["location"] == "/login"
-
-
-def test_welcome_skip_sets_flag_and_redirects_home_when_authenticated(tmp_path: Path) -> None:
-    client, auth_store = _create_test_client_with_stores(tmp_path)
-    _authenticate_client(client=client, auth_store=auth_store)
-
-    response = client.get("/welcome/skip", follow_redirects=False)
-
-    assert response.status_code == 303
-    assert response.headers["location"] == "/"
-    assert get_state(client.application).is_account_setup_skipped is True
-
-
 # -- error-reporting consent + settings tests --
 
 

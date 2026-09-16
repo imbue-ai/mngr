@@ -159,9 +159,24 @@ def test_app_status_authenticated_carries_startup_router_inputs(tmp_path: Path) 
     payload = json.loads(response.get_data(as_text=True))
     assert payload["is_authenticated"] is True
     assert isinstance(payload["restorable_workspace_ids"], list)
-    assert isinstance(payload["has_accounts"], bool)
     assert isinstance(payload["workspace_count"], int)
     assert isinstance(payload["needs_error_reporting_consent"], bool)
+    # No config store is wired here, so the install reads as past onboarding
+    # (a minimal app must never route to the start flow).
+    assert payload["is_onboarding_complete"] is True
+
+
+def test_app_status_reports_onboarding_incomplete_for_a_fresh_install(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, minds_config=minds_config
+    )
+
+    response = client.get("/ui/api/app-status")
+
+    payload = json.loads(response.get_data(as_text=True))
+    assert payload["is_onboarding_complete"] is False
+    assert payload["workspace_count"] == 0
 
 
 def test_sanitize_accent_accepts_hex_and_rejects_anything_else() -> None:
