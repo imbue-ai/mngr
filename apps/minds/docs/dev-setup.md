@@ -41,6 +41,21 @@ ask your agent to run it, or read it directly -- for the build/run loop.
       imbue HCP `VAULT_ADDR` / `VAULT_NAMESPACE` defaults itself, so login is
       all you need. Install + layout: [vault-setup.md](./deploy/setup/vault.md).
 
+- [ ] **Gen-2 box access (only if you bake dev pool slices or run box
+      commands).** The dev fleet's boxes accept management SSH only from the
+      WireGuard overlay and from the connector, with a certificate the dev
+      Vault SSH CA signs through your `employee` login. Once per machine:
+      generate your operator key (`mkdir -p -m 700 ~/.mindsadmin/dev &&
+      wg genkey | tee ~/.mindsadmin/dev/wireguard.key | wg pubkey`), open a
+      PR adding the public half as a `[[management_plane.wireguard.operators]]`
+      block (a free `10.112.0.x` address) in
+      `apps/minds/imbue/minds/config/envs/dev/deploy.toml`, and after it
+      merges ask an existing operator to run
+      `uv run minds-admin wireguard sync-peers --tier dev` (one run puts your
+      key on every dev box). Then `uv run minds-admin wireguard install-onetun`
+      installs the userspace tunnel the tooling dials through. Runbook:
+      [gen2-management-plane.md](./deploy/gen2-management-plane.md).
+
 - [ ] **Membership in the `minds-dev` Modal workspace + a matching
       `~/.modal.toml` profile.** `minds-dev` is a *separate*, workspace-bound
       Modal workspace (there's no shared dev token in Vault), so ask in
