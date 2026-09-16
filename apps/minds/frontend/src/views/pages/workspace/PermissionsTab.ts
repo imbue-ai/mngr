@@ -20,8 +20,15 @@ import { Notice } from "../../components/Notice";
 import type { MarkTone } from "../../components/ServiceMark";
 import { serviceMark } from "../../components/ServiceMark";
 import { Spinner } from "../../components/Spinner";
+import { electronBridge } from "../../../electron-bridge";
+import type { StatusBadgeVariant } from "../../components/StatusBadge";
+import { StatusBadge } from "../../components/StatusBadge";
 import type {
+  FileSharingAccess,
+  FolderSyncConflict,
+  FolderSyncState,
   UiAvailableConnection,
+  UiSharedPath,
   UiPermissionConnection,
   UiSelfPermissionToggle,
   UiWaitingPermissionRequest,
@@ -30,6 +37,8 @@ import type {
 import type { PermissionsModel } from "../../../models/workspacePermissions";
 import {
   ADD_CONNECTION_SECTION,
+  FILE_SHARING_ACCESSES,
+  FOLDER_SYNC_CONFLICTS,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
   WAITING_SECTION,
@@ -37,6 +46,19 @@ import {
   connectServiceRowKey,
   connectionSectionId,
   connectorToggleRowKey,
+  fileSharingAccessLabel,
+  folderSyncConflictLabel,
+  folderSyncStateLabel,
+  hasCopyOnMachine,
+  hasInactiveCopy,
+  isPathSyncOn,
+  syncProgressLabel,
+  pathAccessRowKey,
+  folderSyncDiscardCopyRowKey,
+  ADD_SHARED_PATH_ROW_KEY,
+  folderSyncRetryRowKey,
+  folderSyncToggleRowKey,
+  pathRemoveRowKey,
   isCredentialFormComplete,
   resolvePermissionsSection,
   disconnectRowKey,
@@ -56,6 +78,17 @@ const ADD_CONNECTION_CLASS =
   "transition-colors text-secondary hover:text-primary hover:bg-fill-hover";
 
 const TOGGLE_ROW_CLASS = "perm-row flex items-center justify-between gap-4 py-2";
+
+/** The right-aligned control on a shared path's setting row.
+ *
+ * Carries its own disabled look, which a bare ``<select disabled>`` does not:
+ * the element stops responding but goes on looking exactly as it did, so a
+ * setting that is waiting on the workspace's machine reads as one you simply
+ * failed to click. Same pair the buttons use (``BTN_BASE``), so every control
+ * in the pane that is unavailable says so the same way. */
+const SETTING_SELECT_CLASS =
+  "type-body text-primary bg-transparent border border-subtle rounded-md px-2 py-1 " +
+  "disabled:opacity-40 disabled:cursor-not-allowed";
 
 const CATALOG_HEADING_CLASS = "type-section text-tertiary mt-6 mb-1";
 
@@ -113,13 +146,27 @@ interface PermissionsTabLocalState {
    * Keyed by section rather than by a flag so a dialog cannot outlive the
    * connection it belongs to. */
   disconnectSectionId: string | null;
+  /** Ticker that re-reads the pane while any sync is alive. Nothing else tells
+   * this pane what the subprocess behind a sync is doing. */
+  folderSyncPollTimer: ReturnType<typeof setInterval> | null;
 }
+
+/** How often the pane re-reads while a sync is alive.
+ *
+ * Matched to how often there is anything new: ``mngr pair`` reports a
+ * transfer's progress at most once a second, so a slower tick would show every
+ * other count at best while a big folder is moving. Affordable at this rate
+ * because the endpoint behind it answers from this process alone -- see
+ * ``reloadFolderSyncs`` -- and because nothing ticks at all unless a row is
+ * live. */
+const FOLDER_SYNC_POLL_MS = 1000;
 
 export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
   const local: PermissionsTabLocalState = {
     armedRevokeRowKey: null,
     disarmTimer: null,
     disconnectSectionId: null,
+    folderSyncPollTimer: null,
   };
 
   return {
@@ -128,10 +175,18 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
       // model no-ops a second call, so reopening the tab neither refetches
       // nor blanks the pane.
       vnode.attrs.model.ensureLoaded();
+      const { model } = vnode.attrs;
+      local.folderSyncPollTimer = setInterval(() => {
+        void model.refreshLiveFolderSyncs();
+      }, FOLDER_SYNC_POLL_MS);
     },
     onremove() {
       disarmRevoke(local);
       local.disconnectSectionId = null;
+      if (local.folderSyncPollTimer !== null) {
+        clearInterval(local.folderSyncPollTimer);
+        local.folderSyncPollTimer = null;
+      }
     },
     view(vnode) {
       const { model, workspaceName, requestedSection, onSelectSection, onReviewRequest } = vnode.attrs;
@@ -869,34 +924,379 @@ function renderCredentialForm(
 }
 
 function renderLocalFilesPanel(model: PermissionsModel): m.Children {
-  const toggles = model.data?.file_sharing_toggles ?? [];
+  const rows = model.data?.shared_paths ?? [];
+  const isSyncSupported = model.data?.is_sync_supported === true;
   return m("section", { "data-perm-panel": LOCAL_FILES_SECTION }, [
     m("h2", { class: "type-heading text-primary mb-1" }, "Local files"),
     m(
       "p",
       { class: "type-body text-secondary mb-4" },
-      "Files and folders on this computer that agents in this machine can read or write. To share " +
-        "a new location, ask an agent to access it; revoked locations can be turned back on here.",
+      "Files and folders on this computer that agents in this machine can reach.",
     ),
-    toggles.length === 0
+    rows.length === 0
       ? m(Notice, { variant: "info" }, "No files are being shared with agents in this machine yet.")
       : m(
           "div",
-          { class: "flex flex-col pr-4" },
-          toggles.map((toggle) =>
-            m("div", { class: TOGGLE_ROW_CLASS }, [
-              m(
-                "div",
-                { class: "min-w-0" },
-                m("p", { class: "type-body text-primary flex items-center gap-2 min-w-0" }, [
-                  m("code", { class: "code-pill truncate min-w-0", title: toggle.label }, toggle.label),
-                  m("span", { class: "type-helper text-secondary shrink-0" }, toggle.detail),
-                ]),
-              ),
-              renderSelfSwitch(model, toggle, `Share ${toggle.label} (${toggle.detail})`),
-            ]),
-          ),
+          { class: "flex flex-col gap-3" },
+          rows.map((row) => renderSharedPathRow(model, row, isSyncSupported)),
         ),
+    renderAddSharedPath(model),
+  ]);
+}
+
+/** The band a setting sits in. Each is divided from the one above by a
+ * full-width hairline, so a row of any height still reads as one list. */
+const SETTING_BAND_CLASS = "px-4 py-3 border-t border-subtle";
+
+/** Everything the sync checkbox has to say, hung off a short rule under it.
+ * The rule is what says "this belongs to the checkbox" -- no indent to keep
+ * in step with the checkbox's own width. */
+const SYNC_RAIL_CLASS = "ml-[7px] mt-2 pl-3.5 border-l-2 border-subtle flex flex-col gap-2";
+
+/** One shared path: what it is, and what agents may do with it.
+ *
+ * Drawn as bands -- the path, then one per setting -- rather than as a stack
+ * inside one box. A setting here can grow a paragraph or a sub-control under
+ * it, and a hairline that reaches both edges is what keeps that from reading
+ * as a second, unrelated section of the card.
+ */
+function renderSharedPathRow(model: PermissionsModel, row: UiSharedPath, isSyncSupported: boolean): m.Children {
+  const isRemoving = model.isRowBusy(pathRemoveRowKey(row.path));
+  const isSynced = isPathSyncOn(row);
+  return m("div", { class: "minds-card overflow-hidden", "data-shared-path": row.path }, [
+    m("div", { class: "flex items-center justify-between gap-4 px-4 py-3" }, [
+      m("code", { class: "code-pill truncate min-w-0", title: row.path }, row.path_label),
+      m(
+        Button,
+        {
+          variant: "danger",
+          size: "md",
+          disabled: isRemoving,
+          "data-remove-path": row.path,
+          onclick: () => void model.removeSharedPath(row.path),
+        },
+        removeButtonLabel(row, isRemoving),
+      ),
+    ]),
+    m("div", { class: SETTING_BAND_CLASS }, renderAccessChoice(model, row)),
+    isSyncSupported ? m("div", { class: SETTING_BAND_CLASS }, renderSyncChoice(model, row, isSynced)) : null,
+  ]);
+}
+
+/** What Remove takes away, said on the button rather than in a warning.
+ *
+ * Removing a shared path deletes the machine's copy of it along with the
+ * grant, and the copy is files the user may care about. The button is the only
+ * place that can be said in every case: a path whose copy was already removed
+ * draws no notice under the checkbox to carry it. The same distinction holds
+ * while the removal runs, so the two halves are never one label apart. */
+function removeButtonLabel(row: UiSharedPath, isRemoving: boolean): string {
+  if (hasCopyOnMachine(row)) return isRemoving ? "Revoking and removing..." : "Revoke access and remove copy";
+  return isRemoving ? "Revoking..." : "Revoke access";
+}
+
+/** The access setting, with the spinner every write in this pane wears.
+ *
+ * Changing it is a round trip to the workspace's own machine -- the grant is
+ * not made until that machine has taken it -- so the dropdown showing the new
+ * value before the write lands would be showing something that is not true
+ * yet. Disabled and spinning says the same thing honestly. */
+function renderAccessChoice(model: PermissionsModel, row: UiSharedPath): m.Children {
+  const rowKey = pathAccessRowKey(row.path);
+  const isBusy = model.isRowBusy(rowKey);
+  const isLocked = isLockedByAnotherWrite(model, rowKey);
+  return renderSettingRow(
+    "Agents on this machine may",
+    m("span", { class: "flex items-center gap-2" }, [
+      isBusy ? m(Spinner, { size: "sm" }) : null,
+      m(
+        "select",
+        {
+          class: SETTING_SELECT_CLASS,
+          "data-access-path": row.path,
+          value: row.access,
+          disabled: isBusy || isLocked,
+          ...(isLocked ? { title: PANE_BUSY_TITLE } : {}),
+          onchange: (event: Event) =>
+            void model.setSharedPath(row.path, (event.target as HTMLSelectElement).value as FileSharingAccess),
+        },
+        FILE_SHARING_ACCESSES.map((access) =>
+          m("option", { value: access, selected: access === row.access }, fileSharingAccessLabel(access)),
+        ),
+      ),
+    ]),
+  );
+}
+
+/** Keeping a copy on the machine: an extra thing a shared folder can have,
+ * not an alternative to sharing it.
+ *
+ * A checkbox rather than the other arm of a radio, because it is additive --
+ * the on-demand grant above stays exactly as it was, and the copy is one more
+ * way the same agents reach the same folder. Which way changes travel is not
+ * asked: it says the same thing as the access above, so it is stated instead.
+ *
+ * A folder that cannot be synced keeps the checkbox, greyed, with the reason
+ * where the explanation would be. Hiding the option would leave the user
+ * wondering whether this row is different or they misremembered; letting them
+ * tick it and be refused says the same thing, later and in a banner. */
+function renderSyncChoice(model: PermissionsModel, row: UiSharedPath, isSynced: boolean): m.Children {
+  const sync = row.sync ?? null;
+  const isBusy = model.isRowBusy(folderSyncToggleRowKey(row.path));
+  const unavailableReason = row.sync_unavailable_reason ?? "";
+  const isUnavailable = unavailableReason !== "";
+  return [
+    m("div", { class: "flex items-center justify-between gap-4" }, [
+      m(
+        "label",
+        {
+          class:
+            "flex items-center gap-2 min-w-0 " + (isUnavailable ? "cursor-not-allowed opacity-60" : "cursor-pointer"),
+        },
+        [
+          m("input", {
+            type: "checkbox",
+            class: "shrink-0",
+            checked: isSynced,
+            disabled: isBusy || isUnavailable,
+            "data-sync-path": row.path,
+            "aria-label": `Keep a synchronized copy of ${row.path} on the machine`,
+            onchange: (event: Event) => void model.toggleSync(row, (event.target as HTMLInputElement).checked),
+          }),
+          m("span", { class: "type-body text-primary truncate" }, "Keep a synchronized copy on the machine"),
+        ],
+      ),
+      sync === null ? null : renderSyncStatus(sync.state, syncProgressLabel(sync)),
+    ]),
+    m("div", { class: SYNC_RAIL_CLASS, "data-sync-detail": row.path }, [
+      isUnavailable
+        ? m("p", { class: "type-helper text-secondary m-0", "data-sync-unavailable": row.path }, unavailableReason)
+        : m(
+            "p",
+            { class: "type-helper text-secondary m-0" },
+            "Minds will synchronize the folder when it's running, and agents can continue to access the " +
+              "synchronized folder when Minds is not running or your computer is offline.",
+          ),
+      isSynced ? renderSyncDirectionSentence(row.access) : null,
+      // Only while syncing: it describes what the two running syncs do to each
+      // other, which is not yet true of a folder whose copy is not being kept.
+      !isSynced || row.sync_overlap_warning === "" || row.sync_overlap_warning === undefined
+        ? null
+        : m("p", { class: "type-helper text-warning m-0", "data-sync-overlap": row.path }, row.sync_overlap_warning),
+      isSynced ? renderSyncChoices(model, row) : renderInactiveCopy(model, row),
+      sync === null || sync.message === ""
+        ? null
+        : m("div", { class: "flex items-start justify-between gap-3" }, [
+            m("p", { class: "type-helper text-important m-0 min-w-0" }, sync.message),
+            sync.state !== "FAILED"
+              ? null
+              : m(
+                  Button,
+                  {
+                    variant: "secondary",
+                    disabled: model.isRowBusy(folderSyncRetryRowKey(row.path)),
+                    "data-sync-retry-path": row.path,
+                    onclick: () => void model.retrySync(row),
+                  },
+                  model.isRowBusy(folderSyncRetryRowKey(row.path)) ? "Trying..." : "Try again",
+                ),
+          ]),
+    ]),
+  ];
+}
+
+/** What syncing will actually do, said in terms of the access just granted
+ * rather than as a second choice that could contradict it. The words the
+ * dropdown above uses are the bold ones, so the two can be read as one
+ * sentence. */
+function renderSyncDirectionSentence(access: FileSharingAccess): m.Children {
+  const clause: m.Children =
+    access === "WRITE"
+      ? [
+          "Since agents on this machine may both ",
+          m("strong", { class: "font-semibold" }, "read and write"),
+          " the folder, Minds synchronizes changes between your computer and this machine in both directions.",
+        ]
+      : [
+          "Since agents on this machine may only ",
+          m("strong", { class: "font-semibold" }, "read"),
+          " the folder, Minds synchronizes changes from your computer to this machine in one direction.",
+        ];
+  return m("p", { class: "type-helper text-secondary m-0" }, clause);
+}
+
+function syncStateVariant(state: FolderSyncState): StatusBadgeVariant {
+  if (state === "SYNCED") return "success";
+  // Everything under way reads the same, in either direction: the folder is
+  // not where the user asked for it yet.
+  if (
+    state === "SYNCING" ||
+    state === "STARTING" ||
+    state === "RESTARTING" ||
+    state === "DEACTIVATING" ||
+    state === "DISCARDING"
+  ) {
+    return "info";
+  }
+  if (state === "FAILED") return "error";
+  // Wanted, and not happening. Not an error -- nothing reported one -- but not
+  // the neutral grey of a folder the user turned off either.
+  if (state === "UNKNOWN") return "warn";
+  return "neutral";
+}
+
+/** A label on the left, its control right-aligned on the right. */
+function renderSettingRow(label: string, control: m.Children): m.Children {
+  return m("div", { class: "flex items-center justify-between gap-4" }, [
+    m("span", { class: "type-body text-primary min-w-0" }, label),
+    m("div", { class: "shrink-0" }, control),
+  ]);
+}
+
+/** What became of the machine's copy once syncing is off.
+ *
+ * Turning sync off does not throw the copy away -- it is set aside, so turning
+ * sync back on resumes from the files that were already there. That leaves the
+ * user with a thing they may not want, which nothing else in the pane would
+ * mention, so the row says where it is and offers to remove it. What removing
+ * the whole shared path would do to the copy is left to that button to say,
+ * since it has to say it in the case where this row is not drawn at all.
+ */
+function renderInactiveCopy(model: PermissionsModel, row: UiSharedPath): m.Children {
+  if (!hasInactiveCopy(row)) return null;
+  const isDiscarding = model.isRowBusy(folderSyncDiscardCopyRowKey(row.path));
+  return m("div", { class: "flex items-start justify-between gap-4" }, [
+    m("div", { class: "min-w-0 flex flex-col gap-0.5" }, [
+      m("span", { class: "type-body text-secondary" }, "A copy is still on the machine"),
+      m("span", { class: "type-helper text-tertiary" }, "Turning syncing back on picks up where it left off."),
+    ]),
+    m(
+      Button,
+      {
+        // Destructive, but ranked under the row's own Remove: that one takes
+        // the whole shared path away, this one throws away a copy of something
+        // the user still has. Two filled reds in one card read as two equal
+        // warnings; a neutral button here read as Cancel, which is wrong for a
+        // button whose only effect is a deletion.
+        variant: "danger-soft",
+        disabled: isDiscarding,
+        "data-discard-copy-path": row.path,
+        onclick: () => void model.discardCopy(row),
+      },
+      isDiscarding ? "Removing..." : "Remove copy",
+    ),
+  ]);
+}
+
+function renderSyncChoices(model: PermissionsModel, row: UiSharedPath): m.Children {
+  // Only a two-way sync can have a clash to settle, and only read-and-write
+  // access makes it two-way -- so this question appears exactly when the
+  // access above makes it a real one.
+  if (row.access !== "WRITE") return null;
+  const conflict = model.syncConflictFor(row);
+  return renderSettingRow(
+    "On a clash, keep",
+    m(
+      "select",
+      {
+        class: SETTING_SELECT_CLASS,
+        "data-conflict-path": row.path,
+        value: conflict,
+        onchange: (event: Event) =>
+          void model.setSyncConflict(row, (event.target as HTMLSelectElement).value as FolderSyncConflict),
+      },
+      FOLDER_SYNC_CONFLICTS.map((option) =>
+        m("option", { value: option, selected: option === conflict }, folderSyncConflictLabel(option)),
+      ),
+    ),
+  );
+}
+
+/** The legend: a turning pair of arrows while bytes move, a check once they
+ * have. Everything else keeps a plain badge.
+ *
+ * The one row with nothing to say is a sync that is settled off, which is what
+ * STOPPED means and the only thing it means: the unticked checkbox already
+ * says it, and a badge beside it only asks the reader to reconcile the two. A
+ * folder the user still wants synced with nothing running is UNKNOWN, not
+ * STOPPED, so it keeps its badge without this having to ask a second question
+ * to tell the two apart. */
+function renderSyncStatus(state: FolderSyncState, progress = ""): m.Children {
+  if (state === "STOPPED") return null;
+  const label = folderSyncStateLabel(state);
+  if (state === "SYNCING") {
+    // Blue against the settled green: something is happening, and it is not
+    // yet the state the user is waiting to see. The count beside it is
+    // unison's own, so a big folder says how far through it is rather than
+    // just that it is busy.
+    return m("span", { class: "flex items-center gap-1.5 type-helper text-info" }, [
+      m(Icon16, { name: "arrows-sync", size: "sm", extra: "sync-spin" }),
+      progress === "" ? label : `${label} · ${progress}`,
+    ]);
+  }
+  if (state === "SYNCED") {
+    return m("span", { class: "flex items-center gap-1.5 type-helper text-success" }, [
+      m(Icon16, { name: "badge-check", size: "sm" }),
+      label,
+    ]);
+  }
+  return m(StatusBadge, { variant: syncStateVariant(state), size: "xs" }, label);
+}
+
+async function addSharedPath(model: PermissionsModel, mode: "file" | "directory"): Promise<void> {
+  const selected = await electronBridge.showFilePicker({ mode }).catch(() => null);
+  if (typeof selected !== "string" || selected.length === 0) return;
+  await model.addSharedPath(selected);
+}
+
+/** The two ways in, at the foot of the list: pick something, or let an agent
+ * ask. Read-only to begin with either way -- the row's dropdown widens it, and
+ * starting narrow is the safer default for a path the user just pointed at. */
+function renderAddSharedPath(model: PermissionsModel): m.Children {
+  if (!electronBridge.isDesktop) {
+    return m(
+      "p",
+      { class: "type-helper text-tertiary mt-4" },
+      "Tell an agent to request access to a local file or directory.",
+    );
+  }
+  // Sharing a path is a round trip to the workspace's own machine, like every
+  // other write here, so it wears the same spinner -- and locks the same way,
+  // because a write answers with the whole view and two in flight would fight
+  // over what is on screen.
+  const isAdding = model.isRowBusy(ADD_SHARED_PATH_ROW_KEY);
+  const isAddLocked = isLockedByAnotherWrite(model, ADD_SHARED_PATH_ROW_KEY);
+  return m("div", { class: "mt-4 flex flex-col items-end gap-2" }, [
+    m("div", { class: "flex items-center gap-2" }, [
+      isAdding ? m(Spinner, { size: "sm" }) : null,
+      m(
+        Button,
+        {
+          variant: "secondary",
+          id: "add-shared-file",
+          disabled: isAdding || isAddLocked,
+          ...(isAddLocked ? { title: PANE_BUSY_TITLE } : {}),
+          onclick: () => void addSharedPath(model, "file"),
+        },
+        "Add file",
+      ),
+      m(
+        Button,
+        {
+          variant: "secondary",
+          id: "add-shared-folder",
+          disabled: isAdding || isAddLocked,
+          ...(isAddLocked ? { title: PANE_BUSY_TITLE } : {}),
+          onclick: () => void addSharedPath(model, "directory"),
+        },
+        "Add folder",
+      ),
+    ]),
+    m(
+      "p",
+      { class: "type-helper text-tertiary" },
+      "Or tell an agent to request access to a local file or directory.",
+    ),
   ]);
 }
 

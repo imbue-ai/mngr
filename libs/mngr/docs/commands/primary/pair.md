@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr pair [SOURCE] [--source <SOURCE>] [--target <DIR>] [--sync-direction <DIR>] [--conflict <MODE>] [--include PATTERN] [--exclude PATTERN]
+mngr pair [SOURCE] [--source <SOURCE>] [--target <DIR>] [--sync-direction <DIR>] [--conflict <MODE>] [--include PATTERN] [--exclude PATTERN] [--[no-]start] [--[no-]ignore-archives] [--[no-]links]
 ```
 
 Continuously sync files between an agent and local directory [experimental].
@@ -50,13 +50,21 @@ mngr pair [OPTIONS] SOURCE
 | `--source` | host_location_address | Source specification: AGENT[@HOST[.PROVIDER]][:PATH] | None |
 | `--source-agent` | agent_address | Source agent address (NAME[@HOST[.PROVIDER]]) | None |
 | `--source-host` | host_address | Source host address (HOST[.PROVIDER]) | None |
-| `--source-path` | text | Path within the agent's work directory | None |
+| `--source-path` | text | Path within the agent's work directory, or an absolute path when pairing with a host | None |
 
 ## Target
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--target` | path | Local target directory [default: nearest git root or current directory] | None |
+
+## General
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--links`, `--no-links` | boolean | Carry symbolic links inside the directories across. Turn off when the two sides are different machines, where a link's target need not mean the same thing on both. | `True` |
+| `--ignore-archives`, `--no-ignore-archives` | boolean | Pair as though these two paths had never been paired before. For a caller that just created one of the directories, where any archive from a previous pairing describes a directory that no longer exists. | `False` |
+| `--start`, `--no-start` | boolean | Automatically start the host if offline | `True` |
 
 ## Git Handling
 

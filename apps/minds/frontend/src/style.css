@@ -781,6 +781,21 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
+ * The turning arrows on a shared path that is actively transferring. A slow
+ * turn reads as "working away"; anything quicker reads as a spinner, which
+ * would say "wait for me" about something the user need not wait for. Reduced
+ * motion stops it, leaving the glyph and its label to say the same thing.
+ */
+.sync-spin {
+  animation: spin 3s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sync-spin {
+    animation: none;
+  }
+}
+
+/*
  * Workspace color picker (workspace settings page + create form).
  * The swatch's selected state is conveyed via aria-checked="true" so
  * screen readers see the radio role correctly; the visual ring uses

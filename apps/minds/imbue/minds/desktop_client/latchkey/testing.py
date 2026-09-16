@@ -17,7 +17,10 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import build_account_grant
@@ -75,6 +78,8 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
     _set_calls: list[RecordedSetPermissionCall] = PrivateAttr(default_factory=list)
     _deleted_request_ids: list[str] = PrivateAttr(default_factory=list)
     _deleted_rule_calls: list[tuple[Path, str]] = PrivateAttr(default_factory=list)
+    # Requests filed through this fake, by id, awaiting approval.
+    _pending_file_shares: dict[str, tuple[str, FileSharingAccess, Path]] = PrivateAttr(default_factory=dict)
 
     @property
     def set_calls(self) -> tuple[RecordedSetPermissionCall, ...]:
@@ -118,6 +123,43 @@ class FakeLatchkeyGatewayClient(LatchkeyGatewayClient):
         if not permissions_file_path.is_file():
             return LatchkeyPermissionsConfig()
         return LatchkeyPermissionsConfig.model_validate_json(permissions_file_path.read_text())
+
+    def create_file_sharing_request(
+        self,
+        agent_id: str,
+        path: str,
+        access: FileSharingAccess,
+        target: Path,
+    ) -> str:
+        """Record a file-sharing request; :meth:`approve_permission_request` applies it."""
+        request_id = f"fake-request-{len(self._pending_file_shares) + 1}"
+        self._pending_file_shares[request_id] = (path, access, target)
+        return request_id
+
+    def approve_permission_request(
+        self,
+        request_id: str,
+        override_body: Mapping[str, JsonValue] | None = None,
+    ) -> None:
+        """Apply a request filed through this fake, the way the extension would.
+
+        The real gateway computes a per-path URL pattern and WebDAV verb set;
+        the schema written here is a stand-in, since nothing on this side of the
+        wire reads it -- only its presence matters, which is what makes a
+        revoked grant re-grantable.
+        """
+        pending = self._pending_file_shares.pop(request_id, None)
+        if pending is None:
+            raise LatchkeyGatewayClientError(f"no such request: {request_id}")
+        path, access, target = pending
+        if override_body is not None and isinstance(override_body.get("path"), str):
+            path = str(override_body["path"])
+        permission = f"minds-file-server-{str(access).lower()}-{path}"
+        existing = self.get_permissions_config(target)
+        granted = [name for rule in existing.rules for name in rule.get(SELF_SCOPE, [])]
+        if permission not in granted:
+            granted.append(permission)
+        self.set_permission_rule(target, SELF_SCOPE, granted, schemas={permission: {"type": "object"}})
 
     def set_permission_rule(
         self,

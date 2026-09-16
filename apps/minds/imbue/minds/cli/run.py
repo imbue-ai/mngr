@@ -48,6 +48,7 @@ from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clon
 from imbue.minds.desktop_client.api_key_store import generate_api_key
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.app import start_discovery_health_watchdog_loop
+from imbue.minds.desktop_client.app import start_folder_syncs
 from imbue.minds.desktop_client.app import start_sleep_heartbeat_loop
 from imbue.minds.desktop_client.app import start_system_interface_health_probe_loop
 from imbue.minds.desktop_client.app import start_workspace_update_loops
@@ -495,13 +496,14 @@ def run(
         connector_url=client_env_config.connector_url,
         accounts_base_url=client_env_config.accounts_base_url,
     )
+    # Read-or-create eagerly so this install always has a real identity from
+    # its very first session (a failure aborts startup).
+    device_id = get_or_create_device_id(data_directory, mngr_host_dir)
     workspace_record_store = WorkspaceRecordStore(
         paths=paths,
         mngr_host_dir=mngr_host_dir,
         cli=imbue_cloud_cli,
-        # Read-or-create eagerly so this install always has a real identity
-        # from its very first session (a failure aborts startup).
-        device_id=get_or_create_device_id(data_directory, mngr_host_dir),
+        device_id=device_id,
         device_label=read_device_label(),
     )
     session_store = MultiAccountSessionStore(
@@ -795,6 +797,7 @@ def run(
         connectivity_detector=connectivity_detector,
         sleep_tracker=sleep_tracker,
         sync_scheduler=sync_scheduler,
+        device_id=str(device_id),
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot
@@ -825,6 +828,7 @@ def run(
     )
 
     start_workspace_update_loops(app=app, root_concurrency_group=root_concurrency_group)
+    start_folder_syncs(app=app, root_concurrency_group=root_concurrency_group)
 
     # Wire the permission-requests streaming consumer once the Flask
     # app is built so the on_request callback can mutate the app state

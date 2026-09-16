@@ -256,3 +256,15 @@ class InvalidSha256HexError(LimaImageError, ValueError):
     """
 
     ...
+
+
+class FolderSyncError(MindError):
+    """Raised when a folder sync cannot be started or stopped."""
+
+    ...
+
+
+class FolderSyncStoreError(MindError):
+    """Raised when the record of which folders to keep synced cannot be written."""
+
+    ...

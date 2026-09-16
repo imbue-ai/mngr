@@ -52,6 +52,7 @@ mngr pair my-agent --include "*.py" --exclude "__pycache__/*"
 # Pair a subdirectory of the agent
 mngr pair my-agent:/subdir --target ./local-dir
 
+
 # Pair with an agent running on a remote host
 mngr pair my-agent@my-vps
 
@@ -67,12 +68,30 @@ mngr pair my-agent --no-require-git
 - `--conflict MODE` -- Conflict resolution for bidirectional sync: `newer` (most recent mtime, default), `source`, `target`
 - `--include PATTERN` / `--exclude PATTERN` -- Glob patterns for selective sync (repeatable). `.git` is always excluded.
 
+### `--include` polls rather than watches
+
+Restricting a sync with `--include` is incompatible with `unison-fsmonitor`,
+which fails every event it sees on a replica narrowed by `-path`. Such a sync
+therefore polls every couple of seconds instead of watching, which is a little
+slower to notice a change and otherwise identical.
+
 ### Git handling
 
 - `--require-git` / `--no-require-git` -- Require both sides to be git repos (default: enabled)
 - `--uncommitted-changes MODE` -- How to handle uncommitted changes during initial git sync: `stash`, `clobber`, `merge`, `fail` (default)
 
-Press Ctrl+C to stop the sync.
+Press Ctrl+C to stop the sync. `SIGTERM` stops it the same way, so a supervising
+process can shut pairing down cleanly. Either way unison is stopped with it.
+
+### Machine-readable output
+
+With `--format jsonl` the command streams one JSON object per line. Three of them
+mark the lifecycle: `pair_started` (the two paths have been resolved and work is
+about to begin), `pair_syncing` (unison is up and both replicas are being
+watched), and `pair_stopped` (the sync has ended). A fourth,
+`pair_transferring`, carries `is_transferring` and fires when unison starts
+moving bytes and again when it settles -- a sync spends nearly all its life up
+but idle.
 
 ## Limitations
 

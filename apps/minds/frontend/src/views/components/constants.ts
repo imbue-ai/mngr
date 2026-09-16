@@ -25,7 +25,7 @@ export const BTN_SIZES: Record<ButtonSize, string> = {
 };
 
 export type ButtonVariant =
-  "primary" | "secondary" | "danger" | "success" | "ghost";
+  "primary" | "secondary" | "danger" | "danger-soft" | "success" | "ghost";
 
 // Variant recipes (Figma "Button" component, node 342-4059). Every variant
 // carries a 1px border -- visible on secondary, transparent elsewhere -- so
@@ -38,6 +38,12 @@ export const BTN_VARIANTS: Record<ButtonVariant, string> = {
   secondary:
     "bg-transparent text-primary border border-default hover:bg-fill-hover",
   danger: "bg-important text-white border border-transparent hover:opacity-90",
+  // Destructive, but ranked under `danger` rather than beside it: for a
+  // destructive action that is subordinate to another one in the same view.
+  // Same fill and text pairing the error Notice uses, so the two read as one
+  // idea at two sizes.
+  "danger-soft":
+    "bg-[var(--c-important-surface)] text-important border border-transparent hover:bg-important/15",
   success: "bg-success text-white border border-transparent hover:opacity-90",
   ghost:
     "bg-transparent text-primary border border-transparent hover:bg-fill-hover",

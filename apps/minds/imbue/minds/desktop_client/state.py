@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_trim import BackupTrimManager
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -135,6 +136,15 @@ class DesktopClientState(MutableModel):
     )
     sync_scheduler: WorkspaceSyncScheduler | None = Field(
         default=None, frozen=True, description="Background workspace-record sync loop (kicked on auth changes)"
+    )
+    folder_sync_manager: FolderSyncManager | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Owns the ``mngr pair`` subprocess behind each synced shared path; None when there "
+            "is no root concurrency group to run them on, which the pane reports as syncing "
+            "being unsupported"
+        ),
     )
     pending_requests: PendingRequestsInterface | None = Field(
         default=None,
