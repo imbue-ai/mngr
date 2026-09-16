@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import re
+import stat
 import subprocess
 import threading
 import uuid
@@ -1035,6 +1036,39 @@ def record_sleep_of(sleep_tracker: SleepTracker, clock: CatchUpClock, seconds: f
     sleep_tracker.record_heartbeat()
     clock.lag_seconds = 0.0
     sleep_tracker.record_heartbeat()
+
+
+FAKE_WORKSPACE_HOME: Final[str] = "/home/agent"
+
+
+def write_fake_mngr_pair_script(directory: Path, argv_record_path: Path) -> Path:
+    """A stand-in ``mngr`` for folder-sync tests: records its argv, then waits.
+
+    It answers the two commands a folder sync runs. ``mngr exec`` (which makes
+    the workspace side exist and reports the agent's home directory) prints the
+    success envelope carrying :data:`FAKE_WORKSPACE_HOME` and exits. ``mngr pair`` writes the arguments it was handed to
+    ``argv_record_path``, emits the ``pair_syncing`` event a real pairing emits
+    once unison is watching both replicas, and then blocks on ``signal.pause``
+    until it is signalled -- which is how a real ``mngr pair`` spends the sync.
+    Because ``FolderSyncManager.start`` waits for that event, the argv file is
+    always on disk by the time ``start`` returns.
+    """
+    script = directory / "fake-mngr"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        "import signal\n"
+        "import sys\n"
+        "if sys.argv[1] == 'exec':\n"
+        f"    print(json.dumps({{'results': [{{'stdout': {FAKE_WORKSPACE_HOME!r}, 'stderr': '', 'success': True}}]}}))\n"
+        "    sys.exit(0)\n"
+        f"open({str(argv_record_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+        "sys.stdout.write(json.dumps({'event': 'pair_syncing'}) + '\\n')\n"
+        "sys.stdout.flush()\n"
+        "signal.pause()\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return script
 
 
 def _streamed_request(

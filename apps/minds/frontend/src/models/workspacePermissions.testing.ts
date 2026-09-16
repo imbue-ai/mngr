@@ -8,14 +8,39 @@
 
 import type {
   UiAvailableConnection,
+  UiPathSync,
   UiPermissionConnection,
+  UiSharedPath,
   UiServiceSignIn,
   UiWorkspacePermissions,
 } from "../generated/ui";
 
-/** Slack signs in through a browser; AWS is connected by typing credentials in.
- * Every fixture below picks one deliberately, so no test can pass by treating
- * the two the same way. */
+/** A two-way sync, up and running. */
+export function pathSync(overrides: Partial<UiPathSync> = {}): UiPathSync {
+  return {
+    activity: "ACTIVE",
+    state: "SYNCED",
+    message: "",
+    direction: "BOTH",
+    conflict: "NEWER",
+    workspace_path: "~/synced_folders/home/me/notes",
+    bytes_done: 0,
+    bytes_total: 0,
+    ...overrides,
+  };
+}
+
+/** One shared-path row: ~/notes, readable, not synced. */
+export function sharedPath(overrides: Partial<UiSharedPath> = {}): UiSharedPath {
+  return {
+    path: "/home/me/notes",
+    path_label: "~/notes",
+    access: "READ",
+    sync: null,
+    ...overrides,
+  };
+}
+
 export const BROWSER_SIGN_IN: UiServiceSignIn = {
   is_browser_supported: true,
   credential_parameters: [],
@@ -81,10 +106,11 @@ export function permissionsView(overrides: Partial<UiWorkspacePermissions> = {})
     host_id: "host-" + "b".repeat(8),
     connections: [slackConnection()],
     available_connections: [{ service_name: "notion", display_name: "Notion", sign_in: BROWSER_SIGN_IN }],
-    file_sharing_toggles: [],
+    shared_paths: [],
     workspace_toggles: [],
     waiting_requests: [],
     permissions_unavailable: false,
+    is_sync_supported: true,
     is_credential_store_shared: true,
     ...overrides,
   };

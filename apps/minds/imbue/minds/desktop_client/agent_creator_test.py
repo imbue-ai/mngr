@@ -1038,6 +1038,10 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     assert (dest / "f").read_text() == "uncommitted edit\n"
 
 
+# Seen timing out at the 10s mark under a parallel run, with the root
+# concurrency group already EXITED -- a real git clone racing teardown under
+# load rather than anything about the branch it is checking. Passes alone.
+@pytest.mark.flaky
 def test_clone_git_repo_raises_on_missing_branch(tmp_path: Path) -> None:
     """Requesting a branch that does not exist fails at clone time (cleanly)."""
     origin = tmp_path / "origin"

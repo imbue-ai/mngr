@@ -803,6 +803,174 @@ that cannot be reached shows as "permissions can't be loaded" rather than
 an empty, misleading "nothing granted", and does not take Share machine or
 Machine settings down with it.
 
+### Keeping a copy on the machine
+
+The three routes behind this half live under
+`/api/workspaces/<agent_id>/folder-syncs`, not under `permissions/`: `toggle`
+turns syncing on or off, `discard-copy` removes a copy the machine set aside,
+and a `GET` on the collection itself answers the pane's poll. They are served
+by the same module as the permissions routes, because one card draws both and
+they answer with the same refreshed payload -- but a sync is not a permission,
+none of the three touch latchkey, and a URL saying otherwise would be wrong
+about who owns them.
+
+
+Each shared path is one card, drawn as bands: the path, then one band per
+setting, divided by rules that reach both edges of the card.
+
+The **access** band is the WebDAV file server, reachable only while this
+computer is awake and Minds is running. Its dropdown completes the sentence
+"Agents on this machine may": *Read only*, or *Read and write*. There is no
+write-without-read, because `WRITE` is a strict superset of `READ` in the
+gateway's own model. The card's remove button revokes this grant, and names
+what else it will take -- *Revoke access*, or *Revoke access and remove copy*
+when the machine is holding one.
+
+The **sync** band is a checkbox, "Keep a synchronized copy on the machine", and
+an `mngr pair` sync behind it. The machine gets its own copy, so agents can
+still reach it while this computer is asleep or offline; changes only move
+between the two while Minds is running, since the sync is a process it owns. A
+checkbox rather than the other arm of a radio, because it is additive: ticking
+it revokes nothing, and the on-demand grant above stays exactly where it was.
+
+Everything the checkbox has to say hangs off a short rule under it, so there is
+one left edge rather than an indent to keep in step with the checkbox's width.
+
+Only folders can be synced. unison, which `mngr pair` drives, has no native
+single-file sync; a shared file says so in place of the option.
+
+**Which way changes travel is not a question.** It is the access, said again:
+read-only access means this computer to the machine, read and write means both
+ways. The band states which, in the same words the dropdown above uses --
+"Since agents on this machine may both **read and write** the folder, Minds
+synchronizes changes between your computer and this machine in both
+directions." Changing the access moves a running sync onto it.
+
+The one question a sync does raise is **which side wins when both changed the
+same thing**, and only a two-way sync can face it -- so the clash dropdown
+appears exactly when the access above makes it real. Changing it restarts the
+running sync onto the new setting.
+
+**Where it lands.** `~/synced_folders/<device id>/<whole local path>` on the
+machine, so `/Users/me/notes` synced from device `host-abc` becomes
+`~/synced_folders/host-abc/Users/me/notes`. Each part earns its place. Under the
+*home* directory rather than the working directory, because the latter is a git
+checkout and files synced in from a desktop have no business turning up as
+untracked changes in it. Under the device id, because one workspace can be
+synced with from more than one computer, and the same absolute path on two of
+them names different directories. And the whole local path rather than the
+folder's name, so two same-named folders cannot collide. The device id is this
+install's own, from `<data_dir>/device_id` -- the same identity that stamps
+workspace records.
+
+**Status.** A sync spends nearly all its life up but idle, so "running" and
+"moving bytes right now" are shown as different things: turning arrows and
+*Syncing* while `mngr pair` reports a transfer in flight, a check and *Synced*
+once it settles. Both come from `mngr pair`'s `pair_transferring` event, which
+tracks unison's own narration of what it is doing.
+
+Turning sync on returns immediately, with the row in *Starting*. Bringing one
+up means an `mngr exec` round trip to the machine and then waiting on `mngr
+pair` -- seconds, which is long enough that doing it on the request would
+freeze the pane on the click that asked for it. Anything that goes wrong lands
+on the row as *Failed* with the reason. The pane re-reads once a second while
+any sync is alive, which is how every later transition shows up too; with
+nothing live on screen it does not poll at all. Once a second because that is
+how often `mngr pair` reports a transfer's progress, and the endpoint it polls
+(`folder-syncs`) answers from the desktop process alone -- the full
+permissions read, which crosses to the machine over SSH, is not on that path.
+
+**Add file** / **Add folder**, at the foot of the list, open the native picker
+and share what it returns, read-only to begin with -- the row's dropdown widens
+it, and starting narrow is the safer default for a path the user has just
+pointed at. Outside the desktop app there is no picker, so the buttons are
+replaced by the line that names the other route.
+
+Adding a path, and changing one's access, both go through the gateway rather
+than being computed here: Minds files a file-sharing permission request and
+approves it in the same breath. The gateway owns how a path becomes a
+permission -- the URL pattern over a percent-encoded WebDAV path, the verb set,
+the traversal and mount-root checks -- and a second copy of that in Python
+would be a security decision free to drift.
+
+Doing so needs the request to name its **target**: the gateway otherwise writes
+an approved effect into whichever permissions file the *caller's* extension
+context names, which for Minds is its own admin file. A file-sharing grant
+landing there wedges the gateway, because that file declares no
+`latchkey-self` scope schema and every later request against it then fails the
+permission check. `POST /permission-requests` therefore accepts an optional
+absolute `target`, honoured only when the caller's own context is the desktop
+client's admin file -- an agent's context names its workspace's file and never
+matches, which is what stops one workspace granting itself access through
+another's.
+
+Four more constraints are worth knowing:
+
+* Starting a sync checks only what the next step needs: an absolute path that
+  is a directory and exists. It is deliberately **not** the check a share path
+  goes through. Running that here read as a boundary and was not one -- the
+  caller with the strongest claim to be policed is the restore at launch,
+  reading `<data_dir>/folder_syncs/*.json`, which sits beside this app's own
+  signing key and latchkey credentials. Anything able to edit that file can
+  read those and reach the workspace directly, so checking the path on the way
+  out defends against an attacker who has already won.
+* Two workspaces may each keep their own copy of one folder: the copies land
+  under different machines' home directories and unison keys each pairing's
+  archive by both roots, so the two cannot see each other. What is refused is
+  two *overlapping* folders in the **same** workspace, where the copies nest.
+* A sync runs only while Minds does, but the choice to keep a folder synced is
+  remembered in `<data_dir>/folder_syncs/<agent_id>.json` and started again at
+  launch. Restoring never starts a stopped machine: a sync whose machine is off
+  lands on its row saying so.
+* Every change of destination is asynchronous, in both directions. A click
+  records where the user wants the folder (`activity`: ACTIVE / INACTIVE /
+  DISCARDED) and returns; the row then reports how far the app has got
+  (`state`: *Starting*, *Restarting*, *Stopping*, *Removing*, ...) until it
+  settles. So the checkbox always shows what was asked for and the status
+  beside it shows what is true. A sync that fails on its own keeps its
+  checkbox ticked -- the user still wants it -- with the reason beside it. A
+  settled STOPPED sync shows no status at all: the unticked checkbox already
+  says it is off.
+* *Starting* and *Restarting* are the same work told apart. A restart is what a
+  changed setting needs, and the files are already on the machine, so the user
+  is waiting on a handshake rather than on a folder being copied across.
+* Turning sync off does not throw the machine's copy away. It is renamed from
+  `~/synced_folders/<device id>/...` to `~/inactive_synced_folders/<device id>/...`
+  -- a rename, so it costs no copying however large the folder is -- and the
+  record is kept, saying so. Turning sync on again moves it back, which is what
+  makes resuming pick up the files that were already there instead of
+  re-fetching them. So a remembered sync is in one of three states: **ACTIVE**
+  (running), **INACTIVE** (not running, copy set aside), **DISCARDED** (not
+  running, copy deleted on request). Only ACTIVE ones restart at launch.
+* Removing the set-aside copy is its own action (`folder-syncs/discard-copy`), offered
+  on the row once syncing is off. Turning syncing off never folds it in: the
+  point of setting a copy aside is that turning syncing back on resumes from
+  it.
+* Anything already sitting where a copy is being set aside is deleted first.
+  Nothing but Minds writes under `~/inactive_synced_folders`, so something
+  there is a mistake rather than a file to preserve, and refusing instead would
+  strand the copy being set aside. The agent-facing `file-sharing` skill says
+  so, in default-workspace-template.
+* The last two states are what Minds last did, not what is certainly on the
+  machine: an agent owns its own filesystem and may have deleted the copy
+  itself. Every path that acts on one tolerates finding the opposite -- turning
+  sync on with the copy gone just creates an empty directory and re-fetches,
+  and deleting a copy that is already gone is not an error.
+* Unsharing a path stops its sync, deletes the machine's copy, and forgets the
+  record. The copy goes because nothing would be left to offer it from: the
+  pane draws its rows from the shared paths, so a copy whose path is gone has
+  no row, no button, and nothing that would ever mention it again -- it would
+  simply sit on the machine's disk. This is a destination like any other, so
+  the same converger walks to it, stopping a running sync on the way; a copy
+  that only a store record knows about (a sync turned off before Minds last
+  quit) is reached from that record.
+* Pairing always runs with `--no-require-git`, so syncing never checks out a
+  branch, fetches, or stashes on either side.
+
+The sync half touches no latchkey state, so it works and its status shows even
+when the gateway is unreachable. A build with no root concurrency group offers
+no sync option at all rather than one that cannot work.
+
 ## Agent-side responsibilities
 
 Agents are expected to:

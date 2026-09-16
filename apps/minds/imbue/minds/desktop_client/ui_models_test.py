@@ -14,7 +14,9 @@ from imbue.minds.desktop_client.ui_models import UiWireSchema
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 
-
+# FIXME: lol, what the hell is that record of changes?
+#  also, this is a nightmare to merge
+#  please break the history into something that merges more cleanly.
 def test_schema_version_tracks_breaking_wire_changes() -> None:
     """Bumped to 2 when the inbox detail payload replaced its flat permission
     lists with server-grouped rows, to 3 when every offered connection started
@@ -30,25 +32,50 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     of the two recoveries is running, renamed ``is_restart_a_no_op`` to
     ``is_recovery_a_no_op``, and let the two recovery health values shed their
     ``restart`` spelling for ``recovering`` / ``recovery_failed``, and to 9 when
-    the snapshot gained a required ``workspace_updates`` frame, and to 10 when
-    the bootstrap seed gained a required ``is_onboarding_complete`` flag: a
-    window held open across any of these upgrades would otherwise reconnect and
-    act on a payload it does not know -- for 3, by offering a browser sign-in
-    to a service that has none; for 4, by expecting a field the server no
-    longer sends; for 5, by reading a field that is gone and so never naming
-    the backend its band is about; for 6 and 9, by reading a state off a
-    snapshot field the older server does not send at all; for 7, by failing to
-    parse the new condition and reading it as no condition at all, and by
-    rendering every remote record as "on <device>" with no way in to its
-    backups; for 8, by reading a boolean where a string now sits, so every
-    in-flight recovery would read as the neutral one and a user's own restart
-    would never be named, by missing the renamed no-op field, so a machine that
-    merely never answered would be badged as a restart that failed, and by
-    matching neither recovery value, so an in-flight recovery would raise no
-    band and a failed one no card, while the content stayed withheld either
-    way; and for 10, by seeding the home page's start-flow redirect from a
-    field the older server never sent."""
-    assert UI_SCHEMA_VERSION == 10
+    the snapshot gained a required ``workspace_updates`` frame: a window held
+    open across any of these upgrades would otherwise reconnect and act on a
+    payload it does not know -- for 3, by offering a browser sign-in to a
+    service that has none; for 4, by expecting a field the server no longer
+    sends; for 5, by reading a field that is gone and so never naming the
+    backend its band is about; for 6 and 9, by reading a state off a snapshot
+    field the older server does not send at all; for 7, by failing to parse the
+    new condition and reading it as no condition at all, and by rendering every
+    remote record as "on <device>" with no way in to its backups; and for 8, by
+    reading a boolean where a string now sits, so every in-flight recovery would
+    read as the neutral one and a user's own restart would never be named, by
+    missing the renamed no-op field, so a machine that merely never answered
+    would be badged as a restart that failed, and by matching neither recovery
+    value, so an in-flight recovery would raise no band and a failed one no
+    card, while the content stayed withheld either way; and to 10 when Local files
+    became one row per shared path, carrying the access the agent holds and the
+    sync running on it, in place of one row per granted permission name, so an
+    older client reads a field that is gone and lists nothing at all where the
+    user's shared paths used to be, and to 12 when the bootstrap seed gained a
+    required ``is_onboarding_complete`` flag, and to 15 when a shared path's sync gained
+    RESTARTING as a state -- an older client has no label for a value it has
+    never seen, so a sync coming back up on a changed setting would show a
+    blank status where it says what it is doing -- and to 16 when the three
+    folder-sync routes moved out from under ``permissions/`` to their own
+    ``folder-syncs/`` prefix, so an older window's clicks would post to URLs
+    that are no longer registered and every one of them would 404, and to 17
+    when a shared path gained ``sync_overlap_warning`` -- an older window drops
+    it, so a folder another workspace also syncs would be offered with nothing
+    said about it, and to 18 when a failed sync gained a retry route -- an
+    older window has no way to ask for it, so a sync that failed on its own is
+    a resting place it cannot leave, and to 19 when the sync state gained
+    UNKNOWN -- an older window has no label for it, so a folder that should be
+    syncing and is not would show a blank status, which is the very thing the
+    state was added to stop, and to 20 when a shared path gained
+    ``sync_unavailable_reason`` -- an older window drops it and so offers the
+    option on folders that cannot have it, which is the silent refusal the
+    field exists to prevent, and to 21 when the poll's rows gained
+    ``overlap_warning`` -- an older window drops it and so keeps whatever
+    warning it opened with, which is the staleness the field was added to
+    end, and to 22 when a shared path lost ``is_directory`` -- nothing read it
+    once the reason a folder cannot be synced was sent as a sentence, and an
+    older window reads its absence as "not a folder" and hides the option on
+    every row."""
+    assert UI_SCHEMA_VERSION == 22
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -57,7 +84,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 10}
+    assert parsed == {"type": "hello", "schema_version": 22}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -111,6 +138,11 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "AgentHealth",
             "DiscoveryHealth",
             "EnvironmentCondition",
+            "FileSharingAccess",
+            "FolderSyncActivity",
+            "FolderSyncConflict",
+            "FolderSyncDirection",
+            "FolderSyncState",
             "HostRecoveryKind",
             "NotificationOutcome",
             "ProviderPanelStatus",
@@ -126,11 +158,17 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiCredentialParameter",
             "UiDiscoveryHealthMessage",
             "UiEnvironmentMessage",
+            "UiFolderSyncDiscardCopyRequest",
+            "UiFolderSyncRetryRequest",
+            "UiFolderSyncRow",
+            "UiFolderSyncToggleRequest",
+            "UiFolderSyncs",
             "UiHealthMessage",
             "UiHelloMessage",
             "UiNotificationEntry",
             "UiNotificationsMessage",
             "UiOpenHelpMessage",
+            "UiPathSync",
             "UiPermissionConnection",
             "UiPermissionGrantGroup",
             "UiPermissionGrantRow",
@@ -144,6 +182,9 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiSelfPermissionToggle",
             "UiSelfToggleRequest",
             "UiServiceSignIn",
+            "UiSharedPath",
+            "UiSharedPathRemoveRequest",
+            "UiSharedPathRequest",
             "UiSnapshot",
             "UiWaitingPermissionRequest",
             "UiWorkspaceEntry",

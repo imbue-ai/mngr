@@ -28,6 +28,7 @@ from loguru import logger
 from imbue.minds.desktop_client.onboarding_progress import resolve_is_onboarding_complete
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_create import register_create_routes
+from imbue.minds.desktop_client.ui_api_folder_syncs import register_folder_sync_routes
 from imbue.minds.desktop_client.ui_api_inbox import register_inbox_routes
 from imbue.minds.desktop_client.ui_api_lifecycle import register_lifecycle_routes
 from imbue.minds.desktop_client.ui_api_onboarding import register_onboarding_routes
@@ -263,6 +264,7 @@ def create_ui_blueprint() -> Blueprint:
     register_settings_routes(blueprint)
     register_options_routes(blueprint)
     register_permissions_routes(blueprint)
+    register_folder_sync_routes(blueprint)
     register_lifecycle_routes(blueprint)
     register_inbox_routes(blueprint)
     register_onboarding_routes(blueprint)

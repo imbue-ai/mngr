@@ -146,6 +146,10 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # its reader thread unblocks from its iter_lines read.
     if state.permission_requests_consumer is not None:
         state.permission_requests_consumer.stop()
+    # Stop every folder sync, so no `mngr pair` (and no unison under it) keeps
+    # writing to the user's folders after the app is gone.
+    if state.folder_sync_manager is not None:
+        state.folder_sync_manager.stop_all()
     # Tear down any hub-brokered cross-workspace SSH tunnels (paramiko reverse
     # forwards + their connections) so their threads don't outlive the app.
     state.ssh_tunnel_manager.cleanup()

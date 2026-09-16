@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { UiFolderSyncToggleRequest } from "../generated/ui";
 import { settle } from "../testing";
 import {
   forgetWarmedPermissionsOverview,
@@ -10,11 +11,15 @@ import {
   awsAvailable,
   awsConnection,
   credentialsSignIn,
+  pathSync,
   permissionsView,
+  sharedPath,
   slackConnection,
 } from "./workspacePermissions.testing";
 import {
   ADD_CONNECTION_SECTION,
+  FILE_SHARING_ACCESSES,
+  FOLDER_SYNC_CONFLICTS,
   WAITING_SECTION,
   LOCAL_FILES_SECTION,
   PermissionsModel,
@@ -23,7 +28,14 @@ import {
   connectionSectionId,
   connectorToggleRowKey,
   disconnectRowKey,
+  fileSharingAccessLabel,
+  folderSyncConflictLabel,
   isCredentialFormComplete,
+  isPathSyncLive,
+  isPathSyncOn,
+  pathAccessRowKey,
+  pathRemoveRowKey,
+  folderSyncToggleRowKey,
   resolvePermissionsSection,
   revokeAllRowKey,
   selfToggleRowKey,
@@ -31,6 +43,7 @@ import {
 
 const AGENT_ID = "agent-" + "a".repeat(8);
 const PERMISSIONS_URL = `/ui/api/workspaces/${AGENT_ID}/permissions`;
+const FOLDER_SYNCS_URL = `/ui/api/workspaces/${AGENT_ID}/folder-syncs`;
 
 interface RecordedRequest {
   url: string;
@@ -834,5 +847,197 @@ describe("permission section keys", () => {
     expect(new Set(keys).size).toBe(keys.length);
     // Parts are separated, so no run of names can collide with another key.
     expect(connectorToggleRowKey("a", "b", "c")).not.toBe(connectorToggleRowKey("a b", "", "c"));
+  });
+});
+
+describe("shared paths", () => {
+  it("offers the two access modes latchkey actually has", () => {
+    // WRITE is a superset of READ, so there is no write-without-read to offer.
+    expect(FILE_SHARING_ACCESSES).toEqual(["READ", "WRITE"]);
+    for (const access of FILE_SHARING_ACCESSES) {
+      expect(fileSharingAccessLabel(access)).not.toBe("");
+    }
+  });
+
+  it("posts the path and the chosen access when one is added or re-graded", async () => {
+    const { model, requests } = makeModel(() => okWith(permissionsView()));
+    await model.load();
+
+    await model.setSharedPath("/home/me/pictures", "WRITE");
+
+    expect(requests[requests.length - 1]).toEqual({
+      url: `${PERMISSIONS_URL}/shared-path`,
+      method: "POST",
+      body: { path: "/home/me/pictures", access: "WRITE" },
+    });
+  });
+
+  it("posts only the path when one is removed", async () => {
+    const { model, requests } = makeModel(() => okWith(permissionsView()));
+    await model.load();
+
+    await model.removeSharedPath("/home/me/notes");
+
+    expect(requests[requests.length - 1]).toEqual({
+      url: `${PERMISSIONS_URL}/shared-path-remove`,
+      method: "POST",
+      body: { path: "/home/me/notes" },
+    });
+  });
+
+  it("gives each control on a row its own busy identity", () => {
+    const keys = [
+      folderSyncToggleRowKey("/home/me/a"),
+      pathAccessRowKey("/home/me/a"),
+      pathRemoveRowKey("/home/me/a"),
+    ];
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+});
+
+describe("keeping a shared path in sync", () => {
+  it("offers every clash rule the wire contract has", () => {
+    // Derived from the label map, so a value added upstream that nobody
+    // labelled would show up here rather than silently missing from the row.
+    expect(FOLDER_SYNC_CONFLICTS).toEqual(["NEWER", "THIS_COMPUTER", "WORKSPACE"]);
+    for (const conflict of FOLDER_SYNC_CONFLICTS) expect(folderSyncConflictLabel(conflict)).not.toBe("");
+  });
+
+  it("reads the switch as the destination the user chose, not how far it has got", () => {
+    expect(isPathSyncOn(sharedPath({ sync: pathSync({ state: "STARTING" }) }))).toBe(true);
+    expect(isPathSyncOn(sharedPath({ sync: pathSync({ state: "SYNCING" }) }))).toBe(true);
+    // Still wanted, so still on -- the reason sits beside it rather than
+    // quietly moving the switch the user set.
+    expect(isPathSyncOn(sharedPath({ sync: pathSync({ state: "FAILED" }) }))).toBe(true);
+    // On its way out: the destination is already the other one.
+    expect(
+      isPathSyncOn(sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "DEACTIVATING" }) })),
+    ).toBe(false);
+    expect(isPathSyncOn(sharedPath({ sync: null }))).toBe(false);
+  });
+
+  it("keeps the overlap warning current from the poll, not only from a full read", async () => {
+    // The warning is about what *other* workspaces are doing, which this pane
+    // learns no other way: a full read happens on open and after a write here.
+    const row = sharedPath({ sync: pathSync({ state: "SYNCING" }), sync_overlap_warning: "" });
+    const { model, requests } = makeModel((url) =>
+      url.endsWith("/folder-syncs")
+        ? okWith({ rows: [{ path: row.path, sync: pathSync({ state: "SYNCING" }), overlap_warning: "also synced" }] })
+        : okWith(permissionsView({ shared_paths: [row] })),
+    );
+    await model.load();
+    expect(model.data?.shared_paths?.[0]?.sync_overlap_warning).toBe("");
+
+    await model.refreshLiveFolderSyncs();
+
+    expect(requests[requests.length - 1]?.url).toBe(FOLDER_SYNCS_URL);
+    expect(model.data?.shared_paths?.[0]?.sync_overlap_warning).toBe("also synced");
+  });
+
+  it("polls the folder-sync endpoint, not the whole pane", async () => {
+    // The whole pane costs a round trip to the workspace's machine; this runs
+    // once a second, so it must ask for the half that is already local.
+    const row = sharedPath({ sync: pathSync({ state: "SYNCING" }) });
+    const { model, requests } = makeModel(() =>
+      okWith(permissionsView({ shared_paths: [row] })),
+    );
+    await model.load();
+    const beforePoll = requests.length;
+
+    await model.refreshLiveFolderSyncs();
+
+    expect(requests.length).toBe(beforePoll + 1);
+    expect(requests[requests.length - 1]?.url).toBe(FOLDER_SYNCS_URL);
+  });
+
+  it("keeps re-reading a folder that is still on its way, in either direction", () => {
+    expect(isPathSyncLive(sharedPath({ sync: pathSync({ state: "STARTING" }) }))).toBe(true);
+    expect(
+      isPathSyncLive(sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "DEACTIVATING" }) })),
+    ).toBe(true);
+    expect(
+      isPathSyncLive(sharedPath({ sync: pathSync({ activity: "DISCARDED", state: "DISCARDING" }) })),
+    ).toBe(true);
+    // Nothing left to report, so polling it would cost a request for no news.
+    expect(isPathSyncLive(sharedPath({ sync: pathSync({ state: "FAILED" }) }))).toBe(false);
+    expect(isPathSyncLive(sharedPath({ sync: pathSync({ activity: "INACTIVE", state: "STOPPED" }) }))).toBe(false);
+  });
+
+  it("posts the path and the clash rule when the switch goes on", async () => {
+    // No direction: it says the same thing as the access already granted, so
+    // the server derives it there rather than trusting a pair that could
+    // disagree with each other.
+    const row = sharedPath();
+    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [row] })));
+    await model.load();
+
+    await model.toggleSync(row, true);
+
+    expect(requests[requests.length - 1]).toEqual({
+      url: `${FOLDER_SYNCS_URL}/toggle`,
+      method: "POST",
+      body: { path: row.path, enabled: true, conflict: "NEWER" },
+    });
+  });
+
+  it("carries a changed setting to a running sync in one write", async () => {
+    // The controls only appear once sync is on, so changing one is an
+    // adjustment to something already running. Turning it off first would
+    // rename the machine's copy out of the way and straight back again.
+    const row = sharedPath({ sync: pathSync() });
+    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [row] })));
+    await model.load();
+    const before = requests.length;
+
+    await model.setSyncConflict(row, "THIS_COMPUTER");
+
+    const posted = requests.slice(before).map((request) => request.body as UiFolderSyncToggleRequest);
+    expect(posted.map((body) => body.enabled)).toEqual([true]);
+  });
+
+  it("never drops a sync click, however fast they come", async () => {
+    // Each one records where the folder should end up; the server keeps the
+    // last. Dropping one would leave it somewhere nobody chose.
+    const row = sharedPath({ sync: pathSync() });
+    const { model, requests } = makeModel(() => okWith(permissionsView({ shared_paths: [row] })));
+    await model.load();
+    const before = requests.length;
+
+    await Promise.all([
+      model.toggleSync(row, false),
+      model.toggleSync(row, true),
+      model.toggleSync(row, false),
+    ]);
+
+    const posted = requests.slice(before).map((request) => request.body as UiFolderSyncToggleRequest);
+    expect(posted.map((body) => body.enabled)).toEqual([false, true, false]);
+  });
+
+  it("keeps each row's pending choice to itself", async () => {
+    const { model } = makeModel(() => okWith(permissionsView()));
+    await model.setSyncConflict(sharedPath({ path: "/home/me/a" }), "THIS_COMPUTER");
+    expect(model.syncConflictFor(sharedPath({ path: "/home/me/a" }))).toBe("THIS_COMPUTER");
+    expect(model.syncConflictFor(sharedPath({ path: "/home/me/b" }))).toBe("NEWER");
+  });
+
+  it("keeps re-reading while a sync is alive, and stops once it is not", async () => {
+    // A sync moves between synced and syncing every time something is carried
+    // across, so watching only the starting edge froze the row on "Synced".
+    const { model, requests } = makeModel(() => okWith(permissionsView()));
+    await model.load();
+    let reads = requests.length;
+
+    for (const state of ["STARTING", "SYNCED", "SYNCING"] as const) {
+      model.data = permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state }) })] });
+      await model.refreshLiveFolderSyncs();
+      reads += 1;
+      expect(requests.length).toBe(reads);
+    }
+
+    for (const state of ["STOPPED", "FAILED"] as const) {
+      model.data = permissionsView({ shared_paths: [sharedPath({ sync: pathSync({ state }) })] });
+      await model.refreshLiveFolderSyncs();
+      expect(requests.length).toBe(reads);
+    }
   });
 });

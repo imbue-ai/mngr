@@ -29,6 +29,7 @@ const BUTTON_VARIANTS: ButtonVariant[] = [
   "primary",
   "secondary",
   "danger",
+  "danger-soft",
   "success",
   "ghost",
 ];

@@ -38,7 +38,7 @@ describe("ported constant strings", () => {
     expect(INPUT_BASE).toContain("placeholder:text-tertiary");
   });
 
-  it("keeps all five button variants with a border on every variant", () => {
+  it("keeps a border on every button variant, so they share one box height", () => {
     for (const variant of Object.values(BTN_VARIANTS)) {
       expect(variant).toContain("border");
     }

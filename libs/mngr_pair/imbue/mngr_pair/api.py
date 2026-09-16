@@ -1,6 +1,9 @@
 import platform
+import re
 import tempfile
 import threading
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -16,6 +19,7 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.mngr.api.git import GitContextInterface
 from imbue.mngr.api.git import LocalGitContext
 from imbue.mngr.api.git import RemoteGitContext
@@ -38,6 +42,82 @@ from imbue.mngr_pair.remote import ensure_remote_unison
 from imbue.mngr_pair.remote import write_ssh_wrapper_script
 
 _GIT_FETCH_TIMEOUT_SECONDS: Final[float] = 30.0
+
+# Told True when unison starts moving bytes, False when it settles again.
+TransferCallback = Callable[[bool, "TransferProgress | None"], None]
+
+# How often a path-restricted sync rescans. unison normally watches its
+# replicas through unison-fsmonitor, but that helper cannot cope with a replica
+# narrowed by ``-path``: it fails every event with "No path was found" and
+# nothing is ever propagated. Such a sync therefore polls instead. Two seconds
+# keeps it feeling immediate while the scan stays cheap -- ``-path`` restricts
+# what unison walks, so it is not rescanning the whole directory.
+_PATH_RESTRICTED_POLL_SECONDS: Final[int] = 2
+
+# What unison is told to skip while the git pass is reconciling the two
+# repositories itself. Not a constant of pairing -- see where it is used.
+_GIT_DIRECTORY_NAME: Final[str] = ".git"
+
+# What unison prints as it moves between scanning and actually moving bytes.
+# A sync spends nearly all its life idle, so "is it transferring right now?"
+# is a different question from "is it running", and only these lines answer it.
+_UNISON_TRANSFER_STARTED: Final[tuple[str, ...]] = ("Propagating updates", "[BGN] ")
+_UNISON_TRANSFER_FINISHED: Final[tuple[str, ...]] = ("Synchronization complete", "Nothing to do")
+
+# unison's own progress narration, e.g. `` 70%  1/3  (12.0 MiB of 17.0 MiB)  --:-- ETA``.
+# It rewrites one terminal line, so these arrive separated by carriage returns
+# rather than newlines -- see :meth:`UnisonSyncer._on_output`.
+_UNISON_PROGRESS_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\b\d+%\s+\d+/\d+\s+\(([\d.]+)\s*([KMGT]?i?B)\s+of\s+([\d.]+)\s*([KMGT]?i?B)\)"
+)
+
+# unison reports IEC sizes, so the multipliers are powers of 1024. Converted to
+# bytes here rather than passed on as text, so a consumer formats them however
+# it likes and can compare two of them.
+_IEC_MULTIPLIER: Final[dict[str, int]] = {
+    "B": 1,
+    "KiB": 1024,
+    "MiB": 1024**2,
+    "GiB": 1024**3,
+    "TiB": 1024**4,
+    # unison writes the short forms in some builds; same scale.
+    "KB": 1024,
+    "MB": 1024**2,
+    "GB": 1024**3,
+    "TB": 1024**4,
+}
+
+# The most often a transfer's progress is reported while it runs. unison
+# rewrites its progress line many times a second; a consumer showing "12 of 17
+# MB" wants it current, not every tick, and every event costs a log line.
+_PROGRESS_REPORT_INTERVAL_SECONDS: Final[float] = 1.0
+
+
+@pure
+def parse_transfer_progress(segment: str) -> "TransferProgress | None":
+    """The bytes done and total in one of unison's progress lines, or None.
+
+    Returns None for every other line, which is nearly all of them.
+    """
+    match = _UNISON_PROGRESS_PATTERN.search(segment)
+    if match is None:
+        return None
+    done_text, done_unit, total_text, total_unit = match.groups()
+    done_scale = _IEC_MULTIPLIER.get(done_unit)
+    total_scale = _IEC_MULTIPLIER.get(total_unit)
+    if done_scale is None or total_scale is None:
+        return None
+    return TransferProgress(
+        bytes_done=int(float(done_text) * done_scale),
+        bytes_total=int(float(total_text) * total_scale),
+    )
+
+
+class TransferProgress(FrozenModel):
+    """How far through the current transfer unison says it is."""
+
+    bytes_done: int = Field(frozen=True, description="Bytes carried across so far in this transfer")
+    bytes_total: int = Field(frozen=True, description="Bytes this transfer set out to carry")
 
 
 class GitSyncAction(FrozenModel):
@@ -65,6 +145,24 @@ class UnisonSyncer(MutableModel):
     cg: ConcurrencyGroup = Field(frozen=True, description="Concurrency group for managing the unison process")
     source_root: UnisonRoot = Field(frozen=True, description="Source replica to sync from (local path or ssh:// root)")
     target_root: UnisonRoot = Field(frozen=True, description="Target replica to sync to (local path or ssh:// root)")
+    is_ignoring_archives: bool = Field(
+        default=False,
+        frozen=True,
+        description=(
+            "Start as though these two paths had never been paired, for a caller that just "
+            "created one of them and so knows any archive describes a directory that is gone"
+        ),
+    )
+    is_syncing_links: bool = Field(
+        default=True,
+        frozen=True,
+        description=(
+            "Whether symbolic links inside the replicas are carried across. Turned off by a "
+            "caller whose two sides are different machines, where a link means different things "
+            "on each: an absolute target names a path that need not exist on the other side, and "
+            "a relative one can point out of the replica, where neither side agrees what it reaches"
+        ),
+    )
     ssh_wrapper_path: Path | None = Field(
         frozen=True,
         default=None,
@@ -93,8 +191,16 @@ class UnisonSyncer(MutableModel):
     include_patterns: tuple[str, ...] = Field(
         frozen=True,
         default=(),
-        description="Glob patterns to include in sync",
+        description="Paths to restrict the sync to, passed as unison's -path",
     )
+    on_transfer_change: TransferCallback | None = Field(
+        frozen=True,
+        default=None,
+        description="Called with True when unison starts moving bytes and False when it settles again",
+    )
+    _is_transferring: bool = PrivateAttr(default=False)
+    _progress: "TransferProgress | None" = PrivateAttr(default=None)
+    _progress_reported_at: float = PrivateAttr(default=0.0)
     _running_process: RunningProcess | None = PrivateAttr(default=None)
     _started_event: threading.Event = PrivateAttr(default_factory=threading.Event)
 
@@ -104,17 +210,33 @@ class UnisonSyncer(MutableModel):
         """Build the unison command line arguments."""
         source_arg = self.source_root.as_root_arg()
         target_arg = self.target_root.as_root_arg()
+        # A sync restricted to particular paths has to poll: unison-fsmonitor
+        # cannot watch a replica narrowed by ``-path`` and fails every event it
+        # sees, so watch mode would sit there propagating nothing.
+        repeat_mode = "watch" if not self.include_patterns else str(_PATH_RESTRICTED_POLL_SECONDS)
         cmd = [
             "unison",
             source_arg,
             target_arg,
             "-repeat",
-            "watch",
+            repeat_mode,
             "-auto",
             "-batch",
-            "-ignore",
-            "Name .git",
         ]
+        if not self.is_syncing_links:
+            # Skipped on both sides rather than carried across. unison passes
+            # them over without counting them as failures.
+            cmd.extend(["-links", "false"])
+        # A caller that just created one of these directories knows there is no
+        # shared history to reason from, and must say so: unison would otherwise
+        # load an archive from a previous pairing of the same two paths, see a
+        # replica that used to hold files and now holds none, and refuse to run
+        # at all rather than propagate what looks like a mass deletion. Telling
+        # it to start fresh is what makes re-pairing an emptied directory work;
+        # the alternative it offers -- turning off that safety check -- would
+        # let it delete the other replica instead.
+        if self.is_ignoring_archives:
+            cmd.append("-ignorearchives")
 
         # Reaching a remote replica needs both: -sshcmd decides how the connection is
         # made (the ssh:// root syntax has nowhere to put a port or a key), and
@@ -151,7 +273,7 @@ class UnisonSyncer(MutableModel):
         for pattern in self.exclude_patterns:
             cmd.extend(["-ignore", f"Name {pattern}"])
 
-        # Add include patterns
+        # Restrict the sync to particular paths (see repeat_mode above)
         for pattern in self.include_patterns:
             cmd.extend(["-path", pattern])
 
@@ -161,10 +283,70 @@ class UnisonSyncer(MutableModel):
         """Handle a line of output from the unison process.
 
         Sets the _started_event on first output, which signals that unison has
-        actually initialized (not just that the OS process was spawned).
+        actually initialized (not just that the OS process was spawned), and
+        tracks whether it is currently moving bytes.
         """
-        logger.debug("unison: {}", line.rstrip())
+        stripped = line.rstrip()
+        logger.debug("unison: {}", stripped)
         self._started_event.set()
+        # unison rewrites one terminal line to animate its progress, so a single
+        # "line" of output can carry several states separated by carriage
+        # returns. Splitting on them is what makes the newest one visible;
+        # without it the whole run looks like one unparsable line.
+        for segment in stripped.split("\r"):
+            self._note_transfer_state(segment)
+
+    def _note_transfer_state(self, line: str) -> None:
+        """Flip the transferring flag on unison's own progress narration.
+
+        Only a change is reported: unison prints a line per item copied, and a
+        consumer wants the edges, not one event per file.
+        """
+        progress = parse_transfer_progress(line)
+        if progress is not None:
+            self._progress = progress
+            # A transfer whose first news is a progress line is under way even
+            # if the line that says so was swallowed by a carriage return.
+            self._report_progress(is_transferring=True)
+            return
+        if any(marker in line for marker in _UNISON_TRANSFER_STARTED):
+            is_transferring = True
+        elif any(marker in line for marker in _UNISON_TRANSFER_FINISHED):
+            is_transferring = False
+        else:
+            return
+        if is_transferring == self._is_transferring:
+            return
+        if not is_transferring:
+            # Nothing outstanding once it settles, and a stale "12 of 17 MB"
+            # beside a finished sync reads as a transfer that stopped halfway.
+            self._progress = None
+        self._is_transferring = is_transferring
+        self._notify(is_transferring)
+
+    def _report_progress(self, is_transferring: bool) -> None:
+        """Pass on a progress update, at most once an interval while nothing else changed.
+
+        An edge always goes through; the ticks between are throttled, because
+        unison rewrites its progress many times a second and every one of them
+        would otherwise become an event and a log line.
+        """
+        is_edge = is_transferring != self._is_transferring
+        now = time.monotonic()
+        if not is_edge and now - self._progress_reported_at < _PROGRESS_REPORT_INTERVAL_SECONDS:
+            return
+        self._progress_reported_at = now
+        self._is_transferring = is_transferring
+        self._notify(is_transferring)
+
+    def _notify(self, is_transferring: bool) -> None:
+        if self.on_transfer_change is not None:
+            self.on_transfer_change(is_transferring, self._progress)
+
+    @property
+    def is_transferring(self) -> bool:
+        """Whether unison is moving bytes right now, rather than sitting idle."""
+        return self._is_transferring
 
     def start(self) -> None:
         """Start the unison sync process."""
@@ -491,7 +673,7 @@ def _remote_unison_transport(
 
 @contextmanager
 def pair_files(
-    agent: AgentInterface,
+    agent: AgentInterface | None,
     host: OnlineHostInterface,
     agent_path: Path,
     local_path: Path,
@@ -502,8 +684,11 @@ def pair_files(
     exclude_patterns: tuple[str, ...],
     include_patterns: tuple[str, ...],
     cg: ConcurrencyGroup,
+    is_ignoring_archives: bool = False,
+    is_syncing_links: bool = True,
+    on_transfer_change: TransferCallback | None = None,
 ) -> Iterator[UnisonSyncer]:
-    """Start continuous file synchronization between agent and local directory.
+    """Start continuous file synchronization between an agent and a local directory.
 
     This function first synchronizes git state if both paths are git repositories,
     then starts a unison process for continuous file synchronization.
@@ -515,6 +700,10 @@ def pair_files(
     The returned context manager yields a UnisonSyncer that can be used to
     programmatically stop the sync. The sync is automatically stopped when
     the context manager exits.
+
+    ``agent`` is needed only to synchronize git state, so it may be None when
+    ``is_require_git`` is False -- which is what lets a caller pair with a
+    directory on a host without naming an agent that lives on it.
     """
     require_unison()
 
@@ -528,9 +717,9 @@ def pair_files(
     if not local_path.is_dir():
         raise MngrError(f"Local directory does not exist: {local_path}")
 
-    # Validate agent and local are different directories. Only meaningful when the
-    # agent is on this machine -- an identical path on another host is a different
-    # directory.
+    # Validate agent and local are different directories. Only meaningful when
+    # the agent is on this machine -- an identical path on another host is a
+    # different directory.
     if host.is_local and agent_path.resolve() == local_path.resolve():
         raise MngrError(
             f"Agent and local are the same directory: {agent_path.resolve()}. "
@@ -543,6 +732,8 @@ def pair_files(
     agent_is_git = agent_git.is_git_repository(agent_path)
     local_is_git = local_git.is_git_repository(local_path)
 
+    if is_require_git and agent is None:
+        raise MngrError("Git sync needs an agent to sync with, and none was given.")
     if is_require_git and not (agent_is_git and local_is_git):
         missing = []
         if not agent_is_git:
@@ -562,7 +753,7 @@ def pair_files(
     with _remote_unison_transport(endpoint, host, cg) as (ssh_wrapper_path, remote_unison_path):
         # Determine and perform git sync (skip when --no-require-git is set,
         # since the user explicitly opted out of git-based behavior)
-        if is_require_git and agent_is_git and local_is_git:
+        if is_require_git and agent is not None and agent_is_git and local_is_git:
             git_action = determine_git_sync_actions(agent_path, local_path, host, cg)
             if git_action is not None and (git_action.agent_is_ahead or git_action.local_is_ahead):
                 logger.info(
@@ -579,15 +770,25 @@ def pair_files(
                     cg=cg,
                 )
 
+        # Git-reconciling mode owns ``.git`` through the pass above, so unison
+        # must keep out of it: the two writing to one repository would undo each
+        # other. A caller that opted out of that pass decides for itself, and
+        # asks with ``--exclude .git`` if it wants the same thing -- which is
+        # not a foregone conclusion, since a folder that is not a repository has
+        # no ``.git`` to argue about.
+        git_exclusions = (_GIT_DIRECTORY_NAME,) if is_require_git else ()
         syncer = UnisonSyncer(
             source_root=UnisonRoot(path=agent_path, ssh=endpoint),
             target_root=UnisonRoot(path=local_path),
+            is_ignoring_archives=is_ignoring_archives,
+            is_syncing_links=is_syncing_links,
             ssh_wrapper_path=ssh_wrapper_path,
             remote_unison_path=remote_unison_path,
             sync_direction=sync_direction,
             conflict_mode=conflict_mode,
-            exclude_patterns=exclude_patterns,
+            exclude_patterns=(*git_exclusions, *exclude_patterns),
             include_patterns=include_patterns,
+            on_transfer_change=on_transfer_change,
             cg=cg,
         )
 

@@ -7,16 +7,26 @@ from typing import Any
 
 import pytest
 from flask.testing import FlaskClient
+from pydantic import ConfigDict
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
+from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
+from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
+from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
@@ -29,6 +39,7 @@ from imbue.minds.desktop_client.testing import create_accounts_permission_reques
 from imbue.minds.desktop_client.testing import create_file_sharing_permission_request
 from imbue.minds.desktop_client.testing import create_predefined_permission_request
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
+from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -41,6 +52,8 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 
 _ACCOUNT: str = "alice@example.com"
+# Generous: the stand-in mngr has to be spawned and answer before this elapses.
+_START_TIMEOUT_SECONDS: float = 20.0
 _WORKSPACE_NAME: str = "My Machine"
 _SHARED_PATH_PERMISSION: str = "minds-file-server-read-/Users/me/notes"
 # A ``latchkey-self`` name this screen does not own; every self-toggle write
@@ -115,6 +128,8 @@ def _build_client(
     inbox: StaticPendingRequests | None = None,
     has_handler: bool = True,
     host_by_agent: dict[str, str] | None = None,
+    folder_sync_manager: FolderSyncManager | None = None,
+    machine_operator: MachineOperator | None = None,
 ) -> FlaskClient:
     resolver = _WorkspaceResolver(
         url_by_agent_and_service={},
@@ -130,8 +145,44 @@ def _build_client(
         backend_resolver=resolver,
         request_event_handlers=handlers,
         pending_requests=inbox,
+        folder_sync_manager=folder_sync_manager,
+        machine_operator=machine_operator,
     )
     return client
+
+
+class _RecordingMachineOperator(MachineOperator):
+    """A machine operator that records what it was told to carry, and carries nothing.
+
+    The push to a workspace's machine is the half of a permissions write that
+    nothing else here can see: this computer's copy looks right either way, and
+    the difference only shows on the next read, when the machine's policy is
+    adopted back over it.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
+
+    pushed_agent_ids: list[str] = Field(default_factory=list, description="Workspaces whose policy was pushed")
+    refreshed_agent_ids: list[str] = Field(
+        default_factory=list, description="Workspaces whose machine was read back, one SSH round trip each"
+    )
+
+    def push_permissions(self, workspace_agent_id: str) -> None:
+        self.pushed_agent_ids.append(workspace_agent_id)
+
+    def refresh(self, workspace_agent_id: str) -> None:
+        self.refreshed_agent_ids.append(workspace_agent_id)
+
+
+def _recording_operator(tmp_path: Path, latchkey: Latchkey) -> _RecordingMachineOperator:
+    """An operator whose machine access is never opened, because nothing here reaches one."""
+    return _RecordingMachineOperator(
+        access=MachineAccess(
+            latchkey=latchkey,
+            concurrency_group=ConcurrencyGroup(name="test-machine-access"),
+            backend_resolver=MngrCliBackendResolver(),
+        )
+    )
 
 
 def _latchkey(tmp_path: Path, accounts_by_service: dict[str, list[str]] | None = None) -> FakeAccountsLatchkey:
@@ -154,19 +205,24 @@ def _slack_toggles(payload: dict[str, Any]) -> dict[str, bool]:
     }
 
 
-# Every route of this area, with a body its own validator accepts, so one table
-# can walk the guards they all share. Kept beside the routes rather than in each
-# test, since a route registered without the prelude is exactly what this
-# catches.
+# Every write route this module registers, with a body its own validator
+# accepts, so one table can walk the guards they all share. Written as the
+# whole sub-path under the workspace, because this module serves two resources
+# -- the grants under ``permissions/`` and the three sync routes under
+# ``folder-syncs/`` -- and both are registered by the same function, so both
+# have to be guarded. A route registered without the prelude is exactly what
+# this catches.
 _WRITE_ROUTES: tuple[tuple[str, dict[str, object]], ...] = (
     (
-        "connector-toggle",
+        "permissions/connector-toggle",
         {"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-read", "enabled": True},
     ),
-    ("self-toggle", {"permission": _SHARED_PATH_PERMISSION, "enabled": False}),
-    ("connector-revoke-all", {"service_name": "slack", "account": _ACCOUNT}),
-    ("connector-disconnect", {"service_name": "slack", "account": _ACCOUNT}),
-    ("connect-credentials", {"service_name": "aws", "value_by_parameter_name": _AWS_CREDENTIALS}),
+    ("permissions/self-toggle", {"permission": _SHARED_PATH_PERMISSION, "enabled": False}),
+    ("permissions/connector-revoke-all", {"service_name": "slack", "account": _ACCOUNT}),
+    ("permissions/connector-disconnect", {"service_name": "slack", "account": _ACCOUNT}),
+    ("permissions/connect-credentials", {"service_name": "aws", "value_by_parameter_name": _AWS_CREDENTIALS}),
+    ("folder-syncs/toggle", {"path": "~/notes", "enabled": True}),
+    ("folder-syncs/discard-copy", {"path": "~/notes"}),
 )
 
 
@@ -176,7 +232,7 @@ def test_writes_require_authentication(tmp_path: Path, path: str, body: dict[str
     latchkey = _latchkey(tmp_path)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, is_authenticated=False)
 
-    response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/{path}", json=body)
+    response = client.post(f"/ui/api/workspaces/{agent_id}/{path}", json=body)
 
     assert response.status_code == 401
     # Nothing reached latchkey either -- a 401 that still ran the write would be
@@ -201,7 +257,7 @@ def test_writes_reject_a_body_that_is_not_a_json_object(tmp_path: Path, path: st
     latchkey = _latchkey(tmp_path)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
 
-    response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/{path}", json=["not", "an", "object"])
+    response = client.post(f"/ui/api/workspaces/{agent_id}/{path}", json=["not", "an", "object"])
 
     assert response.status_code == 400
     assert json.loads(response.data) == {"error": "Invalid JSON body"}
@@ -215,7 +271,7 @@ def test_writes_reject_a_body_missing_its_fields(tmp_path: Path, path: str) -> N
     latchkey = _latchkey(tmp_path)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
 
-    response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/{path}", json={})
+    response = client.post(f"/ui/api/workspaces/{agent_id}/{path}", json={})
 
     assert response.status_code == 400
     assert latchkey.auth_set_calls == []
@@ -384,9 +440,8 @@ def test_self_toggle_flips_a_shared_path_and_preserves_unrelated_names(tmp_path:
 
     assert response.status_code == 200
     payload = json.loads(response.data)
-    assert [(t["permission"], t["is_granted"], t["can_enable"]) for t in payload["file_sharing_toggles"]] == [
-        (_SHARED_PATH_PERMISSION, False, True)
-    ]
+    # Revoked paths leave the list entirely: this pane shows what is shared.
+    assert payload["shared_paths"] == []
     assert load_permissions(permissions_path).rules == ({SELF_SCOPE: [_BASELINE_PERMISSION]},)
 
     response = client.post(
@@ -395,7 +450,7 @@ def test_self_toggle_flips_a_shared_path_and_preserves_unrelated_names(tmp_path:
     )
 
     assert response.status_code == 200
-    assert json.loads(response.data)["file_sharing_toggles"][0]["is_granted"] is True
+    assert json.loads(response.data)["shared_paths"][0]["path"] == "/Users/me/notes"
     assert load_permissions(permissions_path).rules == ({SELF_SCOPE: [_BASELINE_PERMISSION, _SHARED_PATH_PERMISSION]},)
 
 
@@ -777,7 +832,7 @@ def test_workspace_permissions_degrades_when_the_gateway_is_unreachable(tmp_path
     assert payload["host_id"] == ""
     assert payload["connections"] == []
     assert payload["available_connections"] == []
-    assert payload["file_sharing_toggles"] == []
+    assert payload["shared_paths"] == []
     assert payload["workspace_toggles"] == []
 
 
@@ -946,6 +1001,395 @@ def test_workspace_permissions_rejects_a_malformed_workspace_id(tmp_path: Path) 
     response = client.get("/ui/api/workspaces/not-an-agent-id/permissions")
 
     assert response.status_code == 404
+
+
+def _seed_shared_path_grant(tmp_path: Path, latchkey: FakeAccountsLatchkey, host_id: HostId, path: str) -> None:
+    """Give the machine one granted shared path, so its row is in the payload."""
+    permission = f"minds-file-server-read-{path}"
+    save_permissions(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        LatchkeyPermissionsConfig(rules=({SELF_SCOPE: [permission]},), schemas={permission: {"type": "object"}}),
+    )
+
+
+def _folder_sync_manager(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> FolderSyncManager:
+    """A manager whose ``mngr`` is the test stand-in, rooted at ``tmp_path``."""
+    return FolderSyncManager(
+        concurrency_group=root_concurrency_group,
+        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
+        mngr_host_dir=tmp_path / ".mngr",
+        home_dir=tmp_path,
+        device_id="host-0f0e0d0c0b0a09080706050403020100",
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={str(agent_id): {}}),
+        store=FolderSyncStore(records_dir=tmp_path / "folder_syncs"),
+    )
+
+
+def _shared_path_row(payload: dict[str, Any], path: str) -> dict[str, Any]:
+    return next(row for row in payload["shared_paths"] if row["path"] == path)
+
+
+def test_sync_is_reported_unsupported_when_the_build_cannot_run_one(tmp_path: Path) -> None:
+    """The pane has to tell "cannot sync here" apart from "not synced"."""
+    agent_id, host_id = AgentId(), HostId()
+    client = _build_client(tmp_path, _latchkey(tmp_path), (agent_id,), host_id)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+
+    assert payload["is_sync_supported"] is False
+
+
+def test_turning_sync_on_answers_with_the_row_carrying_its_sync(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    _seed_shared_path_grant(tmp_path, latchkey, host_id, str(shared))
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(shared), "enabled": True, "conflict": "WORKSPACE"},
+    )
+
+    assert response.status_code == 200
+    # The row appears with the response; bringing the sync up is asynchronous,
+    # so how far along it is by the time this is read is a race the stand-in
+    # mngr -- which answers instantly -- can and does win. That it is one of
+    # the states a sync on its way up can be in is the part that is true every
+    # time; that it has not finished yet is not.
+    assert _shared_path_row(json.loads(response.data), str(shared))["sync"]["state"] in (
+        "STARTING",
+        "SYNCING",
+        "SYNCED",
+    )
+
+    manager.wait_until_started(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+    assert payload["is_sync_supported"] is True
+    row = _shared_path_row(payload, str(shared))
+    assert row["sync"]["state"] == "SYNCED"
+    # Derived from the grant, which is read-only here, not chosen separately.
+    assert row["sync"]["direction"] == "TO_WORKSPACE"
+    assert row["sync"]["workspace_path"] == f"~/synced_folders/host-0f0e0d0c0b0a09080706050403020100{shared}"
+    assert row["path_label"] == "~/notes"
+    manager.stop_all()
+
+
+def test_turning_sync_off_clears_it_from_the_row(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    _seed_shared_path_grant(tmp_path, latchkey, host_id, str(shared))
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager)
+    client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(shared), "enabled": True},
+    )
+    manager.wait_until_started(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(shared), "enabled": False},
+    )
+
+    assert response.status_code == 200
+    # The click records where the folder should end up and returns, so the answer
+    # reports the destination rather than waiting for the move to finish.
+    assert _shared_path_row(json.loads(response.data), str(shared))["sync"]["activity"] == "INACTIVE"
+    assert manager.wait_until_settled(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+
+
+def test_syncing_a_folder_that_is_not_there_is_refused(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A sanity check, not a perimeter.
+
+    The route does not confine a sync to the folders a share may use. That
+    check was there and has gone: the caller it would most need to police is
+    ``restore_all``, reading a file that sits beside this app's signing key and
+    latchkey credentials, so it stopped nobody while implying a boundary that
+    does not exist. What is left is what the next step needs.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    client = _build_client(tmp_path, _latchkey(tmp_path), (agent_id,), host_id, folder_sync_manager=manager)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(tmp_path / "not-there"), "enabled": True},
+    )
+
+    assert response.status_code == 400
+    assert "nothing at" in json.loads(response.data)["error"]
+    assert not (tmp_path / "argv.json").exists()
+
+
+def test_sharing_a_new_path_files_the_grant_against_the_workspaces_own_file(tmp_path: Path) -> None:
+    """Not Minds' own permissions file -- a file-sharing rule there wedges the gateway."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    shared = tmp_path / "pictures"
+    shared.mkdir()
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path",
+        json={"path": str(shared), "access": "WRITE"},
+    )
+
+    assert response.status_code == 200
+    assert _shared_path_row(json.loads(response.data), str(shared))["access"] == "WRITE"
+    granted = [name for rule in load_permissions(permissions_path).rules for name in rule.get(SELF_SCOPE, [])]
+    assert f"minds-file-server-write-{shared}" in granted
+
+
+def test_sharing_a_path_hands_the_grant_to_the_workspaces_own_machine(tmp_path: Path) -> None:
+    """Otherwise the next read adopts the machine's policy back over it and the row vanishes.
+
+    The gateway splices a new grant into this computer's copy only. A remote
+    workspace's machine enforces its own, and opening the pane reads that back
+    over this one -- so a grant the machine never hears about survives exactly
+    until the user looks at it again.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    operator = _recording_operator(tmp_path, latchkey)
+    shared = tmp_path / "pictures"
+    shared.mkdir()
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path",
+        json={"path": str(shared), "access": "READ"},
+    )
+
+    assert response.status_code == 200
+    # READ is what the Add buttons send, and it is the case that used to be
+    # missed: its only other write is a revoke of a grant that was never there,
+    # and a no-op flip returns without pushing anything.
+    assert operator.pushed_agent_ids == [str(agent_id)]
+
+
+def test_the_folder_sync_poll_never_touches_the_workspaces_machine(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """The pane polls this every two seconds; a machine read there costs a round trip per poll.
+
+    Everything it answers with is already in this process, so the operator --
+    which is what reaches the machine -- must be left alone entirely.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    operator = _recording_operator(tmp_path, latchkey)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    _seed_shared_path_grant(tmp_path, latchkey, host_id, str(shared))
+    client = _build_client(
+        tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager, machine_operator=operator
+    )
+
+    response = client.get(f"/ui/api/workspaces/{agent_id}/folder-syncs")
+
+    assert response.status_code == 200
+    assert "rows" in json.loads(response.data)
+    assert operator.refreshed_agent_ids == []
+
+
+def test_the_folder_sync_poll_reports_a_running_sync(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """What the poll exists for: the state a sync reached after the pane was drawn."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    _seed_shared_path_grant(tmp_path, latchkey, host_id, str(shared))
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager)
+    client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(shared), "enabled": True},
+    )
+    manager.wait_until_started(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/folder-syncs").data)
+
+    row = next(entry for entry in payload["rows"] if entry["path"] == str(shared))
+    assert row["sync"]["state"] == "SYNCED"
+    manager.stop_all()
+
+
+def test_narrowing_access_to_read_drops_the_wider_grant(tmp_path: Path) -> None:
+    """Otherwise the agent keeps the write it was just told it no longer has."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    write_name = f"minds-file-server-write-{shared}"
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({SELF_SCOPE: [write_name]},), schemas={write_name: {"type": "object"}}),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path",
+        json={"path": str(shared), "access": "READ"},
+    )
+
+    assert response.status_code == 200
+    assert _shared_path_row(json.loads(response.data), str(shared))["access"] == "READ"
+    granted = [name for rule in load_permissions(permissions_path).rules for name in rule.get(SELF_SCOPE, [])]
+    assert write_name not in granted
+
+
+def test_removing_a_shared_path_drops_every_access_mode(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    read_name = "minds-file-server-read-/Users/me/notes"
+    write_name = "minds-file-server-write-/Users/me/notes"
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: [_BASELINE_PERMISSION, read_name, write_name]},),
+            schemas={read_name: {"type": "object"}, write_name: {"type": "object"}},
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path-remove",
+        json={"path": "/Users/me/notes"},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["shared_paths"] == []
+    # The unrelated baseline name is untouched, as with every other write here.
+    assert load_permissions(permissions_path).rules == ({SELF_SCOPE: [_BASELINE_PERMISSION]},)
+
+
+def test_a_path_held_at_both_access_modes_is_one_row_showing_the_wider(tmp_path: Path) -> None:
+    """WRITE already implies READ, so two grants are still one thing the user shared."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    read_name = "minds-file-server-read-/Users/me/notes"
+    write_name = "minds-file-server-write-/Users/me/notes"
+    save_permissions(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: [read_name, write_name]},),
+            schemas={read_name: {"type": "object"}, write_name: {"type": "object"}},
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+
+    assert len(payload["shared_paths"]) == 1
+    assert payload["shared_paths"][0]["access"] == "WRITE"
+
+
+def test_a_folder_inside_a_synced_one_is_offered_with_the_reason_it_cannot_sync(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """End to end: the manager's refusal has to reach the row, not just exist."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    outer = tmp_path / "work"
+    inner = outer / "subfolder"
+    inner.mkdir(parents=True)
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    permissions = tuple(f"minds-file-server-read-{path}" for path in (str(outer), str(inner)))
+    save_permissions(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        LatchkeyPermissionsConfig(
+            rules=({SELF_SCOPE: list(permissions)},),
+            schemas={permission: {"type": "object"} for permission in permissions},
+        ),
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager)
+    client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(outer), "enabled": True},
+    )
+    manager.wait_until_started(str(agent_id), str(outer), _START_TIMEOUT_SECONDS)
+
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+
+    inner_row = _shared_path_row(payload, str(inner))
+    assert "one folder is inside the other" in inner_row["sync_unavailable_reason"]
+
+    # And still when the inner folder has a record of its own from an earlier
+    # session -- a copy it was told to remove, say. Having been synced before
+    # says nothing about whether it may be synced now.
+    assert manager.store is not None
+    manager.store.remember(
+        FolderSyncRecord(
+            agent_id=str(agent_id),
+            local_path=str(inner),
+            direction=FolderSyncDirection.TO_WORKSPACE,
+            conflict=FolderSyncConflict.NEWER,
+            device_id=manager.device_id,
+            activity=FolderSyncActivity.DISCARDED,
+        )
+    )
+    payload = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+    assert "one folder is inside the other" in _shared_path_row(payload, str(inner))["sync_unavailable_reason"]
+    # And the folder that is syncing is still offered.
+    assert _shared_path_row(payload, str(outer))["sync_unavailable_reason"] == ""
+    manager.stop_all()
+
+
+def test_removing_a_shared_path_stops_any_sync_on_it_and_deletes_the_copy(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """A sync outliving its grant would keep copying files the agent may no longer ask for.
+
+    The copy goes with it rather than being set aside: with the path gone there
+    is no row left that could ever offer to delete it.
+    """
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    shared = tmp_path / "notes"
+    shared.mkdir()
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    _seed_shared_path_grant(tmp_path, latchkey, host_id, str(shared))
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, folder_sync_manager=manager)
+    client.post(
+        f"/ui/api/workspaces/{agent_id}/folder-syncs/toggle",
+        json={"path": str(shared), "enabled": True},
+    )
+    manager.wait_until_started(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+    assert manager.status_for_path(str(agent_id), str(shared)) is not None
+
+    client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/shared-path-remove",
+        json={"path": str(shared)},
+    )
+
+    assert manager.wait_until_settled(str(agent_id), str(shared), _START_TIMEOUT_SECONDS)
+    assert manager.desired_activity_for(str(agent_id), str(shared)) == FolderSyncActivity.DISCARDED
 
 
 def test_connect_browser_signs_in_and_answers_with_the_refreshed_pane(tmp_path: Path) -> None:
