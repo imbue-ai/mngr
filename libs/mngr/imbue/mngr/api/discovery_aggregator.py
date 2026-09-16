@@ -5,6 +5,7 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discovery_events import AgentDestroyedEvent
@@ -25,6 +26,7 @@ from imbue.mngr.api.discovery_reconciliation import should_apply_snapshot_item
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 
 
@@ -286,8 +288,17 @@ class DiscoveryStateAggregator(MutableModel):
         host_id_str = str(event.host_id)
         instance_keys = [AgentInstanceKey.build(agent_id, event.host_id) for agent_id in event.agent_ids]
         with self._lock:
-            removed_host = frozenset({host_id_str}) if host_id_str in self._host_by_id else frozenset()
-            self._forget_host(host_id_str)
+            # Retained as a DESTROYED tombstone rather than forgotten: the event is
+            # the authoritative state, and a provider that persists destroyed host
+            # records re-lists the host in exactly this state on its next snapshot.
+            # The tombstone leaves the aggregator the way any host does: when the
+            # provider's next clean snapshot omits it.
+            known_host = self._host_by_id.get(host_id_str)
+            if known_host is not None:
+                self._host_by_id[host_id_str] = known_host.model_copy_update(
+                    to_update(known_host.field_ref().host_state, HostState.DESTROYED)
+                )
+                self._unknown_host_ids.discard(host_id_str)
             self._last_event_time_by_host_id[host_id_str] = event_at
             removed_agents: set[AgentInstanceKey] = set()
             for instance_key in instance_keys:
@@ -296,7 +307,7 @@ class DiscoveryStateAggregator(MutableModel):
                 self._forget_agent(instance_key)
                 self._last_event_time_by_agent_instance[instance_key] = event_at
             self._bump_last_event_at(event_at)
-            return AggregatorDelta(removed_host_ids=removed_host, removed_agent_instances=frozenset(removed_agents))
+            return AggregatorDelta(removed_agent_instances=frozenset(removed_agents))
 
     def _apply_discovery_error(self, event: DiscoveryErrorEvent) -> AggregatorDelta:
         event_at = parse_event_timestamp(event.timestamp)

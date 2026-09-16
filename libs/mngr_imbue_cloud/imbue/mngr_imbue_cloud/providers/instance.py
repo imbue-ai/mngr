@@ -57,6 +57,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -886,7 +887,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     # which dispatches to ``docker exec`` for a running container or to
     # ``docker cp`` (extracting host_dir to a tmp path) for a stopped one.
     # Either way we surface the container's actual state (RUNNING /
-    # STOPPED / CRASHED / PAUSED / DESTROYED) plus the host's data.json
+    # STOPPED / CRASHED / PAUSED, or FAILED for a missing container) plus the host's data.json
     # (friendly name, image, tags, agents). The cached raw output is then
     # consumed by ``get_host_and_agent_details`` without another SSH.
     #
@@ -940,6 +941,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         cg: ConcurrencyGroup,
         include_destroyed: bool = False,
     ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        """List every leased host, plus every host the lifecycle listing reports as not running, with their agents.
+
+        ``include_destroyed`` has nothing to filter here: a held lease is a live
+        resource whatever its container is doing, so no reading of one becomes
+        DESTROYED (a leased VM with no container is FAILED -- the lease outlives
+        it), and the lifecycle statuses map only to non-terminal states.
+        """
         leased = self._list_leased_hosts_cached()
         result: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
         # Each leased host needs its own outer-SSH round trip (connect + run the
@@ -958,15 +966,10 @@ class ImbueCloudProvider(BaseProviderInstance):
                     name=f"{type(self).__name__}-discover_outer_listing",
                     max_workers=min(len(leased), _DISCOVERY_MAX_WORKERS),
                 ) as executor:
-                    futures = [
-                        executor.submit(self._discover_one_leased_host, entry, include_destroyed, cache_lock)
-                        for entry in leased
-                    ]
+                    futures = [executor.submit(self._discover_one_leased_host, entry, cache_lock) for entry in leased]
                 for future in futures:
-                    pair = future.result()
-                    if pair is not None:
-                        host_ref, agent_refs = pair
-                        result[host_ref] = agent_refs
+                    host_ref, agent_refs = future.result()
+                    result[host_ref] = agent_refs
         # Non-running workspaces have no box to SSH: surface them from the
         # lifecycle listing alone, re-attaching the last-known agents so the
         # workspace keeps its labels (and its is_primary guard) while stopped.
@@ -988,17 +991,16 @@ class ImbueCloudProvider(BaseProviderInstance):
     def _discover_one_leased_host(
         self,
         entry: LeasedHostInfo,
-        include_destroyed: bool,
         cache_lock: Lock,
-    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]] | None:
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
         """Run one leased host's outer-SSH listing and shape it into a discovery result.
 
         Runs on a worker thread from ``discover_hosts_and_agents``'s fan-out.
         ``cache_lock`` guards ``self._listing_raw_cache`` (a plain dict shared
         across every in-flight host's thread); the sticky-identity and
         resolved-host-dir persistence calls need no lock of their own since
-        each writes a distinct per-host file. Returns ``None`` only for a
-        destroyed host when the caller doesn't want those included.
+        each writes a distinct per-host file. Every leased host is listed: a
+        held lease is a live resource whatever its container is doing.
         """
         host_id = HostId(entry.host_id)
         raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
@@ -1066,8 +1068,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         if isinstance(resolved_host_dir, str) and resolved_host_dir and raw.get("certified_data"):
             self._persist_resolved_host_dir(host_id, resolved_host_dir)
         host_state = derive_host_state_from_raw(raw)
-        if host_state == HostState.DESTROYED and not include_destroyed:
-            return None
         # ``entry.host_name`` is the canonical user-supplied name from the
         # connector. On-host certified data may lag (e.g. the bake's
         # initial value before a lease overwrites it), so the lease wins.
@@ -1705,18 +1705,32 @@ class ImbueCloudProvider(BaseProviderInstance):
         container's own sshd. When the per-host key is not on this machine
         (e.g. the host was leased elsewhere), the outer cannot be opened, so we
         cannot prove the container is down and report it as running -- preserving
-        the prior always-online behavior for that path. A container that no
-        longer exists (lease torn down out from under us) reports as not running.
+        the prior always-online behavior for that path. An outer that cannot be
+        reached (a stale host-key pin, a dead VM) is reported the same way and
+        for the same reason: its absence proves nothing about the container,
+        and a destroy's release goes through the connector regardless. A
+        container that no longer exists (lease torn down out from under us)
+        reports as not running.
         """
         private_key_path, _ = self._host_keypair_paths(host_id)
         if not private_key_path.exists():
             return True
-        with self.outer_host_for(host_id) as outer:
-            assert outer is not None
-            container_id = self._resolve_container_id_on_outer(outer, host_id)
-            if container_id is None:
-                return False
-            return docker_inspect_running(outer, container_id)
+        try:
+            with self.outer_host_for(host_id) as outer:
+                assert outer is not None
+                container_id = self._resolve_container_id_on_outer(outer, host_id)
+                if container_id is None:
+                    return False
+                return docker_inspect_running(outer, container_id)
+        except HostConnectionError as exc:
+            logger.warning(
+                "imbue_cloud[{}] outer SSH unreachable for host {}; cannot verify its container state, "
+                "reporting it as running: {}",
+                self.name,
+                host_id,
+                exc,
+            )
+            return True
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Build an OfflineHost from the connector's lease metadata.
@@ -2673,15 +2687,11 @@ class ImbueCloudProvider(BaseProviderInstance):
         failures: list[CleanupFailure] = []
         host_id = host.id if isinstance(host, HostInterface) else host
         leased = self._find_leased(host_id)
-        host_db_id: str | None = None
-        if isinstance(host, HostInterface):
-            host_db_id = self._resolve_host_db_id(host, host_id)
-        if host_db_id is None and leased is not None:
-            host_db_id = str(leased.host_db_id)
+        host_db_id = self._resolve_host_db_id(host, host_id)
 
-        if leased is None and host_db_id is None:
+        if host_db_id is None:
             logger.warning(
-                "destroy_host: no lease record for host {} (already released?); running local cleanup only.",
+                "destroy_host: connector has no record of host {} (already released?); running local cleanup only.",
                 host_id,
             )
             self._cleanup_local_host_state(host_id)
@@ -2720,30 +2730,29 @@ class ImbueCloudProvider(BaseProviderInstance):
                     exc,
                 )
 
-        if host_db_id is not None:
-            account = self._require_account()
-            token = self._get_access_token(account)
-            # release_host raises ImbueCloudConnectorError on failure (transport
-            # error or non-2xx, e.g. the synchronous release returning 5xx when
-            # the OVH cancel failed); the idempotent ``already_released`` case is
-            # a 2xx and returns normally, so any exception here means the paid
-            # lease is actually leaked. Record it as HOST_RESOURCE_REMAINS and
-            # return WITHOUT running local cleanup -- cleaning up here would make
-            # mngr "forget" a host that was never actually released (the old
-            # silent-orphan bug) and drop the local SSH keys needed to reach the
-            # still-running VPS.
-            try:
-                self.client.release_host(token, host_db_id)
-            except ImbueCloudConnectorError as exc:
-                logger.warning("Failed to release leased VPS for host {}: {}", host_id, exc)
-                failures.append(
-                    CleanupFailure(
-                        category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
-                        message=f"failed to release leased VPS for host {host_id}: {exc}",
-                        host_id=host_id,
-                    )
+        account = self._require_account()
+        token = self._get_access_token(account)
+        # release_host raises ImbueCloudConnectorError on failure (transport
+        # error or non-2xx, e.g. the synchronous release returning 5xx when
+        # the OVH cancel failed); the idempotent ``already_released`` case is
+        # a 2xx and returns normally, so any exception here means the paid
+        # lease is actually leaked. Record it as HOST_RESOURCE_REMAINS and
+        # return WITHOUT running local cleanup -- cleaning up here would make
+        # mngr "forget" a host that was never actually released (the old
+        # silent-orphan bug) and drop the local SSH keys needed to reach the
+        # still-running VPS.
+        try:
+            self.client.release_host(token, host_db_id)
+        except ImbueCloudConnectorError as exc:
+            logger.warning("Failed to release leased VPS for host {}: {}", host_id, exc)
+            failures.append(
+                CleanupFailure(
+                    category=CleanupFailureCategory.HOST_RESOURCE_REMAINS,
+                    message=f"failed to release leased VPS for host {host_id}: {exc}",
+                    host_id=host_id,
                 )
-                raise CleanupFailedGroup.from_failures(failures) from exc
+            )
+            raise CleanupFailedGroup.from_failures(failures) from exc
         self._cleanup_local_host_state(host_id)
         if failures:
             raise CleanupFailedGroup.from_failures(failures)
@@ -2754,11 +2763,19 @@ class ImbueCloudProvider(BaseProviderInstance):
         host: HostInterface | HostId,
         host_id: HostId,
     ) -> str | None:
-        """Find the lease's database id for a host, falling back to a discovery scan."""
+        """Find the connector row id for a host, or None when the connector does not know it.
+
+        A stopped (or stopping/starting) host holds its lease without a lease
+        entry -- those cover running hosts only -- so the full-lifecycle
+        listing is consulted too.
+        """
         if isinstance(host, ImbueCloudHost) and host.lease_db_id is not None:
             return host.lease_db_id
         leased = self._find_leased(host_id)
-        return str(leased.host_db_id) if leased is not None else None
+        if leased is not None:
+            return str(leased.host_db_id)
+        lifecycle_entry = self._find_workspace(host_id)
+        return str(lifecycle_entry.host_db_id) if lifecycle_entry is not None else None
 
     def _cleanup_local_host_state(self, host_id: HostId) -> None:
         host_state_dir = self._host_state_dir(host_id)

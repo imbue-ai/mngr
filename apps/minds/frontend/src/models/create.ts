@@ -58,8 +58,15 @@ export interface CreateFormDefaults {
   prefill: CreateRetryPrefill | null;
 }
 
+export interface OrphanedFailedDestroy {
+  agent_id: string;
+  name: string;
+  accent: string;
+}
+
 export interface LandingExtras {
   destroying_status_by_agent_id: Record<string, string>;
+  orphaned_failed_destroys: OrphanedFailedDestroy[];
   locked_account_emails: string[];
   is_discovery_complete: boolean;
   has_restorable_workspaces: boolean;

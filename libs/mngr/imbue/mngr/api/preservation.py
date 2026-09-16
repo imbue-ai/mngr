@@ -977,12 +977,23 @@ def preserve_host_agents_on_destroy(
     opts in (``items_for_agent`` returns items) is preserved straight off the
     volume via the same :func:`preserve_agent_data` used on the online path. A
     host with no readable volume has nothing to preserve and is skipped.
+
+    Best-effort: a host that cannot be reached to discover its agents is logged
+    and skipped, and nothing here may raise, because the hookspec's contract is
+    that a raise from ``on_before_host_destroy`` aborts the destroy -- which
+    would leave the host most in need of destroying undestroyable.
     """
     if not isinstance(host, HostFileReadInterface):
         logger.debug("Host {} is not readable (no volume); skipping agent preservation", host.id)
         return
 
-    for ref in host.discover_agents():
+    try:
+        refs = host.discover_agents()
+    except (MngrError, OSError) as e:
+        logger.warning("Could not discover agents on host {} to preserve their state: {}", host.id, e)
+        return
+
+    for ref in refs:
         if ref.agent_type != agent_type:
             continue
         items = items_for_agent(ref)

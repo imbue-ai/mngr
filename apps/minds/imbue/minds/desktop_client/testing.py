@@ -33,6 +33,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -393,6 +394,29 @@ def capture_error_logs() -> Iterator[list[str]]:
         yield records
     finally:
         loguru_logger.remove(sink_id)
+
+
+def write_dead_destroy_marker(
+    paths: InstallationPaths, agent_id: AgentId, host_id: HostId, exit_code: int | None = None
+) -> None:
+    """Create a destroying/<agent_id>/ dir whose wrapper pid is already dead.
+
+    Spawns and reaps a trivial child so its pid is reliably not alive, then
+    writes a legacy-shaped destroy marker (pid, host_id, log -- no ``provider``
+    file, which ``start_destroy`` also writes when discovery knows the owning
+    provider), so status reads take the legacy absence-equals-gone path.
+    ``exit_code`` is written the way the detached wrapper records it; None
+    leaves it absent, as for a marker from before it was recorded.
+    """
+    dir_path = paths.data_dir / "destroying" / str(agent_id)
+    dir_path.mkdir(parents=True)
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    (dir_path / "pid").write_text(f"{proc.pid}\n")
+    (dir_path / "host_id").write_text(f"{host_id}\n")
+    (dir_path / "output.log").write_text("done\n")
+    if exit_code is not None:
+        (dir_path / "exit_code").write_text(f"{exit_code}\n")
 
 
 def drain_ui_channel_frames(client_queue: "queue.Queue[str | None]") -> list[dict[str, Any]]:

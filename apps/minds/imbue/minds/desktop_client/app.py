@@ -1276,6 +1276,8 @@ def _build_workspace_list(
             "id": tile.agent_id,
             "name": tile.name,
             "accent": tile.accent,
+            # The row's remove-from-list control posts this id.
+            "host_id": tile.host_id,
             "is_remote": "true",
             "remote_kind": tile.kind.value,
             "location": tile.location,
@@ -1762,6 +1764,9 @@ def _derive_ui_workspaces_message(
         return UiWorkspacesMessage(
             workspaces=tuple(_ui_workspace_entry_from_legacy_dict(row) for row in rows),
             destroying_agent_ids=tuple(destroying_marker),
+            failed_destroy_agent_ids=tuple(
+                agent_id for agent_id, marker_status in destroying_marker.items() if marker_status == "failed"
+            ),
             restorable_workspace_ids=tuple(restorable_ids),
             remote_workspace_states=_build_remote_tile_states(backend_resolver, session_store),
         )

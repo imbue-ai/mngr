@@ -35,6 +35,7 @@ from imbue.mngr.api.preservation import write_preservation_manifest
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
@@ -46,6 +47,7 @@ from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostLocation
@@ -785,6 +787,35 @@ def test_manifest_written_by_a_newer_version_still_reads_and_is_never_written_ov
         preserve_host_agents_on_destroy(local_host, temp_mngr_ctx, AgentTypeName("codex"), _items_when_opted_in)
 
     assert json.loads(manifest_path.read_text()) == from_a_newer_version
+
+
+class _UnreachableHost(Host):
+    """Online host whose agent discovery cannot connect (e.g. a served host key that no longer matches its pin)."""
+
+    def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
+        raise HostConnectionError(
+            "Failed to connect to host: SSH host key error (Host key for 203.0.113.9 does not match.)"
+        )
+
+
+@pytest.mark.allow_warnings(match=r"Could not discover agents on host .* to preserve their state: .*does not match")
+def test_preserve_host_agents_on_destroy_tolerates_an_unreachable_host(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A host that cannot be reached is skipped with a warning; raising would abort the destroy."""
+    pyinfra_host = local_provider._create_local_pyinfra_host()
+    unreachable = _UnreachableHost(
+        id=local_provider.host_id,
+        host_name=HostName("unreachable"),
+        connector=PyinfraConnector(pyinfra_host),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+
+    preserve_host_agents_on_destroy(unreachable, temp_mngr_ctx, AgentTypeName("codex"), _items_when_opted_in)
+
+    assert not (Path(temp_mngr_ctx.config.default_host_dir) / "preserved").exists()
 
 
 def test_preserve_host_agents_on_destroy_skips_non_readable_host(

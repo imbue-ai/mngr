@@ -27,6 +27,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
+from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -46,6 +47,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.host_key_store import HostKeyOrigin
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
 from imbue.mngr.providers.ssh_utils import format_as_known_hosts_address
+from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.connector.client import ImbueCloudConnectorClient
 from imbue.mngr_imbue_cloud.data_types import LeaseAttributes
@@ -497,6 +499,43 @@ def test_get_host_returns_online_host_when_container_running(tmp_path: Path, tem
     host = provider.get_host(host_id)
 
     assert isinstance(host, Host)
+    assert host is built
+
+
+class _UnreachableOuter(_StubOuter):
+    """Outer whose SSH transport cannot be opened (e.g. the served host key no longer matches its pin)."""
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        raise HostConnectionError(
+            "Failed to connect to host: SSH host key error (Host key for 203.0.113.42 does not match.)"
+        )
+
+
+def test_get_host_reports_a_leased_host_whose_outer_is_unreachable_as_online(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """An unreachable outer proves nothing about the container, so the host resolves online.
+
+    Raising here made every operation on such a host fail at resolution --
+    including a destroy, whose release goes through the connector and never
+    needed the outer.
+    """
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    (tmp_path / "ssh_key").write_text("private-key")
+    built = ImbueCloudHost.model_construct()
+    provider = _make_provider(lease, _UnreachableOuter(), tmp_path, built, temp_mngr_ctx)
+
+    with allow_warnings(match=r"outer SSH unreachable for host .*reporting it as running"):
+        host = provider.get_host(host_id)
+
     assert host is built
 
 
@@ -1412,6 +1451,34 @@ def test_first_discovery_with_no_cache_falls_back_to_bare_lease_stub(temp_mngr_c
     assert "stale" not in agents[0].certified_data
 
 
+def test_leased_host_whose_container_is_missing_is_listed_as_failed_with_cached_agents(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A leased VM with no container still holds its paid lease, so discovery must keep listing it.
+
+    This is the state a destroy leaves behind when its data wipe ran but the lease
+    release failed. Reporting it DESTROYED (as the missing container used to) made
+    every consumer read the host as gone and the leaked lease vanished from view;
+    FAILED keeps it listed, terminal, and destroyable, with its last-known agents
+    re-attached so it keeps its labels.
+    """
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    provider = _make_sequenced_provider(
+        lease,
+        [(_raw_with_agents([primary]), None, False), ({"container_missing": True}, None, False)],
+        temp_mngr_ctx,
+    )
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert host_ref.host_state == HostState.FAILED
+    assert [agent.labels.get("is_primary") for agent in agents] == ["true"]
+    assert agents[0].certified_data.get("stale") is True
+
+
 def test_reattached_identity_flows_through_to_agent_details(temp_mngr_ctx: MngrContext) -> None:
     """The full round trip: a successful pass persists identity, an unreachable pass re-attaches it,
     and ``get_host_and_agent_details`` shapes the re-attached refs into AgentDetails that still carry
@@ -1993,3 +2060,62 @@ def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_service
     assert agents[0].labels == {"is_primary": "true"}
     # A stub is a live statement about the row, not a replayed cache entry.
     assert "stale" not in agents[0].certified_data
+
+
+# destroy_host on a workspace with no lease entry: a stopped workspace holds its
+# lease without appearing in the running-only lease listing.
+
+
+class _LifecycleReleaseProvider(_CannedLifecycleProvider):
+    """Canned-lifecycle provider stub that also answers the release path and records local cleanup."""
+
+    _cleanup_calls: list[HostId] = []
+
+    def _require_account(self, override: str | None = None) -> ImbueCloudAccount:
+        return ImbueCloudAccount("user@example.com")
+
+    def _get_access_token(self, account: ImbueCloudAccount) -> SecretStr:
+        return SecretStr("token")
+
+    def _cleanup_local_host_state(self, host_id: HostId) -> None:
+        self._cleanup_calls.append(host_id)
+
+
+def _make_lifecycle_release_provider(
+    temp_mngr_ctx: MngrContext, workspaces: list[WorkspaceInfo]
+) -> tuple[_LifecycleReleaseProvider, _RecordingReleaseClient]:
+    client = _RecordingReleaseClient()
+    provider = _LifecycleReleaseProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        client=client,
+        mngr_ctx=temp_mngr_ctx,
+        _workspaces=workspaces,
+        _cleanup_calls=[],
+    )
+    return provider, client
+
+
+def test_destroy_host_releases_the_lease_of_a_stopped_workspace(temp_mngr_ctx: MngrContext) -> None:
+    """The exact leaked-lease bug: a stopped workspace has no lease entry, and its destroy
+    used to run local cleanup only, leaving the row leased and counted against the quota."""
+    host_id = HostId.generate()
+    workspace = _make_workspace_info("stopped", with_placement=False)
+    stopped_workspace = workspace.model_copy_update(to_update(workspace.field_ref().host_id, str(host_id)))
+    provider, client = _make_lifecycle_release_provider(temp_mngr_ctx, [stopped_workspace])
+
+    provider.destroy_host(host_id)
+
+    assert client.release_calls == [str(stopped_workspace.host_db_id)]
+    assert provider._cleanup_calls == [host_id]
+
+
+def test_destroy_host_of_a_workspace_the_connector_does_not_know_runs_local_cleanup_only(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    host_id = HostId.generate()
+    provider, client = _make_lifecycle_release_provider(temp_mngr_ctx, [])
+
+    provider.destroy_host(host_id)
+
+    assert client.release_calls == []
+    assert provider._cleanup_calls == [host_id]

@@ -1516,6 +1516,15 @@ class _AuthErroringHost(Host):
         raise HostAuthenticationError("simulated auth error from test")
 
 
+class _ConnectionErroringHost(Host):
+    """Host subclass whose get_certified_data raises the generic HostConnectionError (e.g. a pinned-key mismatch)."""
+
+    def get_certified_data(self) -> CertifiedHostData:
+        raise HostConnectionError(
+            "Failed to connect to host: SSH host key error (Host key for 203.0.113.9 does not match.)"
+        )
+
+
 def _make_erroring_host(provider: LocalProviderInstance, host_cls: type[Host]) -> Host:
     """Create an instance of host_cls using the local provider's connector and ID."""
     pyinfra_host = provider._create_local_pyinfra_host()
@@ -1585,6 +1594,111 @@ def test_gc_single_host_work_dir_skips_host_auth_error(
 
     assert len(result.work_dirs_destroyed) == 0
     assert len(result.errors) == 0
+
+
+@pytest.mark.allow_warnings(match=r"Failed to connect to host .* for work dir GC: .*does not match")
+def test_gc_single_host_work_dir_records_an_unreachable_host_and_continues(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """A host whose connection fails for any other reason (a pinned host key that no longer
+    matches, here) is recorded as this host's failure under CONTINUE rather than escaping the
+    worker and aborting the whole sweep."""
+    erroring_host = _make_erroring_host(local_provider, _ConnectionErroringHost)
+    provider = _HostOfflineErrorProvider(
+        name=ProviderInstanceName("test-connection"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[erroring_host],
+    )
+    host_ref = DiscoveredHost(
+        host_id=erroring_host.id,
+        host_name=HostName(erroring_host.get_connector_host_name()),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    gc_work_dirs(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=[(provider, [host_ref])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        result=result,
+    )
+
+    assert result.work_dirs_destroyed == []
+    assert [(failure.category, failure.host_id) for failure in result.failures] == [
+        (CleanupFailureCategory.PROVIDER_INACCESSIBLE, erroring_host.id)
+    ]
+    assert "does not match" in result.failures[0].message
+
+
+class _ConnectionErroringGetHostProvider(MockProviderInstance):
+    """Provider whose host resolution itself fails to connect (a provider that probes the machine to resolve it)."""
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        raise HostConnectionError(
+            "Failed to connect to host: SSH host key error (Host key for 203.0.113.9 does not match.)"
+        )
+
+
+@pytest.mark.allow_warnings(match=r"Failed to connect to host .* for work dir GC: .*does not match")
+def test_gc_work_dirs_records_a_host_whose_resolution_cannot_connect_and_continues(
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    """The imbue_cloud shape: get_host probes the machine over SSH, so the connection failure
+    surfaces before any work-dir read. It must be recorded per host, not abort the sweep."""
+    provider = _ConnectionErroringGetHostProvider(
+        name=ProviderInstanceName("test-connection-get-host"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+    )
+    host_ref = DiscoveredHost(
+        host_id=HostId.generate(),
+        host_name=HostName("unreachable"),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    gc_work_dirs(
+        mngr_ctx=temp_mngr_ctx,
+        hosts_by_provider=[(provider, [host_ref])],
+        dry_run=False,
+        error_behavior=ErrorBehavior.CONTINUE,
+        result=result,
+    )
+
+    assert [(failure.category, failure.host_id) for failure in result.failures] == [
+        (CleanupFailureCategory.PROVIDER_INACCESSIBLE, host_ref.host_id)
+    ]
+
+
+def test_gc_single_host_work_dir_raises_for_an_unreachable_host_under_abort(
+    local_provider: LocalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+    temp_host_dir: Path,
+) -> None:
+    erroring_host = _make_erroring_host(local_provider, _ConnectionErroringHost)
+    provider = _HostOfflineErrorProvider(
+        name=ProviderInstanceName("test-connection-abort"),
+        host_dir=temp_host_dir,
+        mngr_ctx=temp_mngr_ctx,
+        mock_hosts=[erroring_host],
+    )
+    host_ref = DiscoveredHost(
+        host_id=erroring_host.id,
+        host_name=HostName(erroring_host.get_connector_host_name()),
+        provider_name=provider.name,
+        host_state=HostState.RUNNING,
+    )
+
+    result = GcResult()
+    with pytest.raises(HostConnectionError):
+        _gc_single_host_work_dir(host_ref, provider, ErrorBehavior.ABORT, False, result)
 
 
 # =========================================================================

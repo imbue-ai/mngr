@@ -40,6 +40,7 @@ from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import ErrorBehavior
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.git_utils import parse_worktree_git_file
@@ -226,7 +227,14 @@ def _gc_single_host_work_dir(
     dry_run: bool,
     result: GcResult,
 ) -> None:
-    host = provider_instance.get_host(host_ref.host_id)
+    # Resolving the host may itself connect to it (a provider that probes the
+    # machine to tell an online host from a stopped one), so it gets the same
+    # per-host handling as the reads below.
+    try:
+        host = provider_instance.get_host(host_ref.host_id)
+    except HostConnectionError as e:
+        _handle_host_connection_failure(host_ref.host_id, "work dir GC", e, error_behavior, result)
+        return
     if not isinstance(host, OnlineHostInterface):
         # Skip offline hosts - can't query them
         logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
@@ -234,10 +242,8 @@ def _gc_single_host_work_dir(
         # otherwise is online
         try:
             orphaned_dirs = _get_orphaned_work_dirs(host=host, provider_name=provider_instance.name)
-        except HostOfflineError:
-            logger.trace("Skipped work dir GC because host is offline", host_id=host.id)
-        except HostAuthenticationError:
-            logger.trace("Skipped work dir GC because host authentication failed", host_id=host.id)
+        except HostConnectionError as e:
+            _handle_host_connection_failure(host.id, "work dir GC", e, error_behavior, result)
         else:
             for work_dir_info in orphaned_dirs:
                 try:
@@ -261,10 +267,8 @@ def _gc_single_host_work_dir(
                 deletable_source_dirs, kept_source_dirs = _get_orphaned_source_dirs(
                     host=host, provider_name=provider_instance.name
                 )
-            except HostOfflineError:
-                logger.trace("Skipped source dir GC because host is offline", host_id=host.id)
-            except HostAuthenticationError:
-                logger.trace("Skipped source dir GC because host authentication failed", host_id=host.id)
+            except HostConnectionError as e:
+                _handle_host_connection_failure(host.id, "source dir GC", e, error_behavior, result)
             else:
                 for info in kept_source_dirs:
                     logger.warning(
@@ -793,6 +797,35 @@ def gc_provider_resources(
             _handle_error(error_msg, error_behavior, exc=e)
             continue
         result.provider_resources_destroyed.extend(reclaimed)
+
+
+def _handle_host_connection_failure(
+    host_id: HostId,
+    phase_description: str,
+    error: HostConnectionError,
+    error_behavior: ErrorBehavior,
+    result: GcResult,
+) -> None:
+    """Skip a host that is offline or refuses our credentials; record any other connection failure.
+
+    A host that cannot be reached for another reason (e.g. a served host key
+    that no longer matches its pin) is this host's failure alone: recorded
+    against it, and raised only under ABORT.
+    """
+    if isinstance(error, HostOfflineError):
+        logger.trace("Skipped {} because host is offline", phase_description, host_id=host_id)
+    elif isinstance(error, HostAuthenticationError):
+        logger.trace("Skipped {} because host authentication failed", phase_description, host_id=host_id)
+    else:
+        error_msg = f"Failed to connect to host {host_id} for {phase_description}: {error}"
+        result.failures.append(
+            CleanupFailure(
+                category=CleanupFailureCategory.PROVIDER_INACCESSIBLE,
+                message=error_msg,
+                host_id=host_id,
+            )
+        )
+        _handle_error(error_msg, error_behavior, exc=error)
 
 
 def _get_orphaned_work_dirs(host: OnlineHostInterface, provider_name: ProviderInstanceName) -> list[WorkDirInfo]:

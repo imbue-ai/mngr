@@ -9,17 +9,23 @@ from flask.testing import FlaskClient
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 
 def test_create_area_routes_require_a_session_cookie(tmp_path: Path) -> None:
@@ -116,6 +122,60 @@ def test_landing_extras_render_empty_state_for_a_minimal_app(tmp_path: Path) -> 
     assert payload["locked_account_emails"] == []
     assert isinstance(payload["is_discovery_complete"], bool)
     assert isinstance(payload["has_restorable_workspaces"], bool)
+
+
+def _landing_extras_with_failed_destroy(tmp_path: Path, is_workspace_still_active: bool) -> tuple[str, dict]:
+    """Landing extras for one workspace whose destroy exited non-zero; returns (agent id, payload)."""
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    write_dead_destroy_marker(paths, agent_id, HostId.generate(), exit_code=137)
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="half-destroyed",
+        color="#3c3d06",
+        is_cloud_row=False,
+    )
+    if not is_workspace_still_active:
+        # This device's record reconcile tombstones a record once discovery stops
+        # listing its host, which can happen before anyone looks at the failure.
+        assert session_store.record_store is not None
+        session_store.record_store.tombstone_record("user-1", "a@b.com", str(agent_id))
+    active_agents: dict[str, dict[str, str]] = {str(agent_id): {}} if is_workspace_still_active else {}
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service=active_agents),
+        paths=paths,
+        session_store=session_store,
+        imbue_cloud_cli=cli,
+    )
+
+    response = client.get("/ui/api/create/landing-extras")
+
+    assert response.status_code == 200
+    return str(agent_id), json.loads(response.get_data(as_text=True))
+
+
+def test_landing_extras_surface_a_failed_destroy_whose_host_is_gone(tmp_path: Path) -> None:
+    """A destroy that failed after its host went away has no row of its own, so extras supply one."""
+    agent_id, payload = _landing_extras_with_failed_destroy(tmp_path, is_workspace_still_active=False)
+
+    assert payload["destroying_status_by_agent_id"] == {agent_id: "failed"}
+    assert payload["orphaned_failed_destroys"] == [
+        {"agent_id": agent_id, "name": "half-destroyed", "accent": "#3c3d06"}
+    ]
+
+
+def test_landing_extras_leave_a_failed_destroy_with_a_live_row_to_that_row(tmp_path: Path) -> None:
+    agent_id, payload = _landing_extras_with_failed_destroy(tmp_path, is_workspace_still_active=True)
+
+    assert payload["destroying_status_by_agent_id"] == {agent_id: "failed"}
+    assert payload["orphaned_failed_destroys"] == []
 
 
 def test_create_attempt_detail_reports_gone_for_unknown_and_malformed_ids(tmp_path: Path) -> None:
