@@ -12,6 +12,7 @@ import sys
 from collections.abc import Generator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import AbstractContextManager
 from datetime import datetime
 from datetime import timezone
 from io import StringIO
@@ -20,6 +21,7 @@ from typing import Final
 from uuid import uuid4
 
 import pytest
+from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -102,7 +104,9 @@ from imbue.modal_proxy.interface import FunctionInterface
 from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
+from imbue.modal_proxy.log_utils import ModalLoguruWriter
 from imbue.modal_proxy.testing import FakeExecOutput
+from imbue.modal_proxy.testing import FakeImage
 from imbue.modal_proxy.testing import FakeModalInterface
 from imbue.modal_proxy.testing import FakeSandbox
 from imbue.modal_proxy.testing import FakeVolume
@@ -1523,6 +1527,158 @@ def test_create_host_wraps_invalid_argument_error_as_clean_mngr_error(
         assert "snap-123abc" in str(exc_info.value)
     finally:
         rejecting_modal.cleanup()
+
+
+# The shape of a build failure that streamed nothing.
+_UNSTREAMED_BUILD_MARKER = "intentional-fail-2f9c1a"
+_UNSTREAMED_BUILD_FAILURE_MESSAGE = (
+    "Image build for im-2f9c1a failed.\nView the build logs:\n  modal image logs im-2f9c1a"
+)
+_UNSTREAMED_BUILD_LOG = (
+    f'=> Step 1: RUN echo "{_UNSTREAMED_BUILD_MARKER}" && exit 1\n{_UNSTREAMED_BUILD_MARKER}\n'
+    "Terminating task due to error: container exit status: 1\n"
+)
+
+
+class _UnstreamedBuildFailureFakeModalInterface(FakeModalInterface):
+    """A FakeModalInterface whose image build fails without having streamed a line.
+
+    Modal's live log stream is best-effort: when its build-failure result is
+    ready before it opens the stream, the build fails with nothing captured, and
+    the output is only available by asking Modal for it. Images from this fake
+    behave that way -- ``build`` raises, the capture buffer stays empty, and the
+    output is reachable only through ``fetch_build_logs``.
+    """
+
+    def image_from_registry(self, name: str) -> ImageInterface:
+        return FakeImage(
+            image_id=f"img-reg-{name}",
+            build_failure_message=_UNSTREAMED_BUILD_FAILURE_MESSAGE,
+            build_logs=_UNSTREAMED_BUILD_LOG,
+        )
+
+
+def test_create_host_surfaces_build_log_that_modal_never_streamed(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """A failed image build shows the failing step's output even when nothing was streamed.
+
+    Without this, the user gets Modal's bare "Image build for <id> failed" and no
+    sign of which Dockerfile line broke -- which is the whole reason they ran the
+    build. The output must reach both the raised error and the failed host record
+    that ``mngr list`` reads.
+    """
+    root = tmp_path / "modal_testing"
+    root.mkdir(parents=True, exist_ok=True)
+    failing_modal = _UnstreamedBuildFailureFakeModalInterface(root_dir=root, concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, failing_modal)
+    try:
+        with pytest.raises(MngrError) as exc_info:
+            provider.create_host(HostName("build-fails"))
+
+        # Nothing streamed, so the capture buffer cannot be where this came from.
+        assert provider.get_captured_output() == ""
+        assert _UNSTREAMED_BUILD_MARKER in str(exc_info.value), str(exc_info.value)
+
+        build_log = provider.get_host(HostName("build-fails")).get_build_log()
+        assert build_log is not None and _UNSTREAMED_BUILD_MARKER in build_log, build_log
+    finally:
+        failing_modal.cleanup()
+
+
+_STREAMED_BUILD_LOG = "=> Step 1: RUN a-command-the-user-already-watched\nits output\n"
+
+
+class _StreamedBuildFailureFakeModalInterface(_UnstreamedBuildFailureFakeModalInterface):
+    """The same failing build, except Modal did stream it, so the capture holds it."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    capture_buffer: StringIO = Field(default_factory=StringIO, description="Shared Modal output capture")
+
+    def enable_output_capture(
+        self, is_logging_to_loguru: bool = True
+    ) -> AbstractContextManager[tuple[StringIO, ModalLoguruWriter | None]]:
+        return contextlib.nullcontext((self.capture_buffer, None))
+
+    def image_from_registry(self, name: str) -> ImageInterface:
+        return FakeImage(
+            image_id=f"img-reg-{name}",
+            build_failure_message=_UNSTREAMED_BUILD_FAILURE_MESSAGE,
+            build_logs=_UNSTREAMED_BUILD_LOG,
+            streamed_build_logs=_STREAMED_BUILD_LOG,
+            streaming_capture_buffer=self.capture_buffer,
+        )
+
+
+def test_create_host_does_not_refetch_a_build_log_that_was_already_streamed(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """A build the user already watched scroll past is not fetched back from Modal.
+
+    Streamed build output is already on the user's terminal, so re-fetching it
+    would only print the whole build a second time under the error.
+    """
+    root = tmp_path / "modal_testing"
+    root.mkdir(parents=True, exist_ok=True)
+    failing_modal = _StreamedBuildFailureFakeModalInterface(root_dir=root, concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, failing_modal)
+    try:
+        with pytest.raises(MngrError) as exc_info:
+            provider.create_host(HostName("build-fails"))
+
+        assert _STREAMED_BUILD_LOG in str(exc_info.value), str(exc_info.value)
+        # The fetched-only copy would be a duplicate of what was already shown.
+        assert _UNSTREAMED_BUILD_MARKER not in str(exc_info.value), str(exc_info.value)
+    finally:
+        failing_modal.cleanup()
+
+
+class _UnfetchableBuildLogFakeImage(FakeImage):
+    """An image whose build fails and whose logs Modal then refuses to hand over."""
+
+    def fetch_build_logs(self) -> str:
+        raise ModalProxyNotFoundError("Image not found")
+
+
+class _UnfetchableBuildLogFakeModalInterface(_UnstreamedBuildFailureFakeModalInterface):
+    """Nothing streamed, and fetching the logs afterwards fails too."""
+
+    def image_from_registry(self, name: str) -> ImageInterface:
+        return _UnfetchableBuildLogFakeImage(
+            image_id=f"img-reg-{name}",
+            build_failure_message=_UNSTREAMED_BUILD_FAILURE_MESSAGE,
+        )
+
+
+def test_create_host_reports_the_build_failure_even_if_its_logs_cannot_be_fetched(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """Failing to explain the build failure must not replace it with a different error.
+
+    Fetching the logs is a diagnostic. If Modal will not hand them over, the
+    user still needs the build failure itself, and the failed host record still
+    has to be written.
+    """
+    root = tmp_path / "modal_testing"
+    root.mkdir(parents=True, exist_ok=True)
+    failing_modal = _UnfetchableBuildLogFakeModalInterface(root_dir=root, concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, failing_modal)
+    try:
+        with pytest.raises(MngrError) as exc_info:
+            provider.create_host(HostName("build-fails"))
+
+        assert "im-2f9c1a" in str(exc_info.value), str(exc_info.value)
+        assert "Image not found" not in str(exc_info.value), str(exc_info.value)
+        assert provider.get_host(HostName("build-fails")).get_build_log() == ""
+    finally:
+        failing_modal.cleanup()
 
 
 # ---------------------------------------------------------------------------

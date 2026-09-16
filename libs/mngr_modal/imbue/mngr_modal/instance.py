@@ -132,6 +132,7 @@ from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.direct import DEPLOY_MAX_DURATION_SECONDS
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -369,6 +370,22 @@ class HostRecord(FrozenModel):
     ssh_port: int | None = Field(default=None, description="SSH port number")
     ssh_host_public_key: str | None = Field(default=None, description="SSH host public key for verification")
     config: SandboxConfig | None = Field(default=None, description="Sandbox configuration")
+
+
+class _ImageBuildAttempt(FrozenModel):
+    """An image build we triggered, and the state needed to report on it if it fails.
+
+    Modal only hands over a failed build's logs through the very image object
+    that failed, and the output capture accumulates everything streamed since
+    the app was created -- so telling whether *this* build streamed means
+    comparing against how long the capture was before it started.
+    """
+
+    image: ImageInterface = Field(description="The image whose build was triggered")
+    captured_length_before_build: int = Field(description="Length of the Modal output capture before the build began")
+
+    def has_streamed_into(self, captured_output: str) -> bool:
+        return len(captured_output) > self.captured_length_before_build
 
 
 class ModalProviderApp(FrozenModel):
@@ -1612,6 +1629,32 @@ log "=== Shutdown script completed ==="
         """
         return self.modal_app.get_captured_output()
 
+    def _collect_build_log(self, error: ModalProxyError | MngrError, build_attempt: _ImageBuildAttempt | None) -> str:
+        """Assemble the build output to report for a host that failed to come up.
+
+        Modal's live log stream is best-effort: when its build-failure result
+        beats the stream, nothing is streamed and the user is told only that
+        "Image build for <id> failed", with no sign of which line of their
+        Dockerfile broke. Ask Modal for the failing layer's output in exactly
+        that case -- fetching a build that did stream would only print it back
+        a second time.
+        """
+        captured_output = self.get_captured_output()
+        if not isinstance(error, ModalProxyImageBuildError) or build_attempt is None:
+            return captured_output
+        if build_attempt.has_streamed_into(captured_output):
+            return captured_output
+        with log_span("Fetching build logs for a failed build that Modal never streamed"):
+            try:
+                fetched_build_log = build_attempt.image.fetch_build_logs()
+            except ModalProxyError as fetch_error:
+                # Explaining the failure must never displace it.
+                logger.warning("Could not fetch the failed build's logs from Modal: {}", fetch_error)
+                return ""
+        if not fetched_build_log:
+            logger.warning("Modal has no build output for the failed image build")
+        return fetched_build_log
+
     def _list_all_sandboxes_for_app(self, app: AppInterface) -> list[SandboxInterface]:
         """
         Caches the list of all sandboxes currently running for this app so that we're not constantly polling modal
@@ -1919,6 +1962,7 @@ log "=== Shutdown script completed ==="
                 DEFAULT_BASE_IMAGE,
             )
 
+        build_attempt: _ImageBuildAttempt | None = None
         try:
             # Get or create the Modal app (uses singleton pattern with context manager)
             with log_span("Getting Modal app", app_name=self.app_name):
@@ -1936,6 +1980,9 @@ log "=== Shutdown script completed ==="
                     )
 
                 # Eagerly trigger the image build so we can measure build time separately from sandbox creation
+                build_attempt = _ImageBuildAttempt(
+                    image=modal_image, captured_length_before_build=len(self.get_captured_output())
+                )
                 with log_span("Building Modal image"):
                     modal_image.build(app)
 
@@ -1951,7 +1998,7 @@ log "=== Shutdown script completed ==="
         except (ModalProxyError, MngrError) as e:
             # On failure, save a failed host record so the user can see what happened
             failure_reason = str(e)
-            build_log = self.get_captured_output()
+            build_log = self._collect_build_log(e, build_attempt)
             logger.error("Host creation failed: {}", failure_reason)
             self._save_failed_host_record(
                 host_id=host_id,

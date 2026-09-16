@@ -42,6 +42,7 @@ from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
+from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
@@ -97,6 +98,9 @@ class _FakeImage(ImageInterface):
         raise NotImplementedError
 
     def build(self, app: "AppInterface") -> None:
+        raise NotImplementedError
+
+    def fetch_build_logs(self) -> str:
         raise NotImplementedError
 
 
@@ -249,6 +253,14 @@ def test_translate_modal_cli_not_found_reraises_for_other() -> None:
             id="resource_exhausted",
         ),
         pytest.param(modal.exception.RemoteError("remote"), ModalProxyRemoteError, id="remote"),
+        # ImageBuildError subclasses RemoteError, so it only gets its own type if
+        # its branch is checked first. Callers rely on the distinction to know
+        # they can ask Modal for the failed layer's build output.
+        pytest.param(
+            modal.exception.ImageBuildError("build failed", "im-123"),
+            ModalProxyImageBuildError,
+            id="image_build",
+        ),
         # The control plane could not be reached at all -- what a dropped network
         # or a Modal outage looks like. This must get its own type rather than
         # falling through to the generic branch: consumers decide "Modal is
