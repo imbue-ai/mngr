@@ -85,6 +85,16 @@ class ModalProxyRemoteError(ModalProxyError):
     """Raised on Modal remote execution errors."""
 
 
+class ModalProxyImageBuildError(ModalProxyRemoteError):
+    """Raised when a Modal image build fails.
+
+    Distinguished from other remote errors because it is the one failure whose
+    explanation lives somewhere the exception does not carry: Modal's message
+    can amount to no more than the id of the image that failed. Callers that
+    catch this can ask for the build output via ``ImageInterface.fetch_build_logs``.
+    """
+
+
 class ModalProxyConnectionError(ModalProxyError):
     """Raised when the Modal control plane could not be reached at all.
 

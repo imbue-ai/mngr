@@ -369,8 +369,6 @@ RUN echo "About to fail with marker: {unique_failure_marker}" && exit 1
     # The combined output should contain the unique marker from the failing command
     # so the user can see what actually failed in the build
     combined_output = result.stdout + result.stderr
-    # this assertion has flaked in CI. It almost certainly happened because put_log_content was not called in _QuietOutputManager before the output buffer was closed
-    #  It's not *entirely* clear to me how to fix this--ideally we wait for that output to be flushed, but I'm not sure how to do that in this context...
     assert unique_failure_marker in combined_output, (
         f"Expected the failing build command's output to be visible in mngr output. "
         f"Looking for unique marker '{unique_failure_marker}' in output.\n"

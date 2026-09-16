@@ -16,16 +16,49 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.utils.polling import wait_for
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
 from imbue.mngr_recursive.provisioning import _upload_deploy_files
+from imbue.modal_proxy.direct import BUILD_TERMINATION_MARKER
+from imbue.modal_proxy.errors import ModalProxyImageBuildError
 
 pytestmark = [pytest.mark.modal]
 
 # Placeholder for the agent parameter in on_agent_created calls.
 # The method doesn't use the agent, but the type signature requires AgentInterface.
 _UNUSED_AGENT: AgentInterface = None  # ty: ignore[invalid-assignment]
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(300)
+def test_modal_still_reports_a_failed_build_terminating(real_modal_provider: ModalProviderInstance) -> None:
+    """Modal still ends a failed build's log with the line mngr waits for.
+
+    Fetching a failed build's logs means waiting for Modal to finish writing
+    them, and Modal offers nothing structural to wait on -- no eof, no task
+    state -- only a line its builder writes as it terminates the task. Waiting
+    on prose is a standing bet on an upstream string, so this test is where
+    that bet is settled: if Modal rewords the line, this fails and names the
+    marker, rather than build logs quietly arriving truncated.
+    """
+    marker = f"build-terminates-{get_short_random_string()}"
+    image = real_modal_provider._modal_interface.image_from_registry("debian:bookworm-slim").dockerfile_commands(
+        [f'RUN echo "{marker}" >&2 && exit 9']
+    )
+
+    with pytest.raises(ModalProxyImageBuildError):
+        image.build(real_modal_provider._get_modal_app())
+
+    build_log = image.fetch_build_logs()
+    assert marker in build_log, f"the failing command's own output is missing from the build log:\n{build_log}"
+    assert BUILD_TERMINATION_MARKER in build_log, (
+        f"Modal no longer writes {BUILD_TERMINATION_MARKER!r} when a build terminates, so "
+        f"fetch_build_logs can no longer tell a finished build log from a half-written one. "
+        f"Update BUILD_TERMINATION_MARKER in modal_proxy/direct.py to whatever Modal now "
+        f"writes at the end of this log:\n{build_log}"
+    )
 
 
 @pytest.mark.acceptance
