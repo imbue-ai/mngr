@@ -14,6 +14,7 @@ from imbue.minds.desktop_client.ui_models import UiWireSchema
 from imbue.minds.desktop_client.ui_models import UiWorkspaceEntry
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 
+
 # FIXME: lol, what the hell is that record of changes?
 #  also, this is a nightmare to merge
 #  please break the history into something that merges more cleanly.

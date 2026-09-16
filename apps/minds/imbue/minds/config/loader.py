@@ -86,6 +86,11 @@ def load_client_config(path: Path) -> ClientEnvConfig:
         raise EnvConfigError(f"Invalid client config at {path}: {exc}") from exc
 
 
+def committed_deploy_config_tiers() -> list[str]:
+    """The tiers with a committed ``imbue/minds/config/envs/<tier>/deploy.toml``, sorted by name."""
+    return sorted(path.parent.name for path in _ENVS_DIR.glob(f"*/{_DEPLOY_FILENAME}"))
+
+
 def load_deploy_config(tier: str) -> DeployEnvConfig:
     """Load a tier's deploy config from ``imbue/minds/config/envs/<tier>/deploy.toml``."""
     path = _ENVS_DIR / tier / _DEPLOY_FILENAME

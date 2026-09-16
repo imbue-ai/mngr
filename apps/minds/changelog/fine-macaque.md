@@ -1,0 +1,1 @@
+- Fixed a type error in the frontend `shouldRedirectToStartFlow` unit tests. The landing-extras test fixture predated the `orphaned_failed_destroys` field on `LandingExtras`, so once both landed on main `tsc --noEmit` failed on every call site that spread the fixture. No behavior change.
