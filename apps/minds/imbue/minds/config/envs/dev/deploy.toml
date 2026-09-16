@@ -90,6 +90,12 @@ name = "josh"
 public_key = "GbBZ3zKqhQYW8R9nbYrV1le0S10KxLT4KqPcRp2r5QI="
 address = "10.112.0.2"
 
+
+[[management_plane.wireguard.operators]]
+name = "hynek"
+public_key = "kourKwkC4VkX9RS0nuPeJHo9hUGQTV7lpzAGyXtbrSQ="
+address = "10.112.0.3"
+
 # The tier's Modal Proxy: created once in the minds-dev Modal workspace,
 # named here with its static egress IPs. Proxy lookup is Modal-environment
 # scoped and the workspace holds at most one proxy, so the shared dev proxy

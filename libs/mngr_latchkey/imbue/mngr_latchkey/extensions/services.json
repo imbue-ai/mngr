@@ -3,11 +3,11 @@
     {
       "scope": "slack-api",
       "display_name": "Slack",
-      "description": "Any interaction with the Slack API.",
+      "description": "Any interaction with the Slack API, including downloading file content and thumbnails from Slack's file-storage host.",
       "permissions": [
         {
           "name": "slack-read-all",
-          "description": "All read operations across the entire Slack API, including messages, users, files, reactions, search, pins, bookmarks, reminders, thread subscriptions, and unread counts."
+          "description": "All read operations across the entire Slack API, including messages, users, files, reactions, search, pins, bookmarks, reminders, thread subscriptions, unread counts, and downloading file content and thumbnails."
         },
         {
           "name": "slack-write-all",
@@ -47,7 +47,7 @@
         },
         {
           "name": "slack-files-read",
-          "description": "List and inspect files, including remote files."
+          "description": "List and inspect files, including remote files, and download file content and thumbnails."
         },
         {
           "name": "slack-files-write",
@@ -385,27 +385,39 @@
         },
         {
           "name": "notion-mcp-read-all",
-          "description": "Run any read-only Notion MCP tool (search, fetch, queries, list comments/teams, bot info) plus the MCP session handshake."
+          "description": "Run any read-only Notion MCP tool (search, fetch, queries, page lists, skills, attachments, comments, teams, users, agent sessions) plus the MCP session handshake."
         },
         {
           "name": "notion-mcp-write-all",
-          "description": "Run any Notion MCP tool that creates or modifies content (create/update pages, databases, views, data sources, comments; move/duplicate pages) plus the MCP session handshake."
+          "description": "Run any Notion MCP tool that creates or modifies content (create/update pages, databases, views, data sources, folders, attachments, comments; move/duplicate pages; drive agent sessions) plus the MCP session handshake."
         },
         {
           "name": "notion-mcp-search",
           "description": "Search across the Notion workspace and connected sources."
         },
         {
+          "name": "notion-mcp-ai-search",
+          "description": "Ask a natural-language question across Notion and connected sources such as Slack, Mail, Calendar, Google Drive, and Jira."
+        },
+        {
           "name": "notion-mcp-fetch",
-          "description": "Retrieve the content of a Notion page, database, or data source by URL or ID."
+          "description": "Retrieve the content of a Notion page, database, data source, or view by URL or ID."
         },
         {
           "name": "notion-mcp-query-data-sources",
-          "description": "Query across one or more Notion data sources with filters, grouping, and summaries."
+          "description": "Query across one or more Notion data sources with filters, grouping, and summaries (the notion-query-data-sources and notion-query-multiple-data-sources tools)."
         },
         {
           "name": "notion-mcp-query-database-view",
           "description": "Query a Notion database using a predefined view's filters and sorts."
+        },
+        {
+          "name": "notion-mcp-query-meeting-notes",
+          "description": "Look through the current user's meeting notes, filtered by title, attendees, or date."
+        },
+        {
+          "name": "notion-mcp-list-pages",
+          "description": "List the current user's pages by relationship: recently visited, private, favorited, or shared. These tools are live on Notion's hosted MCP server but absent from its published tool list."
         },
         {
           "name": "notion-mcp-get-comments",
@@ -424,6 +436,26 @@
           "description": "Retrieve information about the connected bot user and workspace."
         },
         {
+          "name": "notion-mcp-get-async-task",
+          "description": "Check the status of a background Notion operation such as a page duplication or a large write."
+        },
+        {
+          "name": "notion-mcp-read-skills",
+          "description": "Find Notion Skills by name or task description and download a Skill archive."
+        },
+        {
+          "name": "notion-mcp-read-attachments",
+          "description": "Download the text content of an attachment on a Notion page."
+        },
+        {
+          "name": "notion-mcp-read-agents",
+          "description": "Browse Notion Custom Agents and inspect their sessions: list and search agents and sessions, poll or wait on session status, and read session events."
+        },
+        {
+          "name": "notion-mcp-next-steps",
+          "description": "Ask the MCP server what to do next. These guidance tools are live on Notion's hosted MCP server but absent from its published tool list."
+        },
+        {
           "name": "notion-mcp-create-pages",
           "description": "Create one or more Notion pages with properties and content."
         },
@@ -438,6 +470,14 @@
         {
           "name": "notion-mcp-duplicate-page",
           "description": "Duplicate a Notion page within the workspace."
+        },
+        {
+          "name": "notion-mcp-convert-page-to-skill",
+          "description": "Mark an existing Notion page as a Notion Skill."
+        },
+        {
+          "name": "notion-mcp-write-attachments",
+          "description": "Upload a file to Notion and attach text, a public URL, or a finished upload to a page."
         },
         {
           "name": "notion-mcp-create-database",
@@ -456,8 +496,16 @@
           "description": "Update a Notion view's name, filters, sorts, or display configuration."
         },
         {
+          "name": "notion-mcp-write-folders",
+          "description": "Create a folder under a Notion page or update an existing one."
+        },
+        {
           "name": "notion-mcp-create-comment",
           "description": "Add a comment to a Notion page or specific block."
+        },
+        {
+          "name": "notion-mcp-write-agents",
+          "description": "Drive Notion Custom Agent sessions: start a session, send it a message, or stop it."
         }
       ]
     }

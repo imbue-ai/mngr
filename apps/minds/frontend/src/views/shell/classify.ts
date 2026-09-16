@@ -7,7 +7,11 @@ import type { OptionsTab } from "../../models/workspaceOptions";
 import { toOptionsTab } from "../../models/workspaceOptions";
 
 export interface TitlebarContext {
-  kind: "home" | "workspace" | "page" | "welcome";
+  /** `start`: the first-run start flow, whose titlebar holds only the centered
+   * mark. `creating`: a create attempt's page, rendered like a workspace
+   * context with `workspaceAnyId` holding the attempt id (its list row already
+   * carries the name and accent). */
+  kind: "home" | "workspace" | "page" | "start" | "creating";
   workspaceAnyId: string | null;
   activeTab: OptionsTab | null;
   pageLabel: string;
@@ -42,6 +46,13 @@ function pageContext(label: string): TitlebarContext {
 }
 
 const ID_SEGMENT = "((?:agent|host)-[a-f0-9]+)";
+const CREATE_ATTEMPT_ID_SEGMENT = "(create-attempt-[a-f0-9]+)";
+
+/** The create attempt id when `path` is the creation page, else null. */
+export function creatingAttemptIdFromPath(path: string): string | null {
+  const match = path.match(new RegExp(`^/creating/${CREATE_ATTEMPT_ID_SEGMENT}$`, "i"));
+  return match ? match[1] : null;
+}
 
 /** The workspace id when `path` is the workspace content surface
  * (/workspace/<agent-or-host-id>, no sub-page suffix), else null. */
@@ -163,6 +174,10 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
       ? workspaceContext(behind, null)
       : pageContext("New machine");
   }
+  const creatingAttemptId = creatingAttemptIdFromPath(path);
+  if (creatingAttemptId !== null) {
+    return { kind: "creating", workspaceAnyId: creatingAttemptId, activeTab: null, pageLabel: "" };
+  }
   if (path === "/create" || path.startsWith("/creating/")) {
     return pageContext("New machine");
   }
@@ -177,20 +192,16 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (path === "/workspaces/destroyed")
     return pageContext("Recently destroyed");
   if (path === "/consent") return pageContext("Consent");
-  if (path === "/welcome") {
-    return {
-      kind: "welcome",
-      workspaceAnyId: null,
-      activeTab: null,
-      pageLabel: "",
-    };
+  if (path === "/start") {
+    return { kind: "start", workspaceAnyId: null, activeTab: null, pageLabel: "" };
   }
   return HOME_CONTEXT;
 }
 
 /** Which workspace's accent (if any) a route belongs to (accent survives on
- * workspace-scoped pages like destroying/recovery, exactly as before). */
+ * workspace-scoped pages like destroying/recovery, exactly as before). A
+ * creation page takes its in-flight attempt's accent. */
 export function accentSourceForRoute(path: string, search = ""): string | null {
   const context = classifyRoute(path, search);
-  return context.kind === "workspace" ? context.workspaceAnyId : null;
+  return context.kind === "workspace" || context.kind === "creating" ? context.workspaceAnyId : null;
 }

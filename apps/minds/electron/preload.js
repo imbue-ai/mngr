@@ -14,11 +14,18 @@ contextBridge.exposeInMainWorld('mindsNative', {
   onStatusUpdate: (callback) => {
     ipcRenderer.on('status-update', (_event, message) => callback(message));
   },
+  // One line of startup console output for the loading document's log.
+  onStatusLogLine: (callback) => {
+    ipcRenderer.on('status-log-line', (_event, line) => callback(line));
+  },
   onErrorDetails: (callback) => {
     ipcRenderer.on('error-details', (_event, details) => callback(details));
   },
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
+  // The loading document's intro is over (played out, skipped, or never
+  // shown), so main may land the first route on this window.
+  introFinished: () => ipcRenderer.send('intro-finished'),
   // One-shot bug report from the full-app error takeover, via the
   // main-process Sentry (the backend and its /help flow may be down).
   reportError: () => ipcRenderer.invoke('report-error'),

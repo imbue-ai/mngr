@@ -316,7 +316,7 @@ def snap_page(target: Page | Frame, name: str) -> None:
     Raise this page's BrowserWindow to the top of the macOS z-order
     BEFORE the screencapture; otherwise the full-desktop shot just
     captures whatever Minds window the WindowServer has at front
-    (usually still the original /welcome window because Playwright
+    (usually still the original /start window because Playwright
     routes UI events through CDP, never through a real mouse click
     that would update WindowServer focus).
     """
@@ -782,7 +782,7 @@ def live_url(target: Page | Frame) -> str:
     the CDP navigation events its ``connect_over_cdp`` session receives. main.js
     drives these WebContentsViews from the Electron MAIN process
     (``webContents.loadURL`` / ``loadFile``), and such a commit does not reliably
-    reach an attached CDP client: a view can sit on ``/welcome`` while Playwright
+    reach an attached CDP client: a view can sit on ``/start`` while Playwright
     still reports the ``shell.html`` it saw at attach time, permanently. The
     session itself stays healthy -- evaluating in the live document reports the
     real URL -- so every match against a URL the harness did not itself navigate

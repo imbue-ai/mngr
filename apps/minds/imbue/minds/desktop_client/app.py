@@ -717,21 +717,6 @@ def _handle_help_assist() -> Response:
     return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 
-def _handle_welcome_skip() -> Response:
-    """Record the "Continue without an account" choice and land on home.
-
-    Setting ``is_account_setup_skipped`` stops the home route's bounce back
-    to the welcome splash (see ``_handle_landing_page``), so from here on the
-    titlebar home button lands on the workspace list / create form. The flag
-    is per-run; a fresh cold start of a functionally-empty app shows the
-    splash again (matching the startup routing).
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=302, headers={"Location": "/login"})
-    get_state().is_account_setup_skipped = True
-    return make_response(status_code=303, headers={"Location": "/"})
-
-
 def _account_launcher_context(session_store: MultiAccountSessionStore | None) -> tuple[str, int]:
     """Resolve the home screen's bottom-left account launcher label.
 
@@ -761,8 +746,8 @@ def _build_account_launcher_payload(session_store: MultiAccountSessionStore | No
     the channel is what lets the launcher re-label itself (and flip its
     signed-in state, which decides whether clicking it opens Manage Accounts
     or the sign-in modal) without a reload. ``has_accounts`` is derived from the
-    account list rather than the email so the welcome splash's self-advance
-    keeps its exact "any account at all" meaning.
+    account list rather than the email so the start flow's account step keeps
+    its exact "any account at all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
     launcher_email, launcher_extra_count = _account_launcher_context(session_store)
@@ -1461,6 +1446,51 @@ def _handle_account_resend_verification(user_id: str) -> Response:
     return make_response(
         status_code=200,
         content=json.dumps({"sent": is_sent, "email": str(account.email)}),
+        media_type="application/json",
+    )
+
+
+def _signed_in_account_for_email(email: str) -> str | None:
+    """The signed-in account matching ``email`` (case-insensitively), or None."""
+    session_store: MultiAccountSessionStore | None = get_state().session_store
+    if session_store is None:
+        return None
+    wanted = email.strip().lower()
+    for account in session_store.list_accounts():
+        if str(account.email).lower() == wanted:
+            return str(account.email)
+    return None
+
+
+def _handle_account_verification() -> Response:
+    """The start flow's email-verification gate for the account named by ``?email=``.
+
+    GET asks the connector whether the email is verified (a plain status
+    query the flow polls); POST re-sends the verification email. Both answer
+    only for an account this install has signed in, so a stranger's address
+    cannot be probed or spammed through the local app.
+    """
+    if not _is_request_authenticated():
+        return make_response(status_code=403, content="Not authenticated")
+    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+    account = _signed_in_account_for_email(request.args.get("email", ""))
+    if account is None or cli is None:
+        return make_response(status_code=409, content="Account not found or imbue_cloud CLI unavailable.")
+    if request.method == "POST":
+        is_sent = _send_verification_email_best_effort(cli, account)
+        return make_response(
+            status_code=200,
+            content=json.dumps({"sent": is_sent, "email": account}),
+            media_type="application/json",
+        )
+    try:
+        is_verified = cli.auth_is_email_verified(account)
+    except ImbueCloudCliError as exc:
+        logger.warning("Could not check the email verification for {}: {}", account, exc)
+        return make_response(status_code=502, content=f"Could not check the email verification: {exc}")
+    return make_response(
+        status_code=200,
+        content=json.dumps({"verified": is_verified, "email": account}),
         media_type="application/json",
     )
 
@@ -2507,7 +2537,7 @@ def create_desktop_client(
         "/destroying/<agent_id>",
         "/agents/<agent_id>/recovery",
         "/help",
-        "/welcome",
+        "/start",
         "/consent",
         "/_dev/styleguide",
     ):
@@ -2522,7 +2552,6 @@ def create_desktop_client(
     app.add_url_rule("/_chrome/workspaces/remove-record", view_func=_handle_remove_workspace_record, methods=["POST"])
     app.add_url_rule("/help/report", view_func=_handle_help_report, methods=["POST"])
     app.add_url_rule("/help/assist", view_func=_handle_help_assist, methods=["POST"])
-    app.add_url_rule("/welcome/skip", view_func=_handle_welcome_skip)
     app.add_url_rule("/login", view_func=handle_static_login_page)
     app.add_url_rule("/authenticate", view_func=_handle_authenticate)
     app.add_url_rule("/forward-bridge", view_func=_handle_forward_bridge)
@@ -2537,6 +2566,7 @@ def create_desktop_client(
         view_func=_handle_account_resend_verification,
         methods=["POST"],
     )
+    app.add_url_rule("/accounts/verification", view_func=_handle_account_verification, methods=["GET", "POST"])
     app.add_url_rule("/accounts/<user_id>/trim-backups", view_func=_handle_account_trim_backups, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/logout", view_func=_handle_account_logout, methods=["POST"])
 

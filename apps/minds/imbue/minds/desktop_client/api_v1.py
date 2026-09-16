@@ -1166,6 +1166,10 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
         # provider instance. 409 (not 400): the request is well-formed, the
         # name is just contended right now.
         return _json_field_error(str(exc), "host_name", status_code=409)
+    # Starting a create is the point past which the first-run start flow stops
+    # being useful, whichever surface submitted it.
+    if minds_config is not None:
+        minds_config.set_is_onboarding_complete(True)
     return OperationHandleResponse(operation_id=str(create_attempt_id), kind="create"), 202
 
 

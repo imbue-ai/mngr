@@ -89,17 +89,21 @@ def test_discovering_state_before_initial_discovery_finishes(tmp_path: Path) -> 
 
 @pytest.mark.witnesses(
     "home-page.empty-shows-create-form",
-    partial="witnesses the server signals (discovery complete, zero workspaces, none restorable) "
-    "that make the home page the new-workspace form; rendering the form is a frontend concern",
+    partial="witnesses the server signals (discovery complete, zero workspaces, none restorable, "
+    "onboarding complete) that make the home page the new-workspace form; rendering the form is a "
+    "frontend concern",
 )
 def test_empty_after_discovery_shows_the_create_form(tmp_path: Path) -> None:
-    # Given a consented user and an initial discovery that finished without
-    # finding any workspace (update_agents called with an empty agent list).
+    # Given a consented user whose installation is past onboarding, and an
+    # initial discovery that finished without finding any workspace
+    # (update_agents called with an empty agent list).
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    minds_config.set_is_onboarding_complete(True)
     resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
     assert resolver.has_completed_initial_discovery() is True
     assert resolver.list_active_workspace_ids() == ()
     client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path, is_authenticated=True, backend_resolver=resolver
+        tmp_path, is_authenticated=True, backend_resolver=resolver, minds_config=minds_config
     )
 
     payload = json.loads(client.get("/ui/api/create/landing-extras").get_data(as_text=True))
@@ -108,6 +112,43 @@ def test_empty_after_discovery_shows_the_create_form(tmp_path: Path) -> None:
 
     status = json.loads(client.get("/ui/api/app-status").get_data(as_text=True))
     assert status["workspace_count"] == 0
+    assert status["is_onboarding_complete"] is True
+
+
+@pytest.mark.witnesses(
+    "home-page.empty-starts-onboarding",
+    partial="witnesses the server signals (discovery complete, zero workspaces, none restorable, "
+    "onboarding incomplete) that hand the home page over to the start flow, and the sign-in path's "
+    "write that ends the hand-over for good; the redirect itself is the Mithril LandingPage "
+    "(frontend/src/views/pages/LandingPage.ts), and the create path's write of the same flag is "
+    "witnessed in api_v1_test.py",
+)
+def test_empty_after_discovery_hands_over_to_the_start_flow(tmp_path: Path) -> None:
+    # Given an installation that has never been taken past the start flow (the
+    # flag was never written) and an initial discovery that finished without
+    # finding any workspace.
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-data")
+    resolver = make_resolver_with_data(agents_json=json.dumps({"agents": []}))
+    assert resolver.has_completed_initial_discovery() is True
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=resolver, minds_config=minds_config
+    )
+
+    # When they visit "/", the signals say: nothing to list, and the install is
+    # not past onboarding -- the home page hands over to the start flow.
+    payload = json.loads(client.get("/ui/api/create/landing-extras").get_data(as_text=True))
+    assert payload["is_discovery_complete"] is True
+    assert payload["has_restorable_workspaces"] is False
+    status = json.loads(client.get("/ui/api/app-status").get_data(as_text=True))
+    assert status["workspace_count"] == 0
+    assert status["is_onboarding_complete"] is False
+
+    # And once they sign in from the start flow's "I already have one" answer
+    # (the SPA posts the completion), no later visit reads as incomplete again.
+    assert client.post("/ui/api/onboarding/complete").status_code == 200
+    for _ in range(2):
+        status = json.loads(client.get("/ui/api/app-status").get_data(as_text=True))
+        assert status["is_onboarding_complete"] is True
 
 
 @pytest.mark.witnesses(

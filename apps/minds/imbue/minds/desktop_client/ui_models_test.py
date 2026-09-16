@@ -30,22 +30,25 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     of the two recoveries is running, renamed ``is_restart_a_no_op`` to
     ``is_recovery_a_no_op``, and let the two recovery health values shed their
     ``restart`` spelling for ``recovering`` / ``recovery_failed``, and to 9 when
-    the snapshot gained a required ``workspace_updates`` frame: a window held
-    open across any of these upgrades would otherwise reconnect and act on a
-    payload it does not know -- for 3, by offering a browser sign-in to a
-    service that has none; for 4, by expecting a field the server no longer
-    sends; for 5, by reading a field that is gone and so never naming the
-    backend its band is about; for 6 and 9, by reading a state off a snapshot
-    field the older server does not send at all; for 7, by failing to parse the
-    new condition and reading it as no condition at all, and by rendering every
-    remote record as "on <device>" with no way in to its backups; and for 8, by
-    reading a boolean where a string now sits, so every in-flight recovery would
-    read as the neutral one and a user's own restart would never be named, by
-    missing the renamed no-op field, so a machine that merely never answered
-    would be badged as a restart that failed, and by matching neither recovery
-    value, so an in-flight recovery would raise no band and a failed one no
-    card, while the content stayed withheld either way."""
-    assert UI_SCHEMA_VERSION == 9
+    the snapshot gained a required ``workspace_updates`` frame, and to 10 when
+    the bootstrap seed gained a required ``is_onboarding_complete`` flag: a
+    window held open across any of these upgrades would otherwise reconnect and
+    act on a payload it does not know -- for 3, by offering a browser sign-in
+    to a service that has none; for 4, by expecting a field the server no
+    longer sends; for 5, by reading a field that is gone and so never naming
+    the backend its band is about; for 6 and 9, by reading a state off a
+    snapshot field the older server does not send at all; for 7, by failing to
+    parse the new condition and reading it as no condition at all, and by
+    rendering every remote record as "on <device>" with no way in to its
+    backups; for 8, by reading a boolean where a string now sits, so every
+    in-flight recovery would read as the neutral one and a user's own restart
+    would never be named, by missing the renamed no-op field, so a machine that
+    merely never answered would be badged as a restart that failed, and by
+    matching neither recovery value, so an in-flight recovery would raise no
+    band and a failed one no card, while the content stayed withheld either
+    way; and for 10, by seeding the home page's start-flow redirect from a
+    field the older server never sent."""
+    assert UI_SCHEMA_VERSION == 10
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -54,7 +57,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 9}
+    assert parsed == {"type": "hello", "schema_version": 10}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:

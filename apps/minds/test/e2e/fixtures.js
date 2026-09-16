@@ -32,7 +32,7 @@ const _BACKEND_ORIGIN_RE = /^http:\/\/localhost:\d+(?:\/|$)/;
 // `page.url()` is Playwright's own bookkeeping, updated from the CDP navigation
 // events its session receives. main.js drives these WebContentsViews from the
 // Electron MAIN process (`webContents.loadURL` / `loadFile`), and such a commit
-// does not reliably reach an attached client: a view can sit on `/welcome`
+// does not reliably reach an attached client: a view can sit on `/start`
 // while Playwright still reports the `shell.html` it saw at attach time, for the
 // rest of the run. The session stays healthy -- evaluating in the live document
 // reports the real URL.

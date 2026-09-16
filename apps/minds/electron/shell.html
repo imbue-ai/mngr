@@ -5,144 +5,201 @@
   <title>Mind</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    /* Loading / quitting / error takeover screen. Deep-maroon brand
-       surface (#492222) with cream (#E9ECD9) text, matching the Minds
-       app icon branding. */
+    /* Loading / quitting / error takeover screen: a white page carrying the
+       lockup. On an installation's first launch (loaded with the #intro hash)
+       the page plays the intro -- the lockup resolves, two lines type in and
+       out, the lockup travels up to where the app's start route will hold it.
+       Every later launch opens on that parked state at once. */
+    :root {
+      --brand-blue: #1717F0;
+      --ink: #000000;
+      --ink-secondary: rgb(0 0 0 / 0.65);
+      --ink-tertiary: rgb(0 0 0 / 0.45);
+      --surface: #ffffff;
+      --fill-subtle: rgb(0 0 0 / 0.04);
+      --fill-hover: rgb(0 0 0 / 0.06);
+      --border-default: rgb(0 0 0 / 0.17);
+      /* The two intro lines are the only serif on the page; the family is a
+         single knob so a licensed face can be swapped in later. */
+      --intro-serif: Georgia, "Times New Roman", serif;
+      /* The titlebar band the SPA's start route parks the mark in: 38px tall
+         with a 16px mark centered in it. */
+      --titlebar-height: 38px;
+      --parked-mark-height: 16px;
+      /* The intro's durations (--lockup-delay, --lockup-focus, --char-fade,
+         --line-out) are set by the script from intro-timing.js, which owns
+         every number the film is cut to. */
+    }
+    html, body { height: 100%; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: #492222;
-      color: #E9ECD9;
-      display: flex;
+      background: var(--surface);
+      color: var(--ink);
+      position: relative;
+      overflow: hidden;
+      -webkit-app-region: drag;
+      user-select: none;
+      container-type: inline-size;
+    }
+
+    /* The intro layer: the lockup and the lines, stacked in the middle of the
+       page. Present only while the intro plays. The body is a drag region, and
+       a drag region swallows every mouse event, so the layer opts out: a click
+       anywhere during the film has to reach the skip listener. */
+    #intro {
+      display: none;
+      position: absolute;
+      inset: 0;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100vh;
-      -webkit-app-region: drag;
-      user-select: none;
+      padding-bottom: 2cqw;
+      -webkit-app-region: no-drag;
     }
-    /* Brand block: head illustration stacked above the wordmark, centered,
-       18px apart. */
-    .brand {
-      /* Intro timing. --intro-delay is the opening beat of empty maroon before
-         anything appears. The head takes the "first letter" slot; the wordmark
-         letters then follow one --letter-step later, so the reveal cascades
-         head -> M -> i -> n -> d -> s. --letter-step matches the letters' own
-         internal per-letter stagger (~0.1s), so the head leads the M by the
-         same beat that separates the letters. After the intro the wordmark
-         loops; the head stays. */
-      --intro-delay: 1s;
-      --letter-step: 0.1s;
-      display: flex;
+    body.intro #intro { display: flex; }
+    /* The lockup as drawn (577 x 139), 32% of the page wide. The wrapper keeps
+       the aspect ratio so its box is right before the image has loaded, and it
+       is the element that travels: the image inside only ever resolves. */
+    .lockup-travel {
+      width: 32cqw;
+      aspect-ratio: 577 / 139;
+      transform-origin: top center;
+    }
+    .lockup {
+      display: block;
+      width: 100%;
+      animation: lockup-focus var(--lockup-focus) cubic-bezier(0, 0.55, 0.45, 1) var(--lockup-delay) both;
+    }
+    @keyframes lockup-focus {
+      from { opacity: 0; filter: blur(1.25cqw); transform: scale(0.98); }
+      to { opacity: 1; filter: blur(0); transform: scale(1); }
+    }
+    /* Every line sits in the same grid cell, so one leaves while the next
+       arrives in the same place with nothing reflowing. */
+    .lines {
+      margin-top: 2.5cqw;
+      display: grid;
+      justify-items: center;
+    }
+    .line {
+      grid-column: 1;
+      grid-row: 1;
+      font-family: var(--intro-serif);
+      font-size: 2.5cqw;
+      line-height: 1;
+      white-space: pre;
+      color: var(--brand-blue);
+      animation: line-out var(--line-out) ease-out var(--line-out-delay) both;
+    }
+    .line em { font-style: italic; }
+    /* Each character is in the DOM from the first frame at opacity 0, so the
+       centered line never crawls sideways as it fills. */
+    .char {
+      opacity: 0;
+      animation: char-in var(--char-fade) linear var(--char-delay) both;
+    }
+    @keyframes char-in { to { opacity: 1; } }
+    /* The explicit `from` is load-bearing: a keyframe with an implicit start
+       and a var() in its end is dropped whole by Chrome. */
+    @keyframes line-out {
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(-3px); }
+    }
+
+    /* The parked mark: the same drawing at the size and place the SPA's start
+       route holds it, so the hand-off between documents is a substitution. */
+    #parked-mark {
+      display: none;
+      position: absolute;
+      top: calc((var(--titlebar-height) - var(--parked-mark-height)) / 2);
+      left: 50%;
+      transform: translateX(-50%);
+      height: var(--parked-mark-height);
+      width: auto;
+    }
+    body.parked #parked-mark { display: block; }
+
+    /* The status block: what the startup sequence is doing, under an
+       indeterminate bar. Hidden until the intro is over. */
+    #status-block {
+      display: none;
+      position: absolute;
+      inset: 0;
       flex-direction: column;
       align-items: center;
-      gap: 18px;
-      margin-top: -36px;
-      margin-bottom: 36px;
-    }
-    /* The head illustration is the first element to appear: it fades in one
-       --letter-step BEFORE the M (the letters carry the extra offset), using
-       the same 0.5s linear fade-in as a letter, then holds at full opacity
-       instead of cycling (the wordmark loops without it). Shown immediately in
-       the error state. */
-    .illustration {
+      justify-content: center;
+      gap: 14px;
       opacity: 0;
-      animation: head-fade-in 5.4s var(--intro-delay) forwards;
+      animation: status-in 250ms ease-out both;
     }
-    body.error .illustration {
-      animation: none;
-      opacity: 1;
+    body.parked #status-block { display: flex; }
+    body.error #status-block { display: none; }
+    @keyframes status-in { to { opacity: 1; } }
+    .progress {
+      width: 180px;
+      height: 3px;
+      border-radius: 2px;
+      background: var(--fill-subtle);
+      overflow: hidden;
+      position: relative;
     }
-    /* Mirrors the fade-in portion of fade-letter-0 (the M), then stays. */
-    @keyframes head-fade-in {
-      0%    { opacity: 0; animation-timing-function: linear; }
-      9.26% { opacity: 1; }
-      100%  { opacity: 1; }
+    .progress::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: -40%;
+      width: 40%;
+      border-radius: 2px;
+      background: var(--ink-tertiary);
+      animation: progress-slide 1400ms cubic-bezier(0.4, 0, 0.2, 1) infinite;
     }
-    /* Wordmark letter animation. Offset one --letter-step after the head (see
-       .illustration above) so the head leads the M rather than sharing its beat.
-       Cycle = 5.4s: fade in 0.5s linear (0.1s stagger), hold visible 1s,
-       fade out 1.8s cubic-bezier(.05,.25,.08,.99) (0.3s stagger), hold invisible 0.5s.
-       Paths in markup are s, d, n, i, M (right-to-left), so :nth-child(5)
-       targets M (first), :nth-child(1) targets s (last). */
-    .wordmark path { opacity: 0; }
-    /* Error state: freeze the animation and show every letter. */
-    body.error .wordmark path {
-      animation: none;
-      opacity: 1;
+    @keyframes progress-slide {
+      to { left: 100%; }
     }
-    .wordmark path:nth-child(5) { animation: fade-letter-0 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
-    .wordmark path:nth-child(4) { animation: fade-letter-1 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
-    .wordmark path:nth-child(3) { animation: fade-letter-2 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
-    .wordmark path:nth-child(2) { animation: fade-letter-3 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
-    .wordmark path:nth-child(1) { animation: fade-letter-4 5.4s calc(var(--intro-delay) + var(--letter-step)) infinite; }
-    @keyframes fade-letter-0 {
-      0%     { opacity: 0; animation-timing-function: linear; }
-      9.26%  { opacity: 1; }
-      35.19% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
-      68.52% { opacity: 0; }
-      100%   { opacity: 0; }
-    }
-    @keyframes fade-letter-1 {
-      0%     { opacity: 0; }
-      1.85%  { opacity: 0; animation-timing-function: linear; }
-      11.11% { opacity: 1; }
-      40.74% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
-      74.07% { opacity: 0; }
-      100%   { opacity: 0; }
-    }
-    @keyframes fade-letter-2 {
-      0%     { opacity: 0; }
-      3.70%  { opacity: 0; animation-timing-function: linear; }
-      12.96% { opacity: 1; }
-      46.30% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
-      79.63% { opacity: 0; }
-      100%   { opacity: 0; }
-    }
-    @keyframes fade-letter-3 {
-      0%     { opacity: 0; }
-      5.56%  { opacity: 0; animation-timing-function: linear; }
-      14.81% { opacity: 1; }
-      51.85% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
-      85.19% { opacity: 0; }
-      100%   { opacity: 0; }
-    }
-    @keyframes fade-letter-4 {
-      0%     { opacity: 0; }
-      7.41%  { opacity: 0; animation-timing-function: linear; }
-      16.67% { opacity: 1; }
-      57.41% { opacity: 1; animation-timing-function: cubic-bezier(.05, .25, .08, .99); }
-      90.74% { opacity: 0; }
-      100%   { opacity: 0; }
-    }
-    h1 {
-      font-size: 24px;
-      font-weight: 600;
-      margin-bottom: 16px;
-      color: #E9ECD9;
-    }
-    /* Quitting state: a status line under the wordmark, shown only while the
-       app is shutting down. Hidden during normal startup loading so that
-       screen is visually unchanged. */
     .status {
-      display: none;
-      font-size: 14px;
-      color: #E9ECD9;
+      font-size: 13px;
+      color: var(--ink-secondary);
       min-height: 18px;
       text-align: center;
     }
-    body.quitting .status { display: block; }
-    /* Error state */
+    /* The startup console log, closed by default under the status line; the
+       bar and the phase label say enough for most launches. Sized so the
+       parked mark and the bar stay where they are when it opens. */
+    #startup-log-toggle { margin-bottom: 0; }
+    #startup-log {
+      max-width: min(640px, calc(100vw - 48px));
+      max-height: min(240px, 40vh);
+      margin-top: 0;
+      text-align: left;
+    }
+    /* A committed quit hides the bar and the log: nothing is being waited for,
+       only reported. */
+    body.quitting .progress,
+    body.quitting #startup-log-toggle,
+    body.quitting #startup-log { display: none; }
+
+    /* Error state: a takeover with the parked mark still up top. */
     #error-view {
       display: none;
+      position: absolute;
+      inset: 0;
       flex-direction: column;
       align-items: center;
+      justify-content: center;
       text-align: center;
       padding: 32px;
     }
-    #error-view h1 { margin-bottom: 12px; }
+    body.error #error-view { display: flex; }
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--ink);
+    }
     .message {
       font-size: 14px;
-      color: #E9ECD9;
+      color: var(--ink-secondary);
       margin-bottom: 24px;
       max-width: 400px;
     }
@@ -155,38 +212,38 @@
     .actions button {
       padding: 8px 20px;
       border-radius: 6px;
-      border: none;
+      border: 1px solid transparent;
       font-size: 14px;
       cursor: pointer;
       font-weight: 500;
     }
-    .btn-primary { background: #8EAFCB; color: #000000; }
-    .btn-primary:hover { background: #7E9DB8; }
-    .btn-secondary { background: #E9ECD9; color: #492222; }
-    .btn-secondary:hover { background: #D8DBC2; }
+    .btn-primary { background: var(--ink); color: var(--surface); }
+    .btn-primary:hover { opacity: 0.8; }
+    .btn-secondary { background: transparent; color: var(--ink); border-color: var(--border-default); }
+    .btn-secondary:hover { background: var(--fill-hover); }
     .toggle-details {
       background: none;
       border: none;
-      color: #E9ECD9;
+      color: var(--ink-secondary);
       font-size: 13px;
       cursor: pointer;
       text-decoration: underline;
       margin-bottom: 12px;
       -webkit-app-region: no-drag;
     }
-    .toggle-details:hover { color: #E9ECD9; }
+    .toggle-details:hover { color: var(--ink); }
     .details {
       display: none;
       width: 100%;
       max-width: 600px;
       max-height: 200px;
       overflow: auto;
-      background: #f4f4f5;
+      background: var(--fill-subtle);
       border-radius: 8px;
       padding: 16px;
       font-family: "SF Mono", "Fira Code", Menlo, monospace;
       font-size: 12px;
-      color: #492222;
+      color: var(--ink);
       white-space: pre-wrap;
       word-break: break-all;
       -webkit-app-region: no-drag;
@@ -201,112 +258,45 @@
       gap: 8px;
       margin-bottom: 16px;
       font-size: 13px;
-      color: #E9ECD9;
+      color: var(--ink-secondary);
       -webkit-app-region: no-drag;
     }
     #report-result.visible { display: flex; }
     #report-result code {
       font-family: "SF Mono", "Fira Code", Menlo, monospace;
-      background: #f4f4f5;
-      color: #492222;
+      background: var(--fill-subtle);
+      color: var(--ink);
       border-radius: 4px;
       padding: 2px 6px;
       user-select: text;
     }
     #report-copy-btn {
-      background: #E9ECD9;
-      color: #492222;
-      border: none;
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--border-default);
       border-radius: 6px;
       font-size: 12px;
       font-weight: 500;
       padding: 4px 10px;
       cursor: pointer;
     }
-    #report-copy-btn:hover { background: #D8DBC2; }
+    #report-copy-btn:hover { background: var(--fill-hover); }
   </style>
 </head>
 <body>
-  <div class="brand">
-    <svg class="illustration" aria-hidden="true" width="132" height="132" viewBox="0 0 132 132" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M30.8593 44.6318C27.5 50.1062 23.4555 74.6146 21.9412 89.3277C21.7499 91.1869 23.1536 92.8071 25.0186 92.9296L31.3888 93.3478C32.8495 93.4436 34.0778 94.479 34.4194 95.9025L37.0109 106.701C37.3156 107.97 38.3272 108.951 39.6146 109.166C50.013 110.903 68.7473 111.932 80.042 105.728C127.884 79.4505 111.589 32.7973 82.7913 25.0809C53.9934 17.3645 39.1073 31.1906 30.8593 44.6318Z" fill="#E9ECD9"/>
-      <g filter="url(#filter0_g_20_1573)">
-        <path d="M92.811 53.1059C95.9755 53.1059 98.2774 54.1948 99.8042 55.9722C101.351 57.773 102.209 60.4063 102.209 63.6636C102.209 69.9314 97.1287 75.0131 90.8608 75.0132C84.593 75.0132 79.5122 69.9314 79.5122 63.6636C79.5123 60.663 81.1487 58.0461 83.6919 56.1382C86.2409 54.226 89.6094 53.106 92.811 53.1059Z" stroke="#492222" stroke-width="2.22785"/>
-      </g>
-      <g filter="url(#filter1_g_20_1573)">
-        <path d="M92.811 53.1059C95.9755 53.1059 98.2774 54.1948 99.8042 55.9722C101.351 57.773 102.209 60.4063 102.209 63.6636C102.209 69.9314 97.1287 75.0131 90.8608 75.0132C84.593 75.0132 79.5122 69.9314 79.5122 63.6636C79.5123 60.663 81.1487 58.0461 83.6919 56.1382C86.2409 54.226 89.6094 53.106 92.811 53.1059Z" stroke="#492222" stroke-width="2.22785"/>
-      </g>
-      <g filter="url(#filter2_g_20_1573)">
-        <path d="M75.1902 36.3615C80.0694 36.3615 83.6679 37.9331 86.0544 40.5187C88.4534 43.1181 89.7468 46.8717 89.7468 51.4435C89.7466 60.3049 82.0045 67.6222 72.283 67.6223C62.5614 67.6223 54.8193 60.3049 54.8191 51.4435C54.8191 47.1445 57.3418 43.3976 61.238 40.6769C65.1339 37.9566 70.281 36.3616 75.1902 36.3615Z" stroke="#492222" stroke-width="2.22785"/>
-      </g>
-      <g filter="url(#filter3_g_20_1573)">
-        <path d="M93.7683 16.1356C98.6475 16.1356 102.246 17.7072 104.633 20.2928C107.031 22.8921 108.325 26.6458 108.325 31.2176C108.325 40.079 100.583 47.3963 90.8611 47.3963C81.1395 47.3963 73.3974 40.079 73.3972 31.2176C73.3972 26.9185 75.9199 23.1716 79.8162 20.451C83.712 17.7307 88.8592 16.1357 93.7683 16.1356Z" stroke="#E9ECD9" stroke-width="2.22785"/>
-      </g>
-      <mask id="mask0_20_1573" style="mask-type:alpha" maskUnits="userSpaceOnUse" x="20" y="21" width="92" height="91">
-        <path d="M30.8593 44.6318C27.5 50.1062 23.4555 74.6146 21.9412 89.3277C21.7499 91.1869 23.1536 92.8071 25.0186 92.9296L31.3888 93.3478C32.8495 93.4436 34.0778 94.479 34.4194 95.9025L37.0109 106.701C37.3156 107.97 38.3272 108.951 39.6146 109.166C50.013 110.903 68.7473 111.932 80.042 105.728C127.884 79.4505 111.589 32.7973 82.7913 25.0809C53.9934 17.3645 39.1073 31.1906 30.8593 44.6318Z" fill="#97630C" stroke="#E9ECD9" stroke-width="2.22785"/>
-      </mask>
-      <g mask="url(#mask0_20_1573)">
-        <g filter="url(#filter4_g_20_1573)">
-          <path d="M93.7683 16.1356C98.6475 16.1356 102.246 17.7072 104.633 20.2928C107.031 22.8921 108.325 26.6458 108.325 31.2176C108.325 40.079 100.583 47.3963 90.8611 47.3963C81.1395 47.3963 73.3974 40.079 73.3972 31.2176C73.3972 26.9185 75.9199 23.1716 79.8162 20.451C83.712 17.7307 88.8592 16.1357 93.7683 16.1356Z" stroke="#492222" stroke-width="2.22785"/>
-        </g>
-      </g>
-      <defs>
-        <filter id="filter0_g_20_1573" x="77.5028" y="51.0966" width="26.716" height="25.9254" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
-          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
-          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
-          <feMerge result="effect1_texture_20_1573">
-            <feMergeNode in="displacedImage"/>
-          </feMerge>
-        </filter>
-        <filter id="filter1_g_20_1573" x="77.5028" y="51.0966" width="26.716" height="25.9254" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
-          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
-          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
-          <feMerge result="effect1_texture_20_1573">
-            <feMergeNode in="displacedImage"/>
-          </feMerge>
-        </filter>
-        <filter id="filter2_g_20_1573" x="52.8097" y="34.3521" width="38.9462" height="35.2791" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
-          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
-          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
-          <feMerge result="effect1_texture_20_1573">
-            <feMergeNode in="displacedImage"/>
-          </feMerge>
-        </filter>
-        <filter id="filter3_g_20_1573" x="71.3878" y="14.1262" width="38.9462" height="35.2791" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
-          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
-          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
-          <feMerge result="effect1_texture_20_1573">
-            <feMergeNode in="displacedImage"/>
-          </feMerge>
-        </filter>
-        <filter id="filter4_g_20_1573" x="71.3878" y="14.1262" width="38.9462" height="35.2791" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-          <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-          <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
-          <feTurbulence type="fractalNoise" baseFrequency="0.30468317866325378 0.30468317866325378" numOctaves="3" seed="1005" />
-          <feDisplacementMap in="shape" scale="1.7902352809906006" xChannelSelector="R" yChannelSelector="G" result="displacedImage" width="100%" height="100%" />
-          <feMerge result="effect1_texture_20_1573">
-            <feMergeNode in="displacedImage"/>
-          </feMerge>
-        </filter>
-      </defs>
-    </svg>
-    <svg class="wordmark" role="img" aria-label="Minds" width="319" height="86" viewBox="0 0 319 86" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <path d="M294.413 85.92C278.213 85.92 268.613 77.4 268.133 64.32H280.613C280.973 71.76 285.653 76.44 294.293 76.44C301.493 76.44 306.293 73.08 306.293 67.92C306.293 63.72 303.053 61.32 296.453 60L288.533 58.44C277.013 56.28 270.053 50.64 270.053 41.28C270.053 31.32 279.653 23.88 293.333 23.88C308.213 23.88 317.213 31.32 317.813 43.32H305.453C304.733 36.96 300.173 33.36 292.973 33.36C286.733 33.36 282.533 36.12 282.533 40.68C282.533 44.76 285.293 46.8 292.253 48.12L300.293 49.68C311.333 51.84 318.653 57 318.653 66.96C318.653 77.76 309.293 85.92 294.413 85.92Z" fill="#E9ECD9"/>
-      <path d="M229.179 85.92C213.939 85.92 202.419 75.12 202.419 54.96C202.419 35.76 214.419 23.88 229.419 23.88C238.779 23.88 244.779 28.8 247.779 33.84C247.539 32.04 247.539 30.36 247.539 28.68V0H260.019V84H247.539V81.12C247.539 79.2 247.539 77.64 247.779 75.96C245.019 80.76 238.899 85.92 229.179 85.92ZM231.819 76.2C241.419 76.2 248.259 67.68 248.259 54.84C248.259 42 241.419 33.72 231.819 33.72C222.219 33.72 215.259 42.36 215.259 54.96C215.259 67.8 222.219 76.2 231.819 76.2Z" fill="#E9ECD9"/>
-      <path d="M140.786 84V25.8H153.266V29.04C153.266 30.6 153.146 32.04 153.026 33.84C156.146 28.44 162.386 23.88 171.626 23.88C185.306 23.88 193.226 33 193.226 47.76V84H180.626V49.44C180.626 39.6 176.786 33.72 168.146 33.72C158.906 33.72 153.266 41.04 153.266 49.8V84H140.786Z" fill="#E9ECD9"/>
-      <path d="M70.033 84V73.92H97.033V35.88H74.953V25.8H109.393V73.92H132.673V84H70.033ZM94.753 16.44V1.32001H109.753V16.44H94.753Z" fill="#E9ECD9"/>
-      <path d="M0 84V25.8H11.16V29.88C11.16 31.2 11.04 32.76 10.92 33.84C13.08 27.6 17.28 23.88 23.16 23.88C28.32 23.88 33 27 34.8 34.32C37.2 28.2 41.28 23.88 48.48 23.88C57.24 23.88 62.4 31.2 62.4 43.32V84H51.24V45.24C51.24 38.16 49.68 33.72 44.88 33.72C38.64 33.72 36.72 40.2 36.72 47.76V84H25.68V45.6C25.68 38.4 24 33.72 19.08 33.72C13.2 33.72 11.16 40.32 11.16 48V84H0Z" fill="#E9ECD9"/>
-    </svg>
+  <div id="intro" aria-hidden="true">
+    <div class="lockup-travel" id="lockup-travel">
+      <img class="lockup" id="lockup" src="assets/mind-wordmark.svg" alt="mind" draggable="false">
+    </div>
+    <div class="lines" id="lines"></div>
   </div>
-  <div class="status" id="status-line"></div>
+  <img id="parked-mark" src="assets/mind-wordmark.svg" alt="mind" draggable="false">
+  <div id="status-block">
+    <div class="progress" aria-hidden="true"></div>
+    <div class="status" id="status-line"></div>
+    <button class="toggle-details" id="startup-log-toggle" type="button">Show details</button>
+    <pre class="details" id="startup-log"></pre>
+  </div>
   <div id="error-view">
     <h1>Something went wrong</h1>
     <p class="message" id="error-message">Mind stopped unexpectedly.</p>
@@ -324,17 +314,137 @@
     <pre class="details" id="error-details"></pre>
   </div>
 
+  <script src="intro-timing.js"></script>
+  <script src="startup-log.js"></script>
   <script>
-    var errorView = document.getElementById('error-view');
     var statusLine = document.getElementById('status-line');
+    var startupLog = document.getElementById('startup-log');
+    var startupLogToggle = document.getElementById('startup-log-toggle');
+    var startupLogLines = [];
+
+    // The full startup console output, behind "Show details". Every line the
+    // main process forwards lands here whether or not the log is open, so
+    // opening it shows what already happened, scrolled to the newest line.
+    function renderStartupLog() {
+      startupLog.textContent = startupLogLines.join('\n');
+      if (startupLog.classList.contains('visible')) startupLog.scrollTop = startupLog.scrollHeight;
+    }
+    startupLogToggle.addEventListener('click', function() {
+      startupLog.classList.toggle('visible');
+      this.textContent = startupLog.classList.contains('visible') ? 'Hide details' : 'Show details';
+      renderStartupLog();
+    });
+    var lockupTravel = document.getElementById('lockup-travel');
+    var linesEl = document.getElementById('lines');
 
     // Quitting takeover: shell.html is loaded with a `#quitting` hash when a
-    // committed quit flips every window to this page. Reveal the status line and
-    // seed it before any IPC arrives so there's no empty flash.
+    // committed quit flips every window to this page. Seed the status line
+    // before any IPC arrives so there's no empty flash.
     if (location.hash === '#quitting') {
       document.body.classList.add('quitting');
       statusLine.textContent = 'Quitting…';
     }
+
+    // The intro
+
+    var isIntroFinished = false;
+    var introTimers = [];
+    var introAnimations = [];
+
+    // Tell the main process the film is over (or never ran), so it can land the
+    // first route. Idempotent: the skip and the natural end can both reach here.
+    function finishIntro() {
+      if (isIntroFinished) return;
+      isIntroFinished = true;
+      introTimers.forEach(function(timer) { clearTimeout(timer); });
+      introAnimations.forEach(function(animation) { animation.cancel(); });
+      document.body.classList.remove('intro');
+      document.body.classList.add('parked');
+      if (window.mindsNative && window.mindsNative.introFinished) window.mindsNative.introFinished();
+    }
+
+    function buildLine(runs, lineSchedule, timing) {
+      var line = document.createElement('p');
+      line.className = 'line';
+      line.style.setProperty('--line-out-delay', lineSchedule.fadesOutAt + 'ms');
+      var charIndex = 0;
+      runs.forEach(function(run) {
+        var holder = run.em ? document.createElement('em') : document.createElement('span');
+        Array.from(run.text).forEach(function(character) {
+          var span = document.createElement('span');
+          span.className = 'char';
+          span.textContent = character;
+          span.style.setProperty('--char-delay', (lineSchedule.typedAt + charIndex * timing.stepMs) + 'ms');
+          charIndex += 1;
+          holder.appendChild(span);
+        });
+        line.appendChild(holder);
+      });
+      return line;
+    }
+
+    // The lockup's travel is measured rather than written in CSS: one end is a
+    // width in cqw inside a flex column, the other a fixed 16px at the top of
+    // the window, and Chrome does not interpolate a var()-derived transform in
+    // a keyframe. The Web Animations API takes the measured numbers directly.
+    function startLockupTravel(travelAt, travelMs) {
+      // The parked geometry is declared once, on :root, and shared with the
+      // #parked-mark rules.
+      var rootStyle = getComputedStyle(document.documentElement);
+      var parkedHeight = parseFloat(rootStyle.getPropertyValue('--parked-mark-height'));
+      var titlebarHeight = parseFloat(rootStyle.getPropertyValue('--titlebar-height'));
+      var parkedTop = (titlebarHeight - parkedHeight) / 2;
+      var measure = function() {
+        return [
+          { transform: 'translateY(0) scale(1)' },
+          {
+            transform: 'translateY(' + (parkedTop - lockupTravel.offsetTop) + 'px) scale(' +
+              (parkedHeight / lockupTravel.offsetHeight) + ')',
+          },
+        ];
+      };
+      var travel = lockupTravel.animate(measure(), {
+        duration: travelMs,
+        delay: travelAt,
+        easing: 'cubic-bezier(0.76, 0, 0.24, 1)',
+        fill: 'forwards',
+      });
+      introAnimations.push(travel);
+      // A window resized mid-run moves the resting position; re-aim without
+      // disturbing how far through the travel already is.
+      window.addEventListener('resize', function() {
+        if (travel.effect) travel.effect.setKeyframes(measure());
+      });
+    }
+
+    function playIntro() {
+      var introTiming = window.mindsIntroTiming;
+      var timing = introTiming.INTRO_TIMING;
+      var schedule = introTiming.computeIntroSchedule(timing, introTiming.INTRO_LINES);
+      var rootStyle = document.documentElement.style;
+      rootStyle.setProperty('--lockup-delay', timing.lockupDelayMs + 'ms');
+      rootStyle.setProperty('--lockup-focus', timing.lockupFocusMs + 'ms');
+      rootStyle.setProperty('--char-fade', timing.fadeMs + 'ms');
+      rootStyle.setProperty('--line-out', timing.outMs + 'ms');
+      document.body.classList.add('intro');
+      introTiming.INTRO_LINES.forEach(function(runs, index) {
+        linesEl.appendChild(buildLine(runs, schedule.lines[index], timing));
+      });
+      startLockupTravel(schedule.travelAt, timing.travelMs);
+      introTimers.push(setTimeout(finishIntro, schedule.parkedAt));
+      // A click or a key jumps straight to the parked state.
+      document.addEventListener('click', finishIntro, { once: true });
+      document.addEventListener('keydown', finishIntro, { once: true });
+    }
+
+    var isReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (location.hash === '#intro' && !isReducedMotion && window.mindsIntroTiming) {
+      playIntro();
+    } else {
+      finishIntro();
+    }
+
+    // The error takeover
 
     // The latest error-details payload (message/details/actionLabel).
     var lastErrorData = null;
@@ -402,21 +512,25 @@
     });
 
     if (window.mindsNative) {
-      // Drives the status line in the quitting takeover (e.g. "Stopping 2
-      // minds…", "Closing…"). During startup loading the same messages arrive
-      // but the line stays hidden (no `quitting` class), so the loading screen
-      // is unaffected.
+      // Drives the status line under the bar: environment setup progress and
+      // "Starting Mind..." while loading, "Stopping N workspaces…" while quitting.
       window.mindsNative.onStatusUpdate(function(message) {
         if (message) statusLine.textContent = message;
       });
+      window.mindsNative.onStatusLogLine(function(line) {
+        window.mindsStartupLog.appendStartupLogLine(startupLogLines, line);
+        renderStartupLog();
+      });
       window.mindsNative.onErrorDetails(function(data) {
         lastErrorData = data;
+        // An error ends whatever the intro was doing: the takeover needs the
+        // page, and the main process must not keep waiting on the film.
+        finishIntro();
         // This page is reused (not reloaded) across takeovers, so clear any prior
         // report outcome and re-enable the button for the new error.
         reportResult.classList.remove('visible');
         reportBtn.disabled = false;
         document.body.classList.add('error');
-        errorView.style.display = 'flex';
         if (data.message) document.getElementById('error-message').textContent = data.message;
         if (data.details) document.getElementById('error-details').textContent = data.details;
         // Optional per-takeover label for the primary action (e.g. "Restart

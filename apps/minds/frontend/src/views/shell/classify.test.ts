@@ -66,6 +66,14 @@ describe("classifyRoute", () => {
       kind: "page",
       pageLabel: "New machine",
     });
+    // A creation page wears its in-flight attempt's frame: the attempt id is
+    // the coordinate the titlebar names and paints from.
+    expect(classifyRoute("/creating/create-attempt-ff00")).toMatchObject({
+      kind: "creating",
+      workspaceAnyId: "create-attempt-ff00",
+    });
+    expect(accentSourceForRoute("/creating/create-attempt-ff00")).toBe("create-attempt-ff00");
+    // A creating path that names something other than an attempt stays a page.
     expect(classifyRoute("/creating/agent-ff00").kind).toBe("page");
     // Template over a machine is that machine's modal; standalone it is a
     // plain New machine page (until it redirects to the create form).
@@ -82,7 +90,7 @@ describe("classifyRoute", () => {
     expect(classifyRoute("/workspaces/destroyed").pageLabel).toBe(
       "Recently destroyed",
     );
-    expect(classifyRoute("/welcome").kind).toBe("welcome");
+    expect(classifyRoute("/start").kind).toBe("start");
     expect(classifyRoute("/").kind).toBe("home");
     expect(classifyRoute("/definitely/unknown").kind).toBe("home");
   });

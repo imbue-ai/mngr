@@ -306,6 +306,24 @@ def test_auth_resend_verification_raises_on_malformed_output() -> None:
         cli.auth_resend_verification("a@b.com")
 
 
+def test_auth_is_email_verified_reads_the_verdict() -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"verified": True, "email": "a@b.com"}))
+    )
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    assert cli.auth_is_email_verified("a@b.com") is True
+    assert caller.recorded_calls[0].argv == ("imbue_cloud", "auth", "is-verified", "--account", "a@b.com")
+
+
+def test_auth_is_email_verified_raises_on_malformed_output() -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps({"email": "a@b.com"})))
+    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
+
+    with pytest.raises(ImbueCloudCliError, match="Malformed auth is-verified output"):
+        cli.auth_is_email_verified("a@b.com")
+
+
 def test_expect_success_raises_typed_email_not_verified_error_with_the_email() -> None:
     """A structured verification refusal surfaces typed, carrying the address the link goes to."""
     cli = make_fake_imbue_cloud_cli()

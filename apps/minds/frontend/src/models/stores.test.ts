@@ -266,6 +266,7 @@ describe("boot seeding", () => {
         accent: "#123456",
         is_mac: true,
         mngr_forward_origin: "http://localhost:8421",
+        is_onboarding_complete: false,
       },
       schema_version: 1,
       snapshot: {

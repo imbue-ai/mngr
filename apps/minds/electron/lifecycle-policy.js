@@ -94,7 +94,7 @@ function shouldOpenWindowOnActivate({ isShuttingDown, isQuitSequenceRunning, has
  *   'loading'         open shell.html's loading screen; the backend is still
  *                     coming up.
  *   'startup-route'   open a window and land the app's FIRST-window route on
- *                     it (session restore / welcome / consent). Reached when
+ *                     it (session restore / start flow / consent). Reached when
  *                     the launch never got to land anywhere -- its window was
  *                     closed mid-startup -- and also during the window between
  *                     the backend publishing its URL and that route being

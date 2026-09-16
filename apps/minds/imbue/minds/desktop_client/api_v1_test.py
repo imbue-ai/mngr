@@ -61,6 +61,7 @@ from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
@@ -186,6 +187,7 @@ def _client_with_agent_creator(
     resolver: BackendResolverInterface | None = None,
     agent_creator: AgentCreator | None = None,
     session_store: MultiAccountSessionStore | None = None,
+    minds_config: MindsConfig | None = None,
 ) -> FlaskClient:
     """Build a test client whose ``/api/v1`` create route has an ``AgentCreator`` wired.
 
@@ -213,6 +215,7 @@ def _client_with_agent_creator(
         session_store=session_store,
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         minds_api_key=_TEST_KEY,
+        minds_config=minds_config,
     )
     return app.test_client()
 
@@ -3519,6 +3522,33 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 
     assert response.status_code == 202
     assert creator.last_call["account_id"] == "user-77120"
+
+
+def test_create_workspace_marks_onboarding_complete(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    # Starting any create is the point past which the first-run start flow is no
+    # longer useful, so the front door records it for every surface.
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(
+        tmp_path,
+        root_concurrency_group,
+        notification_dispatcher,
+        agent_creator=creator,
+        minds_config=minds_config,
+    )
+
+    response = client.post(
+        "/api/v1/workspaces",
+        headers=_auth_header(),
+        json={"git_url": "https://example/repo", "host_name": "first-ever-workspace"},
+    )
+
+    assert response.status_code == 202
+    assert minds_config.get_is_onboarding_complete() is True
 
 
 # The stderr an `mngr exec` run really produced against a healthy pre-declutter

@@ -7,6 +7,7 @@ const { initElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
 const { initSentry, captureManualReport } = require('./sentry');
 const { runEnvSetup } = require('./env-setup');
+const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
 const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
@@ -110,7 +111,7 @@ const systemInterfaceStatusByAgent = new Map();
 let isShuttingDown = false;
 let initialBundle = null;
 let hasCompletedInitialStart = false;
-// The app's FIRST-window route (session restore / welcome / consent) has not
+// The app's FIRST-window route (session restore / start flow / consent) has not
 // landed on a window yet: either it is still being computed, or the window it
 // was for was closed mid-startup. Set once per launch and cleared by
 // applyStartupRouting, which IS that landing.
@@ -132,6 +133,32 @@ const SHELL_EVENT_DEDUPE_WINDOW_MS = 3000;
 
 function getSessionStatePath() {
   return path.join(paths.getDataDir(), 'window-state.json');
+}
+
+// The loading document's first-launch intro plays once per install. Electron
+// owns this marker because Electron is the only thing that plays the film; the
+// backend separately owns whether onboarding is complete.
+function getIntroSeenPath() {
+  return path.join(paths.getDataDir(), 'intro-seen.json');
+}
+
+function hasSeenIntro() {
+  try {
+    return fs.existsSync(getIntroSeenPath());
+  } catch (err) {
+    console.warn('[startup] could not read the intro-seen marker; skipping the intro:', err.message);
+    return true;
+  }
+}
+
+// Written when the film STARTS, so a quit during it still counts as seen.
+function markIntroSeen() {
+  try {
+    fs.mkdirSync(paths.getDataDir(), { recursive: true });
+    fs.writeFileSync(getIntroSeenPath(), JSON.stringify({ has_seen_intro: true }));
+  } catch (err) {
+    console.warn('[startup] could not write the intro-seen marker:', err.message);
+  }
 }
 
 function toAbsoluteUrl(url) {
@@ -420,6 +447,11 @@ function createBundle() {
     showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
+    // Resolves once this window's loading document reports its intro over
+    // (played, skipped, or never shown). Only the startup window can play it;
+    // every other window starts already resolved.
+    introFinished: Promise.resolve(),
+    resolveIntroFinished: () => {},
   };
   bundles.add(bundle);
   mruWindows.unshift(bundle);
@@ -493,6 +525,9 @@ function wireBundleWindowEvents(bundle) {
     const mruIdx = mruWindows.indexOf(bundle);
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
     if (initialBundle === bundle) initialBundle = null;
+    // A window closed mid-intro can never report the film over; the startup
+    // route waiting on it must not wait forever.
+    bundle.resolveIntroFinished();
   });
 }
 
@@ -1421,8 +1456,8 @@ async function promptWorkspaceShutdown() {
 
 function fetchAppStatus(timeoutMs = 25000) {
   // One GET to /ui/api/app-status to learn auth status, the restore inputs
-  // (has_accounts, workspace_count, restorable ids), and whether the
-  // error-reporting notice still needs acknowledging. See the startup
+  // (is_onboarding_complete, workspace_count, restorable ids), and whether
+  // the error-reporting notice still needs acknowledging. See the startup
   // sequence for how the result routes the cold-start landing screen.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {
@@ -1466,7 +1501,9 @@ function fetchAppStatus(timeoutMs = 25000) {
           const parsed = JSON.parse(body);
           finish({
             authenticated: !!parsed.is_authenticated,
-            hasAccounts: !!parsed.has_accounts,
+            // Absent on a backend that predates the flag: such a backend has
+            // no start flow to route to either.
+            isOnboardingComplete: parsed.is_onboarding_complete !== false,
             workspaceCount: typeof parsed.workspace_count === 'number' ? parsed.workspace_count : 0,
             restorableWorkspaceIds: Array.isArray(parsed.restorable_workspace_ids)
               ? parsed.restorable_workspace_ids.map(String)
@@ -1665,9 +1702,21 @@ function installDevDockIcon() {
 async function runStartupSequence(bundle) {
   console.log('[startup] Loading shell.html...');
   bundle.isLoadingState = true;
+  const isIntroDue = !hasSeenIntro();
+  if (isIntroDue) {
+    // Held open until the document says the film is over, so the first route
+    // never lands mid-intro (see startBackendWithRetry).
+    bundle.introFinished = new Promise((resolve) => {
+      bundle.resolveIntroFinished = resolve;
+    });
+    markIntroSeen();
+  }
   try {
-    await bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'));
-    console.log('[startup] shell.html loaded');
+    await bundle.window.webContents.loadFile(
+      path.join(__dirname, 'shell.html'),
+      isIntroDue ? { hash: 'intro' } : {},
+    );
+    console.log(`[startup] shell.html loaded (intro=${isIntroDue})`);
   } catch (err) {
     // Closing the window mid-load rejects the load. This sequence owns the
     // backend start and the one-time code, so it runs on without a window.
@@ -1675,7 +1724,10 @@ async function runStartupSequence(bundle) {
   }
 
   try {
-    await runEnvSetup((status) => broadcastStatusToLoadingWindows(status));
+    await runEnvSetup(
+      (status) => broadcastStatusToLoadingWindows(status),
+      (line) => broadcastStartupLogLine(line),
+    );
   } catch (err) {
     console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
@@ -1688,14 +1740,26 @@ async function runStartupSequence(bundle) {
   await startBackendWithRetry();
 }
 
-function broadcastStatusToLoadingWindows(status) {
+function sendToLoadingWindows(channel, payload) {
   for (const b of bundles) {
     if (b.window.isDestroyed()) continue;
     if (!b.isLoadingState) continue;
     if (!b.window.webContents.isDestroyed()) {
-      b.window.webContents.send('status-update', status);
+      b.window.webContents.send(channel, payload);
     }
   }
+}
+
+function broadcastStatusToLoadingWindows(status) {
+  sendToLoadingWindows('status-update', status);
+}
+
+// One line of startup console output for the loading document's "Show
+// details" log. Lines carrying a credential the app consumes itself (the
+// one-time login code, the forward tokens) never reach the page.
+function broadcastStartupLogLine(line) {
+  if (isSecretStartupLogLine(line)) return;
+  sendToLoadingWindows('status-log-line', line);
 }
 
 // Consume the backend's one-time login code so the default session -- used by
@@ -1728,7 +1792,7 @@ async function computeStartupRouting() {
   const savedState = loadSessionState();
   const appStatus = await fetchAppStatus();
   const authenticated = appStatus && appStatus.authenticated;
-  const hasAccounts = !!(appStatus && appStatus.hasAccounts);
+  const isOnboardingComplete = !!(appStatus && appStatus.isOnboardingComplete);
 
   const restorableWorkspaceIds = (authenticated && appStatus.restorableWorkspaceIds) || [];
   const knownAgentIdsSet = restorableWorkspaceIds.length > 0
@@ -1742,13 +1806,13 @@ async function computeStartupRouting() {
   const needsConsent = !!(appStatus && appStatus.needsErrorReportingConsent);
   const route = decideStartupRoute({
     authenticated,
-    hasAccounts,
+    isOnboardingComplete,
     workspaceCount,
     restorableCount: restorable.length,
     needsConsent,
   });
   console.log(
-    `[startup] route=${route} authenticated=${authenticated} hasAccounts=${hasAccounts} workspaceCount=${workspaceCount} restorableCount=${restorable.length} needsConsent=${needsConsent}`,
+    `[startup] route=${route} authenticated=${authenticated} isOnboardingComplete=${isOnboardingComplete} workspaceCount=${workspaceCount} restorableCount=${restorable.length} needsConsent=${needsConsent}`,
   );
   return { route, restorable, savedState };
 }
@@ -1769,8 +1833,8 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
   // This IS the first-window route landing, so nothing is owed any more.
   isStartupRoutingPending = false;
   const wc = bundle.window.webContents;
-  if (route === 'welcome') {
-    wc.loadURL(backendBaseUrl + '/welcome').catch(() => {});
+  if (route === 'start') {
+    wc.loadURL(backendBaseUrl + '/start').catch(() => {});
     return;
   }
   if (route === 'consent') {
@@ -1812,6 +1876,7 @@ async function startBackendWithRetry() {
       (event) => handleNotification(event),
       (event) => handleAuthEvent(event),
       (event) => handleMngrForwardStarted(event),
+      (line) => broadcastStartupLogLine(line),
     );
 
     // `localhost` (not `127.0.0.1`) so the auth cookie, issued with
@@ -1826,43 +1891,9 @@ async function startBackendWithRetry() {
     const isFirstStart = !hasCompletedInitialStart;
     hasCompletedInitialStart = true;
 
-    if (isFirstStart) {
-      // The first-window route is now owed. Marked BEFORE the awaits below so a
-      // window requested while they run waits on the loading screen instead of
-      // landing on home and being yanked off it a moment later.
-      isStartupRoutingPending = true;
-      isStartupRoutingBeingComputed = true;
-      let routing;
-      try {
-        // Unconditional, and deliberately NOT inside the window guard below:
-        // this is the only place the one-time code is consumed and a fresh one
-        // is minted per backend run, so skipping it because the startup window
-        // was closed strands the app on /login for the rest of the run.
-        await consumeOneTimeLoginCode(loginUrl);
-        routing = await computeStartupRouting();
-      } finally {
-        isStartupRoutingBeingComputed = false;
-      }
-      // Not necessarily the window startup began in: the user may have closed
-      // that one and re-opened another (which is sitting on the loading
-      // takeover waiting for exactly this).
-      const isInitialAlive = initialBundle && !initialBundle.window.isDestroyed();
-      const target = isInitialAlive ? initialBundle : getMostRecentWindow();
-      if (target) {
-        applyStartupRouting(target, routing, { boundsAlreadyApplied: isInitialAlive });
-      } else {
-        // Nothing is open at all. macOS keeps the app alive, so leave the route
-        // owed rather than popping windows up unprompted a minute after the
-        // user deliberately closed one: the next window they ask for is routed
-        // (against a freshly computed session, not this stale one).
-        console.log('[startup] no window survived startup; holding the route for the next one');
-      }
-    } else {
-      reloadAllWindowsAfterRetry();
-    }
-
-    flushPendingDeeplink();
-
+    // Attached before the routing waits below (the one-time code, the app
+    // status probe, and on a first launch the loading document's intro), so a
+    // backend that dies during any of them is reported rather than missed.
     const proc = getBackendProcess();
     if (proc) {
       proc.on('exit', (code) => {
@@ -1889,6 +1920,54 @@ async function startBackendWithRetry() {
         );
       });
     }
+
+    if (isFirstStart) {
+      // The first-window route is now owed. Marked BEFORE the awaits below so a
+      // window requested while they run waits on the loading screen instead of
+      // landing on home and being yanked off it a moment later.
+      isStartupRoutingPending = true;
+      isStartupRoutingBeingComputed = true;
+      let routing;
+      try {
+        // Unconditional, and deliberately NOT inside the window guard below:
+        // this is the only place the one-time code is consumed and a fresh one
+        // is minted per backend run, so skipping it because the startup window
+        // was closed strands the app on /login for the rest of the run.
+        await consumeOneTimeLoginCode(loginUrl);
+        routing = await computeStartupRouting();
+      } finally {
+        isStartupRoutingBeingComputed = false;
+      }
+      // Not necessarily the window startup began in: the user may have closed
+      // that one and re-opened another (which is sitting on the loading
+      // takeover waiting for exactly this).
+      const isInitialAlive = initialBundle && !initialBundle.window.isDestroyed();
+      const target = isInitialAlive ? initialBundle : getMostRecentWindow();
+      if (target) {
+        // A first launch may still be playing the loading document's intro;
+        // the route waits for it rather than cutting the film short.
+        await target.introFinished;
+        if (lastErrorTakeover) {
+          // The backend died while the film played. The takeover owns the
+          // window now; landing the route would paint the dead port over it.
+          console.log('[startup] the backend failed during the intro; leaving the error takeover up');
+        } else if (!target.window.isDestroyed()) {
+          applyStartupRouting(target, routing, { boundsAlreadyApplied: isInitialAlive });
+        } else {
+          console.log('[startup] the startup window closed during the intro; holding the route for the next one');
+        }
+      } else {
+        // Nothing is open at all. macOS keeps the app alive, so leave the route
+        // owed rather than popping windows up unprompted a minute after the
+        // user deliberately closed one: the next window they ask for is routed
+        // (against a freshly computed session, not this stale one).
+        console.log('[startup] no window survived startup; holding the route for the next one');
+      }
+    } else {
+      reloadAllWindowsAfterRetry();
+    }
+
+    flushPendingDeeplink();
   } catch (err) {
     showErrorInAllWindows('Failed to start Mind', err.message);
   }
@@ -1931,7 +2010,7 @@ function handleDeeplink(rawUrl) {
     // documented contract for it.
     //
     // An explicit deeplink outranks a first-window route still owed (the docs'
-    // rule: a deeplink wins over the welcome screen), and settles it -- this
+    // rule: a deeplink wins over the start flow), and settles it -- this
     // window is where the launch landed, so a later Cmd+N must not still pop
     // the restored session open.
     isStartupRoutingPending = false;
@@ -2138,15 +2217,12 @@ async function handleMngrForwardStarted(event) {
 }
 
 function handleAuthEvent(event) {
-  if (event.event === 'auth_success') {
-    // Sign-in happens on the hosted browser page; the SPA's accounts channel
-    // frame carries the new identity, but pre-WS surfaces (and any window
-    // stuck on a stale state) pick it up from a plain reload.
-    for (const b of bundles) {
-      if (b.window.isDestroyed() || b.window.webContents.isDestroyed()) continue;
-      b.window.webContents.reload();
-    }
-  } else if (event.event === 'auth_required') {
+  // auth_success needs nothing from the shell: sign-in happens on the hosted
+  // browser page and the SPA's accounts channel frame carries the new identity
+  // to every window, which advances whatever it was doing (the start flow's
+  // account step, the accounts page) in place. A reload here would throw that
+  // away.
+  if (event.event === 'auth_required') {
     const mru = getMostRecentWindow();
     if (!mru) return;
     focusBundle(mru);
@@ -2225,6 +2301,11 @@ ipcMain.on('reload-chrome', (event) => {
     : toAbsoluteUrl(bundle.currentContentUrl || '/');
   if (target) bundle.window.webContents.loadURL(target).catch(() => {});
   else if (backendBaseUrl) bundle.window.webContents.loadURL(backendBaseUrl + '/').catch(() => {});
+});
+
+ipcMain.on('intro-finished', (event) => {
+  const senderBundle = getBundleFromEvent(event);
+  if (senderBundle) senderBundle.resolveIntroFinished();
 });
 
 ipcMain.on('retry', async (event) => {

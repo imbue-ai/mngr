@@ -178,7 +178,7 @@ class MultiAccountSessionStore(MutableModel):
 
         Lets callers distinguish "the user has no accounts" from "the account
         listing was unavailable" -- e.g. the landing route must not bounce a
-        just-signed-in user back to the welcome splash because a transient
+        just-signed-in user back to the start flow because a transient
         subprocess failure made ``list_accounts()`` return empty.
         """
         with self._cache_lock:
