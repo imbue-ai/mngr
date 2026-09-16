@@ -1,5 +1,5 @@
-# Public-mirror variant of the root pyproject: identical to the private one
-# minus coverage flags for packages that do not sync.
+# Public-mirror variant of the root pyproject, pruned to the packages and paths
+# that sync.
 [project]
 name = "imbue"
 version = "0.1.0"
@@ -77,6 +77,7 @@ addopts = [
   "--cov=imbue.resource_guards",
   "--cov=imbue.overlay",
   "--cov=imbue.mngr_claude",
+  "--cov=imbue.mngr_autocompact",
   "--cov=imbue.mngr_opencode",
   "--cov=imbue.mngr_antigravity",
   "--cov=imbue.mngr_codex",

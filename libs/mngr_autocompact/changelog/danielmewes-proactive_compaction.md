@@ -1,0 +1,1 @@
+Add `mngr_autocompact` plugin providing stateless staleness checking, on-prompt compaction hooks, and the `mngr autocompact` command group (`check` to inspect agents needing compaction and `run` to execute compaction) for conversational agents when token usage exceeds configured thresholds or caches become stale.

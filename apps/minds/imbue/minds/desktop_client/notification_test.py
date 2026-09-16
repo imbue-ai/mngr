@@ -1,9 +1,11 @@
 import json
+import threading
 import types
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from loguru import logger
 
 from imbue.minds.desktop_client.notification import DispatchChannel
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -188,24 +190,41 @@ def test_dispatcher_is_electron_false_does_not_raise() -> None:
     assert dispatcher.is_electron is False
 
 
-def test_run_tkinter_toast_without_tkinter_does_not_raise() -> None:
-    """When tkinter is unavailable, _run_tkinter_toast returns immediately without error."""
-    # Should not raise even though tk=None indicates no tkinter
-    _run_tkinter_toast("Title", "Message", NotificationUrgency.LOW, "agent", tk=None)
+def test_show_tkinter_toast_without_tkinter_warns_on_the_calling_thread() -> None:
+    warning_thread_ids: list[int] = []
+    sink_id = logger.add(
+        lambda message: warning_thread_ids.append(message.record["thread"].id),
+        level="WARNING",
+        filter=lambda record: "tkinter not available" in record["message"],
+    )
+    try:
+        _show_tkinter_toast(NotificationRequest(message="toast message", title="Test"), "agent-z", tk=None)
+    finally:
+        logger.remove(sink_id)
+    assert warning_thread_ids == [threading.get_ident()]
 
 
-def test_show_tkinter_toast_with_no_tkinter_does_not_raise() -> None:
-    """_show_tkinter_toast does not raise even when tkinter is unavailable.
+def test_show_tkinter_toast_with_tkinter_runs_the_toast_on_a_background_thread() -> None:
+    fake_tk = _make_fake_tk()
+    mainloop_threads: list[threading.Thread] = []
+    is_mainloop_done = threading.Event()
 
-    The function starts a daemon thread. With no tkinter available, the thread
-    logs a warning and exits immediately.
-    """
-    request = NotificationRequest(message="toast message", title="Test")
-    _show_tkinter_toast(request, "agent-z", tk=None)
+    class _RecordingRoot(fake_tk.Tk):
+        def mainloop(self) -> None:
+            mainloop_threads.append(threading.current_thread())
+            is_mainloop_done.set()
+
+    fake_tk.Tk = _RecordingRoot
+
+    _show_tkinter_toast(NotificationRequest(message="toast message", title="Test"), "agent-z", tk=fake_tk)
+
+    assert is_mainloop_done.wait(timeout=5.0)
+    assert [thread.name for thread in mainloop_threads] == ["tkinter-toast"]
+    assert mainloop_threads[0] is not threading.current_thread()
 
 
 def test_dispatch_non_electron_does_not_raise() -> None:
-    """The non-Electron/non-macOS dispatch path starts a background toast and does not raise.
+    """The non-Electron/non-macOS dispatch path does not raise.
 
     is_macos is forced to False so the test exercises the tkinter branch regardless
     of the host platform (and does not fire a real macOS Notification Center banner
@@ -242,9 +261,6 @@ def test_dispatcher_default_constructor_resolves_tkinter() -> None:
     # _tk is set by model_post_init; it will be a ModuleType or None (if tkinter is absent)
     # Just verify the attribute is accessible (not undefined)
     _ = dispatcher._tk
-
-
-# -- macOS notification tests --
 
 
 def test_build_osascript_notification_escapes_double_quotes() -> None:
@@ -362,9 +378,6 @@ def test_dispatcher_create_with_is_macos_override() -> None:
     """Verify create() accepts is_macos parameter."""
     dispatcher = NotificationDispatcher.create(is_electron=False, is_macos=False)
     assert dispatcher.is_macos is False
-
-
-# -- _build_toast_widgets and _position_toast_window tests with fake tkinter --
 
 
 def test_build_toast_widgets_returns_frame_and_content() -> None:

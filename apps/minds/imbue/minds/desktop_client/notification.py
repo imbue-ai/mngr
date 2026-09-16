@@ -186,12 +186,9 @@ def _run_tkinter_toast(
     message: str,
     urgency: NotificationUrgency,
     agent_display_name: str,
-    tk: ModuleType | None,
+    tk: ModuleType,
 ) -> None:
     """Create and display a tkinter toast window. Runs on a background thread."""
-    if tk is None:
-        logger.warning("tkinter not available, cannot show notification toast")
-        return
     try:
         root = tk.Tk()
         root.overrideredirect(True)
@@ -216,6 +213,9 @@ def _show_tkinter_toast(
     tk: ModuleType | None,
 ) -> None:
     """Show a small always-on-top toast window in the bottom-right corner."""
+    if tk is None:
+        logger.warning("tkinter not available, cannot show notification toast")
+        return
     display_title = request.title or "Notification"
     thread = threading.Thread(
         target=_run_tkinter_toast,
