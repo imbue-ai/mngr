@@ -19,6 +19,7 @@ from pyinfra.api.inventory import Inventory
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import LocalHostNotDestroyableError
 from imbue.mngr.errors import LocalHostNotStoppableError
@@ -26,6 +27,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.hosts.host import parse_certified_host_data
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -116,7 +118,27 @@ class LocalProviderInstance(BaseProviderInstance):
     """
 
     def get_host_name(self, style: HostNameStyle) -> HostName:
-        return HostName(LOCAL_HOST_NAME)
+        return self._recorded_host_name()
+
+    def _recorded_host_name(self) -> HostName:
+        """The name the host record gives this host, or ``localhost`` before one is written.
+
+        The record is stamped by whichever provider built the host dir, so a host dir
+        built by an outer provider names the host what that provider did. Read straight
+        from the host dir rather than through a ``Host``: building one constructs a
+        pyinfra inventory, which is far too slow for a lookup that address resolution
+        and name generation repeat many times.
+        """
+        data_path = self.host_dir / "data.json"
+        try:
+            content = data_path.read_text()
+        except FileNotFoundError:
+            return HostName(LOCAL_HOST_NAME)
+        return HostName(parse_certified_host_data(data_path, content).host_name)
+
+    def _is_this_host(self, name: HostName) -> bool:
+        """Whether ``name`` refers to the local host: its recorded name, or the ``localhost`` alias."""
+        return str(name) == LOCAL_HOST_NAME or name == self._recorded_host_name()
 
     @property
     def supports_snapshots(self) -> bool:
@@ -222,18 +244,19 @@ class LocalProviderInstance(BaseProviderInstance):
         """Create (or return) the local host.
 
         For the local provider, this always returns the same host representing
-        the local computer. The name must match LOCAL_HOST_NAME. The image and
-        known_hosts parameters are ignored since the local machine uses its
-        own configuration.
+        the local computer. The name must be its recorded name or the
+        ``localhost`` alias. The image and known_hosts parameters are ignored
+        since the local machine uses its own configuration.
         """
         TMUX.require()
         GIT.require()
         JQ.require()
 
-        if str(name) != LOCAL_HOST_NAME:
-            raise UserInputError(f"Local provider only supports host name '{LOCAL_HOST_NAME}', got '{name}'")
+        if not self._is_this_host(name):
+            accepted_names = " or ".join(f"'{n}'" for n in sorted({LOCAL_HOST_NAME, str(self._recorded_host_name())}))
+            raise UserInputError(f"Local provider only supports host name {accepted_names}, got '{name}'")
         with log_span("Creating local host (provider={})", self.name):
-            host = self._create_host(name, tags)
+            host = self._create_host(self._recorded_host_name(), tags)
 
             # Record BOOT activity for consistency. In this case it represents when mngr first created the local host
             host.record_activity(ActivitySource.BOOT)
@@ -263,7 +286,7 @@ class LocalProviderInstance(BaseProviderInstance):
         For the local provider, this simply returns the local host since it
         is always running.
         """
-        local_host = self._create_host(HostName(LOCAL_HOST_NAME))
+        local_host = self._create_host(self._recorded_host_name())
 
         return local_host
 
@@ -303,12 +326,12 @@ class LocalProviderInstance(BaseProviderInstance):
                     logger.trace("Failed to find host with id={} (local host id={})", host, host_id)
                     raise HostNotFoundError(self.name, host)
             case HostName():
-                if str(host) != LOCAL_HOST_NAME:
+                if not self._is_this_host(host):
                     raise HostNotFoundError(self.name, host)
             case _ as unreachable:
                 assert_never(unreachable)
 
-        return self._create_host(HostName(LOCAL_HOST_NAME))
+        return self._create_host(self._recorded_host_name())
 
     def discover_hosts(
         self,
@@ -322,7 +345,7 @@ class LocalProviderInstance(BaseProviderInstance):
         """
         host_ref = DiscoveredHost(
             host_id=self.host_id,
-            host_name=HostName(LOCAL_HOST_NAME),
+            host_name=self._recorded_host_name(),
             provider_name=self.name,
             host_state=HostState.RUNNING,
         )
@@ -482,12 +505,11 @@ class LocalProviderInstance(BaseProviderInstance):
         host: HostInterface | HostId,
         name: HostName,
     ) -> Host:
-        """Rename the local host.
-
-        For the local provider, this is a no-op since the host name is always
-        effectively "local". Returns the host unchanged.
-        """
-        return self._create_host(HostName(LOCAL_HOST_NAME))
+        """Rename the local host: its recorded name changes, ``localhost`` stays an alias."""
+        host_obj = self.get_host(host.id if isinstance(host, HostInterface) else host)
+        recorded = host_obj.get_certified_data()
+        host_obj.set_certified_data(recorded.model_copy_update(to_update(recorded.field_ref().host_name, str(name))))
+        return self._create_host(name)
 
     # =========================================================================
     # Connector Method

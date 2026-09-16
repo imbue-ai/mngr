@@ -6,6 +6,7 @@ import select
 import threading
 from collections.abc import Callable
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -700,9 +701,11 @@ class AgentObserver(MutableModel):
         # event removes (the delta carries only instance keys, and the aggregator
         # forgets the agent's data as part of applying the removal).
         agents_before = self._aggregator.get_agent_by_instance()
+        with self._lock:
+            known_host_ids_before = frozenset(self._known_hosts)
         delta = self._aggregator.apply_event(event)
         self._sync_known_state_from_aggregator()
-        self._reconcile_activity_streams(delta)
+        self._reconcile_activity_streams(known_host_ids_before)
         self._handle_agent_membership_delta(delta, agents_before)
         if _is_provider_error_event(event):
             self._snapshot_trigger.set()
@@ -742,11 +745,18 @@ class AgentObserver(MutableModel):
             self._last_known_details_by_instance.pop(instance_key_str, None)
 
     def _sync_known_state_from_aggregator(self) -> None:
-        """Refresh known hosts and provider error/known sets from the aggregator."""
+        """Refresh known hosts and provider error/known sets from the aggregator.
+
+        A DESTROYED host is not a known host here: the aggregator retains it as a
+        tombstone (and a provider may re-list it for its persistence window), but
+        there is nothing left on it to stream activity from or fetch agent state
+        for.
+        """
         host_by_id = self._aggregator.get_host_by_id()
         new_known_hosts = {
             host_id_str: _KnownHost(host_id=host.host_id, host_name=host.host_name)
             for host_id_str, host in host_by_id.items()
+            if host.host_state is not HostState.DESTROYED
         }
         errored_providers = set(self._aggregator.get_error_by_provider_name().keys())
         known_providers = {provider.provider_name for provider in self._aggregator.get_providers()} | errored_providers
@@ -755,14 +765,14 @@ class AgentObserver(MutableModel):
             self._currently_errored_providers = errored_providers
             self._known_provider_names = known_providers
 
-    def _reconcile_activity_streams(self, delta: AggregatorDelta) -> None:
-        """Start activity streams for newly-known hosts and stop them for removed hosts."""
-        for host_id_str in delta.removed_host_ids:
+    def _reconcile_activity_streams(self, known_host_ids_before: AbstractSet[str]) -> None:
+        """Start activity streams for newly-known hosts and stop them for hosts no longer known."""
+        with self._lock:
+            known_hosts_after = dict(self._known_hosts)
+        for host_id_str in known_host_ids_before - known_hosts_after.keys():
             self._stop_activity_stream(host_id_str)
-        for host_id_str in delta.added_host_ids:
-            with self._lock:
-                host = self._known_hosts.get(host_id_str)
-            if host is not None:
+        for host_id_str, host in known_hosts_after.items():
+            if host_id_str not in known_host_ids_before:
                 self._start_activity_stream(host_id_str, host.host_name)
 
     # FIXME: we'll need to be smarter about this when we have tons of hosts--add these options to the observe CLI and API:

@@ -30,6 +30,7 @@ from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.local.instance import _read_cpu_frequency_ghz
 from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.utils.testing import make_local_provider
+from imbue.mngr.utils.testing import record_host_name
 
 
 def test_local_provider_name(local_provider: LocalProviderInstance) -> None:
@@ -499,3 +500,38 @@ def test_delete_volume_raises_when_volume_not_found(local_provider: LocalProvide
     some_dir.mkdir(parents=True)
     with pytest.raises(MngrError, match="not found"):
         local_provider.delete_volume(VolumeId.generate())
+
+
+def test_the_local_host_answers_to_its_recorded_name_and_to_localhost(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A host dir built by another provider records the name the user gave the host.
+
+    The local provider running inside it (a workspace container) must resolve
+    that name, since listing reports it, while ``localhost`` stays the alias
+    every in-process caller uses.
+    """
+    record_host_name(local_provider.create_host(HostName(LOCAL_HOST_NAME)), "workspace-1")
+
+    by_recorded_name = local_provider.get_host(HostName("workspace-1"))
+    by_alias = local_provider.get_host(HostName(LOCAL_HOST_NAME))
+
+    assert by_recorded_name.id == by_alias.id == local_provider.host_id
+    assert by_recorded_name.get_name() == HostName("workspace-1")
+    (discovered,) = local_provider.discover_hosts(cg=local_provider.mngr_ctx.concurrency_group)
+    assert discovered.host_name == HostName("workspace-1")
+    with pytest.raises(HostNotFoundError):
+        local_provider.get_host(HostName("some-other-host"))
+    with pytest.raises(UserInputError, match="'localhost' or 'workspace-1'"):
+        local_provider.create_host(HostName("some-other-host"))
+
+
+def test_renaming_the_local_host_persists_and_keeps_the_alias(local_provider: LocalProviderInstance) -> None:
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+
+    renamed = local_provider.rename_host(host, HostName("workspace-2"))
+
+    assert renamed.get_name() == HostName("workspace-2")
+    assert local_provider.get_host(host.id).get_certified_data().host_name == "workspace-2"
+    assert local_provider.get_host(HostName("workspace-2")).id == host.id
+    assert local_provider.get_host(HostName(LOCAL_HOST_NAME)).id == host.id

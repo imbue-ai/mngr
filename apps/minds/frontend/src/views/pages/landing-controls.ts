@@ -62,6 +62,16 @@ export function mindControlsFor(
   };
 }
 
+/** The sentence shown when removing a synced record from the list fails. A
+ * null status is a request that never got an answer; otherwise the server's
+ * own explanation is used when it gave one (a refused removal names the live
+ * lease and points at destroy), else the status. */
+export function removeRecordFailureMessage(status: number | null, body: { error?: string } | null): string {
+  if (status === null) return "Could not remove this machine from the list (the request failed).";
+  const detail = body?.error ?? `HTTP ${status}`;
+  return `Could not remove this machine from the list: ${detail}`;
+}
+
 /** The question a stop or restart asks first, or null for none. An update
  * that is preparing leaves the live machine untouched, so it changes nothing
  * here; only the apply is rewriting the machine, and stopping under it is

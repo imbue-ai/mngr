@@ -1649,14 +1649,16 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     staging_dir = tmp_path / "bug-report-staging"
     staging_dir.mkdir()
     # Dated far ahead so the planted chat outranks any real chat the workspace
-    # holds: selection prefers the transcript whose USER last spoke (the file
-    # mtimes only break ties and cover transcripts with no user message).
+    # holds: selection ranks a transcript by the newest timestamp in it.
+    planted_marker = f"planted-chat-{get_short_random_string()}"
     chat_line = json.dumps(
         {
-            "type": "user_message",
+            "type": "step",
+            "event_id": f"planted-{get_short_random_string()}",
+            "emitter": "claude/common_transcript",
             "timestamp": "2030-01-01T00:00:00.000000000Z",
-            "source": "claude/common_transcript",
-            "message": f"planted-chat-{get_short_random_string()}",
+            "source": "user",
+            "message": planted_marker,
         }
     )
     # mngr is the collector's source of truth for what agents exist, so the
@@ -1714,7 +1716,9 @@ def test_bug_report_diagnostics_collect_the_workspace_logs_and_transcript(
     chat_member_names = [name for name in member_text_by_name if name.startswith(_CHAT_MEMBER_DIR_PREFIX)]
     assert chat_member_names, sorted(member_text_by_name)
     assert all(name.endswith(".jsonl") for name in chat_member_names), chat_member_names
-    assert any(chat_line in member_text_by_name[name] for name in chat_member_names), (
+    # The marker rather than the planted line itself: what mngr writes out is
+    # its own serialization of the record, not the bytes the plant wrote.
+    assert any(planted_marker in member_text_by_name[name] for name in chat_member_names), (
         f"the planted chat is missing from the attached archive: {chat_member_names}"
     )
     # Conversations have to stay tellable apart, and the member name is the only
@@ -1761,17 +1765,21 @@ def test_bug_report_diagnostics_withhold_every_chat_when_one_carries_a_secret(
     clean_marker = f"planted-clean-chat-{get_short_random_string()}"
     clean_chat_line = json.dumps(
         {
-            "type": "user_message",
+            "type": "step",
+            "event_id": f"planted-clean-{get_short_random_string()}",
+            "emitter": "claude/common_transcript",
             "timestamp": "2030-01-01T00:00:00.000000000Z",
-            "source": "claude/common_transcript",
+            "source": "user",
             "message": clean_marker,
         }
     )
     poisoned_chat_line = json.dumps(
         {
-            "type": "user_message",
+            "type": "step",
+            "event_id": f"planted-poisoned-{get_short_random_string()}",
+            "emitter": "claude/common_transcript",
             "timestamp": "2030-01-01T00:00:01.000000000Z",
-            "source": "claude/common_transcript",
+            "source": "user",
             "message": f"here is my key: {fake_api_key}",
         }
     )

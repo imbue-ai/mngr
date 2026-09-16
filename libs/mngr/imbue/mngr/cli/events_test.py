@@ -10,6 +10,7 @@ from imbue.mngr.cli.events import _emit_event_record
 from imbue.mngr.cli.events import _write_and_flush_stdout
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.testing import create_agent_with_events_dir
+from imbue.mngr.cli.testing import create_agent_with_sample_transcript
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentOrHostAddress
@@ -189,6 +190,27 @@ def test_events_cli_streams_all_events(
     )
     assert result.exit_code == 0
     assert "evt-1" in result.output
+
+
+def test_events_cli_reads_a_common_transcript_past_its_stream_header(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    local_provider,
+    temp_mngr_ctx,
+) -> None:
+    """Every harness transcript opens with a header record, which carries no timestamp."""
+    create_agent_with_sample_transcript(local_provider.host_dir, agent_name="events-transcript-header-test")
+
+    result = cli_runner.invoke(
+        events,
+        ["events-transcript-header-test", "--include", 'source.endsWith("common_transcript")', "--format", "jsonl"],
+        obj=plugin_manager,
+    )
+
+    assert result.exit_code == 0, result.output
+    emitted_events = [json.loads(line) for line in result.stdout.splitlines()]
+    transcript_event_ids = [e["event_id"] for e in emitted_events if e.get("emitter") == "claude/common_transcript"]
+    assert transcript_event_ids == ["u1-user", "a1-assistant", "a1-tool_result-call_1"]
 
 
 def test_events_cli_filters_by_source_positional(

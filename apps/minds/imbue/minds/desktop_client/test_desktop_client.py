@@ -2,7 +2,6 @@ import gzip
 import json
 import os
 import queue
-import subprocess
 import time
 from collections.abc import Mapping
 from http.cookies import SimpleCookie
@@ -34,6 +33,7 @@ from imbue.minds.desktop_client.app import _build_requests_payload
 from imbue.minds.desktop_client.app import _build_workspace_list
 from imbue.minds.desktop_client.app import _collect_remote_workspace_tiles
 from imbue.minds.desktop_client.app import _finalize_and_mark_destroying
+from imbue.minds.desktop_client.app import _ui_workspace_entry_from_legacy_dict
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
+from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
@@ -82,6 +83,7 @@ from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
 from imbue.minds.desktop_client.testing import ready_machine_probe_stdout
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
+from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
@@ -711,23 +713,6 @@ def test_destroying_marker_returns_empty_when_paths_is_none() -> None:
     assert _finalize_and_mark_destroying(None, StaticBackendResolver(url_by_agent_and_service={}), None, None) == {}
 
 
-def _write_dead_destroy_dir(paths: InstallationPaths, agent_id: AgentId, host_id: HostId) -> None:
-    """Create a destroying/<agent_id>/ dir whose wrapper pid is already dead.
-
-    Spawns and reaps a trivial child so its pid is reliably not alive, then
-    writes a legacy-shaped destroy marker (pid, host_id, log -- no ``provider``
-    file, which ``start_destroy`` also writes when discovery knows the owning
-    provider), so status reads take the legacy absence-equals-gone path.
-    """
-    dir_path = paths.data_dir / "destroying" / str(agent_id)
-    dir_path.mkdir(parents=True)
-    proc = subprocess.Popen(["true"])
-    proc.wait()
-    (dir_path / "pid").write_text(f"{proc.pid}\n")
-    (dir_path / "host_id").write_text(f"{host_id}\n")
-    (dir_path / "output.log").write_text("done\n")
-
-
 def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -> None:
     """A finished destroy whose host is gone is DONE: the record is tombstoned.
 
@@ -738,7 +723,7 @@ def test_finalize_and_mark_destroying_finalizes_when_host_gone(tmp_path: Path) -
     """
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    write_dead_destroy_marker(paths, agent_id, HostId.generate())
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
@@ -774,7 +759,7 @@ def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: 
     """
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    _write_dead_destroy_dir(paths, agent_id, HostId.generate())
+    write_dead_destroy_marker(paths, agent_id, HostId.generate())
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     session_store = make_session_store_for_test(tmp_path, cli=cli)
@@ -792,6 +777,47 @@ def test_finalize_and_mark_destroying_keeps_failed_when_host_still_up(tmp_path: 
     marker = _finalize_and_mark_destroying(paths, backend_resolver, session_store, cli)
 
     assert marker == {str(agent_id): "failed"}
+    assert (paths.data_dir / "destroying" / str(agent_id)).exists()
+    assert session_store.get_account_for_workspace(str(agent_id)) is not None
+
+
+def test_workspaces_message_lists_a_failed_destroy_whose_host_is_gone(tmp_path: Path) -> None:
+    """A destroy that exited non-zero after its host went away is published as failed, and not finalized.
+
+    The home page refetches its destroy statuses when the workspaces frame
+    changes; a destroy failing after its row already left the list would
+    otherwise change nothing in the frame, and the page would never learn it.
+    """
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    write_dead_destroy_marker(paths, agent_id, HostId.generate(), exit_code=137)
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(HostId.generate()),
+        display_name="half-destroyed",
+        color=None,
+        is_cloud_row=False,
+    )
+    # No active agents -> the host is gone; only the exit status says the destroy failed.
+    _client, app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+        paths=paths,
+        session_store=session_store,
+        imbue_cloud_cli=cli,
+    )
+    publisher = get_state(app).ui_publisher
+    assert publisher is not None
+
+    message = publisher.build_snapshot().workspaces
+
+    assert message.failed_destroy_agent_ids == (str(agent_id),)
+    assert message.destroying_agent_ids == (str(agent_id),)
     assert (paths.data_dir / "destroying" / str(agent_id)).exists()
     assert session_store.get_account_for_workspace(str(agent_id)) is not None
 
@@ -852,6 +878,29 @@ def _upsert_remote_record(
 def _encrypt_payload(dek: bytes, payload: WorkspaceSecretsPayload) -> str:
     """The base64 AEAD blob a record carries for ``payload``, as ``decrypt_record_secrets`` expects it."""
     return encode_encrypted_secrets(dek, payload.model_dump_json().encode("utf-8"))
+
+
+def test_remote_row_entry_carries_the_records_host_id_for_removal(tmp_path: Path) -> None:
+    """The greyed remote row's X posts the record's host id; an entry without one is a dead control."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    record = _upsert_remote_record(
+        session_store,
+        user_id="user-1",
+        email="a@b.com",
+        agent_id=AgentId.generate(),
+        provider_kind="docker",
+        device_label="mac",
+        encrypted_secrets=None,
+    )
+    resolver = make_resolver_with_data(agents_json=make_agents_json(AgentId.generate()))
+
+    entries = _build_workspace_list(resolver, session_store)
+
+    remote_entry = next(entry for entry in entries if entry.get("is_remote") == "true")
+    assert remote_entry["host_id"] == record.host_id
+    assert _ui_workspace_entry_from_legacy_dict(remote_entry).host_id == record.host_id
 
 
 def test_cloud_record_outside_discovery_is_badged_with_its_provider_not_the_creating_device(
@@ -2193,7 +2242,7 @@ def test_finalize_and_mark_destroying_deletes_the_machines_share(tmp_path: Path)
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     host_id = HostId.generate()
-    _write_dead_destroy_dir(paths, agent_id, host_id)
+    write_dead_destroy_marker(paths, agent_id, host_id)
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     cli.add_share(account="a@b.com", host_id=str(host_id))
@@ -2223,7 +2272,7 @@ def test_finalize_and_mark_destroying_tombstones_even_if_the_share_delete_fails(
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
     host_id = HostId.generate()
-    _write_dead_destroy_dir(paths, agent_id, host_id)
+    write_dead_destroy_marker(paths, agent_id, host_id)
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-1", email="a@b.com")
     # The share lookup itself blows up; teardown must still proceed.

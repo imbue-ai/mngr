@@ -951,7 +951,7 @@ class WorkspaceRecordStore(MutableModel):
         """
         if read_canonical_env(self.paths, AgentId(agent_id)) is not None:
             return True
-        found = self._find_record_any_state(agent_id)
+        found = self.find_record_any_state(agent_id)
         if found is None:
             return False
         user_id, record = found
@@ -1209,7 +1209,7 @@ class WorkspaceRecordStore(MutableModel):
             logger.info("Sweeping orphaned imbue_cloud host key dir {} (no lease, no active record)", host_dir)
             shutil.rmtree(host_dir, ignore_errors=True)
 
-    def _find_record_any_state(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
+    def find_record_any_state(self, agent_id: str) -> tuple[str, ReplicaRecord] | None:
         """Like :meth:`find_active_record` but tombstoned records count too (backup access)."""
         fallback: tuple[str, ReplicaRecord] | None = None
         for user_id, records in self.list_all_records().items():

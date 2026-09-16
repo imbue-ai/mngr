@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import is_pid_alive
 from imbue.minds.desktop_client.destroying import list_destroying
 from imbue.minds.desktop_client.destroying import read_destroying
+from imbue.minds.desktop_client.destroying import read_exit_code
 from imbue.minds.desktop_client.destroying import read_host_id
 from imbue.minds.desktop_client.destroying import read_log_chunk
 from imbue.minds.desktop_client.destroying import read_provider_name
@@ -53,7 +54,9 @@ def _wait_for_pid_exit(pid: int, timeout: float = 5.0, poll: float = 0.05) -> bo
     return False
 
 
-def _make_fake_mngr(tmp_path: Path, exit_code: int, stdout: str = "", stderr: str = "") -> Path:
+def _make_fake_mngr(
+    tmp_path: Path, exit_code: int, stdout: str = "", stderr: str = "", sleep_seconds: float = 0.0
+) -> Path:
     """Write a tiny bash script that pretends to be ``mngr`` and exits with ``exit_code``.
 
     The destroy command (``mngr destroy @<host_id>.<provider> --force``, or
@@ -62,7 +65,12 @@ def _make_fake_mngr(tmp_path: Path, exit_code: int, stdout: str = "", stderr: st
 
     stdout/stderr are passed through ``printf '%b'`` so that ``\\n`` in the
     Python string is interpreted as a real newline by bash (rather than a
-    literal backslash-n).
+    literal backslash-n). ``sleep_seconds`` makes the fake block first, for
+    tests that need to observe a destroy while it is still running; such a
+    fake is expected to be killed rather than waited out.
+
+    Always written to the same path, so a second call replaces the fake a
+    retry will pick up.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -72,8 +80,10 @@ def _make_fake_mngr(tmp_path: Path, exit_code: int, stdout: str = "", stderr: st
     def _bash_squote(value: str) -> str:
         return "'" + value.replace("'", "'\\''") + "'"
 
+    sleep_line = f"sleep {sleep_seconds}\n" if sleep_seconds else ""
     script = (
-        f"#!/bin/bash\nprintf '%b' {_bash_squote(stdout)}\nprintf '%b' {_bash_squote(stderr)} >&2\nexit {exit_code}\n"
+        f"#!/bin/bash\n{sleep_line}printf '%b' {_bash_squote(stdout)}\n"
+        f"printf '%b' {_bash_squote(stderr)} >&2\nexit {exit_code}\n"
     )
     fake.write_text(script)
     fake.chmod(0o755)
@@ -123,6 +133,8 @@ def test_start_destroy_writes_pid_log_and_host_id(tmp_path: Path) -> None:
     assert read_host_id(agent_id, paths) == host_id
     assert _wait_for_pid_exit(record.pid)
     assert log_file.read_text() == "destroyed host\n"
+    # The detached process records its own exit status once mngr finishes.
+    assert read_exit_code(agent_id, paths) == 0
 
 
 def test_read_host_id_returns_none_when_absent(tmp_path: Path) -> None:
@@ -268,6 +280,68 @@ def test_read_destroying_status_done_when_pid_dead_and_host_gone(tmp_path: Path)
     assert seen is not None
     assert seen.status == DestroyingStatus.DONE
     assert seen.pid_alive is False
+    assert seen.exit_code == 0
+
+
+def test_read_destroying_status_failed_when_exit_code_is_nonzero_even_if_host_gone(tmp_path: Path) -> None:
+    """A destroy that reported a failure (e.g. a leaked lease) must stay visible with its log,
+    even when the host itself is no longer listed."""
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    fake = _make_fake_mngr(tmp_path, exit_code=3, stderr="failed to release leased VPS\n")
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
+    assert _wait_for_pid_exit(record.pid)
+    seen = read_destroying(agent_id, paths, is_host_still_active=False)
+    assert seen is not None
+    assert seen.status == DestroyingStatus.FAILED
+    assert seen.exit_code == 3
+
+
+def test_read_destroying_keeps_the_host_gate_for_a_marker_without_an_exit_code(tmp_path: Path) -> None:
+    """A marker written before the exit status was recorded still resolves from the host alone."""
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    fake = _make_fake_mngr(tmp_path, exit_code=0)
+    record = start_destroy(
+        agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
+    )
+    assert _wait_for_pid_exit(record.pid)
+    (tmp_path / "destroying" / str(agent_id) / "exit_code").unlink()
+
+    still_up = read_destroying(agent_id, paths, is_host_still_active=True)
+    gone = read_destroying(agent_id, paths, is_host_still_active=False)
+
+    assert still_up is not None and still_up.status == DestroyingStatus.FAILED
+    assert gone is not None and gone.status == DestroyingStatus.DONE
+    assert gone.exit_code is None
+
+
+def test_start_destroy_retry_clears_the_previous_runs_exit_code(tmp_path: Path) -> None:
+    """A Retry must not read the failed run's exit status as its own while it is still running."""
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    failing = _make_fake_mngr(tmp_path, exit_code=1)
+    first = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(failing), mngr_binary="mngr")
+    assert _wait_for_pid_exit(first.pid)
+    assert read_exit_code(agent_id, paths) == 1
+
+    sleeper = _make_fake_mngr(tmp_path, exit_code=0, sleep_seconds=2)
+    retry = start_destroy(agent_id, paths, host_id=host_id, env=_path_with_fake_mngr(sleeper), mngr_binary="mngr")
+    try:
+        seen = read_destroying(agent_id, paths, is_host_still_active=True)
+        assert seen is not None
+        assert seen.status == DestroyingStatus.RUNNING
+        assert seen.exit_code is None
+        assert read_exit_code(agent_id, paths) is None
+    finally:
+        try:
+            os.kill(retry.pid, 15)
+        except ProcessLookupError:
+            pass
+        _wait_for_pid_exit(retry.pid)
 
 
 def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_path: Path) -> None:
@@ -279,7 +353,8 @@ def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_p
     """
     paths = InstallationPaths(data_dir=tmp_path)
     agent_id = AgentId.generate()
-    fake = _make_fake_mngr(tmp_path, exit_code=1, stderr="boom\n")
+    # Exit 0: the host gate alone must produce FAILED here, not the exit status.
+    fake = _make_fake_mngr(tmp_path, exit_code=0)
     record = start_destroy(
         agent_id, paths, host_id=HostId.generate(), env=_path_with_fake_mngr(fake), mngr_binary="mngr"
     )
@@ -287,6 +362,7 @@ def test_read_destroying_status_failed_when_pid_dead_but_host_still_active(tmp_p
     seen = read_destroying(agent_id, paths, is_host_still_active=True)
     assert seen is not None
     assert seen.status == DestroyingStatus.FAILED
+    assert seen.exit_code == 0
 
 
 def test_read_destroying_returns_none_when_no_directory(tmp_path: Path) -> None:

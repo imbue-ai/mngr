@@ -7,6 +7,7 @@ from imbue.imbue_common.event_envelope import EventId
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
+from imbue.mngr.api.discovery_aggregator import AggregatorDelta
 from imbue.mngr.api.discovery_aggregator import DiscoveryStateAggregator
 from imbue.mngr.api.discovery_aggregator import RemovedItemDecision
 from imbue.mngr.api.discovery_aggregator import classify_removed_item
@@ -320,7 +321,8 @@ def test_state_change_during_span_is_not_clobbered_by_in_flight_snapshot() -> No
     assert current.certified_data["work_dir"] == "/new"
 
 
-def test_host_destroyed_event_removes_host_and_its_agents() -> None:
+def test_host_destroyed_event_tombstones_host_and_removes_its_agents() -> None:
+    """The destroy event is authoritative: the host stays, as DESTROYED, and its agents go."""
     aggregator = DiscoveryStateAggregator()
     host = _make_host("docker", "h1")
     agent = _make_agent("docker", "a1", host_id=host.host_id)
@@ -328,10 +330,53 @@ def test_host_destroyed_event_removes_host_and_its_agents() -> None:
 
     delta = aggregator.apply_event(_host_destroyed(host, (agent.agent_id,), at=_BASE_TIME + timedelta(seconds=5)))
 
-    assert aggregator.get_hosts() == []
+    assert [(h.host_id, h.host_state) for h in aggregator.get_hosts()] == [(host.host_id, HostState.DESTROYED)]
     assert aggregator.get_agents() == []
-    assert delta.removed_host_ids == frozenset({str(host.host_id)})
+    assert delta.removed_host_ids == frozenset()
     assert delta.removed_agent_instances == frozenset({agent.instance_key})
+
+
+def test_destroyed_tombstone_is_not_resurrected_by_snapshot_started_before_the_destroy() -> None:
+    """A snapshot whose span predates the destroy still lists the host as RUNNING; that reading is stale."""
+    aggregator = DiscoveryStateAggregator()
+    host = _make_host("docker", "h1")
+    aggregator.apply_event(_snapshot("docker", (), (host,), started_at=_BASE_TIME))
+    aggregator.apply_event(_host_destroyed(host, (), at=_BASE_TIME + timedelta(seconds=5)))
+
+    aggregator.apply_event(
+        _snapshot(
+            "docker",
+            (),
+            (host,),
+            started_at=_BASE_TIME + timedelta(seconds=3),
+            finished_at=_BASE_TIME + timedelta(seconds=8),
+        )
+    )
+
+    assert [h.host_state for h in aggregator.get_hosts()] == [HostState.DESTROYED]
+
+
+def test_destroyed_tombstone_is_dropped_once_a_clean_snapshot_omits_the_host() -> None:
+    """The tombstone leaves the way any host does: the owning provider's next clean snapshot omits it."""
+    aggregator = DiscoveryStateAggregator()
+    host = _make_host("docker", "h1")
+    aggregator.apply_event(_snapshot("docker", (), (host,), started_at=_BASE_TIME))
+    aggregator.apply_event(_host_destroyed(host, (), at=_BASE_TIME + timedelta(seconds=5)))
+
+    delta = aggregator.apply_event(_snapshot("docker", (), (), started_at=_BASE_TIME + timedelta(seconds=10)))
+
+    assert aggregator.get_hosts() == []
+    assert delta.removed_host_ids == frozenset({str(host.host_id)})
+
+
+def test_host_destroyed_event_for_an_unknown_host_records_no_host() -> None:
+    aggregator = DiscoveryStateAggregator()
+    host = _make_host("docker", "h1")
+
+    delta = aggregator.apply_event(_host_destroyed(host, (), at=_BASE_TIME))
+
+    assert aggregator.get_hosts() == []
+    assert delta == AggregatorDelta()
 
 
 # === Freshness + provider metadata ===

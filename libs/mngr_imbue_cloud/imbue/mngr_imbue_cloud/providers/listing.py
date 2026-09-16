@@ -9,6 +9,12 @@ from imbue.mngr.primitives import HostState
 # but the note preserves the observation that the container itself is up.
 INNER_UNREADABLE_NOTE = "container is running on outer host but its inner data was unreadable"
 
+# Diagnostic carried on the FAILED state of a leased VM that has no container.
+# The lease (the billable resource) is still held, so the host is not
+# destroyed: this is what a destroy leaves behind when its data wipe ran
+# but the lease release failed, and nothing can be started on it.
+CONTAINER_MISSING_NOTE = "leased VM has no container; the lease is still held"
+
 
 def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
     """Map the outer-listing raw output to a HostState.
@@ -18,7 +24,12 @@ def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
     to re-run docker inspect.
     """
     if raw.get("container_missing"):
-        return HostState.DESTROYED
+        # The lease outlives the container, so the host is terminal but not
+        # gone: FAILED keeps it listed (and destroyable) rather than reading
+        # as a destroyed host that every consumer then treats as absent.
+        # CRASHED would be wrong too: consumers auto-start CRASHED hosts, and
+        # there is no container here to start.
+        return HostState.FAILED
     container_state = raw.get("container_state")
     if not container_state:
         # Outer SSH succeeded but produced no state -- a degraded
@@ -43,15 +54,15 @@ def derive_host_state_from_raw(raw: Mapping[str, Any]) -> HostState:
 def derive_offline_note_from_raw(raw: Mapping[str, Any]) -> str | None:
     """Produce a short ``failure_reason`` note for a host we could not read cleanly.
 
-    Returns None for the DESTROYED / missing case (the state itself is the
-    message) and for a healthy running container (readable data, no note
-    needed). A running container whose inner data we could not read carries
+    Returns None for a healthy running container (readable data, no note
+    needed). A leased VM with no container carries ``CONTAINER_MISSING_NOTE``
+    behind its FAILED state. A running container whose inner data we could not read carries
     the ``INNER_UNREADABLE_NOTE`` diagnostic behind its UNKNOWN state. For
     stopped/paused/etc., returns the human-readable note that
     ``map_docker_status_to_host_state`` produced.
     """
     if raw.get("container_missing"):
-        return None
+        return CONTAINER_MISSING_NOTE
     container_state = raw.get("container_state")
     if not container_state:
         return None
