@@ -128,17 +128,17 @@ second gateway URL or a different agent skill.
       harness can pair the notice with the right card); the agent wakes up
       and decides whether to retry. The notice goes through the workspace's
       chat app, so a chat that has moved to a new agent still hears it; a
-      direct `mngr message` to the agent is the backoff for a workspace whose
-      template has no chat-messaging script. Delivery is retried with backoff for as
-      long as the app runs, so a nudge for a stopped workspace lands when
-      that workspace next comes up; the in-chat card does not depend on it
-      (see step 8). A `FAILED` or manual-credentials outcome leaves the
-      request pending and notifies only the user (in the dialog), not the
-      agent.
+      direct `mngr message` to the agent is the backoff for a workspace
+      whose template has no chat-messaging script. Delivery is retried with
+      backoff for as long as the app runs, so a nudge for a stopped
+      workspace lands when that workspace next comes up; the in-chat card
+      does not depend on it (see step 8). A `FAILED` or manual-credentials
+      outcome leaves the request pending and notifies only the user (in the
+      dialog), not the agent.
 7. **User denies.** The desktop client appends a `DENIED` response event
-   and sends the agent a plain-English denial message (same id embedding
-   and retrying as the grant nudge). `latchkey_permissions.json` is not
-   touched.
+   and sends the request's chat a plain-English denial notice, by the same
+   route as the grant nudge in step 6.6 and with the same id embedding and
+   retrying. `latchkey_permissions.json` is not touched.
 8. **The asking workspace hears the verdict at once.** Either resolution
    also sends the workspace a one-entry `minds:permission-resolutions`
    embed contract message (see `docs/embed-contract.md`), so its in-chat
