@@ -711,7 +711,9 @@ class CodexAgent(
         the workspace trust the user already granted (which is what gates the bypass flag), so mngr
         does not re-prompt. Best-effort: no screen within the timeout (already trusted, or the TUI
         never rendered it) is a no-op, and a re-check right before the keypress keeps a stray "2"
-        from ever landing in the composer as a message.
+        from ever landing in the composer as a message. Having pressed, this returns only once the
+        freed TUI has finished attaching (see :meth:`_wait_for_tui_attached`), so the create's
+        initial message does not race the TUI's resume.
         """
         if not self.host.is_local:
             return
