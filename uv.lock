@@ -1755,6 +1755,11 @@ dependencies = [
 dev = [
     { name = "inline-snapshot" },
 ]
+testing = [
+    { name = "import-linter" },
+    { name = "inline-snapshot" },
+    { name = "pytest" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1764,14 +1769,17 @@ requires-dist = [
     { name = "cowsay-python", specifier = ">=1.0.2" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "import-linter", marker = "extra == 'testing'", specifier = ">=2.0" },
     { name = "inline-snapshot", marker = "extra == 'dev'", specifier = ">=0.13" },
+    { name = "inline-snapshot", marker = "extra == 'testing'", specifier = ">=0.13" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pytest", marker = "extra == 'testing'", specifier = ">=9.0" },
     { name = "sentry-sdk", specifier = ">=2.63.0" },
     { name = "tenacity", specifier = ">=8.0" },
     { name = "traceback-with-variables", specifier = ">=2.0" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "testing"]
 
 [[package]]
 name = "imbue-mngr"
