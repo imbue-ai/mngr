@@ -33,9 +33,9 @@ services = [
 # Read it after the Vault bring-up (imbue-ai/vault terraform) with
 #   vault read -field=public_key minds-production-ssh/config/ca
 # and commit it here. Until this block exists, gen-2 box prep and slice bakes
-# on the tier refuse.
-# [ssh_ca]
-# public_key = "ssh-ed25519 AAAA... minds-production-ssh-ca"
+# on the tier refuse. Committed 2026-09-15 for the production gen-2 bring-up.
+[ssh_ca]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOHB7JldbVagXungZpZuIqIocRiYZLfTFuLDJ0VTwVMG minds-production-ssh-ca"
 
 # The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
 # whose static IPs the box `:22` lockdown allowlists; runbook:
