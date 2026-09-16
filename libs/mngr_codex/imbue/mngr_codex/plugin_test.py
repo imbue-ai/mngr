@@ -1147,15 +1147,21 @@ def test_wait_for_tui_attached_gives_up_after_the_timeout_without_raising(
 ) -> None:
     """A TUI that never shows its composer does not hang the create: the wait is bounded and the
     initial message goes out as it did before the wait existed."""
+    reads = 0
 
     class _Agent(CodexAgent):
         def capture_pane_content(
             self, include_scrollback: bool = False, window: "int | str | None" = None
         ) -> str | None:
+            nonlocal reads
+            reads += 1
             return _RESUMING_SCREEN
 
     agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     agent._wait_for_tui_attached(timeout=0.3)
+    # It gave up at its deadline rather than never waiting: a timeout above the poll interval reads
+    # the pane again after sleeping on it.
+    assert reads >= 2
 
 
 def test_is_on_hook_trust_prompt_detects_only_the_trust_screen(
