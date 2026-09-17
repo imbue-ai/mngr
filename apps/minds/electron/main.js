@@ -2257,7 +2257,14 @@ ipcMain.handle('install-update', () => updater.installNow());
 ipcMain.on('bring-app-to-front', (event) => {
   const bundle = getBundleFromEvent(event);
   if (!bundle || bundle.window.isDestroyed()) return;
-  if (bundle.window.isFocused()) return;
+  // Logged either way: "the app did not come back after signing in" is
+  // otherwise indistinguishable between the renderer never asking and the
+  // raise being declined here.
+  if (bundle.window.isFocused()) {
+    console.log('[focus] bring-app-to-front: already focused, nothing to raise');
+    return;
+  }
+  console.log('[focus] bring-app-to-front: raising the app');
   stealFocusAndFocusBundle(bundle);
 });
 

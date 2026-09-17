@@ -11,6 +11,7 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
+import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
 import { fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
@@ -194,8 +195,9 @@ export const StartPage: m.ClosureComponent = () => {
       .catch(() => undefined);
   }
 
-  function enterCreation(operationId: string): void {
+  function enterCreation(operationId: string, isCloudPreset = false): void {
     flow.submittedCreateAttemptId = operationId;
+    flow.isSubmittedCreateCloudPreset = isCloudPreset;
     m.route.set(`/creating/${operationId}`);
   }
 
@@ -213,6 +215,11 @@ export const StartPage: m.ClosureComponent = () => {
   /** The email is verified: the question is answered and the create goes out. */
   function finishVerification(): void {
     stopVerificationTimers();
+    // The link is clicked in a browser, which took OS focus with it, so the
+    // answer lands while the user is looking at something else. A no-op when
+    // this window already has focus -- which is the "I verified it" path,
+    // unless the user went back to the browser while that one was retrying.
+    electronBridge.bringAppToFront();
     flow.state = observeEmailVerified(flow.state);
     if (flow.state.isCloudCreatePending) submitCloudCreate();
     redraw();
@@ -321,7 +328,7 @@ export const StartPage: m.ClosureComponent = () => {
         isSubmittingCloud = false;
         if (result.status === 202 && typeof result.data.operation_id === "string") {
           flow.state = settleCloudCreate(flow.state, null);
-          enterCreation(result.data.operation_id);
+          enterCreation(result.data.operation_id, true);
           return;
         }
         const message =
@@ -408,6 +415,7 @@ export const StartPage: m.ClosureComponent = () => {
       if (webLogin.state === "done" || (accounts.hasAccounts && !webLogin.isOpen)) {
         flow.state = dismissPendingModal(flow.state);
         void markOnboardingComplete();
+        webLogin.noteSignedIn();
         webLogin.dismiss();
         m.route.set("/");
       } else if (!webLogin.isOpen) {
@@ -427,6 +435,10 @@ export const StartPage: m.ClosureComponent = () => {
         // beat behind the sign-in, so areDefaultsStale cannot see it yet.
         defaults = null;
         flow.state = observeSignedIn(flow.state, signedInEmail());
+        // Dismissing stops the poll, so tell the flow the sign-in landed
+        // first -- on this branch the channel may well have got there before
+        // any poll did, and the raise is the poll's job otherwise.
+        webLogin.noteSignedIn();
         webLogin.dismiss();
         if (flow.state.isCloudCreatePending) startCloudCreate();
       }
@@ -486,7 +498,7 @@ export const StartPage: m.ClosureComponent = () => {
           onUndo: isSubmittingCloud ? undefined : onUndo,
           onAside,
         }),
-        scrollAnchor(),
+        scrollAnchor(state.entries.length),
       );
       if (isCustomFormOpen) {
         children.push(

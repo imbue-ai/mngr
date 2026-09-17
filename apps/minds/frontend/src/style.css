@@ -425,8 +425,14 @@ body:has(#notice-band) .workspace-surface {
  * margin. A card centered in the whole window loses its top behind the chrome.
  */
 .modal-viewport {
-  padding-top: calc(38px + var(--notice-band-height) + 16px);
-  padding-bottom: 16px;
+  /* The trailing 36px on each end keeps the card off the window's full height;
+     it read as too vertical when it stretched the whole way. */
+  padding-top: calc(38px + var(--notice-band-height) + 16px + 36px);
+  padding-bottom: calc(16px + 36px);
+  /* Painted above the titlebar (z-110) so the dim covers it, which means this
+     backdrop must subtract the titlebar's drag region itself -- see the
+     no-drag block below for why z-order alone is not enough. */
+  -webkit-app-region: no-drag;
 }
 
 .accent-spine::before {

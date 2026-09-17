@@ -36,21 +36,37 @@ export interface Size {
   height: number;
 }
 
+/** Which side of the trigger a bubble prefers; set per trigger via data-tooltip-placement. */
+export type TooltipPlacement = "below" | "above";
+
 /**
  * Where to place a tooltip bubble of `bubble` size for a trigger at `trigger`
- * within a `viewport`. Centered under the trigger and flipped above when it
- * would overflow the bottom, then clamped into the viewport with a small
- * margin. Pure (no DOM) so the positioning is unit-testable; mirrors the
- * legacy overlay_layer.js / tooltip_triggers.js math exactly.
+ * within a `viewport`. Centered on the trigger, on `placement`'s side, and
+ * flipped to the other side when that one would overflow, then clamped into
+ * the viewport with a small margin. Pure (no DOM) so the positioning is
+ * unit-testable; the "below" default mirrors the legacy overlay_layer.js /
+ * tooltip_triggers.js math exactly.
  */
-export function computeTooltipPosition(trigger: Rect, bubble: Size, viewport: Size): { left: number; top: number } {
+export function computeTooltipPosition(
+  trigger: Rect,
+  bubble: Size,
+  viewport: Size,
+  placement: TooltipPlacement = "below",
+): { left: number; top: number } {
   let left = trigger.left + trigger.width / 2 - bubble.width / 2;
-  let top = trigger.bottom + TOOLTIP_GAP;
-  // Flip above the trigger if the bubble would spill past the bottom edge and
-  // there is room above; otherwise keep it below and let the clamp handle it.
-  if (top + bubble.height > viewport.height - TOOLTIP_MARGIN) {
-    const above = trigger.top - bubble.height - TOOLTIP_GAP;
-    if (above >= TOOLTIP_MARGIN) top = above;
+  const above = trigger.top - bubble.height - TOOLTIP_GAP;
+  const below = trigger.bottom + TOOLTIP_GAP;
+  let top: number;
+  if (placement === "above") {
+    top = above;
+    // Drop below only when there is no room above AND the bubble fits there;
+    // otherwise keep it above and let the clamp handle it.
+    if (above < TOOLTIP_MARGIN && below + bubble.height <= viewport.height - TOOLTIP_MARGIN) top = below;
+  } else {
+    top = below;
+    // Flip above the trigger if the bubble would spill past the bottom edge and
+    // there is room above; otherwise keep it below and let the clamp handle it.
+    if (below + bubble.height > viewport.height - TOOLTIP_MARGIN && above >= TOOLTIP_MARGIN) top = above;
   }
   if (left + bubble.width > viewport.width - TOOLTIP_MARGIN) left = viewport.width - TOOLTIP_MARGIN - bubble.width;
   if (left < TOOLTIP_MARGIN) left = TOOLTIP_MARGIN;
@@ -145,7 +161,13 @@ export function installTooltips(doc: Document = document): () => void {
     b.style.transform = `translateY(-${TOOLTIP_SLIDE_PX}px)`;
     const measured = b.getBoundingClientRect();
     const size: Size = { width: Math.ceil(measured.width), height: Math.ceil(measured.height) };
-    const pos = computeTooltipPosition(el.getBoundingClientRect(), size, { width: window.innerWidth, height: window.innerHeight });
+    const placement: TooltipPlacement = el.getAttribute("data-tooltip-placement") === "above" ? "above" : "below";
+    const pos = computeTooltipPosition(
+      el.getBoundingClientRect(),
+      size,
+      { width: window.innerWidth, height: window.innerHeight },
+      placement,
+    );
     // Fix the width so it doesn't reflow if the viewport later changes.
     b.style.width = size.width + "px";
     b.style.left = pos.left + "px";

@@ -4,6 +4,7 @@ import { Badge, formatBadgeCount } from "./Badge";
 import { routeLinkAttrs } from "./route-link";
 import { Button } from "./Button";
 import { Card, cardClass } from "./Card";
+import { Disclosure } from "./Disclosure";
 import { ICONS_12, ICONS_16 } from "./icons";
 import { Modal } from "./Modal";
 import { Notice, noticeClass } from "./Notice";
@@ -84,6 +85,25 @@ describe("Modal", () => {
       expect.arrayContaining(["overflow-y-auto", "min-h-0"]),
     );
     expect(scroller.children).toContain(body);
+  });
+
+  it("pads the scroller rather than the card, so overflow clips at the card edge", () => {
+    // Content that overflows must reach the card's own bottom edge, not stop a
+    // padding's width above it.
+    const overlay = renderRoot(Modal, { isOpen: true }, m("p", "body"));
+    const card = (overlay.children as m.Vnode[])[0];
+    expect(tokensOf(card)).toContain("overflow-hidden");
+    expect(tokensOf(card)).not.toContain("p-6");
+    const scroller = (card.children as m.Vnode[])[0];
+    expect(tokensOf(scroller)).toContain("p-6");
+  });
+
+  it("dims over the titlebar rather than stopping at it", () => {
+    // The titlebar is z-100, so a backdrop below that leaves the top strip
+    // undimmed. style.css pairs this z with no-drag on .modal-viewport.
+    const overlay = renderRoot(Modal, { isOpen: true }, m("p", "body"));
+    expect(tokensOf(overlay)).toContain("z-[110]");
+    expect(tokensOf(overlay)).toContain("inset-0");
   });
 
   it("gives the card exactly the caller's width, and only one", () => {
@@ -282,5 +302,66 @@ describe("icon catalogs", () => {
       "maximize",
       "minimize",
     ]);
+  });
+});
+
+describe("Disclosure", () => {
+  interface Attrs {
+    isOpen: boolean;
+    onToggle: () => void;
+    summary: m.Children;
+    markerStartAtMs?: number;
+    markerFadeMs?: number;
+  }
+
+  function partsOf(attrs: Attrs): { marker: m.Vnode; summary: m.Vnode; detail: m.Vnode | null } {
+    const root = renderRoot(Disclosure, attrs, "the explanation") as unknown as m.Vnode;
+    const [button, detail] = root.children as (m.Vnode | null)[];
+    const [marker, summary] = (button as m.Vnode).children as m.Vnode[];
+    return { marker, summary, detail: detail as m.Vnode | null };
+  }
+
+  it("leaves the marker uncolored so it follows the row it introduces", () => {
+    // The row is text-primary and turns accent on hover; a marker with a color
+    // of its own would sit a shade apart and stay put through the hover.
+    const { marker } = partsOf({ isOpen: false, onToggle: () => undefined, summary: "a point" });
+    const icon = (marker.children as m.Vnode[])[0];
+    expect((icon.attrs as Record<string, unknown>).name).toBe("chevron-right");
+    expect(tokensOf(marker)).not.toContain("text-tertiary");
+    expect(tokensOf(marker).some((token) => token.startsWith("text-"))).toBe(false);
+  });
+
+  it("opens the detail flush with the summary, under a fixed-width marker", () => {
+    // The marker's column is as wide as the detail's indent less the row's
+    // gap, so a narrow glyph does not leave the detail indented past its label.
+    const { marker, detail } = partsOf({ isOpen: true, onToggle: () => undefined, summary: "a point" });
+    expect(tokensOf(marker)).toContain("w-4");
+    expect(tokensOf(detail)).toContain("ml-6");
+  });
+
+  it("turns the marker and emphasizes the line when open", () => {
+    const closed = partsOf({ isOpen: false, onToggle: () => undefined, summary: "a point" });
+    expect(tokensOf(closed.marker)).not.toContain("rotate-90");
+    expect(tokensOf(closed.summary)).not.toContain("font-bold");
+    expect(closed.detail).toBeNull();
+
+    const open = partsOf({ isOpen: true, onToggle: () => undefined, summary: "a point" });
+    expect(tokensOf(open.marker)).toContain("rotate-90");
+    expect(tokensOf(open.summary)).toContain("font-bold");
+    expect(tokensOf(open.detail)).toContain("text-primary");
+  });
+
+  it("fades the marker in with its line when the summary streams", () => {
+    // Otherwise every chevron stands there at once, in front of rows whose
+    // labels have yet to type themselves in underneath.
+    const { marker } = partsOf({
+      isOpen: false,
+      onToggle: () => undefined,
+      summary: "a point",
+      markerStartAtMs: 900,
+      markerFadeMs: 70,
+    });
+    expect(tokensOf(marker)).toContain("start-char");
+    expect(String((marker.attrs as Record<string, unknown>).style)).toContain("--start-char-delay: 900ms");
   });
 });

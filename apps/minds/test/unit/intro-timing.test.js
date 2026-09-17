@@ -12,38 +12,34 @@ const { INTRO_LINES, INTRO_TIMING, computeIntroSchedule } = require('../../elect
 test('the first line waits for the lockup to resolve, plus the beat after it', () => {
   const schedule = computeIntroSchedule(INTRO_TIMING, INTRO_LINES);
   assert.equal(
-    schedule.lines[0].typedAt,
+    schedule.lines[0].shownAt,
     INTRO_TIMING.lockupDelayMs + INTRO_TIMING.lockupFocusMs + INTRO_TIMING.travelGapMs,
   );
 });
 
-test('a line leaves after its last character has landed and been read', () => {
+test('a line leaves once it has arrived and been read', () => {
   const timing = {
     ...INTRO_TIMING,
     lockupDelayMs: 0,
     lockupFocusMs: 0,
     travelGapMs: 0,
-    stepMs: 10,
     fadeMs: 100,
     holdMs: 1000,
   };
-  const lines = [[{ text: 'abcd' }]];
-  const schedule = computeIntroSchedule(timing, lines);
-  // Four characters: the last starts 3 steps in and takes fadeMs to land.
-  assert.equal(schedule.lines[0].fadesOutAt, 3 * 10 + 100 + 1000);
+  const schedule = computeIntroSchedule(timing, [[{ text: 'abcd' }]]);
+  assert.equal(schedule.lines[0].fadesOutAt, 100 + 1000);
 });
 
-test('character counts run straight through emphasised runs', () => {
-  const timing = { ...INTRO_TIMING, lockupDelayMs: 0, lockupFocusMs: 0, travelGapMs: 0, holdMs: 0 };
-  const plain = computeIntroSchedule(timing, [[{ text: 'abcdef' }]]);
-  const split = computeIntroSchedule(timing, [[{ text: 'ab' }, { text: 'cd', em: true }, { text: 'ef' }]]);
-  assert.equal(split.lines[0].fadesOutAt, plain.lines[0].fadesOutAt);
+test('a line is given the same time however long it is', () => {
+  const short = computeIntroSchedule(INTRO_TIMING, [[{ text: 'ab' }]]);
+  const long = computeIntroSchedule(INTRO_TIMING, [[{ text: 'ab' }, { text: 'cdefghij', em: true }]]);
+  assert.equal(long.parkedAt, short.parkedAt);
 });
 
 test('each later line starts once the previous one is gone plus the gap', () => {
   const schedule = computeIntroSchedule(INTRO_TIMING, INTRO_LINES);
   assert.equal(
-    schedule.lines[1].typedAt,
+    schedule.lines[1].shownAt,
     schedule.lines[0].fadesOutAt + INTRO_TIMING.outMs + INTRO_TIMING.gapMs,
   );
 });

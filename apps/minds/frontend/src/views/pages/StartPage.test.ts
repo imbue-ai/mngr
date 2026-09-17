@@ -51,6 +51,7 @@ describe("cloudCreateBody", () => {
       host_name: "",
     });
   });
+
 });
 
 describe("areDefaultsStale", () => {

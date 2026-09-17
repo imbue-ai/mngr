@@ -7,11 +7,13 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     /* Loading / quitting / error takeover screen: a white page carrying the
        lockup. On an installation's first launch (loaded with the #intro hash)
-       the page plays the intro -- the lockup resolves, two lines type in and
+       the page plays the intro -- the lockup resolves, two lines fade in and
        out, the lockup travels up to where the app's start route will hold it.
        Every later launch opens on that parked state at once. */
     :root {
-      --brand-blue: #1717F0;
+      /* The SPA's --c-success green, duplicated because the shell shares no
+         stylesheet with it. */
+      --brand: #0c8106;
       --ink: #000000;
       --ink-secondary: rgb(0 0 0 / 0.65);
       --ink-tertiary: rgb(0 0 0 / 0.45);
@@ -26,9 +28,10 @@
          with a 16px mark centered in it. */
       --titlebar-height: 38px;
       --parked-mark-height: 16px;
-      /* The intro's durations (--lockup-delay, --lockup-focus, --char-fade,
-         --line-out) are set by the script from intro-timing.js, which owns
-         every number the film is cut to. */
+      /* The intro's durations and curves (--lockup-delay, --lockup-focus,
+         --line-fade, --line-ease, --line-out) and the two blurs (--em-blur,
+         --line-out-blur) are set by the script from intro-timing.js, which
+         owns every number the film is cut to. */
     }
     html, body { height: 100%; }
     body {
@@ -88,22 +91,37 @@
       font-size: 2.5cqw;
       line-height: 1;
       white-space: pre;
-      color: var(--brand-blue);
+      color: var(--brand);
       animation: line-out var(--line-out) ease-out var(--line-out-delay) both;
     }
     .line em { font-style: italic; }
-    /* Each character is in the DOM from the first frame at opacity 0, so the
-       centered line never crawls sideways as it fills. */
-    .char {
+    /* The line arrives whole: every run starts together on the lockup's own
+       curve, so the words fade up as one piece of type rather than a wave. */
+    .run {
       opacity: 0;
-      animation: char-in var(--char-fade) linear var(--char-delay) both;
+      animation: run-in var(--line-fade) var(--line-ease) var(--line-in-delay) both;
     }
-    @keyframes char-in { to { opacity: 1; } }
-    /* The explicit `from` is load-bearing: a keyframe with an implicit start
+    /* An emphasised run also comes into FOCUS, the same move the lockup makes
+       above it, so the sharpening lands on exactly the words the line is
+       about. The blur is on the run, not its characters: the italic phrase
+       resolves as one piece of type. The single duration, easing and delay
+       set above apply to both names. */
+    em.run {
+      animation-name: run-in, em-focus;
+    }
+    @keyframes run-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes em-focus {
+      from { filter: blur(var(--em-blur)); }
+      to { filter: blur(0); }
+    }
+    /* A line that has been read leaves whole, rising and blurring as it
+       fades, so it goes the way the mark came.
+
+       The explicit `from` is load-bearing: a keyframe with an implicit start
        and a var() in its end is dropped whole by Chrome. */
     @keyframes line-out {
-      from { opacity: 1; transform: translateY(0); }
-      to { opacity: 0; transform: translateY(-3px); }
+      from { opacity: 1; transform: translateY(0); filter: blur(0); }
+      to { opacity: 0; transform: translateY(-3px); filter: blur(var(--line-out-blur)); }
     }
 
     /* The parked mark: the same drawing at the size and place the SPA's start
@@ -363,21 +381,15 @@
       if (window.mindsNative && window.mindsNative.introFinished) window.mindsNative.introFinished();
     }
 
-    function buildLine(runs, lineSchedule, timing) {
+    function buildLine(runs, lineSchedule) {
       var line = document.createElement('p');
       line.className = 'line';
+      line.style.setProperty('--line-in-delay', lineSchedule.shownAt + 'ms');
       line.style.setProperty('--line-out-delay', lineSchedule.fadesOutAt + 'ms');
-      var charIndex = 0;
       runs.forEach(function(run) {
         var holder = run.em ? document.createElement('em') : document.createElement('span');
-        Array.from(run.text).forEach(function(character) {
-          var span = document.createElement('span');
-          span.className = 'char';
-          span.textContent = character;
-          span.style.setProperty('--char-delay', (lineSchedule.typedAt + charIndex * timing.stepMs) + 'ms');
-          charIndex += 1;
-          holder.appendChild(span);
-        });
+        holder.className = 'run';
+        holder.textContent = run.text;
         line.appendChild(holder);
       });
       return line;
@@ -424,11 +436,14 @@
       var rootStyle = document.documentElement.style;
       rootStyle.setProperty('--lockup-delay', timing.lockupDelayMs + 'ms');
       rootStyle.setProperty('--lockup-focus', timing.lockupFocusMs + 'ms');
-      rootStyle.setProperty('--char-fade', timing.fadeMs + 'ms');
+      rootStyle.setProperty('--line-fade', timing.fadeMs + 'ms');
+      rootStyle.setProperty('--line-ease', timing.fadeEase);
+      rootStyle.setProperty('--em-blur', timing.emBlur);
       rootStyle.setProperty('--line-out', timing.outMs + 'ms');
+      rootStyle.setProperty('--line-out-blur', timing.outBlur);
       document.body.classList.add('intro');
       introTiming.INTRO_LINES.forEach(function(runs, index) {
-        linesEl.appendChild(buildLine(runs, schedule.lines[index], timing));
+        linesEl.appendChild(buildLine(runs, schedule.lines[index]));
       });
       startLockupTravel(schedule.travelAt, timing.travelMs);
       introTimers.push(setTimeout(finishIntro, schedule.parkedAt));

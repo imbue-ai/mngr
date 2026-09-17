@@ -32,6 +32,10 @@ interface ModalAttrs extends m.Attributes {
  * The card is bounded by the window, not its content: `size` is a ceiling it
  * only reaches when there is room, it stops at what .modal-viewport leaves and
  * scrolls the rest, so a tall card keeps its title and close X on screen.
+ *
+ * The backdrop sits above the titlebar (z-110, over its z-100) so the dim
+ * covers the whole window rather than stopping at the 38px strip; style.css
+ * gives .modal-viewport the matching no-drag so clicks up there still land.
  */
 export function Modal(): m.Component<ModalAttrs> {
   return {
@@ -44,7 +48,7 @@ export function Modal(): m.Component<ModalAttrs> {
         "div",
         {
           class:
-            "modal-viewport fixed inset-0 z-50 flex items-center justify-center bg-surface-overlay",
+            "modal-viewport fixed inset-0 z-[110] flex items-center justify-center bg-surface-overlay",
           onclick: (event: MouseEvent) => {
             if (onClose !== undefined && event.target === event.currentTarget) {
               onClose();
@@ -61,13 +65,14 @@ export function Modal(): m.Component<ModalAttrs> {
           "div",
           {
             class:
-              "bg-surface-primary rounded-lg shadow-overlay border border-default w-full mx-4 p-6 " +
+              "bg-surface-primary rounded-lg shadow-overlay border border-default w-full mx-4 overflow-hidden " +
               MODAL_SIZES[size] +
               " flex max-h-full flex-col " +
               cardExtra,
           },
-          // Scroller inside the padding, so content stays clear of the rounded edge.
-          m("div", { class: "min-h-0 overflow-y-auto" }, vnode.children),
+          // The padding rides the scroller, not the card, so overflowing content
+          // runs to the card's own bottom edge and is clipped there.
+          m("div", { class: "min-h-0 overflow-y-auto p-6" }, vnode.children),
         ),
       );
     },

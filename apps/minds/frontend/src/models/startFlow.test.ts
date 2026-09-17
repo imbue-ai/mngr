@@ -85,7 +85,7 @@ describe("answering where to run", () => {
 
   it("custom: the answer lands, the agent acknowledges, and the form is pending", () => {
     const state = answerStep(started(), 1, "custom", SIGNED_OUT);
-    expect(state.entries[1]).toMatchObject({ answer: "custom", said: "Custom" });
+    expect(state.entries[1]).toMatchObject({ answer: "custom", said: "Custom setup" });
     expect(state.entries[2]).toEqual({ kind: "note", text: "Your own platform it is." });
     expect(state.pending).toBe("custom");
   });

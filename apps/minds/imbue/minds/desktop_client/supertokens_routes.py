@@ -207,7 +207,8 @@ class _WebLoginFlowStatus(FrozenModel):
     ``"error"``. ``"finishing"`` means the sign-in was written to disk but the
     desktop client is still mirroring it (registering the provider, bouncing
     the latchkey-forward supervisor); the frontend brings the app to the front
-    and shows "Finishing up..." during it, then refreshes once ``"done"``.
+    and shows "Finishing up..." during it, then settles once ``"done"`` (the
+    accounts channel frame carries the identity itself).
     ``login_url_file`` is where the plugin writes the sign-in URL once its
     loopback listener is live; the status endpoint reads it lazily for the
     copy-the-link fallback while the flow is running. Once the subprocess

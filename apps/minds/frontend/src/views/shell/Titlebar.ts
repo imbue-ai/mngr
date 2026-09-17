@@ -42,7 +42,7 @@ export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
 };
 
 /**
- * The start flow's titlebar: nothing but the lockup, centered, in brand blue.
+ * The start flow's titlebar: nothing but the lockup, centered, in the brand color.
  * Every other control points at something that does not exist yet.
  */
 function startTitlebar(shell: ShellState): m.Children {

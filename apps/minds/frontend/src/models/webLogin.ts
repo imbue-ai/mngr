@@ -5,8 +5,12 @@
 // copy-the-link fallback, and surface errors. Dismissing the modal only hides
 // it -- the subprocess keeps listening until its own timeout, and a sign-in
 // that still completes simply shows up via the accounts channel.
+//
+// The poll is also what hands focus back: signing in happens in the system
+// browser, so the app has to raise itself once the flow lands (see raiseApp).
 
 import m from "mithril";
+import { electronBridge } from "../electron-bridge";
 
 export type WebLoginState = "idle" | "starting" | "waiting" | "finishing" | "done" | "error";
 
@@ -17,7 +21,7 @@ interface FlowStatusBody {
   error?: string | null;
 }
 
-const POLL_INTERVAL_MS = 1000;
+export const POLL_INTERVAL_MS = 1000;
 
 type FetchLike = typeof fetch;
 
@@ -31,21 +35,26 @@ export class WebLoginModel {
   error = "";
   private readonly fetchImpl: FetchLike;
   private readonly redraw: () => void;
+  private readonly bringAppToFront: () => void;
   private activeFlowId = "";
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   // Bumped by dismiss() (and each start()) so a start() continuation that
   // resolves after the user cancelled can detect it has been superseded and
   // must not reopen the modal.
   private generation = 0;
+  // Whether this flow has already asked for the raise (see raiseApp).
+  private hasRaisedApp = false;
 
   constructor(
     // A plain-call wrapper: passing the global `fetch` itself would invoke it
     // with the model as its receiver ("Illegal invocation" in browsers).
     fetchImpl: FetchLike = (input, init) => fetch(input, init),
     redraw: () => void = m.redraw,
+    bringAppToFront: () => void = () => electronBridge.bringAppToFront(),
   ) {
     this.fetchImpl = fetchImpl;
     this.redraw = redraw;
+    this.bringAppToFront = bringAppToFront;
   }
 
   get isOpen(): boolean {
@@ -64,6 +73,7 @@ export class WebLoginModel {
     this.loginUrl = "";
     this.error = "";
     this.email = "";
+    this.hasRaisedApp = false;
     const generation = ++this.generation;
     this.redraw();
     try {
@@ -100,6 +110,37 @@ export class WebLoginModel {
       this.pollTimer = null;
     }
     this.redraw();
+  }
+
+  /** Bring the app to the front, once, as soon as this flow's sign-in lands.
+   *
+   * Sign-in happens in the system browser, which took OS focus with it;
+   * without this the user is left looking at the browser's "you're in" page
+   * with no idea the app behind it has already moved on. Once per flow,
+   * because the poller runs every second and raising on every tick would
+   * fight the user for focus. Fired on "finishing", and on "done" as well
+   * for a mirror fast enough that no poll ever observed "finishing".
+   */
+  private raiseApp(): void {
+    if (this.hasRaisedApp) return;
+    this.hasRaisedApp = true;
+    this.bringAppToFront();
+  }
+
+  /** A flow this model started has landed, as observed by something other
+   * than the poll.
+   *
+   * The accounts channel frame beats the 1s poll whenever the account is
+   * already known locally -- re-picking a recently used account in the
+   * browser -- and the surface that sees it settles the flow and dismisses
+   * it, which stops the poller before it ever reads "finishing". Without
+   * this the raise is lost exactly in the case where the sign-in was
+   * fastest. Idempotent with the poll's own raise, and a no-op once the flow
+   * is idle or failed, so an unrelated account change never pulls focus.
+   */
+  noteSignedIn(): void {
+    if (this.state === "idle" || this.state === "error") return;
+    this.raiseApp();
   }
 
   private schedulePoll(): void {
@@ -140,11 +181,13 @@ export class WebLoginModel {
     this.email = body.email ?? this.email;
     if (body.state === "done") {
       this.state = "done";
+      this.raiseApp();
     } else if (body.state === "error") {
       this.state = "error";
       this.error = body.error || "Sign-in failed. Please try again.";
     } else {
       this.state = body.state === "finishing" ? "finishing" : "waiting";
+      if (this.state === "finishing") this.raiseApp();
       this.schedulePoll();
     }
     this.redraw();

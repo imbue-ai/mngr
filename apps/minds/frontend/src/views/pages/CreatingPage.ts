@@ -232,9 +232,22 @@ export const CreatingPage: m.ClosureComponent = () => {
       });
   }
 
-  /** The user turn restating the settings; the reload path rebuilds it from the record. */
+  /**
+   * The user turn restating the settings; the reload path rebuilds it from the
+   * record. The start flow's Imbue Cloud answer restates only itself, which is
+   * provenance the record cannot carry -- so a create being watched in the
+   * session that submitted it reads as that answer, and one picked up after a
+   * reload falls back to the settings, the way the rest of this page already
+   * degrades to a record view.
+   */
   function summaryTurn(request: CreateAttemptRequestSummary, isInstant: boolean): m.Children {
-    return userTurn({ key: "creation-summary", delayMs: 0, isInstant, text: summaryLines(request).join("\n") });
+    const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
+    return userTurn({
+      key: "creation-summary",
+      delayMs: 0,
+      isInstant,
+      text: summaryLines(request, isCloudPreset).join("\n"),
+    });
   }
 
   function loadingBox(workspaceName: string, live: LiveCreateAttemptDetail | null, arriveAtMs: number): m.Children {
@@ -472,12 +485,13 @@ export const CreatingPage: m.ClosureComponent = () => {
       const prelude = state.isFromStartFlow
         ? transcriptTurns(startFlow.state.entries, { isInstant: true, isPressable: false })
         : [];
+      const turns = creationTurns(detail);
       return m(
         "div",
         { id: "creating", "data-agent-id": state.createAttemptId, class: TRANSCRIPT_COLUMN_CLASS },
         // Every child is keyed: Mithril rejects a fragment that mixes keyed
         // vnodes with holes, so the modal is appended only while it is open.
-        [...prelude, ...creationTurns(detail), scrollAnchor(), ...(state.isRetryFormOpen ? [retryForm()] : [])],
+        [...prelude, ...turns, scrollAnchor(prelude.length + turns.length), ...(state.isRetryFormOpen ? [retryForm()] : [])],
       );
     },
   };

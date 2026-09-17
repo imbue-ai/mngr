@@ -26,6 +26,42 @@ describe("computeTooltipPosition", () => {
     expect(pos.top).toBe(30 + 6);
   });
 
+  it("puts the bubble above the trigger when that placement is asked for", () => {
+    // Room on both sides; "above" must not fall through to the default below.
+    const pos = computeTooltipPosition(
+      { left: 100, top: 400, bottom: 420, width: 20 },
+      { width: 80, height: 24 },
+      VIEWPORT,
+      "above",
+    );
+    // Centered: 100 + 10 - 40 = 70. Above the trigger with the 6px gap: 400 - 24 - 6.
+    expect(pos.left).toBe(70);
+    expect(pos.top).toBe(370);
+  });
+
+  it("drops an above-placed bubble below when it does not fit above", () => {
+    // Trigger near the ceiling: above is off-screen, and the bubble fits below.
+    const pos = computeTooltipPosition(
+      { left: 100, top: 10, bottom: 30, width: 20 },
+      { width: 80, height: 24 },
+      VIEWPORT,
+      "above",
+    );
+    expect(pos.top).toBe(36);
+  });
+
+  it("keeps an above-placed bubble above when neither side has room", () => {
+    // Taller than the space above AND than the space below, so the fallback is
+    // refused and the clamp pins it to the top margin.
+    const pos = computeTooltipPosition(
+      { left: 100, top: 10, bottom: 30, width: 20 },
+      { width: 80, height: 790 },
+      VIEWPORT,
+      "above",
+    );
+    expect(pos.top).toBe(6);
+  });
+
   it("clamps the bubble to the right edge with a margin", () => {
     // A wide bubble under a trigger near the right edge is pulled left so it
     // ends 6px from the edge: 1000 - 6 - 300.

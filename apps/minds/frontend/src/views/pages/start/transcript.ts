@@ -61,12 +61,15 @@ function arrivalClass(attrs: ArrivalAttrs): string {
 export function userTurn(attrs: ArrivalAttrs & { text: string; onUndo?: () => void }): m.Children {
   return m(
     "div",
-    { key: attrs.key, class: "mt-12 flex justify-end first:mt-0" + arrivalClass(attrs), style: arrivalStyle(attrs) },
+    { key: attrs.key, class: "mt-10 flex justify-end first:mt-0" + arrivalClass(attrs), style: arrivalStyle(attrs) },
     m(
       "div",
       {
         class:
-          "max-w-[80%] rounded-[18px] rounded-br-[4px] bg-fill-subtle px-4 py-2.5 leading-[1.5] whitespace-pre-wrap" +
+          "max-w-[80%] rounded-[18px] rounded-br-[4px] bg-fill-subtle px-4 py-2.5 leading-[1.5] " +
+          // break-words, not break-all: ordinary prose still wraps at spaces,
+          // and only a token with nowhere to break is split.
+          "whitespace-pre-wrap break-words" +
           (attrs.onUndo ? " flex items-center gap-2" : ""),
       },
       [
@@ -80,6 +83,7 @@ export function userTurn(attrs: ArrivalAttrs & { text: string; onUndo?: () => vo
                   "-mr-1 inline-flex shrink-0 cursor-pointer items-center opacity-60 transition-opacity hover:opacity-100",
                 "aria-label": "Change answer",
                 "data-tooltip": "Change answer",
+                "data-tooltip-placement": "above",
                 onclick: attrs.onUndo,
               },
               m(Icon16, { name: "undo" }),
@@ -116,7 +120,7 @@ export function agentTurn(attrs: {
     {
       key: attrs.key,
       id: attrs.id,
-      class: "mt-12 max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap first:mt-0",
+      class: "mt-10 max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0",
       "data-agent-turn": "",
     },
     lead === "" ? body : [m("strong", streamedText(lead, attrs.startAtMs, isInstant)), "\n", body],
@@ -165,6 +169,8 @@ export function disclosureList<P extends DisclosurePoint>(attrs: {
             isOpen: attrs.openIds.has(point.id),
             onToggle: () => attrs.onToggle(point.id),
             summary: streamedText(point.label, startAt, isLabelInstant),
+            markerStartAtMs: isLabelInstant ? undefined : startAt,
+            markerFadeMs: CHAT_STREAM_FADE_MS,
           },
           attrs.detailFor ? attrs.detailFor(point) : point.detail,
         ),
@@ -196,10 +202,12 @@ export function answerRow(
         Button,
         {
           key: button.id,
-          variant: button.isEmphasized ? "success" : "ghost",
+          variant: button.isEmphasized ? "success" : "secondary",
           size: "lg",
           "data-answer": button.id,
-          extra: button.isEmphasized ? "" : "font-normal text-secondary hover:text-primary",
+          // The quieter answer is lighter in weight, but not in color: the
+          // variant's own text-primary stands, so it does not read as disabled.
+          extra: button.isEmphasized ? "" : "font-normal",
           onclick: button.onPress,
         },
         button.label,
@@ -212,7 +220,7 @@ export function answerRow(
     "div",
     {
       key: attrs.key,
-      class: "mt-12 flex items-center " + (attrs.aside ? "justify-between gap-6" : "justify-end") + arrivalClass(attrs),
+      class: "mt-10 flex items-center " + (attrs.aside ? "justify-between gap-6" : "justify-end") + arrivalClass(attrs),
       style: arrivalStyle(attrs),
     },
     attrs.aside ? [asideButton(attrs.aside.label, attrs.aside.onPress), buttons] : buttons,
@@ -255,7 +263,8 @@ export function choiceTable(attrs: ArrivalAttrs & { columns: TableColumn[] }): m
                     "span",
                     {
                       class:
-                        "ml-2 inline-flex items-center rounded-md bg-accent/15 px-2 py-0.5 type-helper font-bold uppercase tracking-wide text-accent",
+                        "ml-2 inline-flex items-center rounded-md px-2 py-0.5 type-helper font-bold uppercase tracking-wide " +
+                        (column.isEmphasized ? "bg-accent/15 text-accent" : "bg-fill-subtle text-secondary"),
                     },
                     column.badge,
                   )
@@ -279,8 +288,8 @@ export function choiceTable(attrs: ArrivalAttrs & { columns: TableColumn[] }): m
                   m("li", { key: point, class: "flex items-start gap-2" }, [
                     m(
                       "span",
-                      { class: "mt-0.5 shrink-0" },
-                      m(Icon16, { name: column.isEmphasized ? "badge-check-filled" : "badge-check" }),
+                      { class: "shrink-0 leading-[1.45]", "aria-hidden": "true" },
+                      column.isEmphasized ? "\u2705" : "\u2713",
                     ),
                     point,
                   ]),
@@ -296,43 +305,56 @@ export function choiceTable(attrs: ArrivalAttrs & { columns: TableColumn[] }): m
 
 /** What the scroller reads off the anchor; a real element is one, and tests pass a stub. */
 export interface ScrollTarget {
-  offsetTop: number;
   scrollIntoView?: (options: ScrollIntoViewOptions) => void;
 }
 
 /**
- * Keeps the transcript's end in view: on mount, and then once per growth.
- * Growth is read off the anchor's layout position (offsetTop), which the
- * reader's own scrolling does not move -- the creation page redraws every
- * progress tick, and a viewport-relative measure would drag anyone who had
- * scrolled up back down on each one.
+ * Keeps the transcript's end in view: on mount, and then once per change in
+ * the number of turns.
+ *
+ * The count, rather than the anchor's layout position, is what says a turn
+ * arrived or was undone. Position moves for reasons that are not a new turn --
+ * opening a disclosure part-way up the transcript grows the column and pushes
+ * the anchor down, and scrolling to the end there yanks the reader away from
+ * the row they just opened. It also holds still through the creation page's
+ * per-tick redraws.
  */
 export class TranscriptScroller {
-  private lastOffsetTop: number | null = null;
+  private lastTurnCount: number | null = null;
 
-  mounted(anchor: ScrollTarget): void {
+  mounted(anchor: ScrollTarget, turnCount: number): void {
+    this.lastTurnCount = turnCount;
     this.scrollTo(anchor);
   }
 
-  updated(anchor: ScrollTarget): void {
-    if (anchor.offsetTop === this.lastOffsetTop) return;
+  updated(anchor: ScrollTarget, turnCount: number): void {
+    const isUnchanged = turnCount === this.lastTurnCount;
+    this.lastTurnCount = turnCount;
+    // Either direction: a turn arriving scrolls, and so does an undo removing
+    // one, which is how the undone row lands back in view.
+    if (isUnchanged) return;
     this.scrollTo(anchor);
   }
 
   private scrollTo(anchor: ScrollTarget): void {
-    this.lastOffsetTop = anchor.offsetTop;
     anchor.scrollIntoView?.({ block: "end", behavior: "smooth" });
   }
 }
 
 const transcriptScroller = new TranscriptScroller();
 
-/** A sentinel the column scrolls to after every new turn. */
-export function scrollAnchor(): m.Children {
+/**
+ * A sentinel the column scrolls to whenever `turnCount` changes. Its height is
+ * the clearance ``block: "end"`` leaves under the last turn: without it an
+ * answer row (or an undo button on the final bubble) comes to rest flush
+ * against the bottom edge.
+ */
+export function scrollAnchor(turnCount: number): m.Children {
   return m("div", {
     key: "scroll-anchor",
+    class: "h-8 shrink-0",
     "aria-hidden": "true",
-    oncreate: (vnode: m.VnodeDOM) => transcriptScroller.mounted(vnode.dom as HTMLElement),
-    onupdate: (vnode: m.VnodeDOM) => transcriptScroller.updated(vnode.dom as HTMLElement),
+    oncreate: (vnode: m.VnodeDOM) => transcriptScroller.mounted(vnode.dom as HTMLElement, turnCount),
+    onupdate: (vnode: m.VnodeDOM) => transcriptScroller.updated(vnode.dom as HTMLElement, turnCount),
   });
 }

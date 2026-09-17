@@ -53,15 +53,15 @@ function waitingBody(local: WebLoginModalLocalState): m.Children {
             { class: "type-helper text-tertiary mb-2" },
             "Browser didn't open? Open this link in a browser on this computer:",
           ),
-          // The full link is shown (selectable) and the whole pill copies it
-          // on click -- same pattern as the workspace share-link pill.
+          // The link is shown on one line (truncated, selectable) and the whole
+          // pill copies it on click -- same pattern as the workspace share-link pill.
           m(
             "button",
             {
               id: "web-login-copy-link",
               type: "button",
               class:
-                "inline-flex items-start gap-2 max-w-full rounded-md border border-default " +
+                "inline-flex items-center gap-2 max-w-full rounded-md border border-default " +
                 "bg-fill-subtle px-3 py-1.5 type-helper font-mono text-primary cursor-pointer " +
                 "hover:bg-fill-hover transition-colors text-left",
               style: local.isCopyConfirmed
@@ -71,10 +71,10 @@ function waitingBody(local: WebLoginModalLocalState): m.Children {
               onclick: () => copyLoginLink(local),
             },
             [
-              m("span", { id: "web-login-url", class: "break-all select-text" }, webLogin.loginUrl),
+              m("span", { id: "web-login-url", class: "truncate select-text" }, webLogin.loginUrl),
               m(Icon16, {
                 name: local.isCopyConfirmed ? "check" : "copy",
-                extra: "shrink-0 mt-0.5 " + (local.isCopyConfirmed ? "text-primary" : "text-tertiary"),
+                extra: "shrink-0 " + (local.isCopyConfirmed ? "text-primary" : "text-tertiary"),
               }),
             ],
           ),
@@ -102,7 +102,8 @@ export function WebLoginModal(): m.Component {
       const isDone = webLogin.state === "done";
       return m(
         Modal,
-        { isOpen: true, onClose: () => webLogin.dismiss() },
+        // lg, not the default sm: the sign-in URL is long.
+        { isOpen: true, size: "lg", onClose: () => webLogin.dismiss() },
         m("h2", { class: "type-heading mb-2" }, isDone ? "You're signed in" : "Sign in to Imbue"),
         webLogin.message && !isDone
           ? m("p", { class: "type-body text-secondary mb-4" }, webLogin.message)

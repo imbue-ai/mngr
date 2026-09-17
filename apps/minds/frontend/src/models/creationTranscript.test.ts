@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import { failureLine, shortRepository, summaryLines } from "./creationTranscript";
+import { IMBUE_CLOUD_SUMMARY_LINE, failureLine, shortRepository, summaryLines } from "./creationTranscript";
 
 function request(overrides: Partial<CreateAttemptRequestSummary> = {}): CreateAttemptRequestSummary {
   return {
@@ -17,13 +17,32 @@ function request(overrides: Partial<CreateAttemptRequestSummary> = {}): CreateAt
 }
 
 describe("summaryLines", () => {
-  it("restates the cloud preset, one setting per line, with the repository shortened", () => {
-    expect(summaryLines(request())).toEqual([
+  it("restates an Imbue Cloud create as itself, without the settings behind it", () => {
+    // The flow picked the region, the backup, the template and the branch --
+    // reading them back makes the one choice they did make look like seven.
+    expect(summaryLines(request(), true)).toEqual([IMBUE_CLOUD_SUMMARY_LINE]);
+  });
+
+  it("still lists the settings when Imbue Cloud was chosen inside the form", () => {
+    // Same destination, different provenance: here the reader opened the form
+    // and picked, so the values are theirs and hiding them hides their work.
+    const lines = summaryLines(request(), false);
+    expect(lines).not.toEqual([IMBUE_CLOUD_SUMMARY_LINE]);
+    expect(lines).toContain("Compute — imbue_cloud");
+    expect(lines).toContain("Region — US-EAST-VA");
+  });
+
+  it("restates a custom create one setting per line, with the repository shortened", () => {
+    expect(
+      summaryLines(
+        request({ launch_mode: "DOCKER", backup_provider: "CONFIGURE_LATER", region: "" }),
+        false,
+      ),
+    ).toEqual([
       "Create a workspace with these settings:",
       "Name — workspace-1",
-      "Compute — imbue_cloud",
-      "Backup — imbue_cloud",
-      "Region — US-EAST-VA",
+      "Compute — docker",
+      "Backup — configure_later",
       "Template repository — imbue-ai/default-workspace-template",
       "Branch — minds-v0.6.1",
     ]);
@@ -32,6 +51,7 @@ describe("summaryLines", () => {
   it("omits blank settings such as region and machine size, and says latest for a blank branch", () => {
     const lines = summaryLines(
       request({ launch_mode: "LIMA", backup_provider: "CONFIGURE_LATER", region: "", branch: "" }),
+      false,
     );
     expect(lines).not.toContainEqual(expect.stringMatching(/^Region/));
     expect(lines).not.toContainEqual(expect.stringMatching(/^Machine size/));
@@ -40,12 +60,13 @@ describe("summaryLines", () => {
   });
 
   it("names the backup provider the way the create form's own option does", () => {
-    expect(summaryLines(request({ backup_provider: "API_KEY" }))).toContain("Backup — manual");
+    expect(summaryLines(request({ launch_mode: "LIMA", backup_provider: "API_KEY" }), false)).toContain("Backup — manual");
   });
 
   it("names a bring-your-own-key account as the compute, with its machine size", () => {
     const lines = summaryLines(
       request({ launch_mode: "AWS", cloud_account: "byok-aws-team", region: "us-west-2", instance_type: "t3.large" }),
+      false,
     );
     expect(lines).toContain("Compute — byok-aws-team");
     expect(lines).toContain("Machine size — t3.large");

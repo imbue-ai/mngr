@@ -143,13 +143,13 @@ const CLOUD_CHOICE: FlowChoice = {
 
 const CUSTOM_CHOICE: FlowChoice = {
   id: "custom",
-  label: "Custom",
-  said: "Custom",
+  label: "Custom setup",
+  said: "Custom setup",
   ack: "Your own platform it is.",
   isEmphasized: false,
 };
 
-export const EXISTING_LOGIN_LABEL = "I already have one (log in)";
+export const EXISTING_LOGIN_LABEL = "I already have a workspace (log in)";
 export const RESEND_EMAIL_LABEL = "Send the email again";
 export const VERIFIED_LABEL = "I verified it";
 
@@ -165,7 +165,7 @@ export const FLOW: Record<StepId, FlowStep> = {
   run: {
     ask:
       "Let's create your first workspace. A workspace is your own virtual computer. " +
-      "You can run it on Imbue Cloud (recommended) or bring your own platform (custom).",
+      "You can run it on Imbue Cloud (recommended) or bring your own platform (custom setup).",
     table: [
       {
         title: "Imbue Cloud",
@@ -179,7 +179,8 @@ export const FLOW: Record<StepId, FlowStep> = {
         ],
       },
       {
-        title: "Custom",
+        title: "Custom setup",
+        badge: "Advanced",
         isEmphasized: false,
         points: [
           "Runs on your computer, or in your own cloud",
@@ -195,13 +196,13 @@ export const FLOW: Record<StepId, FlowStep> = {
   auth: {
     ask: "A cloud workspace runs on our machines, so it needs an Imbue account.",
     choices: [
-      { id: "signin", label: "I already have one", said: "", ack: "Welcome back.", isEmphasized: false },
+      { id: "signin", label: "Sign in", said: "", ack: "Welcome back.", isEmphasized: false },
       { id: "signup", label: "Create an account", said: "", ack: "You're in.", isEmphasized: true },
     ],
   },
   retry: {
     ask:
-      "Looks like you closed the custom dialog without finishing. No problem — would you like your " +
+      "Looks like you closed the Custom setup dialog without finishing. No problem — would you like your " +
       "workspace on Imbue Cloud instead? You can always move it later.",
     choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
   },
@@ -487,10 +488,19 @@ export class StartFlowModel {
   state: StartFlowState = initialStartFlowState();
   /** The create attempt the flow submitted, so the creation page knows this transcript is its prelude. */
   submittedCreateAttemptId: string | null = null;
+  /**
+   * Whether that create was the Imbue Cloud answer, which submits the form's
+   * remote preset without ever showing the form. The creation page restates
+   * such a create as the single choice it was; opening the form and picking
+   * Imbue Cloud there is not this, because there the settings are the
+   * reader's own.
+   */
+  isSubmittedCreateCloudPreset = false;
 
   reset(): void {
     this.state = initialStartFlowState();
     this.submittedCreateAttemptId = null;
+    this.isSubmittedCreateCloudPreset = false;
   }
 }
 

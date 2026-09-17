@@ -73,6 +73,13 @@ export const SETUP_SECTIONS: SetupSection[] = [
   },
 ];
 export const READY_LINE = "Your workspace is ready.";
+/**
+ * What an Imbue Cloud create restates instead of its settings. The cloud
+ * preset is not something the reader picked -- the flow chose every one of
+ * those values for them -- so listing them back reads as configuration they
+ * are answerable for rather than as the one choice they actually made.
+ */
+export const IMBUE_CLOUD_SUMMARY_LINE = "Create on Imbue Cloud";
 export const INTERRUPTED_LINE =
   "The app closed while this workspace was being created. " +
   "You can retry with the same settings or discard the partial workspace.";
@@ -90,9 +97,16 @@ export function shortRepository(repository: string): string {
 /**
  * The settings, one per line, in the order the create form asks for them.
  * Region and machine size are omitted when the mode has none, so a local
- * create does not read as missing something.
+ * create does not read as missing something. The start flow's Imbue Cloud
+ * answer restates only itself -- see IMBUE_CLOUD_SUMMARY_LINE. Choosing Imbue
+ * Cloud inside the form still lists everything: there the settings are yours.
+ *
+ * ``isCloudPreset`` is provenance, which the request itself does not carry --
+ * the two submissions are identical on the wire -- so the caller passes what
+ * the start flow remembers.
  */
-export function summaryLines(request: CreateAttemptRequestSummary): string[] {
+export function summaryLines(request: CreateAttemptRequestSummary, isCloudPreset: boolean): string[] {
+  if (isCloudPreset) return [IMBUE_CLOUD_SUMMARY_LINE];
   const compute = request.cloud_account !== "" ? request.cloud_account : launchModeLabel(request.launch_mode);
   const settings: Array<[string, string]> = [
     ["Name", request.display_name],
