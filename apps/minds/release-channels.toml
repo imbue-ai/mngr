@@ -27,9 +27,9 @@
 # Required on every entry: a manifest that declares none is rolled out to 100%.
 
 [channels.stable]
-build_id = "260915wjcyd06bp"
-version = "0.6.1"
-fallback_branch = "minds-v0.6.1"
+build_id = "260917ohslvgoyj"
+version = "0.6.2"
+fallback_branch = "minds-v0.6.2"
 rollout_percentage = 100
 
 [channels.beta]
@@ -59,7 +59,7 @@ rollout_percentage = 100
 # stable). The publish refuses a tag that is not on the template remote.
 
 [web_channels.stable]
-template_ref = "minds-v0.6.1"
+template_ref = "minds-v0.6.2"
 
 [web_channels.beta]
 template_ref = "minds-v0.6.2"
