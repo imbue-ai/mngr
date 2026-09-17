@@ -149,12 +149,19 @@ class FakeHost(MutableModel):
         """Read a file from the local filesystem."""
         return path.read_text(encoding=encoding)
 
-    def write_text_file(self, path: Path, content: str, encoding: str = "utf-8", mode: str | None = None) -> None:
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+        is_atomic: bool = True,
+    ) -> None:
         """Write a text file to the local filesystem."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding=encoding)
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         """Write a binary file to the local filesystem."""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)

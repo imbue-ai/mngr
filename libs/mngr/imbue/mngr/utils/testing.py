@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import typing
 from collections.abc import Callable
@@ -27,10 +28,15 @@ from typing import IO
 from typing import TypeVar
 from uuid import uuid4
 
+import paramiko
 import pluggy
 import pytest
 from click.testing import CliRunner
 from loguru import logger
+from paramiko.common import AUTH_FAILED
+from paramiko.common import AUTH_SUCCESSFUL
+from paramiko.common import OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+from paramiko.common import OPEN_SUCCEEDED
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -66,6 +72,8 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr.providers.registry import load_local_backend_only
+from imbue.mngr.providers.ssh.instance import SSHHostConfig
+from imbue.mngr.providers.ssh.instance import SSHProviderInstance
 from imbue.mngr.utils.deps import CLAUDE
 from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import poll_until
@@ -1255,6 +1263,21 @@ def generate_ssh_keypair(base_path: Path) -> tuple[Path, Path]:
     return key_path, Path(f"{key_path}.pub")
 
 
+def generate_ssh_keypair_with_paramiko(base_path: Path) -> tuple[Path, Path]:
+    """Like ``generate_ssh_keypair`` but needing no ssh-keygen binary: an ECDSA key written by paramiko.
+
+    Returns (private_key_path, public_key_path) tuple.
+    """
+    key_dir = base_path / "ssh_keys"
+    key_dir.mkdir()
+    key_path = key_dir / "id_ecdsa"
+    key = paramiko.ECDSAKey.generate()
+    key.write_private_key_file(str(key_path))
+    public_key_path = Path(f"{key_path}.pub")
+    public_key_path.write_text(f"{key.get_name()} {key.get_base64()}\n")
+    return key_path, public_key_path
+
+
 def _sftp_server_path() -> str:
     """Return the platform-appropriate path to the SFTP server binary."""
     if sys.platform == "darwin":
@@ -1385,6 +1408,144 @@ def build_test_known_hosts_file(host_key_path: Path, port: int, output_path: Pat
     host_pub_key = host_key_path.with_suffix(".pub").read_text().strip()
     output_path.write_text(f"[127.0.0.1]:{port} {host_pub_key}\n")
     return output_path
+
+
+def make_local_ssh_host_factory(
+    port: int,
+    host_key_path: Path,
+    private_key_path: Path,
+    host_dir: Path,
+    mngr_ctx: MngrContext,
+    tmp_path: Path,
+) -> Callable[[str], Host]:
+    """Build a factory of SSH hosts that all reach the SSH server on ``port`` as the current user with ``private_key_path``."""
+    known_hosts_path = build_test_known_hosts_file(host_key_path, port, tmp_path / "known_hosts")
+    current_user = os.environ.get("USER", "root")
+    ssh_config = SSHHostConfig(
+        address="127.0.0.1",
+        port=port,
+        user=current_user,
+        key_file=private_key_path,
+        known_hosts_file=known_hosts_path,
+    )
+
+    def create_ssh_host(name: str) -> Host:
+        provider = SSHProviderInstance(
+            name=ProviderInstanceName(f"ssh-{name}"),
+            host_dir=host_dir,
+            mngr_ctx=mngr_ctx,
+            hosts={name: ssh_config},
+        )
+        return provider.get_host(HostName(name))
+
+    return create_ssh_host
+
+
+# In-process SSH server, for driving the SSH code paths without an sshd binary.
+
+
+class ExecOnlyParamikoServer(paramiko.ServerInterface):
+    """A paramiko server that accepts one public key and runs each ``exec`` request through the local shell.
+
+    Stands in for an sshd on machines without one: the SSH protocol is real
+    (paramiko on both ends), only the commands run in this process rather than
+    in a login session. Every command it is asked to run is recorded. Like the
+    ``authorized_keys`` of ``local_sshd``, only ``authorized_key`` may log in:
+    the port is open to every local process for as long as the server runs.
+    """
+
+    def __init__(self, authorized_key: paramiko.PKey) -> None:
+        super().__init__()
+        self.authorized_key = authorized_key
+        self.exec_commands: list[str] = []
+
+    def check_auth_publickey(self, username: str, key: paramiko.PKey) -> int:
+        if key == self.authorized_key:
+            return AUTH_SUCCESSFUL
+        return AUTH_FAILED
+
+    def get_allowed_auths(self, username: str) -> str:
+        return "publickey"
+
+    def check_channel_request(self, kind: str, chanid: int) -> int:
+        if kind == "session":
+            return OPEN_SUCCEEDED
+        return OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def check_channel_exec_request(self, channel: paramiko.Channel, command: bytes) -> bool:
+        decoded_command = command.decode("utf-8")
+        self.exec_commands.append(decoded_command)
+        threading.Thread(
+            target=_run_exec_request_through_local_shell, args=(channel, decoded_command), daemon=True
+        ).start()
+        return True
+
+
+def _run_exec_request_through_local_shell(channel: paramiko.Channel, command: str) -> None:
+    """Feed the channel's stdin to ``sh -c command`` and report its output and exit status on the channel."""
+    stdin_bytes = channel.makefile("rb").read()
+    finished = subprocess.run(["sh", "-c", command], input=stdin_bytes, capture_output=True)
+    if finished.stdout:
+        channel.sendall(finished.stdout)
+    if finished.stderr:
+        channel.sendall_stderr(finished.stderr)
+    channel.send_exit_status(finished.returncode)
+    channel.close()
+
+
+def _accept_ssh_connections_until_stopped(
+    listener: socket.socket,
+    host_key: paramiko.PKey,
+    server: ExecOnlyParamikoServer,
+    is_stopping: threading.Event,
+    transports: list[paramiko.Transport],
+) -> None:
+    """Turn every connection that arrives on ``listener`` into a server transport, until told to stop."""
+    while not is_stopping.is_set():
+        try:
+            client_socket, _address = listener.accept()
+        except TimeoutError:
+            continue
+        transport = paramiko.Transport(client_socket)
+        transport.add_server_key(host_key)
+        transport.start_server(event=threading.Event(), server=server)
+        transports.append(transport)
+
+
+@contextmanager
+def in_process_paramiko_sshd(
+    host_key_path: Path, authorized_key_path: Path
+) -> Generator[tuple[int, ExecOnlyParamikoServer], None, None]:
+    """Serve SSH on a free localhost port from this process, running exec requests through the local shell.
+
+    Yields (port, server). Unlike ``local_sshd`` this needs no sshd binary, and
+    the server records every command it was asked to run. Only the key at
+    ``authorized_key_path`` (a private key file; its public half is what is
+    compared) can log in.
+    """
+    host_key = paramiko.PKey.from_path(host_key_path)
+    server = ExecOnlyParamikoServer(paramiko.PKey.from_path(authorized_key_path))
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    is_stopping = threading.Event()
+    transports: list[paramiko.Transport] = []
+    accept_thread = threading.Thread(
+        target=_accept_ssh_connections_until_stopped,
+        args=(listener, host_key, server, is_stopping, transports),
+        daemon=True,
+    )
+    accept_thread.start()
+    try:
+        yield port, server
+    finally:
+        is_stopping.set()
+        accept_thread.join(timeout=5.0)
+        for transport in transports:
+            transport.close()
+        listener.close()
 
 
 # =============================================================================

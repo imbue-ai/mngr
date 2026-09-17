@@ -1,0 +1,1 @@
+Persisting a trusted source repo into the user's global Codex `config.toml` writes that file in place (`is_atomic=False`) rather than through the atomic rename that `write_text_file` now defaults to, so a `config.toml` that is a symlink into the user's dotfiles stays a symlink and keeps its mode and owner.

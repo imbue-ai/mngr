@@ -1,16 +1,16 @@
 """Unit tests for OuterHost and the outer-host accessors."""
 
+import shlex
 import stat
-from collections.abc import Mapping
+import subprocess
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 from typing import cast
-from uuid import uuid4
 
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
-from pydantic import Field
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
@@ -19,9 +19,10 @@ from pyinfra.connectors.util import CommandOutput
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.outer_host import OuterHost
-from imbue.mngr.hosts.outer_host import _build_replay_safe_rename_command
+from imbue.mngr.hosts.outer_host import _build_exec_write_command
 from imbue.mngr.hosts.outer_host import _connect_pyinfra_host_retrying_transient_handshake_failures
 from imbue.mngr.hosts.outer_host import _is_remote_directory
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
@@ -29,7 +30,6 @@ from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
-from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -847,158 +847,76 @@ def test_atomic_write_file_applies_the_mode_to_the_file_it_publishes(
     assert stat.S_IMODE(destination.stat().st_mode) == 0o600
 
 
-def test_remote_atomic_write_quotes_paths_containing_shell_metacharacters(
+def test_atomic_write_file_onto_a_directory_fails_without_leaving_the_staged_file_behind(
     local_outer_host: OuterHost, tmp_path: Path
 ) -> None:
-    """Spaces and quotes in a path must break neither the rename nor the chmod that complete the write.
-
-    Only the remote half of the write builds shell commands, so it is the half
-    that has to quote; running it against the local connector exercises those
-    commands without needing a second machine.
-    """
-    destination = tmp_path / "dir with space" / "con'fig.json"
-    staged = destination.parent / f".{destination.name}.{uuid4().hex}.tmp"
-
-    local_outer_host._write_file_remote(destination, staged, b"fresh", "0600")
-
-    assert destination.read_bytes() == b"fresh"
-    assert [entry.name for entry in destination.parent.iterdir()] == [destination.name]
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-
-
-def test_replaying_the_atomic_rename_succeeds_once_the_staged_file_is_consumed(
-    local_outer_host: OuterHost, tmp_path: Path
-) -> None:
-    """The retry that a lost SSH response triggers must not fail a write that already landed.
-
-    ``execute_idempotent_command`` re-runs its command after a transient SSH
-    error, including when the far side had in fact completed it, so running the
-    rename twice stands in for that replay.
-    """
+    """The local half matches the remote command: a rename that cannot land removes what it staged."""
     destination = tmp_path / "config.json"
-    destination.write_bytes(b"stale")
-    staged = tmp_path / f".{destination.name}.{uuid4().hex}.tmp"
-    staged.write_bytes(b"fresh")
-    command = _build_replay_safe_rename_command(staged, destination)
+    destination.mkdir()
 
-    assert local_outer_host.execute_idempotent_command(command).success
-    replayed = local_outer_host.execute_idempotent_command(command)
+    with pytest.raises(IsADirectoryError):
+        local_outer_host.write_file(destination, b"fresh")
 
-    assert replayed.success
-    assert destination.read_bytes() == b"fresh"
-    assert not staged.exists()
+    assert destination.is_dir()
+    assert list(tmp_path.glob(".config.json.*")) == []
 
 
-def test_atomic_rename_fails_when_the_staged_file_and_the_destination_are_both_gone(
+def test_in_place_write_text_file_keeps_a_symlinked_destination_where_the_atomic_default_replaces_it(
     local_outer_host: OuterHost, tmp_path: Path
 ) -> None:
-    """A staged file that vanished without landing is reported, not passed off as a success."""
-    destination = tmp_path / "config.json"
-    staged = tmp_path / f".{destination.name}.{uuid4().hex}.tmp"
+    """``is_atomic=False`` is the opt-out for a config that is a symlink into the user's dotfiles."""
+    target = tmp_path / "dotfiles" / "config.toml"
+    target.parent.mkdir()
+    target.write_text("stale")
+    link = tmp_path / "config.toml"
+    link.symlink_to(target)
 
-    result = local_outer_host.execute_idempotent_command(_build_replay_safe_rename_command(staged, destination))
+    local_outer_host.write_text_file(link, "in place", is_atomic=False)
+    assert link.is_symlink()
+    assert target.read_text() == "in place"
 
-    assert not result.success
-    assert str(destination) in result.stderr
-    assert not destination.exists()
+    local_outer_host.write_text_file(link, "replaced")
+    assert not link.is_symlink()
+    assert link.read_text() == "replaced"
+    assert target.read_text() == "in place"
 
 
-def test_remote_write_does_not_let_the_mode_smuggle_a_second_command_into_the_chmod(
-    local_outer_host: OuterHost, tmp_path: Path
-) -> None:
-    """``mngr file put --mode`` is an unvalidated user string, so it must reach chmod as one argument."""
+def test_write_file_refuses_a_mode_that_is_not_an_octal_number(local_outer_host: OuterHost, tmp_path: Path) -> None:
+    """``mode`` reaches chmod as a number, so a string trying to carry a command along cannot be one.
+
+    ``mngr file put --mode`` is an unvalidated user string. It is parsed before the
+    write touches the filesystem or the connection, on every kind of host alike.
+    """
     destination = tmp_path / "secret.json"
     smuggled = tmp_path / "smuggled"
 
-    local_outer_host._write_file_remote(destination, destination, b"secret", f"0600 {destination}; touch {smuggled}")
+    with pytest.raises(MngrError, match="octal"):
+        local_outer_host.write_file(destination, b"secret", mode=f"0600 {destination}; touch {smuggled}")
 
     assert not smuggled.exists()
+    assert not destination.exists()
+    assert list(tmp_path.glob(".secret.json.*")) == []
 
 
-class _ModeWatchingOuterHost(OuterHost):
-    """An OuterHost that records ``watched_path``'s mode after every command that finds it present.
-
-    Lets a test see the permissions a file actually had while it existed, rather
-    than only the ones it ends up with.
-    """
-
-    watched_path: Path = Field(description="The path whose mode is sampled after each command")
-    observed_modes: list[int] = Field(default_factory=list, description="Modes seen, in order")
-
-    def execute_idempotent_command(
-        self,
-        command: str,
-        user: str | None = None,
-        cwd: Path | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout_seconds: float | None = None,
-    ) -> CommandResult:
-        result = super().execute_idempotent_command(
-            command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds
-        )
-        if self.watched_path.exists():
-            self.observed_modes.append(stat.S_IMODE(self.watched_path.stat().st_mode))
-        return result
-
-
-def test_remote_atomic_write_never_publishes_the_file_without_its_mode(
-    local_outer_host: OuterHost, tmp_path: Path
+@pytest.mark.parametrize("mode", ["-1", "+755", " 755", "7_5_5", "0o755", "77777", "75", "u+x", ""])
+def test_write_file_refuses_a_mode_that_int_would_parse_but_chmod_should_never_get(
+    local_outer_host: OuterHost, tmp_path: Path, mode: str
 ) -> None:
-    """A secret arrives at its published path already carrying its mode, not a round-trip later."""
+    """``int(mode, 8)`` alone is too lenient: a negative or oversized value ends up applied as ``07777``."""
     destination = tmp_path / "secret.json"
-    staged = tmp_path / f".{destination.name}.{uuid4().hex}.tmp"
-    host = _ModeWatchingOuterHost(
-        id=local_outer_host.id,
-        connector=local_outer_host.connector,
-        mngr_ctx=local_outer_host.mngr_ctx,
-        watched_path=destination,
-    )
 
-    host._write_file_remote(destination, staged, b"secret", "0600")
+    with pytest.raises(MngrError, match="octal"):
+        local_outer_host.write_file(destination, b"secret", mode=mode)
 
-    assert host.observed_modes == [0o600]
+    assert not destination.exists()
 
 
-class _ReplayingOuterHost(OuterHost):
-    """An OuterHost that runs every idempotent command twice and reports the second run.
+def test_write_file_accepts_a_mode_without_a_leading_zero(local_outer_host: OuterHost, tmp_path: Path) -> None:
+    destination = tmp_path / "script.sh"
 
-    Stands in for the retry ``@retry_on_transient_ssh_error`` performs when the
-    first run's response is lost on the way back: the far side has already done
-    the work, and the command runs again anyway.
-    """
+    local_outer_host.write_file(destination, b"#!/bin/sh\n", mode="755")
 
-    def execute_idempotent_command(
-        self,
-        command: str,
-        user: str | None = None,
-        cwd: Path | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout_seconds: float | None = None,
-    ) -> CommandResult:
-        super().execute_idempotent_command(command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds)
-        return super().execute_idempotent_command(
-            command, user=user, cwd=cwd, env=env, timeout_seconds=timeout_seconds
-        )
-
-
-def test_remote_atomic_write_survives_a_replay_of_every_command_it_issues(
-    local_outer_host: OuterHost, tmp_path: Path
-) -> None:
-    """The write itself, not just the rename it builds, has to come through the SSH retry."""
-    config_dir = tmp_path / "latchkey"
-    config_dir.mkdir()
-    destination = config_dir / "config.json"
-    destination.write_bytes(b"stale")
-    staged = config_dir / f".{destination.name}.{uuid4().hex}.tmp"
-    host = _ReplayingOuterHost(
-        id=local_outer_host.id, connector=local_outer_host.connector, mngr_ctx=local_outer_host.mngr_ctx
-    )
-
-    host._write_file_remote(destination, staged, b"fresh", "0600")
-
-    assert destination.read_bytes() == b"fresh"
-    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    assert [entry.name for entry in config_dir.iterdir()] == [destination.name]
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o755
 
 
 class _FakeStatSftp:
@@ -1036,3 +954,78 @@ def test_is_remote_directory_false_without_st_mode() -> None:
     """SFTP may omit st_mode; without it the path cannot be classified as a directory."""
     sftp = _FakeStatSftp({"/base/x": None})
     assert _is_remote_directory(cast(Any, sftp), "/base/x") is False
+
+
+def test_exec_write_command_chains_every_step_of_an_atomic_write_with_quoted_paths() -> None:
+    """One ``sh -c`` command carries the mkdir, the upload, the mode and the guarded rename, each path shell-quoted.
+
+    The chain runs under ``sh`` explicitly because an exec request otherwise lands
+    in the remote user's login shell, which may not understand POSIX grouping.
+    """
+    command = _build_exec_write_command("/etc/app dir/.con'fig.tmp", 0o600, "/etc/app dir/con'fig")
+
+    assert shlex.split(command) == [
+        "sh",
+        "-c",
+        "mkdir -p '/etc/app dir' && "
+        "cat > '/etc/app dir/.con'\"'\"'fig.tmp' && "
+        "chmod 0600 '/etc/app dir/.con'\"'\"'fig.tmp' && "
+        "{ [ ! -d '/etc/app dir/con'\"'\"'fig' ] || "
+        "{ echo '/etc/app dir/con'\"'\"'fig: Is a directory' >&2; rm -f '/etc/app dir/.con'\"'\"'fig.tmp'; exit 1; }; } && "
+        "mv -f '/etc/app dir/.con'\"'\"'fig.tmp' '/etc/app dir/con'\"'\"'fig'",
+    ]
+
+
+def test_exec_write_command_for_a_plain_write_is_just_mkdir_and_cat() -> None:
+    """Without a mode or a rename there is nothing to chain beyond landing the bytes."""
+    assert shlex.split(_build_exec_write_command("/tmp/out.bin", None, None)) == [
+        "sh",
+        "-c",
+        "mkdir -p /tmp && cat > /tmp/out.bin",
+    ]
+
+
+def test_exec_write_command_refuses_to_publish_onto_an_existing_directory(tmp_path: Path) -> None:
+    """``mv`` would move the staged file into a directory and exit 0; the guard turns that into a failure."""
+    destination = tmp_path / "config.json"
+    destination.mkdir()
+    staged = tmp_path / ".config.json.tmp"
+    command = _build_exec_write_command(str(staged), None, str(destination))
+
+    result = subprocess.run(["sh", "-c", command], input=b"fresh", capture_output=True)
+
+    assert result.returncode == 1
+    assert result.stderr.decode() == f"{destination}: Is a directory\n"
+    assert destination.is_dir()
+    assert not staged.exists()
+
+
+def test_exec_write_command_lands_binary_bytes_with_their_mode_and_name(tmp_path: Path) -> None:
+    """Run by a real shell: the bytes arrive untouched and chmod-ed under a new directory, despite the metacharacters."""
+    destination = tmp_path / "dir with space" / "con'fig.bin"
+    staged = destination.parent / ".con'fig.bin.tmp"
+    content = bytes(range(256)) * 4
+    command = _build_exec_write_command(str(staged), 0o600, str(destination))
+
+    result = subprocess.run(["sh", "-c", command], input=content, capture_output=True)
+
+    assert result.returncode == 0, result.stderr
+    assert destination.read_bytes() == content
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert [entry.name for entry in destination.parent.iterdir()] == [destination.name]
+
+
+def test_paramiko_is_pinned_to_the_version_whose_private_transport_method_the_remote_write_uses() -> None:
+    """The remote write sends its exec request through paramiko's private ``Transport._send_user_message``.
+
+    That is not public API: a paramiko release can rename it or change what it
+    does without notice, and nothing else would catch that before a remote write
+    hangs or fails in the field. So ``libs/mngr/pyproject.toml`` pins paramiko to
+    an exact version, and this test repeats the pin, deliberately outside
+    inline-snapshot's reach, so that a bump cannot happen without reading this.
+    Whoever bumps it must first run the tests that drive the write through a real
+    SSH transport (in ``test_host.py``: the in-process paramiko server tests, and
+    the local sshd acceptance test) against the new version, then move the pin
+    in ``pyproject.toml`` and here together.
+    """
+    assert importlib_metadata.version("paramiko") == "3.5.1"

@@ -96,9 +96,9 @@ DIFFERENT_MACHINE_KEY_MESSAGE: Final[str] = (
 def resolve_remote_latchkey_directory(host: OuterHostInterface) -> Path:
     """Resolve ``$HOME/.latchkey`` on the VPS to an absolute path.
 
-    ``write_file`` transfers over SFTP with a literal path, so ``~`` is not
-    expanded for us; we ask the remote shell for ``$HOME`` and build the
-    absolute latchkey directory from it.
+    ``write_file`` takes a literal path (it is quoted for the remote shell), so
+    ``~`` is not expanded for us; we ask the remote shell for ``$HOME`` and
+    build the absolute latchkey directory from it.
     """
     result = host.execute_idempotent_command('echo "$HOME"', timeout_seconds=REMOTE_COMMAND_TIMEOUT_SECONDS)
     home = result.stdout.strip()

@@ -465,24 +465,29 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
         """Read a file from the host volume and decode it."""
         return self.read_file(path).decode(encoding)
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         """Write bytes to a file on the host volume.
 
-        Neither ``mode`` (volume writes cannot set file modes) nor ``is_atomic``
-        (the volume API has no atomic-rename primitive) can be honored here; each
-        is ignored with a warning if requested.
+        The volume API has no way to set a file mode and no atomic-rename primitive,
+        so ``mode`` is ignored with a warning if given, and every write is
+        non-atomic whatever ``is_atomic`` says.
         """
         if mode is not None:
             logger.warning(
                 "File mode is not settable when writing to an offline host's volume; ignoring mode={}", mode
             )
-        if is_atomic:
-            logger.warning("Atomic writes are not supported on an offline host's volume; writing non-atomically")
         self.host_volume.write_files({self._to_volume_path(path): content})
 
-    def write_text_file(self, path: Path, content: str, encoding: str = "utf-8", mode: str | None = None) -> None:
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+        is_atomic: bool = True,
+    ) -> None:
         """Write string content to a file on the host volume."""
-        self.write_file(path, content.encode(encoding), mode=mode)
+        self.write_file(path, content.encode(encoding), mode=mode, is_atomic=is_atomic)
 
     def path_exists(self, path: Path) -> bool:
         """Whether a path exists on the host volume."""

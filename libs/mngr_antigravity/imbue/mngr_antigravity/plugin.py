@@ -1363,7 +1363,8 @@ class AntigravityAgent(
             logger.debug("All requested paths already trusted in {}; skipping write", settings_path)
             return
         with log_span("Persisting trusted source repo(s) {} in {}", actually_added, settings_path):
-            host.write_text_file(settings_path, serialize_antigravity_settings(merged))
+            # The user's own settings: written in place so a dotfiles symlink stays one.
+            host.write_text_file(settings_path, serialize_antigravity_settings(merged), is_atomic=False)
 
     def _build_background_tasks_command(self) -> str:
         """Shell snippet that launches the background-tasks supervisor.

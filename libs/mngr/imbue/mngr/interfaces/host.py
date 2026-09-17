@@ -275,15 +275,25 @@ class HostFileWriteInterface(MutableModel, ABC):
       filesystem over SSH / locally.
     - :class:`~imbue.mngr.hosts.offline_host.OfflineHostWithVolume`, writing the
       host's persisted volume when the host itself is stopped (so files can be
-      staged for the next time it starts). File modes are not settable on a
-      volume write, so ``mode`` is ignored there.
+      staged for the next time it starts). A volume write can neither set a
+      file mode nor rename atomically, so ``mode`` and ``is_atomic`` are not
+      honored there.
 
     All paths are absolute paths as seen under the host's ``host_dir``.
     """
 
     @abstractmethod
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file."""
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
+        """Write bytes content to a file, creating parent directories as needed.
+
+        ``mode`` is an octal string such as ``"0755"``. With ``is_atomic`` (the default)
+        the bytes are staged in a sibling temp file that is renamed over ``path`` once
+        complete, so a reader never sees a half-written file. That rename replaces the
+        inode, so an existing file's mode and owner are not kept: without a ``mode`` the
+        result carries the umask default. Pass ``is_atomic=False`` to write through
+        ``path`` in place, e.g. to keep a symlink rather than replace it, or to keep an
+        existing file's mode and owner.
+        """
         ...
 
     @abstractmethod
@@ -293,8 +303,12 @@ class HostFileWriteInterface(MutableModel, ABC):
         content: str,
         encoding: str = "utf-8",
         mode: str | None = None,
+        is_atomic: bool = True,
     ) -> None:
-        """Write string content to a file."""
+        """Write string content to a file.
+
+        ``mode`` and ``is_atomic`` mean what they mean for :meth:`write_file`.
+        """
         ...
 
 

@@ -1382,7 +1382,8 @@ class CodexAgent(
         merged = merge_project_trust(existing_config, canonical_source)
         if merged is not None:
             with log_span("Persisting trusted source repo {} in {}", canonical_source, user_config_path):
-                host.write_text_file(user_config_path, serialize_codex_config(merged))
+                # The user's own config: written in place so a dotfiles symlink stays one.
+                host.write_text_file(user_config_path, serialize_codex_config(merged), is_atomic=False)
 
     def _prompt_user_to_trust_workspace(self, source_path: Path, config_path: Path) -> bool:
         """Prompt to trust the source repo (and allow the codex hook-review bypass).

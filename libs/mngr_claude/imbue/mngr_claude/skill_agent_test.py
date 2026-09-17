@@ -370,7 +370,14 @@ class _RecordingFakeHost(FakeHost):
         self.idempotent_commands.append(command)
         return CommandResult(stdout="", stderr="", success=True)
 
-    def write_text_file(self, path: Path, content: str, encoding: str = "utf-8", mode: str | None = None) -> None:
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+        is_atomic: bool = True,
+    ) -> None:
         self.written_files.append((path, content))
 
 

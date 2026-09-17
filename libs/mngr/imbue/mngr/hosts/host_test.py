@@ -21,6 +21,8 @@ import pytest
 from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SSHException
+from paramiko.common import cMSG_CHANNEL_REQUEST
+from paramiko.message import Message
 from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
@@ -41,6 +43,7 @@ from imbue.mngr.errors import HostDataSchemaError
 from imbue.mngr.errors import HostError
 from imbue.mngr.errors import InvalidActivityTypeError
 from imbue.mngr.errors import LockLostError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import NoCommandDefinedError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.common import get_agent_state_dir_path
@@ -62,6 +65,7 @@ from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_acquired_generation_token
 from imbue.mngr.hosts.host import _parse_boot_info_output
 from imbue.mngr.hosts.outer_host import ActiveRemoteLock
+from imbue.mngr.hosts.outer_host import EXEC_WRITE_STDIN_CHUNK_BYTES
 from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
 from imbue.mngr.hosts.outer_host import SSH_KEEPALIVE_INTERVAL_SECONDS
 from imbue.mngr.interfaces.agent import AgentInterface
@@ -2594,6 +2598,238 @@ def test_put_file_via_paramiko_uploads_via_fresh_sftp_channel(
 
     assert result is True
     assert uploaded["/tmp/test.txt"] == b"hello world"
+
+
+class _FakeExecChannel:
+    """Fake paramiko session channel that records what an exec write sends it."""
+
+    def __init__(
+        self,
+        transport: object,
+        exit_code: int = 0,
+        stderr: bytes = b"",
+        exit_status_error: Exception | None = None,
+        closes_after_bytes: int | None = None,
+    ) -> None:
+        """``closes_after_bytes`` makes the far side close the channel once that much stdin has been sent, as paramiko reports it."""
+        self.transport = transport
+        self.remote_chanid = 7
+        self.sent = b""
+        self.sendall_call_count = 0
+        self.is_eof_sent = False
+        self.is_closed = False
+        self.is_closed_by_peer = False
+        self._exit_code = exit_code
+        self._stderr = stderr
+        self._exit_status_error = exit_status_error
+        self._closes_after_bytes = closes_after_bytes
+
+    def settimeout(self, timeout: float | None) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> None:
+        self.sendall_call_count += 1
+        if self._closes_after_bytes is not None and len(self.sent) >= self._closes_after_bytes:
+            self.is_closed_by_peer = True
+            raise OSError("Socket is closed")
+        self.sent += data
+
+    def exit_status_ready(self) -> bool:
+        return self.is_closed_by_peer
+
+    def shutdown_write(self) -> None:
+        self.is_eof_sent = True
+
+    def makefile(self, mode: str) -> IO[bytes]:
+        return io.BytesIO(b"")
+
+    def makefile_stderr(self, mode: str) -> IO[bytes]:
+        return io.BytesIO(self._stderr)
+
+    def recv_exit_status(self) -> int:
+        if self._exit_status_error is not None:
+            raise self._exit_status_error
+        return self._exit_code
+
+    def close(self) -> None:
+        self.is_closed = True
+
+
+class _FakeExecTransport(_FakeTransport):
+    """Fake transport that hands out prepared exec channels and keeps the raw messages sent on it."""
+
+    def __init__(self, *, is_active: bool = True) -> None:
+        super().__init__(is_active=is_active, open_session_results=[])
+        self.messages: list[Message] = []
+
+    def add_channel(self, channel: _FakeExecChannel) -> None:
+        self._open_session_results.append(channel)
+
+    def _send_user_message(self, message: Message) -> None:
+        self.messages.append(message)
+
+
+def _create_host_with_exec_transport_and_fake(
+    local_provider: LocalProviderInstance, transport: _FakeExecTransport
+) -> tuple[Host, _FakeHostWithSSH]:
+    """Create a Host whose SSH connection is backed by the given fake transport, along with its fake pyinfra host."""
+    fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=transport))
+    host = Host(
+        id=HostId.generate(),
+        host_name=HostName("test"),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        provider_instance=local_provider,
+        mngr_ctx=local_provider.mngr_ctx,
+    )
+    return host, fake
+
+
+def _create_host_with_exec_transport(local_provider: LocalProviderInstance, transport: _FakeExecTransport) -> Host:
+    """Create a Host whose SSH connection is backed by the given fake transport."""
+    host, _fake = _create_host_with_exec_transport_and_fake(local_provider, transport)
+    return host
+
+
+def _parse_exec_request(message: Message) -> tuple[int, str, bool, str]:
+    """Decode a sent channel request into (channel id, request type, want_reply, command)."""
+    parsed = Message(message.asbytes())
+    assert parsed.get_byte() == cMSG_CHANNEL_REQUEST
+    return parsed.get_int(), parsed.get_text(), parsed.get_boolean(), parsed.get_text()
+
+
+def test_write_file_sends_the_command_and_the_bytes_on_one_exec_channel_without_waiting_for_the_exec_reply(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """The whole remote write is one channel: exec request with no reply asked, the bytes as stdin, then EOF."""
+    transport = _FakeExecTransport()
+    channel = _FakeExecChannel(transport)
+    transport.add_channel(channel)
+    host = _create_host_with_exec_transport(local_provider, transport)
+    content = bytes(range(256))
+
+    host.write_file(Path("/srv/app dir/config.json"), content, mode="0600", is_atomic=True)
+
+    assert transport.open_session_call_count == 1
+    (message,) = transport.messages
+    channel_id, request_type, want_reply, command = _parse_exec_request(message)
+    assert (channel_id, request_type, want_reply) == (7, "exec", False)
+    shell, flag, chain = shlex.split(command)
+    assert (shell, flag) == ("sh", "-c")
+    assert chain.startswith("mkdir -p '/srv/app dir' && cat > '/srv/app dir/.config.json.")
+    assert "chmod 0600 '/srv/app dir/.config.json." in chain
+    assert chain.endswith("'/srv/app dir/config.json'")
+    assert channel.sent == content
+    assert channel.is_eof_sent
+    assert channel.is_closed
+
+
+def test_write_file_raises_the_command_stderr_when_the_remote_write_fails(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A non-zero exit surfaces as one structured error carrying what the command said."""
+    transport = _FakeExecTransport()
+    transport.add_channel(_FakeExecChannel(transport, exit_code=1, stderr=b"/srv/config.json: Is a directory\n"))
+    host = _create_host_with_exec_transport(local_provider, transport)
+
+    with pytest.raises(
+        MngrError,
+        match=r"^Failed to write file '/srv/config.json' on outer host .* \(exit 1\): /srv/config.json: Is a directory$",
+    ):
+        host.write_file(Path("/srv/config.json"), b"fresh", is_atomic=True)
+
+
+def test_write_file_re_sends_the_bytes_when_a_transient_error_hits_the_exit_status(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """The retry unit is the whole write, so a replay opens a fresh channel and sends the content again."""
+    transport = _FakeExecTransport()
+    first = _FakeExecChannel(transport, exit_status_error=SSHException("Channel closed"))
+    second = _FakeExecChannel(transport)
+    transport.add_channel(first)
+    transport.add_channel(second)
+    host = _create_host_with_exec_transport(local_provider, transport)
+
+    host.write_file(Path("/srv/config.json"), b"fresh")
+
+    assert first.sent == b"fresh"
+    assert first.is_closed
+    assert second.sent == b"fresh"
+    assert transport.open_session_call_count == 2
+
+
+def test_write_file_sends_a_large_payload_in_bounded_chunks_that_arrive_whole_and_in_order(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A big file goes out as many bounded sends (so paramiko never re-copies the whole remainder per packet), intact."""
+    transport = _FakeExecTransport()
+    channel = _FakeExecChannel(transport)
+    transport.add_channel(channel)
+    host = _create_host_with_exec_transport(local_provider, transport)
+    content = bytes(range(256)) * (5 * 1024)
+
+    host.write_file(Path("/srv/blob.bin"), content)
+
+    assert channel.sent == content
+    assert channel.sendall_call_count > 1
+
+
+def test_write_file_retries_when_the_transport_died_before_the_command_reported_its_status(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A channel closed by a dropped connection reads as a failed command; it is retried as a connection error."""
+    transport = _FakeExecTransport(is_active=False)
+    transport.add_channel(_FakeExecChannel(transport, exit_code=-1))
+    transport.add_channel(_FakeExecChannel(transport))
+    host, fake = _create_host_with_exec_transport_and_fake(local_provider, transport)
+
+    host.write_file(Path("/srv/config.json"), b"fresh")
+
+    assert transport.open_session_call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+def test_write_file_reports_a_command_that_exited_before_reading_all_of_its_stdin(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A far side that fails before consuming the bytes closes the channel mid-send; its verdict wins over the send error."""
+    transport = _FakeExecTransport()
+    channel = _FakeExecChannel(
+        transport,
+        exit_code=1,
+        stderr=b"mkdir: cannot create directory '/srv': Permission denied\n",
+        closes_after_bytes=EXEC_WRITE_STDIN_CHUNK_BYTES,
+    )
+    transport.add_channel(channel)
+    host, fake = _create_host_with_exec_transport_and_fake(local_provider, transport)
+    content = bytes(range(256)) * (5 * 1024)
+
+    with pytest.raises(MngrError, match=r"\(exit 1\): mkdir: cannot create directory '/srv': Permission denied$"):
+        host.write_file(Path("/srv/blob.bin"), content)
+
+    assert len(channel.sent) == EXEC_WRITE_STDIN_CHUNK_BYTES
+    assert channel.is_closed
+    assert transport.open_session_call_count == 1
+    assert fake.disconnect_call_count == 0
+
+
+def test_write_file_retries_when_the_channel_closes_mid_send_without_an_exit_status(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A channel that closes without a status while the bytes are still going out is a dropped connection, not a verdict."""
+    transport = _FakeExecTransport()
+    first = _FakeExecChannel(transport, exit_code=-1, closes_after_bytes=EXEC_WRITE_STDIN_CHUNK_BYTES)
+    second = _FakeExecChannel(transport)
+    transport.add_channel(first)
+    transport.add_channel(second)
+    host, fake = _create_host_with_exec_transport_and_fake(local_provider, transport)
+    content = bytes(range(256)) * (5 * 1024)
+
+    host.write_file(Path("/srv/blob.bin"), content)
+
+    assert first.is_closed
+    assert second.sent == content
+    assert transport.open_session_call_count == 2
+    assert fake.disconnect_call_count == 1
 
 
 def test_get_file_wraps_ssh_exception_in_host_connection_error(

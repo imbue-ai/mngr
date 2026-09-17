@@ -308,7 +308,7 @@ class StubOuter(MutableModel):
         else:
             self.machine_accounts.pop(service_name, None)
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         self.written.append(WrittenFile(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
         self.remote_files[str(path)] = content
 
@@ -318,8 +318,11 @@ class StubOuter(MutableModel):
         content: str,
         encoding: str = "utf-8",
         mode: str | None = None,
+        is_atomic: bool = True,
     ) -> None:
-        self.written.append(WrittenFile(path=str(path), content=content.encode(encoding), mode=mode))
+        self.written.append(
+            WrittenFile(path=str(path), content=content.encode(encoding), mode=mode, is_atomic=is_atomic)
+        )
 
 
 def _b64(content: bytes) -> str:

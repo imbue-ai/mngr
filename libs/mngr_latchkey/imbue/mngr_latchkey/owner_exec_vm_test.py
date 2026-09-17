@@ -52,7 +52,7 @@ class _StubOuter(MutableModel):
         self.recorded.append(_Recorded(command=command))
         return self.result
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         self.written.append(_Written(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
 
 

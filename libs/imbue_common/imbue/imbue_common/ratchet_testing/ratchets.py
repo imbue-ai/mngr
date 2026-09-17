@@ -334,7 +334,7 @@ def find_per_file_host_uploads_in_loops(
     Flags ``.write_file(...)`` / ``.write_text_file(...)`` / ``.put_file(...)`` calls
     that appear inside a ``for`` or ``while`` loop. Writing files to a (possibly
     remote) host one at a time is slow and fragile: each call is a separate
-    round-trip (an SFTP channel open per file), which over an SSH tunnel scales
+    round-trip (an SSH channel open per file), which over an SSH tunnel scales
     linearly and has repeatedly caused upload timeouts and "connection reset / SSH
     protocol banner" failures. Transfer many files with a single bulk copy
     (``host.copy_directory``, i.e. rsync) instead.

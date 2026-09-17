@@ -44,6 +44,7 @@ class _RecordingHost(FakeHost):
         content: str,
         encoding: str = "utf-8",
         mode: str | None = None,
+        is_atomic: bool = True,
     ) -> None:
         self.files[Path(path)] = content
 

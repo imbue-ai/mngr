@@ -519,7 +519,7 @@ def test_a_push_too_large_for_one_command_is_refused_rather_than_split(tmp_path:
 class _KeyForgettingMachine(StubOuter):
     """A stub machine whose tmpfs swallows every key written to it."""
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         if str(path) != _MACHINE_KEY_PATH:
             super().write_file(path, content, mode, is_atomic)
 

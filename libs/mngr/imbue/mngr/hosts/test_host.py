@@ -60,15 +60,14 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
-from imbue.mngr.providers.ssh.instance import SSHHostConfig
-from imbue.mngr.providers.ssh.instance import SSHProviderInstance
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.read_deadline import reads_bounded_for
-from imbue.mngr.utils.testing import build_test_known_hosts_file
+from imbue.mngr.utils.testing import ExecOnlyParamikoServer
 from imbue.mngr.utils.testing import capture_tmux_pane_contents
 from imbue.mngr.utils.testing import generate_ssh_keypair
 from imbue.mngr.utils.testing import local_sshd
+from imbue.mngr.utils.testing import make_local_ssh_host_factory
 from imbue.mngr.utils.testing import tmux_session_cleanup
 from imbue.mngr.utils.thread_cleanup import mngr_executor
 
@@ -97,27 +96,78 @@ def ssh_host_factory(
     public_key_content = public_key.read_text()
 
     with local_sshd(public_key_content, tmp_path) as (port, host_key_path):
-        known_hosts_path = build_test_known_hosts_file(host_key_path, port, tmp_path / "known_hosts")
+        yield make_local_ssh_host_factory(port, host_key_path, private_key, temp_dir, temp_mngr_ctx, tmp_path)
 
-        current_user = os.environ.get("USER", "root")
-        ssh_config = SSHHostConfig(
-            address="127.0.0.1",
-            port=port,
-            user=current_user,
-            key_file=private_key,
-            known_hosts_file=known_hosts_path,
-        )
 
-        def create_ssh_host(name: str) -> Host:
-            provider = SSHProviderInstance(
-                name=ProviderInstanceName(f"ssh-{name}"),
-                host_dir=temp_dir,
-                mngr_ctx=temp_mngr_ctx,
-                hosts={name: ssh_config},
-            )
-            return provider.get_host(HostName(name))
+# Remote File Write Tests
 
-        yield create_ssh_host
+
+# Past paramiko's default 2 MiB channel window, so the write has to ride flow control.
+_LARGE_WRITE_PAYLOAD = bytes(range(256)) * (12 * 1024)
+
+
+@pytest.mark.timeout(60)
+def test_write_file_over_a_real_transport_lands_a_large_file_with_its_mode_through_one_exec_channel(
+    paramiko_ssh_host_factory: tuple[Callable[[str], Host], ExecOnlyParamikoServer],
+    tmp_path: Path,
+) -> None:
+    """Drives the remote write through a real paramiko transport, with the server side in-process.
+
+    This is the guard for the private ``Transport._send_user_message`` call the
+    write relies on (see the paramiko version pin in ``outer_host_test.py``): the
+    exec request leaves without a reply being awaited, the bytes follow on the
+    same channel, and the command lands them under the requested mode.
+    """
+    create_ssh_host, server = paramiko_ssh_host_factory
+    host = create_ssh_host("writer")
+    assert not host.is_local
+    destination = tmp_path / "landing dir" / "con'fig.bin"
+
+    host.write_file(destination, _LARGE_WRITE_PAYLOAD, mode="0600", is_atomic=True)
+
+    assert destination.read_bytes() == _LARGE_WRITE_PAYLOAD
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert [entry.name for entry in destination.parent.iterdir()] == [destination.name]
+    (command,) = server.exec_commands
+    shell, flag, chain = shlex.split(command)
+    assert (shell, flag) == ("sh", "-c")
+    assert chain.startswith(f"mkdir -p {shlex.quote(str(destination.parent))} && cat > ")
+    assert chain.endswith(shlex.quote(str(destination)))
+
+
+@pytest.mark.timeout(60)
+def test_write_file_over_a_real_transport_reports_the_remote_command_failure(
+    paramiko_ssh_host_factory: tuple[Callable[[str], Host], ExecOnlyParamikoServer],
+    tmp_path: Path,
+) -> None:
+    """A command that fails on the far side surfaces its stderr and exit status, read back over the same channel."""
+    create_ssh_host, _server = paramiko_ssh_host_factory
+    host = create_ssh_host("writer")
+    destination = tmp_path / "config.json"
+    destination.mkdir()
+
+    with pytest.raises(MngrError, match=r"\(exit 1\): .*config\.json: Is a directory$"):
+        host.write_file(destination, b"fresh")
+
+    assert destination.is_dir()
+    assert list(tmp_path.glob(".config.json.*")) == []
+
+
+@pytest.mark.acceptance
+@pytest.mark.timeout(60)
+def test_write_file_over_a_real_sshd_lands_a_large_file_with_its_mode(
+    ssh_host_factory: Callable[[str], Host],
+    tmp_path: Path,
+) -> None:
+    """The same write against OpenSSH, which has to accept stdin bytes sent behind an exec request it has not answered."""
+    host = ssh_host_factory("writer")
+    destination = tmp_path / "landing dir" / "con'fig.bin"
+
+    host.write_file(destination, _LARGE_WRITE_PAYLOAD, mode="0600")
+
+    assert destination.read_bytes() == _LARGE_WRITE_PAYLOAD
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+    assert [entry.name for entry in destination.parent.iterdir()] == [destination.name]
 
 
 # Run Shell Command Tests

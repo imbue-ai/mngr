@@ -218,7 +218,7 @@ class _LocalFakeOuter(OuterHostInterface):
     def read_file(self, path: Path) -> bytes:
         return path.read_bytes()
 
-    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
@@ -231,6 +231,7 @@ class _LocalFakeOuter(OuterHostInterface):
         content: str,
         encoding: str = "utf-8",
         mode: str | None = None,
+        is_atomic: bool = True,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding=encoding)
