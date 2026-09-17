@@ -307,7 +307,7 @@ pnpm install        # Install Electron and ToDesktop CLI
 pnpm start          # Launch the Electron app in dev mode
 ```
 
-In dev mode, the Electron app skips `uv sync` and uses the monorepo's workspace venv directly (via `uv run --package minds` from the repo root). This means all mngr plugins (claude, modal, etc.) are available without any extra setup, and changes to the Python code are picked up immediately on restart.
+In dev mode, the Electron app skips `uv sync` and uses the monorepo's workspace venv directly (via `uv run --package minds` from the repo root). That installs the `minds` package's own dependency closure, which includes the agent-type plugins the default workspace template configures and the modal provider plugin minds enables; other plugins (e.g. ovh) are available only if the venv already has them (e.g. after `uv sync --all-packages`). Changes to the Python code are picked up immediately on restart.
 
 ### Building for distribution
 

@@ -1,16 +1,15 @@
-"""Guard: the packaged desktop app must bundle every agent-type plugin the template uses.
+"""Guard: every way of installing minds must carry every agent-type plugin the template uses.
 
-The packaged app runs ``mngr create`` against the default workspace template,
-and mngr hard-fails parsing ``.mngr/settings.toml`` when an
-``[agent_types.<name>]`` section belongs to a plugin that is not installed
-("Unknown fields in agent_types.<name>"). The app's Python environment is the
-explicit workspace-package list in ``electron/pyproject/pyproject.toml``
-(mirrored in ``scripts/build.js``, ``electron/env-setup.js``, and
-``scripts/build_test.py``) -- NOT the monorepo venv -- so a template that
-grows a new agent type works everywhere in dev and then breaks every create
-from the shipped binary. Exactly that gap shipped in the first cut of
-minds-v0.3.17 (codex / pi-coding, caught only by the tag-time launch-to-msg
-run); this test turns it into a direct per-run failure.
+minds runs ``mngr create`` against the default workspace template, and mngr
+hard-fails parsing ``.mngr/settings.toml`` when an ``[agent_types.<name>]``
+section belongs to a plugin that is not installed ("Unknown fields in
+agent_types.<name>"). Two dependency lists decide which plugins are installed,
+and neither is the monorepo venv: the packaged desktop app installs the
+workspace-package list in ``electron/pyproject/pyproject.toml``, and running
+from source (e.g. dev-mode Electron's ``uv run --package minds``) installs only
+the ``minds`` package's own dependency closure. A template that grows a new
+agent type works in a fully synced dev venv yet breaks every create through
+either path, so this test fails as soon as the lists fall behind the template.
 
 Lives in the ``minds_snapshot_resume`` suite because that is the CI stage
 whose image carries the paired default-workspace-template worktree the test
@@ -31,13 +30,50 @@ from imbue.mngr.config.agent_plugin_registry import get_agent_type_owner
 from imbue.mngr.main import get_or_create_plugin_manager
 
 # Plugins mngr registers itself (not via setuptools entry points); their agent
-# types ship inside imbue-mngr, which is always bundled.
+# types ship inside imbue-mngr, which is always installed.
 _BUILTIN_AGENT_PLUGIN_NAMES: Final[frozenset[str]] = frozenset({"command", "headless_command"})
+
+_MINDS_DIR: Final[Path] = Path(__file__).parent
+
+_PACKAGED_APP_FIX: Final[str] = (
+    "add it to ALL FOUR mirrored workspace-package lists: "
+    "apps/minds/scripts/build.js (WORKSPACE_PACKAGES), apps/minds/electron/env-setup.js "
+    "(WORKSPACE_PACKAGES), apps/minds/electron/pyproject/pyproject.toml "
+    "([project.dependencies] AND [tool.uv.sources], then run `uv lock` in that directory), "
+    "and apps/minds/scripts/build_test.py (WORKSPACE_PACKAGES)."
+)
+
+_SOURCE_INSTALL_FIX: Final[str] = (
+    "add it to apps/minds/pyproject.toml ([project.dependencies] AND [tool.uv.sources]), "
+    "then run `uv lock` at the repo root."
+)
 
 
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.timeout(60)
-def test_template_agent_types_are_bundled_into_the_desktop_app(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("install_description", "pyproject_path", "fix_instructions"),
+    [
+        pytest.param(
+            "the packaged desktop app",
+            _MINDS_DIR / "electron" / "pyproject" / "pyproject.toml",
+            _PACKAGED_APP_FIX,
+            id="packaged_app",
+        ),
+        pytest.param(
+            "minds run from source",
+            _MINDS_DIR / "pyproject.toml",
+            _SOURCE_INSTALL_FIX,
+            id="source_install",
+        ),
+    ],
+)
+def test_template_agent_types_are_installed_with_minds(
+    install_description: str,
+    pyproject_path: Path,
+    fix_instructions: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     settings_path = DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE / ".mngr" / "settings.toml"
     assert settings_path.is_file(), (
         f"No default-workspace-template settings at {settings_path}. This test needs the paired "
@@ -71,13 +107,9 @@ def test_template_agent_types_are_bundled_into_the_desktop_app(monkeypatch: pyte
         if entry_point.dist is not None
     }
 
-    # The packaged app's dependency closure -- one of the four mirrored
-    # bundled-package lists (the drift guard in scripts/build_test.py keeps
-    # them identical, so checking this one covers all four).
-    bundle_pyproject_path = Path(__file__).parent / "electron" / "pyproject" / "pyproject.toml"
-    bundle_dependencies = tomllib.loads(bundle_pyproject_path.read_text())["project"]["dependencies"]
-    bundled_package_names = {
-        re.split(r"[><=!~\[; ]", dependency, maxsplit=1)[0].strip().lower() for dependency in bundle_dependencies
+    dependencies = tomllib.loads(pyproject_path.read_text())["project"]["dependencies"]
+    installed_package_names = {
+        re.split(r"[><=!~\[; ]", dependency, maxsplit=1)[0].strip().lower() for dependency in dependencies
     }
 
     problems: list[str] = []
@@ -98,20 +130,15 @@ def test_template_agent_types_are_bundled_into_the_desktop_app(monkeypatch: pyte
                     f"agent type '{agent_type_name}' is owned by plugin '{owner_plugin_name}', which has no "
                     "matching setuptools entry point in the 'mngr' group -- cannot determine its package."
                 )
-            elif package_name.lower() in bundled_package_names:
+            elif package_name.lower() in installed_package_names:
                 pass
             else:
                 problems.append(
                     f"agent type '{agent_type_name}' is provided by package '{package_name}', which is NOT "
-                    "bundled into the packaged desktop app. Every `mngr create` from the shipped binary "
-                    f'will fail with "Unknown fields in agent_types.{agent_type_name}". Fix: add '
-                    f"'{package_name}' to ALL FOUR mirrored workspace-package lists: "
-                    "apps/minds/scripts/build.js (WORKSPACE_PACKAGES), apps/minds/electron/env-setup.js "
-                    "(WORKSPACE_PACKAGES), apps/minds/electron/pyproject/pyproject.toml "
-                    "([project.dependencies] AND [tool.uv.sources], then run `uv lock` in that directory), "
-                    "and apps/minds/scripts/build_test.py (WORKSPACE_PACKAGES)."
+                    f"a dependency of {install_description}. Every `mngr create` from it will fail with "
+                    f'"Unknown fields in agent_types.{agent_type_name}". Fix: {fix_instructions}'
                 )
     assert not problems, (
-        "The default-workspace-template declares agent types the packaged desktop app cannot parse:\n- "
+        f"The default-workspace-template declares agent types {install_description} cannot parse:\n- "
         + "\n- ".join(problems)
     )

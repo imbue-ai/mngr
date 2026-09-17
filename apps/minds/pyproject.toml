@@ -23,7 +23,19 @@ dependencies = [
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
+    # minds writes an enabled modal provider block into its mngr settings, and
+    # mngr rejects an enabled provider whose backend plugin is not installed.
+    "imbue-mngr-modal",
     "imbue-mngr-vps",
+    # The agent-type plugins the default workspace template configures. mngr
+    # refuses to parse the template's settings when any of them is missing, so
+    # running minds from source (which installs only this package's closure)
+    # would fail every create without them.
+    "imbue-mngr-antigravity",
+    "imbue-mngr-claude",
+    "imbue-mngr-codex",
+    "imbue-mngr-opencode",
+    "imbue-mngr-pi-coding",
     "modal>=1.4.3",
     "paramiko>=3.0",
     "playwright>=1.40.0",
@@ -56,10 +68,16 @@ build-backend = "hatchling.build"
 [tool.uv.sources]
 concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
+imbue-mngr-antigravity = { workspace = true }
 imbue-mngr-aws = { workspace = true }
+imbue-mngr-claude = { workspace = true }
+imbue-mngr-codex = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-imbue-cloud = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }
+imbue-mngr-modal = { workspace = true }
+imbue-mngr-opencode = { workspace = true }
+imbue-mngr-pi-coding = { workspace = true }
 imbue-mngr-vps = { workspace = true }
 imbue-common = { workspace = true }
 

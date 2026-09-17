@@ -216,7 +216,7 @@ function logBundledGitVersion(gitRoot) {
  * login_url event and log everything to the log file.
  *
  * In dev mode, uses `uv run --package minds` from the monorepo root so
- * the workspace venv (with all plugins) is used directly.
+ * the workspace venv (synced to minds' dependency closure) is used directly.
  *
  * Returns a promise that resolves with { loginUrl, port } when the backend
  * is ready, or rejects if the process exits before emitting the URL.
