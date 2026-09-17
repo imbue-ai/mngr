@@ -33,15 +33,15 @@ fallback_branch = "minds-v0.6.1"
 rollout_percentage = 100
 
 [channels.beta]
-build_id = "260915wjcyd06bp"
-version = "0.6.1"
-fallback_branch = "minds-v0.6.1"
+build_id = "260917ohslvgoyj"
+version = "0.6.2"
+fallback_branch = "minds-v0.6.2"
 rollout_percentage = 100
 
 [channels.alpha]
-build_id = "260915wjcyd06bp"
-version = "0.6.1"
-fallback_branch = "minds-v0.6.1"
+build_id = "260917ohslvgoyj"
+version = "0.6.2"
+fallback_branch = "minds-v0.6.2"
 rollout_percentage = 100
 
 # Which default-workspace-template tag browser-created workspaces pin to, per
@@ -62,7 +62,7 @@ rollout_percentage = 100
 template_ref = "minds-v0.6.1"
 
 [web_channels.beta]
-template_ref = "minds-v0.6.1"
+template_ref = "minds-v0.6.2"
 
 [web_channels.alpha]
-template_ref = "minds-v0.6.1"
+template_ref = "minds-v0.6.2"
