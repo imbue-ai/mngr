@@ -52,8 +52,14 @@ def resolve_request(
             "The pending-requests view is not configured; a verdict cannot be indexed."
         )
     pending.record_response(response_event)
-    mngr_message_sender.send(agent_id, format_resolution_notice(message, request_event_id, status))
     backend_resolver: BackendResolverInterface = get_state().backend_resolver
+    # The request names its chat; a seeded chat's id is not an agent's, so the nudge runs on
+    # the agent the resolver knows for it (the chat's newest member) and names the chat by id.
+    mngr_message_sender.send(
+        agent_id,
+        format_resolution_notice(message, request_event_id, status),
+        exec_agent_id=backend_resolver.resolve_agent_id(agent_id),
+    )
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()
     return response_event

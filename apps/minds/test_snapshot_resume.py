@@ -2032,8 +2032,10 @@ def test_live_reprovision_succeeds_inside_the_running_workspace(running_workspac
             f"--- stdout (tail) ---\n{reprovision.stdout[-4000:]}\n"
             f"--- stderr (tail) ---\n{reprovision.stderr[-4000:]}"
         )
-        # The provision guard's short-circuit also exits 0.
-        assert "[provision-guard]" not in reprovision.stdout, "the provision guard skipped the re-provision"
+        # The provision guard's short-circuit also exits 0. Only its skip line means the
+        # script did not run; its other lines (an inherited pin being ignored) are printed
+        # by a run that proceeds.
+        assert "already provisioned for tree" not in reprovision.stdout, "the provision guard skipped the re-provision"
         stamped = _exec_in_container(container_name, f"ls {_PROVISION_MARKER_DIR}/*.setup_system.done", timeout=30)
         assert stamped.returncode == 0, f"no fresh provision marker under {_PROVISION_MARKER_DIR}: {stamped.stderr!r}"
         # The busy binary was replaced under the running process (no ETXTBSY).

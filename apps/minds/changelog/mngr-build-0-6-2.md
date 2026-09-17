@@ -1,0 +1,5 @@
+- Cut the minds 0.6.2 release: the app version is 0.6.2 and the pinned default-workspace-template tag (`FALLBACK_BRANCH`) is `minds-v0.6.2`, carrying everything that landed on `main` since `minds-v0.6.1` (the welcome-chat onboarding flow, the start-flow and modal polish, the brand color change, and the rest of that day's changes).
+
+- Added the `minds-v0.6.2` deploy history entry and reset `next_deploy.md` for the items the 0.6.2 staging rehearsal discharged.
+
+- Fixed latchkey permission requests from a workspace's seeded welcome chat: the request names the chat, and a seeded chat's id belongs to its seed rather than to any agent, so the desktop could not find the chat's host (approvals answered 503) and its resolution nudge (`mngr exec` of the workspace's `message_chat.py`, then `mngr message`) retried forever, leaving the in-chat card pending. The desktop now resolves a chat id to the chat's newest member through the `chat_id` label the chat app stamps on every member, runs the nudge script on that agent while still addressing the chat by id, and no longer mistakes an mngr provider warning's "No such file or directory" for a missing script.

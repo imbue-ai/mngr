@@ -11,9 +11,12 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.create import bootstrap_backend_for_host_creation
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import MngrError
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.deploy_utils import MngrInstallMode
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_modal.instance import ModalProviderInstance
@@ -240,7 +243,12 @@ def schedule_add(ctx: click.Context, **kwargs: Any) -> None:
     if opts.snapshot_id is not None:
         raise NotImplementedError("--snapshot is not yet implemented for schedule add")
 
-    # Load the provider instance
+    # A schedule deploys into the provider's environment, which on Modal exists only
+    # once a host has been created there; create it first, the way `mngr create` does.
+    try:
+        bootstrap_backend_for_host_creation(ProviderInstanceName(opts.provider), mngr_ctx)
+    except MngrError as e:
+        raise click.ClickException(f"Failed to load provider '{opts.provider}': {e}") from e
     provider = load_schedule_provider(opts.provider, mngr_ctx)
 
     # Generate name if not provided

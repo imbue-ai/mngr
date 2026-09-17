@@ -19,6 +19,7 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.primitives import ServiceName
@@ -44,6 +45,14 @@ SYSTEM_SERVICES_AGENT_NAME: Final[str] = "system-services"
 # It lives on the ``system-services`` (primary) agent. The host's normalized
 # slug name lives on the host itself, not in a label.
 WORKSPACE_DISPLAY_NAME_LABEL: Final[str] = "workspace_display_name"
+
+# The chat app inside a workspace labels every agent it launches as a member of its
+# chat (``chat_id=<chat id>``, ``chat_seq=<member ordinal>``). A permission request
+# names the chat it belongs to, and a seeded chat's id is its seed's rather than any
+# agent's, so an id that names no agent is looked up as a chat and resolves to the
+# chat's newest member.
+CHAT_ID_LABEL: Final[str] = "chat_id"
+CHAT_SEQ_LABEL: Final[str] = "chat_seq"
 
 
 class AgentDisplayInfo(FrozenModel):
@@ -330,6 +339,14 @@ class BackendResolverInterface(MutableModel, ABC):
         Subclasses with access to per-host agent data should override this.
         """
         return None
+
+    def resolve_agent_id(self, agent_id: AgentId) -> AgentId:
+        """The discovered agent ``agent_id`` names: itself, else the newest member of the chat it identifies.
+
+        Default implementation returns ``agent_id`` unchanged. Subclasses with access
+        to agent labels should override this.
+        """
+        return agent_id
 
     def has_completed_initial_discovery(self) -> bool:
         """Whether any agent discovery data has been received.
@@ -625,6 +642,22 @@ def _to_agent_record(agent: DiscoveredAgent) -> _AgentRecord:
         agent_name=agent.agent_name,
         provider_name=agent.provider_name,
     )
+
+
+@pure
+def _chat_member_ordinal(agent: DiscoveredAgent) -> int:
+    raw = agent.labels.get(CHAT_SEQ_LABEL, "")
+    return int(raw) if raw.isdigit() else 0
+
+
+@pure
+def agents_named_by_id(agents: Sequence[DiscoveredAgent], agent_id: AgentId) -> list[DiscoveredAgent]:
+    """The agents ``agent_id`` names: those with that id, else the members of the chat it identifies, newest first."""
+    direct = [agent for agent in agents if agent.agent_id == agent_id]
+    if direct:
+        return direct
+    members = [agent for agent in agents if agent.labels.get(CHAT_ID_LABEL) == str(agent_id)]
+    return sorted(members, key=_chat_member_ordinal, reverse=True)
 
 
 def _display_info_from_agent(agent: DiscoveredAgent) -> AgentDisplayInfo:
@@ -1465,14 +1498,13 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def _discovery_workspace_display_name_locked(self, agent_id: AgentId) -> str | None:
         """Return the display name from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
-        for agent in self._agents_result.discovered_agents:
-            if agent.agent_id == agent_id:
-                display_name = agent.labels.get(WORKSPACE_DISPLAY_NAME_LABEL)
-                if display_name:
-                    return display_name
-                # Backwards-compat fallback for workspaces created before the
-                # display label existed. Removable ~Sept 2026.
-                return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+        for agent in agents_named_by_id(self._agents_result.discovered_agents, agent_id):
+            display_name = agent.labels.get(WORKSPACE_DISPLAY_NAME_LABEL)
+            if display_name:
+                return display_name
+            # Backwards-compat fallback for workspaces created before the
+            # display label existed. Removable ~Sept 2026.
+            return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
         return None
 
     def get_host_name(self, agent_id: AgentId) -> str | None:
@@ -1492,17 +1524,15 @@ class MngrCliBackendResolver(BackendResolverInterface):
 
     def _discovery_host_name_locked(self, agent_id: AgentId) -> str | None:
         """Return the host name from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
-        for agent in self._agents_result.discovered_agents:
-            if agent.agent_id == agent_id:
-                return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
+        for agent in agents_named_by_id(self._agents_result.discovered_agents, agent_id):
+            return self._agents_result.host_name_by_host_id.get(str(agent.host_id))
         return None
 
     def get_agent_label(self, agent_id: AgentId, label_key: str) -> str | None:
         """Return the value of an arbitrary mngr label for an agent, or None."""
         with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    return agent.labels.get(label_key)
+            for agent in agents_named_by_id(self._agents_result.discovered_agents, agent_id):
+                return agent.labels.get(label_key)
             return None
 
     def get_workspace_color(self, agent_id: AgentId) -> str | None:
@@ -1517,23 +1547,22 @@ class MngrCliBackendResolver(BackendResolverInterface):
         carry junk.
         """
         with self._lock:
-            for agent in self._agents_result.discovered_agents:
-                if agent.agent_id == agent_id:
-                    raw = agent.labels.get("color")
-                    if raw is None:
-                        return None
-                    normalized = normalize_workspace_color(raw)
-                    if normalized is None:
-                        if str(agent_id) not in self._logged_malformed_color_agents:
-                            logger.warning(
-                                "Ignoring malformed color label {!r} for agent {}; "
-                                "rendering as default. Repick in machine settings to fix.",
-                                raw,
-                                agent_id,
-                            )
-                            self._logged_malformed_color_agents.add(str(agent_id))
-                        return DEFAULT_WORKSPACE_COLOR
-                    return normalized
+            for agent in agents_named_by_id(self._agents_result.discovered_agents, agent_id):
+                raw = agent.labels.get("color")
+                if raw is None:
+                    return None
+                normalized = normalize_workspace_color(raw)
+                if normalized is None:
+                    if str(agent_id) not in self._logged_malformed_color_agents:
+                        logger.warning(
+                            "Ignoring malformed color label {!r} for agent {}; "
+                            "rendering as default. Repick in machine settings to fix.",
+                            raw,
+                            agent_id,
+                        )
+                        self._logged_malformed_color_agents.add(str(agent_id))
+                    return DEFAULT_WORKSPACE_COLOR
+                return normalized
             return None
 
     def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
@@ -1575,7 +1604,16 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def get_ssh_info(self, agent_id: AgentId) -> RemoteSSHInfo | None:
         """Return SSH info for the agent's host, or None for local agents."""
         with self._lock:
-            return self._agents_result.ssh_info_by_agent_id.get(str(agent_id))
+            return self._agents_result.ssh_info_by_agent_id.get(str(self._resolve_agent_id_locked(agent_id)))
+
+    def resolve_agent_id(self, agent_id: AgentId) -> AgentId:
+        with self._lock:
+            return self._resolve_agent_id_locked(agent_id)
+
+    def _resolve_agent_id_locked(self, agent_id: AgentId) -> AgentId:
+        """The agent ``agent_id`` names in the snapshot, else ``agent_id`` itself. Must hold ``self._lock``."""
+        named = agents_named_by_id(self._agents_result.discovered_agents, agent_id)
+        return named[0].agent_id if named else agent_id
 
     def get_system_services_agent_id(self, workspace_agent_id: AgentId) -> AgentId | None:
         """Return the ``system-services`` agent sharing the workspace agent's host.
@@ -1588,6 +1626,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         system-services agent.
         """
         with self._lock:
+            workspace_agent_id = self._resolve_agent_id_locked(workspace_agent_id)
             live = _find_system_services_agent(
                 (_to_agent_record(agent) for agent in self._agents_result.discovered_agents),
                 workspace_agent_id,
@@ -1609,7 +1648,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             # globally, e.g. mid-migration) resolves to the same machine on
             # every refresh rather than flapping with discovery order.
             live_matches = sorted(
-                (agent for agent in self._agents_result.discovered_agents if agent.agent_id == agent_id),
+                agents_named_by_id(self._agents_result.discovered_agents, agent_id),
                 key=lambda agent: str(agent.host_id),
             )
             _warn_if_agent_id_spans_machines(agent_id, [agent.host_id for agent in live_matches])

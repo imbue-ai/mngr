@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(not is_claude_installed(), reason="Claude Code C
 
 @pytest.mark.release
 @pytest.mark.tmux
+@pytest.mark.rsync
 @pytest.mark.timeout(120)
 def test_ask_simple_query(temp_git_repo: Path) -> None:
     """Verify `mngr ask --format json` drives a real Claude agent end-to-end and returns its answer.

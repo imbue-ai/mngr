@@ -1,0 +1,1 @@
+- The `mngr ask` release test declares the rsync it now performs: `mngr ask` preserves its agent's logs when it destroys the agent at the end of a successful run, and the test's resource guard requires the mark for that.

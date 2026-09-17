@@ -1727,3 +1727,72 @@ def test_workspace_name_override_covers_host_name_on_slug_rename() -> None:
     resolver.update_agents(_snapshot("Other Name", "other-slug"))
     assert resolver.get_workspace_name(agent) == "Other Name"
     assert resolver.get_host_name(agent) == "other-slug"
+
+
+def _chat_member_agent(host_id: HostId, agent_id: AgentId, chat_id: AgentId, chat_seq: int) -> DiscoveredAgent:
+    """An agent the chat app launched as a member of ``chat_id`` (its ``chat_id`` / ``chat_seq`` labels)."""
+    return DiscoveredAgent(
+        host_id=host_id,
+        agent_id=agent_id,
+        agent_name=AgentName("welcome"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={"labels": {"chat_id": str(chat_id), "chat_seq": str(chat_seq)}},
+    )
+
+
+def test_resolve_agent_id_names_the_newest_member_of_a_seeded_chat() -> None:
+    """A seeded chat's id belongs to its seed, not to any agent: lookups by that id land on the
+    chat's newest member (the highest chat_seq), which is the agent the chat runs on now."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    chat_id = AgentId.generate()
+    first_member = AgentId.generate()
+    second_member = AgentId.generate()
+    services = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(first_member, second_member, services),
+            discovered_agents=(
+                _chat_member_agent(host, first_member, chat_id, chat_seq=2),
+                _chat_member_agent(host, second_member, chat_id, chat_seq=3),
+                _discovered_agent(host, services, "system-services"),
+            ),
+            host_name_by_host_id={str(host): "e2e-workspace"},
+        )
+    )
+
+    assert resolver.resolve_agent_id(chat_id) == second_member
+    info = resolver.get_agent_display_info(chat_id)
+    assert info is not None and info.host_id == str(host)
+    assert resolver.get_workspace_name(chat_id) == "e2e-workspace"
+    assert resolver.get_system_services_agent_id(chat_id) == services
+    assert resolver.get_agent_label(chat_id, "chat_seq") == "3"
+
+
+def test_resolve_agent_id_prefers_the_agent_itself_over_a_chat_label_match() -> None:
+    """A chat that is its own first agent (chat id == agent id) resolves to that agent even when a
+    later member carries the chat's label."""
+    resolver = MngrCliBackendResolver()
+    host = HostId.generate()
+    chat_id = AgentId.generate()
+    successor = AgentId.generate()
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(chat_id, successor),
+            discovered_agents=(
+                _discovered_agent(host, chat_id, "chat"),
+                _chat_member_agent(host, successor, chat_id, chat_seq=2),
+            ),
+        )
+    )
+
+    assert resolver.resolve_agent_id(chat_id) == chat_id
+
+
+def test_resolve_agent_id_returns_an_unknown_id_unchanged() -> None:
+    resolver = MngrCliBackendResolver()
+    unknown = AgentId.generate()
+    resolver.update_agents(ParsedAgentsResult(agent_ids=()))
+
+    assert resolver.resolve_agent_id(unknown) == unknown
+    assert resolver.get_agent_display_info(unknown) is None

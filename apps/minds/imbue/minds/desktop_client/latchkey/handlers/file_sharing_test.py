@@ -46,8 +46,8 @@ class _RecordingMessageSender(MngrMessageSender):
     concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
-    def send(self, agent_id: AgentId, text: str) -> None:
-        self.sent_messages.append((str(agent_id), text))
+    def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
+        self.sent_messages.append((str(chat_id), text))
 
 
 def _build_gateway_client(handler: _HttpxHandler) -> LatchkeyGatewayClient:

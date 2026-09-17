@@ -93,24 +93,29 @@ def stdout_reports_message_delivered(stdout: str) -> bool:
 
 
 @pure
-def message_chat_argv(chat_id: str, text: str) -> list[str]:
+def message_chat_argv(exec_agent_id: str, chat_id: str, text: str) -> list[str]:
     """The ``mngr exec`` that messages a chat through its workspace's chat app.
 
-    ``mngr exec <chat id>`` resolves the chat's first agent (the chat id IS that agent's id)
-    and runs the script from the workspace root, where the script finds the chat app and
-    posts to its send route by chat id. The chat app delivers to the chat's active agent,
-    or holds the message while the chat moves to a new one.
+    ``mngr exec`` runs the script on ``exec_agent_id``, an agent of the chat's workspace
+    (the chat's newest member, which the backend resolver names for a chat id: a seeded
+    chat's id is its seed's, not any agent's). The script runs from the workspace root,
+    where it finds the chat app and posts to its send route by chat id; the chat app
+    delivers to the chat's active agent, or holds the message while the chat moves to a
+    new one.
 
     ``mngr exec`` takes every positional but the last as an agent and the last as ONE shell
     command string, so the script invocation is shell-quoted into a single argument; the
     notice text carries spaces and parentheses. ``--no-start``: a verdict for a stopped
     workspace waits for it to come up (the caller retries) rather than booting it.
     """
-    return ["exec", chat_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]), "--no-start"]
+    return ["exec", exec_agent_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]), "--no-start"]
 
 
-# What python prints when the workspace has no messaging script (a template from before it).
-_SCRIPT_MISSING_MARKERS: Final[tuple[str, ...]] = ("can't open file", "No such file or directory")
+# What python prints when the workspace has no messaging script (a template from before
+# it): ``python3: can't open file '<path>': [Errno 2] No such file or directory``. Only the
+# first clause is matched: mngr's own stderr can carry the errno text from an unrelated
+# provider warning (an unreachable Docker socket).
+_SCRIPT_MISSING_MARKERS: Final[tuple[str, ...]] = ("can't open file",)
 
 
 @pure
@@ -161,8 +166,11 @@ class MngrMessageSender(MutableModel):
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def send(self, agent_id: AgentId, text: str) -> None:
-        """Dispatch the message without blocking the caller, retrying until it lands.
+    def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
+        """Dispatch the message to ``chat_id`` without blocking the caller, retrying until it lands.
+
+        ``exec_agent_id`` is the agent the chat script runs on (see ``message_chat_argv``);
+        for a chat that is its own first agent it is the chat id itself.
 
         The send runs on a thread tracked by :attr:`concurrency_group` and
         never raises -- failures are logged. Undelivered attempts retry on the
@@ -172,15 +180,15 @@ class MngrMessageSender(MutableModel):
         """
         self.concurrency_group.start_new_thread(
             self._send_with_retries,
-            args=(str(agent_id), text),
+            args=(str(chat_id), text, str(exec_agent_id)),
             name="resolution-nudge-send",
             is_checked=False,
             on_failure=lambda exc: logger.opt(exception=True).error(
-                "resolution nudge to chat {} failed: {}", agent_id, exc
+                "resolution nudge to chat {} failed: {}", chat_id, exc
             ),
         )
 
-    def _send_with_retries(self, target: str, text: str) -> bool:
+    def _send_with_retries(self, target: str, text: str, exec_agent_id: str) -> bool:
         """Deliver ``text`` to ``target``, retrying until delivery or shutdown.
 
         The between-attempt waits ride the concurrency group's shutdown
@@ -192,7 +200,7 @@ class MngrMessageSender(MutableModel):
         attempt_index = 0
         is_shutting_down = False
         while not is_shutting_down:
-            if self.deliver(target, text):
+            if self.deliver(target, text, exec_agent_id):
                 if attempt_index > 0:
                     logger.info("resolution nudge to target {} delivered after retry", target)
                 return True
@@ -216,15 +224,18 @@ class MngrMessageSender(MutableModel):
         logger.info("resolution nudge retry to target {} abandoned: shutting down", target)
         return False
 
-    def deliver(self, target: str, text: str) -> bool:
+    def deliver(self, target: str, text: str, exec_agent_id: str) -> bool:
         """Deliver the notice to the chat ``target`` names and return whether it landed.
 
-        The chat app is tried first: ``mngr exec`` on the chat's first agent runs the
-        workspace's messaging script, and exit 0 is the chat app's word that the message was
-        delivered or queued. Only when the script is not there to run (an older workspace)
-        does the direct ``mngr message`` run; any other failure is retried by the caller.
+        The chat app is tried first: ``mngr exec`` on ``exec_agent_id`` (an agent of the
+        chat's workspace) runs the workspace's messaging script, and exit 0 is the chat
+        app's word that the message was delivered or queued. Only when the script is not
+        there to run (an older workspace, whose chats are their own agents) does the direct
+        ``mngr message`` to that agent run; any other failure is retried by the caller.
         """
-        exec_result = self.mngr_caller.call(message_chat_argv(target, text), timeout=_MESSAGE_CHAT_TIMEOUT_SECONDS)
+        exec_result = self.mngr_caller.call(
+            message_chat_argv(exec_agent_id, target, text), timeout=_MESSAGE_CHAT_TIMEOUT_SECONDS
+        )
         if exec_result.returncode == 0:
             return True
         if not is_message_chat_unavailable(exec_result.stderr):
@@ -236,7 +247,7 @@ class MngrMessageSender(MutableModel):
             )
             return False
         logger.debug("target {} has no chat app script to message through; falling back to mngr message", target)
-        return self._deliver_through_mngr_message(target, text)
+        return self._deliver_through_mngr_message(exec_agent_id, text)
 
     def _deliver_through_mngr_message(self, target: str, text: str) -> bool:
         """Send with ``mngr message`` and return whether the TARGET agent actually received it.
