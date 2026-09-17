@@ -17,22 +17,22 @@ def poll_for_value(
     - poll_count: Number of times the producer was called
     - elapsed_seconds: Total time spent polling
     """
-    start_time = time.time()
+    start_time = time.monotonic()
     poll_count = 0
     elapsed = 0.0
     while elapsed < timeout:
         poll_count += 1
         result = producer()
         if result is not None:
-            return result, poll_count, time.time() - start_time
+            return result, poll_count, time.monotonic() - start_time
         time.sleep(poll_interval)
-        elapsed = time.time() - start_time
+        elapsed = time.monotonic() - start_time
     # One final check after timeout in case value became available during last sleep
     poll_count += 1
     result = producer()
     if result is not None:
-        return result, poll_count, time.time() - start_time
-    return None, poll_count, time.time() - start_time
+        return result, poll_count, time.monotonic() - start_time
+    return None, poll_count, time.monotonic() - start_time
 
 
 def poll_until(
