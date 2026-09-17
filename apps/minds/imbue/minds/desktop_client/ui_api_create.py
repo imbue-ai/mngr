@@ -18,6 +18,9 @@ renders:
   detail: the live in-flight attempt or the record-backed interrupted/failed
   view (both carrying the attempt's persisted request so the page can restate
   the chosen settings after a reload), or "gone".
+- ``POST /ui/api/create/attempts/<create_attempt_id>/welcome-chat`` -- once the
+  attempt is done, hands the onboarding conversation to the new workspace as
+  its first chat (``welcome_chat.py``), answering the chat's id.
 
 Some small derivations here (suggested color, locked emails, destroy statuses)
 mirror private helpers in ``app.py``; importing them would be circular
@@ -31,11 +34,14 @@ from collections.abc import Mapping
 from flask import Blueprint
 from flask import Response
 from flask import request
+from loguru import logger
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
 from imbue.minds.desktop_client.destroying import DestroyingRecord
@@ -49,9 +55,12 @@ from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.region_preference import IMBUE_CLOUD_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import VULTR_PROVIDER_KEY
 from imbue.minds.desktop_client.region_preference import known_regions_for_provider
+from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
+from imbue.minds.desktop_client.welcome_chat import WelcomeChatRequest
+from imbue.minds.desktop_client.welcome_chat import seed_welcome_chat
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import pick_unused_create_color
 from imbue.minds.desktop_client.workspace_create import default_region_for_provider_with_config
@@ -76,6 +85,7 @@ from imbue.minds.primitives import DEFAULT_GCP_ZONE
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
 from imbue.minds.primitives import default_docker_runtime
+from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
 # The cloud modes are bring-your-own-key-account only; they never appear as
@@ -196,6 +206,12 @@ class RecordCreateAttemptDetail(FrozenModel):
     log_tail: tuple[str, ...] = Field(default=(), description="Persisted tail of the create log")
     provider_label: str = Field(default="", description="Friendly compute-provider label")
     request: CreateAttemptRequestSummary = Field(description="The settings the attempt was submitted with")
+
+
+class WelcomeChatResponse(FrozenModel):
+    """Response for POST /ui/api/create/attempts/<id>/welcome-chat: the seeded chat's id."""
+
+    chat_id: str = Field(description="The id of the chat the conversation continues in")
 
 
 class CreateAttemptDetailResponse(FrozenModel):
@@ -477,8 +493,59 @@ def _handle_create_attempt_detail(create_attempt_id: str) -> Response:
     return _json_response(CreateAttemptDetailResponse(kind="record", record=record_detail))
 
 
+def _done_workspace_agent_id(create_attempt_id: str) -> AgentId | None:
+    """The agent id of a finished attempt's workspace: from the live thread, else its DONE record; None until then."""
+    agent_creator = get_state().agent_creator
+    try:
+        parsed_id = CreateAttemptId(create_attempt_id)
+    except InvalidRandomIdError:
+        return None
+    info = agent_creator.get_create_attempt_info(parsed_id) if agent_creator is not None else None
+    if info is not None and info.status is AgentCreateAttemptStatus.DONE and info.agent_id is not None:
+        return info.agent_id
+    record = _read_pending_record(create_attempt_id)
+    if record is not None and record.state is PendingCreateAttemptState.DONE and record.agent_id:
+        return AgentId(record.agent_id)
+    return None
+
+
+def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
+    """Hand the onboarding conversation to the finished attempt's workspace as its first chat.
+
+    The body is a :class:`WelcomeChatRequest`. Answers 200 with the chat's id; 409 while the
+    attempt has no workspace yet (the page posts after DONE, so this is a race or a stale
+    tab), and 502 with the script's own words when the workspace refused or could not be
+    reached, in which case the page enters the workspace without the chat.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return make_json_error_response("Invalid JSON body", 400)
+    try:
+        welcome_chat = WelcomeChatRequest.model_validate(body)
+    except ValidationError as e:
+        logger.debug("Rejected a malformed welcome-chat body: {}", e)
+        return make_json_error_response("Invalid JSON body", 400)
+    workspace_agent_id = _done_workspace_agent_id(create_attempt_id)
+    if workspace_agent_id is None:
+        return make_json_error_response("The workspace is not ready yet", 409)
+    mngr_caller = get_state().mngr_caller or get_default_mngr_caller()
+    outcome = seed_welcome_chat(mngr_caller, workspace_agent_id, welcome_chat)
+    if not outcome.is_seeded:
+        return make_json_error_response(
+            "Couldn't open the welcome chat in the workspace.", 502, detail=outcome.failure_detail
+        )
+    return _json_response(WelcomeChatResponse(chat_id=outcome.chat_id))
+
+
 def register_create_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
+    blueprint.add_url_rule(
+        "/api/create/attempts/<create_attempt_id>/welcome-chat",
+        view_func=_handle_seed_welcome_chat,
+        methods=["POST"],
+    )
     blueprint.add_url_rule("/api/create/form-defaults", view_func=_handle_create_form_defaults)
     blueprint.add_url_rule("/api/create/landing-extras", view_func=_handle_landing_extras)
     blueprint.add_url_rule(

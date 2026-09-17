@@ -114,7 +114,7 @@ class E2EFailure(Exception):
     """
 
 
-# --- knobs (override via env) ---
+# knobs (override via env)
 
 MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Mind.app/Contents/MacOS/Mind"))
 
@@ -185,15 +185,11 @@ FOLLOWUP_W2_EXPECT = "bong"
 
 CREATE_TIMEOUT = 900
 REPLY_TIMEOUT = 480
-# A fresh workspace lands on the New Tab page with no chat; the page's tile runs the chat
-# app's ``new``. The shell opens the first New Tab page once its app list has arrived and
-# renders the tiles from that list, so the page and its tiles can still be on their way
-# when the dockview is first visible. The chat's page then renders in its own frame at the
-# chat app's origin, whose URL path is the chat's agent id.
-NEW_TAB_PAGE_SELECTOR = ".new-tab-launcher"
-NEW_CHAT_TILE_SELECTOR = '.new-tab-launcher-tile[data-launch="chat:new"]'
-NEW_TAB_ADD_BUTTON_SELECTOR = "button.dockview-add-tab-button"
-NEW_CHAT_FRAME_TIMEOUT = 60
+# A fresh workspace opens on the welcome chat the creation page seeded with the onboarding
+# conversation. The chat's page renders in its own frame at the chat app's origin, whose URL
+# path is the chat's id; the shell docks it once its app list has arrived, so the frame can
+# still be on its way when the dockview is first visible.
+CHAT_FRAME_TIMEOUT = 60
 CHAT_PAGE_URL_RE = re.compile(r"/agent-[a-f0-9]+/?$")
 # The in-chat permission card's opener. Matched by label, not by class: the card's classes
 # are DEFAULT_WORKSPACE_TEMPLATE styling internals, its label is what the user is shown.
@@ -235,7 +231,7 @@ SKIP_SLACK_FLOW = os.environ.get("SKIP_SLACK_FLOW", "0") == "1"
 # form -- useful when the failure is upstream of the form.
 SKIP_FIRST_MESSAGE = os.environ.get("SKIP_FIRST_MESSAGE", "0") == "1"
 
-# --- snap helpers ---
+# snap helpers
 
 if SCREENSHOT_DIR.exists():
     # Self-hosted runner persists /tmp; stale shots from past runs would
@@ -336,7 +332,7 @@ def snap_page(target: Page | Frame, name: str) -> None:
     snap(name)
 
 
-# --- HTTP slack mock (stdlib only) ---
+# HTTP slack mock (stdlib only)
 
 
 def _json_body(payload: dict[str, Any]) -> bytes:
@@ -453,7 +449,7 @@ def start_mock() -> _ThreadedHTTP:
     raise E2EFailure(f"slack mock failed to bind {SLACK_MOCK_PORT}")
 
 
-# --- cert + /etc/hosts + socat + latchkey wiring ---
+# cert + /etc/hosts + socat + latchkey wiring
 
 
 def ensure_cert() -> Path:
@@ -617,7 +613,7 @@ def latchkey_clear_slack() -> None:
     )
 
 
-# --- Mind.app launcher + auth ---
+# Mind.app launcher + auth
 
 
 def wait_backend_url(since_offset: int = 0) -> str:
@@ -888,7 +884,7 @@ def find_chat_frame(workspace: Frame, host: str | None = None) -> Frame | None:
 
 
 def wait_for_chat_frame(
-    workspace: Frame, *, label: str, timeout: float = NEW_CHAT_FRAME_TIMEOUT, host: str | None = None
+    workspace: Frame, *, label: str, timeout: float = CHAT_FRAME_TIMEOUT, host: str | None = None
 ) -> Frame:
     """Return the chat page's frame once the shell has docked one inside ``workspace``."""
     deadline = time.time() + timeout
@@ -918,26 +914,6 @@ def find_docked_chat(ctx: BrowserContext, host: str | None = None) -> Frame | No
     """
     workspace = find_chat_window(ctx, host)
     return find_chat_frame(workspace) if workspace is not None else None
-
-
-def start_new_chat_from_new_tab(workspace: Frame, *, label: str) -> Frame:
-    """Press the New Tab page's New Chat tile and return the frame of the chat the shell docks.
-
-    Mirrors ``e2e_workspace_runner.start_new_chat_from_new_tab``; this script stays free of
-    package imports.
-    """
-    # The add button always opens ANOTHER New Tab page, so it is pressed only when no page is
-    # showing (e.g. a real tab holds the pane). At boot the button can arrive with the dock's
-    # chrome after this probe, so the press waits with the page budget rather than skipping.
-    if workspace.query_selector(f"{NEW_TAB_PAGE_SELECTOR}:visible") is None:
-        workspace.click(NEW_TAB_ADD_BUTTON_SELECTOR, timeout=NEW_CHAT_FRAME_TIMEOUT * 1000)
-    # A background New Tab page keeps an identical tile hidden in the DOM, and an unscoped
-    # wait pins to the first match in DOM order whether or not it can ever become visible.
-    visible_tile_selector = f"{NEW_TAB_PAGE_SELECTOR}:visible {NEW_CHAT_TILE_SELECTOR}"
-    workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=NEW_CHAT_FRAME_TIMEOUT * 1000)
-    workspace.click(visible_tile_selector)
-    logger.info("[{}] started a new chat from the New Tab page", label)
-    return wait_for_chat_frame(workspace, label=label)
 
 
 def find_inbox_frame(ctx: BrowserContext) -> tuple[Page, Frame] | None:
@@ -1052,7 +1028,7 @@ def agent_id_for_workspace_coordinate(win: Page, coordinate: str) -> str:
     raise E2EFailure(f"No workspace row with host_id {coordinate!r} to translate to an agent id")
 
 
-# --- per-workspace helpers ---
+# per-workspace helpers
 
 
 class _SnapPrefixes(BaseModel):
@@ -1097,17 +1073,17 @@ class _WorkspaceResult(BaseModel):
 
 
 def _sign_in_via_provider_chooser(chat: Frame, *, api_key: SecretStr, label: str) -> None:
-    """Drive the provider chooser in a new chat's own frame through the Anthropic API-key path.
+    """Drive the provider chooser in the welcome chat's own frame through the Anthropic API-key path.
 
-    A freshly created workspace has no provider accounts, so a chat started from
-    the New Tab page waits for an account and its page opens the chooser on its
-    own -- the designed first-boot step. Signing in mints a provider account
-    holding the key rather than writing a shared settings block, so nothing is
-    restarted and the success state is the harness's own probe answering (which
-    is why the success wait is generous). Selectors mirror
-    ``test_snapshot_resume._sign_in_with_api_key_via_modal``.
+    A freshly created workspace has no provider accounts, so the first message sent in
+    its welcome chat (the conversation the creation page seeded) opens the chooser in
+    that chat's page -- the designed first-boot step. Signing in mints a provider account
+    holding the key rather than writing a shared settings block, and launches the chat on
+    it with the message that was sent, so nothing is restarted and the success state is
+    the harness's own probe answering (which is why the success wait is generous).
+    Selectors mirror ``test_snapshot_resume._sign_in_with_api_key_via_modal``.
     """
-    logger.info("[{}] waiting for the provider chooser to appear in the new chat's frame", label)
+    logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
     chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
     # Anthropic's lane, then its API-key method under "Other ways to sign in" --
     # the lane's primary method is the browser sign-in, which needs a human.
@@ -1139,12 +1115,12 @@ def _create_workspace_and_first_message(
 
     Steps: navigate to /create, fill the form for `host_name`, submit,
     poll /api/v1/workspaces/operations/create/<id> until DONE, wait for the
-    app to open the workspace, start the first chat from the workspace's New
-    Tab page, sign in through the provider chooser in that chat's frame
-    (API_KEY mode only -- the create flow injects no AI credentials, so the
-    workspace boots unauthenticated), send FIRST_PROMPT, wait for a
-    >=2-occurrence reply of FIRST_EXPECT. Snaps each milestone with names
-    from `snaps`.
+    app to open the workspace on the welcome chat the creation page seeded,
+    send FIRST_PROMPT there, sign in through the provider chooser that first
+    send opens in the chat's frame (API_KEY mode only -- the create flow
+    injects no AI credentials, so the workspace boots unauthenticated), wait
+    for a >=2-occurrence reply of FIRST_EXPECT. Snaps each milestone with
+    names from `snaps`.
 
     One page, two surfaces. `chrome` is the window's page and stays on local
     routes throughout -- the create form, then /creating/<id>, then
@@ -1290,18 +1266,18 @@ def _create_workspace_and_first_message(
     logger.info("[{}] agent DONE; workspace URL={}", label, chat_url)
     snap_page(workspace, snaps.done)
 
-    # A fresh workspace lands on its New Tab page with no chat; the page's tile mints
-    # one, and its page renders in its own frame at the chat app's origin. The create
-    # flow injects no AI credentials, so in API_KEY mode that chat waits for an account
-    # and shows the provider chooser, which signs in and launches it; in SUBSCRIPTION
-    # mode the synced Claude credentials are already an account and it launches at once.
-    chat = start_new_chat_from_new_tab(workspace, label=label)
-    if ai_provider == "API_KEY":
-        _sign_in_via_provider_chooser(chat, api_key=anthropic_key, label=label)
-
+    # A fresh workspace opens on the welcome chat the creation page seeded, docked in its own
+    # frame at the chat app's origin, with a composer under the seeded turns before any agent
+    # exists; the first message sent there is what launches the chat's first agent. The create
+    # flow injects no AI credentials, so in API_KEY mode that send opens the provider chooser,
+    # which signs in and launches the chat with the message; in SUBSCRIPTION mode the synced
+    # Claude credentials are already an account and it launches at once.
+    chat = wait_for_chat_frame(workspace, label=label)
     inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
     inp.fill(FIRST_PROMPT)
     inp.press("Enter")
+    if ai_provider == "API_KEY":
+        _sign_in_via_provider_chooser(chat, api_key=anthropic_key, label=label)
     with contextlib.suppress(Exception):
         chat.wait_for_function(
             _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),
@@ -1352,15 +1328,13 @@ def _send_followup_and_verify(
     # with the token being waited on, and the hop passes without ever being made.
     host = _workspace_coordinate(chat_url, label=label)
     inp = None
-    deadline = time.time() + NEW_CHAT_FRAME_TIMEOUT
+    deadline = time.time() + CHAT_FRAME_TIMEOUT
     while inp is None and time.time() < deadline:
         chat = wait_for_chat_frame(workspace, label=label, timeout=max(deadline - time.time(), 0.0), host=host)
         with contextlib.suppress(PlaywrightError):
             inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=5_000)
     if inp is None:
-        raise E2EFailure(
-            f"[{label}] the chat docked at {host} never showed a composer within {NEW_CHAT_FRAME_TIMEOUT}s"
-        )
+        raise E2EFailure(f"[{label}] the chat docked at {host} never showed a composer within {CHAT_FRAME_TIMEOUT}s")
     inp.fill(prompt)
     inp.press("Enter")
     with contextlib.suppress(Exception):
@@ -1378,7 +1352,7 @@ def _send_followup_and_verify(
     logger.info("[{}] follow-up reply confirmed", label)
 
 
-# --- main flow ---
+# main flow
 
 
 def _kill_pgrep(pgrep_pattern: str, label: str, *, sudo: bool = False) -> None:
@@ -1543,9 +1517,9 @@ def run_e2e() -> int:
 
         # 4-6. Create agent via UI click and drive to first message. Mirrors
         # what a user does (Configure panel, launch_mode field, host_name fill,
-        # submit, poll until DONE, start a chat from the workspace's New Tab
-        # page, sign in through that chat's provider chooser in API_KEY mode,
-        # send FIRST_PROMPT, wait for >=2 occurrences of FIRST_EXPECT in body).
+        # submit, poll until DONE, send FIRST_PROMPT in the welcome chat the
+        # workspace opens on, sign in through the provider chooser that send
+        # opens in API_KEY mode, wait for >=2 occurrences of FIRST_EXPECT in body).
         # See _create_workspace_and_first_message for the exact step list.
         ai_provider = os.environ.get("MINDS_AI_PROVIDER", "API_KEY").upper()
         if ai_provider not in ("API_KEY", "SUBSCRIPTION"):
@@ -1638,7 +1612,7 @@ def run_e2e() -> int:
                 inp.press("Enter")
                 snap_page(chat_frame, "07-slack-prompt-sent")
 
-                # === Iter 10 Phase A: drive the FIRST permission request to DENY ===
+                # Phase A: drive the FIRST permission request to DENY
                 # Real users sometimes click Deny by accident or change their
                 # mind. Drive the 3-stage state machine with decision="deny".
                 logger.info("=== Phase A: drive permission request -> DENY ===")
@@ -1678,7 +1652,7 @@ def run_e2e() -> int:
                         f"{_visible_button_labels(chat_frame)}"
                     )
 
-                # === Iter 10 Phase B: snapshot latchkey pending requests state ===
+                # Phase B: snapshot latchkey pending requests state
                 # The latchkey gateway extension stores each pending request
                 # as a single JSON file. Right after Deny, the previous
                 # request's file should be gone. Read directly from disk
@@ -1690,7 +1664,7 @@ def run_e2e() -> int:
                     [f.name for f in files_post_deny],
                 )
 
-                # === Iter 10 Phase C: kick the agent to re-request ===
+                # Phase C: kick the agent to re-request
                 # The latchkey skill (DEFAULT_WORKSPACE_TEMPLATE) says to re-POST /permission-requests
                 # when a previous request was denied. The kick gives Claude
                 # the explicit user-side signal; without a follow-up the
@@ -1708,7 +1682,7 @@ def run_e2e() -> int:
                 retry_inp.press("Enter")
                 snap_page(target, "07e-retry-after-deny-sent")
 
-                # === Iter 10 Phase D: wait for Claude to submit a NEW request ===
+                # Phase D: wait for Claude to submit a NEW request
                 # Poll the latchkey dir directly. If a new file appears,
                 # Claude re-submitted -- proceed to the APPROVE phase. If
                 # nothing appears within 120s, surface that as the failure
@@ -1738,7 +1712,7 @@ def run_e2e() -> int:
                         f"after deny. Chat tail: ...{chat_body[-400:]!r}"
                     )
 
-                # === Iter 10 Phase E: drive APPROVE on the new request ===
+                # Phase E: drive APPROVE on the new request
                 logger.info("=== Phase E: APPROVE the re-submitted request ===")
                 approval_stage = 0
                 deadline = time.time() + DRIVE_SLACK_TIMEOUT

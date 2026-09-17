@@ -7,6 +7,7 @@ import pytest
 from flask.testing import FlaskClient
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.model_update import to_update
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -24,6 +25,9 @@ from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMP
 from imbue.minds.desktop_client.workspace_defaults import FALLBACK_BRANCH
 from imbue.minds.primitives import CreateAttemptId
 from imbue.minds.primitives import LaunchMode
+from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
@@ -37,6 +41,20 @@ def test_create_area_routes_require_a_session_cookie(tmp_path: Path) -> None:
     ):
         response = client.get(path)
         assert response.status_code == 401, path
+    seeded = client.post(
+        f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat", json=_welcome_chat_body()
+    )
+    assert seeded.status_code == 401
+
+
+def _welcome_chat_body() -> dict[str, object]:
+    return {
+        "title": "Welcome",
+        "turns": [
+            {"role": "user", "text": "Wait.. what is honest software?"},
+            {"role": "assistant", "text": "Software that works for you."},
+        ],
+    }
 
 
 def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(tmp_path: Path) -> None:
@@ -232,8 +250,13 @@ def _make_client_with_store(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     notification_dispatcher: NotificationDispatcher,
+    mngr_caller: MngrCaller | None = None,
 ) -> tuple[FlaskClient, PendingCreateAttemptStore, AgentCreator]:
-    """A desktop-client test app whose agent creator carries a pending-create-attempt store."""
+    """A desktop-client test app whose agent creator carries a pending-create-attempt store.
+
+    ``mngr_caller`` is what the app reaches workspaces through; the default leaves the app on
+    the process-wide caller, which the routes here never use unless a test seeds a chat.
+    """
     store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
     creator = AgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
@@ -248,6 +271,7 @@ def _make_client_with_store(
         agent_creator=creator,
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
+        mngr_caller=mngr_caller,
     )
     return client, store, creator
 
@@ -404,4 +428,96 @@ def test_create_attempt_detail_carries_the_request_summary_for_a_record(
         "instance_type": "t3.large",
         "repository": "https://example.com/some-repo.git",
         "branch": "feature-branch-7",
+    }
+
+
+_WORKSPACE_AGENT_ID = AgentId("agent-0123456789abcdef0123456789abcdef")
+
+
+def _done_record(create_attempt_id: str) -> PendingCreateAttemptRecord:
+    """A finished attempt's record: DONE, naming the workspace it made."""
+    record = _record(create_attempt_id, PendingCreateAttemptState.DONE)
+    return record.model_copy_update(
+        to_update(record.field_ref().agent_id, str(_WORKSPACE_AGENT_ID)),
+        to_update(record.field_ref().host_id, "host-0123456789abcdef0123456789abcdef"),
+    )
+
+
+def test_the_welcome_chat_is_seeded_in_the_finished_attempts_workspace(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    """A DONE record names the workspace; the conversation goes to it through the template's script."""
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout='{"chat_id": "agent-seeded"}\n'))
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, notification_dispatcher, mngr_caller=caller
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(_done_record(create_attempt_id))
+
+    response = client.post(f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat", json=_welcome_chat_body())
+
+    assert response.status_code == 200
+    assert json.loads(response.get_data(as_text=True)) == {"chat_id": "agent-seeded"}
+    (argv,) = caller.calls
+    assert argv[:3] == ["exec", "--agent", str(_WORKSPACE_AGENT_ID)]
+    assert "system/scripts/seed_welcome_chat.py" in argv[3]
+
+
+def test_the_welcome_chat_is_refused_while_the_attempt_has_no_workspace(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    caller = RecordingMngrCaller()
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, notification_dispatcher, mngr_caller=caller
+    )
+    in_flight = str(CreateAttemptId.generate())
+    store.write_record(_record(in_flight, PendingCreateAttemptState.IN_FLIGHT))
+
+    assert (
+        client.post(f"/ui/api/create/attempts/{in_flight}/welcome-chat", json=_welcome_chat_body()).status_code == 409
+    )
+    unknown = client.post(
+        f"/ui/api/create/attempts/{CreateAttemptId.generate()}/welcome-chat", json=_welcome_chat_body()
+    )
+    assert unknown.status_code == 409
+    assert client.post("/ui/api/create/attempts/not-an-id/welcome-chat", json=_welcome_chat_body()).status_code == 409
+    assert caller.calls == []
+
+
+def test_the_welcome_chat_refuses_a_body_without_turns_and_reports_a_workspace_that_would_not_take_it(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    notification_dispatcher: NotificationDispatcher,
+) -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=1,
+            stderr=(
+                "Could not seed the welcome chat: could not connect\n"
+                f"ERROR: Command failed on agent {_WORKSPACE_AGENT_ID}\n"
+            ),
+            is_mngr_output=True,
+        )
+    )
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, notification_dispatcher, mngr_caller=caller
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(_done_record(create_attempt_id))
+    path = f"/ui/api/create/attempts/{create_attempt_id}/welcome-chat"
+
+    assert client.post(path, json={"title": "Welcome", "turns": []}).status_code == 400
+    assert client.post(path, data="not json", content_type="application/json").status_code == 400
+    assert caller.calls == []
+
+    refused = client.post(path, json=_welcome_chat_body())
+
+    assert refused.status_code == 502
+    assert json.loads(refused.get_data(as_text=True)) == {
+        "error": "Couldn't open the welcome chat in the workspace.",
+        "detail": "Could not seed the welcome chat: could not connect",
     }

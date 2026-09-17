@@ -960,7 +960,7 @@ def create_workspace_via_electron(
     )
 
 
-# -- Full workspace lifecycle flow (create -> message -> terminal -> home -> destroy) --
+# Full workspace lifecycle flow (create -> message -> new chat -> terminal -> home -> destroy)
 #
 # These build on the create primitives above to drive the *entire* user journey
 # the desktop client exists for, keeping the browser attached across every step
@@ -973,13 +973,14 @@ def create_workspace_via_electron(
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # A chat renders inside its own frame at the chat app's origin: the page's URL path is the
-# chat's agent id, which is how the frame is found among the workspace frame's children.
-_CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/agent-[0-9a-f]+/?$")
+# chat's agent id, which is how the frame is found among the workspace frame's children and
+# how one docked chat is told from another.
+_CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/(agent-[0-9a-f]+)/?$")
 _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
-# A fresh workspace lands on the New Tab page with no chat; each of the page's tiles runs one
-# app's ``new`` action. The shell opens the first New Tab page once its app list has arrived
-# and renders the tiles from that list, so the page and its tiles can still be on their way
-# when the dockview is first visible.
+# A fresh workspace opens on the welcome chat the creation page seeded; the New Tab page
+# (behind the dockview add button) carries one tile per app's ``new`` action. The shell
+# renders the tiles from its app list once that has arrived, so a page and its tiles can
+# still be on their way when the dockview is first visible.
 _NEW_TAB_ADD_BUTTON_SELECTOR: Final[str] = "button.dockview-add-tab-button"
 _NEW_TAB_PAGE_SELECTOR: Final[str] = ".new-tab-launcher"
 _NEW_CHAT_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="chat:new"]'
@@ -994,10 +995,10 @@ _NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
-# The workspace boots with no chat: the New Tab page's tile mints one, signing in
-# through its provider chooser launches it, and creating that agent runs
-# asynchronously, so the chat input can take a while to appear on a fresh
-# first boot.
+# The welcome chat's composer is on its page before any agent exists, but the shell docks
+# the chat only once its app list has arrived, and a chat minted from a tile is created
+# asynchronously (a sign-in through its provider chooser launches it), so a chat input can
+# take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
 _CHAT_REPLY_TIMEOUT_SECONDS: Final[int] = 240
 _DESTROY_TIMEOUT_SECONDS: Final[int] = 300
@@ -1142,10 +1143,40 @@ def _agent_id_for_coordinate(content_page: Page, backend_origin: str, coordinate
     raise WorkspaceFlowError(f"No workspace with host id {coordinate!r} in /api/v1/workspaces")
 
 
-def _find_chat_frame(workspace: Page | Frame) -> Frame | None:
-    """The first chat page's frame currently inside the workspace, or None while it has opened none."""
+def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
+    """The chat pages' frames currently inside the workspace, each with its chat's agent id, in frame order.
+
+    The id is the frame's URL path, so it names the same chat however the URL's query string
+    or trailing slash changes while the page is open.
+    """
     candidates = workspace.frames if isinstance(workspace, Page) else workspace.child_frames
-    return next((frame for frame in candidates if _CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])), None)
+    matched: list[tuple[Frame, str]] = []
+    for frame in candidates:
+        match = _CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])
+        if match is not None:
+            matched.append((frame, match.group(1)))
+    return matched
+
+
+def _find_chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[str]) -> Frame | None:
+    """The first chat page's frame whose chat is not among ``known_chat_ids``, or None while there is none."""
+    return next((frame for frame, chat_id in _chat_frames_with_ids(workspace) if chat_id not in known_chat_ids), None)
+
+
+def _chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[str], timeout_seconds: float) -> Frame:
+    """The frame of a chat page whose chat is not among ``known_chat_ids``, once the shell has docked one.
+
+    Raises WorkspaceFlowError when no such frame appears within ``timeout_seconds``.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    chat = _find_chat_frame_other_than(workspace, known_chat_ids)
+    while chat is None and time.monotonic() < deadline:
+        workspace.wait_for_timeout(_CHAT_FRAME_POLL_INTERVAL_MS)
+        chat = _find_chat_frame_other_than(workspace, known_chat_ids)
+    if chat is None:
+        which = "" if len(known_chat_ids) == 0 else f" other than the {len(known_chat_ids)} already open"
+        raise WorkspaceFlowError(f"No chat frame{which} opened inside the workspace within {timeout_seconds:.0f}s")
+    return chat
 
 
 def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
@@ -1153,14 +1184,7 @@ def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
 
     Raises WorkspaceFlowError when no chat frame appears within ``timeout_seconds``.
     """
-    deadline = time.monotonic() + timeout_seconds
-    chat = _find_chat_frame(workspace)
-    while chat is None and time.monotonic() < deadline:
-        workspace.wait_for_timeout(_CHAT_FRAME_POLL_INTERVAL_MS)
-        chat = _find_chat_frame(workspace)
-    if chat is None:
-        raise WorkspaceFlowError(f"No chat frame opened inside the workspace within {timeout_seconds:.0f}s")
-    return chat
+    return _chat_frame_other_than(workspace, frozenset(), timeout_seconds)
 
 
 def start_new_chat_from_new_tab(
@@ -1168,27 +1192,41 @@ def start_new_chat_from_new_tab(
 ) -> Frame:
     """Run the chat app's ``new`` from the New Tab page and return the frame of the chat it docked.
 
-    A fresh workspace boots with no chat: the chat app mints one from the tile (a chat that waits
-    for an account when nothing is signed in, whose page shows the provider chooser), and the
-    shell docks its page as a frame at the chat app's origin.
+    The chat app mints a chat from the tile (one that waits for an account when nothing is signed
+    in, whose page shows the provider chooser), and the shell docks its page as a frame at the
+    chat app's origin. A workspace opens on the welcome chat the creation page seeded, so the new
+    chat is the frame that was not there before the press.
     """
-    _press_new_tab_tile(workspace, _NEW_CHAT_TILE_SELECTOR)
+    # The tile arrives with the shell's app list, which is also what docks the welcome chat, so
+    # the chats already open are counted only once the tile is on screen.
+    visible_tile_selector = _reveal_new_tab_tile(workspace, _NEW_CHAT_TILE_SELECTOR)
+    known_chat_ids = frozenset(chat_id for _frame, chat_id in _chat_frames_with_ids(workspace))
+    workspace.click(visible_tile_selector)
     logger.info("Started a new chat from the New Tab page; waiting up to {:.0f}s for its frame", timeout_seconds)
-    return _chat_frame(workspace, timeout_seconds)
+    return _chat_frame_other_than(workspace, known_chat_ids, timeout_seconds)
 
 
-def _start_new_chat_and_send_message(page: Page | Frame, token: str) -> None:
-    """Start the workspace's first chat from the New Tab page, then message it and wait for the reply.
+def _message_welcome_chat(page: Page | Frame, token: str) -> None:
+    """The full flow's message step: message the welcome chat the workspace opened on and wait for the reply.
 
-    The full flow signs nothing in (its workspace runs on synced account credentials), so the
-    tile-minted chat launches at once and the transcript is the next thing to wait for.
+    The creation page seeded that chat with the onboarding conversation, so its composer is the
+    workspace's first chat input, and the message sent there launches the chat's first agent.
+    The full flow signs nothing in (its workspace runs on synced account credentials), so no
+    provider chooser opens and the reply is the next thing to wait for.
     """
-    start_new_chat_from_new_tab(page)
     _send_message_and_await_reply(page, token)
 
 
-def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
-    """Type a unique-token prompt into the dockview chat and wait for the reply to echo it."""
+def _start_new_chat(page: Page | Frame) -> None:
+    """The full flow's New Tab step: start a second chat from the page's tile and wait for its composer."""
+    chat = start_new_chat_from_new_tab(page)
+    chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
+    logger.info("The chat started from the New Tab page shows its composer at {}", chat.url)
+    _flow_screenshot(page, "04b-new-chat-from-new-tab")
+
+
+def wait_for_chat_input(page: Page | Frame) -> Frame:
+    """The first chat's frame inside the workspace, once its composer is visible."""
     logger.info("Waiting up to {}s for the first chat's frame and its input", _CHAT_INPUT_TIMEOUT_SECONDS)
     input_deadline = time.monotonic() + _CHAT_INPUT_TIMEOUT_SECONDS
     chat = _chat_frame(page, _CHAT_INPUT_TIMEOUT_SECONDS)
@@ -1196,6 +1234,11 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     input_wait_seconds = max(input_deadline - time.monotonic(), 1.0)
     logger.info("Chat frame at {}; waiting up to {:.0f}s for its input", chat.url, input_wait_seconds)
     chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=input_wait_seconds * 1000)
+    return chat
+
+
+def send_chat_message(chat: Frame, page: Page | Frame, token: str) -> None:
+    """Type a unique-token prompt into the chat's composer and send it; the user turn must render."""
     prompt = f"Reply with exactly this token and nothing else: {token}"
     chat.fill(_CHAT_INPUT_SELECTOR, prompt)
     chat.press(_CHAT_INPUT_SELECTOR, "Enter")
@@ -1204,6 +1247,10 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     # message) almost immediately -- proves the chat round-trips through the proxy.
     chat.wait_for_selector(".pending-message, .message.message-user", state="attached", timeout=30_000)
     _flow_screenshot(page, "03-message-sent")
+
+
+def await_chat_reply(chat: Frame, page: Page | Frame, token: str) -> None:
+    """Wait for an agent reply that echoes ``token``."""
     logger.info("Waiting up to {}s for the agent reply to echo the token", _CHAT_REPLY_TIMEOUT_SECONDS)
     chat.wait_for_function(
         """(token) => {
@@ -1220,8 +1267,15 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     _flow_screenshot(page, "04-reply-received")
 
 
-def _press_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> None:
-    """Run an app action from the visible New Tab page's tile, opening the page first when none is showing."""
+def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
+    """Type a unique-token prompt into the dockview chat and wait for the reply to echo it."""
+    chat = wait_for_chat_input(page)
+    send_chat_message(chat, page, token)
+    await_chat_reply(chat, page, token)
+
+
+def _reveal_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> str:
+    """Bring a New Tab page's tile on screen, opening the page first when none is showing; returns the selector naming it there."""
     # The add button always opens ANOTHER New Tab page, so it is pressed only when no page is
     # showing (e.g. a real tab holds the pane). At boot the button can arrive with the dock's
     # chrome after this probe, so the press waits with the page budget rather than skipping.
@@ -1231,7 +1285,12 @@ def _press_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> None:
     # wait pins to the first match in DOM order whether or not it can ever become visible.
     visible_tile_selector = f"{_NEW_TAB_PAGE_SELECTOR}:visible {tile_selector}"
     workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
-    workspace.click(visible_tile_selector)
+    return visible_tile_selector
+
+
+def _press_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> None:
+    """Run an app action from the visible New Tab page's tile, opening the page first when none is showing."""
+    workspace.click(_reveal_new_tab_tile(workspace, tile_selector))
 
 
 def open_terminal_from_new_tab(workspace: Page | Frame) -> None:
@@ -1385,7 +1444,7 @@ def _run_flow_step(results: dict[str, str], name: str, page: Page | Frame, actio
 def run_full_workspace_flow(
     default_workspace_template_path: Path, workspace_name: str, token: str, debug_port: int
 ) -> tuple[dict[str, str], str | None]:
-    """Drive create -> message -> terminal -> home -> destroy; return per-step results + agent id.
+    """Drive create -> message -> new chat -> terminal -> home -> destroy; return per-step results + agent id.
 
     The returned agent id (canonical ``agent-<hex>``) lets the caller's cleanup
     tear the host down even when the in-flow destroy step did not run.
@@ -1410,8 +1469,8 @@ def run_full_workspace_flow(
                 logger.info("=== STEP 1: create local Docker machine ===")
                 # The create form is driven on the chrome view (content_page); the
                 # ready workspace opens on the content view (workspace_page). The
-                # dockview steps (message, terminal) and the agent-id read run on
-                # workspace_page; the chrome-surface steps below (home, landing,
+                # dockview steps (message, new chat, terminal) and the agent-id read run
+                # on workspace_page; the chrome-surface steps below (home, landing,
                 # settings/destroy) stay on content_page.
                 workspace_page = drive_create_docker_imbue_workspace(
                     browser, content_page, default_workspace_template_path, workspace_name
@@ -1426,18 +1485,19 @@ def run_full_workspace_flow(
                     results,
                     "STEP 2 message",
                     workspace_page,
-                    lambda: _start_new_chat_and_send_message(workspace_page, token),
+                    lambda: _message_welcome_chat(workspace_page, token),
                 )
-                _run_flow_step(results, "STEP 3 terminal", workspace_page, lambda: _open_terminal(workspace_page))
+                _run_flow_step(results, "STEP 3 new chat", workspace_page, lambda: _start_new_chat(workspace_page))
+                _run_flow_step(results, "STEP 4 terminal", workspace_page, lambda: _open_terminal(workspace_page))
                 _run_flow_step(
                     results,
-                    "STEP 4 lifecycle",
+                    "STEP 5 lifecycle",
                     content_page,
                     lambda: _verify_v1_lifecycle(content_page, backend_origin, agent_id),
                 )
                 _run_flow_step(
                     results,
-                    "STEP 5 home",
+                    "STEP 6 home",
                     content_page,
                     lambda: _navigate_home(browser, content_page, backend_origin, workspace_name),
                 )
@@ -1453,7 +1513,7 @@ def run_full_workspace_flow(
                 resolved_agent_id = agent_id
                 _run_flow_step(
                     results,
-                    "STEP 6 destroy",
+                    "STEP 7 destroy",
                     content_page,
                     lambda: _destroy_via_settings(content_page, backend_origin, resolved_agent_id, workspace_name),
                 )

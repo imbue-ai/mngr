@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import { IMBUE_CLOUD_SUMMARY_LINE, failureLine, shortRepository, summaryLines } from "./creationTranscript";
+import {
+  IMBUE_CLOUD_SUMMARY_LINE,
+  READY_LINE,
+  START_OPTIONS,
+  failureLine,
+  readyTurnMarkdown,
+  shortRepository,
+  startOptionsMarkdown,
+  summaryLines,
+} from "./creationTranscript";
 
 function request(overrides: Partial<CreateAttemptRequestSummary> = {}): CreateAttemptRequestSummary {
   return {
@@ -85,5 +94,18 @@ describe("failureLine", () => {
   it("names the workspace and the error, with fallbacks for both", () => {
     expect(failureLine("alpha", "clone blew up")).toBe("Could not create alpha: clone blew up");
     expect(failureLine("", "")).toBe("Could not create the workspace: unknown error");
+  });
+});
+
+describe("startOptionsMarkdown", () => {
+  it("numbers the ways to start as markdown headings, each with its detail under it", () => {
+    const blocks = startOptionsMarkdown();
+    expect(blocks).toHaveLength(START_OPTIONS.length);
+    expect(blocks[0]).toBe(`### 1. ${START_OPTIONS[0].title}\n\n${START_OPTIONS[0].detail}`);
+    expect(blocks[blocks.length - 1].startsWith(`### ${START_OPTIONS.length}. `)).toBe(true);
+  });
+
+  it("puts the ready line one heading level above the options", () => {
+    expect(readyTurnMarkdown().startsWith(`## ${READY_LINE}\n\n### 1. `)).toBe(true);
   });
 });

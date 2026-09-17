@@ -1,0 +1,1 @@
+Carries `mngr/chat-agent-refactor-8` into this branch: a codex agent created with an initial message no longer has that first turn cut off, since mngr waits for the visible TUI to finish attaching after the "Hooks need review" screen before it sends the message. No further mngr_codex changes in this PR.

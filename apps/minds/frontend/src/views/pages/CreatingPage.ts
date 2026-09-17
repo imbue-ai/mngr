@@ -1,15 +1,17 @@
 // The creation page (/creating/<create_attempt_id>): a create attempt's
-// progress, told as the tail of a conversation. A user turn restates the
-// settings the attempt was submitted with, the agent says it is setting the
-// workspace up, and a loading box tracks the real attempt (status polling +
-// the op-log SSE). Reached from the start flow in
-// the same session, the flow's transcript renders above; reached any other
-// way (the create form, a reload), the page holds only these turns.
+// progress, told as the tail of a conversation. The manifesto exchange opens
+// it (already on the page, since every workspace's conversation starts there),
+// then a user turn restates the settings the attempt was submitted with, the
+// agent says it is setting the workspace up, and a loading box tracks the real
+// attempt (status polling + the op-log SSE). Reached from the start flow in
+// the same session, the flow's transcript renders between the two.
 //
-// When the attempt is ready the wash carries the app into the workspace; a
-// failure or an interrupted record becomes an agent turn with Retry and
-// Dismiss / Discard, the retry reopening the create form as a modal prefilled
-// from the attempt's record.
+// When the attempt is ready the agent asks how the user would like to start,
+// the whole conversation is handed to the new workspace as its first chat
+// (models/welcomeChat.ts), and the wash carries the app in; a failure or an
+// interrupted record becomes an agent turn with Retry and Dismiss / Discard,
+// the retry reopening the create form as a modal prefilled from the attempt's
+// record.
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
@@ -20,11 +22,21 @@ import {
   READY_LINE,
   SETUP_LINE,
   SETUP_SECTIONS,
+  START_OPTIONS,
   failureLine,
   summaryLines,
 } from "../../models/creationTranscript";
-import { FLOW_OPTIONS_GAP_MS, FLOW_THINK_MS, startFlow, streamDurationMs } from "../../models/startFlow";
+import {
+  FLOW_OPTIONS_GAP_MS,
+  FLOW_THINK_MS,
+  MANIFESTO_HEADING,
+  MANIFESTO_POINTS,
+  MANIFESTO_QUESTION,
+  startFlow,
+  streamDurationMs,
+} from "../../models/startFlow";
 import { wash } from "../../models/wash";
+import { postWelcomeChat, welcomeChatBody } from "../../models/welcomeChat";
 import { Button } from "../components/Button";
 import { Link } from "../components/Link";
 import { Notice } from "../components/Notice";
@@ -53,6 +65,12 @@ interface CreatingState {
   isLogOpen: boolean;
   /** The reading material's sections the reader has opened. */
   openSectionIds: Set<string>;
+  /** The manifesto points the reader has opened. */
+  openManifestoIds: Set<string>;
+  /** The hand-off of the conversation to the new workspace, settled either way before the wash. */
+  welcomeChat: Promise<void> | null;
+  /** Set once the page is left or a later attempt takes it over, so a pending entry never fires. */
+  isEntryCancelled: boolean;
   isActionPending: boolean;
   isRetryFormOpen: boolean;
   progressTimer: ReturnType<typeof setInterval> | null;
@@ -123,6 +141,9 @@ function freshState(createAttemptId: string): CreatingState {
     logLines: [],
     isLogOpen: false,
     openSectionIds: new Set<string>(),
+    openManifestoIds: new Set<string>(),
+    welcomeChat: null,
+    isEntryCancelled: false,
     isActionPending: false,
     isRetryFormOpen: false,
     progressTimer: null,
@@ -158,19 +179,47 @@ export const CreatingPage: m.ClosureComponent = () => {
     if (state.redirectUrl) enterWorkspaceFromRedirect(state.redirectUrl);
   }
 
-  // The ready line gets its moment, then the workspace's color takes the
-  // window and the shell enters the workspace while the cover is whole.
+  /** When the ready turn's list of ways to start arrives, after the line has streamed. */
+  function startOptionsAtMs(): number {
+    return FLOW_THINK_MS + streamDurationMs(READY_LINE) + FLOW_OPTIONS_GAP_MS;
+  }
+
+  // The ready turn gets its moment and the conversation reaches the workspace,
+  // then the workspace's color takes the window and the shell enters the
+  // workspace while the cover is whole.
   function scheduleEntry(): void {
-    const readyDelayMs = FLOW_THINK_MS + streamDurationMs(READY_LINE) + READY_HOLD_MS;
+    const own = state;
     state.washTimer = setTimeout(() => {
-      state.washTimer = null;
-      if (isReducedMotion()) {
-        enter();
-        return;
-      }
-      const accent = accentForAttempt();
-      wash.start(accent, washOrigin(), { width: window.innerWidth, height: window.innerHeight }, enter);
-    }, readyDelayMs);
+      own.washTimer = null;
+      void (own.welcomeChat ?? Promise.resolve()).then(() => {
+        // The page was left, or a later attempt took it over, while the hand-off was in flight.
+        if (own.isEntryCancelled) return;
+        if (isReducedMotion()) {
+          enter();
+          return;
+        }
+        const accent = accentForAttempt();
+        wash.start(accent, washOrigin(), { width: window.innerWidth, height: window.innerHeight }, enter);
+      });
+    }, startOptionsAtMs() + READY_HOLD_MS);
+  }
+
+  /**
+   * Hand the conversation so far to the new workspace as its first chat. Best effort: a
+   * workspace that cannot take it (its chat app still down, an older template) is entered
+   * all the same, on its plain landing page, with the reason in the console.
+   */
+  function seedWelcomeChat(): Promise<void> {
+    const request = state.detail?.live?.request;
+    if (request === undefined || request === null) return Promise.resolve();
+    const entries = state.isFromStartFlow ? startFlow.state.entries : [];
+    const isCloudPreset = state.isFromStartFlow && startFlow.isSubmittedCreateCloudPreset;
+    return postWelcomeChat(state.createAttemptId, welcomeChatBody(entries, request, isCloudPreset)).then(
+      () => undefined,
+      (error: unknown) => {
+        console.warn("The conversation could not be handed to the new workspace:", error);
+      },
+    );
   }
 
   function accentForAttempt(): string {
@@ -186,6 +235,7 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state.isDone) return;
         state.isDone = true;
         state.redirectUrl = redirectUrl;
+        state.welcomeChat = seedWelcomeChat();
         scheduleEntry();
       },
       onFailed(error, errorKind) {
@@ -400,8 +450,8 @@ export const CreatingPage: m.ClosureComponent = () => {
         else state.openSectionIds.add(id);
       },
       detailFor: (section) => [
-        m("p", section.detail),
-        m("p", { class: "mt-1" }, m(Link, { href: section.href, target: "_blank", rel: "noopener" }, section.linkLabel)),
+        ...section.detail.split("\n\n").map((paragraph, index) => m("p", { class: index === 0 ? "" : "mt-2" }, paragraph)),
+        m("p", { class: "mt-2" }, m(Link, { href: section.href, target: "_blank", rel: "noopener" }, section.linkLabel)),
       ],
     });
   }
@@ -420,9 +470,48 @@ export const CreatingPage: m.ClosureComponent = () => {
     const boxAt = isInstant ? 0 : guideAt + FLOW_OPTIONS_GAP_MS * 2;
     turns.push(loadingBox(workspaceName, live, boxAt));
     if (state.isDone) {
-      turns.push(agentTurn({ key: "creation-ready", text: READY_LINE, startAtMs: FLOW_THINK_MS }));
+      turns.push(agentTurn({ key: "creation-ready", text: READY_LINE, startAtMs: FLOW_THINK_MS, class: "type-heading" }));
+      turns.push(startOptionsList(startOptionsAtMs()));
     }
     return turns;
+  }
+
+  /** The ways to start, as the numbered list under the ready line, each a title over its line; arrives whole once the line has streamed. */
+  function startOptionsList(arriveAtMs: number): m.Children {
+    return m(
+      "ol",
+      {
+        key: "creation-start-options",
+        id: "start-options",
+        class: "start-chat-in mt-3 flex max-w-[calc(100%-100px)] list-decimal flex-col gap-3 pl-6 leading-[1.5]",
+        style: `--start-chat-delay: ${arriveAtMs}ms; --start-chat-fade: 280ms;`,
+      },
+      START_OPTIONS.map((option) =>
+        m("li", { key: option.title }, [
+          m("div", { class: "font-semibold" }, option.title),
+          m("div", { class: "text-secondary" }, option.detail),
+        ]),
+      ),
+    );
+  }
+
+  /** The manifesto exchange, already on the page: every workspace's conversation opens with it. */
+  function manifestoTurns(): m.Children[] {
+    return [
+      userTurn({ key: "manifesto-question", delayMs: 0, isInstant: true, text: MANIFESTO_QUESTION }),
+      agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: 0, isInstant: true }),
+      disclosureList({
+        key: "manifesto-points",
+        startAtMs: 0,
+        isInstant: true,
+        points: MANIFESTO_POINTS,
+        openIds: state.openManifestoIds,
+        onToggle: (id) => {
+          if (state.openManifestoIds.has(id)) state.openManifestoIds.delete(id);
+          else state.openManifestoIds.add(id);
+        },
+      }),
+    ];
   }
 
   function creationTurns(detail: CreateAttemptDetail): m.Children[] {
@@ -435,6 +524,7 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   function stopWatching(): void {
+    state.isEntryCancelled = true;
     state.watcher?.stop();
     if (state.progressTimer !== null) clearInterval(state.progressTimer);
     if (state.washTimer !== null) clearTimeout(state.washTimer);
@@ -482,9 +572,12 @@ export const CreatingPage: m.ClosureComponent = () => {
           m("div", { class: "flex justify-center pt-24" }, m(Spinner, { size: "lg" })),
         ]);
       }
-      const prelude = state.isFromStartFlow
-        ? transcriptTurns(startFlow.state.entries, { isInstant: true, isPressable: false })
-        : [];
+      const prelude = [
+        ...manifestoTurns(),
+        ...(state.isFromStartFlow
+          ? transcriptTurns(startFlow.state.entries, { isInstant: true, isPressable: false })
+          : []),
+      ];
       const turns = creationTurns(detail);
       return m(
         "div",

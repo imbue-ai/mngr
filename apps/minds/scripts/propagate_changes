@@ -20,10 +20,7 @@
 
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
 # Path inference
-# ---------------------------------------------------------------------------
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MNGR_REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TEMPLATE_DIR="${MNGR_REPO_ROOT}/.external_worktrees/default-workspace-template"
@@ -34,14 +31,11 @@ if [[ ! -d "${TEMPLATE_DIR}" ]]; then
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
 # Require an activated minds env -- no implicit default to production.
 # Without activation we'd silently talk to ~/.minds/ (production), which
 # is almost never what an iteration-loop script should be doing. Mirrors
 # the `minds run` / `minds-admin env deploy` activation check in
 # imbue.minds.bootstrap + apps/minds_admin/imbue/minds_admin/cli/env.py.
-# ---------------------------------------------------------------------------
-
 if [[ -z "${MINDS_ROOT_NAME:-}" ]]; then
     echo "ERROR: MINDS_ROOT_NAME is not set." >&2
     echo "       Run \`eval \"\$(uv run minds-admin env activate <name>)\"\` first" >&2
@@ -56,10 +50,7 @@ if [[ -z "${MNGR_HOST_DIR:-}" || -z "${MNGR_PREFIX:-}" ]]; then
     exit 2
 fi
 
-# ---------------------------------------------------------------------------
 # Argument parsing
-# ---------------------------------------------------------------------------
-
 SSH_USER=""
 SSH_HOST=""
 SSH_PORT=""
@@ -83,10 +74,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---------------------------------------------------------------------------
 # Agent name resolution
-# ---------------------------------------------------------------------------
-
 list_mngr_agent_names() {
     # Print one agent name per line. Empty output means no agents found.
     uv run --directory "${MNGR_REPO_ROOT}" mngr list --format json 2>/dev/null \
@@ -131,7 +119,6 @@ else
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
 # Shared rsync exclusions
 #
 # `:- .gitignore` is rsync's dir-merge filter: it reads .gitignore at each
@@ -146,33 +133,26 @@ fi
 # Both rsync sources (mngr monorepo for step 1, default workspace template for step 2/3)
 # carry their own .gitignore at the root, so the same filter applies cleanly
 # to all three rsync calls below.
-# ---------------------------------------------------------------------------
-
 RSYNC_EXCLUDES=(
     --filter=':- .gitignore'
     --exclude='.git'
     --exclude='uv.lock'
 )
 
-# ---------------------------------------------------------------------------
 # Step 1: Sync mngr repo into template's system/vendor/mngr/
-# ---------------------------------------------------------------------------
-
 echo "[1/4] Syncing mngr repo into template system/vendor/mngr/..."
 rsync -a --delete \
     "${RSYNC_EXCLUDES[@]}" \
     "${MNGR_REPO_ROOT}/" "${TEMPLATE_DIR}/system/vendor/mngr/"
 echo "      Done."
 
-# ---------------------------------------------------------------------------
 # Step 2 (parallel): Agent update + Desktop client restart
-# ---------------------------------------------------------------------------
 
 # Track background PIDs for parallel execution
 AGENT_PID=""
 ELECTRON_PID=""
 
-# --- Track A: Agent stop -> sync -> frontend build -> start ---
+# Track A: Agent stop -> sync -> frontend build -> start
 agent_update() {
     echo "[2/4] Stopping agent '${AGENT_NAME}'..."
     if ! uv run --directory "${MNGR_REPO_ROOT}" mngr stop "${AGENT_NAME}" 2>&1; then
@@ -182,6 +162,14 @@ agent_update() {
         return 1
     fi
 
+    # The protect rules name what --delete must leave alone on the agent side.
+    # A rule ending in "/" protects only the directory entry itself, while "/***"
+    # protects the directory and everything under it. The template tracks
+    # README.md files under data/, so rsync descends into data/, and only the
+    # "/***" form keeps --delete away from the runtime files there that the
+    # template does not carry: chat records and seeded transcripts,
+    # data/.state/apps.toml, the secrets. .mngr/ holds the workspace's local
+    # config layer the same way.
     # .claude/settings.local.json is generated per-agent at create time and
     # holds mngr's UserPromptSubmit hook; without protection, --delete removes
     # it and send_message then hangs the 90s submission-signal timeout.
@@ -189,16 +177,16 @@ agent_update() {
     if [[ "${MODE}" == "remote" ]]; then
         rsync -avz --delete \
             "${RSYNC_EXCLUDES[@]}" \
-            --filter='protect data/' \
-            --filter='protect .mngr/' \
+            --filter='protect data/***' \
+            --filter='protect .mngr/***' \
             --filter='protect .claude/settings.local.json' \
             -e "ssh -p ${SSH_PORT} -i ${SSH_KEY} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
             "${TEMPLATE_DIR}/" "${SSH_USER}@${SSH_HOST}:/home/user/workspace/"
     else
         rsync -a --delete \
             "${RSYNC_EXCLUDES[@]}" \
-            --filter='protect data/' \
-            --filter='protect .mngr/' \
+            --filter='protect data/***' \
+            --filter='protect .mngr/***' \
             --filter='protect .claude/settings.local.json' \
             "${TEMPLATE_DIR}/" "${LOCAL_TARGET}/"
     fi
@@ -218,7 +206,7 @@ agent_update() {
     echo "      Agent started."
 }
 
-# --- Track B: Desktop client stop and restart ---
+# Track B: Desktop client stop and restart
 
 electron_stop() {
     local electron_pid

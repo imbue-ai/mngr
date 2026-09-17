@@ -26,19 +26,21 @@ export const SETUP_SECTIONS: SetupSection[] = [
     id: "what",
     label: "What a workspace is",
     detail:
-      "A workspace is a computer of your Mind's own: its files, its tools, its memory of what you have worked " +
-      "on together, and the services you have let it reach. It keeps running between conversations, so your " +
-      "Mind can keep working while you are away and pick up where you left off when you come back.",
-    linkLabel: "More about workspaces",
+      "A workspace is a private computer where you and your Mind work together. It holds your files, apps, " +
+      "tools, and the memory you build together. It keeps your work in one place from one conversation to the " +
+      "next, so you don’t have to start over.\n\n" +
+      "When you hand off a task or set a routine, your Mind can keep working while you’re away.",
+    linkLabel: "How workspaces work",
     href: PRODUCT_HOME_URL,
   },
   {
     id: "now",
-    label: "What is happening right now",
+    label: "What’s happening right now",
     detail:
-      "The workspace template is being copied onto the machine, its tools are being installed, and its " +
-      "services are starting up. The last step connects it to this app so you can talk to your Mind here. " +
-      "The log under the progress bar shows each step as it happens.",
+      "We’re setting up your workspace on its own computer. We’re installing the tools your Mind needs to make " +
+      "apps, work with your files and accounts, and keep tasks running while you’re away.\n\n" +
+      "The last step connects your workspace to this app so you can start using it.\n\n" +
+      "Want more detail? The setup log shows each part as it happens.",
     linkLabel: "How setup works",
     href: PRODUCT_HOME_URL,
   },
@@ -46,33 +48,85 @@ export const SETUP_SECTIONS: SetupSection[] = [
     id: "do",
     label: "What you can do with it",
     detail:
-      "Ask your Mind for anything you would ask a capable colleague: research, writing, code, keeping track " +
-      "of things. Give it access to your email, calendar or other services one permission at a time, and take " +
-      "any of them back whenever you like. Share the workspace with other people when you want to work together.",
-    linkLabel: "What a Mind can do",
+      "Start with a problem you want to solve or an app you want to make. Your Mind can build tools around the " +
+      "way you work, use the files and accounts you connect, handle a task, or run a routine on a schedule.\n\n" +
+      "You can keep what you make private, invite people to work with you in the same workspace, or share a " +
+      "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
+      "works in the same place. Sharing a copy gives someone the app without giving them your data.\n\n" +
+      "When Mind needs an account, it’ll ask you to connect it. You can see and remove that access later.",
+    linkLabel: "See what you can make with Mind",
     href: PRODUCT_HOME_URL,
   },
   {
     id: "data",
     label: "How your data is handled",
     detail:
-      "Everything your Mind knows lives in this workspace. It is never sold and never used to train models for " +
-      "other people. Backups are yours to turn on, check and turn off, and you can move the workspace to your " +
-      "own computer or another provider at any time.",
-    linkLabel: "Our data promises",
+      "Your workspace keeps its own files, apps, memory, and settings. Imbue never sells that data or uses it to " +
+      "train AI models for other people.\n\n" +
+      "When Mind uses an outside AI model or connected service, that company’s data rules apply too.\n\n" +
+      "We’re working toward full end-to-end encryption. Once that’s ready, no one but you—not even Imbue—will " +
+      "be able to read what’s in your workspace.\n\n" +
+      "Your workspace is backed up as you use it, much like version history in a document. It’s built to move " +
+      "with you, too. You can download it to your computer or move it to another service without starting " +
+      "over. The work you’ve built stays yours.",
+    linkLabel: "Read our data promises",
     href: PRODUCT_HOME_URL,
   },
   {
     id: "later",
     label: "Changing it later",
     detail:
-      "The name, the color, the compute it runs on and every permission can be changed later from the " +
-      "workspace's settings. Nothing you choose now is final.",
+      "You can rename your workspace, change its color, connect or disconnect accounts, and change the computer " +
+      "it runs on later in Settings.",
     linkLabel: "Workspace settings",
     href: PRODUCT_HOME_URL,
   },
 ];
-export const READY_LINE = "Your workspace is ready.";
+export const READY_LINE = "Your workspace is ready! What would you like to do first?";
+
+/** One way to start: its title, and the line or two under it. */
+export interface StartOption {
+  title: string;
+  detail: string;
+}
+
+/** The ways to start the closing turn offers, in the order they are numbered. */
+export const START_OPTIONS: StartOption[] = [
+  {
+    title: "Start with an app",
+    detail: "Pick a useful app someone else made, then change it to fit you.",
+  },
+  {
+    title: "Make something new",
+    detail:
+      "Tell your Mind about a problem you want to solve or an app you want to make. It’ll help you shape it, " +
+      "build it, and improve it as you use it.",
+  },
+  {
+    title: "Connect your data",
+    detail:
+      "Connect your email, calendar, Slack, GitHub, or another service so Mind can help with the information " +
+      "already there.",
+  },
+  {
+    title: "Hand off some work",
+    detail: "Give your Mind a task to do now, or set something to run on a schedule.",
+  },
+  {
+    title: "Learn how Mind works",
+    detail: "Ask your Mind to explain what it can do, how your workspace works, and what you control.",
+  },
+];
+
+/** The closing turn as markdown: the ready line as a heading one level above the numbered option headings under it. */
+export function readyTurnMarkdown(): string {
+  return [`## ${READY_LINE}`, ...startOptionsMarkdown()].join("\n\n");
+}
+
+/** The closing turn's options as markdown: a numbered heading per option with its detail under it. */
+export function startOptionsMarkdown(): string[] {
+  return START_OPTIONS.map((option, index) => `### ${index + 1}. ${option.title}\n\n${option.detail}`);
+}
 /**
  * What an Imbue Cloud create restates instead of its settings. The cloud
  * preset is not something the reader picked -- the flow chose every one of

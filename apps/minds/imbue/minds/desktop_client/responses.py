@@ -35,13 +35,16 @@ def make_response(
     return response
 
 
-def make_json_error_response(message: str, status_code: int) -> Response:
-    """Build the ``{"error": ...}`` JSON body the API-style routes share."""
-    return make_response(
-        content=json.dumps({"error": message}),
-        media_type="application/json",
-        status_code=status_code,
-    )
+def make_json_error_response(message: str, status_code: int, detail: str = "") -> Response:
+    """Build the ``{"error": ...}`` JSON body the API-style routes share.
+
+    ``detail``, when given, rides along as a ``detail`` key: verbatim machine output (a
+    workspace's own verdict, say) the SPA renders apart from the message.
+    """
+    body: dict[str, str] = {"error": message}
+    if detail:
+        body["detail"] = detail
+    return make_response(content=json.dumps(body), media_type="application/json", status_code=status_code)
 
 
 def make_html_response(

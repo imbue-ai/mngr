@@ -109,6 +109,8 @@ export function agentTurn(attrs: {
   textId?: string;
   /** A bold first line, streamed ahead of the text. */
   lead?: string;
+  /** A type class for the whole turn, when it is not body text. */
+  class?: string;
 }): m.Children {
   const isInstant = attrs.isInstant ?? false;
   const lead = attrs.lead ?? "";
@@ -120,7 +122,9 @@ export function agentTurn(attrs: {
     {
       key: attrs.key,
       id: attrs.id,
-      class: "mt-10 max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0",
+      class:
+        "mt-10 max-w-[calc(100%-100px)] leading-[1.5] whitespace-pre-wrap break-words first:mt-0" +
+        (attrs.class !== undefined ? ` ${attrs.class}` : ""),
       "data-agent-turn": "",
     },
     lead === "" ? body : [m("strong", streamedText(lead, attrs.startAtMs, isInstant)), "\n", body],

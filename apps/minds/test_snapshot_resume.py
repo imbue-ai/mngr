@@ -69,14 +69,15 @@ from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
-from imbue.minds.desktop_client.e2e_workspace_runner import _send_message_and_await_reply
+from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import destroy_agent_best_effort
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
-from imbue.minds.desktop_client.e2e_workspace_runner import start_new_chat_from_new_tab
+from imbue.minds.desktop_client.e2e_workspace_runner import send_chat_message
+from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_chat_input
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
 from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
 from imbue.minds.desktop_client.workspace_diagnostics import WORKSPACE_COLLECTOR_PATH
@@ -545,16 +546,16 @@ def test_minds_recovery_restores_dead_system_interface() -> None:
     )
 
 
-# -- Electron-driven create + chat (a second workspace) -----------------------
+# Electron-driven create + chat (a second workspace)
 #
 # The snapshot image bakes a warm Electron/Playwright/Xvfb/Docker toolchain (the
 # snapshot *build* drives that same toolchain to create the first workspace).
 # This test reuses that warm toolchain to drive the real Electron app and create
 # a SECOND workspace -- which boots unauthenticated (the create flow injects no
-# AI credentials) on its New Tab page, starts a chat from that page's tile,
-# signs in through the provider chooser in the chat's own frame with a raw API
-# key (the designed first-boot step), then sends the chat a message and asserts
-# the agent replies. It runs in the same offload snapshot stage (carries
+# AI credentials), open on the welcome chat the creation page seeded. The first
+# message sent there opens the provider chooser in the chat's own frame; the
+# test signs in through it with a raw API key (the designed first-boot step) and
+# asserts the agent replies. It runs in the same offload snapshot stage (carries
 # minds_snapshot_resume), so all the "drive Electron" coverage lives in one
 # place. It does NOT use the baked first workspace (it creates its own), so it
 # is independent of the ``running_workspace`` fixture.
@@ -660,11 +661,12 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def _sign_in_with_api_key_via_modal(chat: Frame, api_key: str) -> None:
-    """Drive the provider chooser in a new chat's own frame through the API-key path.
+    """Drive the provider chooser in the chat's own frame through the API-key path.
 
-    A freshly created workspace has no providers, so a chat started from the New Tab page waits
-    for an account and its page opens the chooser on its own -- the designed first-boot step.
-    The sign-in launches that same chat on the account it minted.
+    A freshly created workspace has no providers, so the first send in its welcome chat (the
+    conversation the creation page seeded) opens the chooser in that chat's page -- the designed
+    first-boot step. The sign-in launches that same chat, on the account it minted, with the
+    message that was sent.
 
     Signing in MINTS AN ACCOUNT (a folder under ``~/.minds/accounts`` plus an index row) rather
     than writing into a shared settings block, so nothing is restarted here and the verdict is
@@ -692,9 +694,11 @@ def _sign_in_with_api_key_via_modal(chat: Frame, api_key: str) -> None:
 
 
 def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
-    chat = start_new_chat_from_new_tab(page)
+    """Message the welcome chat the creation page opened; its first send is what asks for the account."""
+    chat = wait_for_chat_input(page)
+    send_chat_message(chat, page, token)
     _sign_in_with_api_key_via_modal(chat, api_key)
-    _send_message_and_await_reply(page, token)
+    await_chat_reply(chat, page, token)
 
 
 @pytest.mark.minds_snapshot_resume
@@ -715,11 +719,12 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     """Create an unauthenticated Docker workspace, sign in via the chooser, chat.
 
     The product-level first-boot round-trip: the create flow injects no AI
-    credentials, so the workspace boots unauthenticated on its New Tab page; a
-    chat started from the page's tile waits for an account and shows the
-    provider chooser in its own frame; the test fills the API-key path in the
-    real chooser UI (which mints a provider account holding the key), then asserts
-    the agent answers a chat message (echoes a unique token) -- end-to-end
+    credentials, so the workspace boots unauthenticated, open on the welcome chat
+    the creation page seeded with the onboarding conversation; the first message
+    sent there asks for an account by showing the provider chooser in the chat's
+    own frame; the test fills the API-key path in the real chooser UI (which mints
+    a provider account holding the key), which launches the chat with that
+    message, then asserts the agent answers it (echoes a unique token) -- end-to-end
     through the real Electron app and the desktop client proxy.
 
     Runs in the snapshot offload sandbox, reusing the warm Electron toolchain
@@ -759,7 +764,7 @@ def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
         destroy_agent_best_effort(workspace_name, config_project_dir=host_config_root / ".mngr")
 
 
-# -- Backup-update chat gate against a deterministically RUNNING agent --------
+# Backup-update chat gate against a deterministically RUNNING agent
 #
 # The backup update's chat gate must (a) classify a non-main agent that is
 # RUNNING as a running chat, (b) block the mutating update on it, and (c) stop
@@ -894,7 +899,7 @@ def test_backup_update_gate_blocks_on_live_chat_and_stop_chats_clears_it(
         )
 
 
-# -- Backup service: check / update / converge against the resumed workspace --
+# Backup service: check / update / converge against the resumed workspace
 #
 # These replace the old test_backup_service_release.py release tests (which
 # ran against a fake default-workspace-template-shaped repo with a stub supervisorctl). Here
@@ -982,7 +987,7 @@ def test_backup_service_check_update_and_force_update_converge(running_workspace
     assert forced_payload["committed"] is False, forced_payload
 
 
-# -- Backup enable / env repair / destination change (minds-side, real exec) --
+# Backup enable / env repair / destination change (minds-side, real exec)
 
 # Pinned restic download for sandboxes whose snapshot image predates the
 # bundled binary; must track scripts/download-binaries.js.
@@ -1131,7 +1136,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     assert read_workspace_env() == canonical_three
 
 
-# -- In-place restore (the real worker + script, against the resumed workspace) --
+# In-place restore (the real worker + script, against the resumed workspace)
 
 
 def _cp_repo_host_to_container(container_name: str, repository: Path) -> None:
@@ -1390,7 +1395,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     assert _wait_for_system_interface_up(container_name)
 
 
-# -- Bug-report diagnostics against the resumed workspace ---------------------
+# Bug-report diagnostics against the resumed workspace
 #
 # A bug report can carry the workspace's own logs and its recent chat
 # transcripts, gathered by the RESIDENT collector the workspace template ships
