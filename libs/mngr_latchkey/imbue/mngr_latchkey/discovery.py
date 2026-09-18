@@ -44,6 +44,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -814,7 +815,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
         )
         # A fresh context object also invalidates ``get_provider_instance``'s
         # cache, which is keyed by ``(name, id(mngr_ctx))``.
+        retired_ctx = self.mngr_ctx
         self.mngr_ctx = self.mngr_ctx.model_copy_update(to_update(self.mngr_ctx.field_ref().config, config))
+        # Invalidating that cache leaves the instances it held in it, answering
+        # from the configuration this reload replaced and holding the listings
+        # they built against it. Retired once the context that replaced them is
+        # the one resolution reads.
+        close_provider_instances_for_context(retired_ctx)
         with self._remote_hosts_lock:
             # Routes resolved against the previous provider set may have been
             # decided by a provider that has since been (re)configured.

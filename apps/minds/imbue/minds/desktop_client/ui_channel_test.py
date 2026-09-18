@@ -14,6 +14,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 import httpx
 from simple_websocket import Client as WebSocketClient
@@ -32,8 +33,6 @@ from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiReloadMessage
 from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
-
-# -- Broadcaster unit tests --
 
 
 def test_broadcaster_delivers_frames_to_every_registered_queue() -> None:
@@ -132,9 +131,6 @@ def test_connected_focused_workspace_agent_ids_excludes_unfocused_windows() -> N
     assert reader() == ("agent-focused",)
 
 
-# -- Full-path integration over real cheroot --
-
-
 @contextmanager
 def _serve_ws_capable_app(tmp_path: Path) -> Iterator[tuple[int, str, DesktopClientState]]:
     """The real desktop-client app on the real WebSocket-aware cheroot server."""
@@ -155,6 +151,24 @@ def _serve_ws_capable_app(tmp_path: Path) -> Iterator[tuple[int, str, DesktopCli
         resolver.notify_change()
         server.stop()
         thread.join(timeout=5)
+
+
+def _receive_frame_of_type(client: WebSocketClient, frame_type: str) -> dict[str, Any]:
+    """The first frame of ``frame_type``, reading past whatever the connection sends before it.
+
+    The connect sequence carries one frame per workspace whose health was
+    derivable, and the publisher loop can broadcast onto the same connection
+    meanwhile, so what precedes a pushed frame is not a fixed number of frames
+    to drain.
+    """
+    frame: dict[str, Any] = {}
+    is_found = False
+    while not is_found:
+        received = client.receive(timeout=5)
+        assert received is not None, f"no {frame_type} frame arrived"
+        frame = json.loads(received)
+        is_found = frame["type"] == frame_type
+    return frame
 
 
 def _connect_ws(port: int, cookie: str) -> WebSocketClient:
@@ -214,12 +228,12 @@ def test_broadcast_after_connect_reaches_the_ws_client(tmp_path: Path) -> None:
         client = _connect_ws(port, cookie)
         try:
             assert state.ui_publisher is not None
-            # However long the connect sequence is: what is under test here is
-            # the push that follows it, not the sequence itself.
-            for _ in state.ui_publisher.build_snapshot_frames():
-                client.receive(timeout=5)
+            # The handler registers the connection before it sends the connect
+            # sequence, so a push that follows the registration is delivered
+            # after that sequence however long it turns out to be.
+            assert state.ui_channel_broadcaster.wait_for_connection_count(1, timeout_seconds=5.0)
             state.ui_publisher.publish_one_shot(UiReloadMessage())
-            pushed = json.loads(client.receive(timeout=5))
+            pushed = _receive_frame_of_type(client, "reload_ui")
         finally:
             client.close()
         assert pushed == {"type": "reload_ui"}

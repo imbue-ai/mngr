@@ -7,6 +7,7 @@ import pytest
 
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.api.providers import _is_backend_enabled
+from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_all_provider_instances
 from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.api.providers import get_provider_instance
@@ -457,6 +458,30 @@ class _CloseCountingProvider(MockProviderInstance):
         self.close_count = self.close_count + 1
 
 
+class _CloseCountingBackend(ProviderBackendInterface):
+    """Shared metadata for the backends that build :class:`_CloseCountingProvider` instances.
+
+    Subclasses supply the two members that carry anything test-specific: the name
+    they are registered under, and how they build their instance.
+    """
+
+    @staticmethod
+    def get_description() -> str:
+        return "Test backend whose instances record being closed"
+
+    @staticmethod
+    def get_config_class() -> type[ProviderInstanceConfig]:
+        return ProviderInstanceConfig
+
+    @staticmethod
+    def get_build_args_help() -> str:
+        return "No arguments supported."
+
+    @staticmethod
+    def get_start_args_help() -> str:
+        return "No arguments supported."
+
+
 def test_get_provider_instance_racing_on_one_name_shares_the_winner_and_closes_the_loser(
     temp_host_dir: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -477,28 +502,12 @@ def test_get_provider_instance_racing_on_one_name_shares_the_winner_and_closes_t
     built: list[_CloseCountingProvider] = []
     built_lock = threading.Lock()
 
-    class _RacingConstructionBackend(ProviderBackendInterface):
+    class _RacingConstructionBackend(_CloseCountingBackend):
         """Backend whose construction waits for a second caller to be building too."""
 
         @staticmethod
         def get_name() -> ProviderBackendName:
             return _RACING_CONSTRUCTION_BACKEND_NAME
-
-        @staticmethod
-        def get_description() -> str:
-            return "Test backend whose construction blocks until both racing callers are inside it"
-
-        @staticmethod
-        def get_config_class() -> type[ProviderInstanceConfig]:
-            return ProviderInstanceConfig
-
-        @staticmethod
-        def get_build_args_help() -> str:
-            return "No arguments supported."
-
-        @staticmethod
-        def get_start_args_help() -> str:
-            return "No arguments supported."
 
         @staticmethod
         def build_provider_instance(
@@ -548,3 +557,57 @@ def test_get_provider_instance_racing_on_one_name_shares_the_winner_and_closes_t
     finally:
         del _backend_registry[_RACING_CONSTRUCTION_BACKEND_NAME]
         del _provider_config_registry[_RACING_CONSTRUCTION_BACKEND_NAME]
+
+
+_RETIRED_CONTEXT_BACKEND_NAME = ProviderBackendName("test-retired-context-backend")
+
+
+def test_close_provider_instances_for_context_retires_only_that_contexts_instances(
+    temp_host_dir: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A process that reloads its settings must be able to retire the provider set it loaded before.
+
+    The cache is keyed by the context's identity, so a retired context's
+    instances would otherwise answer from a config that no longer applies and
+    hold connections nothing will ever use again -- while a context that is
+    still in use must come through untouched.
+    """
+
+    class _RetiredContextBackend(_CloseCountingBackend):
+        """Backend that builds one instance per context asking for it."""
+
+        @staticmethod
+        def get_name() -> ProviderBackendName:
+            return _RETIRED_CONTEXT_BACKEND_NAME
+
+        @staticmethod
+        def build_provider_instance(
+            name: ProviderInstanceName,
+            config: ProviderInstanceConfig,
+            mngr_ctx: MngrContext,
+        ) -> ProviderInstanceInterface:
+            del config
+            return _CloseCountingProvider(name=name, host_dir=temp_host_dir, mngr_ctx=mngr_ctx)
+
+    _backend_registry[_RETIRED_CONTEXT_BACKEND_NAME] = _RetiredContextBackend
+    _provider_config_registry[_RETIRED_CONTEXT_BACKEND_NAME] = ProviderInstanceConfig
+    try:
+        provider_name = ProviderInstanceName(str(_RETIRED_CONTEXT_BACKEND_NAME))
+        still_used_ctx = MngrContext(
+            config=temp_mngr_ctx.config, pm=temp_mngr_ctx.pm, profile_dir=temp_mngr_ctx.profile_dir
+        )
+        retired_instance = get_provider_instance(provider_name, temp_mngr_ctx)
+        still_used_instance = get_provider_instance(provider_name, still_used_ctx)
+        assert isinstance(retired_instance, _CloseCountingProvider)
+        assert isinstance(still_used_instance, _CloseCountingProvider)
+        assert retired_instance is not still_used_instance
+
+        close_provider_instances_for_context(temp_mngr_ctx)
+
+        assert retired_instance.close_count == 1, "the retired context's instance must be closed"
+        assert (provider_name, id(temp_mngr_ctx)) not in _instance_cache, "and forgotten, not left to be handed out"
+        assert still_used_instance.close_count == 0
+        assert get_provider_instance(provider_name, still_used_ctx) is still_used_instance
+    finally:
+        del _backend_registry[_RETIRED_CONTEXT_BACKEND_NAME]
+        del _provider_config_registry[_RETIRED_CONTEXT_BACKEND_NAME]

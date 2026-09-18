@@ -19,6 +19,7 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import HostAuthenticationError
@@ -142,9 +143,6 @@ def test_start_gateway_raises_when_binary_disappears_after_initialize(tmp_path: 
             manager.start_gateway(cg)
 
 
-# -- initialize() version check ----------------------------------------------
-
-
 def _make_version_binary(tmp_path: Path, version_output: str, exit_code: int = 0) -> Path:
     """Build a stub ``latchkey`` that responds to ``--version``.
 
@@ -209,9 +207,6 @@ def test_initialize_raises_when_version_command_exits_nonzero(tmp_path: Path) ->
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
     with pytest.raises(LatchkeyError):
         manager.initialize()
-
-
-# -- initialize() additional-service registration ----------------------------
 
 
 def test_initialize_registers_additional_services_in_latchkey_config(tmp_path: Path) -> None:
@@ -1078,9 +1073,6 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
         manager.stop_gateway()
 
 
-# -- Discovery handler --
-
-
 def test_discovery_handler_spawns_shared_gateway_for_every_provider(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
@@ -1500,13 +1492,15 @@ class _ReloadingHandler(LatchkeyDiscoveryHandler):
         }
 
 
-def test_reload_provider_config_picks_up_a_new_provider_and_forgets_routes(
+def test_reload_provider_config_picks_up_a_new_provider_and_drops_what_it_replaced(
     tmp_path: Path, temp_mngr_ctx: MngrContext
 ) -> None:
     """SIGHUP must refresh the supervisor's own provider view, not just the observe child.
 
     Otherwise a workspace on a provider the desktop client registered mid-session
-    is unresolvable until the whole app restarts.
+    is unresolvable until the whole app restarts. What the reload replaces has to
+    go with it: this supervisor runs for the whole session, and the desktop client
+    SIGHUPs it on every provider-set change.
     """
     fake_binary = _make_fake_latchkey_binary(tmp_path)
     manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
@@ -1518,15 +1512,21 @@ def test_reload_provider_config_picks_up_a_new_provider_and_forgets_routes(
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
         )
-        # A route resolved against the previous provider set.
+        # A route resolved against the previous provider set, which caches that
+        # set's provider instance against the context it was resolved through.
         assert handler._resolve_gateway_route(host_id, "local", _CONTAINER_SSH_INFO) is not None
         original_host_dir = handler.mngr_ctx.config.default_host_dir
+        retired_ctx = handler.mngr_ctx
+        assert (ProviderInstanceName("local"), id(retired_ctx)) in _instance_cache
 
         handler.reload_provider_config()
 
         assert ProviderInstanceName("vultr-added-later") in handler.mngr_ctx.config.providers
         # Stale route verdicts are dropped so the new provider set is consulted.
         assert handler._gateway_route_by_host_id == {}
+        # And the set they were resolved through is closed, not left cached
+        # against a context nothing reads any more.
+        assert (ProviderInstanceName("local"), id(retired_ctx)) not in _instance_cache
         # Only the provider mapping is replaced; the rest of the config survives.
         assert handler.mngr_ctx.config.default_host_dir == original_host_dir
 
@@ -2119,9 +2119,6 @@ def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path
             assert handler._provisioning_hosts == set()
 
 
-# -- Transient-failure reporting for the per-host wiring steps --
-
-
 def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
     """Return ``error`` chained as if it had been ``raise``d ``from cause``."""
     error.__cause__ = cause
@@ -2522,9 +2519,6 @@ def test_ensure_browser_not_called_when_binary_missing(tmp_path: Path) -> None:
     assert not ensure_browser_log_path(manager.plugin_data_dir).exists()
 
 
-# -- Destruction handler --
-
-
 def test_destruction_handler_removes_reverse_tunnels_for_destroyed_agent() -> None:
     """The handler must ask the tunnel manager to drop the destroyed agent's
     reverse tunnels. The shared gateway must NOT be touched -- it serves
@@ -2536,9 +2530,6 @@ def test_destruction_handler_removes_reverse_tunnels_for_destroyed_agent() -> No
     host_id = HostId()
     handler(agent_id, host_id)
     assert tunnel_manager._removed_agent_ids == [_instance_tag(agent_id, host_id)]
-
-
-# -- services_info / auth_browser --
 
 
 def _make_services_info_binary(
@@ -2983,9 +2974,6 @@ def test_auth_browser_does_not_retry_on_unrelated_failure(tmp_path: Path) -> Non
     assert argv_calls == [["auth", "browser", "slack"]]
 
 
-# -- auth_browser_login / auth_prepare / auth_clear --
-
-
 def test_auth_browser_login_reports_success_on_zero_exit(tmp_path: Path) -> None:
     binary = _make_recording_binary(tmp_path, exit_code=0)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
@@ -3079,9 +3067,6 @@ def test_auth_clear_account_passes_account_flag(tmp_path: Path) -> None:
     assert argv_calls == [["auth", "clear", "-y", "slack", "--account", "hynek@imbue-ai"]]
 
 
-# -- auth_set_credentials --
-
-
 def test_auth_set_credentials_passes_the_argv_through_verbatim(tmp_path: Path) -> None:
     binary = _make_recording_binary(tmp_path, exit_code=0)
     latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
@@ -3108,9 +3093,6 @@ def test_auth_set_credentials_reports_the_failure_detail(tmp_path: Path) -> None
 
     assert is_success is False
     assert detail == "Error: Unknown service: aws"
-
-
-# -- add_account --
 
 
 def _make_env_recording_binary(tmp_path: Path, *, exit_code: int = 0, stderr: str = "") -> Path:
@@ -3229,9 +3211,6 @@ def test_add_account_google_falls_back_to_browser_prepare_when_official_client_f
     # The failed Minds preparation is left for browser-prepare to overwrite; it
     # is not cleared (which would wipe other accounts' credentials).
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
-
-
-# -- auth_browser Minds Google OAuth client preference --
 
 
 def _make_google_oauth_binary(

@@ -124,17 +124,38 @@ def get_provider_instance(
         # Another thread cached one for this name first. Hand back the cached
         # instance so every caller shares one, and close the duplicate rather
         # than dropping it: it may already hold a connection nothing will reap.
-        _close_unused_provider_instance(instance)
+        _close_discarded_provider_instance(instance)
         return existing
     return instance
 
 
-def _close_unused_provider_instance(instance: BaseProviderInstance) -> None:
-    """Close a provider instance that lost a construction race and will never be handed out."""
+def close_provider_instances_for_context(mngr_ctx: MngrContext) -> None:
+    """Close and forget every cached provider instance built against ``mngr_ctx``.
+
+    For a long-lived process that reloads its configuration: the instances a
+    retired context left behind answer from a config that no longer applies,
+    and hold connections and listings that nothing will ever use again.
+
+    The caller must still hold ``mngr_ctx`` -- it does, by passing it -- because
+    the cache is keyed by the context's identity, which a later context can
+    reuse once the retired one is collected. Removing the whole of a context's
+    entries while it is alive is what keeps those two from ever overlapping.
+    """
+    context_id = id(mngr_ctx)
+    with _instance_cache_lock:
+        retired_keys = [key for key in _instance_cache if key[1] == context_id]
+        retired_instances = [_instance_cache.pop(key) for key in retired_keys]
+    # Closed outside the lock, for the same reason the atexit close is.
+    for instance in retired_instances:
+        _close_discarded_provider_instance(instance)
+
+
+def _close_discarded_provider_instance(instance: BaseProviderInstance) -> None:
+    """Close a provider instance that will never be handed out again."""
     try:
         instance.close()
     except (MngrError, OSError) as e:
-        logger.warning("Error closing duplicate provider instance {}: {}", instance.name, e)
+        logger.warning("Error closing discarded provider instance {}: {}", instance.name, e)
 
 
 def get_local_host(mngr_ctx: MngrContext) -> OnlineHostInterface:

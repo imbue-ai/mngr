@@ -8,11 +8,14 @@ the workspace's outer host and hands back a
 :class:`~imbue.mngr_latchkey.remote.credentials.MachineCredentials` bound to it.
 
 Opening that door needs mngr's provider set, which is loaded from the same
-settings the ``mngr`` CLI reads. It is loaded **once, lazily**, and kept for the
-life of the process: loading it imports every installed provider plugin, which
-is seconds of work that must not land on the first click. :meth:`warm` starts
-that load off the request path at startup, so in practice the first Permissions
-tab open finds it done.
+settings the ``mngr`` CLI reads. It is loaded **lazily and kept across calls**,
+because loading it imports every installed provider plugin, which is seconds of
+work that must not land on the first click. :meth:`warm` starts that load off
+the request path at startup, so in practice the first Permissions tab open finds
+it done. What is kept is dropped and reloaded whenever those settings change on
+disk, because this app writes them itself -- signing an account in registers a
+new provider instance, and a workspace created on it would otherwise be
+unreachable until the app restarted.
 
 Every call here is synchronous and blocks its caller until the machine has
 answered. That is the point: a workspace's Permissions tab shows what its
@@ -34,13 +37,18 @@ from pydantic import Field
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
+from imbue.mngr.api.providers import close_provider_instances_for_context
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.plugin_manager import get_or_create_plugin_manager
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.config.host_dir import read_default_host_dir
+from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.config.loader import load_config
+from imbue.mngr.config.pre_readers import get_user_config_path
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -55,6 +63,14 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 
 # Name of the thread the provider set is pre-loaded on.
 _WARM_THREAD_NAME: Final[str] = "latchkey-machine-access-warm"
+
+
+class _ProviderSettingsStamp(FrozenModel):
+    """What the settings file a provider set was loaded from looked like at the time."""
+
+    inode: int = Field(description="Identifies the file itself, which an atomic rewrite replaces.")
+    modified_time_in_nanoseconds: int = Field(description="When the file was last written.")
+    size_in_bytes: int = Field(description="How long the file was.")
 
 
 class MachineUnreachableError(Exception):
@@ -88,6 +104,7 @@ class MachineAccess(MutableModel):
     )
 
     _mngr_ctx: MngrContext | None = PrivateAttr(default=None)
+    _mngr_ctx_settings_stamp: _ProviderSettingsStamp | None = PrivateAttr(default=None)
     _mngr_ctx_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def warm(self) -> None:
@@ -155,12 +172,13 @@ class MachineAccess(MutableModel):
     ) -> Iterator[OuterHostInterface | None]:
         """Open a host's outer machine, looking again on fresh data if the provider has not heard of it.
 
-        This process holds one long-lived provider instance, and some providers
-        cache their whole host/lease listing on it with no expiry (imbue_cloud
-        does). A workspace leased *after* that listing was taken would then be
-        permanently invisible -- its Permissions tab unreachable until the app
-        restarts -- so "not found" is treated as "our listing may be older than
-        this workspace" and asked once more.
+        A provider instance is kept across calls, and some providers cache their
+        whole host/lease listing on it with no expiry (imbue_cloud does). A
+        workspace leased *after* that listing was taken would then be invisible
+        for as long as that instance is kept -- its Permissions tab unreachable,
+        and leasing one is not a settings change, so nothing reloads it away --
+        so "not found" is treated as "our listing may be older than this
+        workspace" and asked once more.
         """
         is_machine_handed_over = False
         try:
@@ -200,25 +218,97 @@ class MachineAccess(MutableModel):
         return info.provider_name
 
     def _provider_context(self) -> MngrContext:
-        """The loaded mngr context, loading it on first use.
+        """The loaded mngr context, reloaded whenever the settings behind it have changed.
 
-        One context for the life of the process, because the provider instances
-        cached against it hold the connections and listings that make a second
-        machine operation cheaper than the first.
+        One context is kept across calls, because the provider instances cached
+        against it hold the connections and listings that make a second machine
+        operation cheaper than the first. Keeping it *unconditionally* is what
+        must not happen: this app registers a provider instance per signed-in
+        account in the very settings file the context was loaded from, so a
+        context taken before an account signed in knows nothing of the provider
+        its workspaces run on, and every machine operation on one of them fails
+        for as long as the app stays up.
+
+        Watching the user settings file rather than being told when it changes
+        covers every writer of it, including a user editing it by hand while the
+        app runs. That is the layer this app writes; a change to the project,
+        local or environment layers ``load_config`` also merges is picked up by
+        the next reload or by a restart, not by itself.
+
+        Raises:
+            MachineUnreachableError: when the settings cannot be loaded and none
+                have been loaded yet.
+        """
+        with self._mngr_ctx_lock:
+            kept_ctx = self._mngr_ctx
+            # Stamped before the load, not after: the load is seconds long, and
+            # a write that lands inside it would otherwise be stamped as one
+            # this context already carries -- leaving it stale for good.
+            settings_stamp = _read_settings_stamp()
+            if kept_ctx is not None and settings_stamp == self._mngr_ctx_settings_stamp:
+                return kept_ctx
+            try:
+                # Loaded under the lock: it is seconds of plugin imports, and a
+                # second caller arriving mid-load wants that one, not its own.
+                reloaded_ctx = self._load_context()
+            except MachineUnreachableError as e:
+                if kept_ctx is None:
+                    raise
+                # The settings changed into something that will not load -- a
+                # hand edit with a typo, a block naming a backend this install
+                # has not got. The set in hand still opens every machine it was
+                # loaded for, and the stamp is left as it was, so the next
+                # operation reads the new settings again.
+                logger.warning("Could not reload the mngr provider set; keeping the one already loaded: {}", e)
+                return kept_ctx
+            self._mngr_ctx = reloaded_ctx
+            self._mngr_ctx_settings_stamp = settings_stamp
+        # Closing can block, so it happens off the lock.
+        if kept_ctx is not None:
+            logger.debug("mngr settings changed; retiring the provider set loaded from them")
+            close_provider_instances_for_context(kept_ctx)
+            # Safe only because the reload built a whole new context, which
+            # brought a watchdog of its own: the retired one would otherwise
+            # keep its thread for the life of the app, one more per reload.
+            kept_ctx.suspension_watchdog.shutdown()
+        return reloaded_ctx
+
+    def _load_context(self) -> MngrContext:
+        """Load a fresh mngr context (a seam for tests).
 
         Raises:
             MachineUnreachableError: when the settings cannot be loaded.
         """
-        with self._mngr_ctx_lock:
-            if self._mngr_ctx is None:
-                self._mngr_ctx = _load_provider_context(self.concurrency_group)
-            return self._mngr_ctx
+        return _load_provider_context(self.concurrency_group)
 
     def _warm_provider_set(self) -> None:
         try:
             self._provider_context()
         except MachineUnreachableError as e:
             logger.warning("Could not pre-load the provider set for latchkey machine access: {}", e)
+
+
+def _read_settings_stamp() -> _ProviderSettingsStamp | None:
+    """Stamp the user settings file a context would be loaded from, or None when it cannot be read.
+
+    Resolved the way ``load_config`` resolves it, rather than from a loaded
+    context, so a stamp can be taken *before* a load as well as after one.
+
+    None is a stamp like any other: it says the file was not there, so a file
+    appearing (mngr initialising after this process started) reads as a change,
+    and a file that is never there never does.
+    """
+    try:
+        settings_path = get_user_config_path(get_or_create_profile_dir(read_default_host_dir()))
+        stat_result = settings_path.stat()
+    except (MngrError, OSError) as e:
+        logger.debug("Could not stat the mngr settings file: {}", e)
+        return None
+    return _ProviderSettingsStamp(
+        inode=stat_result.st_ino,
+        modified_time_in_nanoseconds=stat_result.st_mtime_ns,
+        size_in_bytes=stat_result.st_size,
+    )
 
 
 def _load_provider_context(concurrency_group: ConcurrencyGroup) -> MngrContext:

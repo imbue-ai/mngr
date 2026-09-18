@@ -56,10 +56,12 @@ class SuspensionWatchdog(MutableModel):
 
     Held by :class:`MngrContext`, since "the machine stopped" is true of every
     connection at once. The background thread starts on the first registration
-    and runs until :meth:`shutdown` or process exit; nothing in production calls
-    ``shutdown``, which costs one thread per context for consumers that build a
-    context per call. Closed or collected transports are dropped on the next
-    pass, so long-running consumers do not accumulate them.
+    and runs until :meth:`shutdown` or process exit. A consumer that builds a
+    context per call leaves it to process exit, at one thread per context; a
+    long-lived one that retires a whole context -- say, on reloading its
+    configuration -- calls ``shutdown`` so the retired context's thread goes
+    with it. Closed or collected transports are dropped on the next pass, so
+    long-running consumers do not accumulate them.
     """
 
     check_interval_seconds: float = Field(
