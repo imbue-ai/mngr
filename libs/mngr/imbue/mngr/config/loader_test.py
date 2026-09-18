@@ -309,8 +309,35 @@ def test_parse_providers_explicit_plugin_field_not_disabled() -> None:
 def test_parse_providers_unknown_backend_mentions_disabled_plugins() -> None:
     """_parse_providers error message should mention disabled plugins when they exist."""
     raw = {"my-provider": {"backend": "nonexistent"}}
-    with pytest.raises(ConfigParseError, match="Currently disabled plugins: modal"):
+    with pytest.raises(ConfigParseError, match="currently disabled plugins.*modal"):
         _parse_providers(raw, disabled_plugins=frozenset({"modal"}))
+
+
+def test_parse_providers_uninstalled_backend_suggests_install_not_plugin_field() -> None:
+    """An uninstalled backend should point at installing the plugin, not `plugin =`.
+
+    Setting `plugin = "<name>"` cannot resolve a backend whose plugin is not
+    installed at all, so the primary remediation must be the install hint. The
+    `plugin =` advice may only appear framed as a secondary "if instead" path.
+    """
+    raw = {"azure": {"backend": "azure"}}
+    with pytest.raises(ConfigParseError) as exc_info:
+        _parse_providers(raw, disabled_plugins=frozenset({"claude_subagent_proxy"}))
+    message = str(exc_info.value)
+    # The catalog names the concrete package to install.
+    assert "imbue-mngr-azure" in message
+    # The install hint must come before any secondary `plugin =` suggestion.
+    assert "plugin =" not in message.split("If instead")[0]
+
+
+def test_parse_providers_uninstalled_backend_no_disabled_plugins_omits_plugin_field() -> None:
+    """With no disabled plugins, the message must not mention `plugin =` at all."""
+    raw = {"azure": {"backend": "azure"}}
+    with pytest.raises(ConfigParseError) as exc_info:
+        _parse_providers(raw, disabled_plugins=frozenset())
+    message = str(exc_info.value)
+    assert "imbue-mngr-azure" in message
+    assert "plugin =" not in message
 
 
 def test_parse_providers_skips_disabled_provider_with_unknown_backend() -> None:
