@@ -57,22 +57,23 @@ class FakeExecOutput(ExecOutput):
 
 
 class FakeExecProcess(ExecProcess):
-    """Exec process backed by a ConcurrencyGroup-managed process."""
+    """Exec process backed by a ConcurrencyGroup-managed process, or by an already-known outcome."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    _completed_text: str = PrivateAttr(default="")
+    completed_output: str = Field(default="", description="Stdout of a command that already finished")
+    completed_exit_code: int = Field(default=0, description="Exit code of a command that already finished")
     _running_process: RunningProcess | None = PrivateAttr(default=None)
 
     def get_stdout(self) -> ExecOutput:
         if self._running_process is not None:
             return FakeExecOutput(output_text=self._running_process.read_stdout())
-        return FakeExecOutput(output_text=self._completed_text)
+        return FakeExecOutput(output_text=self.completed_output)
 
     def wait(self) -> int:
         if self._running_process is not None:
             return self._running_process.wait()
-        return 0
+        return self.completed_exit_code
 
 
 class FakeSecret(SecretInterface):
@@ -230,6 +231,17 @@ class FakeVolume(VolumeInterface):
 # (128 + SIGKILL) that Modal surfaces for a terminated sandbox.
 _FAKE_TERMINATED_EXIT_CODE: Final[int] = 137
 
+# FakeSandbox runs argv on the machine running the tests. mngr's host bring-up
+# (build_configure_ssh_command and friends) rewrites the sshd host key, replaces
+# root's authorized_keys, and apt-installs packages; run as root, e.g. inside a
+# workspace container, that re-keys the real machine and locks its owner out.
+# Any command that reaches for these is refused instead of executed.
+_HOST_PROVISIONING_MARKERS: Final[tuple[str, ...]] = ("/etc/ssh", "/usr/sbin/sshd", "apt-get")
+
+
+class FakeSandboxRefusedHostProvisioningError(ModalProxyError):
+    """Raised when a FakeSandbox is asked to run mngr's host bring-up on the test machine."""
+
 
 class FakeSandbox(SandboxInterface):
     """Sandbox that runs commands locally via ConcurrencyGroup.
@@ -261,6 +273,14 @@ class FakeSandbox(SandboxInterface):
         if self._cg is None:
             raise ModalProxyError("Sandbox has no ConcurrencyGroup")
 
+        command_text = " ".join(args)
+        if any(marker in command_text for marker in _HOST_PROVISIONING_MARKERS):
+            raise FakeSandboxRefusedHostProvisioningError(
+                "FakeSandbox runs commands on the test machine and refuses to run host provisioning there "
+                f"(command mentions one of {_HOST_PROVISIONING_MARKERS}); drive bring-up against a real "
+                f"sandbox, or use a sandbox fake that answers without executing. Command: {command_text[:200]}"
+            )
+
         # Check if this is a "background" command (like sshd -D or nohup)
         # that should not block
         is_background = False
@@ -285,9 +305,10 @@ class FakeSandbox(SandboxInterface):
                 timeout=60,
                 is_checked_after=False,
             )
-            exec_proc = FakeExecProcess()
-            exec_proc._completed_text = finished.stdout
-            return exec_proc
+            return FakeExecProcess(
+                completed_output=finished.stdout,
+                completed_exit_code=finished.returncode if finished.returncode is not None else 0,
+            )
 
     def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
         if self._is_terminated:
@@ -439,7 +460,7 @@ class FakeModalInterface(ModalInterface):
         experimental_options: Mapping[str, bool] | None = None,
     ) -> SandboxInterface:
         sandbox_id = f"sb-{uuid.uuid4().hex}"
-        sandbox = FakeSandbox(sandbox_id=sandbox_id)
+        sandbox = self._build_sandbox(sandbox_id)
         # Create a child ConcurrencyGroup for this sandbox's processes
         child_cg = self.concurrency_group.make_concurrency_group(
             name=f"sandbox-{sandbox_id}",
@@ -449,6 +470,10 @@ class FakeModalInterface(ModalInterface):
         sandbox._cg = child_cg
         self._sandboxes.append(sandbox)
         return sandbox
+
+    def _build_sandbox(self, sandbox_id: str) -> FakeSandbox:
+        """The sandbox object sandbox_create hands out; a subclass overrides this to change how commands are answered."""
+        return FakeSandbox(sandbox_id=sandbox_id)
 
     def sandbox_list(self, *, app_id: str) -> list[SandboxInterface]:
         # Return all non-terminated sandboxes

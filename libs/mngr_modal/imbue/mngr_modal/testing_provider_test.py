@@ -7,6 +7,7 @@ Modal credentials or SSH connections.
 
 import contextlib
 import json
+import shlex
 import subprocess
 import sys
 from collections.abc import Generator
@@ -25,6 +26,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
@@ -50,6 +52,9 @@ from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.providers.ssh_host_setup import SSHD_START_OPTIONS
+from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
+from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.utils.testing import SHARED_MODAL_ENV_NAME_VAR
 from imbue.mngr.utils.testing import generate_test_environment_name
 from imbue.mngr.utils.testing import read_shared_modal_env_name
@@ -106,9 +111,11 @@ from imbue.modal_proxy.interface import SandboxInterface
 from imbue.modal_proxy.interface import VolumeInterface
 from imbue.modal_proxy.log_utils import ModalLoguruWriter
 from imbue.modal_proxy.testing import FakeExecOutput
+from imbue.modal_proxy.testing import FakeExecProcess
 from imbue.modal_proxy.testing import FakeImage
 from imbue.modal_proxy.testing import FakeModalInterface
 from imbue.modal_proxy.testing import FakeSandbox
+from imbue.modal_proxy.testing import FakeSandboxRefusedHostProvisioningError
 from imbue.modal_proxy.testing import FakeVolume
 
 
@@ -1478,17 +1485,104 @@ def test_start_host_not_found_raises(testing_provider: ModalProviderInstance) ->
 # ---------------------------------------------------------------------------
 
 
-def test_create_host_raises_on_ssh_setup_failure(
-    testing_provider: ModalProviderInstance,
-) -> None:
-    """create_host raises when SSH setup fails in the testing environment.
+class _SshSetupFailingSandbox(FakeSandbox):
+    """A sandbox that answers every command without executing it and fails the SSH configuration step."""
 
-    The sandbox is created successfully (FakeModalInterface doesn't need real
-    Modal), but SSH setup fails because the testing sandbox can't start sshd
-    as a non-root user. This verifies the error propagation path.
+    def exec(
+        self,
+        *args: str,
+        stdout: StreamType = StreamType.PIPE,
+        stderr: StreamType = StreamType.PIPE,
+    ) -> ExecProcess:
+        if "/etc/ssh" in " ".join(args):
+            return FakeExecProcess(completed_output="sh: /etc/ssh: read-only file system", completed_exit_code=1)
+        return FakeExecProcess()
+
+
+class _SshSetupFailingFakeModalInterface(FakeModalInterface):
+    def _build_sandbox(self, sandbox_id: str) -> FakeSandbox:
+        return _SshSetupFailingSandbox(sandbox_id=sandbox_id)
+
+
+def test_create_host_surfaces_a_failed_ssh_setup_as_a_mngr_error(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    cg: ConcurrencyGroup,
+) -> None:
+    """The sandbox comes up but its SSH configuration command fails; create_host reports that step."""
+    fake_modal = _SshSetupFailingFakeModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
+    provider = make_testing_provider(temp_mngr_ctx, fake_modal)
+    try:
+        with pytest.raises(ConcurrencyExceptionGroup) as excinfo:
+            provider.create_host(HostName("ssh-setup-fails"))
+    finally:
+        fake_modal.cleanup()
+
+    assert excinfo.group_contains(MngrError, match="configure SSH in sandbox")
+
+
+@pytest.mark.parametrize(
+    ("argv", "is_prefixable"),
+    [
+        pytest.param(("sh", "-c", build_check_and_install_packages_command("/opt/mngr-host-dir")), True, id="install"),
+        pytest.param(
+            (
+                "sh",
+                "-c",
+                build_configure_ssh_command("root", "ssh-ed25519 AAAAclient", "PRIVATE", "ssh-ed25519 AAAAhost"),
+            ),
+            True,
+            id="configure-ssh",
+        ),
+        pytest.param(("/usr/sbin/sshd", "-D", *shlex.split(SSHD_START_OPTIONS)), False, id="start-sshd"),
+    ],
+)
+def test_fake_sandbox_refuses_to_run_host_provisioning_on_the_test_machine(
+    testing_modal: FakeModalInterface,
+    tmp_path: Path,
+    argv: tuple[str, ...],
+    is_prefixable: bool,
+) -> None:
+    """Every production bring-up command is refused before anything runs.
+
+    The fake executes argv on the machine running the tests; as root, these
+    commands would replace its sshd host key, overwrite root's authorized_keys
+    and apt-install packages. A marker file prepended to the shell commands
+    proves nothing of the command ran, not just that an error came back.
     """
-    with pytest.raises((MngrError, OSError, ExceptionGroup)):
-        testing_provider.create_host(HostName("will-fail"))
+    marker = tmp_path / f"ran-{uuid4().hex}"
+    if is_prefixable:
+        argv = (argv[0], argv[1], f"touch '{marker}' && {argv[2]}")
+    image = testing_modal.image_debian_slim()
+    app = testing_modal.app_create("provisioning-refusal")
+    sandbox = testing_modal.sandbox_create(image=image, app=app, timeout=300, cpu=1.0, memory=1024)
+
+    try:
+        with pytest.raises(FakeSandboxRefusedHostProvisioningError, match="refuses to run host provisioning"):
+            sandbox.exec(*argv)
+    finally:
+        testing_modal.cleanup()
+
+    assert not marker.exists()
+
+
+def test_create_host_through_the_plain_fake_never_provisions_the_test_machine(
+    testing_provider: ModalProviderInstance,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """Driving the real create_host through the unmodified fake stops at the first bring-up command.
+
+    Bring-up would otherwise replace the provider's host dir with a symlink to
+    the sandbox volume mount and go on to re-key the machine's sshd.
+    """
+    host_dir = temp_mngr_ctx.config.default_host_dir
+
+    with pytest.raises(ConcurrencyExceptionGroup) as excinfo:
+        testing_provider.create_host(HostName("never-provisions"))
+
+    assert excinfo.group_contains(FakeSandboxRefusedHostProvisioningError)
+    assert host_dir.is_dir()
+    assert not host_dir.is_symlink()
 
 
 class _ImageRejectingFakeModalInterface(FakeModalInterface):
