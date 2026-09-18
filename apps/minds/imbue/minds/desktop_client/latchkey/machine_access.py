@@ -224,11 +224,20 @@ class MachineAccess(MutableModel):
 def _load_provider_context(concurrency_group: ConcurrencyGroup) -> MngrContext:
     """Load mngr's settings the way the CLI does, so this process can open a workspace's machine.
 
+    Read non-strictly, because the settings are the whole CLI's while the
+    plugins are only the ones this app depends on: the layers include the
+    project settings of whatever checkout the app was launched from, which may
+    configure a backend no minds build ships. Strictly, one such block fails
+    the load, and every workspace loses the machine behind it over a provider
+    this app would never open. Non-strict skips the block with a warning, and
+    drops any settings field this build does not know; a malformed value in a
+    block minds does use still fails the load.
+
     Raises:
         MachineUnreachableError: when the settings cannot be loaded.
     """
     try:
-        return load_config(get_or_create_plugin_manager(), concurrency_group)
+        return load_config(get_or_create_plugin_manager(), concurrency_group, strict=False)
     except (MngrError, OSError) as e:
         raise MachineUnreachableError(
             f"Could not load the mngr settings that name your workspaces' machines: {e}"

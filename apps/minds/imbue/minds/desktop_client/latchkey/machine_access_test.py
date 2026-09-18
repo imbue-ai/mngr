@@ -12,6 +12,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_access import MachineUnreachableError
+from imbue.minds.desktop_client.latchkey.machine_access import _load_provider_context
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.mngr.errors import HostNotFoundError
@@ -117,3 +118,29 @@ def test_a_local_workspace_has_no_machine_to_open(tmp_path: Path) -> None:
     (access.latchkey.plugin_data_dir / "hosts").rename(access.latchkey.plugin_data_dir / "hosts-moved-aside")
 
     assert access.machine_host_for(agent_id) is None
+
+
+def test_a_provider_block_for_a_backend_this_app_lacks_does_not_cost_any_workspace_its_machine(
+    project_config_dir: Path,
+    temp_git_repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cg: ConcurrencyGroup,
+    log_warnings: list[str],
+) -> None:
+    """The settings read here are the whole CLI's, and may name a backend this app has no plugin for.
+
+    Refusing such a block would take out the machine behind every workspace,
+    over a provider this app would never open.
+    """
+    (project_config_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[providers.no_such_cloud]\nbackend = "no_such_cloud"\n\n'
+        '[providers.here]\nbackend = "local"\n'
+    )
+    monkeypatch.chdir(temp_git_repo)
+
+    mngr_ctx = _load_provider_context(cg)
+
+    assert ProviderInstanceName("here") in mngr_ctx.config.providers
+    assert ProviderInstanceName("no_such_cloud") not in mngr_ctx.config.providers
+    assert any("no_such_cloud" in message for message in log_warnings), log_warnings

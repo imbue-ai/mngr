@@ -69,9 +69,8 @@ import pytest
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.latchkey.machine_access import _load_provider_context
 from imbue.mngr.api.providers import get_provider_instance
-from imbue.mngr.config.loader import load_config
-from imbue.mngr.main import get_or_create_plugin_manager
 from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
@@ -536,7 +535,7 @@ def _machine_of(
         # from a clean registry so the singleton's own load includes it.
         reset_backend_registry()
         reset_plugin_manager()
-        mngr_ctx = load_config(get_or_create_plugin_manager(), concurrency_group)
+        mngr_ctx = _load_provider_context(concurrency_group)
         provider = get_provider_instance(ProviderInstanceName("docker"), mngr_ctx)
         with provider.outer_host_for(HostId(host_id)) as outer:
             assert outer is not None and not outer.is_local, "the fake VPS did not resolve as a remote outer host"
