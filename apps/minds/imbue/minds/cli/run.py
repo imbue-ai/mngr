@@ -123,6 +123,7 @@ from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.device_metadata import build_device_metadata_env
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 
@@ -320,6 +321,10 @@ def run(
     # containers/VMs keep working across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
+    # Read-or-create eagerly so this install always has a real identity from
+    # its very first session (a failure aborts startup).
+    device_id = get_or_create_device_id(data_directory, mngr_host_dir)
+
     # Build the supervisor once and keep the handle: the startup restart runs on
     # the background thread below, and the same instance is held in the app state
     # so the provider-change request handlers can ``bounce()`` it mid-session
@@ -340,6 +345,9 @@ def run(
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,
+            # A host's permissions file is shared with the user's other computers, so a rule
+            # that should hold on this one only has to be able to gate on its device id.
+            **build_device_metadata_env(str(device_id)),
             # Publish the daemon's (mostly static) Sentry infrastructure config + the path of the
             # live consent file, while reading only its own MNGR_LATCHKEY_* vars. The toggleable
             # consent lives in the file (written just below and on every change), not in the env,
@@ -496,9 +504,6 @@ def run(
         connector_url=client_env_config.connector_url,
         accounts_base_url=client_env_config.accounts_base_url,
     )
-    # Read-or-create eagerly so this install always has a real identity from
-    # its very first session (a failure aborts startup).
-    device_id = get_or_create_device_id(data_directory, mngr_host_dir)
     workspace_record_store = WorkspaceRecordStore(
         paths=paths,
         mngr_host_dir=mngr_host_dir,

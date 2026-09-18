@@ -428,6 +428,19 @@ Minds' own gateway-self scopes (`latchkey-self`, `minds-api-proxy-*`) stay
 account-agnostic: latchkey attaches no account metadata to requests an
 extension serves, so an account-gated schema would never match them.
 
+### Device id metadata
+
+A host's permissions file is shared by every computer the user connects to that
+machine from, so a rule that should hold on one computer only needs something
+to gate on. An embedder can start the desktop gateway with
+`DETENT_CUSTOM_METADATA={"deviceId": "<id>"}` in its environment
+(`imbue.mngr_latchkey.device_metadata.build_device_metadata_env` builds the
+value; minds passes it through the forward supervisor's `extra_env`). Detent
+reads that variable as `customMetadata` whenever latchkey supplies none of its
+own. Latchkey supplies `{"account": ...}` for every request it injects
+credentials into, so `customMetadata.deviceId` is visible only to checks on
+requests that carry their own credentials.
+
 ## Data-format changes
 
 The plugin has no data-format migration mechanism. A permissions file is
