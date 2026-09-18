@@ -1,0 +1,7 @@
+# Entering the master password no longer reports success when it unlocked nothing (MIND-249)
+
+`POST /_chrome/sync-unlock` -- the request the landing page's "Enter your master password" banner sends -- reported `{"ok": true}` even when it had unlocked nothing at all. It only tries accounts that read as locked on this device, and an account whose encrypted material (a secret-carrying workspace record, or a synced cloud connection) has not been pulled down yet does not read as locked. With nothing to try, the route fell through to the success response: the banner cleared, the typed password was discarded, no data-encryption key was installed, and the account's synced secrets stayed unreachable with nothing prompting a retry.
+
+The route now succeeds only when this device actually ends up holding a key: it reports `ok: false` with "No account on this device is waiting to be unlocked yet. Try again in a moment." when the unlock had nothing to act on. Wrong-password, partial-unlock, and already-unlocked outcomes are unchanged, so a re-submitted password on an account that is already open still reports success.
+
+This was also the root cause of a CI flake in the cross-device cloud-connection sync end-to-end test: it posted an unlock before the connection document had reached the second device, was told the unlock succeeded, and then timed out 180 seconds later waiting for a provider block that could never be written without the key.

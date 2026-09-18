@@ -2164,6 +2164,58 @@ def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> No
     assert is_account_unlocked(InstallationPaths(data_dir=tmp_path), "user-1")
 
 
+def test_sync_unlock_refuses_when_the_encrypted_material_has_not_reached_this_device(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    # Another device set the password and synced a secret-carrying workspace.
+    # Deliberately never pulled here: with no local record and no bundle
+    # mirror, this device cannot tell that the account is locked.
+    other_device = InstallationPaths(data_dir=tmp_path / "other-device")
+    bundle = set_master_password_for_account(other_device, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+    remote = ReplicaRecord(
+        host_id="host-remote-1",
+        agent_id=str(AgentId.generate()),
+        display_name="remote-ws",
+        provider_kind="lima",
+        hosting_device_id="device-other",
+        device_label="other-device",
+        encrypted_secrets="b3BhcXVl",
+    )
+    cli.sync_records_by_email["a@b.com"] = {remote.agent_id: remote.to_wire(1)}
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.post("/_chrome/sync-unlock", json={"password": "hunter2"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is False, body
+    assert body["unlocked"] == []
+    assert "waiting to be unlocked" in body["error"]
+    assert not is_account_unlocked(InstallationPaths(data_dir=tmp_path), "user-1")
+
+
+def test_sync_unlock_reports_success_for_an_account_that_is_already_unlocked(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    paths = InstallationPaths(data_dir=tmp_path)
+    bundle = set_master_password_for_account(paths, "user-1", SecretStr("hunter2"))
+    assert bundle is not None
+    cli.sync_bundle_push("a@b.com", bundle)
+
+    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
+    _authenticate_client(client, auth_store)
+
+    response = client.post("/_chrome/sync-unlock", json={"password": "hunter2"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True, body
+    assert body["unlocked"] == []
+    assert is_account_unlocked(paths, "user-1")
+
+
 def test_sync_unlock_requires_auth(tmp_path: Path) -> None:
     client, _ = _create_test_client_with_stores(tmp_path)
     assert client.post("/_chrome/sync-unlock", json={"password": "x"}).status_code == 403

@@ -448,6 +448,11 @@ def _handle_sync_unlock() -> Response:
     key bundle (fetched from the connector when no local mirror exists);
     whichever accounts it unwraps get their DEK installed. Reports which
     accounts remain locked -- they may need an older password.
+
+    Succeeds only when this device ends up holding a key. An account whose
+    encrypted material has not reached this device yet does not read as
+    locked, so the loop below has nothing to try -- an unlock that acted on
+    nothing is reported as a failure, not a success.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")
@@ -486,22 +491,23 @@ def _handle_sync_unlock() -> Response:
         scheduler.kick()
     if is_ssh_material_written:
         bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
-    if not unlocked and still_locked:
+    is_any_account_unlocked = any(
+        is_account_unlocked(record_store.paths, str(account.user_id)) for account in accounts
+    )
+    if unlocked or (not still_locked and is_any_account_unlocked):
         return make_response(
             status_code=200,
-            content=json.dumps(
-                {
-                    "ok": False,
-                    "unlocked": unlocked,
-                    "still_locked": still_locked,
-                    "error": "That password did not unlock any account.",
-                }
-            ),
+            content=json.dumps({"ok": True, "unlocked": unlocked, "still_locked": still_locked}),
             media_type="application/json",
         )
+    error = (
+        "That password did not unlock any account."
+        if still_locked
+        else "No account on this device is waiting to be unlocked yet. Try again in a moment."
+    )
     return make_response(
         status_code=200,
-        content=json.dumps({"ok": True, "unlocked": unlocked, "still_locked": still_locked}),
+        content=json.dumps({"ok": False, "unlocked": unlocked, "still_locked": still_locked, "error": error}),
         media_type="application/json",
     )
 
