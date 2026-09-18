@@ -1,4 +1,5 @@
 import contextlib
+import signal
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -158,6 +159,21 @@ def test_concurrency_group_supports_running_running_local_process_in_background(
         process = cg.run_process_in_background(INSTANT_SUCCESS_COMMAND)
         process.wait()
     assert process.poll() == 0
+
+
+def test_concurrency_group_kills_a_background_process_that_outlives_its_shutdown_grace() -> None:
+    seen_lines: list[str] = []
+    with ConcurrencyGroup(name="outer") as cg:
+        # SIGTERM is ignored across the exec, so only the SIGKILL that follows the grace can stop it.
+        process = cg.run_process_in_background(
+            ["bash", "-c", "trap '' TERM; echo trap-installed; exec sleep 58213"],
+            is_checked_by_group=False,
+            on_output=lambda line, is_stdout: seen_lines.append(line),
+            shutdown_timeout_sec=0.2,
+        )
+        assert poll_until(lambda: len(seen_lines) > 0)
+        process.terminate(force_kill_seconds=20.0)
+    assert process.returncode == -signal.SIGKILL
 
 
 def test_concurrency_group_raises_timeout_when_not_finished_in_time() -> None:

@@ -449,6 +449,8 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         # that must not appear in ``argv``, such as a secret. Must be small; see
         # ``run_local_command_modern_version``.
         stdin_bytes: bytes | None = None,
+        # How long the process gets to exit after SIGTERM before it is sent SIGKILL.
+        shutdown_timeout_sec: float = 30.0,
     ) -> RunningProcess:
         """
         Run a process in the background, returning immediately.
@@ -464,6 +466,11 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         (a permanent stream would otherwise grow the parent's memory without bound). `read_stdout()`/`read_stderr()`
         raise `OutputNotAccumulatedError` in that mode, and any error raised for the process (including by
         `is_checked_by_group`) reports a placeholder in place of its output.
+
+        Pass a short `shutdown_timeout_sec` for a process with nothing worth saving on exit (a browser on a
+        throwaway profile, say), so that stopping it is quick even when it is slow to honour SIGTERM. A caller
+        that stops the process with `.terminate()` must give that call a `force_kill_seconds` longer than this
+        grace, or it raises while the shutdown it is waiting on is still within its budget.
         """
 
         def process_factory():
@@ -480,6 +487,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 name=name,
                 is_output_accumulated=is_output_accumulated,
                 stdin_bytes=stdin_bytes,
+                shutdown_timeout_sec=shutdown_timeout_sec,
             )
 
         return self.start_background_process_from_factory(process_factory)

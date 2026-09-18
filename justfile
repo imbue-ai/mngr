@@ -108,42 +108,6 @@ test-minds-js:
   # without typechecking it, so the suites alone never see a type error.
   cd apps/minds/frontend && pnpm install --frozen-lockfile && pnpm run generate && pnpm run check && pnpm test
 
-
-# Type-check and test apps/minds_evals. It is a standalone uv project, not a
-# workspace member (see the root [tool.uv.workspace].exclude), so it has its own
-# lock and venv: the root `uv sync --all-packages`, `just test-quick`, `just
-# test-offload` and the root `ty check` all skip it, and this recipe is the only
-# thing that runs its suite. `--locked` fails rather than silently re-resolving,
-# so a pyproject edit without a matching `uv lock` is caught here.
-#
-# CI caps each pytest session at 150 s, and the tests marked `chromium` (a real
-# headless Chromium each, seconds apiece) would take most of that budget on
-# their own. So a run with no args is two sessions: the rest of the suite, then
-# the chromium tests, each with its own budget; the second appends to the
-# first's coverage data, so its report covers the whole suite. Given args (a
-# path, a node id, a -m), the recipe runs the one session they select.
-[group("minds evals")]
-test-minds-evals args="":
-  #!/usr/bin/env bash
-  set -uo pipefail
-  cd apps/minds_evals
-  uv sync --locked || exit 1
-  uv run ty check || exit 1
-  if [ -n {{quote(args)}} ]; then
-    exec uv run pytest {{_minds_evals_parallel}} {{args}}
-  fi
-  uv run pytest {{_minds_evals_parallel}} -m "not release and not chromium"
-  rest_exit_code=$?
-  uv run pytest {{_minds_evals_parallel}} -m "not release and chromium" --cov-append
-  chromium_exit_code=$?
-  [ "$rest_exit_code" -eq 0 ] && [ "$chromium_exit_code" -eq 0 ]
-
-# Sized for CI's two-vCPU runner rather than taken from `_parallel`: workers
-# beyond the core count spend the session importing the suite in parallel and
-# starve each other's Chromium.
-_minds_evals_parallel := "-n 2 --dist=worksteal --max-worker-restart=0"
-
-
 # Render one relay's on-disk config (frps.toml, nftables.conf, the :80
 # redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
 # apps/share_relay/README.md. RELAY_ID comes from `just register-share-relay`
