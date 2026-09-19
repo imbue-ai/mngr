@@ -275,6 +275,13 @@ class ImbueCloudRecordFormatTooNewError(ImbueCloudSyncError):
 # can recognize the refusal in stderr, the way it matches mngr's
 # HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE.
 WORKSPACE_HELD_MESSAGE = "This machine is undergoing maintenance and will be back shortly."
+# The connector's refusal of any start of a retired machine (``code:
+# workspace_retired``). Leads the message for the same stderr-matching reason
+# as WORKSPACE_HELD_MESSAGE.
+WORKSPACE_RETIRED_MESSAGE = (
+    "This machine has been retired and cannot be started again. "
+    "Download its data from its backups, or contact support if it has none."
+)
 
 
 class ImbueCloudWorkspaceHeldError(ImbueCloudError):
@@ -284,12 +291,39 @@ class ImbueCloudWorkspaceHeldError(ImbueCloudError):
     callers show the message rather than retrying.
     """
 
+    # The sentence the message leads with; a subclass swaps in its own verdict.
+    lead_sentence: str = WORKSPACE_HELD_MESSAGE
+
     def __init__(self, message: str) -> None:
         detail = message.strip()
-        if not detail or detail.startswith(WORKSPACE_HELD_MESSAGE):
-            super().__init__(detail or WORKSPACE_HELD_MESSAGE)
+        if not detail or detail.startswith(self.lead_sentence):
+            super().__init__(detail or self.lead_sentence)
         else:
-            super().__init__(f"{WORKSPACE_HELD_MESSAGE} ({detail})")
+            super().__init__(f"{self.lead_sentence} ({detail})")
+
+
+class ImbueCloudWorkspaceRetiredError(ImbueCloudWorkspaceHeldError):
+    """Raised when a start targets a retired machine: one that never runs again (its data is archived).
+
+    A hold like its parent, so every caller that stands down for a held
+    machine stands down for a retired one, with the retired sentence.
+    """
+
+    lead_sentence: str = WORKSPACE_RETIRED_MESSAGE
+
+
+# The hold sentences a refused start's stderr can carry, for embedders that run
+# ``mngr start`` as a subprocess: the retired sentence is
+# checked first since it is the more specific verdict.
+WORKSPACE_HOLD_MESSAGES: tuple[str, ...] = (WORKSPACE_RETIRED_MESSAGE, WORKSPACE_HELD_MESSAGE)
+
+
+def workspace_hold_message_in(text: str) -> str | None:
+    """The hold sentence ``text`` carries (a refused start's stderr), or None when it carries none."""
+    for message in WORKSPACE_HOLD_MESSAGES:
+        if message in text:
+            return message
+    return None
 
 
 class UnrecognizedWorkspaceStatusError(ImbueCloudError):

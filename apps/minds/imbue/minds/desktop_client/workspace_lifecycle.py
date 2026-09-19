@@ -27,7 +27,7 @@ from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
-from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 
 # A host stop/start shells out to ``mngr`` and blocks until the host transition
 # resolves before returning the outcome. A timeout here is reported to the UI as
@@ -199,18 +199,19 @@ def perform_mind_host_action(
         _restore_unattended_recovery_after_failed_stop(health_tracker, action, workspace_agent_id)
         return MindHostActionOutcome(is_successful=False, failure_reason=f"could not run mngr: {exc}")
     if finished.returncode != 0:
-        if action is MindHostAction.START and WORKSPACE_HELD_MESSAGE in finished.stderr:
-            # An operator holds the machine's stop (a migration, a suspension):
-            # not a failure of the machine or of this device, so no warning,
-            # and a stop someone asked for, so the unattended dispatch must not
-            # undo it.
-            logger.info("Host start for {} refused: {}", workspace_agent_id, WORKSPACE_HELD_MESSAGE)
+        hold_message = workspace_hold_message_in(finished.stderr) if action is MindHostAction.START else None
+        if hold_message is not None:
+            # An operator holds the machine's stop (a migration, a suspension,
+            # a retirement): not a failure of the machine or of this device,
+            # so no warning, and a stop someone asked for, so the unattended
+            # dispatch must not undo it.
+            logger.info("Host start for {} refused: {}", workspace_agent_id, hold_message)
             if host_id is not None:
                 backend_resolver.clear_host_state_override(host_id)
                 backend_resolver.clear_host_lifecycle_transition(host_id)
             if health_tracker is not None:
                 health_tracker.suppress_unattended_recovery(workspace_agent_id)
-            return MindHostActionOutcome(is_successful=False, failure_reason=WORKSPACE_HELD_MESSAGE)
+            return MindHostActionOutcome(is_successful=False, failure_reason=hold_message)
         # mngr's own diagnosis, reordered to lead with its verdict; the warnings
         # it emits first can name unrelated hosts and read as this host being
         # unreachable. They are kept -- a caller on another host has no other

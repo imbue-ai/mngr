@@ -37,6 +37,7 @@ def test_wire_enum_coerces_unrecognized_value_to_unknown() -> None:
 
 def test_workspace_stop_kind_coerces_and_defaults_to_absent() -> None:
     assert WorkspaceStopKind("maintenance") is WorkspaceStopKind.MAINTENANCE
+    assert WorkspaceStopKind("retired") is WorkspaceStopKind.RETIRED
     assert WorkspaceStopKind("quarantine") is WorkspaceStopKind.UNKNOWN
     entry = validate_wire(
         WorkspaceInfo,

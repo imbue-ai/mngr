@@ -105,8 +105,8 @@ class UiWorkspaceEntry(FrozenModel):
     stop_kind: str = Field(
         default="",
         description=(
-            "Why a cloud machine's current stop happened: owner / maintenance / idle / suspension, 'unknown' for a "
-            "kind this build does not recognize, empty while running or when not known"
+            "Why a cloud machine's current stop happened: owner / maintenance / idle / suspension / retired, "
+            "'unknown' for a kind this build does not recognize, empty while running or when not known"
         ),
     )
     account: str = Field(default="", description="Owning account email, when known")

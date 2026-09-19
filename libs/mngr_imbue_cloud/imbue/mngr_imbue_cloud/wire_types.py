@@ -62,15 +62,18 @@ class WorkspaceStopKind(WireEnum):
     is an operator hold (the gen-1 -> gen-2 migration) and ``suspension`` the
     account suspend fan-out: the connector refuses owner starts of both, and the
     machine comes back through an operator start (or, for a suspension, becomes
-    ``idle`` at unsuspend). ``unknown`` is never sent: it is the client-side
-    coercion of a kind this client version does not recognize, treated as not
-    the owner's to start.
+    ``idle`` at unsuspend). ``retired`` is a workspace that can never run again
+    (its version cannot run on the gen-2 fleet; its data was archived for its
+    owner): the connector refuses every start of it, the operator's included.
+    ``unknown`` is never sent: it is the client-side coercion of a kind this
+    client version does not recognize, treated as not the owner's to start.
     """
 
     OWNER = auto()
     MAINTENANCE = auto()
     IDLE = auto()
     SUSPENSION = auto()
+    RETIRED = auto()
     UNKNOWN = auto()
 
 

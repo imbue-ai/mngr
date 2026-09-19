@@ -102,6 +102,7 @@ from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_RETIRED_MESSAGE
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 # Long enough that only a genuinely broken run reaches it. The wait ends the
@@ -778,8 +779,15 @@ def test_run_host_recovery_sequence_skips_stop_for_start_only_dispatch(tmp_path:
     "machine-lifecycle.held-start-refused-plainly",
     partial="witnesses the recovery sequence's plain outcome and the withheld failure report; the shown sentence is witnessed by the SPA's own suite",
 )
-def test_run_host_recovery_sequence_ends_plainly_when_the_connector_holds_the_machine(tmp_path: Path) -> None:
-    """A start the connector refuses as an operator hold is neither the machine's nor this device's failure.
+@pytest.mark.witnesses(
+    "machine-lifecycle.retired-machine",
+    partial="witnesses the recovery sequence's plain outcome and the withheld failure report for the retired sentence; the badge, the withheld Start and the band are witnessed by the SPA's own suite",
+)
+@pytest.mark.parametrize("hold_sentence", [WORKSPACE_HELD_MESSAGE, WORKSPACE_RETIRED_MESSAGE])
+def test_run_host_recovery_sequence_ends_plainly_when_the_connector_holds_the_machine(
+    tmp_path: Path, hold_sentence: str
+) -> None:
+    """A start the connector refuses as an operator hold (or a retirement) is neither the machine's nor this device's failure.
 
     The episode ends with the connector's own sentence in the operation log,
     the operation declined with that sentence rather than done (nothing
@@ -793,7 +801,7 @@ def test_run_host_recovery_sequence_ends_plainly_when_the_connector_holds_the_ma
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
     mngr_binary = _write_mngr_stub(
         tmp_path / "held_mngr",
-        f"  start) echo 'ERROR: host x failed to start: {WORKSPACE_HELD_MESSAGE}' >&2; exit 1 ;;\n",
+        f"  start) echo 'ERROR: host x failed to start: {hold_sentence}' >&2; exit 1 ;;\n",
     )
     registry = _started_registry(workspace_agent)
     with capture_loguru(level="WARNING") as log_output, ConcurrencyGroup(name="test-held") as cg:
@@ -813,7 +821,7 @@ def test_run_host_recovery_sequence_ends_plainly_when_the_connector_holds_the_ma
     record = registry.get(workspace_agent)
     assert record is not None and record.status == WorkspaceOperationStatus.DECLINED
     assert record.error is None
-    assert record.warning == WORKSPACE_HELD_MESSAGE
+    assert record.warning == hold_sentence
     # Back to STUCK, not left RECOVERING: the probe loop stands off a RECOVERING
     # agent, so only a probe target can be noticed answering again after the
     # operator's start.

@@ -11,7 +11,7 @@
 
 import type { DiscoveryHealth, EnvironmentCondition, RecoveryKind, WorkspaceHealth } from "../../models/health";
 import type { StandingUpdateNotice, UpdateRunOutcome, UpdateRunPhase } from "../../models/updates";
-import { MAINTENANCE_MESSAGE, isMaintenanceHold } from "../pages/landing-controls";
+import { MAINTENANCE_MESSAGE, RETIRED_MESSAGE, isMaintenanceHold, isRetiredHold } from "../pages/landing-controls";
 
 /** What an action asks the shell to do. The views bind these; the decision
  * itself stays free of routing and IPC. */
@@ -32,6 +32,7 @@ export interface NoticePayload {
     | "workspace-recovering"
     | "workspace-restart-failed"
     | "workspace-maintenance"
+    | "workspace-retired"
     | "workspace-update-preparing"
     | "workspace-update-applying"
     | "workspace-update-waiting"
@@ -178,6 +179,9 @@ export function noticeBandFor(
   const isStoppedOnPurpose = liveness === "STOPPED" || liveness === "STOPPING" || liveness === "STARTING";
   if (isMaintenanceHold(liveness, stopKind)) {
     return { key: "workspace-maintenance", variant: "info", message: MAINTENANCE_MESSAGE, action: null };
+  }
+  if (isRetiredHold(liveness, stopKind)) {
+    return { key: "workspace-retired", variant: "info", message: RETIRED_MESSAGE, action: null };
   }
   const workspaceHealth: WorkspaceHealth = isStoppedOnPurpose ? "healthy" : reportedWorkspaceHealth;
   // This device's own condition outranks the backend's for the same reason

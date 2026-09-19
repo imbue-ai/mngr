@@ -16,7 +16,7 @@ import {
   workspacesMessage,
   type AnyVnode,
 } from "../../testing";
-import { MAINTENANCE_MESSAGE } from "./landing-controls";
+import { MAINTENANCE_MESSAGE, RETIRED_MESSAGE } from "./landing-controls";
 
 const RECOVERY_ROUTE =
   "/agents/agent-aa11/recovery?return_to=%2Fgoto%2Fhost-bb22%2F&intent=start";
@@ -308,8 +308,9 @@ async function initPageOn(
     intent,
     return_to: RETURN_TO,
   };
-  vi.spyOn(m.route, "param").mockImplementation(((key: string) =>
-    params[key]) as typeof m.route.param);
+  vi.spyOn(m.route, "param").mockImplementation(
+    ((key: string) => params[key]) as typeof m.route.param,
+  );
   vi.spyOn(RecoveryModel.prototype, "load").mockResolvedValue(undefined);
   const dispatch = vi
     .spyOn(RecoveryModel.prototype, "dispatchRecovery")
@@ -327,6 +328,16 @@ describe("recovery page click-through on a held machine", () => {
     const { state, dispatch } = await initPageOn("start", "maintenance");
 
     expect(state.heldMessage).toBe(MAINTENANCE_MESSAGE);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("dispatches no start for a retired machine, and says it never starts again", async () => {
+    // The retired verdict is final, so the page answers with the retired
+    // sentence (the one the badge, the band and the connector use), not the
+    // maintenance one that promises the machine back shortly.
+    const { state, dispatch } = await initPageOn("start", "retired");
+
+    expect(state.heldMessage).toBe(RETIRED_MESSAGE);
     expect(dispatch).not.toHaveBeenCalled();
   });
 

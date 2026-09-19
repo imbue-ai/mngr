@@ -10,7 +10,8 @@ def is_owner_startable(stop_kind: WorkspaceStopKind | None) -> bool:
 
     ``None`` (running, a legacy stop, or an old connector) and ``owner`` /
     ``idle`` are the owner's to end; ``maintenance`` and ``suspension`` are
-    operator holds, and a kind this client does not recognize is treated as a
-    hold (shown but not actionable, per the remote-compatibility invariants).
+    operator holds, ``retired`` is final (nobody starts it), and a kind this
+    client does not recognize is treated as a hold (shown but not actionable,
+    per the remote-compatibility invariants).
     """
     return stop_kind in (None, WorkspaceStopKind.OWNER, WorkspaceStopKind.IDLE)

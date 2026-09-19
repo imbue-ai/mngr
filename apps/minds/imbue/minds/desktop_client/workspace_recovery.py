@@ -97,7 +97,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
-from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 # Stand-in provider name for the "Can't connect to ..." headline, for a provider
@@ -1462,8 +1462,10 @@ def run_host_recovery_sequence(
             timeout_seconds=HOST_START_TIMEOUT_SECONDS,
         )
     except MngrCommandError as exc:
-        if WORKSPACE_HELD_MESSAGE in str(exc):
-            # An operator holds this machine's stop (a migration, a suspension):
+        hold_message = workspace_hold_message_in(str(exc))
+        if hold_message is not None:
+            # An operator holds this machine's stop (a migration, a suspension,
+            # a retirement):
             # not a failure of the machine or of this device, and nothing a retry
             # here can change -- and not a success either, since nothing started
             # (a DONE operation reads as the machine answering to the recovery
@@ -1472,9 +1474,9 @@ def run_host_recovery_sequence(
             # agent and this worker was the readiness probe that would have
             # settled it; as STUCK, the loop's first 200 after the operator's
             # start makes it HEALTHY and clears the mark.
-            logger.info("Host recovery of {} ended: {}", workspace_agent_id, WORKSPACE_HELD_MESSAGE)
-            registry.append_log(workspace_agent_id, WORKSPACE_HELD_MESSAGE)
-            registry.decline(workspace_agent_id, WORKSPACE_HELD_MESSAGE)
+            logger.info("Host recovery of {} ended: {}", workspace_agent_id, hold_message)
+            registry.append_log(workspace_agent_id, hold_message)
+            registry.decline(workspace_agent_id, hold_message)
             tracker.suppress_unattended_recovery(workspace_agent_id)
             tracker.mark_stuck(workspace_agent_id)
             return

@@ -130,9 +130,11 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import RepoIdentityError
 from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_RETIRED_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartTimeoutError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
@@ -440,9 +442,10 @@ def _advance_workspace_start(
     still-``stopping`` host is waited out first (the connector refuses
     starts mid-stop; the stop lands on ``stopped`` once its upload verifies).
     A stop that is not the owner's to end (``maintenance``, ``suspension``)
-    is refused at once with ``ImbueCloudWorkspaceHeldError``, and a kind this
-    client does not recognize with the unrecognized-state error, without
-    waiting or requesting.
+    is refused at once with ``ImbueCloudWorkspaceHeldError``, a retired
+    machine with ``ImbueCloudWorkspaceRetiredError``, and a kind this client
+    does not recognize with the unrecognized-state error, without waiting or
+    requesting.
     """
     current = client.get_workspace(token_provider(), host_db_id)
     state.last_observed_status = current.status
@@ -457,6 +460,8 @@ def _advance_workspace_start(
     ):
         if current.stop_kind is WorkspaceStopKind.UNKNOWN:
             return _unrecognized_workspace_status_error(host_id)
+        if current.stop_kind is WorkspaceStopKind.RETIRED:
+            return ImbueCloudWorkspaceRetiredError(WORKSPACE_RETIRED_MESSAGE)
         return ImbueCloudWorkspaceHeldError(WORKSPACE_HELD_MESSAGE)
     match current.status:
         case WorkspaceStatus.RUNNING:
@@ -518,9 +523,7 @@ class ImbueCloudProvider(BaseProviderInstance):
     # start/restart paths discard this entry AND invalidate that stamp.
     _adoption_attempted_host_ids: set[str] = PrivateAttr(default_factory=set)
 
-    # ------------------------------------------------------------------
     # Capability flags
-    # ------------------------------------------------------------------
 
     @property
     def supports_snapshots(self) -> bool:
@@ -545,9 +548,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         self._is_workspaces_cache_loaded = False
         self._listing_raw_cache.clear()
 
-    # ------------------------------------------------------------------
     # Paths
-    # ------------------------------------------------------------------
 
     def _provider_data_dir(self) -> Path:
         return get_provider_data_dir(self.mngr_ctx.profile_dir, str(self.name))
@@ -573,7 +574,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         """The other known in-container host_dir layouts, tried after the configured one."""
         return host_dir_fallbacks(self.host_dir)
 
-    # ------------------------------------------------------------------
     # Sticky host_dir
     #
     # A container is baked with one host_dir layout and keeps it for life, but
@@ -586,7 +586,6 @@ class ImbueCloudProvider(BaseProviderInstance):
     # of its one outer-SSH pass, so record it per host and hand it to the host
     # object as `host_dir_override` (the same per-host mechanism the docker and
     # lima providers feed from their persisted host records).
-    # ------------------------------------------------------------------
 
     def _persist_resolved_host_dir(self, host_id: HostId, host_dir: str) -> None:
         """Record the in-container host_dir a listing pass resolved for this host.
@@ -615,7 +614,6 @@ class ImbueCloudProvider(BaseProviderInstance):
             return None
         return Path(recorded) if recorded else None
 
-    # ------------------------------------------------------------------
     # Sticky agent identity
     #
     # Discovery persists the identity (name + certified_data) of the agents
@@ -628,7 +626,6 @@ class ImbueCloudProvider(BaseProviderInstance):
     # vanishes from the sidebar and 404s on restart. Persisting to disk (not
     # just in-memory) lets the identity survive an app/forward relaunch into a
     # flaky-network window, which is the production failure mode this fixes.
-    # ------------------------------------------------------------------
 
     def _persist_last_known_agents(self, host_id: HostId, agent_refs: Sequence[DiscoveredAgent]) -> None:
         """Persist the identity of the agents seen in a successful listing pass.
@@ -679,9 +676,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
         return agents
 
-    # ------------------------------------------------------------------
     # Auth helper
-    # ------------------------------------------------------------------
 
     def _resolve_account(self, override: str | None = None) -> ImbueCloudAccount | None:
         """Pick the effective account for this provider operation.
@@ -736,9 +731,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             "or pin the account in the provider config."
         )
 
-    # ------------------------------------------------------------------
     # Lease bookkeeping
-    # ------------------------------------------------------------------
 
     def generate_per_host_keypair(self, host_id: HostId) -> tuple[Path, str]:
         """Generate (or load) the SSH keypair used to authenticate to this host.
@@ -748,9 +741,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         return load_or_create_ssh_keypair(self._host_state_dir(host_id), "ssh_key")
 
-    # ------------------------------------------------------------------
     # Discovery
-    # ------------------------------------------------------------------
 
     def _list_workspaces_cached(self) -> list[WorkspaceInfo] | None:
         """List the account's workspaces in every lifecycle state, or None.
@@ -879,7 +870,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         )
         return discovered
 
-    # ------------------------------------------------------------------
     # Listing
     #
     # Discovery is outer-SSH-primary: for each lease we connect to the
@@ -895,7 +885,6 @@ class ImbueCloudProvider(BaseProviderInstance):
     # the underlying error) is reserved for the last-resort case where
     # even the outer SSH is unreachable -- in normal operation we expect
     # outer SSH to be reachable for every leased VPS.
-    # ------------------------------------------------------------------
 
     def discover_hosts_and_agents_within_timeouts(
         self,
@@ -1774,9 +1763,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                 return HostResources(cpu=CpuResources(count=cpus), memory_gb=memory, disk_gb=None, gpu=None)
         return HostResources(cpu=CpuResources(count=1), memory_gb=1.0, disk_gb=None, gpu=None)
 
-    # ------------------------------------------------------------------
     # Lifecycle
-    # ------------------------------------------------------------------
 
     def create_host(
         self,
@@ -2856,9 +2843,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         finally:
             outer.disconnect()
 
-    # ------------------------------------------------------------------
     # Snapshots / volumes / tags / rename: not supported
-    # ------------------------------------------------------------------
 
     def create_snapshot(
         self,
@@ -2940,9 +2925,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         self.reset_caches()
         return self._build_host_object(updated_lease, adopt_pre_baked_agent=False)
 
-    # ------------------------------------------------------------------
     # pyinfra connector lookup
-    # ------------------------------------------------------------------
 
     def get_connector(
         self,

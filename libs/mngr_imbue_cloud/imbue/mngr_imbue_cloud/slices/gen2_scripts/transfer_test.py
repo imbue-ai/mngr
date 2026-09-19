@@ -81,12 +81,23 @@ def test_script_prelude_sources_the_env_and_publishes_status_atomically() -> Non
     assert "trap 'fail \"command failed: $BASH_COMMAND\"' ERR" in prelude
 
 
-def test_detached_launch_clears_the_stale_status_before_backgrounding() -> None:
-    command = build_launch_detached_command(_INSTANCE, "upload.sh")
+def test_detached_launch_fences_the_transfer_to_its_token_before_backgrounding() -> None:
+    command = build_launch_detached_command(_INSTANCE, "upload.sh", "token-a")
     assert_valid_bash(command)
-    assert command.index("rm -f status") < command.index("setsid nohup bash upload.sh")
+    # Kill a transfer another token left running, reset every earlier run's
+    # file, record the token, and only then background the script.
+    kill_at = command.index("kill -TERM")
+    reset_at = command.index("rm -f status status.tmp pid token *.sha *.bytes")
+    token_at = command.index("printf '%s' token-a > token")
+    launch_at = command.index("setsid nohup bash upload.sh")
+    assert kill_at < reset_at < token_at < launch_at
+    # The kill is guarded on the pid belonging to a transfer script under another token.
+    assert '[ "$(cat token 2>/dev/null)" != token-a ]' in command
+    assert 'grep -q -- "bash upload.sh"' in command
     assert f'echo $! > "{transfer_dir(_INSTANCE)}/pid"' in command
-    assert_valid_bash(build_is_transfer_alive_command(_INSTANCE))
+    alive = build_is_transfer_alive_command(_INSTANCE, "token-a")
+    assert_valid_bash(alive)
+    assert f'[ "$(cat "{transfer_dir(_INSTANCE)}/token" 2>/dev/null)" = token-a ]' in alive
     assert build_read_status_command(_INSTANCE).endswith("|| true")
 
 

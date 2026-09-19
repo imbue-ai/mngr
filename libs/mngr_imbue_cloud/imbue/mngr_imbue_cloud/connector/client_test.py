@@ -39,10 +39,13 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_RETIRED_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
+from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
@@ -1211,9 +1214,7 @@ def test_sync_records_auth_error_raises(monkeypatch: pytest.MonkeyPatch) -> None
         client.list_sync_records(SecretStr("bad"))
 
 
-# ---------------------------------------------------------------------------
 # create_litellm_key_rotating_on_exists
-# ---------------------------------------------------------------------------
 
 
 class _RotationScriptedConnectorClient(ImbueCloudConnectorClient):
@@ -1349,9 +1350,7 @@ def test_rotating_create_errors_when_no_listable_key_matches_the_alias() -> None
     assert client.create_call_count == 1
 
 
-# ---------------------------------------------------------------------------
 # Shares (self-hosted relays)
-# ---------------------------------------------------------------------------
 
 _SHARE_HOST_ID = "host-" + "a" * 32
 _SHARE_DOMAIN = _SHARE_HOST_ID + "." + "b" * 32 + ".us1.imbueminds.com"
@@ -1684,9 +1683,7 @@ def test_list_shares_parses_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert items[0].state == "inactive"
 
 
-# ----------------------------------------------------------------------
 # Browser-login support probe + device-token exchange
-# ----------------------------------------------------------------------
 
 
 def _make_transport_client(handler) -> ImbueCloudConnectorClient:
@@ -1902,6 +1899,25 @@ def test_start_workspace_surfaces_an_operator_hold_as_the_typed_error(monkeypatc
     with pytest.raises(ImbueCloudWorkspaceHeldError) as excinfo:
         client.start_workspace(SecretStr("tok"), "00000000-0000-0000-0000-000000000042")
     assert str(excinfo.value) == WORKSPACE_HELD_MESSAGE
+
+
+def test_start_workspace_surfaces_a_retired_workspace_as_the_retired_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            409, json={"detail": {"code": "workspace_retired", "message": WORKSPACE_RETIRED_MESSAGE}}
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    with pytest.raises(ImbueCloudWorkspaceRetiredError) as excinfo:
+        client.start_workspace(SecretStr("tok"), "00000000-0000-0000-0000-000000000042")
+    # A hold for every caller that stands down for one, with its own sentence.
+    assert isinstance(excinfo.value, ImbueCloudWorkspaceHeldError)
+    assert str(excinfo.value) == WORKSPACE_RETIRED_MESSAGE
+    assert str(ImbueCloudWorkspaceRetiredError("")) == WORKSPACE_RETIRED_MESSAGE
+    assert str(ImbueCloudWorkspaceRetiredError("archived")) == f"{WORKSPACE_RETIRED_MESSAGE} (archived)"
+    assert workspace_hold_message_in(f"error: {WORKSPACE_RETIRED_MESSAGE}") == WORKSPACE_RETIRED_MESSAGE
+    assert workspace_hold_message_in(f"error: {WORKSPACE_HELD_MESSAGE}") == WORKSPACE_HELD_MESSAGE
+    assert workspace_hold_message_in("error: no capacity") is None
 
 
 def test_admin_start_reports_a_parked_rows_hold_as_a_plain_connector_refusal(monkeypatch: pytest.MonkeyPatch) -> None:

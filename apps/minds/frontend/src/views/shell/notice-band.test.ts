@@ -415,6 +415,21 @@ describe("noticeBandFor, a machine stopped on purpose", () => {
     expect(noticeBandFor("stuck", "healthy", true, { liveness: "STARTING", stopKind: "maintenance" })).toBeNull();
   });
 
+  it("says a retired machine never starts again and points at its backups", () => {
+    const retired = noticeBandFor("stuck", "healthy", true, { liveness: "STOPPED", stopKind: "retired" });
+    expect(retired?.key).toBe("workspace-retired");
+    expect(retired?.variant).toBe("info");
+    expect(retired?.message).toContain("cannot be started again");
+    expect(retired?.message).toContain("backups");
+    expect(retired?.action).toBeNull();
+    expect(noticeBandFor("stuck", "healthy", true, { liveness: "STOPPING", stopKind: "retired" })?.key).toBe(
+      "workspace-retired",
+    );
+    expect(noticeBandFor("stuck", "blocked", true, { liveness: "STOPPED", stopKind: "retired" })?.key).toBe(
+      "discovery-blocked",
+    );
+  });
+
   it("keeps a device block off the user's own restart through the connector's states", () => {
     // The bounce runs STOPPING -> STOPPED -> STARTING; a device block must not
     // displace a recovery it explains nothing about, so no band is raised over

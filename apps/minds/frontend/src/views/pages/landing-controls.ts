@@ -30,19 +30,34 @@ export function isOwnerStartableStopKind(stopKind: string): boolean {
  * refused start with the same words, so the two never disagree. */
 export const MAINTENANCE_MESSAGE = "This machine is undergoing maintenance and will be back shortly.";
 
+/** The sentence a retired machine's surfaces show: it never runs again, and
+ * its data lives in its backups (or in an archive support hands out). The
+ * connector answers a refused start with the same words. */
+export const RETIRED_MESSAGE =
+  "This machine has been retired and cannot be started again. " +
+  "Download its data from its backups, or contact support if it has none.";
+
 /** What the liveness badge says: the lifecycle label, except that a machine an
  * operator is holding says so instead of "Stopped" (the badge is the one
  * place the row explains why Start is missing). */
 export function livenessBadgeLabelFor(liveness: string, stopKind: string): string {
   if (isMaintenanceHold(liveness, stopKind)) return "Maintenance";
+  if (isRetiredHold(liveness, stopKind)) return "Retired";
   return MIND_LIVENESS_LABELS[liveness] ?? "Status unknown";
 }
 
 /** Whether a machine is stopped, or on its way there, under an operator's
- * maintenance hold: the one hold the badge and the notice band name (the other
- * holds read as a plain "Stopped"). */
+ * maintenance hold: the badge and the notice band name it (the suspension
+ * hold reads as a plain "Stopped"). */
 export function isMaintenanceHold(liveness: string, stopKind: string): boolean {
   return stopKind === "maintenance" && (liveness === "STOPPED" || liveness === "STOPPING");
+}
+
+/** Whether a machine is stopped, or on its way there, as a retired one: the
+ * badge and the notice band name it too, since the user's next step (the
+ * backups) differs from waiting out a maintenance hold. */
+export function isRetiredHold(liveness: string, stopKind: string): boolean {
+  return stopKind === "retired" && (liveness === "STOPPED" || liveness === "STOPPING");
 }
 
 /** Whether the app has any current reading of a machine's state at all. */

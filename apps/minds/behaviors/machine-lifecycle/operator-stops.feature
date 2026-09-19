@@ -1,5 +1,5 @@
 Feature: Stops the owner did not ask for
-  A remote machine can be stopped by the owner from another device, by an operator holding it for maintenance, by an operator freeing capacity, or by the account's suspension.
+  A remote machine can be stopped by the owner from another device, by an operator holding it for maintenance, by an operator freeing capacity, by the account's suspension, or by an operator retiring it for good.
   The app tells a held machine from one the owner may start, and never treats a stop someone asked for as a machine that wedged.
 
   @held-machine-maintenance
@@ -9,6 +9,16 @@ Feature: Stops the owner did not ask for
     Then its badge reads "Maintenance" instead of "Stopped"
     And no Start control is offered for it
     And opening it shows "This machine is undergoing maintenance and will be back shortly." over the machine
+
+  @retired-machine
+  Scenario: A retired machine says it never starts again and points at its backups
+    A retirement is final: the machine's data was archived for its owner and nobody, the owner included, starts it again.
+    Given a remote machine whose stop kind is retired
+    When the machines list shows it
+    Then its badge reads "Retired" instead of "Stopped"
+    And no Start control is offered for it
+    And opening it shows "This machine has been retired and cannot be started again. Download its data from its backups, or contact support if it has none." over the machine
+    And a start of it the connector refuses shows that same sentence and is not reported as a failed recovery
 
   @owner-startable-idle
   Scenario: A machine stopped to free capacity is the owner's to start

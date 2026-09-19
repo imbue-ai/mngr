@@ -31,7 +31,11 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { PageContainer } from "../components/Layout";
 import { Notice } from "../components/Notice";
-import { MAINTENANCE_MESSAGE, isOwnerStartableStopKind } from "./landing-controls";
+import {
+  MAINTENANCE_MESSAGE,
+  RETIRED_MESSAGE,
+  isOwnerStartableStopKind,
+} from "./landing-controls";
 import { Spinner } from "../components/Spinner";
 import { RecoveryPanel } from "../recovery/RecoveryCard";
 import { browserLifecycleDeps, RecoveryModel } from "../../models/backups";
@@ -73,7 +77,9 @@ function isMachineAnswering(model: RecoveryModel): boolean {
 /** Follow a validated in-app return_to; /goto/ URLs enter the workspace
  * through the shell (routing a /goto path would dead-end on RouteError). */
 function followReturnTo(returnTo: string): void {
-  const gotoMatch = returnTo.match(/^\/goto\/((?:agent|host)-[a-f0-9]+)(?:[/?]|$)/i);
+  const gotoMatch = returnTo.match(
+    /^\/goto\/((?:agent|host)-[a-f0-9]+)(?:[/?]|$)/i,
+  );
   if (gotoMatch) {
     getAppContext().shell.enterWorkspace(gotoMatch[1]);
     return;
@@ -105,16 +111,29 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     const rawReturnTo = m.route.param("return_to") ?? "";
     // Same-app paths only ("/..." but not protocol-relative "//..."), so a
     // crafted deeplink cannot turn the return into an open redirect.
-    vnode.state.returnTo = rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") ? rawReturnTo : null;
+    vnode.state.returnTo =
+      rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//")
+        ? rawReturnTo
+        : null;
     vnode.state.hasReturned = false;
     // A start of a machine an operator is holding would only be refused: the
-    // page says so instead of dispatching, in the connector's own words.
-    const entry = getAppContext().shell.stores.workspaces.entryByAnyId(workspaceAnyId);
-    const isHeld = intent === "start" && !isOwnerStartableStopKind(entry?.stop_kind ?? "");
-    vnode.state.heldMessage = isHeld ? MAINTENANCE_MESSAGE : null;
-    const dispatchKind: RecoveryKind | null = !isHeld && (intent === "start" || intent === "restart") ? intent : null;
+    // page says so instead of dispatching, in the connector's own words (the
+    // retired verdict has its own sentence; every other hold reads as
+    // maintenance).
+    const entry =
+      getAppContext().shell.stores.workspaces.entryByAnyId(workspaceAnyId);
+    const stopKind = entry?.stop_kind ?? "";
+    const isHeld = intent === "start" && !isOwnerStartableStopKind(stopKind);
+    const heldMessage =
+      stopKind === "retired" ? RETIRED_MESSAGE : MAINTENANCE_MESSAGE;
+    vnode.state.heldMessage = isHeld ? heldMessage : null;
+    const dispatchKind: RecoveryKind | null =
+      !isHeld && (intent === "start" || intent === "restart") ? intent : null;
     vnode.state.isDispatchSettled = dispatchKind === null;
-    const model = new RecoveryModel(workspaceAnyId, browserLifecycleDeps(() => m.redraw()));
+    const model = new RecoveryModel(
+      workspaceAnyId,
+      browserLifecycleDeps(() => m.redraw()),
+    );
     vnode.state.model = model;
     void model.load().then(async () => {
       // load() already re-attached if a recovery is in flight, and
@@ -132,7 +151,12 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     // The click-through carried where the user was headed; once the machine
     // answers, take them there instead of parking them on the card.
     const { model, returnTo } = vnode.state;
-    if (returnTo === null || vnode.state.hasReturned || !vnode.state.isDispatchSettled) return;
+    if (
+      returnTo === null ||
+      vnode.state.hasReturned ||
+      !vnode.state.isDispatchSettled
+    )
+      return;
     // Not out from under a bug report opened over this page: the reader is
     // mid-sentence in a form about this machine, and this page is what the
     // form is floating on.
@@ -154,7 +178,10 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
     if (model.info === null) {
       return m(
         PageContainer,
-        m("div", { class: "flex items-center gap-2 pt-10" }, [m(Spinner, { size: "sm" }), "Loading..."]),
+        m("div", { class: "flex items-center gap-2 pt-10" }, [
+          m(Spinner, { size: "sm" }),
+          "Loading...",
+        ]),
       );
     }
     // Only while the machine is not answering: once the operator's start
@@ -177,7 +204,9 @@ export const RecoveryPage: m.Component<Record<string, never>, RecoveryState> = {
         // Withheld until the machine answers, for the reason the module
         // comment gives: before that, this button would name a destination
         // known not to work.
-        onEnterMachine: isMachineAnswering(model) ? () => leaveForMachine(vnode.state) : null,
+        onEnterMachine: isMachineAnswering(model)
+          ? () => leaveForMachine(vnode.state)
+          : null,
       }),
     );
   },

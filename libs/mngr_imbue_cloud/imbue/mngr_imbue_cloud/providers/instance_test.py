@@ -56,8 +56,10 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudAuthError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import UnrecognizedWorkspaceStatusError
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
+from imbue.mngr_imbue_cloud.errors import WORKSPACE_RETIRED_MESSAGE
 from imbue.mngr_imbue_cloud.errors import WorkspaceStartFailedError
 from imbue.mngr_imbue_cloud.hosts.host import ImbueCloudHost
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
@@ -211,12 +213,10 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert agent_details_list[0].host == host_details
 
 
-# =============================================================================
 # _release_lease_on_failure -- the reliability invariant that a failure after a
 # successful lease releases the host back to the pool exactly once (so failed
 # fast/slow-path builds never leak a paid lease), while a success releases
 # nothing and lets the wrapped result/exception flow through untouched.
-# =============================================================================
 
 
 class _RecordingReleaseClient:
@@ -280,11 +280,9 @@ def test_release_lease_on_failure_does_not_release_on_success() -> None:
     assert provider._cleanup_calls == []
 
 
-# =============================================================================
 # rename_host -- the workspace-name refactor exposes host rename for imbue_cloud.
 # The lease's host_db_id is the durable identity; only the friendly host_name
 # changes (via the connector), so a rename never touches the VPS/container.
-# =============================================================================
 
 
 class _RecordingRenameClient:
@@ -316,7 +314,6 @@ def test_rename_host_raises_when_lease_not_found() -> None:
     assert client.rename_calls == []
 
 
-# =============================================================================
 # Restart routing + re-bootstrap: a stopped leased container must (1) resolve
 # via get_host to an OFFLINE host so ensure_host_started routes ``mngr start``
 # through start_host, and (2) have start_host relaunch the container's sshd over
@@ -326,7 +323,6 @@ def test_rename_host_raises_when_lease_not_found() -> None:
 # must be relaunched. Without (1), start_host is never reached; without (2), the
 # container comes back with no sshd. Either way a stopped leased mind is left
 # unrecoverable.
-# =============================================================================
 
 
 _RESTART_CONTAINER_ID = "container-xyz"
@@ -572,13 +568,11 @@ def test_start_host_rebootstraps_container_ssh(tmp_path: Path, temp_mngr_ctx: Mn
     assert result is built
 
 
-# =============================================================================
 # _list_leased_hosts_cached -- discovery-time error narrowing. A transport-level
 # failure reaching the connector (flaky wifi / connector down) must surface as
 # ProviderUnavailableError so recovery UIs can tell "the provider is unreachable,
 # don't bother restarting" apart from auth/account problems, which keep their own
 # types and fall through to the generic "can't reach your workspace" handling.
-# =============================================================================
 
 
 class _ListHostsClient:
@@ -1268,7 +1262,6 @@ def test_fast_path_rejects_image_swap_and_names_only_the_image(temp_mngr_ctx: Mn
     assert not provider._did_reach_fast_path
 
 
-# =============================================================================
 # Sticky agent labels (husk fix): discovery persists the identity (name +
 # certified_data) of the agents seen in the last successful outer-listing pass,
 # and re-attaches that full set -- each marked ``"stale": true`` -- in the two
@@ -1277,7 +1270,6 @@ def test_fast_path_rejects_image_swap_and_names_only_the_image(temp_mngr_ctx: Mn
 # ``is_primary``), so it never collapses to a single label-less "husk" agent and
 # vanishes from consumers that filter on labels. Persisting to disk lets the
 # identity survive an app/forward relaunch into a flaky-network window.
-# =============================================================================
 
 
 _STICKY_PROVIDER_NAME = ProviderInstanceName("imbue-cloud-test")
@@ -1512,13 +1504,11 @@ def test_reattached_identity_flows_through_to_agent_details(temp_mngr_ctx: MngrC
     assert agent_details.labels["is_primary"] == "true"
 
 
-# =============================================================================
 # Sticky host_dir: a container is baked with one host_dir layout and keeps it
 # for life, but the provider config is account-wide. Discovery resolves the real
 # location as part of its one outer-SSH pass; recording it per host is what lets
 # the later operations (`mngr exec`, `mngr start`, the minds SSH broker) address
 # the same directory rather than the account-wide default.
-# =============================================================================
 
 
 def _raw_at_host_dir(host_dir: str) -> dict[str, Any]:
@@ -1796,16 +1786,26 @@ def test_advance_workspace_start_requests_the_start_once_the_stop_lands() -> Non
     assert state.is_start_requested is True
 
 
-@pytest.mark.parametrize("held_kind", ["maintenance", "suspension"])
+@pytest.mark.parametrize(
+    ("held_kind", "expected_error", "expected_sentence"),
+    [
+        ("maintenance", ImbueCloudWorkspaceHeldError, WORKSPACE_HELD_MESSAGE),
+        ("suspension", ImbueCloudWorkspaceHeldError, WORKSPACE_HELD_MESSAGE),
+        ("retired", ImbueCloudWorkspaceRetiredError, WORKSPACE_RETIRED_MESSAGE),
+    ],
+)
 @pytest.mark.parametrize("status", ["stopping", "stopped"])
-def test_advance_workspace_start_refuses_a_held_stop_without_asking(held_kind: str, status: str) -> None:
+def test_advance_workspace_start_refuses_a_held_stop_without_asking(
+    held_kind: str, expected_error: type[ImbueCloudWorkspaceHeldError], expected_sentence: str, status: str
+) -> None:
     # An operator hold is not the owner's to end: the poll refuses at once,
-    # with the connector's own sentence, instead of waiting out the stop or
-    # requesting a start the server would refuse anyway.
+    # with the connector's own sentence (the retired verdict has its own),
+    # instead of waiting out the stop or requesting a start the server would
+    # refuse anyway.
     state = _WorkspaceStartPollState()
     outcome, client = _advance_once(_make_workspace_info(status, with_placement=False, stop_kind=held_kind), state)
-    assert isinstance(outcome, ImbueCloudWorkspaceHeldError)
-    assert str(outcome).startswith(WORKSPACE_HELD_MESSAGE)
+    assert isinstance(outcome, expected_error)
+    assert str(outcome).startswith(expected_sentence)
     assert client.start_request_count == 0
 
 

@@ -131,29 +131,62 @@ def script_prelude(instance_name: str) -> str:
     return _SCRIPT_PRELUDE.format(transfer_dir_root=TRANSFER_DIR_ROOT, instance=instance_name)
 
 
-@pure
-def build_launch_detached_command(instance_name: str, script_filename: str) -> str:
-    """Launch a transfer script detached from the SSH session, recording its pid.
+# The transfer dir files one launch leaves for the next: its status (and the
+# atomic-rename staging copy), the pid and token of the detached script, and
+# the sha/size taps the pipelines tee into.
+_LAUNCH_RESET_FILES: Final[str] = "status status.tmp pid token *.sha *.bytes"
 
-    Any prior status file is removed first so pollers only ever observe the
-    launched transfer's own status (a stale file from an earlier failed or
-    unrelated transfer must not masquerade as this one's result).
+
+@pure
+def build_launch_detached_command(instance_name: str, script_filename: str, transition_id: str) -> str:
+    """Launch a transfer script detached from the SSH session, fenced to ``transition_id``.
+
+    The row's fencing token keeps two supervisors from driving one transition,
+    but a supervisor fenced out of the row leaves the transfer it launched
+    running on the box. So the launch first kills a transfer that is still
+    running here for another token (its whole pipeline: the script runs in its
+    own session, so its pid is also its process group), then removes every
+    file an earlier run left (status, pid, token, hash/size taps), records
+    this launch's token, and only then backgrounds the script. The kill is
+    guarded on the recorded pid still being a transfer script, so a recycled
+    pid is never signalled. Pollers therefore only ever observe this launch's
+    own transfer, and its taps only ever hold this run's readings.
     """
     td = transfer_dir(instance_name)
-    # The brace group backgrounds only the script itself: the stale-status
-    # removal happens synchronously, before the launch command returns, so a
-    # poller can never race it.
+    script = shlex.quote(script_filename)
+    is_stale_transfer_running = (
+        f'[ -f pid ] && [ "$(cat token 2>/dev/null)" != {shlex.quote(transition_id)} ] '
+        '&& kill -0 "$(cat pid)" 2>/dev/null '
+        f'&& tr "\\0" " " < "/proc/$(cat pid)/cmdline" 2>/dev/null | grep -q -- "bash {script_filename}"'
+    )
+    kill_stale_transfer = (
+        'kill -TERM -- "-$(cat pid)" 2>/dev/null || true; '
+        'for _ in $(seq 1 50); do kill -0 "$(cat pid)" 2>/dev/null || break; sleep 0.1; done; '
+        'kill -KILL -- "-$(cat pid)" 2>/dev/null || true'
+    )
+    # The brace group backgrounds only the script itself: the kill, the reset
+    # and the token write happen synchronously, before the launch command
+    # returns, so a poller can never race them.
     return (
-        f'cd "{td}" && rm -f status && '
-        f'{{ setsid nohup bash {shlex.quote(script_filename)} >> run.log 2>&1 & echo $! > "{td}/pid"; }}'
+        f'cd "{td}" && if {is_stale_transfer_running}; then {kill_stale_transfer}; fi && '
+        f"rm -f {_LAUNCH_RESET_FILES} && printf '%s' {shlex.quote(transition_id)} > token && "
+        f'{{ setsid nohup bash {script} >> run.log 2>&1 & echo $! > "{td}/pid"; }}'
     )
 
 
 @pure
-def build_is_transfer_alive_command(instance_name: str) -> str:
-    """Exit 0 when the recorded transfer pid is still running."""
+def build_is_transfer_alive_command(instance_name: str, transition_id: str) -> str:
+    """Exit 0 when the recorded transfer pid is still running and was launched under ``transition_id``.
+
+    A transfer another token launched reads as not alive, so a supervisor
+    that finds one relaunches (which kills it) instead of adopting a pipeline
+    it cannot vouch for.
+    """
     td = transfer_dir(instance_name)
-    return f'[ -f "{td}/pid" ] && kill -0 "$(cat "{td}/pid")" 2>/dev/null'
+    return (
+        f'[ -f "{td}/pid" ] && [ "$(cat "{td}/token" 2>/dev/null)" = {shlex.quote(transition_id)} ] '
+        f'&& kill -0 "$(cat "{td}/pid")" 2>/dev/null'
+    )
 
 
 @pure
@@ -387,6 +420,8 @@ trap 'rm -f "$IDF"' EXIT
 
 download_one() {{
     local object="$1" target="$2" name="$3" expected="$4"
+    # This run's readings only: an earlier run's tap must never be read as ours.
+    rm -f "$TD/$name.sha" "$TD/$name.bytes"
     s5cmd --endpoint-url "$WS_S3_ENDPOINT" cat "s3://$WS_BUCKET/$WS_KEY_PREFIX/$object" \\
         | tee >(sha256sum | awk '{{print $1}}' > "$TD/$name.sha") \\
         | age -d -i "$IDF" \\

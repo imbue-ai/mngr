@@ -29,7 +29,7 @@ describe("mindControlsFor", () => {
   });
 
   it("withholds Start from a machine an operator is holding, or whose stop kind this build does not know", () => {
-    for (const stopKind of ["maintenance", "suspension", "unknown"]) {
+    for (const stopKind of ["maintenance", "suspension", "retired", "unknown"]) {
       expect(mindControlsFor({ supports_shutdown: true, stop_kind: stopKind }, "STOPPED", "healthy")).toEqual({
         isStartShown: false,
         isStopShown: false,
@@ -107,6 +107,7 @@ describe("rowClickActionFor", () => {
 
   it("blocks the row of a held machine and routes an idle-stopped one to the start", () => {
     expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPED", true)).toBe("blocked");
+    expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "retired" }, "STOPPED", true)).toBe("blocked");
     expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "maintenance" }, "STOPPING", false)).toBe("blocked");
     expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "unknown" }, "STOPPED", true)).toBe("blocked");
     expect(rowClickActionFor({ supports_shutdown: true, stop_kind: "idle" }, "STOPPED", true)).toBe("recover-start");
@@ -119,6 +120,9 @@ describe("livenessBadgeLabelFor", () => {
     expect(livenessBadgeLabelFor("STOPPED", "maintenance")).toBe("Maintenance");
     expect(livenessBadgeLabelFor("STOPPING", "maintenance")).toBe("Maintenance");
     expect(livenessBadgeLabelFor("STARTING", "maintenance")).toBe("Starting…");
+    expect(livenessBadgeLabelFor("STOPPED", "retired")).toBe("Retired");
+    expect(livenessBadgeLabelFor("STOPPING", "retired")).toBe("Retired");
+    expect(livenessBadgeLabelFor("STARTING", "retired")).toBe("Starting…");
     expect(livenessBadgeLabelFor("STOPPED", "idle")).toBe("Stopped");
     expect(livenessBadgeLabelFor("STOPPED", "")).toBe("Stopped");
     expect(livenessBadgeLabelFor("WEIRD", "")).toBe("Status unknown");
