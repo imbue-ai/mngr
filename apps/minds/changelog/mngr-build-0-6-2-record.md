@@ -1,0 +1,1 @@
+- Recorded the minds 0.6.2 release in `docs/deploy/history/minds-v0.6.2.md` (tag pair, build id, verification runs, the staging deploy `20260917T054239Z` and the three staging bakes) and updated `docs/deploy/next_deploy.md` for what the staging rehearsal discharged (connector migration 043 applied on staging; 0.6.2 baked on every staging box).
