@@ -538,9 +538,7 @@ class DirectModalInterface(ModalInterface):
         # explicit MODAL_SANDBOX_V2=0 opt-out; GPU sandboxes fall back to V1.
         os.environ.setdefault("MODAL_SANDBOX_V2", "1")
 
-    # =====================================================================
     # Environment
-    # =====================================================================
 
     def environment_create(self, name: str) -> None:
         try:
@@ -556,9 +554,7 @@ class DirectModalInterface(ModalInterface):
         if result.returncode != 0:
             raise ModalProxyError(f"Failed to create Modal environment '{name}': {result.stderr or result.stdout}")
 
-    # =====================================================================
     # App
-    # =====================================================================
 
     def app_create(self, name: str) -> AppInterface:
         return DirectApp.model_construct(app=modal.App(name))
@@ -576,9 +572,7 @@ class DirectModalInterface(ModalInterface):
             raise _translate_modal_error(e) from e
         return DirectApp.model_construct(app=app)
 
-    # =====================================================================
     # Image
-    # =====================================================================
 
     def image_debian_slim(self) -> ImageInterface:
         return DirectImage.model_construct(image=modal.Image.debian_slim())
@@ -589,9 +583,7 @@ class DirectModalInterface(ModalInterface):
     def image_from_id(self, image_id: str) -> ImageInterface:
         return DirectImage.model_construct(image=modal.Image.from_id(image_id))
 
-    # =====================================================================
     # Sandbox
-    # =====================================================================
 
     def sandbox_create(
         self,
@@ -638,9 +630,7 @@ class DirectModalInterface(ModalInterface):
     def sandbox_from_id(self, sandbox_id: str) -> SandboxInterface:
         return DirectSandbox.model_construct(sandbox=modal.Sandbox.from_id(sandbox_id))
 
-    # =====================================================================
     # Volume
-    # =====================================================================
 
     def volume_from_name(
         self,
@@ -681,16 +671,12 @@ class DirectModalInterface(ModalInterface):
         except modal.exception.Error as e:
             raise _translate_modal_error(e) from e
 
-    # =====================================================================
     # Secret
-    # =====================================================================
 
     def secret_from_dict(self, values: Mapping[str, str | None]) -> SecretInterface:
         return DirectSecret.model_construct(secret=modal.Secret.from_dict(dict(values)))
 
-    # =====================================================================
     # Function
-    # =====================================================================
 
     @_translate_exceptions
     def function_from_name(
@@ -703,9 +689,23 @@ class DirectModalInterface(ModalInterface):
         func = modal.Function.from_name(name=name, app_name=app_name, environment_name=environment_name)
         return DirectFunction.model_construct(function=func)
 
-    # =====================================================================
+    @_translate_exceptions
+    def is_function_deployed(
+        self,
+        name: str,
+        *,
+        app_name: str,
+        environment_name: str | None = None,
+    ) -> bool:
+        # from_name is lazy, so the server lookup happens in hydrate()
+        func = modal.Function.from_name(name=name, app_name=app_name, environment_name=environment_name)
+        try:
+            func.hydrate()
+        except modal.exception.NotFoundError:
+            return False
+        return True
+
     # CLI
-    # =====================================================================
 
     @retry(retry=_DEPLOY_LOCK_RETRY, stop=_DEPLOY_LOCK_STOP, wait=_DEPLOY_LOCK_WAIT, reraise=True)
     def deploy(
@@ -714,6 +714,7 @@ class DirectModalInterface(ModalInterface):
         *,
         app_name: str,
         environment_name: str | None = None,
+        extra_env: Mapping[str, str] = {},
     ) -> None:
         cmd = ["modal", "deploy"]
         if environment_name is not None:
@@ -730,6 +731,7 @@ class DirectModalInterface(ModalInterface):
                     text=True,
                     env={
                         **os.environ,
+                        **extra_env,
                         "MNGR_MODAL_APP_NAME": app_name,
                         "MNGR_MODAL_APP_BUILD_PATH": tmpdir,
                     },

@@ -25,9 +25,7 @@ from imbue.modal_proxy.data_types import StreamType
 from imbue.modal_proxy.data_types import TunnelInfo
 from imbue.modal_proxy.log_utils import ModalLoguruWriter
 
-# ---------------------------------------------------------------------------
 # Object interfaces -- mirror modal's instance-level APIs
-# ---------------------------------------------------------------------------
 
 
 class ExecOutput(MutableModel, ABC):
@@ -240,26 +238,20 @@ class AppInterface(MutableModel, ABC):
         ...
 
 
-# ---------------------------------------------------------------------------
 # Top-level interface -- mirrors modal module-level and class-method APIs
-# ---------------------------------------------------------------------------
 
 
 class ModalInterface(MutableModel, ABC):
     """Abstraction over the Modal SDK module-level and class-method APIs."""
 
-    # =====================================================================
     # Environment (CLI: `modal environment create`)
-    # =====================================================================
 
     @abstractmethod
     def environment_create(self, name: str) -> None:
         """Create a Modal environment for resource isolation."""
         ...
 
-    # =====================================================================
     # App (modal.App constructor, modal.App.lookup)
-    # =====================================================================
 
     @abstractmethod
     def app_create(self, name: str) -> AppInterface:
@@ -277,9 +269,7 @@ class ModalInterface(MutableModel, ABC):
         """Look up a persistent Modal app (mirrors modal.App.lookup)."""
         ...
 
-    # =====================================================================
     # Image (modal.Image class methods)
-    # =====================================================================
 
     @abstractmethod
     def image_debian_slim(self) -> ImageInterface:
@@ -296,9 +286,7 @@ class ModalInterface(MutableModel, ABC):
         """Load an image by ID, e.g. from a snapshot (mirrors modal.Image.from_id)."""
         ...
 
-    # =====================================================================
     # Sandbox (modal.Sandbox class methods)
-    # =====================================================================
 
     @abstractmethod
     def sandbox_create(
@@ -329,9 +317,7 @@ class ModalInterface(MutableModel, ABC):
         """Look up a sandbox by ID (mirrors modal.Sandbox.from_id)."""
         ...
 
-    # =====================================================================
     # Volume (modal.Volume class methods and modal.Volume.objects)
-    # =====================================================================
 
     @abstractmethod
     def volume_from_name(
@@ -355,18 +341,14 @@ class ModalInterface(MutableModel, ABC):
         """Delete a volume by name (mirrors modal.Volume.objects.delete)."""
         ...
 
-    # =====================================================================
     # Secret (modal.Secret class methods)
-    # =====================================================================
 
     @abstractmethod
     def secret_from_dict(self, values: Mapping[str, str | None]) -> SecretInterface:
         """Create a secret from key-value pairs (mirrors modal.Secret.from_dict)."""
         ...
 
-    # =====================================================================
     # Function (modal.Function class methods)
-    # =====================================================================
 
     @abstractmethod
     def function_from_name(
@@ -379,9 +361,24 @@ class ModalInterface(MutableModel, ABC):
         """Look up a deployed function by name (mirrors modal.Function.from_name)."""
         ...
 
-    # =====================================================================
+    @abstractmethod
+    def is_function_deployed(
+        self,
+        name: str,
+        *,
+        app_name: str,
+        environment_name: str | None = None,
+    ) -> bool:
+        """Whether the app's current deployment publishes a function with this name.
+
+        This answers presence only, and answers it once: unlike
+        ``FunctionInterface.get_web_url``, it does not ride out the
+        deploy-then-lookup consistency window, so an absent function is
+        reported immediately rather than after a retry budget.
+        """
+        ...
+
     # CLI operations
-    # =====================================================================
 
     @abstractmethod
     def deploy(
@@ -390,13 +387,16 @@ class ModalInterface(MutableModel, ABC):
         *,
         app_name: str,
         environment_name: str | None = None,
+        extra_env: Mapping[str, str] = {},
     ) -> None:
-        """Deploy a script to Modal (mirrors `modal deploy` CLI)."""
+        """Deploy a script to Modal (mirrors `modal deploy` CLI).
+
+        ``extra_env`` is added to the environment the script is deployed
+        under, for scripts that read their configuration from the environment.
+        """
         ...
 
-    # =====================================================================
     # Output capture
-    # =====================================================================
 
     @abstractmethod
     def enable_output_capture(

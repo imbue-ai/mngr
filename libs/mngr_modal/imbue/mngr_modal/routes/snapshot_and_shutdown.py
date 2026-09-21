@@ -8,8 +8,10 @@ This function is deployed as a Modal web endpoint and can be invoked to:
 
 All code is self-contained in this file - no imports from the mngr codebase.
 
-Required environment variable (must be set when deploying):
+Required environment variables (must be set when deploying):
 - MNGR_MODAL_APP_NAME: The Modal app name (e.g., "mngr-<user_id>-modal")
+- MNGR_MODAL_APP_BUILD_PATH: Staging directory copied into the image at /deployment/
+- MNGR_MODAL_SOURCE_MARKER_NAME: Name for the marker function published below
 
 (note: do NOT remove this module docstring--this is a fully standalone script)
 """
@@ -41,13 +43,18 @@ if modal.is_local():
     APP_BUILD_PATH = os.environ.get("MNGR_MODAL_APP_BUILD_PATH")
     if APP_BUILD_PATH is None:
         raise ConfigurationError("MNGR_MODAL_APP_BUILD_PATH environment variable must be set")
+    SOURCE_MARKER_NAME = os.environ.get("MNGR_MODAL_SOURCE_MARKER_NAME")
+    if SOURCE_MARKER_NAME is None:
+        raise ConfigurationError("MNGR_MODAL_SOURCE_MARKER_NAME environment variable must be set")
     output_app_name_file = Path(APP_BUILD_PATH) / "app_name"
     output_app_name_file.parent.mkdir(parents=True, exist_ok=True)
     output_app_name_file.write_text(APP_NAME)
     (Path(APP_BUILD_PATH) / "app_build_path").write_text(APP_BUILD_PATH)
+    (Path(APP_BUILD_PATH) / "source_marker_name").write_text(SOURCE_MARKER_NAME)
 else:
     APP_NAME = Path("/deployment/app_name").read_text().strip()
     APP_BUILD_PATH = Path("/deployment/app_build_path").read_text().strip()
+    SOURCE_MARKER_NAME = Path("/deployment/source_marker_name").read_text().strip()
 
 image = (
     modal.Image.debian_slim()
@@ -58,6 +65,16 @@ image = (
 app = modal.App(name=APP_NAME, image=image)
 VOLUME_NAME = f"{APP_NAME}-state"
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=True)
+
+
+# A marker naming the source this app was deployed from. It is never called --
+# publishing it is the whole point. A deploy replaces the app's function set as
+# a unit, so this name resolves if and only if the app's current deployment
+# came from exactly that source, which is how mngr tells whether the app
+# already carries this endpoint.
+@app.function(name=SOURCE_MARKER_NAME)
+def deployed_source_marker() -> None:
+    pass
 
 
 def _read_host_record(host_id: str) -> dict[str, Any] | None:

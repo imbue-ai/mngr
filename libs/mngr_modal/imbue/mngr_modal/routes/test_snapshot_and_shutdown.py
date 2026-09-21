@@ -9,14 +9,17 @@ import io
 import json
 import subprocess
 from collections.abc import Generator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import httpx
 import modal
 import pytest
 from loguru import logger
+from pydantic import Field
 from tenacity import retry
 from tenacity import retry_if_exception
 from tenacity import retry_if_exception_type
@@ -31,6 +34,7 @@ from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_volume
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
 from imbue.mngr_modal.routes.deployment import deploy_function
+from imbue.mngr_modal.routes.deployment import ensure_function_deployed
 from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.interface import ModalInterface
@@ -38,9 +42,7 @@ from imbue.resource_guards.resource_guards import fixture_uses_resources
 
 _MAX_MODAL_ENVIRONMENT_NAME_LENGTH = 64
 
-# =============================================================================
 # Acceptance tests (require Modal network access)
-# =============================================================================
 
 
 class DeploymentError(RuntimeError):
@@ -448,3 +450,36 @@ def test_snapshot_and_shutdown_nonexistent_host_record(
             sandbox.terminate()
         except modal.exception.Error:
             pass
+
+
+class _DeployCountingModalInterface(DirectModalInterface):
+    """Real Modal interface that records how many deploys it was asked to perform."""
+
+    deploy_count: int = Field(default=0, description="Number of deploys performed through this interface")
+
+    def deploy(
+        self,
+        script_path: Path,
+        *,
+        app_name: str,
+        environment_name: str | None = None,
+        extra_env: Mapping[str, str] = {},
+    ) -> None:
+        self.deploy_count = self.deploy_count + 1
+        super().deploy(script_path, app_name=app_name, environment_name=environment_name, extra_env=extra_env)
+
+
+@pytest.mark.acceptance
+@pytest.mark.modal
+@pytest.mark.timeout(180)
+def test_ensure_function_deployed_reuses_an_app_that_already_carries_this_source(
+    deployed_snapshot_function: tuple[str, str, str],
+) -> None:
+    """A second caller against a freshly deployed app must not deploy again."""
+    app_name, function_url, environment_name = deployed_snapshot_function
+    interface = _DeployCountingModalInterface()
+
+    url = ensure_function_deployed("snapshot_and_shutdown", app_name, environment_name, interface)
+
+    assert url == function_url
+    assert interface.deploy_count == 0
