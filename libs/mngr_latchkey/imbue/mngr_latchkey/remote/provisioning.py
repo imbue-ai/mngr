@@ -117,6 +117,11 @@ _CURL_DISPATCH_BIN: Final[str] = "latchkey-curl-dispatch"
 _CURL_IMPERSONATE_BIN: Final[str] = "latchkey-curl-impersonate"
 _CURL_DISPATCH_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/{_CURL_DISPATCH_BIN}"
 _CURL_IMPERSONATE_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/{_CURL_IMPERSONATE_BIN}"
+# The curl the gateway run script this build writes names as ``LATCHKEY_CURL``
+# (the one ``ensure_latchkey_installed`` puts on the machine), for a caller
+# that replays a run script written by another build and must give it a curl
+# at the path it expects.
+LATCHKEY_CURL_PATH: Final[str] = _CURL_DISPATCH_PATH
 # Suffix the new binaries are staged under before being renamed over the old
 # ones. Overwriting them in place would truncate a file the gateway may be
 # executing right then, which fails with ETXTBSY ("Text file busy"); a rename

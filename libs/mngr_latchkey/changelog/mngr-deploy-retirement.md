@@ -1,0 +1,1 @@
+- `imbue.mngr_latchkey.remote.provisioning` now exposes `LATCHKEY_CURL_PATH`, the curl the gateway run script this build writes names as `LATCHKEY_CURL` (the shim `ensure_latchkey_installed` installs), so the gen-2 migrate can give a run script written by another minds build a curl at the path it expects.
