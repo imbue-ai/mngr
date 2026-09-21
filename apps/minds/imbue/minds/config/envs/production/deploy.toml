@@ -85,12 +85,21 @@ tracks_generation = true
 [storage]
 stop_retention_seconds = 600
 
-# Per-app warm-pool sizes. Keep one container of each app alive so the
-# desktop client never pays a cold-boot penalty on auth / lease /
-# share hits. Bump if you want more headroom for spiky traffic.
+# Per-app warm-pool sizes. Keep containers alive so the desktop client never
+# pays a cold-boot penalty on auth / lease / share hits. The connector keeps
+# two so that one container being recycled (a redeploy, a worker event) is
+# never the whole fleet: every share relay's frps heartbeat auth goes through
+# it.
 [min_containers]
-connector = 1
+connector = 2
 litellm_proxy = 1
+
+# Idle seconds before the autoscaler retires a container it added for a
+# burst. Modal's default retires it between two bursts with requests still in
+# flight; ten minutes lets it ride out the quiet spell instead.
+[scaledown_window]
+connector = 600
+litellm_proxy = 600
 
 # Default paid-access entries seeded (seed-if-absent) into paid_domains after
 # migrations, so the imbue team can exercise paid features on production.

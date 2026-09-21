@@ -266,9 +266,10 @@ class MinContainersConfig(FrozenModel):
 
     Defaults are zero so a tier that omits the block (or omits a
     specific service) gets the cheapest possible warm pool. Staging /
-    production override to ``1`` in their committed ``deploy.toml`` so
+    production keep a warm pool in their committed ``deploy.toml`` so
     the desktop client doesn't pay a cold-boot penalty on auth / lease
-    / share hits.
+    / share hits, and production keeps more than one connector so a
+    single recycled container is never the whole fleet.
     """
 
     connector: NonNegativeInt = Field(
@@ -310,9 +311,10 @@ class ScaledownWindowConfig(FrozenModel):
     scaledown window" (Modal requires the value > 0, so the apps normalize
     ``0`` to ``None``). Dev tiers raise this to ~10 minutes so their
     no-warm-pool apps (``min_containers = 0``) stay hot across a dev session
-    instead of cold-booting on every request. Staging / production leave it
-    at ``0`` and rely on ``min_containers`` instead, and the ci/test tier
-    leaves it at ``0`` so test containers tear down promptly.
+    instead of cold-booting on every request. Staging / production set the
+    same window so a container the autoscaler added for a burst is not
+    retired with requests still in flight, and the ci/test tier leaves it
+    at ``0`` so test containers tear down promptly.
     """
 
     connector: NonNegativeInt = Field(
