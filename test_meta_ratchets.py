@@ -929,9 +929,10 @@ def test_standalone_project_ci_gates_list_every_in_repo_dependency() -> None:
         }
         gate = _find_ci_path_gate(workflow, rel_project)
         assert gate is not None, f"no path-gated CI job found for standalone project {rel_project}"
-        # Compare whole shell words, not substrings: `libs/mngr` is a substring of the
-        # listed `libs/mngr_usage`, so a substring test would report a gate that omits
-        # `libs/mngr` as complete.
+        # Compare whole shell words, not substrings: one package path under `libs/` is a
+        # prefix of another's (`libs/mngr` of `libs/mngr_usage`, `libs/mngr_modal` and the
+        # rest), so a substring test would read a gate that lists only the longer one as
+        # covering the shorter.
         gate_words = set(gate.split())
         missing.extend(
             f"{rel_project}: CI gate omits {dep}" for dep in sorted(editable_deps) if str(dep) not in gate_words
