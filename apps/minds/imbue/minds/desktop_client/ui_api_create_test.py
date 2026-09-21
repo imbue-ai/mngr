@@ -80,6 +80,45 @@ def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(t
     assert payload["accounts"] == []
 
 
+def test_form_defaults_report_what_each_local_backend_needs_from_this_machine(tmp_path: Path) -> None:
+    """The form annotates the local backends from these, so every one must be described.
+
+    The test app's FakeHostProbe describes a bare Linux machine (nothing on
+    PATH, no devices), so every backend is missing and the local preset falls
+    back to Linux's first choice, Docker.
+    """
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    payload = json.loads(response.get_data(as_text=True))
+    by_key = {entry["key"]: entry for entry in payload["local_prerequisites"]}
+    assert set(by_key) == {"DOCKER", "RUNSC", "LIMA"}
+    for entry in by_key.values():
+        assert not entry["is_available"]
+        assert entry["summary"]
+        assert entry["docs_url"].startswith("https://")
+    assert payload["local_launch_mode"] == "DOCKER"
+    assert payload["local_launch_mode"] in payload["launch_modes"]
+
+
+def test_form_defaults_describe_no_local_backend_when_the_app_has_no_probe(tmp_path: Path) -> None:
+    """An app built without a probe (no concurrency group to run one under) still answers.
+
+    It reports no prerequisites rather than reaching for docker, and the local
+    preset's launch mode still has to be one the form offers.
+    """
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True, host_probe=None)
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    payload = json.loads(response.get_data(as_text=True))
+    assert payload["local_prerequisites"] == []
+    assert payload["local_launch_mode"] in payload["launch_modes"]
+
+
 def test_form_defaults_seed_the_shipped_template_repo_and_ref(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Scrub any operator dev-loop vars left in the shell (`just minds-start`
     # sets them) so this test always sees the end-user defaults.

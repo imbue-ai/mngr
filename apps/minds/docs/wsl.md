@@ -27,41 +27,43 @@ Then, inside the distro (from your interactive session -- a Windows Terminal
 tab, not SSH; see the session-affinity gotcha below):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install-wsl.sh | bash
+curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install-linux.sh | bash
 ```
 
-The script narrates each step, is idempotent (re-run it to update), and ends
-by launching the app and dropping a "Minds (WSL)" shortcut on the Windows
-desktop for next time. Flags (pass via `bash -s -- <flags>`):
+This is the same Linux installer every platform uses
+([dev-setup.md](./dev-setup.md)); it detects WSL from `/proc/version` and adds
+the WSL-specific steps. It narrates each step, is idempotent (re-run it to
+update), and ends by launching the app and dropping a "Mind (WSL)" shortcut on
+the Windows desktop for next time. Flags (pass via `bash -s -- <flags>`):
 
-- `--env NAME` -- minds env to activate (default `production`)
-- `--version REF` -- mngr ref to install (default: latest `minds-v*` tag;
-  `main` for the development tip)
-- `--dev` -- contributor layout: `main` + a local default-workspace-template
-  checkout + launch via `just minds-start` (system/vendor/mngr sync included)
-- `--install-dir DIR` (default `~/mngr`), `--no-launch`
+- `--version REF` -- mngr ref to install (`latest` for the newest `minds-v*`
+  tag; a fresh clone without it lands on `main`, and an existing checkout is
+  left as it is)
+- `--install-dir DIR` (default `~/mngr`), `--no-launch`, `--skip-docker`
+- `--yes` runs every privileged step without prompting; `--non-interactive`
+  never prompts and instead prints the exact command for any privileged step
+  that still needs doing
 
 It installs, skipping anything already present: apt basics + Electron's
-GTK/NSS libraries, Docker CE, systemd lingering (the `just` runtime dir), uv,
-`just`, nvm + the pinned node, pnpm, the `latchkey` CLI (a hard requirement of
-`minds run`), the mngr checkout, `uv sync`, and `pnpm install`.
+GTK/NSS libraries, Docker CE, systemd lingering (keeps the app's background
+daemons alive between sessions), uv, nvm + the pinned node, pnpm, the mngr
+checkout, `uv sync`, and `pnpm install`. The launcher it writes
+(`~/.local/bin/minds-desktop`) runs the app from source against production.
 
 It refuses clearly on: WSL1, missing systemd (it writes `/etc/wsl.conf` and
-asks you to `wsl --shutdown` and re-run), non-apt distros, <20GB free disk, an
+asks you to `wsl --shutdown` and re-run), non-apt distros, <20GB free disk (5GB with `--skip-docker`), an
 install dir under `/mnt/` (Windows-filesystem line endings and IO would bite),
 and **Docker Desktop WSL integration** -- minds has not been verified against
 the Docker Desktop daemon (follow-up task; for now disable the integration for
 this distro or use a separate distro so Docker CE can be installed).
 
-## Container runtime: runc by default under WSL
+## Container runtime: runc by default
 
-The launcher exports `MINDS_DOCKER_RUNTIME_DEFAULT=runc`, so new workspaces
-default to Docker's standard runtime instead of Linux's usual gVisor default.
-Rationale: under WSL the utility VM is the isolation boundary between
-containers and Windows -- the same posture as the Docker VM on macOS, which
-also defaults to runc. Note what that does NOT cover: a container escape would
-land in the WSL distro itself, so keep secrets you care about out of the
-distro or opt into gVisor.
+New workspaces default to Docker's standard `runc` runtime on every platform.
+Under WSL the utility VM is the isolation boundary between containers and
+Windows -- the same posture as the Docker VM on macOS. Note what that does NOT
+cover: a container escape would land in the WSL distro itself, so keep secrets
+you care about out of the distro or opt into gVisor.
 
 gVisor remains a per-create opt-in (advanced settings -> runsc) and works
 under WSL2 once registered the way mngr requires:
@@ -78,8 +80,8 @@ explains why: gVisor's default overlay discards root-filesystem writes.)
 
 `wsl --shutdown` (and anything else that stops the distro) kills the Docker
 daemon and every workspace container with it. When bringing workspaces back,
-use `mngr start` (e.g. `uv run mngr start --host <host>` under the activated
-env), never a raw `docker start`: docker only resurrects the container and
+use `mngr start` (e.g. `MNGR_HOST_DIR=~/.minds/mngr MNGR_PREFIX=minds- uv run mngr start --host <host>`,
+the same host dir and prefix the app runs with), never a raw `docker start`: docker only resurrects the container and
 its sshd, while the agent processes (tmux, supervisord, the system
 interface) exist only in tmux sessions that mngr recreates. A raw
 `docker start` leaves the workspace half-up -- reachable at the container

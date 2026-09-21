@@ -12,16 +12,38 @@
 // ToDesktop still builds, signs, notarizes, and hosts every artifact. Only the
 // feed each channel reads is ours.
 
-const { app } = require('electron');
+const { app, autoUpdater: nativeAutoUpdater } = require('electron');
 const fs = require('fs');
-const { autoUpdater } = require('electron-updater');
+const electronUpdater = require('electron-updater');
 const { parse: parseToml } = require('smol-toml');
 
 const paths = require('./paths');
 const channels = require('./update-channel');
+const { installPolicyFor, installStagedUpdate, readLinuxPackageType, relaunchTargetFor } = require('./install-policy');
+const { AppImageUpdaterWithoutRestart } = require('./appimage-updater');
+const { startRelaunchAfterExit } = require('./linux-relaunch');
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const CHECK_TIMEOUT_MS = 60 * 1000;
+
+/**
+ * How a downloaded update gets installed on this install.
+ *
+ * Read once: the package type is a property of the running binary. See
+ * install-policy.js for the table.
+ */
+const packageType = process.platform === 'linux' ? readLinuxPackageType(process.resourcesPath) : 'appimage';
+const installPolicy = installPolicyFor({ platform: process.platform, packageType });
+// electron-updater's own AppImage updater starts the replaced file before this
+// process has quit (see appimage-updater.js); every other shape keeps its
+// updater.
+const autoUpdater =
+  process.platform === 'linux' && packageType === 'appimage'
+    ? new AppImageUpdaterWithoutRestart()
+    : electronUpdater.autoUpdater;
+// The AppImage file to restart from: where the runtime mounted this process
+// from, or where the updater put the replacement when it took a new name.
+let appImagePath = process.env.APPIMAGE ?? null;
 
 let statusListener = null;
 let lastStatus = { type: 'idle' };
@@ -36,6 +58,10 @@ let inFlight = null;
 let lastCheckedAt = null;
 /** The version already downloaded and offered, so a later check does not re-offer it. */
 let downloadedVersion = null;
+// Under on-request, whether the staged update's install already ran: the Linux
+// installers apply the package before asking the app to quit, and that quit can
+// be cancelled at the shutdown prompt.
+let isInstallApplied = false;
 
 /**
  * The channel-manifest host for this tier, or null when unconfigured.
@@ -67,9 +93,15 @@ function getAppId() {
  * A dev run has nothing to update: it executes a source folder out of
  * `node_modules/electron`, so there is no signed bundle for Squirrel to swap,
  * and `_bundled/` ships empty so it names no feed either.
+ *
+ * On Linux the updater also answers for itself: an AppImage run without the
+ * `APPIMAGE` variable -- extracted with --appimage-extract, or launched by a
+ * test harness -- has no file to replace, and electron-updater's own
+ * `isUpdaterActive` says so. That is a state to report, not an error to repeat
+ * every ten minutes.
  */
 function isUpdaterUsable() {
-  return app.isPackaged;
+  return app.isPackaged && autoUpdater.isUpdaterActive();
 }
 
 function resolveFeed(channel) {
@@ -293,19 +325,64 @@ async function downloadAndOffer(version) {
   // completes, to decide whether to hand the zip to Squirrel. It extends
   // AppUpdater rather than BaseUpdater, so there is no quit handler either:
   // arming this afterwards installs nothing.
-  autoUpdater.autoInstallOnAppQuit = true;
+  //
+  // Under the on-request policy it stays off: the Linux updaters do have a
+  // quit handler, and on a .deb it would run dpkg under pkexec as the app
+  // closes -- a password prompt for a quit the user thought was over.
+  autoUpdater.autoInstallOnAppQuit = installPolicy.policy === 'on-quit';
   await autoUpdater.downloadUpdate();
   downloadedVersion = version;
   // The whole announcement: a status the window renders itself. Nothing
-  // interrupts -- no dialog, and no OS notification either. The update installs
-  // on the next restart whether or not it is ever acknowledged, so it does not
-  // deserve to pull the user out of whatever they are doing.
+  // interrupts -- no dialog, and no OS notification either. Under on-quit the
+  // update installs on the next restart whether or not it is ever
+  // acknowledged; under on-request it waits for the install control. Neither
+  // deserves to pull the user out of whatever they are doing.
   setStatus({ type: 'update-downloaded', version });
 }
 
-/** Restart into the downloaded update, from the renderer's "Restart" control. */
+/**
+ * Install the downloaded update and restart into it, from the renderer's
+ * install control. Under the on-request policy this is the only install path;
+ * on a .deb the password prompt appears here, right after the click.
+ *
+ * Throws when the install fails (the prompt was cancelled, dpkg refused),
+ * which leaves the app running with the download still staged for another
+ * try; the renderer says so, since nothing else would.
+ */
 function installNow() {
-  autoUpdater.quitAndInstall();
+  // The package on disk is already the new version and the quit it asked for
+  // was cancelled; electron-updater ignores a second install outright (no
+  // error, nothing run), so the only thing left to do is quit into it.
+  if (isInstallApplied) {
+    console.log('[update] Install already applied; quitting into it');
+    app.quit();
+    return;
+  }
+  try {
+    installStagedUpdate(autoUpdater, installPolicy.relaunchedBy === 'app' ? relaunchAfterQuit : null);
+  } catch (err) {
+    console.error(`[update] ${err.message}`);
+    throw err;
+  }
+}
+
+/**
+ * Start the installed version once this process has exited -- what
+ * electron-updater's own restart would do, minus what makes it unusable here
+ * (see linux-relaunch.js and appimage-updater.js). Like `app.relaunch`, it
+ * fires whenever this process exits, including after a quit cancelled at the
+ * running-workspaces prompt: the install on disk is the new version by then.
+ */
+function relaunchAfterQuit() {
+  const target = relaunchTargetFor({
+    packageType,
+    appImagePath,
+    executablePath: process.execPath,
+    args: process.argv.slice(1),
+  });
+  const replacement = startRelaunchAfterExit({ pid: process.pid, ...target });
+  replacement.once('spawn', () => console.log('[update] The installed version starts when this process exits'));
+  replacement.once('error', (err) => console.error(`[update] Could not arm the restart into the installed version: ${err.message}`));
 }
 
 /**
@@ -315,10 +392,12 @@ function installNow() {
  * `updaterCacheDirName`, so the previous channel's artifact would otherwise sit
  * there for a later download to reuse.
  *
- * This does not un-stage a completed download. `downloadAndOffer` arms
- * `autoInstallOnAppQuit` before downloading, so Squirrel is handed the zip the
- * moment it lands and installs it on the next launch regardless -- switching
- * changes what the app asks for next, not what is already on its way in.
+ * Under the on-quit policy (macOS) this does not un-stage a completed
+ * download: `downloadAndOffer` arms `autoInstallOnAppQuit` before downloading,
+ * so Squirrel is handed the zip the moment it lands and installs it on the
+ * next launch regardless -- switching changes what the app asks for next, not
+ * what is already on its way in. Under on-request (Linux) nothing was handed
+ * to an installer, so clearing the cache does drop the staged download.
  */
 async function setChannel(channel) {
   if (channels.normalizeChannel(channel) === null) {
@@ -414,13 +493,18 @@ function describe() {
     // with Squirrel by then, so a panel reading the status alone stops saying
     // the update still installs at exactly the moment it is being asked.
     downloadedVersion,
+    // How a staged update gets applied, so the renderer can say "installs
+    // when you restart" or "install now, and expect a password prompt".
+    installPolicy: installPolicy.policy,
+    needsPasswordToInstall: installPolicy.needsPasswordToInstall,
   };
 }
 
 function init({ onStatus } = {}) {
   statusListener = onStatus || null;
   if (!isUpdaterUsable()) {
-    console.log('[update] Skipping auto-update (dev build -- not packaged)');
+    const reason = app.isPackaged ? 'the updater is inactive for this install' : 'dev build -- not packaged';
+    console.log(`[update] Skipping auto-update (${reason})`);
     setStatus({ type: 'disabled' });
     return;
   }
@@ -436,6 +520,19 @@ function init({ onStatus } = {}) {
   // it the log jumps from the download finishing to the app being asked to
   // quit, with the minutes in between unaccounted for.
   autoUpdater.logger = { info: console.log, warn: console.warn, error: console.error, debug: console.log };
+  // The AppImage updater keeps a versioned file name when the running file
+  // has one, so the replacement can land beside the file this process runs
+  // from rather than over it.
+  autoUpdater.on('appimage-filename-updated', (updatedPath) => {
+    appImagePath = updatedPath;
+  });
+  // electron-updater emits this on Electron's own autoUpdater once the Linux
+  // install has run, right before it asks the app to quit.
+  if (installPolicy.policy === 'on-request') {
+    nativeAutoUpdater.on('before-quit-for-update', () => {
+      isInstallApplied = true;
+    });
+  }
   void check();
   const timer = setInterval(() => void check(), CHECK_INTERVAL_MS);
   timer.unref?.();

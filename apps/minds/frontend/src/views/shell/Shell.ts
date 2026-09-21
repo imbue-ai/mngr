@@ -38,6 +38,10 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
 import {
   dismissUpdateReady,
+  installUpdateReady,
+  isUpdateInstalling,
+  updateInstallError,
+  updateInstallTerms,
   updateReadyVersion,
   watchUpdateStatus,
 } from "./update-ready";
@@ -489,7 +493,11 @@ export function Shell(): m.Component<ShellAttrs> {
               },
               m(UpdateReadyCard, {
                 version: updateReady,
-                onRestart: () => void electronBridge.installUpdate(),
+                installPolicy: updateInstallTerms().policy,
+                needsPassword: updateInstallTerms().needsPassword,
+                error: updateInstallError(),
+                isInstalling: isUpdateInstalling(),
+                onRestart: () => void installUpdateReady(() => m.redraw()),
                 onDismiss: () => dismissUpdateReady(),
               }),
             )

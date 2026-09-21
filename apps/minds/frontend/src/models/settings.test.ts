@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
-import { jsonResponse, settingsOverview, settle, withMindsNative, withReceiverGuardedGlobalFetch } from "../testing";
+import {
+  jsonResponse,
+  pendingInstallUpdate,
+  settingsOverview,
+  settle,
+  withMindsNative,
+  withReceiverGuardedGlobalFetch,
+} from "../testing";
 import {
   DEFAULT_NOTIFICATION_PREFS,
   currentNotificationPrefs,
@@ -642,6 +649,45 @@ describe("SettingsModel release channels", () => {
       // Left busy, the panel would read as a check that never returns.
       expect(model.isUpdateBusy).toBe(false);
       expect(model.updateState?.channel).toBe("alpha");
+    });
+  });
+
+  it("surfaces an install that did not go through, where the app is still up to read it", async () => {
+    // A .deb installs under the system password prompt; cancelling it leaves
+    // the app running with the download still staged, and the main process
+    // rejects the install rather than quitting. Silence here would read as a
+    // button that does nothing.
+    const { surface } = nativeStub(RUNNING, PEEKED);
+    const failing = {
+      ...surface,
+      installUpdate: async () => ({ error: "Installing the update failed: Command failed: pkexec" }),
+    };
+    await withMindsNative(failing, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadUpdateState();
+
+      await model.installUpdateNow();
+
+      expect(model.updateError).toContain("Installing the update failed");
+      expect(model.isUpdateInstalling).toBe(false);
+    });
+  });
+
+  it("is installing from the click until the main process settles the call", async () => {
+    // Set before the main process is asked, since a .deb install blocks it;
+    // cleared only when the call settles, which means the app stayed up.
+    const { surface } = nativeStub(RUNNING, PEEKED);
+    const { installUpdate, resolveInstall } = pendingInstallUpdate();
+    await withMindsNative({ ...surface, installUpdate }, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadUpdateState();
+
+      const done = model.installUpdateNow();
+      expect(model.isUpdateInstalling).toBe(true);
+      resolveInstall();
+      await done;
+      expect(model.isUpdateInstalling).toBe(false);
+      expect(model.updateError).toBe("");
     });
   });
 

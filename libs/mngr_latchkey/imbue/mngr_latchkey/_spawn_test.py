@@ -25,6 +25,7 @@ from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.testing import wait_for_process_exit
 
 _POLL_INTERVAL_SECONDS = 0.05
 
@@ -102,6 +103,7 @@ def test_spawn_detached_latchkey_ensure_browser_invokes_subcommand_and_logs(
     assert report_path.read_text() == "\n"
     # Log parent directory was created and the log file exists (child redirected stdio there).
     assert log_path.is_file()
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
@@ -122,6 +124,7 @@ def test_spawn_detached_latchkey_ensure_browser_sets_latchkey_directory(
     assert _wait_for_file_content(report_path)
     assert latchkey_directory.is_dir()
     assert report_path.read_text() == f"{latchkey_directory}\n"
+    assert wait_for_process_exit(pid)
 
 
 def _make_encryption_key_reporter_binary(tmp_path: Path) -> Path:
@@ -157,6 +160,7 @@ def test_spawn_detached_latchkey_ensure_browser_injects_encryption_key(
     # The child sees the per-directory key, so Latchkey never falls through to
     # the system keychain (which on macOS would pop an access dialog).
     assert report_path.read_text() == "per-directory-key\n"
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
@@ -177,6 +181,7 @@ def test_spawn_detached_latchkey_ensure_browser_operator_key_wins(
     assert pid > 0
     assert _wait_for_file_content(report_path)
     assert report_path.read_text() == "operator-key\n"
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_detached_latchkey_ensure_browser_raises_when_binary_missing(tmp_path: Path) -> None:
@@ -235,6 +240,7 @@ def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
     # ``--quiet`` suppresses the detached child's console handler so the raw
     # stdout/stderr capture file does not accumulate in steady state.
     assert "--quiet" in argv
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_writes_timestamped_marker_above_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -251,7 +257,7 @@ def test_spawn_writes_timestamped_marker_above_child_output(tmp_path: Path, monk
     monkeypatch.setenv("FAKE_LATCHKEY_REPORT", str(tmp_path / "report"))
     log_path = tmp_path / "logs" / "ensure_browser.log"
 
-    spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
+    pid = spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
 
     assert _wait_for_text_in_file(log_path, _CHILD_STDOUT_SENTINEL)
     lines = log_path.read_text().splitlines()
@@ -262,6 +268,7 @@ def test_spawn_writes_timestamped_marker_above_child_output(tmp_path: Path, monk
     parsed = datetime.fromisoformat(timestamp_text)
     assert parsed.tzinfo is not None
     assert abs((datetime.now(timezone.utc) - parsed).total_seconds()) < 60
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_rotates_an_oversized_raw_capture_and_prunes_old_rotations(
@@ -282,10 +289,7 @@ def test_spawn_rotates_an_oversized_raw_capture_and_prunes_old_rotations(
     for suffix in ("20260101000000000000", "20260102000000000000"):
         log_path.with_name(f"{log_path.name}.{suffix}").write_text("old")
 
-    spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
-    # The detached child is done once its sentinel lands; returning before that
-    # leaves it running into the leak check at teardown.
-    assert _wait_for_text_in_file(log_path, _CHILD_STDOUT_SENTINEL)
+    pid = spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
 
     rotation_names = sorted(path.name for path in log_path.parent.glob(f"{log_path.name}.*"))
     assert len(rotation_names) == _MAX_RAW_CAPTURE_ROTATIONS
@@ -295,6 +299,7 @@ def test_spawn_rotates_an_oversized_raw_capture_and_prunes_old_rotations(
     assert any(log_path.with_name(name).stat().st_size > _MAX_RAW_CAPTURE_BYTES for name in rotation_names)
     # The live file is fresh: the marker, not the rotated-away bulk.
     assert log_path.stat().st_size < _MAX_RAW_CAPTURE_BYTES
+    assert wait_for_process_exit(pid)
 
 
 def test_spawn_leaves_a_small_raw_capture_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -305,8 +310,8 @@ def test_spawn_leaves_a_small_raw_capture_in_place(tmp_path: Path, monkeypatch: 
     log_path.parent.mkdir(parents=True)
     log_path.write_text("previous run output\n")
 
-    spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
-    assert _wait_for_text_in_file(log_path, _CHILD_STDOUT_SENTINEL)
+    pid = spawn_detached_latchkey_ensure_browser(latchkey_binary=str(fake_binary), log_path=log_path)
 
     assert list(log_path.parent.glob(f"{log_path.name}.*")) == []
     assert "previous run output" in log_path.read_text()
+    assert wait_for_process_exit(pid)

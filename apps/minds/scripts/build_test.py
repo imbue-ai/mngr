@@ -31,12 +31,15 @@ import re
 import shutil
 import subprocess
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Final
 
 import pytest
 
 from imbue.mngr_latchkey.remote.provisioning import DATALIB_CURL_VERSION as GATEWAY_DATALIB_CURL_VERSION
+from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 
 # The full set of workspace packages bundled into the standalone app. This
 # same set is hand-maintained in three other places:
@@ -75,6 +78,8 @@ MONOREPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_PATTERN = re.compile(r"(^|/)(test_[^/]*\.py|[^/]+_test\.py|conftest\.py)$")
 _DOWNLOAD_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "download-binaries.js"
 _ENSURE_BINARIES_PATH: Final[Path] = APP_ROOT / "scripts" / "ensure-binaries.js"
+_INSTALL_LINUX_PATH: Final[Path] = APP_ROOT / "scripts" / "install-linux.sh"
+_VERIFY_LINUX_ARTIFACTS_PATH: Final[Path] = APP_ROOT / "scripts" / "verify-linux-artifacts.sh"
 _GENERATE_TYPES_PATH: Final[Path] = APP_ROOT / "frontend" / "scripts" / "generate-types.mjs"
 _GENERATE_UI_SCHEMA_PATH: Final[Path] = APP_ROOT / "scripts" / "generate_ui_schema.py"
 _UV_SCHEMA_ARGV_PATTERN: Final[re.Pattern[str]] = re.compile(r'execFileSync\("uv",\s*\[(?P<args>[^\]]*)\]')
@@ -392,12 +397,121 @@ def test_build_js_stages_every_runtime_binary() -> None:
     assert match is not None, "Could not locate main() in build.js"
     body = match.group(1)
 
-    assert "downloadBinaries(RESOURCES_DIR)" in body, (
-        "build.js main() must stage binaries via downloadBinaries(RESOURCES_DIR), which "
+    assert "for (const target of SHIPPED_TARGETS)" in body, (
+        "build.js main() must stage binaries once per entry of download-binaries.js's "
+        "SHIPPED_TARGETS. Staging only the build host's own architecture is what shipped "
+        "a Linux AppImage full of arm64 Mach-O tools (issue #940)."
+    )
+    assert "downloadBinaries(targetDir, target)" in body, (
+        "build.js main() must stage binaries via downloadBinaries(targetDir, target), which "
         "iterates download-binaries.js's BINARIES table. Naming individual downloaders "
         "here is what let desync -- and later the latchkey curl -- ship staged by "
         "nothing that reaches the app, landing in app.asar where nothing reads them."
     )
+    assert "copySharedPayloadInto(targetDir)" in body, (
+        "build.js must copy the shared payload (wheels, pyproject, latchkey) into every target "
+        "tree; todesktop.js uploads only the target trees"
+    )
+    assert "assertStagedExecutablesMatchTarget(targetDir, target)" in body, (
+        "build.js main() must check every staged target's executables against the "
+        "target's format, so a downloader that fetched the wrong architecture fails the "
+        "build instead of shipping."
+    )
+
+
+def test_todesktop_config_stages_every_shipped_target_for_its_platform() -> None:
+    """Drift guard: each SHIPPED_TARGETS directory must be delivered to its platform.
+
+    ToDesktop packages every platform from the one upload, choosing each
+    target's resources from ``targetOverrides.<platform>.<arch>.extraResources``.
+    A target staged by build.js but listed for no target ships nowhere; one
+    listed for the wrong target ships tools that cannot run there.
+    """
+    config = _load_todesktop_config()
+    shipped = _run_download_binaries_function("console.log(JSON.stringify(db.SHIPPED_TARGETS));")
+    assert shipped.returncode == 0, shipped.stderr
+    targets = json.loads(shipped.stdout)
+    assert {target["platform"] for target in targets} == {"darwin", "linux"}
+
+    lists_by_platform = {
+        "darwin": config["targetOverrides"]["mac"]["arm64"]["extraResources"],
+        "linux": config["targetOverrides"]["linux"]["x64"]["extraResources"],
+    }
+    assert "extraResources" not in config and "platformOverrides" not in config, (
+        "a base or platform list beside the target lists is what ToDesktop shipped to Linux "
+        "instead of the Linux tree; keep every entry under targetOverrides"
+    )
+    staged = _run_download_binaries_function(
+        "console.log(JSON.stringify(db.SHIPPED_TARGETS.map((target) => db.stagedTargetPath(target))));"
+    )
+    assert staged.returncode == 0, staged.stderr
+    staged_path_by_dir_name = dict(
+        zip((target["dirName"] for target in targets), json.loads(staged.stdout), strict=True)
+    )
+    for target in targets:
+        sources = [entry["from"] for entry in lists_by_platform[target["platform"]]]
+        expected_source = staged_path_by_dir_name[target["dirName"]] + "/"
+        assert expected_source in sources, (
+            f"todesktop.js does not deliver {expected_source} to {target['platform']} builds; its list is {sources}"
+        )
+        for entry in lists_by_platform[target["platform"]]:
+            assert entry["to"] == ".", (
+                "every extraResources entry must land at the resources root, which is what "
+                "electron/paths.js resolves against"
+            )
+        # Exactly the target's tree: build.js copies the shared payload into it,
+        # so a second entry would be a directory build.js does not stage.
+        assert len(lists_by_platform[target["platform"]]) == 1, (
+            f"{target['platform']} builds list more than the target's own tree: {sources}"
+        )
+
+
+def test_todesktop_config_names_every_targets_source_the_same() -> None:
+    """ToDesktop pairs the per-target lists by `to` plus source directory name.
+
+    Its documentation requires corresponding entries to "use the same `to`
+    value and source file or directory name"; the builds whose sources were
+    named darwin-arm64/ and linux-x64/ produced Linux packages with wheels or
+    nothing at all, and no tools. So every list's source must be a directory
+    of the same name, differing only in its parent (ToDesktop's own example:
+    dist/bin/<arch>/helper).
+    """
+    config = _load_todesktop_config()
+    lists = [
+        by_arch["extraResources"]
+        for by_platform in config["targetOverrides"].values()
+        for by_arch in by_platform.values()
+    ]
+    names_by_list = [{PurePosixPath(entry["from"].rstrip("/")).name for entry in entries} for entries in lists]
+    assert all(names == names_by_list[0] for names in names_by_list), (
+        f"every platform's extraResources sources must share their directory names; got {names_by_list}"
+    )
+    parents = {PurePosixPath(entry["from"].rstrip("/")).parent for entries in lists for entry in entries}
+    assert len(parents) == len(lists), "each platform's source must live under its own target directory"
+
+
+def test_todesktop_config_pins_the_linux_sandbox_probe() -> None:
+    """Drift guard: the AppImage must keep Chromium's sandbox wherever it can run.
+
+    ``linux.noSandbox: "probe"`` passes ``--no-sandbox`` only on hosts without
+    unprivileged user namespaces (Ubuntu 24.04's AppArmor default). For AppImage
+    targets ToDesktop honors it only under app-builder-lib 26.9.0 or later, so
+    the pin and the probe travel together.
+    """
+    config = _load_todesktop_config()
+    assert config["linux"]["noSandbox"] == "probe", (
+        "todesktop.js linux.noSandbox must be 'probe': `true` drops Chromium's sandbox on "
+        "every distro, and unset leaves Ubuntu 24.04 unable to start the AppImage"
+    )
+    pinned = config.get("appBuilderLibVersion")
+    assert pinned is not None and re.fullmatch(r"\d+\.\d+\.\d+", pinned), (
+        "todesktop.js must pin appBuilderLibVersion to an exact version; 'latest' would let "
+        "the packager move under a release"
+    )
+    assert tuple(int(part) for part in pinned.split(".")) >= (26, 9, 0), (
+        f"appBuilderLibVersion {pinned} predates the AppImage support for linux.noSandbox (26.9.0)"
+    )
+    assert config["linux"]["category"], "todesktop.js must set linux.category for the desktop entry"
 
 
 def test_bundle_latchkey_uses_pnpm_deploy_against_lockfile() -> None:
@@ -900,6 +1014,47 @@ def test_datalib_curl_pin_agrees_with_the_latchkey_gateway() -> None:
     )
 
 
+def test_linux_installer_pins_the_mngr_vps_gvisor_release() -> None:
+    """Drift guard: the Linux installer's Pi mode must install the gVisor release the cloud hosts pin.
+
+    ``install-linux.sh --raspberry-pi`` registers runsc the way ``mngr_vps.host_setup``
+    does, but a shell script cannot import ``PINNED_GVISOR_RELEASE``, so the release is
+    restated there. Bumping mngr_vps without the script would leave the Pi on an
+    older runsc than every other Docker host mngr provisions.
+    """
+    script_text = _INSTALL_LINUX_PATH.read_text()
+    match = re.search(r'^GVISOR_RELEASE="([^"]+)"', script_text, re.MULTILINE)
+    assert match is not None, "Could not find GVISOR_RELEASE in install-linux.sh"
+    assert match.group(1) == PINNED_GVISOR_RELEASE, (
+        f"install-linux.sh pins gVisor {match.group(1)} but mngr_vps.host_setup pins "
+        f"{PINNED_GVISOR_RELEASE}; bump both together."
+    )
+
+
+def test_verify_linux_artifacts_runs_every_linux_provisioned_binary() -> None:
+    """Drift guard: the CI artifact check must exercise every binary the Linux target ships.
+
+    ``verify-linux-artifacts.sh`` restates the Linux entries of ``BINARIES`` by hand
+    (a shell script cannot read the table), so a binary added to the table would be
+    format-checked at build time yet skipped by the check that runs the shipped
+    artifacts.
+    """
+    script_text = _VERIFY_LINUX_ARTIFACTS_PATH.read_text()
+    listed_paths = set(re.findall(r'^\s+"([^"|]+)\|', script_text, re.MULTILINE))
+    assert listed_paths, "Could not find RUNNABLE_TOOLS entries in verify-linux-artifacts.sh"
+    provisioned = _run_download_binaries_function(
+        "const target = db.SHIPPED_TARGETS.find((entry) => entry.platform === 'linux');"
+        "console.log(JSON.stringify(db.getProvisionedBinaries(target).map("
+        "(name) => [name, db.BINARIES[name].requiredPath])));"
+    )
+    assert provisioned.returncode == 0, provisioned.stderr
+    for name, required_path in json.loads(provisioned.stdout):
+        assert f"{name}/{required_path}" in listed_paths, (
+            f"BINARIES.{name} ships on Linux but verify-linux-artifacts.sh's RUNNABLE_TOOLS "
+            f"never runs {name}/{required_path}; add it with the argument that makes it exit 0."
+        )
+
+
 def _run_download_binaries_function(expression: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     """Run one exported download-binaries.js function via ``node -e``.
 
@@ -918,6 +1073,16 @@ def _run_download_binaries_function(expression: str, *arguments: str) -> subproc
         capture_output=True,
         text=True,
         timeout=60,
+    )
+
+
+def _estimate_todesktop_upload(app_root: Path, config: Mapping[str, object]) -> subprocess.CompletedProcess[str]:
+    """Price ``config``'s upload from ``app_root`` through the estimator; stdout carries the JSON estimate."""
+    return _run_download_binaries_function(
+        "console.log(JSON.stringify(db.estimateToDesktopUploadBytes(process.argv[2], JSON.parse("
+        + json.dumps(json.dumps(config))
+        + "))));",
+        str(app_root),
     )
 
 
@@ -1182,12 +1347,7 @@ def test_estimate_todesktop_upload_mirrors_cli_composition(tmp_path: Path) -> No
         "icon": "./icon.png",
         "uploadSizeLimit": 600,
     }
-    result = _run_download_binaries_function(
-        "console.log(JSON.stringify(db.estimateToDesktopUploadBytes(process.argv[2], JSON.parse("
-        + json.dumps(json.dumps(config))
-        + "))));",
-        str(app_root),
-    )
+    result = _estimate_todesktop_upload(app_root, config)
     assert result.returncode == 0, f"estimator failed:\nstderr:\n{result.stderr}"
     estimate = json.loads(result.stdout)
     # App files: electron/main.js (1000) plus icon.png (500) -- the icon
@@ -1201,6 +1361,43 @@ def test_estimate_todesktop_upload_mirrors_cli_composition(tmp_path: Path) -> No
     assert estimate["totalBytes"] == 52_000
 
 
+def test_estimate_todesktop_upload_prices_every_list(tmp_path: Path) -> None:
+    """One upload serves every platform, so the base, platform, and target lists are all charged.
+
+    Each list's entries go to their own archive directory, so a source two lists
+    name is uploaded twice and is priced twice. Skipping an override would pass
+    builds that do not fit.
+    """
+    app_root = tmp_path / "app"
+    (app_root / "resources" / "shared").mkdir(parents=True)
+    (app_root / "resources" / "shared" / "wheel.whl").write_bytes(b"s" * 10_000)
+    (app_root / "resources" / "darwin-arm64").mkdir()
+    (app_root / "resources" / "darwin-arm64" / "uv").write_bytes(b"d" * 3_000)
+    (app_root / "resources" / "linux-x64").mkdir()
+    (app_root / "resources" / "linux-x64" / "uv").write_bytes(b"l" * 5_000)
+    (app_root / "main.js").write_bytes(b"m" * 100)
+
+    config = {
+        "appFiles": ["**", "!resources/**"],
+        "extraResources": [{"from": "resources/shared/", "to": "."}, {"from": "resources/darwin-arm64/", "to": "."}],
+        "platformOverrides": {
+            "linux": {
+                "extraResources": [
+                    {"from": "resources/shared/", "to": "."},
+                ]
+            }
+        },
+        "targetOverrides": {"linux": {"x64": {"extraResources": [{"from": "resources/linux-x64/", "to": "."}]}}},
+        "uploadSizeLimit": 600,
+    }
+    result = _estimate_todesktop_upload(app_root, config)
+    assert result.returncode == 0, f"estimator failed:\nstderr:\n{result.stderr}"
+    estimate = json.loads(result.stdout)
+    assert estimate["appFilesBytes"] == 100
+    assert estimate["extraBytes"] == 10_000 + 3_000 + 10_000 + 5_000
+    assert estimate["totalBytes"] == 28_100
+
+
 def test_estimate_todesktop_upload_rejects_unsupported_globs(tmp_path: Path) -> None:
     """Unsupported appFiles shapes must throw rather than silently mis-estimate.
 
@@ -1212,10 +1409,7 @@ def test_estimate_todesktop_upload_rejects_unsupported_globs(tmp_path: Path) -> 
     app_root.mkdir()
     (app_root / "main.js").write_bytes(b"m")
     config = {"appFiles": ["dist/**"], "uploadSizeLimit": 600}
-    result = _run_download_binaries_function(
-        "db.estimateToDesktopUploadBytes(process.argv[2], JSON.parse(" + json.dumps(json.dumps(config)) + "));",
-        str(app_root),
-    )
+    result = _estimate_todesktop_upload(app_root, config)
     assert result.returncode != 0
     assert "only understands" in result.stderr
 
@@ -1264,9 +1458,19 @@ def test_todesktop_config_excludes_resources_from_app_files() -> None:
         "todesktop.js appFiles must exclude resources/ wholesale; extraResources already "
         f"delivers it, and anything left in appFiles ships a dead copy in app.asar. Got {exclusions}."
     )
-    extra_resource_sources = [entry["from"] for entry in config.get("extraResources", [])]
-    assert "resources/" in extra_resource_sources, (
-        "todesktop.js must keep uploading resources/ via extraResources; it is the only "
-        "channel that reaches Contents/Resources, so excluding it from appFiles without "
-        "this entry would ship an app with no bundled binaries at all"
+    listed = _run_download_binaries_function(
+        "console.log(JSON.stringify(db.extraFileEntries(require(process.argv[2]))));",
+        str(APP_ROOT / "todesktop.js"),
     )
+    assert listed.returncode == 0, listed.stderr
+    extra_resource_sources = [entry["from"] for entry in json.loads(listed.stdout)]
+    assert extra_resource_sources, (
+        "todesktop.js must keep uploading resources/ via extraResources; it is the only "
+        "channel that reaches the packaged resources dir, so excluding it from appFiles "
+        "without these entries would ship an app with no bundled binaries at all"
+    )
+    for source in extra_resource_sources:
+        assert source.startswith("resources/"), (
+            f"extraResources source {source!r} lives outside resources/, where appFiles would "
+            "upload it a second time into app.asar"
+        )

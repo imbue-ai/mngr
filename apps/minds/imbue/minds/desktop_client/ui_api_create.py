@@ -29,6 +29,7 @@ logic is re-derived from the same underlying modules. When the legacy SSE
 surface is deleted, those helpers should collapse into one shared home.
 """
 
+import platform
 from collections.abc import Mapping
 
 from flask import Blueprint
@@ -48,6 +49,10 @@ from imbue.minds.desktop_client.destroying import DestroyingRecord
 from imbue.minds.desktop_client.destroying import DestroyingStatus
 from imbue.minds.desktop_client.destroying import is_host_still_active
 from imbue.minds.desktop_client.destroying import list_destroying
+from imbue.minds.desktop_client.local_prerequisites import LocalBackendPrerequisite
+from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
+from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
+from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -134,7 +139,9 @@ class CreateFormDefaultsResponse(FrozenModel):
     launch_modes: tuple[str, ...] = Field(description="Selectable compute modes (BYOK-only modes excluded)")
     selected_launch_mode: str = Field(description="Pre-selected compute mode")
     docker_runtimes: tuple[str, ...] = Field(description="Container runtime options for the local Docker provider")
-    selected_docker_runtime: str = Field(description="Platform-default container runtime")
+    selected_docker_runtime: str = Field(
+        description="Pre-selected container runtime (runc unless MINDS_DOCKER_RUNTIME_DEFAULT overrides it)"
+    )
     backup_providers: tuple[str, ...] = Field(description="Backup provider options")
     selected_backup_provider: str = Field(description="Pre-selected backup provider")
     region_options_by_launch_mode: dict[str, tuple[str, ...]] = Field(
@@ -151,6 +158,12 @@ class CreateFormDefaultsResponse(FrozenModel):
     branch: str = Field(description="Default template ref paired with the default repository")
     color: str = Field(description="Suggested accent color for the new workspace")
     prefill: CreateRetryPrefill | None = Field(default=None, description="Retry pre-fill, when ?retry named a record")
+    local_prerequisites: tuple[LocalBackendPrerequisite, ...] = Field(
+        description="Per local backend: whether this machine can run it, and the command that installs what is missing"
+    )
+    local_launch_mode: str = Field(
+        description="The compute mode the local preset selects: the first local backend that is ready here"
+    )
 
 
 class OrphanedFailedDestroy(FrozenModel):
@@ -314,6 +327,15 @@ def _handle_create_form_defaults() -> Response:
         CloudAccountOption(name=account.name, alias=account.alias, backend=account.backend, region=account.region)
         for account in list_cloud_account_providers(root=MindsRoot.from_environment())
     )
+    # The probe is injected so tests describe a machine rather than run docker;
+    # an app built without one (a minimal test app, with no concurrency group
+    # to run probes under) reports nothing rather than reaching for docker.
+    if state.host_probe is not None:
+        host_platform = host_platform_from_system(state.host_probe.platform_system())
+        local_prerequisites = probe_local_prerequisites(state.host_probe)
+    else:
+        host_platform = host_platform_from_system(platform.system())
+        local_prerequisites = ()
     response = CreateFormDefaultsResponse(
         accounts=accounts,
         default_account_id=default_account_id,
@@ -341,6 +363,8 @@ def _handle_create_form_defaults() -> Response:
         branch=default_workspace_template_ref(),
         color=_suggested_create_color(state.backend_resolver),
         prefill=_read_retry_prefill(request.args.get("retry", ""), cloud_accounts),
+        local_prerequisites=local_prerequisites,
+        local_launch_mode=local_launch_mode_for(host_platform, local_prerequisites).value,
     )
     return _json_response(response)
 

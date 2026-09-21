@@ -411,6 +411,74 @@ describe("the Updates panel", () => {
       expect(panelText(updatesModel())).not.toContain("Restart now");
     });
   });
+
+  it("holds the install button and says what is happening while the install runs", async () => {
+    // The panel mirrors the card: through a .deb install the main process is
+    // blocked, so the panel's own flag is what changes the button and the line.
+    await withMindsNative({}, async () => {
+      const installing = updatesModel({
+        updateState: {
+          ...ON_STABLE,
+          status: { type: "update-downloaded", version: "0.5.0" },
+          downloadedVersion: "0.5.0",
+          installPolicy: "on-request",
+          needsPasswordToInstall: true,
+        },
+        isUpdateInstalling: true,
+      });
+      const text = panelText(installing);
+      expect(text).toContain("Installing Mind 0.5.0. Enter your password when asked; Mind restarts when it's done.");
+      expect(text).toContain("Installing...");
+      expect(text).not.toContain("Install and restart");
+
+      // The button is offered for as long as the download is staged, so the
+      // line has to follow the staged version too: a check that failed since
+      // the download replaced the downloaded status with its error.
+      const afterFailedCheck = updatesModel({
+        updateState: {
+          ...installing.updateState!,
+          status: { type: "error", channel: "stable", message: "feed unreachable" },
+        },
+        isUpdateInstalling: true,
+      });
+      const laterText = panelText(afterFailedCheck);
+      expect(laterText).toContain("Installing Mind 0.5.0. Enter your password when asked; Mind restarts when it's done.");
+      expect(laterText).not.toContain("Update check failed");
+    });
+  });
+
+  it("says the install waits for the button, and about the password, where nothing installs on quit", async () => {
+    // A Linux install applies the update only from this control; a .deb does it
+    // through the system's package tool, which asks for the password. Saying
+    // "Restart to install" there would send the user through a quit that
+    // installs nothing.
+    await withMindsNative({}, async () => {
+      const deb = updatesModel({
+        updateState: {
+          ...ON_STABLE,
+          status: { type: "update-downloaded", version: "0.5.0" },
+          downloadedVersion: "0.5.0",
+          installPolicy: "on-request",
+          needsPasswordToInstall: true,
+        },
+      });
+      const text = panelText(deb);
+      expect(text).toContain("Mind 0.5.0 is downloaded. Install it below; you'll be asked for your password.");
+      expect(text).toContain("Install and restart");
+      expect(text).not.toContain("Restart now");
+
+      const appImage = updatesModel({
+        updateState: {
+          ...ON_STABLE,
+          status: { type: "update-downloaded", version: "0.5.0" },
+          downloadedVersion: "0.5.0",
+          installPolicy: "on-request",
+          needsPasswordToInstall: false,
+        },
+      });
+      expect(panelText(appImage)).toContain("Mind 0.5.0 is downloaded. Install it below.");
+    });
+  });
 });
 
 /** The sections view, rendered from a bare model: every panel guards on a

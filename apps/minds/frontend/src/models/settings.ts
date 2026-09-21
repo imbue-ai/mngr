@@ -116,6 +116,8 @@ export class SettingsModel {
   /** Set when a switch would park the user; cleared by confirm or cancel. */
   pendingChannelSwitch: { channel: UpdateChannel; targetVersion: string | null } | null = null;
   isUpdateBusy = false;
+  /** An install from the panel is running and the app has not quit yet. */
+  isUpdateInstalling = false;
   updateError = "";
   errorReportingError = "";
   updateWindowError = "";
@@ -515,12 +517,25 @@ export class SettingsModel {
   /**
    * Restart into the staged update.
    *
-   * No busy flag and no redraw: the app is quitting, so there is no later state
-   * to render, and a spinner that never resolves is what a failed quit would
-   * leave behind.
+   * `isUpdateInstalling` (not `isUpdateBusy`, which the check and switch paths
+   * share) is set before the main process is asked, since on a .deb the
+   * install blocks it for its whole duration (see `installUpdateReady`). It is
+   * cleared when the call settles, which happens only if the app stays up: a
+   * rejected install (a cancelled password prompt) with the reason for the
+   * panel to show, or a quit cancelled at the running-workspaces prompt.
    */
   async installUpdateNow(): Promise<void> {
-    await electronBridge.installUpdate();
+    this.updateError = "";
+    this.isUpdateInstalling = true;
+    this.redraw();
+    try {
+      await electronBridge.installUpdate();
+    } catch (error) {
+      this.updateError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.isUpdateInstalling = false;
+      this.redraw();
+    }
   }
 
   async checkForUpdatesNow(): Promise<void> {

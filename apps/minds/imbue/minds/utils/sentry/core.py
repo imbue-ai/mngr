@@ -157,8 +157,8 @@ def sentry_deploy_environment_from_minds_env_name(env_name: str | None) -> Sentr
     """Map an activated minds env name to its Sentry environment.
 
     Only the exact names ``production`` and ``staging`` get their own targets;
-    everything else (``dev-*``, ``ci-*``, or ``None`` when no env is activated)
-    falls back to ``DEVELOPMENT``.
+    everything else (``dev-*``, ``ci-*``, or ``None`` when the process has no
+    ``MINDS_ROOT_NAME`` at all) falls back to ``DEVELOPMENT``.
     """
     if env_name == SentryDeployEnvironment.PRODUCTION.value:
         return SentryDeployEnvironment.PRODUCTION
@@ -171,8 +171,11 @@ def resolve_sentry_environment() -> SentryDeployEnvironment:
     """Select the Sentry environment from the activated minds env in the process env.
 
     ``production``/``staging`` map to their own targets; everything else (dev-*,
-    ci-*, or no activated env) falls back to ``development``. Shared by the
-    backend and the frontend so both report under the same environment.
+    ci-*) falls back to ``development``, as does a process with no
+    ``MINDS_ROOT_NAME`` at all -- which the ``minds`` CLI never is, since it
+    seeds production before its bootstrap, so that case is reached only from
+    other entry points such as ``minds-admin``. Shared by the backend and the
+    frontend so both report under the same environment.
     """
     activated_env_name = env_name_from_root_name(resolve_minds_root_name()) if is_env_activated() else None
     return sentry_deploy_environment_from_minds_env_name(activated_env_name)

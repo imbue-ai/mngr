@@ -156,6 +156,23 @@ export function memoryStorage(): Pick<Storage, "getItem" | "setItem"> & {
   };
 }
 
+/** An `installUpdate` stub whose call stays pending, as the main process's
+ * does until the app is known to be staying up, until `resolveInstall()`
+ * settles it as a success. */
+export function pendingInstallUpdate(): {
+  installUpdate: () => Promise<{ error: null }>;
+  resolveInstall: () => void;
+} {
+  let resolveInstall: () => void = () => {};
+  return {
+    installUpdate: () =>
+      new Promise<{ error: null }>((resolve) => {
+        resolveInstall = () => resolve({ error: null });
+      }),
+    resolveInstall: () => resolveInstall(),
+  };
+}
+
 /** Run `run` with `window.mindsNative` set to `surface`, or with a `window`
  * carrying no bridge at all when it is null -- which is the browser build.
  *

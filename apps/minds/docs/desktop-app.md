@@ -120,8 +120,8 @@ The accent is a **pure function of the window's current route**, not a remembere
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
-- `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`. Activated by `minds-admin env activate <name>`; legacy values like `devminds` are silently treated as unset with a warning.
-- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds-admin env activate`; passing `--config-file` to `minds run` overrides it. The backend refuses to start when neither is set.
+- `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`.
+- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load; passing `--config-file` to `minds run` overrides it. When neither is set and `MINDS_ROOT_NAME` is unset (or `minds`), the backend loads the in-repo production `client.toml`. It refuses to start only when `MINDS_ROOT_NAME` names another env and nothing says where that env's config lives.
 
 ## Output and logging conventions
 
@@ -137,12 +137,12 @@ The desktop app bundles platform-specific binaries so users need zero prerequisi
 
 - **uv**: Downloads Python, creates venvs, installs packages. Downloaded from GitHub releases during `pnpm build`.
 - **git**: Required for agent creation (cloning repos). A pinned, SHA256-verified [dugite-native](https://github.com/desktop/dugite-native) payload -- the relocatable git distribution GitHub Desktop builds for embedding in Electron apps -- downloaded during `pnpm build` per `apps/minds/scripts/git-manifest.json`. It is self-contained: the `git` binary plus its `libexec/git-core/` helpers, `share/git-core/templates/`, a system `etc/gitconfig`, and (on Linux) an `ssl/cacert.pem` CA bundle. Because the payload binaries bake in an empty prefix, the backend child environment must -- and does -- set `GIT_EXEC_PATH`, `GIT_TEMPLATE_DIR`, and `GIT_CONFIG_SYSTEM` (plus `GIT_SSL_CAINFO` on Linux); a bare `PATH` prepend is not sufficient. See [specs/minds-managed-git/concise.md](../../../specs/minds-managed-git/concise.md).
-- **lima**: Required for the Lima launch mode (running agents in Linux VMs). SHA256-verified download, pinned to the version in `download-binaries.js`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; macOS Intel and Linux still run the VM itself via host QEMU.
+- **lima**: Required for the Lima launch mode (running agents in Linux VMs). SHA256-verified download, pinned to the version in `download-binaries.js`. Self-contained on macOS Apple Silicon via Lima's `vz` backend; on Linux it runs the VM through the host's QEMU with KVM (see [Linux](#linux) below).
 - **restic**: Per-workspace backup repositories. Downloaded from GitHub releases.
 - **desync**: Content-defined-chunking client that fetches the pre-baked Lima image. Downloaded from GitHub releases. macOS/Linux only.
 - **uv-shims**: macOS only, and the one payload that is generated rather than downloaded. It holds a single `install_name_tool` shim, which runs Apple's real tool from the toolchain under `DEVELOPER_DIR` (the standard Xcode location when that is unset) or from `/Library/Developer/CommandLineTools`, and exits nonzero when neither is present. uv unconditionally execs a bare `install_name_tool` after downloading a managed CPython, to rewrite libpython's Mach-O install name ([astral-sh/uv#14893](https://github.com/astral-sh/uv/issues/14893)); on a Mac with no Xcode Command Line Tools, `/usr/bin/install_name_tool` is the xcselect stub, which asks macOS to offer the developer-tools install and so raises a system modal on first launch. uv reports the shim's nonzero exit as a non-fatal warning and libpython keeps its as-shipped install name, which is inert here: Minds runs `bin/python3.12`, which links libpython statically, and none of the bundled packages link it either.
 
-Each is placed in the `resources/` directory (outside the asar archive). The packaged app prepends the `uv-shims`, `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`, and prepends `uv-shims` to the `uv sync` environment setup's `PATH` as well -- it is the only payload on both, because either spawn can be the one that fetches the managed CPython. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`.
+Each is placed in the packaged app's resources directory (`Contents/Resources` on macOS, `resources/` beside the executable on Linux; outside the asar archive). The packaged app prepends the `uv-shims`, `uv`, `git`, `lima`, and `desync` directories to the backend child process's `PATH`, and prepends `uv-shims` to the `uv sync` environment setup's `PATH` as well -- it is the only payload on both, because either spawn can be the one that fetches the managed CPython. `restic` and `desync` are also named by explicit absolute path (`MINDS_RESTIC_BINARY`, `MINDS_DESYNC_BINARY`), so their resolution never depends on `PATH` ordering; `restic` is reached *only* that way, its directory never being on `PATH`.
 
 Dev mode reaches the same pinned binaries: it prepends the `git` and `lima` directories to `PATH` and names `restic`, `desync`, and the latchkey curl by absolute path. `lima` matters because `mngr_lima` resolves `limactl` from `PATH` and enforces only a *minimum* version, so a developer's newer system lima would pass the check and then hang agent creation on the 2.1.x forwarder regression the pin exists to avoid.
 
@@ -152,13 +152,22 @@ There is deliberately no bundled `qemu-img`. The pre-baked image is published, d
 
 ### How the shipped binaries are chosen
 
-`scripts/build.js` (`pnpm build`, the first half of `pnpm dist`) is the only stage whose output reaches the app. It runs on whichever machine invokes `pnpm dist` -- in CI, the arm64 `minds-runner` -- and downloads for its own `process.arch`. ToDesktop then packages the uploaded `resources/` into `Contents/Resources` via `extraResources`, which is what `paths.getResourcesDir()` resolves to (`process.resourcesPath`) in a packaged app.
+`scripts/build.js` (`pnpm build`, the first half of `pnpm dist`) is the only stage whose output reaches the app. One upload builds every platform, so it stages one complete resources tree per shipped target, whatever machine runs it (in CI, the arm64 `minds-runner`):
+
+```
+resources/darwin-arm64/payload/    uv, uv-shims, git, lima, desync, restic, curl for macOS arm64,
+                                   plus a copy of the shared payload
+resources/linux-x64/payload/       uv, git, lima, desync, restic, curl for Linux x86_64,
+                                   plus a copy of the shared payload
+```
+
+The shared payload (wheels, the runtime pyproject + lockfile with the bundled client config, the latchkey bundle) is built once under `resources/shared/` and copied into every target tree; the staging copy is then removed. `todesktop.js` names exactly one source per target under `targetOverrides` (`mac.arm64` gets `resources/darwin-arm64/payload/`, `linux.x64` gets `resources/linux-x64/payload/`) and no base `extraResources` list: the build service shipped the base list's bytes to Linux under every `platformOverrides` shape tried, which is how three builds produced Linux packages with no tools or with arm64 Mach-O tools (the spec records them). Both sources are directories named `payload` because ToDesktop pairs the per-target lists by `to` plus the source directory's name. The runtime resolves the same paths (`paths.getResourcesDir()`, which is `process.resourcesPath`) on every target. `SHIPPED_TARGETS` in `download-binaries.js` is the list of targets, and `assertStagedExecutablesMatchTarget` refuses a staged directory whose executables are the wrong format for it, by reading the ELF or Mach-O header of every provisioned binary. That assertion is what would have caught the first Linux AppImage, which shipped the build host's arm64 Mach-O tools inside an x86_64 app.
 
 What `build.js` stages is `scripts/download-binaries.js`'s `BINARIES` table, iterated -- not a list written out a second time. Naming the downloaders individually is what shipped `desync`, and later the latchkey `curl`, staged by nothing that reaches the app.
 
-`extraResources` is the only channel that reaches the shipped app, so `appFiles` excludes `resources/` wholesale (`'!resources/**'`) -- anything it matched would be packed into `app.asar` as a second copy nothing reads.
+`extraResources` is the only channel that reaches the shipped app, so `appFiles` excludes `resources/` wholesale (`'!resources/**'`) -- anything it matched would be packed into `app.asar` as a second copy nothing reads. The upload carries both targets' tools, so `uploadSizeLimit` in `todesktop.js` is sized for it; `assertUploadFitsToDesktopLimit` prices every platform's list and fails the build before the upload if the estimate exceeds the limit.
 
-Two things would put that copy back, so neither is wired:
+Two things would put a duplicate copy back, so neither is wired:
 
 - **`todesktop:beforeInstall`.** ToDesktop runs a hook script against `app-wrapper/app/`, so anything it downloads is folded into `app.asar`. Its agent is x86_64, so the binaries it fetches are Intel ones inside an arm64 app -- unreachable *and* unrunnable. `scripts/build.js` is the only stage whose output ships.
 - **`mac.additionalBinariesToSign`.** The builder's signing preflight rejects a listed path that is missing from the app-files upload, so every entry pins its subtree into that upload. It buys nothing: ToDesktop deep-signs every Mach-O under `Contents/Resources` with `mac.entitlements` whether or not it is listed.
@@ -175,11 +184,27 @@ Raw costs no extra disk. On the real 20 GiB image the sparse raw occupies **4.9 
 
 ### macOS Intel (x86_64) is not supported
 
-ToDesktop publishes `arm64`, `x64`, and `universal` mac artifacts, but only arm64 works, and only it is fetched and verified by `.github/workflows/minds-launch-to-msg.yml`. In the published x64 app, `Contents/MacOS/Mind` is x86_64 while the bundled `uv`, `restic`, and `limactl` are arm64, so it cannot launch a VM.
+Only the arm64 mac artifacts are built: the Intel (x64) and universal mac targets are disabled in the ToDesktop dashboard (the config schema exposes no arch selection, so the dashboard is where that decision lives), and `.github/workflows/minds-launch-to-msg.yml` fetches and verifies arm64 only. Supporting Intel would need a `darwin-x64` entry in `SHIPPED_TARGETS` plus either a per-arch `extraResources` mapping or `lipo`-merged universal binaries, and a pre-baked x86_64 Lima image, without which an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM anyway.
 
-The cause is structural. `build.js` stages binaries for the arch of the machine it runs on, and all three mac artifacts are packaged from that one upload. ToDesktop's own build agent is x86_64, so nothing on the build server can supply arm64 bytes either.
+### Linux
 
-ToDesktop exposes no arch selection -- its config schema has no `mac.target`/`mac.arch`, and the CLI has no `--arch` -- so the x64 and universal artifacts cannot be turned off from this repo. Supporting Intel would need `build.js` to stage both arches (it already downloads per-arch; nothing forces it to fetch only its own) and either a per-arch `extraResources` mapping or `lipo`-merged universal binaries, plus a pre-baked x86_64 Lima image, without which an Intel app's prefetch reports `VERSION_UNAVAILABLE` and builds in-VM anyway. `git` is already universal, since `xcrun --find git` returns Apple's fat binary.
+Linux x86_64 ships as two artifacts of every build, both packaged by ToDesktop from the same upload: a `.deb` and an AppImage. The `.deb` is the recommended install; the AppImage is for distributions without `dpkg` and for running without installing. ToDesktop's "Add APT sources to the system" is set to **No** in the dashboard, so the `.deb` adds no apt repository -- updates come through the app, exactly as on macOS. `linux.category` is `Development` and `linux.noSandbox` is `probe`, pinned by `appBuilderLibVersion`: the launcher passes `--no-sandbox` only where its probe (`unshare -Ur true`, run from `/bin/sh`) finds no unprivileged user namespaces, which is the case under the AppArmor restriction Ubuntu 24.04 and later ship, so the app starts there rather than aborting. That probe answers for the shell, not for the app. The `.deb`'s post-install script installs an AppArmor profile for `/opt/Mind/minds` whose `userns` rule lets the executable itself create the namespaces Chromium's sandbox needs (the script's other fallback, a setuid `chrome-sandbox`, never applies there because it tests user namespaces as root, which always succeeds). So a `.deb` launched with the flag relaunches itself without it when it finds itself under that profile or beside a root-owned setuid helper (`electron/linux-sandbox.js`; the relaunched process carries `--minds-sandbox-relaunched` so it can never loop, and every packaged Linux launch that saw the flag logs a `[sandbox]` line to `electron.log` saying whether it relaunched, is the relaunched process, or is running without the sandbox and why). The replacement is started by a detached shell that waits for the old process to exit (`electron/linux-relaunch.js`), not by Electron's `app.relaunch`: on Linux that goes through a relauncher helper that Chromium's process launcher starts with the kernel's one-way `no_new_privs` flag (its default for child processes), and a process with that flag can never run a setuid helper, so the `.deb` updater's `pkexec dpkg -i` would fail with "pkexec must be setuid root". Verified on Ubuntu 26.04 on 2026-09-14: launched directly, the packaged binary runs with the namespace sandbox. Debian 12 has no such restriction (and the `.deb`'s post-install script declines to load the profile there, since Debian 12's AppArmor predates the `userns` rule), so there the probe passes, no flag is passed, and both artifacts run sandboxed from the first launch with no relaunch. The AppImage has neither a profile nor a setuid helper on the distributions with that restriction, since nothing can install one for a user-owned mount, so it runs without the Chromium process sandbox there; the app's own isolation of workspaces (containers and VMs) is unaffected either way.
+
+**Installing.** `sudo apt install ./minds-<version>-amd64.deb` installs under `/opt/Mind` with a menu entry and the `minds://` scheme handler registered by the package. The AppImage needs `chmod +x` and, on the distributions that no longer ship it, `libfuse2`; on its first launch (and every launch after, so the entry follows the file) it writes `~/.local/share/applications/minds.desktop` and its icon and registers itself as the `minds://` handler with `xdg-mime`, best-effort. `electron/linux-desktop-entry.js` renders the entry.
+
+**Local backends need host prerequisites.** Nothing is bundled for them. The create form probes the machine when it loads its defaults (`desktop_client/local_prerequisites.py`) and, under whichever local backend is selected, shows what is missing with a copyable install command and a "Check again" button, so every backend stays selectable:
+
+| Backend | Needs | Probe |
+|---|---|---|
+| Docker | a reachable Docker daemon | `docker version` reports a server |
+| gVisor (`runsc` runtime) | Docker plus `runsc` registered as a runtime | `docker info` lists `runsc` |
+| Lima | the host architecture's QEMU (`qemu-system-x86_64` or, on arm64, `qemu-system-aarch64`) and a usable `/dev/kvm` | both present and `/dev/kvm` readable and writable |
+
+The create form's local preset prefers Docker on Linux and Lima on macOS, taking the other when the preferred backend's prerequisites are missing (`local_launch_mode` in the form defaults). The install commands are apt one-liners on apt systems and a link to the project's install guide elsewhere. While the selection the form would submit has an unmet prerequisite (the local preset's backend, a compute mode picked in Advanced, or the runsc runtime) the Create button is held, since the create would only fail, slowly, where the notice already says what to do.
+
+**Updates.** electron-updater picks its Linux driver from `resources/package-type`: `deb` selects `DebUpdater`, which installs the downloaded package with `dpkg -i` under `pkexec` and so prompts for the user's password; an absent file selects `AppImageUpdater`, which replaces the running AppImage file in place. On Linux an update is never installed at quit: the update-ready card offers **Install and restart**, the install runs only on that click, and for a `.deb` the card says the password prompt is coming (`electron/install-policy.js`; on macOS the policy stays install-on-quit). From the click until the app quits, the card and the Settings panel show an installing state (the button held, the copy naming the password prompt on a `.deb`); it is set in the renderer before the main process is asked, because the `.deb` install runs the package tool synchronously and blocks the main process for its whole duration, so nothing pushed from there could reach the window in time. An install that does not go through (the prompt cancelled, `dpkg` refusing the package) leaves the app running with the download still staged; the card and the Settings panel say so, and the button is live for another try. A quit cancelled at the running-workspaces prompt after a successful install is reported back to the renderer (the install call settles only then), so the control comes back rather than staying held in an app that is not quitting. An install that did go through but whose quit was cancelled at the running-workspaces prompt has already replaced the package on disk, so the next click on the button only quits, into the new version. After a Linux install the app restarts itself through the same detached shell the sandbox relaunch uses (`relaunchedBy: 'app'` in the policy table; `electron/linux-relaunch.js`) rather than through electron-updater: the `.deb` updater's `app.relaunch` would hand the replacement `no_new_privs`, so it could never run `pkexec` for the update after this one, and the AppImage updater would start the replaced file at once, before this process has quit, where it dies on the single-instance lock and its arrival raises the window over the running-workspaces prompt (`electron/appimage-updater.js` keeps that updater's file replacement and drops its start). An AppImage restarts from the AppImage file with no arguments, since the mounted executable is gone once the old process exits and the file's launcher adds what the executable needs. The running-workspaces prompt and the other quit-time dialogs are owned by the app's most recent window, so a raise of that window cannot hide them. The AppImage updater needs the `APPIMAGE` environment variable the AppImage runtime sets, so an extracted AppImage (`--appimage-extract`) reports updates as unavailable. If two copies of the AppImage exist, only the one being run is replaced.
+
+**Known limitations.** The latchkey gateway keeps running after the app quits, as on macOS. There is no Linux launch-to-message flow in CI yet: `minds-launch-to-msg.yml`'s `linux_artifacts` job extracts both artifacts on an Ubuntu runner and checks that every bundled tool is an x86-64 ELF that runs, that the `.deb` carries `package-type`, and that the bundled wheels resolve into a working `minds` (`scripts/verify-linux-artifacts.sh`); creating a mind on Linux is verified by hand before stable lists `linux` (see [next_deploy.md](deploy/next_deploy.md)).
 
 ### Updating the bundled git
 
@@ -215,27 +240,22 @@ same shape:
   <agent-id>/             # Per-agent workspace directories
 ```
 
-`MINDS_ROOT_NAME` selects which data root the backend uses. Activation
-(`minds-admin env activate <name>`) sets it to `minds-<env-name>` (or just
-`minds` for production) and exports the derived `MNGR_HOST_DIR` /
-`MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` alongside. Two envs
+`MINDS_ROOT_NAME` selects which data root the backend uses: unset or
+`minds` is production, `minds-<env-name>` is another env, with the derived
+`MNGR_HOST_DIR` / `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` exported
+alongside it. Two envs
 activated in parallel shells (or by two Electron instances pointed at
 two different bundled configs) never share state. Standalone `mngr`
 invocations ignore `MINDS_ROOT_NAME`.
 
 ### Environment selection
 
-The desktop client picks the env it talks to via shell activation:
-
-```bash
-eval "$(uv run minds-admin env activate <name>)"
-minds run                                  # or `just minds-start`
-```
-
-`minds run` reads `MINDS_CLIENT_CONFIG_PATH` (set by activation) for
-the per-env `client.toml`. Passing `--config-file <path>` overrides
-the env var. There is no implicit fallback: the backend refuses to
-start when neither is set.
+Production is the default. A source checkout with nothing exported
+(`apps/minds/scripts/start-desktop.sh`, or a bare `uv run minds run`) reads the
+in-repo production `client.toml` and owns `~/.minds/`. Another env is
+selected by exporting `MINDS_ROOT_NAME` / `MNGR_HOST_DIR` / `MNGR_PREFIX` /
+`MINDS_CLIENT_CONFIG_PATH` for it (Imbue's internal operator tooling does
+this); `minds run --config-file <path>` overrides the config path either way.
 
 The packaged Electron app embeds a `client.toml` + `MINDS_ROOT_NAME`
 pair at build time via `MINDS_CLIENT_CONFIG_BUNDLE` and
@@ -298,15 +318,19 @@ Both package managers are configured to refuse any distribution published less t
 - **JS (pnpm)**: `minimumReleaseAge: 20160` (minutes) in `apps/minds/pnpm-workspace.yaml`. Requires pnpm >= 10.16.0 (we pin 10.33.4).
 - **Python (uv)**: `exclude-newer = "14 days"` under `[tool.uv]` in `apps/minds/electron/pyproject/pyproject.toml` (the packaged end-user app).
 
-The cooldown only bites during **resolution** -- `pnpm install` without `--frozen-lockfile`, `pnpm add`/`update`, and `uv lock`/`uv add` or a re-resolve. Frozen installs (CI's `pnpm install --frozen-lockfile`, and `uv sync` replaying an up-to-date lockfile) replay the committed lockfile and are unaffected. If you add or update a dependency and pnpm/uv refuses a version that is too new, either wait out the window or, for pnpm, add a targeted exception via `minimumReleaseAgeExclude`.
+The cooldown only bites during **resolution** -- `pnpm install` without `--frozen-lockfile`, `pnpm add`/`update`, and `uv lock`/`uv add` or a re-resolve. Frozen installs (CI's `pnpm install --frozen-lockfile`, and `uv sync` replaying an up-to-date lockfile) replay the committed lockfile and are unaffected. ToDesktop's build agents are not frozen: they run `pnpm install --no-frozen-lockfile`, which re-resolves on every build, so a version the cooldown refuses fails every desktop build at "Configuring App" even while CI is green. If you add or update a dependency and pnpm/uv refuses a version that is too new, either wait out the window or, for pnpm, add a targeted exception via `minimumReleaseAgeExclude`. The current exceptions are `latchkey`, `@imbue-ai/detent`, and `playwright` / `playwright-core` (latchkey pins playwright to an exact version, so a latchkey bump can otherwise land a playwright still inside the window).
 
 ### Running locally
 
 ```bash
-cd apps/minds
-pnpm install        # Install Electron and ToDesktop CLI
-pnpm start          # Launch the Electron app in dev mode
+apps/minds/scripts/start-desktop.sh   # pnpm install + pnpm start, from any directory
 ```
+
+The script selects the pinned Node, requires the pinned pnpm, installs the
+Electron dependencies, and launches the app in dev mode against production.
+On Linux, `apps/minds/scripts/install-linux.sh` installs every prerequisite
+above (and Docker) and writes a launcher that runs this script; see
+[dev-setup.md](./dev-setup.md).
 
 In dev mode, the Electron app skips `uv sync` and uses the monorepo's workspace venv directly (via `uv run --package minds` from the repo root). That installs the `minds` package's own dependency closure, which includes the agent-type plugins the default workspace template configures and the modal provider plugin minds enables; other plugins (e.g. ovh) are available only if the venv already has them (e.g. after `uv sync --all-packages`). Changes to the Python code are picked up immediately on restart.
 
@@ -317,9 +341,9 @@ pnpm build                        # Prepare resources
 pnpm exec todesktop build         # Upload to ToDesktop for native builds
 ```
 
-ToDesktop builds the macOS arm64 native installer (.zip / .dmg), handles code signing, notarization, and auto-update infrastructure. Linux + Windows targets are not currently wired up: `todesktop.js` ships only a `mac:` block, and the release pipeline (`minds-launch-to-msg.yml`) builds and verifies macOS only. The host scripts (`download-binaries.js`, `build.js`) have skeletons for Linux x86_64 and a few Linux native modules ship prebuilds via pnpm; git for Linux is already the complete dugite-native manifest payload (continuously proven by the bundled-git acceptance test on Linux in CI), so the only remaining gap for a packaged Linux install is a `linux:` ToDesktop block.
+ToDesktop builds the macOS arm64 native installer (.zip / .dmg) and the Linux x86_64 packages (.deb / AppImage) from one upload, and handles code signing, notarization, and the auto-update infrastructure. Which targets it builds is set in the ToDesktop dashboard (mac Intel and universal are off, the `.deb` is on); how each platform's resources are staged is in "How the shipped binaries are chosen" above, and the Linux specifics are in "Linux". There is no Windows target, and no packaged Linux arm64 build: `download-binaries.js` provisions linux/arm64 binaries for dev-mode runs only (exercised on a Raspberry Pi; see [raspberry-pi.md](./raspberry-pi.md)). The release pipeline (`minds-launch-to-msg.yml`) verifies the macOS app end to end and the Linux artifacts structurally.
 
-The build script (`scripts/build.js`) builds a wheel for every workspace package into `resources/wheels/`, rewrites `[tool.uv.sources]` in the staged `resources/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `resources/pyproject/uv.lock` against the rewritten pyproject. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
+The build script (`scripts/build.js`) builds a wheel for every workspace package into the shared payload (`resources/shared/wheels/`), rewrites `[tool.uv.sources]` in the staged `resources/shared/pyproject/pyproject.toml` to point each workspace package at its bundled wheel, then runs `uv lock` in-place to regenerate `uv.lock` beside it against the rewritten pyproject. The shared payload is then copied into every target tree, so the app reads them as `<resources>/wheels/` and `<resources>/pyproject/`. The regenerated lockfile is what ships in the app bundle; the dev-time `electron/pyproject/uv.lock` is not committed.
 
 ### Updating the Python package
 

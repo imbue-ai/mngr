@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.permission_requests_consumer import PermissionRequestsConsumer
+from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
 from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -106,6 +107,14 @@ class DesktopClientState(MutableModel):
     minds_config: MindsConfig | None = Field(default=None, frozen=True, description="Per-user minds config store")
     geo_location_cache: GeoLocationCache = Field(
         default_factory=GeoLocationCache, description="One-shot IP-geolocation cache for region defaults"
+    )
+    host_probe: HostProbeInterface | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Reads what the local compute backends need from this machine (Docker, runsc, QEMU/KVM) for the "
+            "create form; wired by create_desktop_client (None only for apps constructed without it)"
+        ),
     )
     ui_channel_broadcaster: UiChannelBroadcaster = Field(
         default_factory=UiChannelBroadcaster,

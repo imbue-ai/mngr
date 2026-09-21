@@ -272,7 +272,7 @@ class CreateWorkspaceRequest(ApiRequestModel):
     runtime: DockerRuntime | None = Field(
         default=None,
         description="Docker container runtime for DOCKER launch mode (runc vs gVisor's runsc); "
-        "defaults to the platform-appropriate value (runc on macOS, runsc on Linux)",
+        "defaults to runc, with runsc an explicit opt-in",
     )
     account_id: str | None = Field(default=None, description="imbue_cloud account id (required for imbue_cloud modes)")
     region: str | None = Field(default=None, description="Provider region")

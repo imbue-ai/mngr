@@ -37,6 +37,16 @@ export interface CreateRetryPrefill {
   color: string;
 }
 
+/** One local backend's availability on this machine (see local_prerequisites.py). */
+export interface LocalBackendPrerequisite {
+  key: "DOCKER" | "RUNSC" | "LIMA";
+  is_available: boolean;
+  summary: string;
+  /** A pasteable install command, or "" when only the docs can help. */
+  install_command: string;
+  docs_url: string;
+}
+
 export interface CreateFormDefaults {
   accounts: CreateAccountOption[];
   default_account_id: string;
@@ -56,6 +66,9 @@ export interface CreateFormDefaults {
   branch: string;
   color: string;
   prefill: CreateRetryPrefill | null;
+  local_prerequisites: LocalBackendPrerequisite[];
+  /** The compute mode the local preset selects: the first local backend that is ready here. */
+  local_launch_mode: string;
 }
 
 export interface OrphanedFailedDestroy {

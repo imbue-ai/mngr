@@ -20,12 +20,22 @@ describe("failureGuidance", () => {
 
 describe("failureTurn", () => {
   it("keeps the ids the e2e workspace runner polls, around the failure text", () => {
-    const turn = failureTurn("alpha", "clone blew up", true);
+    const turn = failureTurn("alpha", "clone blew up");
     const nodes = collectVnodes(turn);
     const view = nodes.find((node) => attrsOf(node).id === "failure-view");
     const message = nodes.find((node) => attrsOf(node).id === "error-message");
     expect(view).toBeDefined();
     expect(message).toBeDefined();
+    expect(allText(message)).toBe("Could not create alpha: clone blew up");
+  });
+
+  it("lands the failure text whole rather than streamed", () => {
+    // An error can run to pages, and streamed a character at a time it reads
+    // as the app hanging while the cause is still spelling itself out.
+    const turn = failureTurn("alpha", "clone blew up");
+    const streamed = collectVnodes(turn).filter((node) => String(attrsOf(node).class ?? "").includes("start-char"));
+    expect(streamed).toHaveLength(0);
+    const message = collectVnodes(turn).find((node) => attrsOf(node).id === "error-message");
     expect(allText(message)).toBe("Could not create alpha: clone blew up");
   });
 });

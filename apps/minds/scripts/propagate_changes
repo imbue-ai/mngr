@@ -34,8 +34,8 @@ fi
 # Require an activated minds env -- no implicit default to production.
 # Without activation we'd silently talk to ~/.minds/ (production), which
 # is almost never what an iteration-loop script should be doing. Mirrors
-# the `minds run` / `minds-admin env deploy` activation check in
-# imbue.minds.bootstrap + apps/minds_admin/imbue/minds_admin/cli/env.py.
+# the `minds-admin env deploy` / `destroy` activation check
+# (`is_env_activated` in imbue.minds.bootstrap).
 if [[ -z "${MINDS_ROOT_NAME:-}" ]]; then
     echo "ERROR: MINDS_ROOT_NAME is not set." >&2
     echo "       Run \`eval \"\$(uv run minds-admin env activate <name>)\"\` first" >&2

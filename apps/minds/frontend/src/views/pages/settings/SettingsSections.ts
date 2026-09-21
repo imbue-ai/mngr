@@ -20,6 +20,8 @@ import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
+import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
+import { installTermsOf } from "../../shell/update-ready";
 
 interface SectionsAttrs {
   model: SettingsModel;
@@ -456,14 +458,47 @@ function masterPasswordPanel(
 function updateStatusLine(model: SettingsModel): m.Children {
   const state = model.updateState;
   if (state === null) return null;
+  // Keyed off the staged version rather than the status: the button that
+  // starts the install is offered for as long as a download is staged, while
+  // the status a later check publishes may have replaced `update-downloaded`.
+  if (model.isUpdateInstalling && state.downloadedVersion != null) {
+    const terms = installTermsOf(state);
+    const copy = updateInstallingCopy(state.downloadedVersion, terms.policy, terms.needsPassword);
+    return m(Notice, { variant: "info" }, `${copy.title}. ${copy.detail}.`);
+  }
   const status = state.status;
   if (status.type === "error") {
     return m(Notice, { variant: "warn" }, `Update check failed: ${status.message}`);
   }
   if (status.type === "update-downloaded") {
-    return m(Notice, { variant: "info" }, `Mind ${status.version} is downloaded. Restart to install.`);
+    return m(Notice, { variant: "info" }, `Mind ${status.version} is downloaded. ${installInstruction(state)}`);
   }
   return null;
+}
+
+/**
+ * What applying a staged update takes on this install.
+ *
+ * macOS installs on the next quit, so restarting is the whole instruction. A
+ * Linux install waits for the button below, and a .deb reinstalls through the
+ * system's package tool, which asks for the user's password.
+ */
+function installInstruction(state: UpdateState): string {
+  const terms = installTermsOf(state);
+  if (terms.policy === "on-quit") return "Restart to install.";
+  return terms.needsPassword ? "Install it below; you'll be asked for your password." : "Install it below.";
+}
+
+/** The label of the control that applies a staged update: the same words as the floating card's. */
+function installActionLabel(state: UpdateState): string {
+  const terms = installTermsOf(state);
+  return updateReadyCopy(terms.policy, terms.needsPassword).action;
+}
+
+/** The label of that control while it is held, again the floating card's words. */
+function installingActionLabel(state: UpdateState, version: string): string {
+  const terms = installTermsOf(state);
+  return updateInstallingCopy(version, terms.policy, terms.needsPassword).action;
 }
 
 /**
@@ -723,7 +758,15 @@ function updatesPanel(model: SettingsModel): m.Children {
       // does not come back for a version already dismissed -- so without this
       // there is no way in the app to install a download it has finished.
       state.downloadedVersion != null
-        ? m(Button, { variant: "primary", onclick: () => void model.installUpdateNow() }, "Restart now")
+        ? m(
+            Button,
+            {
+              variant: "primary",
+              disabled: model.isUpdateInstalling,
+              onclick: () => void model.installUpdateNow(),
+            },
+            model.isUpdateInstalling ? installingActionLabel(state, state.downloadedVersion) : installActionLabel(state),
+          )
         : null,
       // Disabled while the download it already started is running, because a
       // check queued behind that transfer would answer minutes later. The

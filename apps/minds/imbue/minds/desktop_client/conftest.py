@@ -40,6 +40,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
+from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.testing import device_id_for_test
@@ -514,6 +515,9 @@ def build_desktop_client_for_test(
     """
     auth_store = FileAuthStore(data_directory=tmp_path / "auth")
     effective_resolver = backend_resolver if backend_resolver is not None else MngrCliBackendResolver()
+    # A described machine rather than the real one: the create form's defaults
+    # probe the local backends, and a real probe would run docker in a test.
+    create_kwargs.setdefault("host_probe", FakeHostProbe())
     app = create_desktop_client(
         auth_store=auth_store,
         backend_resolver=effective_resolver,

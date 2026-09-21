@@ -1,0 +1,1 @@
+Merges `mngr/linux-dev-packaging` (see `mngr-linux-dev-packaging.md`): the README's "For development" section points Linux users who want to run the minds desktop app from source at `apps/minds/scripts/install-linux.sh`.

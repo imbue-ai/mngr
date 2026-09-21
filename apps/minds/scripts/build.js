@@ -1,19 +1,39 @@
 /**
  * Build script for Minds desktop app.
  *
- * Downloads platform-specific uv, git, Lima, restic, and desync
- * binaries, copies the standalone pyproject.toml + lockfile into the
- * resources directory for packaging.
+ * Stages everything ToDesktop packages under `resources/`, one complete tree
+ * per shipped target:
+ *
+ *   resources/<target>/payload/   the native tools for that target (every
+ *                                 BINARIES entry download-binaries.js
+ *                                 provisions for it) plus a copy of the
+ *                                 shared payload
+ *
+ * The shared payload -- wheels, the runtime pyproject + lockfile (with the
+ * bundled client config), the latchkey bundle -- is built once under
+ * `resources/shared/` and copied into every target tree, so each platform's
+ * list in todesktop.js names exactly one source. Every source is named
+ * `payload` because ToDesktop matches a platform override to the base entry it
+ * replaces by `to` plus source name (see TARGET_PAYLOAD_DIR_NAME). Every build
+ * stages every shipped target, whatever machine runs it.
  */
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execSync, execFileSync } = require('child_process');
-const { downloadBinaries, assertTreeFitsUploadBudget, assertUploadFitsToDesktopLimit } = require('./download-binaries.js');
+const {
+  SHIPPED_TARGETS,
+  stagedTargetPath,
+  downloadBinaries,
+  assertStagedExecutablesMatchTarget,
+  assertTreeFitsUploadBudget,
+  assertUploadFitsToDesktopLimit,
+} = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const RESOURCES_DIR = path.join(ROOT, 'resources');
+const SHARED_RESOURCES_DIR = path.join(RESOURCES_DIR, 'shared');
 
 const MONOREPO_ROOT = path.resolve(ROOT, '../..');
 
@@ -55,7 +75,8 @@ const WORKSPACE_PACKAGES = {
 };
 
 /**
- * Build each workspace package as a wheel into `resources/wheels/`.
+ * Build each workspace package as a wheel into the shared payload
+ * (`resources/shared/wheels/`, copied into every target tree).
  *
  * Relies on each package's `pyproject.toml` (and hatchling's
  * `[tool.hatch.build.targets.wheel]` config) to determine what goes into the
@@ -66,7 +87,7 @@ const WORKSPACE_PACKAGES = {
  * rewriting `pyproject.toml` to reference the wheels.
  */
 function buildWorkspaceWheels() {
-  const wheelsDir = path.join(RESOURCES_DIR, 'wheels');
+  const wheelsDir = path.join(SHARED_RESOURCES_DIR, 'wheels');
   fs.mkdirSync(wheelsDir, { recursive: true });
 
   const wheelByPackage = {};
@@ -138,8 +159,9 @@ function dereferenceSymlinksInPlace(root) {
 }
 
 /**
- * Bundle the latchkey npm CLI (plus all its runtime dependencies) into
- * ``resources/latchkey/``.
+ * Bundle the latchkey npm CLI (plus all its runtime dependencies) into the
+ * shared payload (``resources/shared/latchkey/``, copied into every target
+ * tree, so it ships as ``<resources>/latchkey/``).
  *
  * Context:
  *   apps/minds is managed by pnpm, which installs each package into its own
@@ -156,7 +178,7 @@ function dereferenceSymlinksInPlace(root) {
  *   ``pnpm-lock.yaml`` resolved. We deploy the ``minds`` workspace
  *   package itself with ``--prod`` to exclude minds' devDeps (the e2e
  *   playwright + electron) and copy the resulting ``node_modules`` into
- *   ``resources/latchkey/``.
+ *   the bundle directory.
  *
  *   The ``--config`` flags steer the deploy:
  *     - ``node-linker=hoisted`` produces a flat top-level layout (real
@@ -177,18 +199,18 @@ function dereferenceSymlinksInPlace(root) {
  *
  *   ``@todesktop/runtime`` and its own transitives (electron-updater,
  *   builder-util-runtime, ...) ride along because they're also prod deps
- *   of minds. They sit next to latchkey in ``resources/latchkey/``
+ *   of minds. They sit next to latchkey in the bundle directory
  *   without colliding; the small extra weight is acceptable in exchange
  *   for not having to compute a latchkey-only transitive closure.
  *
  * Runtime:
- *   A small shell shim at ``resources/latchkey/bin/latchkey`` invokes the
+ *   A small shell shim at ``<resources>/latchkey/bin/latchkey`` invokes the
  *   CLI under the packaged Electron binary as Node (``ELECTRON_RUN_AS_NODE=1``),
  *   so we don't need to ship a separate Node runtime. The Python backend
  *   sets ``MINDS_ELECTRON_EXEC_PATH`` in the env before spawning the shim.
  */
 function bundleLatchkey() {
-  const destDir = path.join(RESOURCES_DIR, 'latchkey');
+  const destDir = path.join(SHARED_RESOURCES_DIR, 'latchkey');
   const destNodeModules = path.join(destDir, 'node_modules');
   const destBinDir = path.join(destDir, 'bin');
 
@@ -335,13 +357,10 @@ function bakeBuildInfo() {
  *     never collides with an installed prod build). Must match the
  *     minds(-<env-name>)? shape enforced by the runtime bootstrap.
  *
- * When both are unset, leaves _bundled/ empty -- this is the
- * `uv run minds run` / dev-mode case where the user is expected to
- * activate an env in their shell (`minds-admin env activate <name>`) before
- * invoking the backend. The packaged Electron startup refuses to run
- * without a bundled config if it was built without these vars set,
- * which surfaces the missing build-time config loudly instead of
- * silently shipping a dev-only artifact.
+ * When both are unset, leaves _bundled/ empty -- the `uv run minds run` /
+ * dev-mode case. The Electron startup then passes no --config-file and
+ * the backend loads the in-repo production client config, unless the
+ * user's shell exports another env.
  *
  * Refuses if exactly one of the two is set -- both knobs travel
  * together (the config path identifies WHICH env's URLs ship; the root
@@ -375,9 +394,9 @@ function bundleClientConfig() {
   if (!configBundle && !rootNameBundle) {
     console.log(
       'MINDS_CLIENT_CONFIG_BUNDLE / MINDS_ROOT_NAME_BUNDLE both unset; ' +
-        'leaving _bundled/ empty. Packaged runtime will refuse to start ' +
-        'without an activated env in the user\'s shell -- this is the ' +
-        'dev-build path.'
+        'leaving _bundled/ empty. The runtime will load the in-repo ' +
+        'production config unless the user\'s shell exports another env ' +
+        '-- this is the dev-build path.'
     );
     return;
   }
@@ -418,11 +437,11 @@ function bundleClientConfig() {
   // The source-tree _bundled/ above ends up inside app.asar, which the
   // Python backend subprocess cannot read. paths.js getBundledConfigDir()
   // resolves the packaged-mode bundle under the pyproject resources dir
-  // (extraResources copies resources/ -> Resources/), so stage a second
-  // copy there on the real filesystem where `minds run --config-file`
-  // can reach it.
+  // (the shared payload lands at the root of every target's packaged
+  // resources dir), so stage a second copy there on the real filesystem
+  // where `minds run --config-file` can reach it.
   const packagedBundledDir = path.join(
-    RESOURCES_DIR,
+    SHARED_RESOURCES_DIR,
     'pyproject',
     'imbue',
     'minds',
@@ -437,7 +456,8 @@ function bundleClientConfig() {
 }
 
 /**
- * Write `resources/pyproject/pyproject.toml` and regenerate `uv.lock`.
+ * Write the shared payload's `pyproject/pyproject.toml` and regenerate
+ * `uv.lock` beside it (shipped as `<resources>/pyproject/`).
  *
  * Starts from `electron/pyproject/pyproject.toml` (the dev-time pyproject),
  * replaces `[tool.uv.sources]` with entries pointing at the bundled wheels,
@@ -447,7 +467,7 @@ function bundleClientConfig() {
  */
 function stageRuntimePyproject(wheelByPackage) {
   const srcDir = path.join(ROOT, 'electron', 'pyproject');
-  const destDir = path.join(RESOURCES_DIR, 'pyproject');
+  const destDir = path.join(SHARED_RESOURCES_DIR, 'pyproject');
   fs.mkdirSync(destDir, { recursive: true });
 
   const pyprojectSrc = path.join(srcDir, 'pyproject.toml');
@@ -478,6 +498,22 @@ function stageRuntimePyproject(wheelByPackage) {
   console.log(`Regenerated uv.lock at ${destDir}`);
 }
 
+/**
+ * Copy the shared payload into a target tree. A name present on both sides
+ * would be a tool directory shadowing part of the payload, so it is an error
+ * rather than an overwrite.
+ */
+function copySharedPayloadInto(targetDir) {
+  for (const entry of fs.readdirSync(SHARED_RESOURCES_DIR)) {
+    const destination = path.join(targetDir, entry);
+    if (fs.existsSync(destination)) {
+      throw new Error(`${entry} is staged both as a tool under ${targetDir} and in the shared payload`);
+    }
+    fs.cpSync(path.join(SHARED_RESOURCES_DIR, entry), destination, { recursive: true });
+  }
+  console.log(`Copied the shared payload into ${targetDir}`);
+}
+
 async function main() {
   console.log('Building Minds desktop app...\n');
 
@@ -485,16 +521,27 @@ async function main() {
   if (fs.existsSync(RESOURCES_DIR)) {
     fs.rmSync(RESOURCES_DIR, { recursive: true });
   }
-  fs.mkdirSync(RESOURCES_DIR, { recursive: true });
-
-  // The only staging whose output reaches the packaged app.
-  await downloadBinaries(RESOURCES_DIR);
+  fs.mkdirSync(SHARED_RESOURCES_DIR, { recursive: true });
 
   bundleLatchkey();
   const wheelByPackage = buildWorkspaceWheels();
   stageRuntimePyproject(wheelByPackage);
   bundleClientConfig();
   bakeBuildInfo();
+
+  // The only staging whose output reaches the packaged app: one tree per
+  // shipped target, its native tools checked against the target's executable
+  // format before the shared payload is copied in beside them.
+  for (const target of SHIPPED_TARGETS) {
+    const targetDir = path.join(ROOT, stagedTargetPath(target));
+    fs.mkdirSync(targetDir, { recursive: true });
+    await downloadBinaries(targetDir, target);
+    assertStagedExecutablesMatchTarget(targetDir, target);
+    copySharedPayloadInto(targetDir);
+  }
+  // Only the target trees are uploaded; the staging copy would otherwise be
+  // counted against the upload budget below.
+  fs.rmSync(SHARED_RESOURCES_DIR, { recursive: true });
 
   // Fail at build time -- not tens of cloud-build minutes later at ToDesktop
   // upload time -- if the app-source upload would blow todesktop.js's

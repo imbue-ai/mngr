@@ -170,14 +170,15 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # All 9 of these are filename references to `pnpm-workspace.yaml` /
+    # All 10 of these are filename references to `pnpm-workspace.yaml` /
     # `pnpm-lock.yaml` in scripts/build_test.py docstrings + assertion
-    # messages, plus one in test_latchkey_version_alignment.py -- pnpm
-    # mandates YAML for its config so we cannot pick TOML there. The
-    # ratchet's `r"yaml"` regex catches the substring in filenames as if
-    # it were `import yaml`; tightening the regex belongs in
-    # libs/imbue_common, which these branches are scoped out of.
-    rc.check_yaml_usage(_DIR, snapshot(9))
+    # messages, plus one each in test_latchkey_version_alignment.py and
+    # test_electron_updater_dependency_alignment.py -- pnpm mandates YAML
+    # for its config so we cannot pick TOML there. The ratchet's `r"yaml"`
+    # regex catches the substring in filenames as if it were `import yaml`;
+    # tightening the regex belongs in libs/imbue_common, which these
+    # branches are scoped out of.
+    rc.check_yaml_usage(_DIR, snapshot(10))
 
 
 def test_prevent_functools_partial() -> None:

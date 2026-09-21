@@ -16,12 +16,15 @@ The minds app creates and manages persistent Claude agents running in Docker con
 minds ships as a desktop app (Electron, packaged via ToDesktop; see
 [docs/desktop-app.md](./docs/desktop-app.md)).
 
-To run it from source for development, follow the setup guide
-**[docs/dev-setup.md](./docs/dev-setup.md)**: install the one-time
-prerequisites (Docker, Node/pnpm, GNU rsync, GitHub access, Vault, Modal),
-then the `minds-dev-workflow` skill takes you through first-time bootstrap and
-the every-startup launch. You create your first agent from the login URL the
-app prints on startup.
+To run it from source, follow the setup guide
+**[docs/dev-setup.md](./docs/dev-setup.md)**. On Linux one script installs
+the prerequisites (Docker, uv, the pinned Node and pnpm) and launches the app;
+on macOS you install those once and run `apps/minds/scripts/start-desktop.sh`.
+Run from source, the app targets production and needs nothing exported. You
+create your first agent from the login URL the app prints on startup. The
+guide's Imbue-internal section covers developing against a dev env (Vault,
+Modal, GNU rsync, the `minds-dev-workflow` skill), none of which a public
+contributor needs.
 
 ## How it works
 

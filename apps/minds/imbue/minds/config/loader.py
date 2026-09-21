@@ -15,11 +15,15 @@ and the per-env-data-roots spec):
   writer for these tiers never touches disk-local files (the values are
   computable from the tier's Modal workspace + app names).
 
-There is no implicit fallback: ``minds run`` refuses to start unless
-``--config-file`` is passed or ``MINDS_CLIENT_CONFIG_PATH`` is
-exported. The bundled-Electron entry path always passes ``--config-file``
-explicitly (the build embeds the file's path via
-``MINDS_CLIENT_CONFIG_BUNDLE``).
+Production is the default: when neither ``--config-file`` nor
+``MINDS_CLIENT_CONFIG_PATH`` is set and no other env is active
+(``MINDS_ROOT_NAME`` unset or ``minds``), ``minds run`` loads the in-repo
+production ``client.toml`` -- the same file a packaged build embeds -- so a
+source checkout runs against production with nothing exported. Only a shell
+that names a non-production env without saying where its config lives is
+refused (see :func:`resolve_client_config_path`). The bundled-Electron entry
+path always passes ``--config-file`` explicitly (the build embeds the file's
+path via ``MINDS_CLIENT_CONFIG_BUNDLE``).
 """
 
 import tomllib
@@ -28,6 +32,9 @@ from typing import Final
 
 from pydantic import ValidationError
 
+from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import ManagementPlaneConfig
@@ -38,6 +45,7 @@ _ENVS_DIR: Final[Path] = Path(__file__).parent / "envs"
 _BUNDLED_DIR: Final[Path] = _ENVS_DIR / "_bundled"
 _CLIENT_FILENAME: Final[str] = "client.toml"
 _DEPLOY_FILENAME: Final[str] = "deploy.toml"
+_PRODUCTION_TIER: Final[str] = "production"
 
 
 class EnvConfigError(MindError):
@@ -54,6 +62,40 @@ def repo_tier_client_config_path(tier: str) -> Path:
     ``client.toml`` (per-dev envs each carry their own URLs).
     """
     return _ENVS_DIR / tier / _CLIENT_FILENAME
+
+
+def resolve_client_config_path(explicit_config_file: Path | None) -> Path:
+    """Return the client config ``minds run`` should load.
+
+    An explicit path (``--config-file``, which click already fills from
+    ``MINDS_CLIENT_CONFIG_PATH``) always wins. Without one, production is the
+    default -- the in-repo production ``client.toml`` -- provided no other env
+    is active: ``MINDS_ROOT_NAME`` unset or ``minds`` (production) resolves
+    the same data root, so it is the only value under which silently picking
+    production cannot point a shell at a different tier's data.
+
+    Raises ``EnvConfigError`` when ``MINDS_ROOT_NAME`` names another env and
+    nothing says where that env's config lives -- a half-activated shell,
+    where defaulting to production would pair one env's data root with
+    another's services. A value that is not a legal root name at all raises
+    ``BootstrapError`` from :func:`resolve_minds_root_name`.
+    """
+    if explicit_config_file is not None:
+        return explicit_config_file
+    root_name = resolve_minds_root_name()
+    if root_name != DEFAULT_MINDS_ROOT_NAME:
+        raise EnvConfigError(
+            f"{MINDS_ROOT_NAME_ENV_VAR}={root_name!r} names a non-production env but no client "
+            "config path is set. Export MINDS_CLIENT_CONFIG_PATH (or pass --config-file) for that "
+            f"env, or `unset {MINDS_ROOT_NAME_ENV_VAR}` to run against production."
+        )
+    production_config = repo_tier_client_config_path(_PRODUCTION_TIER)
+    if not production_config.is_file():
+        raise EnvConfigError(
+            f"Production client config not found at {production_config}. This file is committed "
+            "with the repo; check your checkout."
+        )
+    return production_config
 
 
 def bundled_client_config_path_or_none() -> Path | None:

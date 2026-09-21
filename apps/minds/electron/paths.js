@@ -150,8 +150,9 @@ function getLatchkeyDirectory() {
  * `client.toml` (the embedded per-env config) and `root_name` (the
  * MINDS_ROOT_NAME the runtime should export). When the build did NOT
  * set those (i.e. a dev-mode `pnpm start` / unflagged packaged build),
- * neither file exists and the runtime refuses to start without the
- * user activating an env in their shell first.
+ * neither file exists; the runtime then passes no `--config-file` and the
+ * backend loads the in-repo production config unless the shell exports
+ * another env.
  *
  * Dev mode resolves to the source tree; packaged mode resolves under
  * the extra-resources pyproject dir that build.js syncs alongside the
@@ -211,11 +212,11 @@ function getBundledMindsRootName() {
  *      production ("minds") or staging ("minds-staging"). Always wins so a
  *      user with a stale MINDS_ROOT_NAME export from a parent shell can't
  *      accidentally misdirect a packaged build.
- *   2. The process env MINDS_ROOT_NAME (the dev-mode `minds-admin env activate`
- *      case). Validated against the runtime regex.
- *   3. Default to 'minds' (production) for the case where dev mode
- *      runs without activation (the Python backend will then refuse to
- *      start unless --config-file is passed -- by design).
+ *   2. The process env MINDS_ROOT_NAME (a dev-mode shell pointed at another
+ *      env). Validated against the runtime regex.
+ *   3. Default to 'minds' (production) for the case where dev mode runs
+ *      with nothing exported -- the Python backend then loads the in-repo
+ *      production client config, the same file a packaged build embeds.
  */
 function getMindsRootName() {
   const bundled = getBundledMindsRootName();
@@ -227,7 +228,7 @@ function getMindsRootName() {
     if (!/^minds(-[a-z0-9][a-z0-9_-]{0,38}[a-z0-9])?$/.test(fromEnv)) {
       throw new Error(
         `MINDS_ROOT_NAME=${JSON.stringify(fromEnv)} does not match \`minds(-<env-name>)?\`. ` +
-          'Activate a valid env via `eval "$(minds-admin env activate <name>)"` or unset the var.'
+          'Unset the var to use production, or set it to a valid env name.'
       );
     }
     return fromEnv;

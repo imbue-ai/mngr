@@ -62,7 +62,19 @@ export interface UpdateState {
    * replaces it.
    */
   downloadedVersion?: string | null;
+  /**
+   * How a staged update gets applied. `on-quit` (macOS) installs when the app
+   * quits or from the restart control; `on-request` (Linux) installs only from
+   * the install control. Optional because the state shape is shared with the
+   * browser build and with tests that stub only part of the surface; silence
+   * reads as on-quit, the policy every macOS build has.
+   */
+  installPolicy?: UpdateInstallPolicy;
+  /** Whether installing raises the system password prompt (a Linux .deb). */
+  needsPasswordToInstall?: boolean;
 }
+
+export type UpdateInstallPolicy = "on-quit" | "on-request";
 
 interface MindsNativeSurface {
   platform: string;
@@ -92,8 +104,16 @@ interface MindsNativeSurface {
   peekUpdateChannels?(): Promise<Record<string, PeekedChannel>>;
   setUpdateChannel?(channel: UpdateChannel): Promise<UpdateState>;
   checkForUpdates?(): Promise<UpdateState>;
-  installUpdate?(): Promise<void>;
+  // Resolves the failure as a payload: a rejected invoke would arrive wrapped
+  // in Electron's "Error invoking remote method" text. A stub that resolves
+  // nothing (the browser build, a partial test surface) reads as success.
+  installUpdate?(): Promise<InstallUpdateOutcome | void>;
   onUpdateStatus?(callback: (status: UpdateStatus) => void): void;
+}
+
+/** Why the main process could not install the staged update, or null when it is quitting into it. */
+export interface InstallUpdateOutcome {
+  error: string | null;
 }
 
 declare global {
@@ -176,8 +196,15 @@ export const electronBridge = {
   async checkForUpdates(): Promise<UpdateState | null> {
     return (await native()?.checkForUpdates?.()) ?? null;
   },
+  /**
+   * Rejects with the main process's own sentence when the install did not go
+   * through. Resolves only when the app is staying up after a successful
+   * install -- the quit was cancelled at the running-workspaces prompt; when
+   * the quit goes ahead the app exits and the call never settles.
+   */
   async installUpdate(): Promise<void> {
-    await native()?.installUpdate?.();
+    const outcome = await native()?.installUpdate?.();
+    if (outcome && outcome.error !== null) throw new Error(outcome.error);
   },
   onUpdateStatus(callback: (status: UpdateStatus) => void): void {
     native()?.onUpdateStatus?.(callback);

@@ -41,3 +41,39 @@ jobs:
           # Match the job timeout so the pytest global duration guard does not
           # fail a passing-but-slow run.
           PYTEST_MAX_DURATION_SECONDS: "2400"
+
+  # Proves the public-repo developer bootstrap: apps/minds/scripts/install-linux.sh
+  # run from a checkout on a stock Ubuntu runner, non-interactively and without
+  # Docker (the runner's daemon is not what the script installs), must leave
+  # the pinned toolchain, the Electron dependencies, the bundled binaries, and
+  # a working `minds run` behind. Anything the script touches is on the public
+  # mirror, so this needs no secrets.
+  test-minds-linux-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the Linux installer from the checkout
+        run: apps/minds/scripts/install-linux.sh --yes --no-launch --skip-docker
+
+      - name: Verify the installed toolchain and app
+        env:
+          NODE_PIN_FILE: apps/minds/.nvmrc
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          export NVM_DIR="$HOME/.nvm"
+          set +u; . "$NVM_DIR/nvm.sh"; nvm use "$(cat "$NODE_PIN_FILE")" >/dev/null; set -u
+          node_pin="v$(tr -d '[:space:]' < "$NODE_PIN_FILE")"
+          pnpm_pin="$(node -p "require('./apps/minds/package.json').engines.pnpm")"
+          git_pin="$(node -p "require('./apps/minds/scripts/git-manifest.json').gitVersion")"
+          test "$(node --version)" = "$node_pin"
+          test "$(cd apps/minds && pnpm --version)" = "$pnpm_pin"
+          test -x apps/minds/node_modules/.bin/electron
+          test -x "$HOME/.local/bin/minds-desktop"
+          apps/minds/resources/git/bin/git --version | tee /dev/stderr | grep -F "git version $git_pin"
+          test -f apps/minds/imbue/minds/desktop_client/static/ui/.vite/manifest.json
+          uv run minds run --help

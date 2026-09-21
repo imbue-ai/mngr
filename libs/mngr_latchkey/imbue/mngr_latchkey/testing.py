@@ -5,11 +5,14 @@ are exercised through the tests that import them.
 """
 
 from pathlib import Path
+from typing import Final
 from urllib.parse import urlsplit
 
+import psutil
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
 from imbue.mngr_latchkey.core import Latchkey
@@ -17,6 +20,35 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+
+_POLL_INTERVAL_SECONDS: Final[float] = 0.05
+
+# Upper bound for the tests' process-state polls (wait_for_process_exit and
+# the test modules that import this). Purely a worst-case ceiling
+# (every poll returns as soon as its condition holds): spawning and tearing
+# down real subprocesses has been seen to exceed a 5s bound on a heavily
+# loaded machine, which is noise, not a bug in the code under test.
+PROCESS_WAIT_TIMEOUT_SECONDS: Final[float] = 15.0
+
+
+def _has_process_exited(pid: int) -> bool:
+    try:
+        return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return True
+
+
+def wait_for_process_exit(pid: int, timeout: float = PROCESS_WAIT_TIMEOUT_SECONDS) -> bool:
+    """Poll until ``pid`` is gone or has become a zombie.
+
+    Zombies count as "exited": the subprocesses these tests spawn are children
+    of the test process whose ``Popen`` is never waited on, so a terminated
+    child lingers as a zombie until it is reaped. The session-end leak check
+    (``session_cleanup`` in libs/mngr's conftest) ignores zombies but fails the
+    run over a live child, and pytest reports that against whichever test ran
+    last -- so every test that spawns a child waits for it before returning.
+    """
+    return poll_until(lambda: _has_process_exited(pid), timeout=timeout, poll_interval=_POLL_INTERVAL_SECONDS)
 
 
 class FakeLatchkey(Latchkey):

@@ -99,14 +99,16 @@ function isReducedMotion(): boolean {
  * e2e workspace runner (desktop_client/e2e_workspace_runner.py) polls to fail
  * a create fast and to read the cause: `#failure-view` and `#error-message`.
  */
-export function failureTurn(workspaceName: string, error: string, isInstant: boolean): m.Children {
+export function failureTurn(workspaceName: string, error: string): m.Children {
   return agentTurn({
     key: "creation-failed",
     id: "failure-view",
     textId: "error-message",
     text: failureLine(workspaceName, error),
     startAtMs: FLOW_THINK_MS,
-    isInstant,
+    // An error is read, not followed, and can run to pages: streamed a
+    // character at a time it reads as the app hanging.
+    isInstant: true,
   });
 }
 
@@ -409,15 +411,15 @@ export const CreatingPage: m.ClosureComponent = () => {
   }
 
   /** The failure turn, followed by the recognized-error guidance when the error kind has some. */
-  function failureTurns(workspaceName: string, error: string, errorKind: string, isInstant: boolean): m.Children[] {
+  function failureTurns(workspaceName: string, error: string, errorKind: string): m.Children[] {
     const guidance = failureGuidance(errorKind);
-    return [failureTurn(workspaceName, error, isInstant), ...(guidance !== null ? [guidance] : [])];
+    return [failureTurn(workspaceName, error), ...(guidance !== null ? [guidance] : [])];
   }
 
   /** A record-backed attempt with no live thread: the failure with its log tail, or the interrupted notice. */
   function recordTurns(record: NonNullable<CreateAttemptDetail["record"]>): m.Children[] {
     if (record.state === "failed") {
-      const turns = failureTurns(record.workspace_name, record.error ?? "unknown error", record.error_kind ?? "", true);
+      const turns = failureTurns(record.workspace_name, record.error ?? "unknown error", record.error_kind ?? "");
       if (record.log_tail.length > 0) {
         turns.push(
           m(
@@ -461,7 +463,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     const setupAt = isInstant ? 0 : FLOW_THINK_MS;
     const turns: m.Children[] = [agentTurn({ key: "creation-setup", text: SETUP_LINE, startAtMs: setupAt, isInstant })];
     if (state.isFailed) {
-      turns.push(...failureTurns(workspaceName, state.errorText, state.errorKind, false));
+      turns.push(...failureTurns(workspaceName, state.errorText, state.errorKind));
       turns.push(recoveryButtons("Dismiss", dismissAttempt));
       return turns;
     }

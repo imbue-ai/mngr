@@ -1,5 +1,12 @@
 onlyBuiltDependencies:
   - electron
+# Transitive deps of latchkey / @todesktop/cli whose install scripts the app
+# does not need; listing them silences pnpm's "Ignored build scripts / run
+# pnpm approve-builds" warning, which reads like a failed install.
+ignoredBuiltDependencies:
+  - "@firebase/util"
+  - dtrace-provider
+  - protobufjs
 
 # Supply-chain hardening: refuse to install any version published less than
 # 14 days ago (20160 minutes), including transitive dependencies. A

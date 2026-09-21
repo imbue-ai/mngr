@@ -10,7 +10,12 @@ import sys
 
 from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.bootstrap import apply_bootstrap
+from imbue.minds.bootstrap import default_root_name_to_production
 
+# The ``minds`` CLI is production unless the shell names another env; the
+# seed must precede the bootstrap so the derived MNGR_* vars and the settings
+# reconcile below see it.
+default_root_name_to_production()
 try:
     apply_bootstrap()
 except BootstrapError as e:

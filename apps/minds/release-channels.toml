@@ -7,10 +7,11 @@
 #   1. Find the build id (the `build` job's summary in minds-launch-to-msg, or
 #      the ToDesktop dashboard).
 #   2. Edit the channel below.
-#   3. For `stable` only, bump `_DEFAULT_TARGET_BY_PLATFORM[_MAC_ARM64_PLATFORM]`
-#      in `apps/remote_service_connector/imbue/remote_service_connector/accounts_web.py`
-#      to the build being promoted: that constant is what the public download
-#      link serves while the update feed is down.
+#   3. For `stable` only, bump the `fallback_url` of
+#      `_RELEASE_CHANNEL_PLATFORMS[_MAC_ARM64_PLATFORM]` in
+#      `apps/remote_service_connector/imbue/remote_service_connector/accounts_web.py`
+#      to the build being promoted: that URL is what the public download link
+#      serves while the update feed is down.
 #   4. Open a PR. CI dry-runs every gate against it, so review sees whether it
 #      would actually publish.
 #   5. Merge. CI publishes.
@@ -25,24 +26,35 @@
 # published as electron-updater's `stagingPercentage` key.
 #
 # Required on every entry: a manifest that declares none is rolled out to 100%.
+#
+# `platforms` lists which of ToDesktop's per-platform manifests the channel
+# publishes for this build: `mac`, `linux`, or both. Required rather than
+# defaulted, because every build ToDesktop made before Linux packaging landed
+# carries a Linux manifest whose binaries cannot run there. When a
+# Linux-capable build is promoted to alpha or beta, list it for
+# `["mac", "linux"]`; stable stays `["mac"]` until the manual Linux pass in
+# apps/minds/docs/deploy/next_deploy.md.
 
 [channels.stable]
 build_id = "260917ohslvgoyj"
 version = "0.6.2"
 fallback_branch = "minds-v0.6.2"
 rollout_percentage = 100
+platforms = ["mac"]
 
 [channels.beta]
 build_id = "260917ohslvgoyj"
 version = "0.6.2"
 fallback_branch = "minds-v0.6.2"
 rollout_percentage = 100
+platforms = ["mac"]
 
 [channels.alpha]
 build_id = "260917ohslvgoyj"
 version = "0.6.2"
 fallback_branch = "minds-v0.6.2"
 rollout_percentage = 100
+platforms = ["mac"]
 
 # Which default-workspace-template tag browser-created workspaces pin to, per
 # channel. The hosted web chrome's create (the connector's POST /hosts/claim)

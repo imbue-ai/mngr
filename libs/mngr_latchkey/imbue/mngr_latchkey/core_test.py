@@ -11,7 +11,6 @@ from typing import cast
 from uuid import uuid4
 
 import paramiko
-import psutil
 import pytest
 from loguru import logger
 from pydantic import Field
@@ -348,18 +347,6 @@ def _wait_for_listening(host: str, port: int, timeout: float = 5.0) -> bool:
             except OSError:
                 poll_event.wait(timeout=_POLL_INTERVAL_SECONDS)
     return False
-
-
-def _wait_for_process_exit(pid: int, timeout: float = 5.0) -> bool:
-    try:
-        process = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return True
-    try:
-        process.wait(timeout=timeout)
-        return True
-    except psutil.TimeoutExpired:
-        return False
 
 
 def test_start_gateway_spawns_subprocess(tmp_path: Path) -> None:

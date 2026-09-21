@@ -9,6 +9,7 @@ from imbue.minds.bootstrap import DEFAULT_MINDS_ROOT_NAME
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
 from imbue.minds.bootstrap import MINDS_ROOT_NAME_PATTERN
 from imbue.minds.bootstrap import apply_bootstrap
+from imbue.minds.bootstrap import default_root_name_to_production
 from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import is_env_activated
 from imbue.minds.bootstrap import minds_data_dir_for
@@ -19,10 +20,15 @@ from imbue.minds.bootstrap import root_name_for_env_name
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Remove MINDS_ROOT_NAME and MNGR_* overrides that tests might have set."""
-    monkeypatch.delenv(MINDS_ROOT_NAME_ENV_VAR, raising=False)
-    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
-    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    """Leave MINDS_ROOT_NAME and the MNGR_* overrides unset, restoring the original state at teardown.
+
+    monkeypatch only records vars it changed itself, so a plain delenv of an absent var would leave
+    anything the code under test writes directly into os.environ (apply_bootstrap does) in place after
+    the test. Setting a placeholder first makes it remember the original (absent) state.
+    """
+    for name in (MINDS_ROOT_NAME_ENV_VAR, "MNGR_HOST_DIR", "MNGR_PREFIX"):
+        monkeypatch.setenv(name, "placeholder")
+        monkeypatch.delenv(name)
 
 
 def test_defaults_to_minds_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +77,26 @@ def test_path_with_dot_dot_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "../evil")
     with pytest.raises(BootstrapError):
         resolve_minds_root_name()
+
+
+def test_default_root_name_to_production_seeds_minds_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_env(monkeypatch)
+    default_root_name_to_production()
+    assert os.environ[MINDS_ROOT_NAME_ENV_VAR] == DEFAULT_MINDS_ROOT_NAME
+    apply_bootstrap()
+    assert Path(os.environ["MNGR_HOST_DIR"]) == mngr_host_dir_for(DEFAULT_MINDS_ROOT_NAME)
+    assert os.environ["MNGR_PREFIX"] == mngr_prefix_for(DEFAULT_MINDS_ROOT_NAME)
+
+
+@pytest.mark.parametrize("root_name", ["minds-staging", "minds-dev-josh-3", "devminds"])
+def test_default_root_name_to_production_leaves_a_set_value_alone(
+    monkeypatch: pytest.MonkeyPatch, root_name: str
+) -> None:
+    """An activated env, and even a stale invalid value, must reach the bootstrap untouched so its own handling applies."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, root_name)
+    default_root_name_to_production()
+    assert os.environ[MINDS_ROOT_NAME_ENV_VAR] == root_name
 
 
 def test_is_active_when_set_to_valid_value(monkeypatch: pytest.MonkeyPatch) -> None:

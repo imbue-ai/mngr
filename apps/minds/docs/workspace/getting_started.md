@@ -8,8 +8,13 @@ Electron spawns the `minds run` backend internally (default:
 `http://127.0.0.1:8420`); a one-time login URL is printed to the
 terminal and the system browser opens directly on that URL.
 
-Before running `just minds-start` (or invoking `minds run` directly
-from source), **activate an env in your shell**:
+Run from source with nothing exported (`minds run`, or
+`apps/minds/scripts/start-desktop.sh`), the backend targets production:
+it loads the in-repo production `client.toml` and owns `~/.minds/`.
+`just minds-start` always needs an env **activated in your shell** first,
+because it syncs your local mngr into the workspace template and refuses
+to guess whose data root that lands in -- activate `production` to get
+the default, or another env to run against it:
 
 ```bash
 eval "$(uv run minds-admin env activate dev-<your-user>)"   # or `staging`, `production`
@@ -19,8 +24,9 @@ just minds-start
 Activation exports the four env vars (`MINDS_ROOT_NAME`,
 `MNGR_HOST_DIR`, `MNGR_PREFIX`, `MINDS_CLIENT_CONFIG_PATH`) that
 point the backend at the env's `~/.minds-<env-name>/` data root and
-the env's `client.toml`. Source runs refuse to start without
-activation -- there is no implicit default.
+the env's `client.toml`. A shell that names another env via
+`MINDS_ROOT_NAME` without `MINDS_CLIENT_CONFIG_PATH` (or
+`--config-file`) is refused rather than silently pointed at production.
 
 To bypass Electron and exercise the backend on its own:
 

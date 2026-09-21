@@ -84,4 +84,17 @@ function initElectronLogging() {
   });
 }
 
-module.exports = { initElectronLogging };
+/**
+ * Flush electron.log and close it, resolving once every line logged so far is
+ * on disk. Console output keeps reaching stdout/stderr afterwards; only the
+ * file tee stops. For the paths that exit the process before the event loop
+ * has had a chance to drain the async stream.
+ */
+function closeElectronLogging() {
+  if (!logStream) return Promise.resolve();
+  const ending = logStream.end();
+  logStream = null;
+  return ending;
+}
+
+module.exports = { initElectronLogging, closeElectronLogging };

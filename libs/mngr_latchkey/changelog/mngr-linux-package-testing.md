@@ -1,0 +1,1 @@
+The detached-spawn unit tests now wait for the fake `latchkey` child to exit before they end. Two of them asserted on the capture file and returned while the child was still starting up, so when one of them was the last test in a session the session-end leak check found a live child at teardown and failed the run (on main as well as this branch).

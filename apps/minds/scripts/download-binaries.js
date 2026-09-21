@@ -52,10 +52,11 @@ const LIMA_VERSION = '2.0.3';
 // datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
 // curl it fronts (see the `curl-<triple>.tar.gz` release asset).
 // The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
-// requests get Chrome TLS impersonation. Only macOS arm64 and Linux x86_64
-// are bundled; there is no impersonation on Windows. The Linux build is the
-// statically linked musl one, so it runs on any glibc version (and on musl
-// distros) rather than requiring one at least as new as the build host's.
+// requests get Chrome TLS impersonation. Only macOS arm64 and Linux (x86_64
+// and aarch64) are bundled; there is no impersonation on Windows. The Linux
+// builds are the statically linked musl ones, so they run on any glibc version
+// (and on musl distros) rather than requiring one at least as new as the build
+// host's.
 //
 // When bumping DATALIB_CURL_VERSION, update the `curl-*` hashes in
 // EXPECTED_SHA256 to match (the tarball filename is version-less, so the
@@ -82,11 +83,13 @@ const EXPECTED_SHA256 = {
   'uv-aarch64-apple-darwin.tar.gz':     '7e5b336108f8576eda1939920ca0a805b4a9a3c3d3eb2f6140e38b7092fbe4f3',
   'uv-x86_64-apple-darwin.tar.gz':      '42bca7cc879d117ed7139a0e26de8cab0b6f033ad439a32144f324d1f8580d8c',
   'uv-x86_64-unknown-linux-gnu.tar.gz': 'b03e572f010bea94a4a52d42671ba72981e12894f71576181a1d26ff68546da7',
+  'uv-aarch64-unknown-linux-gnu.tar.gz': '21a7dd1a03ea17ac0366887455dab15d215b31dba0870dcd65d3714e22f46c81',
   'uv-x86_64-pc-windows-msvc.zip':      '04b98d414a9000e25e5e0e7c9f53749e66b790cdaffc582829e6f58c544ee11c',
   'MinGit-2.49.0-64-bit.zip':           '971cdee7c0feaa1e41369c46da88d1000a24e79a6f50191c820100338fb7eca5',
   'restic_0.18.1_darwin_arm64.bz2':     '193fccc8bb4567b498923bc70261e104ff22be88016f0f108b035dad372ab711',
   'restic_0.18.1_darwin_amd64.bz2':     'eb8543ed92ff1ddb67762daebf09f7bea4b0c37d21edb6a910bee3d4f514015f',
   'restic_0.18.1_linux_amd64.bz2':      '680838f19d67151adba227e1570cdd8af12c19cf1735783ed1ba928bc41f363d',
+  'restic_0.18.1_linux_arm64.bz2':      '87f53fddde38764095e9c058a3b31834052c37e5826d2acf34e18923c006bd45',
   'restic_0.18.1_windows_amd64.zip':    '0c1a713440578cb400d2e76208feb24f1b339426b075a21f73b6b2132692515d',
   'desync_1.0.3_darwin_arm64.tar.gz':   'd3082017b9f12d8716aa1fb4b33f80a4e781305971508db45bf777fc110a657d',
   'desync_1.0.3_darwin_amd64.tar.gz':   'ab029448074428dc757d2235109dd557e9f34e4865052432a6ea7c431f0a5a19',
@@ -100,6 +103,7 @@ const EXPECTED_SHA256 = {
   // (`curl-<triple>.tar.gz.sha256`).
   'curl-aarch64-apple-darwin.tar.gz':      '38db8dca3aa4106c653808fce5e2f0d2cf79345f18980ffb89c14b91b642c037',
   'curl-x86_64-unknown-linux-musl.tar.gz': '7d1cd95bc90869b722aa4cb60181ca71e73186a50ba15002f1848b6266873b72',
+  'curl-aarch64-unknown-linux-musl.tar.gz': '87a9a0a27def2a4a4913ca297c8cc5508e4f0ba6454be22d15d651c0d3cff594',
 };
 
 const MAX_REDIRECTS = 5;
@@ -117,15 +121,151 @@ function readGitManifest() {
   return JSON.parse(fs.readFileSync(GIT_MANIFEST_PATH, 'utf-8'));
 }
 
-function getPlatformArch() {
-  const platform = process.platform;
-  const arch = process.arch;
+// Every `process.platform/process.arch` pair the downloader supports, mapped
+// to the platform/arch names the release assets use.
+const PLATFORM_ARCH_BY_NODE_TARGET = {
+  'darwin/arm64': { platform: 'darwin', arch: 'aarch64' },
+  'darwin/x64': { platform: 'darwin', arch: 'x86_64' },
+  'linux/x64': { platform: 'linux', arch: 'x86_64' },
+  'linux/arm64': { platform: 'linux', arch: 'aarch64' },
+  'win32/x64': { platform: 'win32', arch: 'x86_64' },
+};
 
-  if (platform === 'darwin' && arch === 'arm64') return { platform: 'darwin', arch: 'aarch64' };
-  if (platform === 'darwin' && arch === 'x64') return { platform: 'darwin', arch: 'x86_64' };
-  if (platform === 'linux' && arch === 'x64') return { platform: 'linux', arch: 'x86_64' };
-  if (platform === 'win32' && arch === 'x64') return { platform: 'win32', arch: 'x86_64' };
-  throw new Error(`Unsupported platform/arch: ${platform}/${arch}`);
+function getPlatformArch() {
+  const nodeTarget = `${process.platform}/${process.arch}`;
+  const platformArch = PLATFORM_ARCH_BY_NODE_TARGET[nodeTarget];
+  if (platformArch === undefined) {
+    throw new Error(`Unsupported platform/arch: ${nodeTarget}`);
+  }
+  return platformArch;
+}
+
+/**
+ * The targets a ToDesktop build ships, and the `resources/<dirName>/payload/`
+ * each one's tree is staged under (see stagedTargetPath). `todesktop.js` maps every tree to the root of the
+ * packaged resources dir for its platform, so the runtime paths in
+ * electron/paths.js are the same on every target. The build host's own arch
+ * plays no part: every build stages every target.
+ */
+const SHIPPED_TARGETS = [
+  { platform: 'darwin', arch: 'aarch64', dirName: 'darwin-arm64' },
+  { platform: 'linux', arch: 'x86_64', dirName: 'linux-x64' },
+];
+
+/**
+ * The directory under `resources/<dirName>/` that holds a target's complete
+ * tree, and the one name todesktop.js's lists point at. ToDesktop pairs the
+ * per-target lists by `to` plus the source directory's name ("corresponding
+ * entries must use the same `to` value and source file or directory name"),
+ * so every target's source shares this name and differs only in its parent.
+ */
+const TARGET_PAYLOAD_DIR_NAME = 'payload';
+
+/** Where a shipped target's tree is staged, relative to apps/minds. */
+function stagedTargetPath(target) {
+  return path.join('resources', target.dirName, TARGET_PAYLOAD_DIR_NAME);
+}
+
+const ELF_MAGIC = Buffer.from([0x7f, 0x45, 0x4c, 0x46]);
+const ELF_MACHINE_BY_CODE = { 0x3e: 'x86_64', 0xb7: 'aarch64' };
+// The 64-bit Mach-O magic as the header is read below (big-endian): MH_MAGIC_64
+// means a big-endian file, its byte-swapped form MH_CIGAM_64 a little-endian
+// one (every arm64 and x86_64 Mac binary).
+const MACHO_64_MH_MAGIC = 0xfeedfacf;
+const MACHO_64_MH_CIGAM = 0xcffaedfe;
+const MACHO_FAT_MAGIC = 0xcafebabe;
+const MACHO_CPU_BY_TYPE = { 0x0100000c: 'aarch64', 0x01000007: 'x86_64' };
+
+/**
+ * Classify an executable from its leading bytes.
+ *
+ * Returns `{ format, arch }`: `format` is `elf`, `macho`, `macho-fat`, `script`
+ * (a `#!` file) or `unknown`; `arch` is `x86_64`, `aarch64`, or null when the
+ * format carries no single architecture (a fat binary, a script, unknown).
+ */
+function classifyExecutable(buffer) {
+  if (buffer.length >= 2 && buffer[0] === 0x23 && buffer[1] === 0x21) {
+    return { format: 'script', arch: null };
+  }
+  if (buffer.length >= 20 && buffer.subarray(0, 4).equals(ELF_MAGIC)) {
+    const isLittleEndian = buffer[5] === 1;
+    const machine = isLittleEndian ? buffer.readUInt16LE(18) : buffer.readUInt16BE(18);
+    return { format: 'elf', arch: ELF_MACHINE_BY_CODE[machine] || null };
+  }
+  if (buffer.length >= 8) {
+    const magic = buffer.readUInt32BE(0);
+    if (magic === MACHO_FAT_MAGIC) {
+      return { format: 'macho-fat', arch: null };
+    }
+    if (magic === MACHO_64_MH_MAGIC) {
+      return { format: 'macho', arch: MACHO_CPU_BY_TYPE[buffer.readUInt32BE(4)] || null };
+    }
+    if (magic === MACHO_64_MH_CIGAM) {
+      return { format: 'macho', arch: MACHO_CPU_BY_TYPE[buffer.readUInt32LE(4)] || null };
+    }
+  }
+  return { format: 'unknown', arch: null };
+}
+
+/**
+ * Whether a classified executable can run on the target.
+ *
+ * Scripts run anywhere their interpreter does, and a fat Mach-O carries every
+ * macOS slice, so neither is held to a single architecture.
+ */
+function isExecutableForTarget(classification, { platform, arch }) {
+  if (classification.format === 'script') return true;
+  if (platform === 'darwin') {
+    if (classification.format === 'macho-fat') return true;
+    return classification.format === 'macho' && classification.arch === arch;
+  }
+  if (platform === 'linux') {
+    return classification.format === 'elf' && classification.arch === arch;
+  }
+  return false;
+}
+
+// Real executables inside the git payload, beyond bin/git: the remote helper
+// git dispatches https clones to (the -https name is one of our shims).
+const GIT_PAYLOAD_EXECUTABLES = [path.join('libexec', 'git-core', 'git-remote-http')];
+
+/**
+ * Refuse a staged target tree (see stagedTargetPath) whose executables cannot
+ * run on the target. Every provisioned binary's `requiredPath` is read, plus the git
+ * payload's remote helper.
+ */
+function assertStagedExecutablesMatchTarget(resourcesDir, target) {
+  const mismatches = [];
+  const candidates = [];
+  for (const name of getProvisionedBinaries(target)) {
+    candidates.push(path.join(resourcesDir, name, BINARIES[name].requiredPath));
+    if (name === 'git') {
+      for (const relative of GIT_PAYLOAD_EXECUTABLES) {
+        candidates.push(path.join(resourcesDir, 'git', relative));
+      }
+    }
+  }
+  for (const candidate of candidates) {
+    const descriptor = fs.openSync(candidate, 'r');
+    const header = Buffer.alloc(32);
+    let bytesRead;
+    try {
+      bytesRead = fs.readSync(descriptor, header, 0, header.length, 0);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    const classification = classifyExecutable(header.subarray(0, bytesRead));
+    if (!isExecutableForTarget(classification, target)) {
+      mismatches.push(`${candidate}: ${classification.format}/${classification.arch || '?'}`);
+    }
+  }
+  if (mismatches.length > 0) {
+    throw new Error(
+      `Staged executables under ${resourcesDir} do not match ${target.platform}/${target.arch}:\n  ` +
+      mismatches.join('\n  '),
+    );
+  }
+  console.log(`[download-binaries] ${candidates.length} staged executables match ${target.platform}/${target.arch}`);
 }
 
 function getUvDownloadUrl({ platform, arch }) {
@@ -188,6 +328,8 @@ function getLatchkeyCurlDownloadInfo({ platform, arch }) {
     triple = 'aarch64-apple-darwin';
   } else if (platform === 'linux' && arch === 'x86_64') {
     triple = 'x86_64-unknown-linux-musl';
+  } else if (platform === 'linux' && arch === 'aarch64') {
+    triple = 'aarch64-unknown-linux-musl';
   }
   if (triple === null) {
     return null;
@@ -818,7 +960,7 @@ function assertTreeFitsUploadBudget(rootDir, { uploadSizeLimitMb, label }) {
 
 /**
  * Estimate the ToDesktop app-source upload in bytes, mirroring how
- * @todesktop/cli@1.23 composes it (dist/cli.js, uploadApplicationSource):
+ * @todesktop/cli@1.28 composes it (dist/cli.js, uploadApplicationSource):
  *
  * - App files: every regular file under the app root matching `appFiles`
  *   (default `['**']`), always minus `node_modules` and `.git` at any depth
@@ -872,11 +1014,11 @@ function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
   };
   walkAppFiles(appRoot, '');
 
+  // Every list is uploaded, since one upload serves every build, and each
+  // list's entries go to their own archive directory, so a source named by
+  // two lists is uploaded -- and priced -- once per list.
   let extraBytes = 0;
-  const extraEntries = [
-    ...(todesktopConfig.extraResources || []),
-    ...(todesktopConfig.extraContentFiles || []),
-  ];
+  const extraEntries = extraFileEntries(todesktopConfig);
   for (const { from } of extraEntries) {
     const fromPath = path.resolve(appRoot, from);
     const stats = fs.lstatSync(fromPath);
@@ -886,6 +1028,19 @@ function estimateToDesktopUploadBytes(appRoot, todesktopConfig) {
     extraBytes += fs.lstatSync(path.resolve(appRoot, todesktopConfig.icon)).size;
   }
   return { appFilesBytes, extraBytes, totalBytes: appFilesBytes + extraBytes };
+}
+
+/**
+ * Every extraResources / extraContentFiles entry the config names: the base
+ * lists, each platformOverrides list, and each targetOverrides list.
+ */
+function extraFileEntries(todesktopConfig) {
+  const scopes = [
+    todesktopConfig,
+    ...Object.values(todesktopConfig.platformOverrides || {}),
+    ...Object.values(todesktopConfig.targetOverrides || {}).flatMap((byArch) => Object.values(byArch)),
+  ];
+  return scopes.flatMap((scope) => [...(scope.extraResources || []), ...(scope.extraContentFiles || [])]);
 }
 
 /**
@@ -1047,12 +1202,14 @@ async function ensureCachedBinary(name, { platform, arch }) {
 }
 
 /**
- * Stage every binary this platform provisions, as real directories. This is the
- * packaging path -- build.js calls it and ToDesktop ships the result.
+ * Stage every binary `target` provisions, as real directories under
+ * `resourcesDir`. This is the packaging path -- build.js calls it once per
+ * shipped target and ToDesktop ships the result. The target is explicit rather
+ * than the build host's own: every build stages every target.
  */
-async function downloadBinaries(resourcesDir) {
-  const { platform, arch } = getPlatformArch();
-  console.log(`[download-binaries] Platform: ${platform}, Architecture: ${arch}`);
+async function downloadBinaries(resourcesDir, target) {
+  const { platform, arch } = target;
+  console.log(`[download-binaries] Staging ${platform}/${arch} into ${resourcesDir}`);
 
   await Promise.all(
     getProvisionedBinaries({ platform, arch }).map((name) =>
@@ -1060,15 +1217,24 @@ async function downloadBinaries(resourcesDir) {
     ),
   );
 
-  console.log('[download-binaries] Done.');
+  console.log(`[download-binaries] Done staging ${platform}/${arch}.`);
 }
 
-// Individual downloaders are reachable as BINARIES[name].download; only the
-// two with their own tests are named here.
 module.exports = {
   BINARIES,
+  SHIPPED_TARGETS,
+  TARGET_PAYLOAD_DIR_NAME,
+  stagedTargetPath,
+  extraFileEntries,
+  EXPECTED_SHA256,
+  PLATFORM_ARCH_BY_NODE_TARGET,
   getProvisionedBinaries,
   getPlatformArch,
+  getUvDownloadUrl,
+  getResticDownloadUrl,
+  getDesyncDownloadUrl,
+  getLimaDownloadUrl,
+  getLatchkeyCurlDownloadInfo,
   getCacheEntryPath,
   ensureCachedBinary,
   downloadBinaries,
@@ -1076,6 +1242,9 @@ module.exports = {
   downloadLatchkeyCurl,
   DATALIB_CURL_VERSION,
   download,
+  classifyExecutable,
+  isExecutableForTarget,
+  assertStagedExecutablesMatchTarget,
   convertGitPayloadSymlinksToShims,
   measureTreeAsArchived,
   assertTreeFitsUploadBudget,
@@ -1085,7 +1254,7 @@ module.exports = {
 
 if (require.main === module) {
   const resourcesDir = process.argv[2] || path.join(path.resolve(__dirname, '..'), 'resources');
-  downloadBinaries(resourcesDir).catch((err) => {
+  downloadBinaries(resourcesDir, getPlatformArch()).catch((err) => {
     console.error('[download-binaries] Failed:', err);
     process.exit(1);
   });

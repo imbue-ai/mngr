@@ -114,6 +114,13 @@ is the only thing that runs them.
   not minds_snapshot_resume`; pre-creates a shared Modal env.
 - **`test-docker`** -- real Docker daemon on a GitHub runner; `(docker or
   docker_sdk) and not release and not minds_snapshot_resume`.
+- **`test-minds-linux-install`** -- the public-repo developer bootstrap: runs
+  `apps/minds/scripts/install-linux.sh --yes --no-launch --skip-docker` from
+  the checkout on a stock `ubuntu-latest` runner, then asserts the pinned
+  Node and pnpm, the Electron dependencies, the bundled git at its pinned
+  version, the built UI bundle, the `~/.local/bin/minds-desktop` launcher,
+  and `uv run minds run --help`. Everything it touches is public, so the
+  same job runs in the public-mirror overlay workflow.
 - **`build-minds-snapshot` + `test-minds-snapshot`** ("Minds Snapshot Resume
   Tests") -- the modal-snapshot stage (see below). All `minds_snapshot_resume`
   tests run here, including the Electron create+chat test (which reuses the

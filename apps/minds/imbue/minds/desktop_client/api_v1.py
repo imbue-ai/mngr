@@ -997,8 +997,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     except ValueError:
         return _json_error(f"Invalid launch_mode: {body.get('launch_mode')!r}", 400)
     # Docker container runtime (runc vs gVisor's runsc); only consumed for
-    # LaunchMode.DOCKER. Defaults to the platform-appropriate value so macOS
-    # (no gVisor) gets runc and Linux gets the hardened runsc.
+    # LaunchMode.DOCKER. Defaults to runc; runsc is an explicit opt-in.
     try:
         docker_runtime = DockerRuntime(str(body.get("runtime", default_docker_runtime().value)))
     except ValueError:

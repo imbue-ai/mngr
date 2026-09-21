@@ -549,15 +549,50 @@ export function DevStyleguide(): m.Component {
               id: "update-ready-card",
               toc: "Update ready",
               title: "Update ready card",
-              body: m(
-                "div",
-                { class: "inline-flex" },
+              body: m("div", { class: "flex flex-col items-start gap-3" }, [
                 m(UpdateReadyCard, {
                   version: "0.4.2",
+                  installPolicy: "on-quit",
+                  needsPassword: false,
+                  error: null,
+                  isInstalling: false,
                   onRestart: () => {},
                   onDismiss: () => {},
                 }),
-              ),
+                // The Linux .deb variant: the install waits for the click and
+                // raises the system password prompt when it runs.
+                m(UpdateReadyCard, {
+                  version: "0.4.2",
+                  installPolicy: "on-request",
+                  needsPassword: true,
+                  error: null,
+                  isInstalling: false,
+                  onRestart: () => {},
+                  onDismiss: () => {},
+                }),
+                // The same card after the password prompt was dismissed: the
+                // app is still here, and the button is live again.
+                m(UpdateReadyCard, {
+                  version: "0.4.2",
+                  installPolicy: "on-request",
+                  needsPassword: true,
+                  error: "Installing the update failed: the password prompt was cancelled.",
+                  isInstalling: false,
+                  onRestart: () => {},
+                  onDismiss: () => {},
+                }),
+                // The same card while the .deb installs: the button is held and
+                // the copy names the password prompt that is on its way.
+                m(UpdateReadyCard, {
+                  version: "0.4.2",
+                  installPolicy: "on-request",
+                  needsPassword: true,
+                  error: null,
+                  isInstalling: true,
+                  onRestart: () => {},
+                  onDismiss: () => {},
+                }),
+              ]),
             },
             {
               id: "form-controls",

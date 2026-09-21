@@ -2,10 +2,21 @@
 // script). Pure state + injected fetchers so vitest can drive every branch;
 // the CreatePage view renders from it and forwards DOM events.
 
-import type { CloudAccountOption, CreateFormDefaults } from "../../../models/create";
+import type { CloudAccountOption, CreateFormDefaults, LocalBackendPrerequisite } from "../../../models/create";
 import { hostNameFormatError } from "../../../models/create";
 
 export type PresetName = "remote" | "local";
+
+/**
+ * The local backend a compute mode depends on, or null for the cloud modes.
+ * The container runtime's own requirement (runsc) is annotated separately,
+ * under the runtime selector.
+ */
+function localPrerequisiteKeyFor(launchMode: string): LocalBackendPrerequisite["key"] | null {
+  if (launchMode === "LIMA") return "LIMA";
+  if (launchMode === "DOCKER") return "DOCKER";
+  return null;
+}
 
 // Seeded into the restic-env textarea so what the user sees is exactly what
 // submit sends (the view renders model state verbatim; no display-only
@@ -17,9 +28,12 @@ export const DEFAULT_RESTIC_ENV =
   "AWS_ACCESS_KEY_ID=\n" +
   "AWS_SECRET_ACCESS_KEY=\n";
 
-export const PRESET_FILLS: Record<PresetName, { launch_mode: string; backup_provider: string }> = {
+// The local preset's compute mode comes from the defaults (`local_launch_mode`,
+// the first local backend the machine can run); only its backup provider is
+// fixed here.
+export const PRESET_FILLS: Record<PresetName, { launch_mode: string | null; backup_provider: string }> = {
   remote: { launch_mode: "IMBUE_CLOUD", backup_provider: "IMBUE_CLOUD" },
-  local: { launch_mode: "LIMA", backup_provider: "CONFIGURE_LATER" },
+  local: { launch_mode: null, backup_provider: "CONFIGURE_LATER" },
 };
 
 export interface LaunchSelection {
@@ -153,9 +167,69 @@ export class CreateFormModel {
     return this.defaults?.cloud_accounts.find((account) => account.name === name) ?? null;
   }
 
+  /** The compute mode the local preset selects: whichever local backend this machine can run. */
+  localLaunchMode(): string {
+    return this.defaults?.local_launch_mode ?? "LIMA";
+  }
+
+  /** What the machine reports about one local backend, or null before the defaults land. */
+  prerequisiteFor(key: LocalBackendPrerequisite["key"]): LocalBackendPrerequisite | null {
+    return this.defaults?.local_prerequisites.find((entry) => entry.key === key) ?? null;
+  }
+
+  /**
+   * What the machine is missing for one local backend, or null when the key
+   * is a cloud mode's (none), the defaults have not landed, or it can run it.
+   */
+  unmetPrerequisite(key: LocalBackendPrerequisite["key"] | null): LocalBackendPrerequisite | null {
+    if (key === null) return null;
+    const prerequisite = this.prerequisiteFor(key);
+    return prerequisite !== null && !prerequisite.is_available ? prerequisite : null;
+  }
+
+  /** What the selected compute mode itself needs from this machine and is not getting. */
+  unmetPrerequisiteForLaunchMode(): LocalBackendPrerequisite | null {
+    return this.unmetPrerequisite(localPrerequisiteKeyFor(this.launchSelection().mode));
+  }
+
+  /** What the selected container runtime (runsc) needs and is not getting, while the runtime selector is shown. */
+  unmetPrerequisiteForRuntime(): LocalBackendPrerequisite | null {
+    return this.isRuntimeShown() && this.runtime === "RUNSC" ? this.unmetPrerequisite("RUNSC") : null;
+  }
+
+  /** What the local preset's compute mode needs and is not getting. */
+  unmetPrerequisiteForLocalPreset(): LocalBackendPrerequisite | null {
+    return this.unmetPrerequisite(localPrerequisiteKeyFor(this.localLaunchMode()));
+  }
+
+  /**
+   * What the selection submit would send needs from this machine and is not
+   * getting: the compute mode's own need, else the runtime's. The local preset
+   * fills the compute select with the local backend, so it is covered too, and
+   * a cloud mode needs nothing local. Submit is refused while this is set: the
+   * create would only fail, slowly, where the notice already says what to do.
+   */
+  unmetPrerequisiteForSubmit(): LocalBackendPrerequisite | null {
+    return this.unmetPrerequisiteForLaunchMode() ?? this.unmetPrerequisiteForRuntime();
+  }
+
+  /**
+   * Re-read what the machine can run, after the user installed something. Only
+   * the prerequisite facts move; every edit in the form stays.
+   */
+  refreshPrerequisites(defaults: CreateFormDefaults): void {
+    if (this.defaults === null) return;
+    this.defaults = {
+      ...this.defaults,
+      local_prerequisites: defaults.local_prerequisites,
+      local_launch_mode: defaults.local_launch_mode,
+    };
+    if (this.selectedPreset === "local") this.launchValue = defaults.local_launch_mode;
+  }
+
   applyPreset(name: PresetName): void {
     this.selectedPreset = name;
-    this.launchValue = PRESET_FILLS[name].launch_mode;
+    this.launchValue = PRESET_FILLS[name].launch_mode ?? this.localLaunchMode();
     this.backupProvider = PRESET_FILLS[name].backup_provider;
     if (name === "remote" && this.accountId === "" && (this.defaults?.accounts.length ?? 0) > 0) {
       this.accountId = this.defaults?.accounts[0]?.user_id ?? "";

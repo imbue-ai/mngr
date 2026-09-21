@@ -31,9 +31,49 @@ function buildDefaults(overrides: Partial<CreateFormDefaults> = {}): CreateFormD
     branch: "minds-v9.9.9",
     color: "#0b292b",
     prefill: null,
+    local_prerequisites: [
+      { key: "DOCKER", is_available: false, summary: "Docker is not installed.", install_command: "", docs_url: "https://d" },
+      { key: "RUNSC", is_available: false, summary: "No runsc on macOS.", install_command: "", docs_url: "https://g" },
+      { key: "LIMA", is_available: true, summary: "Lima is built in.", install_command: "", docs_url: "https://q" },
+    ],
+    local_launch_mode: "LIMA",
     ...overrides,
   };
 }
+
+/** A Linux machine with Docker running and nothing else. */
+const LINUX_WITH_DOCKER: Partial<CreateFormDefaults> = {
+  selected_docker_runtime: "RUNC",
+  local_prerequisites: [
+    { key: "DOCKER", is_available: true, summary: "Docker is running.", install_command: "", docs_url: "https://d" },
+    {
+      key: "RUNSC",
+      is_available: false,
+      summary: "gVisor (runsc) is not registered with Docker.",
+      install_command: "sudo apt-get install -y runsc",
+      docs_url: "https://g",
+    },
+    {
+      key: "LIMA",
+      is_available: false,
+      summary: "QEMU is not installed.",
+      install_command: "sudo apt-get install -y qemu-system-x86",
+      docs_url: "https://q",
+    },
+  ],
+  local_launch_mode: "DOCKER",
+};
+
+/** A Linux machine with no local backend runnable; the local preset still resolves to Docker. */
+const LINUX_WITH_NOTHING: Partial<CreateFormDefaults> = {
+  selected_docker_runtime: "RUNC",
+  local_prerequisites: [
+    { key: "DOCKER", is_available: false, summary: "Docker is not installed.", install_command: "", docs_url: "https://d" },
+    { key: "RUNSC", is_available: false, summary: "No runsc.", install_command: "", docs_url: "https://g" },
+    { key: "LIMA", is_available: false, summary: "QEMU is not installed.", install_command: "", docs_url: "https://q" },
+  ],
+  local_launch_mode: "DOCKER",
+};
 
 describe("CreateFormModel", () => {
   it("applies presets by filling the advanced selects (the submit source of truth)", () => {
@@ -47,6 +87,85 @@ describe("CreateFormModel", () => {
     model.applyPreset("remote");
     expect(model.launchValue).toBe("IMBUE_CLOUD");
     expect(model.accountId).toBe("user-1");
+  });
+
+  it("points the local preset at whichever local backend this machine can run", () => {
+    // On a Linux box with Docker but no QEMU the local preset must not pick Lima.
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
+    model.applyPreset("local");
+    expect(model.launchValue).toBe("DOCKER");
+    expect(model.unmetPrerequisiteForSubmit()).toBeNull();
+  });
+
+  it("names the unmet prerequisite behind the current selection, runtime included", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
+    model.launchValue = "LIMA";
+    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe("QEMU is not installed.");
+    model.launchValue = "DOCKER";
+    model.runtime = "RUNSC";
+    expect(model.unmetPrerequisiteForSubmit()?.key).toBe("RUNSC");
+    model.runtime = "RUNC";
+    expect(model.unmetPrerequisiteForSubmit()).toBeNull();
+    // Cloud modes depend on nothing local.
+    model.launchValue = "IMBUE_CLOUD";
+    expect(model.unmetPrerequisiteForSubmit()).toBeNull();
+  });
+
+  it("holds submit on the local preset's backend through the compute select it fills", () => {
+    // The create would only fail, slowly, where the notice already says what
+    // to do, so a click on the local card with nothing runnable is refused too.
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
+    model.applyPreset("local");
+    expect(model.unmetPrerequisiteForSubmit()).toBeNull();
+
+    model.applyDefaults(buildDefaults(LINUX_WITH_NOTHING));
+    model.applyPreset("local");
+    expect(model.unmetPrerequisiteForSubmit()?.summary).toBe("Docker is not installed.");
+    // Check again found Docker up: the same selection submits.
+    model.refreshPrerequisites(buildDefaults(LINUX_WITH_DOCKER));
+    expect(model.unmetPrerequisiteForSubmit()).toBeNull();
+  });
+
+  it("keys the local preset's need on the local backend, not on the current selection", () => {
+    // The local card's notice must say what the preset would need, whichever
+    // mode the advanced view has selected: Docker is ready here, so nothing,
+    // even while the selected mode (Lima) has its own unmet need.
+    const model = new CreateFormModel();
+    expect(model.unmetPrerequisiteForLocalPreset()).toBeNull();
+    model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
+    model.launchValue = "LIMA";
+    expect(model.unmetPrerequisiteForLaunchMode()?.key).toBe("LIMA");
+    expect(model.unmetPrerequisiteForLocalPreset()).toBeNull();
+
+    // A Linux with no Docker: the preset still resolves to Docker, and its
+    // need is reported even while a cloud mode is selected.
+    model.applyDefaults(buildDefaults(LINUX_WITH_NOTHING));
+    model.launchValue = "IMBUE_CLOUD";
+    expect(model.unmetPrerequisiteForLaunchMode()).toBeNull();
+    expect(model.unmetPrerequisiteForLocalPreset()?.summary).toBe("Docker is not installed.");
+  });
+
+  it("re-reads the prerequisites without disturbing the rest of the form", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults(LINUX_WITH_DOCKER));
+    model.applyPreset("local");
+    model.hostName = "my-box";
+    const lima = { key: "LIMA" as const, is_available: true, summary: "Ready.", install_command: "", docs_url: "https://q" };
+    const limaReady = buildDefaults({ ...LINUX_WITH_DOCKER, local_prerequisites: [lima], local_launch_mode: "LIMA" });
+    model.refreshPrerequisites(limaReady);
+    expect(model.hostName).toBe("my-box");
+    // The local preset follows the refreshed choice.
+    expect(model.launchValue).toBe("LIMA");
+    expect(model.unmetPrerequisiteForSubmit()).toBeNull();
+
+    // An explicit pick (which the view makes by clearing the preset) stays put.
+    model.selectedPreset = null;
+    model.launchValue = "DOCKER";
+    model.refreshPrerequisites(limaReady);
+    expect(model.launchValue).toBe("DOCKER");
   });
 
   it("requires an account only for imbue_cloud compute or backups", () => {

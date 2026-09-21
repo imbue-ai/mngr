@@ -5,6 +5,7 @@ from pydantic import AnyUrl
 from pydantic import ValidationError
 
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.bootstrap import BootstrapError
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import ManagementPlaneConfig
@@ -18,6 +19,7 @@ from imbue.minds.config.loader import load_client_config
 from imbue.minds.config.loader import load_deploy_config
 from imbue.minds.config.loader import per_env_secret_services
 from imbue.minds.config.loader import repo_tier_client_config_path
+from imbue.minds.config.loader import resolve_client_config_path
 
 _VALID_CLIENT_TOML = (
     'connector_url = "https://connector.example.com/"\nlitellm_proxy_url = "https://litellm.example.com/"\n'
@@ -227,3 +229,40 @@ def test_committed_deploy_toml_carries_the_tier_ca_from_its_vault_mount(tier: st
     ssh_ca = load_deploy_config(tier).ssh_ca
     assert ssh_ca is not None
     assert str(ssh_ca.public_key).startswith(ca_key)
+
+
+def test_resolve_client_config_path_prefers_the_explicit_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-dev-alice")
+    explicit = tmp_path / "client.toml"
+    assert resolve_client_config_path(explicit) == explicit
+
+
+def test_resolve_client_config_path_defaults_to_production_when_nothing_is_exported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MINDS_ROOT_NAME", raising=False)
+    resolved = resolve_client_config_path(None)
+    assert resolved == repo_tier_client_config_path("production")
+    assert load_client_config(resolved).connector_url.host is not None
+
+
+def test_resolve_client_config_path_defaults_to_production_for_the_production_root_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds")
+    assert resolve_client_config_path(None) == repo_tier_client_config_path("production")
+
+
+def test_resolve_client_config_path_refuses_a_half_activated_non_production_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MINDS_ROOT_NAME", "minds-staging")
+    with pytest.raises(EnvConfigError, match="names a non-production env"):
+        resolve_client_config_path(None)
+
+
+def test_resolve_client_config_path_rejects_an_illegal_root_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A value that is not a root name at all gets the bootstrap pattern error, not the half-activated one."""
+    monkeypatch.setenv("MINDS_ROOT_NAME", "devminds")
+    with pytest.raises(BootstrapError, match="does not match"):
+        resolve_client_config_path(None)

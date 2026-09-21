@@ -19,6 +19,7 @@
 import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { fetchCreateFormDefaults, recoveryRoute } from "../../models/create";
+import type { LocalBackendPrerequisite } from "../../models/create";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { Button, ButtonSubmit } from "../components/Button";
 import { Card } from "../components/Card";
@@ -28,6 +29,7 @@ import { Icon16 } from "../components/Icon";
 import { StatusBadge } from "../components/StatusBadge";
 import { keyStateChipFor, livenessBadgeLabelFor, rowClickActionFor } from "./landing-controls";
 import { PresetCards } from "./create/PresetCards";
+import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
 
@@ -116,6 +118,26 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   // Which step circles have already played their completion pop, so a redraw
   // does not replay it (cleared if the step reopens).
   const poppedSteps = new Set<number>();
+
+  // Re-probe the machine after the user installed something: only the
+  // prerequisite facts move, every edit in the form stays. A failed re-probe
+  // leaves the notice as it was, which is still what the machine last said.
+  function checkPrerequisitesAgain(): void {
+    fetchCreateFormDefaults(null)
+      .then((defaults) => {
+        model.refreshPrerequisites(defaults);
+        m.redraw();
+      })
+      .catch((error: unknown) => {
+        console.error("Could not re-check the local prerequisites", error);
+      });
+  }
+
+  /** The notice for one local backend's unmet prerequisite, or nothing. */
+  function prerequisiteNotice(prerequisite: LocalBackendPrerequisite | null, id: string): m.Children {
+    if (prerequisite === null) return null;
+    return m(PrerequisiteNotice, { prerequisite, onCheckAgain: checkPrerequisitesAgain, id });
+  }
 
   function resetFlow(start: string): void {
     branch = start === "create" || start === "add" ? start : null;
@@ -242,6 +264,7 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
     if (!isTrusted) return;
     model.gitUrl = gitUrl;
     model.branch = branchName;
+    if (model.unmetPrerequisiteForSubmit() !== null) return;
     if (model.imbueCloudNeedsAccount()) {
       if ((model.defaults?.accounts.length ?? 0) > 0) {
         isAccountErrorShown = true;
@@ -344,18 +367,28 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
   }
 
   function createPresetBody(): m.Children {
-    return m(
-      "div",
-      { role: "radiogroup", "aria-label": "Where to run your machine" },
-      m(PresetCards, {
-        selectedPreset: model.selectedPreset,
-        onSelect: (name: PresetName) => {
-          model.applyPreset(name);
-          isAdvanced = false;
-          activeStep = 3;
-        },
-      }),
-    );
+    return [
+      // The radio group owns only the cards: the notice below it carries its
+      // own controls, which are not part of the choice.
+      m(
+        "div",
+        { role: "radiogroup", "aria-label": "Where to run your machine" },
+        m(PresetCards, {
+          selectedPreset: model.selectedPreset,
+          onSelect: (name: PresetName) => {
+            model.applyPreset(name);
+            isAdvanced = false;
+            activeStep = 3;
+          },
+        }),
+      ),
+      // The local card stays selectable: the notice says what to install so
+      // the machine can run it, and "Check again" re-probes without leaving
+      // the page.
+      model.selectedPreset === "local"
+        ? prerequisiteNotice(model.unmetPrerequisiteForLocalPreset(), "insp-local-preset-prerequisite")
+        : null,
+    ];
   }
 
   function advancedPanel(): m.Children {
@@ -549,12 +582,23 @@ export const CreateTemplatePage: m.ClosureComponent = () => {
             )
           : null,
       ]),
+      // Outside the collapsible panel: picking the local card lands here with
+      // the panel closed, and this is where the user must learn what to install
+      // before the create fails on it. The compute selector is directly above
+      // when the panel is open. It covers whatever holds the button: the
+      // runtime (runsc) has no selector on this page, so its need can only be
+      // explained here.
+      prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "insp-submit-prerequisite"),
       m(
         "div",
         { class: "mt-6" },
         m(
           ButtonSubmit,
-          { variant: "primary", block: true, disabled: !isTrusted || model.isSubmitting },
+          {
+            variant: "primary",
+            block: true,
+            disabled: !isTrusted || model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
+          },
           model.isSubmitting ? "Creating..." : "Create from Template",
         ),
       ),

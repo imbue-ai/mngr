@@ -77,6 +77,8 @@ from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPerm
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.local_prerequisites import HostProbeInterface
+from imbue.minds.desktop_client.local_prerequisites import SubprocessHostProbe
 from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_agent_id
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
@@ -2274,6 +2276,7 @@ def create_desktop_client(
     mngr_caller: MngrCaller | None = None,
     sync_scheduler: WorkspaceSyncScheduler | None = None,
     connectivity_detector: ConnectivityDetector | None = None,
+    host_probe: HostProbeInterface | None = None,
     sleep_tracker: SleepTracker | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
     device_id: str = "",
@@ -2461,6 +2464,13 @@ def create_desktop_client(
         machine_operator=machine_operator,
         discovery_health_watchdog=discovery_health_watchdog,
         connectivity_detector=connectivity_detector,
+        # The real machine's probe needs a group to run commands under; an app
+        # built without one gets no probe and the create form reports nothing.
+        host_probe=(
+            host_probe
+            if host_probe is not None or root_concurrency_group is None
+            else SubprocessHostProbe(concurrency_group=root_concurrency_group)
+        ),
         mngr_caller=mngr_caller,
         sync_scheduler=sync_scheduler,
         folder_sync_manager=folder_sync_manager,

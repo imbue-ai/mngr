@@ -52,16 +52,26 @@ def resolve_minds_root_name() -> str:
     if not re.fullmatch(MINDS_ROOT_NAME_PATTERN, value):
         raise BootstrapError(
             f"{MINDS_ROOT_NAME_ENV_VAR}={value!r} does not match {MINDS_ROOT_NAME_PATTERN!r}. "
-            f'Run `unset {MINDS_ROOT_NAME_ENV_VAR}`, then `eval "$(minds-admin env activate <name>)"` '
-            "to activate a valid env."
+            f"Run `unset {MINDS_ROOT_NAME_ENV_VAR}` to use production, or set it to a valid env name."
         )
     return value
+
+
+def default_root_name_to_production() -> None:
+    """Seed ``MINDS_ROOT_NAME`` with :data:`DEFAULT_MINDS_ROOT_NAME` when it is unset.
+
+    Run before :func:`apply_bootstrap` so a bare source run owns the whole production root
+    (data dir, mngr host dir and prefix, Sentry target), not just the production client config
+    that :func:`imbue.minds.config.loader.resolve_client_config_path` defaults to. A set value,
+    valid or not, is left alone.
+    """
+    os.environ.setdefault(MINDS_ROOT_NAME_ENV_VAR, DEFAULT_MINDS_ROOT_NAME)
 
 
 def is_env_activated() -> bool:
     """Return whether ``MINDS_ROOT_NAME`` is set in the environment.
 
-    Used by ``minds-admin env deploy/destroy`` and ``minds run`` to refuse when no env has been activated; ``MINDS_ROOT_NAME=minds`` counts as an explicit activation of production.
+    An unset value means the shell has not explicitly activated any env, which is what callers that must not silently fall back to production gate on; ``MINDS_ROOT_NAME=minds`` counts as an explicit activation of production.
     Raises ``BootstrapError`` (via :func:`resolve_minds_root_name`) when the value is set but invalid.
     """
     if os.environ.get(MINDS_ROOT_NAME_ENV_VAR) is None:
@@ -164,8 +174,8 @@ def apply_bootstrap() -> None:
     Must be called before any ``imbue.mngr.*`` module is imported.
     When ``MINDS_ROOT_NAME`` is set to a valid value, the derived ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` values unconditionally override any pre-existing values -- otherwise an inherited ``MNGR_HOST_DIR`` from a parent process (e.g. a Claude Code agent's tmux env) would silently win and minds would read a different mngr settings.toml than the bootstrap wrote to.
 
-    When ``MINDS_ROOT_NAME`` is unset, leaves ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` untouched -- env activation is an explicit ``minds-admin env activate`` step, so an unactivated shell has nothing to seed.
-    Production-only entry points (the bundled Electron build) always set both ``MINDS_ROOT_NAME`` and the derived vars before invoking us, so an unset value here genuinely means "the user has not activated any env yet".
+    When ``MINDS_ROOT_NAME`` is unset, leaves ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` untouched -- naming a non-production env is an explicit step, so an unactivated shell has nothing to seed.
+    Production-only entry points (the bundled Electron build, and the ``minds`` CLI via :func:`default_root_name_to_production`) always set ``MINDS_ROOT_NAME`` before invoking us, so an unset value here genuinely means "the user has not activated any env yet" -- which is what ``minds-admin`` relies on.
 
     When ``MINDS_ROOT_NAME`` is set to an invalid value, raises ``BootstrapError`` (via :func:`resolve_minds_root_name`); ``main.py`` turns that into a clean one-line error.
 

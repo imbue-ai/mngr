@@ -259,8 +259,8 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // build, which today means production or staging), pass --config-file explicitly
       // so the backend doesn't have to fall back to MINDS_CLIENT_CONFIG_PATH.
       // Dev-mode builds (no bundle) inherit MINDS_CLIENT_CONFIG_PATH from
-      // the user's activated shell instead; the backend refuses to start
-      // if neither path is set.
+      // the shell when one is exported; otherwise the backend defaults to
+      // the in-repo production config.
       const bundledClientConfig = paths.getBundledClientConfigPath();
       const configFileArgs = bundledClientConfig ? ['--config-file', bundledClientConfig] : [];
 

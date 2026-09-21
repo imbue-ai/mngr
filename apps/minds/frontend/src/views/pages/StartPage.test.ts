@@ -34,6 +34,8 @@ function defaults(): CreateFormDefaults {
     branch: "minds-v9.9.9",
     color: "#0b292b",
     prefill: null,
+    local_prerequisites: [],
+    local_launch_mode: "DOCKER",
   };
 }
 

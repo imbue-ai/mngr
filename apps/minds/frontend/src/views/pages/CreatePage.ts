@@ -10,7 +10,7 @@
 // and a successful submit reports the operation id instead of routing.
 
 import m from "mithril";
-import type { CreateFormDefaults } from "../../models/create";
+import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
 import {
   backupProviderLabel,
   fetchCreateFormDefaults,
@@ -25,6 +25,7 @@ import { PageNarrowContainer } from "../components/Layout";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
 import { PresetCards } from "./create/PresetCards";
+import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
 import type { PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
 
@@ -66,6 +67,29 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
   let hostNameDebounce: ReturnType<typeof setTimeout> | null = null;
   let availabilitySequence = 0;
 
+  // Re-probe the machine after the user installed something: only the
+  // prerequisite facts move, every edit in the form stays. A failed re-probe
+  // leaves the notice as it was, which is still what the machine last said.
+  // The local preset's compute mode can move with the facts, and the host-name
+  // verdict is keyed on the mode, so it is re-checked like any other mode change.
+  function checkPrerequisitesAgain(): void {
+    fetchCreateFormDefaults(null)
+      .then((defaults) => {
+        model.refreshPrerequisites(defaults);
+        scheduleHostNameValidation();
+        m.redraw();
+      })
+      .catch((error: unknown) => {
+        console.error("Could not re-check the local prerequisites", error);
+      });
+  }
+
+  /** The notice for one local backend's unmet prerequisite, or nothing. */
+  function prerequisiteNotice(prerequisite: LocalBackendPrerequisite | null, id: string): m.Children {
+    if (prerequisite === null) return null;
+    return m(PrerequisiteNotice, { prerequisite, onCheckAgain: checkPrerequisitesAgain, id });
+  }
+
   function scheduleHostNameValidation(): void {
     if (hostNameDebounce !== null) clearTimeout(hostNameDebounce);
     hostNameDebounce = setTimeout(() => {
@@ -90,6 +114,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   function submit(event: SubmitEvent): void {
     event.preventDefault();
+    // The button is held while a prerequisite is unmet; a submit that still
+    // arrives (Enter in a field) is refused the same way.
+    if (model.unmetPrerequisiteForSubmit() !== null) return;
     if (model.imbueCloudNeedsAccount()) {
       if ((model.defaults?.accounts.length ?? 0) > 0) {
         model.isAccountErrorShown = true;
@@ -247,6 +274,9 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   "another account entry with the same keys.",
               )
             : null,
+          // The compute mode's own requirement (Docker's daemon, Lima's QEMU and
+          // KVM); the runtime's (runsc) is annotated under the runtime selector.
+          prerequisiteNotice(model.unmetPrerequisiteForLaunchMode(), "launch-mode-prerequisite"),
         ]),
         m("div", [
           m("div", { class: "flex items-center justify-between gap-3" }, [
@@ -420,6 +450,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   ),
                 ),
               ]),
+              prerequisiteNotice(model.unmetPrerequisiteForRuntime(), "runtime-prerequisite"),
             ])
           : null,
         m("hr", { class: "border-t border-dashed border-default my-2" }),
@@ -538,22 +569,29 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       model.submitError,
                     )
                   : m("p", { id: "create-error", class: "hidden" }),
-                m(
-                  "div",
-                  {
-                    id: "simple-view",
-                    role: "radiogroup",
-                    "aria-label": "Where to run your machine",
-                    class: model.isAdvancedOpen ? "hidden" : "",
-                  },
-                  m(PresetCards, {
-                    selectedPreset: model.selectedPreset,
-                    onSelect: (name: PresetName) => {
-                      model.applyPreset(name);
-                      scheduleHostNameValidation();
-                    },
-                  }),
-                ),
+                m("div", { id: "simple-view", class: model.isAdvancedOpen ? "hidden" : "" }, [
+                  // The radio group owns only the cards: the notice below it
+                  // carries its own controls, which are not part of the choice.
+                  m(
+                    "div",
+                    { role: "radiogroup", "aria-label": "Where to run your machine" },
+                    m(PresetCards, {
+                      selectedPreset: model.selectedPreset,
+                      onSelect: (name: PresetName) => {
+                        model.applyPreset(name);
+                        scheduleHostNameValidation();
+                      },
+                    }),
+                  ),
+                  // The local card stays selectable: the notice says what to
+                  // install so the machine can run it, and "Check again"
+                  // re-probes without leaving the page. It covers whatever
+                  // holds Create, so a selection made in Advanced (a compute
+                  // mode, the runsc runtime) is still explained here after
+                  // "Back to simple configuration", where its own notice is
+                  // hidden with the panel.
+                  prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "submit-prerequisite"),
+                ]),
                 m("div", { class: "flex items-center justify-between mt-8 type-helper" }, [
                   m(
                     "select",
@@ -633,7 +671,11 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   { class: "flex justify-center mt-16" },
                   m(
                     ButtonSubmit,
-                    { id: "create-submit", extra: "w-80", disabled: model.isSubmitting },
+                    {
+                      id: "create-submit",
+                      extra: "w-80",
+                      disabled: model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
+                    },
                     model.isSubmitting ? "Creating..." : "Create",
                   ),
                 ),

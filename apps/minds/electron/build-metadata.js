@@ -1,4 +1,4 @@
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const paths = require('./paths');
@@ -20,7 +20,13 @@ function getBuildMetadata() {
   let gitSha = 'unknown';
   if (paths.isDev()) {
     try {
-      gitSha = execSync('git rev-parse HEAD', { cwd: paths.getMonorepoRoot() }).toString().trim() || 'unknown';
+      // git's stderr is dropped rather than forwarded: Node forwards even an
+      // empty stderr buffer to process.stderr, and that zero-length write
+      // fails with EFAULT under Electron on linux/arm64.
+      gitSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: paths.getMonorepoRoot(),
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).toString().trim() || 'unknown';
     } catch (err) {
       console.warn(`[build-metadata] Could not resolve git SHA from checkout: ${err.message}`);
     }

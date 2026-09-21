@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { settle, withMindsNative } from "../../testing";
-import { dismissUpdateReady, resetUpdateReadyForTest, updateReadyVersion, watchUpdateStatus } from "./update-ready";
+import { pendingInstallUpdate, settle, withMindsNative } from "../../testing";
+import {
+  dismissUpdateReady,
+  installUpdateReady,
+  isUpdateInstalling,
+  resetUpdateReadyForTest,
+  updateInstallError,
+  updateInstallTerms,
+  updateReadyVersion,
+  watchUpdateStatus,
+} from "./update-ready";
 
 const DOWNLOADED = {
   channel: "alpha",
@@ -36,6 +45,28 @@ describe("the update-ready card's state", () => {
       await settle();
 
       expect(updateReadyVersion()).toBe("0.3.14");
+    });
+  });
+
+  it("reads how the install happens from the same state, defaulting to on-quit", async () => {
+    // The terms are a fact about the running binary and ride the seed read; a
+    // state that names none (a stub covering only part of the surface) means
+    // the macOS policy, install on quit.
+    const silent = nativeStub(DOWNLOADED);
+    await withMindsNative(silent.surface, async () => {
+      watchUpdateStatus(() => {});
+      await settle();
+
+      expect(updateInstallTerms()).toEqual({ policy: "on-quit", needsPassword: false });
+    });
+
+    resetUpdateReadyForTest();
+    const deb = nativeStub({ ...DOWNLOADED, installPolicy: "on-request", needsPasswordToInstall: true });
+    await withMindsNative(deb.surface, async () => {
+      watchUpdateStatus(() => {});
+      await settle();
+
+      expect(updateInstallTerms()).toEqual({ policy: "on-request", needsPassword: true });
     });
   });
 
@@ -123,6 +154,70 @@ describe("the update-ready card's state", () => {
       expect(updateReadyVersion()).toBeNull();
       push({ type: "update-downloaded", version: "0.3.15" });
       expect(updateReadyVersion()).toBe("0.3.15");
+    });
+  });
+
+  it("keeps a failed install for the card, and clears it on the next try", async () => {
+    // The main process rejects the install when electron-updater reports a
+    // failure (a cancelled password prompt on a .deb) rather than quitting;
+    // the card is where the click happened, so it is where the answer goes.
+    let isInstallable = false;
+    const surface = {
+      ...nativeStub(DOWNLOADED).surface,
+      installUpdate: async () => ({ error: isInstallable ? null : "Installing the update failed: pkexec" }),
+    };
+    await withMindsNative(surface, async () => {
+      let changeCount = 0;
+      await installUpdateReady(() => changeCount++);
+
+      expect(updateInstallError()).toBe("Installing the update failed: pkexec");
+      expect(isUpdateInstalling()).toBe(false);
+      // Once as the install starts, once as it settles.
+      expect(changeCount).toBe(2);
+
+      isInstallable = true;
+      await installUpdateReady(() => changeCount++);
+      expect(updateInstallError()).toBeNull();
+    });
+  });
+
+  it("is installing from the click until the main process settles the call", async () => {
+    // The main process is blocked for the whole of a .deb install, so the
+    // state has to be up before it is asked, from the renderer's own hand;
+    // and it settles only if the app stays up (here: the quit was cancelled
+    // at the running-workspaces prompt), which hands the control back.
+    const { installUpdate, resolveInstall } = pendingInstallUpdate();
+    await withMindsNative({ ...nativeStub(DOWNLOADED).surface, installUpdate }, async () => {
+      const seen: boolean[] = [];
+      const done = installUpdateReady(() => seen.push(isUpdateInstalling()));
+      expect(isUpdateInstalling()).toBe(true);
+      expect(seen).toEqual([true]);
+
+      resolveInstall();
+      await done;
+      expect(isUpdateInstalling()).toBe(false);
+      expect(seen).toEqual([true, false]);
+      expect(updateInstallError()).toBeNull();
+    });
+  });
+
+  it("drops a failed install's account once a different version is offered", async () => {
+    // The failure described an attempt on the version offered at the time;
+    // shown under the next version's card it would report a click that never
+    // happened on that download. The same offer re-published keeps it.
+    const { surface, push } = nativeStub(DOWNLOADED);
+    const failing = { ...surface, installUpdate: async () => ({ error: "Installing the update failed: pkexec" }) };
+    await withMindsNative(failing, async () => {
+      watchUpdateStatus(() => {});
+      await settle();
+      await installUpdateReady(() => {});
+      expect(updateInstallError()).toBe("Installing the update failed: pkexec");
+
+      push({ type: "update-downloaded", version: "0.3.14" });
+      expect(updateInstallError()).toBe("Installing the update failed: pkexec");
+
+      push({ type: "update-downloaded", version: "0.3.15" });
+      expect(updateInstallError()).toBeNull();
     });
   });
 });
