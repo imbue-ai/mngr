@@ -2,7 +2,7 @@
 
 The flow encoded here is the same one the apps/minds Electron e2e test
 asserts on: launch the Electron app, drive its create form via Playwright
-over CDP, and wait until the workspace's ``system_interface`` dockview UI
+over CDP, and wait until the workspace's ``system_interface`` desktop
 renders through the desktop client's subdomain proxy.
 
 Two callers consume this module:
@@ -119,11 +119,9 @@ _CREATE_FORM_TIMEOUT_SECONDS: Final[int] = 1200
 _SYSTEM_INTERFACE_TIMEOUT_SECONDS: Final[int] = 180
 _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
-# Pre-tested CSS selector against the system_interface frontend at
-# .external_worktrees/default-workspace-template/system/apps/system_interface/.
-# `.dockview-workspace` is the wrapper div the DockviewWorkspace mithril
-# component mounts on first render.
-_DOCKVIEW_WORKSPACE_SELECTOR: Final[str] = "div.dockview-workspace"
+# The desktop's backdrop, which the system_interface frontend renders once it has its desktops
+# (docs/system/blueprint/desktop-interface/contracts.md section 12 in default-workspace-template).
+_DESKTOP_BACKDROP_SELECTOR: Final[str] = "[data-desktop-id]"
 
 
 def configure_logging() -> None:
@@ -761,11 +759,11 @@ def _drive_create_flow(
     logger.info("Machine ready at {}", workspace_page.url)
 
     workspace_page.wait_for_selector(
-        _DOCKVIEW_WORKSPACE_SELECTOR,
+        _DESKTOP_BACKDROP_SELECTOR,
         state="visible",
         timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
     )
-    logger.info("system_interface dockview rendered; machine create attempt complete")
+    logger.info("system_interface desktop rendered; machine create attempt complete")
     return workspace_page
 
 
@@ -910,7 +908,7 @@ def create_workspace_via_electron(
     the workspace has rendered, before teardown -- e.g. to send a chat message and
     await the reply on the same Electron session.
 
-    Returns once the workspace's ``system_interface`` dockview UI has
+    Returns once the workspace's ``system_interface`` desktop has
     rendered through the desktop client proxy. Does NOT clean up the
     resulting mngr agent or its Docker container -- the caller decides
     whether to destroy or to capture the state.
@@ -964,8 +962,8 @@ def create_workspace_via_electron(
 #
 # These build on the create primitives above to drive the *entire* user journey
 # the desktop client exists for, keeping the browser attached across every step
-# so they can act on both Electron web surfaces: the dockview *content* view
-# (chat / terminal) and the *chrome* view (Home button). Used by
+# so they can act on both Electron web surfaces: the workspace *content* view
+# (the desktop's chat and terminal windows) and the *chrome* view (Home button). Used by
 # ``scripts/electron_full_flow_e2e.py`` (wrapped in xvfb via
 # ``just minds-test-electron-flow``) to verify the v1 lifecycle/destroy routes
 # end-to-end against a real local-Docker workspace.
@@ -973,29 +971,31 @@ def create_workspace_via_electron(
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
 _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 # A chat renders inside its own frame at the chat app's origin: the page's URL path is the
-# chat's agent id, which is how the frame is found among the workspace frame's children and
-# how one docked chat is told from another.
+# chat's agent id, which is how the frame is found among the workspace frame's descendants (the
+# desktop frames the chat app's root, and the root frames the chat) and how one open chat is told
+# from another.
 _CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/(agent-[0-9a-f]+)/?$")
 _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
-# A fresh workspace opens on the welcome chat the creation page seeded; the New Tab page
-# (behind the dockview add button) carries one tile per app's ``new`` action. The shell
-# renders the tiles from its app list once that has arrived, so a page and its tiles can
-# still be on their way when the dockview is first visible.
-_NEW_TAB_ADD_BUTTON_SELECTOR: Final[str] = "button.dockview-add-tab-button"
-_NEW_TAB_PAGE_SELECTOR: Final[str] = ".new-tab-launcher"
-_NEW_CHAT_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="chat:new"]'
-_NEW_TERMINAL_TILE_SELECTOR: Final[str] = '.new-tab-launcher-tile[data-launch="terminal:new"]'
-_NEW_TAB_TILE_TIMEOUT_SECONDS: Final[int] = 60
-# How long the shell gets to dock the new chat's frame after the tile is pressed.
+# A fresh workspace opens on the welcome chat the creation page seeded; the desktop's launcher
+# (behind the taskbar's search field) carries one tile per app launch path. The shell renders
+# the tiles from its app list once that has arrived, so the tiles can still be on their way when
+# the backdrop is first visible.
+_LAUNCHER_FIELD_SELECTOR: Final[str] = "[data-launcher-field]"
+_LAUNCHER_INPUT_SELECTOR: Final[str] = "[data-launcher-field] input"
+_LAUNCHER_OVERLAY_SELECTOR: Final[str] = "[data-launcher-overlay]"
+_NEW_CHAT_TILE_SELECTOR: Final[str] = '.launcher-tile[data-launch="chat:new"]'
+_NEW_TERMINAL_TILE_SELECTOR: Final[str] = '.launcher-tile[data-launch="terminal:new"]'
+_LAUNCHER_TILE_TIMEOUT_SECONDS: Final[int] = 60
+# How long the shell gets to frame the new chat's page after the tile is pressed.
 _NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
-# Terminal panels are cross-origin iframes at the terminal service's own
+# Terminal windows' pages are cross-origin iframes at the terminal service's own
 # origin (service-per-origin): the terminal's origin label is ``terminal-<rand>``
 # (a random per-service suffix), so the origin is
 # https://terminal-<rand>.agent-<hex>.localhost:<port>/. Match the ``terminal-``
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
-# The welcome chat's composer is on its page before any agent exists, but the shell docks
+# The welcome chat's composer is on its page before any agent exists, but the shell frames
 # the chat only once its app list has arrived, and a chat minted from a tile is created
 # asynchronously (a sign-in through its provider chooser launches it), so a chat input can
 # take a while to appear on a fresh first boot.
@@ -1097,10 +1097,10 @@ def drive_create_docker_imbue_workspace(
     workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Machine ready at {}", workspace_page.url)
     workspace_page.wait_for_selector(
-        _DOCKVIEW_WORKSPACE_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
+        _DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
     )
-    logger.info("system_interface dockview rendered")
-    _flow_screenshot(workspace_page, "02-workspace-dockview")
+    logger.info("system_interface desktop rendered")
+    _flow_screenshot(workspace_page, "02-workspace-desktop")
     return workspace_page
 
 
@@ -1143,13 +1143,23 @@ def _agent_id_for_coordinate(content_page: Page, backend_origin: str, coordinate
     raise WorkspaceFlowError(f"No workspace with host id {coordinate!r} in /api/v1/workspaces")
 
 
+def descendant_frames(frame: Frame) -> list[Frame]:
+    """Every frame under ``frame``, depth first: the desktop frames each app's page, and the chat app's root frames
+    its chats, so a chat page is a grandchild of the workspace."""
+    found: list[Frame] = []
+    for child in frame.child_frames:
+        found.append(child)
+        found.extend(descendant_frames(child))
+    return found
+
+
 def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
     """The chat pages' frames currently inside the workspace, each with its chat's agent id, in frame order.
 
     The id is the frame's URL path, so it names the same chat however the URL's query string
     or trailing slash changes while the page is open.
     """
-    candidates = workspace.frames if isinstance(workspace, Page) else workspace.child_frames
+    candidates = workspace.frames if isinstance(workspace, Page) else descendant_frames(workspace)
     matched: list[tuple[Frame, str]] = []
     for frame in candidates:
         match = _CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])
@@ -1164,7 +1174,7 @@ def _find_chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozens
 
 
 def _chat_frame_other_than(workspace: Page | Frame, known_chat_ids: frozenset[str], timeout_seconds: float) -> Frame:
-    """The frame of a chat page whose chat is not among ``known_chat_ids``, once the shell has docked one.
+    """The frame of a chat page whose chat is not among ``known_chat_ids``, once the shell has framed one.
 
     Raises WorkspaceFlowError when no such frame appears within ``timeout_seconds``.
     """
@@ -1187,22 +1197,22 @@ def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
     return _chat_frame_other_than(workspace, frozenset(), timeout_seconds)
 
 
-def start_new_chat_from_new_tab(
+def start_new_chat_from_launcher(
     workspace: Page | Frame, timeout_seconds: float = _NEW_CHAT_FRAME_TIMEOUT_SECONDS
 ) -> Frame:
-    """Run the chat app's ``new`` from the New Tab page and return the frame of the chat it docked.
+    """Run the chat app's ``new`` launch path from the launcher's tile and return the frame of the chat it opened.
 
-    The chat app mints a chat from the tile (one that waits for an account when nothing is signed
-    in, whose page shows the provider chooser), and the shell docks its page as a frame at the
-    chat app's origin. A workspace opens on the welcome chat the creation page seeded, so the new
-    chat is the frame that was not there before the press.
+    The desktop opens a window of the chat app at the launch path; the chat root there mints a chat
+    (or offers the provider chooser when nothing is signed in) and frames its page. A workspace opens
+    on the welcome chat the creation page seeded, so the new chat is the frame that was not there
+    before the press.
     """
-    # The tile arrives with the shell's app list, which is also what docks the welcome chat, so
+    # The tile arrives with the shell's app list, which is also what frames the welcome chat, so
     # the chats already open are counted only once the tile is on screen.
-    visible_tile_selector = _reveal_new_tab_tile(workspace, _NEW_CHAT_TILE_SELECTOR)
+    visible_tile_selector = _reveal_launcher_tile(workspace, _NEW_CHAT_TILE_SELECTOR)
     known_chat_ids = frozenset(chat_id for _frame, chat_id in _chat_frames_with_ids(workspace))
     workspace.click(visible_tile_selector)
-    logger.info("Started a new chat from the New Tab page; waiting up to {:.0f}s for its frame", timeout_seconds)
+    logger.info("Started a new chat from the launcher; waiting up to {:.0f}s for its frame", timeout_seconds)
     return _chat_frame_other_than(workspace, known_chat_ids, timeout_seconds)
 
 
@@ -1218,11 +1228,11 @@ def _message_welcome_chat(page: Page | Frame, token: str) -> None:
 
 
 def _start_new_chat(page: Page | Frame) -> None:
-    """The full flow's New Tab step: start a second chat from the page's tile and wait for its composer."""
-    chat = start_new_chat_from_new_tab(page)
+    """The full flow's launcher step: start a second chat from the launcher's tile and wait for its composer."""
+    chat = start_new_chat_from_launcher(page)
     chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
-    logger.info("The chat started from the New Tab page shows its composer at {}", chat.url)
-    _flow_screenshot(page, "04b-new-chat-from-new-tab")
+    logger.info("The chat started from the launcher shows its composer at {}", chat.url)
+    _flow_screenshot(page, "04b-new-chat-from-launcher")
 
 
 def wait_for_chat_input(page: Page | Frame) -> Frame:
@@ -1268,41 +1278,48 @@ def await_chat_reply(chat: Frame, page: Page | Frame, token: str) -> None:
 
 
 def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
-    """Type a unique-token prompt into the dockview chat and wait for the reply to echo it."""
+    """Type a unique-token prompt into the workspace's chat and wait for the reply to echo it."""
     chat = wait_for_chat_input(page)
     send_chat_message(chat, page, token)
     await_chat_reply(chat, page, token)
 
 
-def _reveal_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> str:
-    """Bring a New Tab page's tile on screen, opening the page first when none is showing; returns the selector naming it there."""
-    # The add button always opens ANOTHER New Tab page, so it is pressed only when no page is
-    # showing (e.g. a real tab holds the pane). At boot the button can arrive with the dock's
-    # chrome after this probe, so the press waits with the page budget rather than skipping.
-    if workspace.query_selector(f"{_NEW_TAB_PAGE_SELECTOR}:visible") is None:
-        workspace.click(_NEW_TAB_ADD_BUTTON_SELECTOR, timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
-    # A background New Tab page keeps an identical tile hidden in the DOM, and an unscoped
-    # wait pins to the first match in DOM order whether or not it can ever become visible.
-    visible_tile_selector = f"{_NEW_TAB_PAGE_SELECTOR}:visible {tile_selector}"
-    workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=_NEW_TAB_TILE_TIMEOUT_SECONDS * 1000)
+def _reveal_launcher_tile(workspace: Page | Frame, tile_selector: str) -> str:
+    """Bring a launcher tile on screen, opening the launcher first when it is not showing; returns the selector
+    naming the tile there."""
+    # The launcher opens from the taskbar's search field: focusing its input on a laptop, or
+    # pressing the field itself where the compact layout renders it as a bare button. The shell
+    # renders the taskbar together with the backdrop the caller has already waited for, so probing
+    # for the input is enough to tell the two layouts apart.
+    if workspace.query_selector(f"{_LAUNCHER_OVERLAY_SELECTOR}:visible") is None:
+        opener = (
+            _LAUNCHER_INPUT_SELECTOR
+            if workspace.query_selector(_LAUNCHER_INPUT_SELECTOR) is not None
+            else _LAUNCHER_FIELD_SELECTOR
+        )
+        workspace.click(opener)
+    # Tiles render only inside the overlay, so scoping the wait to the showing one also confirms
+    # the opener brought the launcher up.
+    visible_tile_selector = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {tile_selector}"
+    workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=_LAUNCHER_TILE_TIMEOUT_SECONDS * 1000)
     return visible_tile_selector
 
 
-def _press_new_tab_tile(workspace: Page | Frame, tile_selector: str) -> None:
-    """Run an app action from the visible New Tab page's tile, opening the page first when none is showing."""
-    workspace.click(_reveal_new_tab_tile(workspace, tile_selector))
+def _press_launcher_tile(workspace: Page | Frame, tile_selector: str) -> None:
+    """Run an app launch path from the launcher's tile, opening the launcher first when it is not showing."""
+    workspace.click(_reveal_launcher_tile(workspace, tile_selector))
 
 
-def open_terminal_from_new_tab(workspace: Page | Frame) -> None:
-    """Run the terminal app's ``new`` from the New Tab page and wait for the terminal's frame to dock."""
-    _press_new_tab_tile(workspace, _NEW_TERMINAL_TILE_SELECTOR)
+def open_terminal_from_launcher(workspace: Page | Frame) -> None:
+    """Run the terminal app's ``new`` launch path from the launcher and wait for the terminal's frame."""
+    _press_launcher_tile(workspace, _NEW_TERMINAL_TILE_SELECTOR)
     workspace.wait_for_selector(_TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
     logger.info("Terminal iframe present")
 
 
 def _open_terminal(page: Page | Frame) -> None:
-    """The full flow's terminal step: open a terminal from the New Tab page and record the screenshot."""
-    open_terminal_from_new_tab(page)
+    """The full flow's terminal step: open a terminal from the launcher and record the screenshot."""
+    open_terminal_from_launcher(page)
     _flow_screenshot(page, "05-terminal-open")
 
 
@@ -1469,7 +1486,7 @@ def run_full_workspace_flow(
                 logger.info("=== STEP 1: create local Docker machine ===")
                 # The create form is driven on the chrome view (content_page); the
                 # ready workspace opens on the content view (workspace_page). The
-                # dockview steps (message, new chat, terminal) and the agent-id read run
+                # desktop steps (message, new chat, terminal) and the agent-id read run
                 # on workspace_page; the chrome-surface steps below (home, landing,
                 # settings/destroy) stay on content_page.
                 workspace_page = drive_create_docker_imbue_workspace(

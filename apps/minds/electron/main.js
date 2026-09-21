@@ -692,8 +692,8 @@ function registerShortcutsFor(bundle, wc) {
       try { wc.send('escape-pressed'); } catch { /* noop */ }
       return;
     }
-    // Cmd+W (macOS) / Ctrl+W closes the active dockview tab INSIDE the
-    // displayed workspace, not the window. before-input-event sees the
+    // Cmd+W (macOS) / Ctrl+W closes the focused window INSIDE the
+    // displayed workspace, not the Electron window. before-input-event sees the
     // keystroke even when focus is inside the workspace iframe; the chrome
     // page relays it into the workspace through the embed contract.
     const closeTabCombo = isMac
@@ -1645,8 +1645,8 @@ function installApplicationMenu() {
         },
         { type: 'separator' },
         {
-          // Deliberately NO Cmd+W accelerator: inside a workspace the dockview
-          // UI closes its active tab with it (via the embed contract).
+          // Deliberately NO Cmd+W accelerator: inside a workspace the desktop
+          // closes its focused window with it (via the embed contract).
           label: 'Close Window',
           click: () => {
             const target = getMostRecentWindow();

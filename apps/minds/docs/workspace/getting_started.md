@@ -51,7 +51,7 @@ and user-initiated later, from the workspace options panel's Share tab.
 ## Accessing your agent
 
 After creation, the agent is accessible at:
-- **Local**: `https://host-{hex}.localhost:8421/` (the desktop client byte-forwards the bare workspace origin to the workspace's system interface, which serves the dockview UI)
+- **Local**: `https://host-{hex}.localhost:8421/` (the desktop client byte-forwards the bare workspace origin to the workspace's system interface, which serves the desktop)
 - **Individual app**: `https://{app_name}.host-{hex}.localhost:8421/` (every registered service owns its own origin; nothing proxies or rewrites service traffic)
 - **Shared** (while sharing is enabled): `https://{label}.{host-id}.{user}.{region}.{domain}`, served over the workspace's share through the self-hosted relay. `{label}` is the service's origin label (`<service>-<rand>`, the shell's for a whole-machine share); it is the link the Share tab shows and copies. The bare `{host-id}.{user}.{region}.{domain}` origin is deliberately not routed, and neither is a plain service-name prefix.
 

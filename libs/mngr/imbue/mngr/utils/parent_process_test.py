@@ -1,6 +1,9 @@
 import os
+import shlex
 import subprocess
+import sys
 import threading
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -11,6 +14,7 @@ from imbue.mngr.utils.parent_process import _read_grandparent_pid
 from imbue.mngr.utils.parent_process import _read_ppid_via_ps
 from imbue.mngr.utils.parent_process import start_grandparent_death_watcher
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+from imbue.mngr.utils.polling import wait_for
 
 
 def test_start_parent_death_watcher_starts_thread_in_concurrency_group() -> None:
@@ -89,3 +93,50 @@ def test_start_grandparent_death_watcher_starts_thread_when_resolvable() -> None
         deadline = threading.Event()
         deadline.wait(timeout=_PARENT_POLL_INTERVAL_SECONDS + 1.0)
         assert watcher_thread.is_alive(), "Grandparent watcher exited unexpectedly during poll cycle"
+
+
+_ORPHAN_WATCHER_SCRIPT = """
+import os
+import threading
+from pathlib import Path
+
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.utils.parent_process import start_parent_death_watcher
+
+with ConcurrencyGroup(name="orphan-watcher-probe") as concurrency_group:
+    Path({pid_file!r}).write_text(str(os.getpid()))
+    start_parent_death_watcher(concurrency_group)
+    # Without the watcher this process would idle here for a long time.
+    threading.Event().wait(timeout=60.0)
+"""
+
+
+def test_parent_death_watcher_exits_at_arm_time_when_parent_is_already_gone(tmp_path: Path) -> None:
+    """A child whose parent died before the watcher armed must still exit.
+
+    The intermediate ``sh`` backgrounds the Python child and exits immediately, so by the time
+    the child has imported enough to arm its watcher it has already been reparented to init.
+    A watcher that merely recorded the parent PID at arm time would record init and never fire.
+    """
+    pid_file = tmp_path / "orphan.pid"
+    script = _ORPHAN_WATCHER_SCRIPT.format(pid_file=str(pid_file))
+    subprocess.run(
+        ["sh", "-c", f"{shlex.quote(sys.executable)} -c {shlex.quote(script)} &"],
+        check=True,
+        timeout=30.0,
+    )
+    wait_for(pid_file.exists, timeout=20.0, poll_interval=0.05)
+    orphan_pid = int(pid_file.read_text())
+
+    def is_orphan_gone() -> bool:
+        try:
+            os.kill(orphan_pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    try:
+        wait_for(is_orphan_gone, timeout=15.0, poll_interval=0.1)
+    finally:
+        if not is_orphan_gone():
+            os.kill(orphan_pid, 9)

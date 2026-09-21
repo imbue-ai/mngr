@@ -17,7 +17,7 @@ exit code, which would conflate "file absent" with "probe never ran".
 not this app's. The workspace keeps its default provider account's harness and
 binding in ``.mngr/settings.local.toml`` -- mngr's local config layer, which every
 unqualified ``mngr create`` there resolves -- so the create this builds names no
-account and no type and lands on whatever a New Tab chat would. That file exists
+account and no type and lands on whatever a launcher-started chat would. That file exists
 on every workspace that writes it; the ones from minds-v0.5.0 through v0.5.2 keep
 accounts but write no file, and for their one update the app falls back to asking
 the template's own resolver (:func:`resolve_account_binding`) and splicing its
@@ -101,7 +101,7 @@ ACCOUNT_ARGS_EXIT_SENTINEL: Final[str] = "MNGR_ACCOUNT_ARGS_EXIT="
 # What the resolver emits per account: the flag, then its ``NAME=VALUE``.
 _ACCOUNT_ARG_FLAG: Final[str] = "--env"
 
-# Both labels make the workspace's chat app dock the chat's tab: shipped
+# Both labels make the workspace's chat app open the chat's window on the desktop: shipped
 # interfaces key on ``assist``, newer ones on the purpose-neutral ``auto_open``.
 AUTO_OPEN_CHAT_LABELS: Final[tuple[str, ...]] = ("assist", "auto_open")
 
@@ -377,7 +377,7 @@ def spawn_skill_chat(
     """Spawn the chat and wait for ``mngr create`` to finish; report how it went.
 
     Synchronous on purpose: the caller holds its "starting..." state until the
-    chat actually exists rather than dismissing into a blank gap before the tab
+    chat actually exists rather than dismissing into a blank gap before the chat's window
     appears.
 
     A failure carries the workspace's verdict rather than only logging it: the

@@ -13,17 +13,17 @@ Key concepts in the minds system:
   mngr-level code speaks host/agent; minds-level code speaks machine/workspace (see `specs/machine-workspace-naming/decisions.md`).
 
 - **creation**: anything a user makes in their workspace.
-  Used only at the highest conceptual level; the working vocabulary is the kinds: *apps* (opened as tabs), *skills* (an *automation* is a skill run automatically on a schedule), *data* (documents, images, notes), and *customizations* (changes to any of the above).
+  Used only at the highest conceptual level; the working vocabulary is the kinds: *apps* (opened as windows on the desktop), *skills* (an *automation* is a skill run automatically on a schedule), *data* (documents, images, notes), and *customizations* (changes to any of the above).
 
-- **app**: something the user can open as a tab and interact with.
+- **app**: something the user can open as a window on the desktop and interact with.
   Lives under `system/apps/<package>/` in the workspace, runs as a supervisord program, and registers its port in `data/.state/apps.toml` via `system/scripts/forward_port.py`.
   Each app gets a local URL (via the desktop client) and, while sharing is enabled, a shared URL (via the workspace's share through the self-hosted relay).
-  The built-in apps are the terminal, the browser, and the system interface (the special app that hosts the other tabs).
+  The built-in apps are the chat, the terminal, the file viewer, and the browser; the system interface is the shell that hosts their windows.
   Never "application" -- always "app".
 
-- **service**: a background supervisord program with no tab (host-backup, the share-gateway, the app watcher).
+- **service**: a background supervisord program with no window (host-backup, the share-gateway, the app watcher).
   Standalone services live under `system/services/`; a service that exists solely to support one app lives in that app's folder and is named `<app>-<role>`.
-  "Web service" is retired vocabulary: a tab-openable thing is an app.
+  "Web service" is retired vocabulary: a thing the user can open is an app.
 
 - **automation** [future]: a skill that runs automatically on a schedule, without the user asking.
   The scheduling primitive is landing separately; until then skills run when invoked.
@@ -43,18 +43,18 @@ Key concepts in the minds system:
   Its `workspace_display_name` label holds the workspace's human-readable name (the normalized slug is the host's name).
   Hidden from the UI agent list and protected against direct destroy.
 
-- **chat**: a user-facing conversation in a workspace, one per chat tab: a sequence of agent transcripts run by one agent at a time (the template's `docs/system/blueprint/chat-agent-split/`). Its id is its first agent's id, and every agent the chat app creates for it carries that id as `MINDS_CHAT_ID`. A chat that has run on several agents has a chat record in the workspace (`data/.apps/chat/chats/<chat-id>/record.json`) naming its agents in order; the earlier ones are *archived agents*, kept for their transcripts and never listed as chats. A *handoff* is how a chat moves to another harness: the chat app archives the agent it is leaving and creates a successor with a summary, and the record carries the handoff's state while the chat is *converging*. A *rebind* is how a chat moves to another account on its own harness and lane: the same agent is stopped, repointed at the new account's credential in its own state dir, relabeled, and started again, with its transcript, tk steps, and model settings kept; the record carries a rebind's state the same way. The desktop client's permission-resolution nudge therefore goes to the chat, through the workspace's chat app, rather than to an agent by id.
+- **chat**: a user-facing conversation in a workspace, one per chat window: a sequence of agent transcripts run by one agent at a time (the template's `docs/system/blueprint/chat-agent-split/`). Its id is its first agent's id, and every agent the chat app creates for it carries that id as `MINDS_CHAT_ID`. A chat that has run on several agents has a chat record in the workspace (`data/.apps/chat/chats/<chat-id>/record.json`) naming its agents in order; the earlier ones are *archived agents*, kept for their transcripts and never listed as chats. A *handoff* is how a chat moves to another harness: the chat app archives the agent it is leaving and creates a successor with a summary, and the record carries the handoff's state while the chat is *converging*. A *rebind* is how a chat moves to another account on its own harness and lane: the same agent is stopped, repointed at the new account's credential in its own state dir, relabeled, and started again, with its transcript, tk steps, and model settings kept; the record carries a rebind's state the same way. The desktop client's permission-resolution nudge therefore goes to the chat, through the workspace's chat app, rather than to an agent by id.
 - **chat agent**: the mngr agent a chat currently runs on, created on demand in a workspace by the chat app; the phrase names the agent, never the chat.
   Created with `--transfer none`, so it shares the primary agent's work_dir, and bound on its create to one signed-in provider account under `~/.minds/accounts/` (an `--env CLAUDE_CONFIG_DIR=<account dir>` for claude). A create that names no account gets the workspace's default one from `.mngr/settings.local.toml`, which the workspace's chat app writes; with no account signed in the create is refused, since `~/.claude` holds no credential.
   Bootstrap seeds the first one on initial container boot; the count grows and shrinks with the user's workload, and is not capped.
 
-- **worktree agent**: a mngr agent created from the "New agent" tab, using `--template worktree` and `--transfer git-worktree` on branch `mngr/<name>`.
-  Unlike a chat agent it lives in its own git worktree, outside the repo-root work_dir.
+- **worktree agent**: a mngr agent the user creates with `--transfer git-worktree` on branch `mngr/<name>`.
+  Unlike a chat agent it lives in its own git worktree, outside the repo-root work_dir; no app on the desktop offers a launch path for one.
   Labeled `user_created=true`.
 
 - **worker agent**: a mngr agent created by *another agent* (not by the user) when it delegates a task to a sub-agent, via the `launch-task` skill.
   Labeled `agent_created=true`.
-  Not tied to any tab.
+  Not tied to any window.
   The `user_created` / `agent_created` distinction drives the OOM shedding bands.
 
 - **template repository**: a git repository (e.g. default-workspace-template) that defines a workspace's entire runtime: Dockerfile, apps, services, skills, scripts, and mngr configuration.

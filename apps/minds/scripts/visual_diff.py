@@ -427,8 +427,7 @@ def _render_spa_index_html(bootstrap: UiBootstrap) -> str:
     """The SPA index page for a capture, mirroring ``ui_api.serve_spa_index``.
 
     Keep this shape in sync with the real handler (same bootstrap inline, the
-    embed-contract script before the entry tags -- the shell consumes
-    ``window.MindsEmbedContract`` at module-evaluation time -- and the same
+    embed-contract module preloaded before the entry tags, and the same
     entry-tag source via ``read_vite_entry_tags``); the tag builder is
     imported so hashed asset names always come from the live manifest.
     """
@@ -444,7 +443,7 @@ def _render_spa_index_html(bootstrap: UiBootstrap) -> str:
         '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
         "    <title>Mind</title>\n"
         f"    <script>window.__MINDS_BOOTSTRAP__ = {bootstrap_json};</script>\n"
-        '    <script src="/_static/embed_contract.js"></script>\n'
+        '    <link rel="modulepreload" href="/_static/embed_contract.js">\n'
         f"    {entry_tags}\n"
         "  </head>\n"
         '  <body><div id="app"></div></body>\n'

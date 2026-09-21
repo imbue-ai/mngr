@@ -14,7 +14,7 @@ The desktop client (`minds run`) provides:
 - Agent creation from git repositories or local paths via a web form or API
 - Byte-forwarding of HTTP and WebSocket traffic from `[<service>.]host-<hex>.localhost:8421/*` to the workspace's own backends: the bare origin reaches the system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), `<service>.` origins reach that registered service (optionally through an SSH tunnel for remote agents)
 
-Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), which serves the dockview UI at the workspace's bare origin. Every other registered service owns its own origin, so nothing proxies or rewrites service traffic. The workspace's chat is a registered app (`chat`) at its own origin, and the system interface frames app pages in its tabs. Browsers access a workspace at `https://host-<hex>.localhost:8421/` and its individual services at `https://<service_name>.host-<hex>.localhost:8421/`.
+Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), which serves the desktop (windows over a wallpaper, a taskbar, a launcher) at the workspace's bare origin. Every other registered service owns its own origin, so nothing proxies or rewrites service traffic. The workspace's chat is a registered app (`chat`) at its own origin, and the system interface frames app pages in its windows. Browsers access a workspace at `https://host-<hex>.localhost:8421/` and its individual services at `https://<service_name>.host-<hex>.localhost:8421/`.
 
 ### Agent container (runs in Docker)
 
@@ -36,7 +36,7 @@ Agents can be created in two ways:
 
 ## Port forwarding
 
-Apps (tab-openable, with forwarded ports) are tracked in `data/.state/apps.toml`:
+Apps (openable as windows on the desktop, with forwarded ports) are tracked in `data/.state/apps.toml`:
 
 ```toml
 [[apps]]
@@ -48,7 +48,7 @@ Each app gets two URLs:
 1. **Local**: `https://{service_name}.{host_id}.localhost:8421/` (the desktop client byte-forwards the service-origin request straight to the registered service's backend)
 2. **Shared**: `https://[{service}.]{host_id}.{user}.{region}.{domain}` (over the workspace's share, while sharing is enabled)
 
-The Share modal inside the workspace's dockview UI is authoritative for the actual sharing state.
+The Share modal inside the workspace's desktop is authoritative for the actual sharing state.
 
 ## Workspace sharing
 

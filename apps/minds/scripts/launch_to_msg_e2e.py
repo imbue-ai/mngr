@@ -99,6 +99,7 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.minds.desktop_client.e2e_workspace_runner import descendant_frames
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 
 
@@ -187,8 +188,8 @@ CREATE_TIMEOUT = 900
 REPLY_TIMEOUT = 480
 # A fresh workspace opens on the welcome chat the creation page seeded with the onboarding
 # conversation. The chat's page renders in its own frame at the chat app's origin, whose URL
-# path is the chat's id; the shell docks it once its app list has arrived, so the frame can
-# still be on its way when the dockview is first visible.
+# path is the chat's id, inside the chat root's frame the desktop opened; the shell frames it once
+# its app list has arrived, so the frame can still be on its way when the backdrop is first visible.
 CHAT_FRAME_TIMEOUT = 60
 CHAT_PAGE_URL_RE = re.compile(r"/agent-[a-f0-9]+/?$")
 # The in-chat permission card's opener. Matched by label, not by class: the card's classes
@@ -856,7 +857,7 @@ def _iframe_srcs(frame: Frame) -> list[str]:
     """The ``src`` of every iframe in ``frame``'s own DOM.
 
     Read alongside the frames Playwright enumerates: an iframe the shell mounted
-    but Playwright never surfaced separates a docking failure from a lookup one.
+    but Playwright never surfaced separates a framing failure from a lookup one.
     """
     try:
         return frame.evaluate("() => [...document.querySelectorAll('iframe')].map((f) => f.src)")
@@ -865,13 +866,13 @@ def _iframe_srcs(frame: Frame) -> list[str]:
 
 
 def find_chat_frame(workspace: Frame, host: str | None = None) -> Frame | None:
-    """The chat page's frame inside the workspace frame, or None while none is docked.
+    """The chat page's frame inside the workspace frame, or None while none is open.
 
     Pass ``host`` (e.g. ``agent-1f90…``) to pin the match to one workspace. The frame
     list lags a navigation, so the workspace being left behind is still listed here --
     and briefly still usable, which no liveness check can tell from the one arriving.
     """
-    for frame in workspace.child_frames:
+    for frame in descendant_frames(workspace):
         if frame.is_detached():
             continue
         url = live_url(frame)
@@ -886,7 +887,7 @@ def find_chat_frame(workspace: Frame, host: str | None = None) -> Frame | None:
 def wait_for_chat_frame(
     workspace: Frame, *, label: str, timeout: float = CHAT_FRAME_TIMEOUT, host: str | None = None
 ) -> Frame:
-    """Return the chat page's frame once the shell has docked one inside ``workspace``."""
+    """Return the chat page's frame once the shell has opened one inside ``workspace``."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         chat = find_chat_frame(workspace, host)
@@ -894,19 +895,24 @@ def wait_for_chat_frame(
             return chat
         # Playwright, attached to Electron over CDP, surfaces a nested cross-origin
         # target only once something reaches into its parent: ``child_frames`` alone
-        # stays stale for the whole wait while the chat is already docked and running.
-        _iframe_srcs(workspace)
+        # stays stale for the whole wait while the chat is already open and running.
+        # The chat page's parent is the chat root's frame, so every frame under the
+        # workspace is reached into, not just the workspace itself.
+        for frame in (workspace, *descendant_frames(workspace)):
+            _iframe_srcs(frame)
         _sleep(0.5)
+    descendants = descendant_frames(workspace)
     raise E2EFailure(
         f"[{label}] no chat frame opened inside the workspace within {timeout}s; "
         f"workspace={live_url(workspace)!r}; "
-        f"child frames: {[live_url(f) for f in workspace.child_frames]}; "
-        f"iframes in the workspace DOM: {_iframe_srcs(workspace)}"
+        f"frames under the workspace: {[live_url(f) for f in descendants]}; "
+        f"iframes in the workspace DOM: {_iframe_srcs(workspace)}; "
+        f"iframes in the DOM of each frame under it: {[_iframe_srcs(f) for f in descendants]}"
     )
 
 
-def find_docked_chat(ctx: BrowserContext, host: str | None = None) -> Frame | None:
-    """The chat page's frame docked inside the open workspace (see ``find_chat_window``), or None.
+def find_open_chat(ctx: BrowserContext, host: str | None = None) -> Frame | None:
+    """The chat page's frame inside the open workspace (see ``find_chat_window``), or None.
 
     For flows that outlive a remount of the workspace iframe: the app can tear
     it down under the harness, which detaches the chat frame with it, so the
@@ -1127,7 +1133,7 @@ def _create_workspace_and_first_message(
     /workspace/<agent_id> once the app enters the workspace. The workspace
     iframe the Shell mounts inside that page is the only frame that holds agent
     content (see ``wait_for_chat_window``); this returns it alongside the
-    result, and the chat renders in its own frame docked inside it, which
+    result, and the chat renders in its own frame open inside it, which
     callers re-resolve after navigating or reloading the workspace (see
     ``wait_for_chat_frame``). `chrome` is reusable for a second workspace,
     which is why it is never navigated to a workspace URL.
@@ -1266,7 +1272,7 @@ def _create_workspace_and_first_message(
     logger.info("[{}] agent DONE; workspace URL={}", label, chat_url)
     snap_page(workspace, snaps.done)
 
-    # A fresh workspace opens on the welcome chat the creation page seeded, docked in its own
+    # A fresh workspace opens on the welcome chat the creation page seeded, framed in its own
     # frame at the chat app's origin, with a composer under the seeded turns before any agent
     # exists; the first message sent there is what launches the chat's first agent. The create
     # flow injects no AI credentials, so in API_KEY mode that send opens the provider chooser,
@@ -1321,7 +1327,7 @@ def _send_followup_and_verify(
     """
     logger.info("[{}] navigating back to {}", label, chat_url)
     workspace.goto(chat_url)
-    # The workspace's layout holds the chat, so the shell docks its frame again on load.
+    # The desktop's windows hold the chat, so the shell frames its page again on load.
     # Pinned to the workspace being hopped to, because the chat left behind matches
     # CHAT_PAGE_URL_RE just as well and outlives the navigation in the frame list: an
     # unpinned match sends this follow-up to the previous workspace, whose agent answers
@@ -1334,7 +1340,7 @@ def _send_followup_and_verify(
         with contextlib.suppress(PlaywrightError):
             inp = chat.wait_for_selector('textarea, [contenteditable="true"]', timeout=5_000)
     if inp is None:
-        raise E2EFailure(f"[{label}] the chat docked at {host} never showed a composer within {CHAT_FRAME_TIMEOUT}s")
+        raise E2EFailure(f"[{label}] the chat open at {host} never showed a composer within {CHAT_FRAME_TIMEOUT}s")
     inp.fill(prompt)
     inp.press("Enter")
     with contextlib.suppress(Exception):
@@ -1535,7 +1541,7 @@ def run_e2e() -> int:
 
         w1_result: _WorkspaceResult | None = None
         # The frame showing the workspace under test; chat interactions go to
-        # the chat frame docked inside it (``wait_for_chat_frame``). ``win``
+        # the chat frame open inside it (``wait_for_chat_frame``). ``win``
         # stays on the local-page surface.
         chat: Frame | None = None
         if not SKIP_FIRST_MESSAGE:
@@ -1557,7 +1563,7 @@ def run_e2e() -> int:
             logger.info("[ci-metric] w1_create_s={:.1f}", w1_result.total_create_s)
 
             # Iter 15 (reload chat persists state): real users hit F5 / Cmd-R
-            # in the chat tab. The chat must reattach to the agent's event
+            # with the chat's window showing. The chat must reattach to the agent's event
             # stream and re-render history -- losing the pong reply would
             # break the user's trust in the workspace as a persistent place.
             logger.info("=== iter 15: reload W1 chat, verify history persists ===")
@@ -1571,8 +1577,8 @@ def run_e2e() -> int:
                 label="w1-after-reload",
                 host=_workspace_coordinate(w1_result.chat_url, label="w1-after-reload"),
             )
-            # The transcript lives in the chat's own frame, which the shell docks again from
-            # the workspace's saved layout.
+            # The transcript lives in the chat's own frame, which the shell frames again from
+            # the desktop's saved windows.
             reloaded_chat = wait_for_chat_frame(chat, label="w1-after-reload")
             _sleep(2)
             with contextlib.suppress(Exception):
@@ -1604,7 +1610,7 @@ def run_e2e() -> int:
             try:
                 latchkey_set_slack()
                 # 8. Send slack prompt. The composer, the transcript, and the in-chat
-                # permission card all live in the chat's own frame docked inside the
+                # permission card all live in the chat's own frame open inside the
                 # workspace frame.
                 chat_frame = wait_for_chat_frame(chat, label="slack")
                 inp = chat_frame.wait_for_selector('textarea, [contenteditable="true"]', timeout=180_000)
@@ -1623,7 +1629,7 @@ def run_e2e() -> int:
                     # The app can tear the workspace iframe down under us (a
                     # route change remounts it), so re-resolve the chat frame
                     # each pass.
-                    chat_now = find_docked_chat(ctx)
+                    chat_now = find_open_chat(ctx)
                     if chat_now is not None:
                         chat_frame = chat_now
                     if deny_stage >= 3:
@@ -1671,7 +1677,7 @@ def run_e2e() -> int:
                 # agent's slack tool sits on its polling loop until the
                 # request times out instead of self-triggering a re-ask.
                 logger.info("=== Phase C: kick agent to re-request after deny ===")
-                target = find_docked_chat(ctx) or chat_frame
+                target = find_open_chat(ctx) or chat_frame
                 retry_msg = (
                     "I just denied that request by mistake -- please send a fresh "
                     "Slack permission request via the latchkey skill (POST to "
@@ -1728,7 +1734,7 @@ def run_e2e() -> int:
                     "07j-approve-stage2-post",
                 )
                 while time.time() < deadline:
-                    chat_now = find_docked_chat(ctx)
+                    chat_now = find_open_chat(ctx)
                     if chat_now is not None:
                         chat_frame = chat_now
                     # Scroll the transcript to the live tail before reading it.
@@ -1780,7 +1786,7 @@ def run_e2e() -> int:
                         KICK_INTERVAL = 30
                         now = time.monotonic()
                         if now - first_approve_at >= KICK_DELAY and now - last_kick_at >= KICK_INTERVAL:
-                            target = find_docked_chat(ctx)
+                            target = find_open_chat(ctx)
                             if target is not None:
                                 kick_msg = (
                                     "Slack permission is now granted -- please retry the "
@@ -2359,7 +2365,7 @@ def _advance_approval(
             snap_page(owner, snap_stage0)
             return
         # The in-chat card is part of the chat's transcript, so it renders in
-        # ``chat`` (the chat's own frame, docked inside the workspace iframe),
+        # ``chat`` (the chat's own frame, open inside the workspace iframe),
         # and carries this button only while the request is pending (a resolved
         # request renders as a one-line receipt). Clicking it posts
         # OPEN_REQUEST_MODAL to the embedder, which floats /inbox.

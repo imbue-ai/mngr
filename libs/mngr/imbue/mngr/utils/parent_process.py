@@ -9,6 +9,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 
 _PARENT_POLL_INTERVAL_SECONDS: Final[float] = 3.0
+# A process whose parent is init has already been orphaned: its real parent is gone.
+_INIT_PID: Final[int] = 1
 _PS_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
@@ -41,8 +43,20 @@ def start_parent_death_watcher(concurrency_group: ConcurrencyGroup) -> None:
     Records the current parent PID and polls every ~3 seconds. If the parent PID
     changes (e.g. reparented to PID 1 because the parent exited), sends SIGTERM
     to the current process. This triggers the same clean shutdown path as Ctrl+C.
+
+    The parent may already be gone by the time this arms: interpreter startup takes
+    long enough that a parent stopped right after spawning us has exited and we have
+    been reparented to init. Recording init as the parent would leave the watcher
+    waiting forever for a change that never comes, so that case is treated as the
+    parent's death and the process is signalled at once.
     """
     original_ppid = os.getppid()
+    if original_ppid == _INIT_PID:
+        logger.info(
+            "Parent process was already gone when the watcher armed (parent PID={}), sending SIGTERM", original_ppid
+        )
+        os.kill(os.getpid(), signal.SIGTERM)
+        return
     logger.debug("Parent death watcher started (parent PID={})", original_ppid)
 
     stop_event = threading.Event()

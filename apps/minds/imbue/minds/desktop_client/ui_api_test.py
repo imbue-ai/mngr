@@ -60,6 +60,10 @@ def test_ui_index_inlines_bootstrap_and_hashed_asset_tags(tmp_path: Path, monkey
     assert '<link rel="stylesheet" href="/_static/ui/assets/boot-DeF456.css">' in html
     # Non-entry chunks are not emitted as tags.
     assert "chunk-XyZ789" not in html
+    # The embed contract is an ES module the workspace frame imports on mount: preloaded, never
+    # run as a classic script.
+    assert '<link rel="modulepreload" href="/_static/embed_contract.js">' in html
+    assert '<script src="/_static/embed_contract.js"></script>' not in html
     # The bootstrap document is inlined with the full snapshot.
     assert "window.__MINDS_BOOTSTRAP__ = " in html
     bootstrap_json = html.split("window.__MINDS_BOOTSTRAP__ = ", 1)[1].split(";</script>", 1)[0]

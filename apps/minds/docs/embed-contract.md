@@ -61,7 +61,7 @@ see the `*_PATTERN` constants in the module.
 
 | Type | Payload | Meaning |
 |---|---|---|
-| `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the active dockview tab. |
+| `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the focused window. |
 | `minds:open-ai-keys-ack` | `{}` | A minds chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 

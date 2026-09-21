@@ -1,12 +1,12 @@
 # Terminal persistence in minds workspaces
 
-The terminals in the minds dockview are backed by named [tmux](https://github.com/tmux/tmux/wiki) sessions. Each "New terminal" tab attaches to (or creates) its own session, so the terminal's shell, working directory, running processes, and in-memory scrollback survive:
+The terminals on the minds desktop are backed by named [tmux](https://github.com/tmux/tmux/wiki) sessions. Each terminal window attaches to (or creates) its own session, so the terminal's shell, working directory, running processes, and in-memory scrollback survive:
 
-- closing the tab and reopening it,
+- closing the window and reopening it,
 - reloading the workspace,
 - and the terminal service itself restarting.
 
-They do **not** survive a container/host restart: the tmux server lives in memory and is cleared when the container stops, so a restored tab comes back as a fresh shell rather than its previous state.
+They do **not** survive a container/host restart: the tmux server lives in memory and is cleared when the container stops, so a restored terminal window comes back as a fresh shell rather than its previous state.
 
 This is intentional. Nothing about your terminals -- input, output, commands, or scrollback -- is written to disk or included in any backup, which keeps secrets that pass through a terminal from being persisted anywhere.
 

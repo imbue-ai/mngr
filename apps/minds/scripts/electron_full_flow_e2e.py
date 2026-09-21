@@ -11,9 +11,9 @@ created from the default-workspace-template:
   2. message the welcome chat the workspace opens on (the onboarding
      conversation the creation page seeded; its first send launches the
      chat's first agent) and wait for the agent's reply,
-  3. start a second chat from the workspace's New Tab page and wait for its
+  3. start a second chat from the workspace's launcher and wait for its
      composer,
-  4. open a terminal panel in the dockview,
+  4. open a terminal window on the desktop,
   5. navigate back to the home/landing screen (via the chrome Home button),
   6. open that workspace's settings and destroy it (the versioned
      ``POST /api/v1/workspaces/<id>/destroy`` flow), confirming it leaves the

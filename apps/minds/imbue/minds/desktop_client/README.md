@@ -24,7 +24,7 @@ The local desktop client is a Flask app that handles authentication and traffic 
 > embed contract module, the vendored Sentry browser bundle + its init, the
 > service icons, and the built SPA bundle (`static/ui/`, gitignored).
 
-Each workspace already runs its own `system_interface`, which serves the dockview UI at the workspace's bare origin; every other registered service owns its own origin (`<service>.agent-<hex>.localhost:PORT/`), so nothing proxies or rewrites service traffic. The desktop client's job is to route browser traffic for `[<service>.]agent-<hex>.localhost:PORT/*` to the right in-workspace backend -- it does not rewrite paths or inject anything itself.
+Each workspace already runs its own `system_interface`, which serves the desktop at the workspace's bare origin; every other registered service owns its own origin (`<service>.agent-<hex>.localhost:PORT/`), so nothing proxies or rewrites service traffic. The desktop client's job is to route browser traffic for `[<service>.]agent-<hex>.localhost:PORT/*` to the right in-workspace backend -- it does not rewrite paths or inject anything itself.
 
 This desktop client is a separate component from any individual workspace's web server -- the desktop client does not define what workspaces do or how they respond to messages. It only handles routing and authentication so that the URLs being served by the workspace are accessible locally.
 

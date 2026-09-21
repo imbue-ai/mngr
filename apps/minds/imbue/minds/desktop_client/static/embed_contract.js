@@ -54,7 +54,7 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
-// workspace was displayed; close the active dockview tab. Payload: {}.
+// workspace was displayed; close the focused window. Payload: {}.
 export const CLOSE_ACTIVE_TAB = "minds:close-active-tab";
 // embedder -> workspace: ack for OPEN_AI_KEYS_PAGE (see above). Payload: {}.
 export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";

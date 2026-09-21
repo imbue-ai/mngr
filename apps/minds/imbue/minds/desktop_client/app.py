@@ -649,7 +649,7 @@ def _handle_help_assist() -> Response:
     unreachable -- so we never spawn a chat that could only hang. Then we ask it which signed-in account the chat
     should run on, and return 409 if it names none or 502 if that probe could not run either. Otherwise the
     desktop app runs ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
-    with ``/assist <description>``; the system interface auto-opens its tab. The call blocks until
+    with ``/assist <description>``; the workspace's desktop opens its window. The call blocks until
     ``mngr create`` finishes so the get-help modal can hold its "starting..." state until the chat
     exists, then returns 200 on success or 502 if the spawn failed.
     """
