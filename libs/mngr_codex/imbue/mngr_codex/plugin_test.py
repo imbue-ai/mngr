@@ -80,9 +80,7 @@ from imbue.mngr_codex.plugin import agent_field_generators
 from imbue.mngr_codex.plugin import on_before_create
 from imbue.mngr_codex.plugin import register_agent_type
 
-# =============================================================================
 # Config
-# =============================================================================
 
 
 def test_codex_agent_config_has_correct_defaults() -> None:
@@ -135,9 +133,7 @@ def test_register_agent_type_returns_codex_class_and_config() -> None:
     assert config_class is CodexAgentConfig
 
 
-# =============================================================================
 # Capability-mixin contract methods (install / unattended / permission / version)
-# =============================================================================
 
 
 def test_get_install_binary_name_is_codex() -> None:
@@ -269,9 +265,7 @@ def _stub_host(
     return _StubHost(host_dir=host_dir, is_local=is_local, command_results=command_results or {})
 
 
-# =============================================================================
 # Construction helpers
-# =============================================================================
 
 
 def _make_codex_agent(
@@ -327,9 +321,7 @@ def codex_agent(local_provider: LocalProviderInstance, tmp_path: Path) -> CodexA
     return _make_codex_agent(CodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
 
 
-# =============================================================================
 # send_message (app-server drive)
-# =============================================================================
 
 
 class _ScriptedTransport:
@@ -524,9 +516,7 @@ def test_send_message_raises_delivered_but_blocked_when_agent_blocks(
     assert transport.is_closed is True
 
 
-# =============================================================================
 # Lifecycle / waiting_reason re-sourced from live thread status (event-sourced)
-# =============================================================================
 
 
 def _status_transport(
@@ -730,9 +720,7 @@ def test_get_lifecycle_state_degrades_to_waiting_when_daemon_unreachable(
     assert agent.compute_waiting_reason() == WaitingReason.END_OF_TURN
 
 
-# =============================================================================
 # Simple accessors
-# =============================================================================
 
 
 def test_get_expected_process_name(codex_agent: CodexAgent) -> None:
@@ -762,9 +750,7 @@ def test_codex_home_and_root_session_paths(codex_agent: CodexAgent) -> None:
     assert codex_agent._get_root_session_file_path() == state_dir / "codex_root_session"
 
 
-# =============================================================================
 # Host-shell resolution helpers
-# =============================================================================
 
 
 def test_resolve_user_codex_home_defaults_to_home_dot_codex(codex_agent: CodexAgent, tmp_path: Path) -> None:
@@ -794,9 +780,7 @@ def test_resolve_canonical_path_resolves_symlinks(codex_agent: CodexAgent, tmp_p
     assert Path(resolved) == real.resolve()
 
 
-# =============================================================================
 # assemble_command
-# =============================================================================
 
 
 def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
@@ -936,9 +920,7 @@ def test_assemble_command_is_posix_compatible(codex_agent: CodexAgent) -> None:
     assert_posix_compatible(command)
 
 
-# =============================================================================
 # wait_for_ready_signal (app-server readiness)
-# =============================================================================
 
 
 def _make_remote_codex_agent(
@@ -1132,14 +1114,42 @@ def test_clear_hook_trust_prompt_selects_trust_all_and_waits_for_the_tui_to_atta
             seen_after_keypress.append(pane)
             return pane
 
-        def _send_hook_trust_keypress(self) -> None:
+        def _send_hook_trust_keypress(self) -> bool:
             sent.append("trust")
+            return True
 
     agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     agent._clear_hook_trust_prompt()
     assert sent == ["trust"]
     # The clear outlasted the resume: it kept reading the pane until the composer showed.
     assert seen_after_keypress == panes_after_keypress
+
+
+def test_clear_hook_trust_prompt_does_not_wait_for_an_attach_after_the_keypress_failed(
+    local_provider: LocalProviderInstance, tmp_path: Path
+) -> None:
+    """A keypress that did not go out leaves the trust screen up, so no TUI is resuming and the composer is not
+    coming: the clear returns at once rather than spending the attach timeout on it."""
+    attach_waits: list[float] = []
+    sent: list[str] = []
+
+    class _Agent(CodexAgent):
+        def capture_pane_content(
+            self, include_scrollback: bool = False, window: "int | str | None" = None
+        ) -> str | None:
+            return _HOOK_TRUST_SCREEN
+
+        def _send_hook_trust_keypress(self) -> bool:
+            sent.append("trust")
+            return False
+
+        def _wait_for_tui_attached(self, timeout: float = 6_734.0) -> None:
+            attach_waits.append(timeout)
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
+    agent._clear_hook_trust_prompt()
+    assert sent == ["trust"]
+    assert attach_waits == []
 
 
 def test_wait_for_tui_attached_gives_up_after_the_timeout_without_raising(
@@ -1194,9 +1204,7 @@ def test_app_server_client_version_is_a_nonempty_string() -> None:
     assert _app_server_client_version() != ""
 
 
-# =============================================================================
 # provision
-# =============================================================================
 
 
 def _provision(agent: CodexAgent) -> None:
@@ -1258,9 +1266,7 @@ def test_provision_sets_approval_never_when_auto_allow(local_provider: LocalProv
     assert config["approval_policy"] == "never"
 
 
-# =============================================================================
 # Trust / hook-bypass consent
-# =============================================================================
 
 
 def _read_user_codex_config(agent: CodexAgent) -> dict[str, object]:
@@ -1318,9 +1324,7 @@ def test_auto_dismiss_dialogs_persists_trust_without_optin_ctx(
     assert is_project_trusted(_read_user_codex_config(agent), str(agent.work_dir.resolve()))
 
 
-# =============================================================================
 # Update check / auto-update
-# =============================================================================
 
 
 class _CodexUpdateRan(Exception):
@@ -1591,9 +1595,7 @@ def test_read_codex_versions_latest_is_none_for_unusable_cache(
     assert latest is None
 
 
-# =============================================================================
 # Preservation on destroy
-# =============================================================================
 
 
 def test_codex_config_preserves_on_destroy_by_default() -> None:
@@ -1635,9 +1637,7 @@ def test_on_destroy_skips_preservation_when_disabled(local_provider: LocalProvid
     assert not dest_dir.exists()
 
 
-# =============================================================================
 # Lifecycle promotion + waiting_reason field generator
-# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -1693,9 +1693,7 @@ def test_waiting_reason_generator_returns_end_of_turn_for_an_idle_daemon(
     assert _waiting_reason(agent, agent.host) == WaitingReason.END_OF_TURN
 
 
-# =============================================================================
 # Session adoption
-# =============================================================================
 
 # A codex session id is a UUID; the rollout filename embeds it as
 # ``rollout-<timestamp>-<uuid>.jsonl`` under ``sessions/YYYY/MM/DD/``.
@@ -1755,7 +1753,7 @@ def test_user_native_codex_home_honors_override(monkeypatch: pytest.MonkeyPatch)
     assert _user_native_codex_home() == Path.home() / ".codex"
 
 
-# --- _resolve_adopt_session -------------------------------------------------
+# _resolve_adopt_session
 
 
 def test_resolve_adopt_session_by_jsonl_path(codex_agent: CodexAgent, tmp_path: Path) -> None:
@@ -1823,7 +1821,7 @@ def test_resolve_adopt_session_dedupes_a_coinciding_store(codex_agent: CodexAgen
     assert session_id == _SESSION_ID
 
 
-# --- find / rewrite / rebind helpers ----------------------------------------
+# find / rewrite / rebind helpers
 
 
 def test_find_latest_session_id_picks_the_newest_rollout(codex_agent: CodexAgent, tmp_path: Path) -> None:
@@ -1924,7 +1922,7 @@ def test_rebind_adopted_rollout_cwd_warns_when_rollout_is_missing(
     assert any("no rollout file" in m for m in log_warnings)
 
 
-# --- adopt_session / on_after_provisioning ----------------------------------
+# adopt_session / on_after_provisioning
 
 
 @pytest.mark.rsync
@@ -2044,7 +2042,7 @@ def test_adopt_and_from_resumes_the_clone(codex_agent: CodexAgent, tmp_path: Pat
     assert codex_agent._find_adopted_rollout_path(codex_agent.host, dest_sessions, _SESSION_ID) is not None
 
 
-# --- on_before_create -------------------------------------------------------
+# on_before_create
 
 
 def _on_before_create_args(local_provider: LocalProviderInstance, **option_kwargs: Any) -> OnBeforeCreateArgs:

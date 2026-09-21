@@ -111,11 +111,9 @@ def message_chat_argv(exec_agent_id: str, chat_id: str, text: str) -> list[str]:
     return ["exec", exec_agent_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]), "--no-start"]
 
 
-# What python prints when the workspace has no messaging script (a template from before
-# it): ``python3: can't open file '<path>': [Errno 2] No such file or directory``. Only the
-# first clause is matched: mngr's own stderr can carry the errno text from an unrelated
-# provider warning (an unreachable Docker socket).
-_SCRIPT_MISSING_MARKERS: Final[tuple[str, ...]] = ("can't open file",)
+# The start of what python prints when the script it was told to run is not there (a workspace
+# whose template predates the script): `python3: can't open file '<path>': [Errno 2] No such file or directory`.
+_SCRIPT_MISSING_MARKER: Final[str] = "can't open file"
 
 
 @pure
@@ -124,11 +122,12 @@ def is_message_chat_unavailable(stderr: str) -> bool:
 
     ``mngr exec`` folds every failure into exit 1, so the script's own verdict (refused, or
     blocked on a dialog) and a missing script look alike by code; only the missing script has
-    python's complaint on stderr. A refusal is never second-guessed with a direct send: while
-    a chat moves to a new agent the chat app holds the message for it, and a send around the
-    app would land on the agent the chat is leaving.
+    python's complaint about that script on stderr. Any other failure, an unrelated missing
+    file included, is retried rather than second-guessed with a direct send: while a chat moves
+    to a new agent the chat app holds the message for it, and a send around the app would land
+    on the agent the chat is leaving.
     """
-    return any(marker in stderr for marker in _SCRIPT_MISSING_MARKERS)
+    return any(_SCRIPT_MISSING_MARKER in line and MESSAGE_CHAT_SCRIPT in line for line in stderr.splitlines())
 
 
 class MngrMessageSender(MutableModel):

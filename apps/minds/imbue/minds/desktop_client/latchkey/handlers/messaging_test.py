@@ -182,6 +182,38 @@ def test_message_chat_argv_is_one_agent_and_one_shell_command_to_mngr_exec() -> 
 def test_is_message_chat_unavailable_only_for_pythons_missing_script_complaint() -> None:
     assert is_message_chat_unavailable(_SCRIPT_MISSING_STDERR) is True
     assert is_message_chat_unavailable("the chat app refused: the chat is moving to another agent") is False
+    # The same complaint about a different script says nothing about whether the workspace has this one.
+    assert (
+        is_message_chat_unavailable(
+            "python3: can't open file '/home/user/workspace/system/scripts/other.py': "
+            "[Errno 2] No such file or directory\n"
+        )
+        is False
+    )
+
+
+def test_deliver_retries_rather_than_sending_around_the_chat_app_on_an_unrelated_missing_file(
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    """Python's complaint about SOME OTHER script is a failed attempt, not a workspace without the chat's.
+
+    The failure it must not be read as is the one that sends around the chat app: matching the
+    complaint alone, without the script it names, answers True here and falls back to a direct
+    ``mngr message`` -- the second call this asserts is not made.
+    """
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=1,
+            stderr=(
+                "python3: can't open file '/home/user/workspace/system/scripts/other.py': "
+                "[Errno 2] No such file or directory\n"
+            ),
+        )
+    )
+    sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
+
+    assert sender.deliver("assistant", "hello", "assistant") is False
+    assert caller.calls == [message_chat_argv("assistant", "assistant", "hello")]
 
 
 def test_is_message_chat_unavailable_ignores_the_errno_text_of_mngr_provider_warnings() -> None:

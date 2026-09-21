@@ -349,7 +349,7 @@ def _load_codex_resource_script(filename: str) -> str:
 class CodexAgentConfig(AgentTypeConfig):
     """Config for the codex agent type."""
 
-    # --- role behaviour, set by a create template and applied by this harness ---
+    # role behaviour, set by a create template and applied by this harness
     #
     # Both are harness-neutral *intent*: a role states them once and each harness applies
     # them its own way. They live on the harness subclasses rather than AgentTypeConfig so
@@ -713,7 +713,8 @@ class CodexAgent(
         never rendered it) is a no-op, and a re-check right before the keypress keeps a stray "2"
         from ever landing in the composer as a message. Having pressed, this returns only once the
         freed TUI has finished attaching (see :meth:`_wait_for_tui_attached`), so the create's
-        initial message does not race the TUI's resume.
+        initial message does not race the TUI's resume; a keypress that did not go out leaves the
+        screen up, so there is no attach to wait for.
         """
         if not self.host.is_local:
             return
@@ -728,8 +729,8 @@ class CodexAgent(
             return
         if not self._is_on_hook_trust_prompt():
             return
-        self._send_hook_trust_keypress()
-        self._wait_for_tui_attached()
+        if self._send_hook_trust_keypress():
+            self._wait_for_tui_attached()
 
     def _wait_for_tui_attached(self, timeout: float = _TUI_ATTACH_TIMEOUT_SECONDS) -> None:
         """Wait for the ``--remote`` TUI to finish resuming the root thread once the hook-trust screen is cleared.
@@ -768,8 +769,8 @@ class CodexAgent(
         pane = self.capture_pane_content()
         return pane is not None and _HOOK_TRUST_PROMPT_MARKER not in pane and _TUI_COMPOSER_MARKER in pane
 
-    def _send_hook_trust_keypress(self) -> None:
-        """Select "Trust all and continue" on the hook-trust screen (a test seam).
+    def _send_hook_trust_keypress(self) -> bool:
+        """Select "Trust all and continue" on the hook-trust screen (a test seam); whether the keypress went out.
 
         ``2`` selects the "Trust all and continue" option, ``Enter`` confirms (verified live: this
         clears the screen and makes every hook fire on subsequent programmatic and typed turns).
@@ -785,6 +786,7 @@ class CodexAgent(
                 self.name,
                 result.stderr or result.stdout,
             )
+        return result.success
 
     def _establish_root_conversation(self) -> None:
         """Establish, materialize, and persist this agent's ONE root conversation (create only).
