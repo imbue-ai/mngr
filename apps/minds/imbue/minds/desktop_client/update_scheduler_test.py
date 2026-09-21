@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_scheduler import ScheduledRunConditions
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
@@ -98,7 +99,10 @@ class _SchedulerHarness:
         self.conditions = _conditions()
         self.now = now
         self.schedule_store = UpdateScheduleStore(records_dir=records_dir)
-        self.state_store = WorkspaceUpdateStateStore(schedule_store=self.schedule_store)
+        self.state_store = WorkspaceUpdateStateStore(
+            schedule_store=self.schedule_store,
+            dismissal_store=UpdateDismissalStore(records_dir=records_dir.parent / "update_dismissals"),
+        )
         self.scheduler = UpdateScheduler(
             schedule_store=self.schedule_store,
             read_update_window=lambda: window,

@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import ConfigDict
@@ -19,6 +20,8 @@ from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
+from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalRecord
+from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
@@ -325,9 +328,6 @@ def test_a_run_in_flight_is_what_locks_the_row(tmp_path: Path, root_concurrency_
     for activity in (UpdateActivity.IDLE, UpdateActivity.STALLED):
         store.set_activity(agent_id, activity)
         assert store.get(agent_id).is_run_in_flight is False
-
-
-# -- The detection sweep: what it reads, what it skips, and what it reuses -----
 
 
 class _WorkspacesResolver(StaticBackendResolver):
@@ -702,9 +702,7 @@ def test_only_a_material_discovery_change_is_worth_a_sweep() -> None:
     assert topology_signature({agent_id: HostState.STOPPING}) == topology_signature({agent_id: HostState.STOPPED})
 
 
-# -- The workspace's own run record ------------------------------------------
-
-
+# The workspace's own run record
 def _run_record(
     *,
     chat: str = "update-abc123",
@@ -793,6 +791,167 @@ def test_a_dismissed_outcome_is_not_resurrected_but_a_newer_runs_is_recorded(tmp
     newer = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
     store.observe_run_record(agent_id, _run_record(started_at=newer, verdict=UpdateVerdict.UPDATED))
     assert store.get(agent_id).verdict is UpdateVerdict.UPDATED
+
+
+def test_a_dismissed_outcome_stays_dismissed_after_a_relaunch(tmp_path: Path) -> None:
+    """A relaunched app re-reads the same run record on its first sweep."""
+    agent_id = AgentId.generate()
+    started_at = datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc)
+    first_launch = make_update_state_store(tmp_path)
+    first_launch.observe_run_record(agent_id, _run_record(started_at=started_at, verdict=UpdateVerdict.STUCK))
+    first_launch.dismiss_run_outcome(agent_id)
+
+    relaunched = make_update_state_store(tmp_path)
+    relaunched.observe_run_record(agent_id, _run_record(started_at=started_at, verdict=UpdateVerdict.STUCK))
+    assert relaunched.get(agent_id).verdict is None
+
+    newer = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+    relaunched.observe_run_record(agent_id, _run_record(started_at=newer, verdict=UpdateVerdict.REFUSED))
+    assert relaunched.get(agent_id).verdict is UpdateVerdict.REFUSED
+
+
+def test_a_dismissed_stall_does_not_come_back_as_a_running_run_after_a_relaunch(tmp_path: Path) -> None:
+    """A stall's record is verdictless, so a forgotten dismissal would re-enter it as in flight and lock the row."""
+    agent_id = AgentId.generate()
+    started_at = datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc)
+    first_launch = make_update_state_store(tmp_path)
+    first_launch.observe_run_record(agent_id, _run_record(started_at=started_at))
+    first_launch.set_activity(agent_id, UpdateActivity.STALLED)
+    first_launch.dismiss_run_outcome(agent_id)
+
+    relaunched = make_update_state_store(tmp_path)
+    relaunched.observe_run_record(agent_id, _run_record(started_at=started_at))
+
+    state = relaunched.get(agent_id)
+    assert state.activity is UpdateActivity.IDLE
+    assert state.is_run_in_flight is False
+
+    newer = datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc)
+    relaunched.observe_run_record(agent_id, _run_record(chat="update-newer", started_at=newer))
+    assert relaunched.get(agent_id).activity is UpdateActivity.RUNNING
+
+
+def test_dismissing_a_landed_runs_outcome_keeps_its_note_after_a_relaunch(tmp_path: Path) -> None:
+    """The badge and the note are dismissed separately, so a relaunch must not let one take the other."""
+    agent_id = AgentId.generate()
+    record = _run_record(verdict=UpdateVerdict.UPDATED, resulting_ref="minds-v0.4.1")
+    first_launch = make_update_state_store(tmp_path)
+    first_launch.observe_run_record(agent_id, record)
+    first_launch.dismiss_run_outcome(agent_id)
+
+    relaunched = make_update_state_store(tmp_path)
+    relaunched.observe_run_record(agent_id, record)
+    relaunched.observe_run_record(agent_id, record)
+
+    state = relaunched.get(agent_id)
+    assert state.success_note_version == "minds-v0.4.1"
+    assert state.verdict is None
+
+
+@pytest.mark.witnesses("workspace-updates.updated-note", partial="the dismissal outliving a relaunch")
+def test_a_dismissed_note_stays_dismissed_after_a_relaunch_without_clearing_the_outcome(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    record = _run_record(verdict=UpdateVerdict.UPDATED_WITH_REBUILD_ITEMS, resulting_ref="minds-v0.4.1")
+    first_launch = make_update_state_store(tmp_path)
+    first_launch.observe_run_record(agent_id, record)
+    first_launch.dismiss_success_note(agent_id)
+
+    relaunched = make_update_state_store(tmp_path)
+    relaunched.observe_run_record(agent_id, record)
+
+    state = relaunched.get(agent_id)
+    assert state.success_note_version == ""
+    assert state.verdict is UpdateVerdict.UPDATED_WITH_REBUILD_ITEMS
+
+
+def test_dismissing_an_earlier_runs_note_during_a_newer_run_keeps_the_newer_runs_note(tmp_path: Path) -> None:
+    """The note outlives its record once a newer run starts; the dismissal must name the run that earned it."""
+    agent_id = AgentId.generate()
+    first_launch = make_update_state_store(tmp_path)
+    first_launch.observe_run_record(
+        agent_id,
+        _run_record(
+            started_at=datetime(2026, 8, 26, 3, 0, tzinfo=timezone.utc),
+            verdict=UpdateVerdict.UPDATED,
+            resulting_ref="minds-v0.4.1",
+        ),
+    )
+    assert first_launch.try_begin_run(agent_id, chat_agent_name="update-newer")
+    first_launch.dismiss_success_note(agent_id)
+
+    relaunched = make_update_state_store(tmp_path)
+    relaunched.observe_run_record(
+        agent_id,
+        _run_record(
+            chat="update-newer",
+            started_at=datetime(2026, 8, 27, 3, 0, tzinfo=timezone.utc),
+            verdict=UpdateVerdict.UPDATED,
+            resulting_ref="minds-v0.5.0",
+        ),
+    )
+
+    assert relaunched.get(agent_id).success_note_version == "minds-v0.5.0"
+
+
+# Bounds the park in both directions: long enough that a dismissal racing an unlocked
+# read always gets through, short enough that one blocked behind the lock does not hang.
+_PARK_SECONDS: Final[float] = 1.0
+
+
+class _ParkableDismissalStore(UpdateDismissalStore):
+    """A dismissal store whose read can be parked once, holding a sweep where it consults the dismissals."""
+
+    _is_park_armed: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _is_parked: threading.Event = PrivateAttr(default_factory=threading.Event)
+    _is_park_over: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    def arm_park(self) -> None:
+        self._is_park_armed.set()
+
+    def wait_until_parked(self) -> None:
+        assert self._is_parked.wait(timeout=_PARK_SECONDS), "the sweep never reached its dismissal read"
+
+    def end_park(self) -> None:
+        self._is_park_over.set()
+
+    def read(self, agent_id: AgentId) -> UpdateDismissalRecord:
+        record = super().read(agent_id)
+        if self._is_park_armed.is_set():
+            self._is_park_armed.clear()
+            self._is_parked.set()
+            self._is_park_over.wait(timeout=_PARK_SECONDS)
+        return record
+
+
+def test_a_dismissal_landing_while_a_sweep_reads_the_dismissals_is_not_undone(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The dismissals a sweep decides from and the row it writes have to come from one lock hold.
+
+    A dismissal persists the run and clears the row under that lock; a sweep that read the
+    store before the write and reached the row after it would put the badge straight back.
+    """
+    agent_id = AgentId.generate()
+    dismissal_store = _ParkableDismissalStore(records_dir=tmp_path / "update_dismissals")
+    store = make_update_state_store(tmp_path, dismissal_store=dismissal_store)
+    record = _run_record(verdict=UpdateVerdict.STUCK)
+    store.observe_run_record(agent_id, record)
+    is_dismissed = threading.Event()
+
+    def dismiss() -> None:
+        store.dismiss_run_outcome(agent_id)
+        is_dismissed.set()
+
+    dismissal_store.arm_park()
+    with root_concurrency_group.make_concurrency_group("dismissal-race") as race:
+        race.start_new_thread(target=store.observe_run_record, args=(agent_id, record), name="sweep")
+        dismissal_store.wait_until_parked()
+        race.start_new_thread(target=dismiss, name="dismiss")
+        # Held off by the sweep's lock hold, this waits out; unlocked, it lands here.
+        is_dismissed.wait(timeout=_PARK_SECONDS)
+        dismissal_store.end_park()
+
+    assert store.get(agent_id).verdict is None
 
 
 def test_a_stalled_runs_own_record_does_not_re_enter_it_as_running(tmp_path: Path) -> None:

@@ -120,6 +120,12 @@ class UpdateScheduleStoreError(MindError):
     ...
 
 
+class UpdateDismissalStoreError(MindError):
+    """Raised when an update-row dismissal cannot be written."""
+
+    ...
+
+
 class PendingRequestsUnavailableError(MindError):
     """Raised when a verdict must be recorded but no pending-requests view is configured."""
 

@@ -29,6 +29,8 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
+from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
+from imbue.minds.desktop_client.update_dismissal_store import is_run_dismissed
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleRecord
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
@@ -168,9 +170,9 @@ class _RunFacts(FrozenModel):
     target_override: str = Field(default="")
     success_note_version: str = Field(default="")
     success_note_at: datetime | None = Field(default=None)
-    # So the sweep's re-read of the run record does not restore a dismissed
-    # outcome. In-memory on purpose: a relaunched app re-reports it.
-    dismissed_run_started_at: datetime | None = Field(default=None)
+    # The note outlives the record once a newer run starts, so a dismissal must
+    # name the run that earned it rather than the one on the record.
+    success_note_run_started_at: datetime | None = Field(default=None)
 
     def with_record(self, status: UpdateRunStatus) -> "_RunFacts":
         """These facts with ``status`` as the run's record; a verdict ends the run and may earn the note.
@@ -192,7 +194,20 @@ class _RunFacts(FrozenModel):
                 status.resulting_ref if is_note_earned else self.success_note_version,
             ),
             to_update(self.field_ref().success_note_at, completed_at if is_note_earned else self.success_note_at),
+            to_update(
+                self.field_ref().success_note_run_started_at,
+                status.started_at if is_note_earned else self.success_note_run_started_at,
+            ),
         )
+
+
+def _without_outcome(record: UpdateRunStatus) -> UpdateRunStatus:
+    """``record`` with how its run ended cleared, as a dismissed badge leaves it."""
+    return record.model_copy_update(
+        to_update(record.field_ref().verdict, None),
+        to_update(record.field_ref().detail, ""),
+        to_update(record.field_ref().in_place_compatible_ref, ""),
+    )
 
 
 def _compose(detected: _DetectionFacts, run: _RunFacts, schedule: UpdateScheduleRecord | None) -> UiWorkspaceUpdate:
@@ -235,6 +250,9 @@ class WorkspaceUpdateStateStore(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     schedule_store: UpdateScheduleStore = Field(frozen=True, description="The armed intents, read at composition")
+    dismissal_store: UpdateDismissalStore = Field(
+        frozen=True, description="What the user dismissed, so a re-read run record does not restore it"
+    )
 
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _detected_by_agent: dict[str, _DetectionFacts] = PrivateAttr(default_factory=dict)
@@ -371,15 +389,23 @@ class WorkspaceUpdateStateStore(MutableModel):
         and there is no schedule attempt to close. ``started_at`` dedups re-reads.
         """
         aid_str = str(agent_id)
+        # The one directory glob is paid off the lock the composed reads take; the
+        # read that decides is under it, since a dismissal writes the store and
+        # clears the row together, and an older store beside the cleared row would
+        # restore what was just dismissed.
+        self.dismissal_store.load()
         with self._lock:
             facts = self._run_by_agent.get(aid_str, _RunFacts())
             if facts.activity in IN_FLIGHT_ACTIVITIES:
                 return
-            if facts.dismissed_run_started_at is not None and (
-                status.started_at is None or status.started_at <= facts.dismissed_run_started_at
+            dismissals = self.dismissal_store.read(agent_id)
+            is_same_run = status.started_at is not None and status.started_at == facts.record.started_at
+            is_outcome_dismissed = is_run_dismissed(dismissals.outcome_run_started_at, status.started_at)
+            # A landed run's note is dismissed on its own, so a relaunch still earns it under a dismissed badge.
+            if is_outcome_dismissed and (
+                is_same_run or status.started_at is None or status.verdict not in _SUCCESS_VERDICTS
             ):
                 return
-            is_same_run = status.started_at is not None and status.started_at == facts.record.started_at
             if status.verdict is None:
                 # A verdictless record with no chat name would lock the row for
                 # good: the liveness probe could never match its agent.
@@ -396,19 +422,46 @@ class WorkspaceUpdateStateStore(MutableModel):
                 new_facts = facts.model_copy_update(to_update(facts.field_ref().target_override, "")).with_record(
                     status
                 )
+                if new_facts.success_note_version and is_run_dismissed(
+                    dismissals.note_run_started_at, new_facts.success_note_run_started_at
+                ):
+                    new_facts = new_facts.model_copy_update(
+                        to_update(new_facts.field_ref().success_note_version, ""),
+                        to_update(new_facts.field_ref().success_note_at, None),
+                        to_update(new_facts.field_ref().success_note_run_started_at, None),
+                    )
+                if is_outcome_dismissed:
+                    new_facts = new_facts.model_copy_update(
+                        to_update(new_facts.field_ref().record, _without_outcome(new_facts.record))
+                    )
             self._run_by_agent[aid_str] = new_facts
         self._fire_on_change()
 
     def dismiss_success_note(self, agent_id: AgentId) -> None:
-        """Clear the "Updated to X" note for a workspace (the user dismissed it)."""
+        """Clear the "Updated to X" note for a workspace (the user dismissed it).
+
+        The run that earned the note is persisted, so neither this launch's sweep
+        nor a later one re-earns it from the same record. The write shares the
+        lock hold: a sweep landing between the memory clear and the write would
+        read a store that does not know about the dismissal yet.
+        """
         aid_str = str(agent_id)
         with self._lock:
             facts = self._run_by_agent.get(aid_str)
             if facts is None or not facts.success_note_version:
                 return
+            if facts.success_note_run_started_at is not None:
+                self.dismissal_store.dismiss_note(agent_id, facts.success_note_run_started_at)
+            else:
+                logger.warning(
+                    "Clearing {}'s update note without remembering it: the run that earned it has no readable "
+                    "start to key the dismissal on, so the next launch will show the note again",
+                    agent_id,
+                )
             self._run_by_agent[aid_str] = facts.model_copy_update(
                 to_update(facts.field_ref().success_note_version, ""),
                 to_update(facts.field_ref().success_note_at, None),
+                to_update(facts.field_ref().success_note_run_started_at, None),
             )
         self._fire_on_change()
 
@@ -417,7 +470,8 @@ class WorkspaceUpdateStateStore(MutableModel):
 
         STALLED draws the same "Update failed" badge as a verdict, so it is
         dismissible too and goes back to IDLE. The dismissed run's start is
-        remembered so the sweep's re-read of the record does not restore it.
+        persisted so the sweep's re-read of the record, in this launch or a
+        later one, does not restore it.
         """
         aid_str = str(agent_id)
         with self._lock:
@@ -425,23 +479,20 @@ class WorkspaceUpdateStateStore(MutableModel):
             if facts is None or (facts.record.verdict is None and facts.activity is not UpdateActivity.STALLED):
                 return
             record = facts.record
+            if record.started_at is not None:
+                self.dismissal_store.dismiss_outcome(agent_id, record.started_at)
+            else:
+                logger.warning(
+                    "Clearing {}'s update outcome without remembering it: the run has no readable start to key "
+                    "the dismissal on, so the next launch will report the outcome again",
+                    agent_id,
+                )
             self._run_by_agent[aid_str] = facts.model_copy_update(
                 to_update(
                     facts.field_ref().activity,
                     UpdateActivity.IDLE if facts.activity is UpdateActivity.STALLED else facts.activity,
                 ),
-                to_update(
-                    facts.field_ref().record,
-                    record.model_copy_update(
-                        to_update(record.field_ref().verdict, None),
-                        to_update(record.field_ref().detail, ""),
-                        to_update(record.field_ref().in_place_compatible_ref, ""),
-                    ),
-                ),
-                to_update(
-                    facts.field_ref().dismissed_run_started_at,
-                    record.started_at if record.started_at is not None else facts.dismissed_run_started_at,
-                ),
+                to_update(facts.field_ref().record, _without_outcome(record)),
             )
         self._fire_on_change()
 

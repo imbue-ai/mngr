@@ -140,6 +140,7 @@ from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspacesMessage
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
+from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
@@ -207,9 +208,7 @@ def _get_mngr_forward_origin() -> str:
     return f"https://localhost:{port}"
 
 
-# -- Auth helpers --
-
-
+# Auth helpers
 def _required_one_time_code() -> OneTimeCode:
     """Parse the required ``one_time_code`` query param, aborting 422 when absent.
 
@@ -239,9 +238,7 @@ def _is_request_authenticated() -> bool:
     )
 
 
-# -- Route handlers (module-level; deps read from get_state()) --
-
-
+# Route handlers (module-level; deps read from get_state())
 def _handle_forward_bridge() -> Response:
     """Bounce an authenticated browser into a forward-plugin session.
 
@@ -943,12 +940,6 @@ def _handle_post_login_redirect() -> Response:
     return make_response(status_code=302, headers={"Location": destination})
 
 
-# -- Agent create-attempt route handlers --
-
-
-# -- Agent destruction route handlers --
-
-
 def _finalize_and_mark_destroying(
     paths: InstallationPaths | None,
     backend_resolver: BackendResolverInterface,
@@ -1349,7 +1340,7 @@ def _build_requests_payload(
     return {"count": len(request_ids), "request_ids": request_ids}
 
 
-# -- System-interface health probing --
+# System-interface health probing
 #
 # The probe loop's own timeout is all that lives here. The recovery page's route
 # is registered with the rest of the SPA routes further down, and its data calls
@@ -1364,9 +1355,7 @@ def _build_requests_payload(
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 
 
-# -- Account management routes --
-
-
+# Account management routes
 def _handle_account_trim_backups(user_id: str) -> Response:
     """Start the over-quota backup trim flow for one account (idempotent while running)."""
     if not _is_request_authenticated():
@@ -1612,12 +1601,6 @@ def _handle_account_logout(
     return make_response(status_code=303, headers={"Location": "/accounts"})
 
 
-# -- Workspace settings routes --
-
-
-# -- Inbox routes --
-
-
 def _handle_sharing_redirect(
     agent_id: str,
     service_name: str = "",
@@ -1699,9 +1682,7 @@ def _dispatch_request_action(
     return make_json_error_response(f"Unsupported action '{action}'", status_code=500)
 
 
-# -- /ui channel publisher wiring --
-
-
+# /ui channel publisher wiring
 def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspaceEntry:
     """Convert one ``_build_workspace_list`` row into the typed channel entry.
 
@@ -2128,7 +2109,10 @@ def _build_workspace_update_machinery(
     ):
         return None
     schedule_store = UpdateScheduleStore(records_dir=paths.data_dir / "update_schedules")
-    state_store = WorkspaceUpdateStateStore(schedule_store=schedule_store)
+    state_store = WorkspaceUpdateStateStore(
+        schedule_store=schedule_store,
+        dismissal_store=UpdateDismissalStore(records_dir=paths.data_dir / "update_dismissals"),
+    )
     apply_window = UpdateApplyWindowManager(
         tracker=system_interface_health_tracker,
         store=state_store,
@@ -2243,9 +2227,7 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
     )
 
 
-# -- App factory --
-
-
+# App factory
 def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,

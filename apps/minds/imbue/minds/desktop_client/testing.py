@@ -92,6 +92,7 @@ from imbue.minds.desktop_client.update_apply_window import AGENTS_END_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import AGENTS_FAILED_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_apply_window import RUN_END_SENTINEL
+from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
@@ -121,8 +122,6 @@ def device_id_for_test(name: str) -> DeviceId:
     """Deterministic device id for a named fake device in tests (legacy host-id-shaped values)."""
     return DeviceId(f"host-{hashlib.sha256(name.encode()).hexdigest()[:32]}")
 
-
-# -- Connectivity, without a network --
 
 # Stand-in probe hosts. Deliberately unresolvable names, so a stub that somehow
 # reached the real prober would fail rather than quietly measure the machine
@@ -480,8 +479,6 @@ def build_ui_state_publisher_for_test(
     return publisher, broadcaster.register()
 
 
-# -- Backend resolvers, for the host lifecycle helpers that resolve agents --
-
 _DEFAULT_WORKSPACE_AGENT_NAME: Final[AgentName] = AgentName("my-claude-agent")
 # The provider every agent from :func:`build_resolver_with_system_services` sits
 # on. Named so a test that has to seed a snapshot for that provider cannot drift
@@ -670,9 +667,7 @@ def record_provider_discovery_error(
     )
 
 
-# -- Stub mngr binaries, for the host lifecycle helpers that shell out --
-
-
+# Stub mngr binaries, for the host lifecycle helpers that shell out
 def write_stub_mngr(tmp_path: Path, name: str, body: str) -> str:
     """Write an executable stub standing in for ``mngr`` with ``body`` as its script."""
     script = tmp_path / name
@@ -890,9 +885,19 @@ def exec_json_envelope(
     return json.dumps({results_key: [{"stdout": remote_stdout, "stderr": stderr, "success": success}]})
 
 
-def make_update_state_store(tmp_path: Path) -> WorkspaceUpdateStateStore:
-    """An update state store over a fresh schedule store under ``tmp_path``."""
-    return WorkspaceUpdateStateStore(schedule_store=UpdateScheduleStore(records_dir=tmp_path / "update_schedules"))
+def make_update_state_store(
+    tmp_path: Path, *, dismissal_store: UpdateDismissalStore | None = None
+) -> WorkspaceUpdateStateStore:
+    """An update state store over the schedule and dismissal stores under ``tmp_path``.
+
+    A second call on the same ``tmp_path`` reads what the first one wrote, as a relaunched app would.
+    """
+    return WorkspaceUpdateStateStore(
+        schedule_store=UpdateScheduleStore(records_dir=tmp_path / "update_schedules"),
+        dismissal_store=dismissal_store
+        if dismissal_store is not None
+        else UpdateDismissalStore(records_dir=tmp_path / "update_dismissals"),
+    )
 
 
 def landed_verdict(
@@ -963,9 +968,6 @@ def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:
     )
 
 
-# -- Discovery-health watchdog, for its state machine and its loop --
-
-
 class ManualClock:
     """A UTC clock that only moves when a test advances it.
 
@@ -1002,9 +1004,6 @@ class RecordingProducerRemediator(ProducerRemediator):
         self.calls.append("restart")
         if self.fail_restart:
             raise LatchkeyError("simulated supervisor restart failure")
-
-
-# -- Sleep signal, for the tracker and the loops that drive it --
 
 
 class CatchUpClock:

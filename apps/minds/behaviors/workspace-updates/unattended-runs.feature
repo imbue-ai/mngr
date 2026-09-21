@@ -19,6 +19,7 @@ Feature: Scheduling an update
     Given a workspace whose update landed
     Then the workspace's row notes the version it was updated to
     And the user can dismiss that note
+    And a dismissed note stays dismissed after the app relaunches
     And dismissing it does not clear an unread failure of a later run
 
   @skipped-window
