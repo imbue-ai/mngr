@@ -3,6 +3,7 @@
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,6 +21,7 @@ from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import default_branch_name
+from imbue.mngr.primitives import read_checked_out_branch
 
 
 def test_host_name_rejects_dot() -> None:
@@ -220,6 +222,67 @@ def test_discovered_agent_created_branch_name_raises_on_unexpected_type() -> Non
     ref = _make_discovered_agent({"created_branch_name": 42})
     with pytest.raises(CertifiedDataError, match="Expected str or None"):
         _ = ref.created_branch_name
+
+
+# =============================================================================
+# checked_out_branch_name tests
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "agent_data, expected",
+    [
+        ({"checked_out_branch_name": "already/mine", "created_branch_name": None}, "already/mine"),
+        # A created branch is also the branch we checked out, so both name it.
+        ({"checked_out_branch_name": "mngr/cut", "created_branch_name": "mngr/cut"}, "mngr/cut"),
+        # Records written before the field existed: the created branch is the only
+        # branch they ever knew, so it is the best available answer.
+        ({"created_branch_name": "mngr/legacy"}, "mngr/legacy"),
+        ({"checked_out_branch_name": None, "created_branch_name": "mngr/legacy"}, "mngr/legacy"),
+        # A legacy record for an agent attached to a pre-existing branch: which
+        # branch that was is unknowable in hindsight.
+        ({"created_branch_name": None}, None),
+        ({}, None),
+        # An empty name is no name; do not report it as the branch.
+        ({"checked_out_branch_name": "", "created_branch_name": "mngr/legacy"}, "mngr/legacy"),
+    ],
+)
+def test_read_checked_out_branch(agent_data: dict[str, Any], expected: str | None) -> None:
+    """The shared helper the hand-built providers read data.json through.
+
+    It carries the fallback for records written before the field existed, which is
+    why it exists in one place rather than at each provider's call site.
+    """
+    assert read_checked_out_branch(agent_data) == expected
+
+
+def test_discovered_agent_checked_out_branch_name_returns_string_when_present() -> None:
+    """checked_out_branch_name should return the string value from certified_data."""
+    ref = _make_discovered_agent({"checked_out_branch_name": "already/mine"})
+    assert ref.checked_out_branch_name == "already/mine"
+
+
+@pytest.mark.parametrize("stored", [{}, {"checked_out_branch_name": None}])
+def test_discovered_agent_checked_out_branch_name_falls_back_to_the_created_branch(
+    stored: dict[str, Any],
+) -> None:
+    """Absent or null, the offline path falls back to the created branch.
+
+    Discovery reads records written before this field existed, for which a created
+    branch is the only branch that was ever recorded.
+    """
+    ref = _make_discovered_agent({**stored, "created_branch_name": "mngr/my-agent"})
+    assert ref.checked_out_branch_name == "mngr/my-agent"
+
+
+def test_discovered_agent_checked_out_branch_name_raises_on_unexpected_type() -> None:
+    """checked_out_branch_name should raise CertifiedDataError for non-string non-None values."""
+    ref = _make_discovered_agent({"checked_out_branch_name": 42})
+    with pytest.raises(CertifiedDataError, match="Expected str or None"):
+        _ = ref.checked_out_branch_name
+
+
+# === AgentInstanceKey ===
 
 
 def test_agent_instance_key_round_trips_agent_and_host_ids() -> None:

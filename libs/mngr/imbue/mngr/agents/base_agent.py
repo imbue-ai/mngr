@@ -45,6 +45,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import LifecycleProbeResult
+from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.utils.env_utils import parse_env_file
 
 _CAPTURE_PANE_TIMEOUT_SECONDS: Final[float] = 10.0
@@ -213,6 +214,9 @@ class BaseAgent(AgentInterface[AgentConfigT]):
     def get_created_branch_name(self) -> str | None:
         data = self._read_data()
         return data.get("created_branch_name")
+
+    def get_checked_out_branch_name(self) -> str | None:
+        return read_checked_out_branch(self._read_data())
 
     def get_is_start_on_boot(self) -> bool:
         data = self._read_data()

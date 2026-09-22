@@ -149,6 +149,7 @@ class ImbueCloudHost(Host):
         work_dir_path: Path,
         options: CreateAgentOptions,
         created_branch_name: str | None = None,
+        checked_out_branch_name: str | None = None,
     ) -> AgentInterface:
         """Adopt the pre-baked agent's state instead of writing a fresh ``data.json``.
 
@@ -170,7 +171,12 @@ class ImbueCloudHost(Host):
         wiped the previous lease cycle's state and we need a full create.
         """
         if self.pre_baked_agent_id is None:
-            return super().create_agent_state(work_dir_path, options, created_branch_name)
+            return super().create_agent_state(
+                work_dir_path,
+                options,
+                created_branch_name=created_branch_name,
+                checked_out_branch_name=checked_out_branch_name,
+            )
         if options.agent_id is not None and options.agent_id != self.pre_baked_agent_id:
             raise FixedAgentIdError(
                 f"imbue_cloud agent id is fixed by the lease ({self.pre_baked_agent_id}); "
@@ -186,7 +192,12 @@ class ImbueCloudHost(Host):
             # matters here we want a louder failure mode, but that's a
             # different conversation than the lease-adopt happy path).
             options_with_id = options.model_copy(update={"agent_id": self.pre_baked_agent_id})
-            return super().create_agent_state(work_dir_path, options_with_id, created_branch_name)
+            return super().create_agent_state(
+                work_dir_path,
+                options_with_id,
+                created_branch_name=created_branch_name,
+                checked_out_branch_name=checked_out_branch_name,
+            )
 
         # Hydrate the agent class with the bake's name; minds no longer
         # renames the pre-baked agent (the workspace identity lives on the
@@ -244,6 +255,8 @@ class ImbueCloudHost(Host):
         # invokes the lease flow without driving branch naming).
         if created_branch_name is not None:
             patched["created_branch_name"] = created_branch_name
+        if checked_out_branch_name is not None:
+            patched["checked_out_branch_name"] = checked_out_branch_name
 
         data_path = get_agent_state_dir_path(self.host_dir, self.pre_baked_agent_id) / "data.json"
         self.write_text_file(data_path, _json.dumps(patched, indent=2))

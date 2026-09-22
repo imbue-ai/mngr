@@ -128,6 +128,17 @@ class AgentInterface(MutableModel, ABC, Generic[AgentConfigT]):
         ...
 
     @abstractmethod
+    def get_checked_out_branch_name(self) -> str | None:
+        """Return the git branch this agent's work_dir is on, or None if not applicable.
+
+        Unlike :meth:`get_created_branch_name`, this is set whether the branch was
+        created for the agent or already existed and was merely checked out. Callers
+        deciding where an agent's commits land want this one; only teardown, which
+        must not delete a branch it did not create, wants the other.
+        """
+        ...
+
+    @abstractmethod
     def get_is_start_on_boot(self) -> bool:
         """Return whether this agent should start automatically on host boot."""
         ...

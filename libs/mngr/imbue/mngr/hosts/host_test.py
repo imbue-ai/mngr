@@ -481,6 +481,30 @@ def test_create_agent_state_stores_created_branch_name(
     assert agent.get_created_branch_name() == "mngr/my-branch"
 
 
+def test_create_agent_state_records_a_checked_out_branch_it_did_not_create(
+    local_host: Host,
+    temp_host_dir: Path,
+    temp_work_dir: Path,
+) -> None:
+    """The two branch answers are persisted separately, and must stay separate.
+
+    Teardown deletes the created branch, so that one has to stay null for a branch
+    the user already had -- while the checked-out branch still names where this
+    agent's work_dir sits.
+    """
+    host = local_host
+    options = CreateAgentOptions(
+        name=AgentName("test-checked-out-branch-store"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+
+    agent = host.create_agent_state(temp_work_dir, options, checked_out_branch_name="already/mine")
+
+    assert agent.get_created_branch_name() is None
+    assert agent.get_checked_out_branch_name() == "already/mine"
+
+
 def test_create_agent_state_uses_explicit_agent_id(
     local_host: Host,
     temp_host_dir: Path,
@@ -663,6 +687,33 @@ def test_ensure_work_dir_exists_raises_with_recovery_command(
     agent = host.create_agent_state(missing_dir, options, created_branch_name="mngr/my-branch")
 
     with pytest.raises(AgentStartError, match="git worktree add.*mngr/my-branch"):
+        host._ensure_work_dir_exists(agent)
+
+
+def test_ensure_work_dir_exists_recovers_a_branch_mngr_did_not_create(
+    local_provider: LocalProviderInstance,
+    temp_host_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """The recovery command is owed to an agent attached to a pre-existing branch too.
+
+    ``git worktree add`` restores the work_dir from that branch just as well, and the
+    created-branch answer is deliberately None here -- so reading it would tell exactly
+    these users that no branch is recorded while one is.
+    """
+    missing_dir = tmp_path / "worktrees" / "also-gone"
+    host = local_provider.create_host(HostName(LOCAL_HOST_NAME))
+    assert isinstance(host, Host)
+
+    options = CreateAgentOptions(
+        name=AgentName("test-recovery-cmd-existing-branch"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+    )
+    agent = host.create_agent_state(missing_dir, options, checked_out_branch_name="already/mine")
+
+    assert agent.get_created_branch_name() is None
+    with pytest.raises(AgentStartError, match="git worktree add.*already/mine"):
         host._ensure_work_dir_exists(agent)
 
 

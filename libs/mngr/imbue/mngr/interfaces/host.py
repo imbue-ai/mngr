@@ -705,6 +705,7 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         work_dir_path: Path,
         options: CreateAgentOptions,
         created_branch_name: str | None = None,
+        checked_out_branch_name: str | None = None,
     ) -> AgentInterface:
         """Create the state directory and metadata for a new agent."""
         ...
@@ -838,6 +839,15 @@ class CreateWorkDirResult(FrozenModel):
     created_branch_name: str | None = Field(
         default=None,
         description="Name of the git branch created for this work directory, if any",
+    )
+    # Distinct from created_branch_name, which stays scoped to "a branch we made,
+    # and may therefore delete on cleanup". This one answers "what branch is this
+    # work dir on", which is also the answer when the branch already existed and
+    # was merely checked out -- the case created_branch_name deliberately leaves
+    # None so teardown never deletes a user's own branch.
+    checked_out_branch_name: str | None = Field(
+        default=None,
+        description="Name of the git branch this work directory is on, whether created or pre-existing",
     )
 
 

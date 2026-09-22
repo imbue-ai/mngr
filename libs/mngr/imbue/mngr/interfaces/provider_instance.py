@@ -230,7 +230,7 @@ def _build_agent_details_from_online_agent(
         type=str(agent.agent_type),
         command=agent.get_command(),
         work_dir=agent.work_dir,
-        initial_branch=agent.get_created_branch_name(),
+        initial_branch=agent.get_checked_out_branch_name(),
         create_time=agent.create_time,
         start_on_boot=agent.get_is_start_on_boot(),
         state=lifecycle.state,
@@ -267,7 +267,7 @@ def build_agent_details_from_offline_ref(
         # surfaced via to_offline_host with no certified data).
         command=agent_ref.command or CommandString("(unknown)"),
         work_dir=agent_ref.work_dir or Path("/"),
-        initial_branch=agent_ref.created_branch_name,
+        initial_branch=agent_ref.checked_out_branch_name,
         create_time=create_time,
         start_on_boot=agent_ref.start_on_boot,
         state=AgentLifecycleState.STOPPED,

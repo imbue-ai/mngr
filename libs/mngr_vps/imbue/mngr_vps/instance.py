@@ -81,6 +81,7 @@ from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
+from imbue.mngr.primitives import read_checked_out_branch
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.providers.host_key_store import has_host_key_store
 from imbue.mngr.providers.host_key_store import remove_host_key_record
@@ -2167,7 +2168,7 @@ class VpsProvider(BaseProviderInstance):
             type=agent_type,
             command=command,
             work_dir=Path(agent_data.get("work_dir", "/")),
-            initial_branch=agent_data.get("created_branch_name"),
+            initial_branch=read_checked_out_branch(agent_data),
             create_time=create_time,
             start_on_boot=agent_data.get("start_on_boot", False),
             state=lifecycle.state,

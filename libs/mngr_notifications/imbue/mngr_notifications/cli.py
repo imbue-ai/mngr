@@ -7,10 +7,9 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.local_process import RunningProcess
-from imbue.mngr.api.observe import ObserveLockError
-from imbue.mngr.api.observe import acquire_observe_lock
+from imbue.mngr.api.observe import ObserveLockProbeError
 from imbue.mngr.api.observe import get_default_events_base_dir
-from imbue.mngr.api.observe import release_observe_lock
+from imbue.mngr.api.observe import is_observe_writer_running
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.cli.help_formatter import CommandHelpMetadata
@@ -41,13 +40,19 @@ def _get_plugin_config(mngr_ctx: MngrContext) -> NotificationsPluginConfig:
 
 
 def _is_observe_running(mngr_ctx: MngrContext) -> bool:
-    """Check if mngr observe is already running by trying to acquire its lock."""
+    """Whether some process already holds the observe lock for this context's host dir.
+
+    A probe that cannot answer at all (a permission problem, say) is reported and
+    answered "not running", so the caller starts one. That is the failure that
+    announces itself: if an observer really was running, the child exits immediately
+    on the lock and the watcher reports it, whereas assuming one is running would
+    leave ``mngr notify`` silently waiting on events nobody writes.
+    """
     try:
-        fd = acquire_observe_lock(get_default_events_base_dir(mngr_ctx.config))
-        release_observe_lock(fd)
+        return is_observe_writer_running(get_default_events_base_dir(mngr_ctx.config))
+    except ObserveLockProbeError as e:
+        write_human_line("Could not tell whether mngr observe is already running ({}); starting one.", e)
         return False
-    except ObserveLockError:
-        return True
 
 
 @contextmanager

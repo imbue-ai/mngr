@@ -240,6 +240,7 @@ def _make_mock_online_agent(agent_id: AgentId) -> MagicMock:
     agent.get_command.return_value = CommandString("claude")
     agent.work_dir = Path("/tmp/work")
     agent.get_created_branch_name.return_value = None
+    agent.get_checked_out_branch_name.return_value = None
     agent.create_time = datetime.now(timezone.utc)
     agent.get_is_start_on_boot.return_value = False
     agent.get_reported_url.return_value = None

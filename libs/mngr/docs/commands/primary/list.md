@@ -127,7 +127,7 @@ Fields marked `(cel only)` cannot be used in `--fields`/`--format` template stri
 - `type` - Agent type (claude, codex, etc.)
 - `command` - Command used to start the agent
 - `work_dir` - Working directory
-- `initial_branch` - Git branch name created for this agent
+- `initial_branch` - Git branch mngr placed this agent's work_dir on at creation, whether it created the branch or checked out one that already existed. Read back from the work_dir after checkout, so it is None when the work_dir ended up on no branch at all (--branch accepts any checkout target, and a commit or tag detaches). Recorded at create time and not re-read, so an agent that checks out a different branch itself is not reflected here; None for transfer modes that involve no git (none, rsync).
 - `create_time` - Creation timestamp
 - `start_on_boot` - Whether agent starts on host boot
 - `state` - Agent lifecycle state (STOPPED/RUNNING/WAITING/REPLACED/RUNNING_UNKNOWN_AGENT_TYPE/DONE/UNKNOWN)

@@ -206,6 +206,7 @@ def create(
     mngr_ctx: MngrContext,
     create_work_dir: bool = True,
     created_branch_name: str | None = None,
+    checked_out_branch_name: str | None = None,
 ) -> CreateAgentResult:
     """Create and run an agent.
 
@@ -338,6 +339,7 @@ def create(
                     )
                     work_dir_path = work_dir_result.path
                     created_branch_name = work_dir_result.created_branch_name
+                    checked_out_branch_name = work_dir_result.checked_out_branch_name
             else:
                 # Work dir was already created (e.g. by CLI's early copy).
                 # Use target_path if set (it should contain the actual work_dir path),
@@ -366,7 +368,10 @@ def create(
                 # Create the agent state (registers the agent with the host)
                 with log_span("Creating agent state in work directory {}", work_dir_path):
                     agent = host.create_agent_state(
-                        work_dir_path, agent_options, created_branch_name=created_branch_name
+                        work_dir_path,
+                        agent_options,
+                        created_branch_name=created_branch_name,
+                        checked_out_branch_name=checked_out_branch_name,
                     )
 
                 # Run provisioning for the agent (hooks, dependency installation, etc.)

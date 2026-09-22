@@ -785,6 +785,44 @@ def test_get_created_branch_name_returns_value_when_set(
 
 
 # =========================================================================
+# get_checked_out_branch_name tests
+# =========================================================================
+
+
+def test_get_checked_out_branch_name_reports_a_branch_we_did_not_create(
+    test_agent: BaseAgent,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """The case created_branch_name deliberately cannot answer.
+
+    An agent placed on a branch the user already had records no created branch (so
+    teardown never deletes it), but still needs to say where its commits land.
+    """
+    data_path = local_provider.host_dir / "agents" / str(test_agent.id) / "data.json"
+    data = json.loads(data_path.read_text())
+    data["created_branch_name"] = None
+    data["checked_out_branch_name"] = "already/mine"
+    data_path.write_text(json.dumps(data, indent=2))
+
+    assert test_agent.get_created_branch_name() is None
+    assert test_agent.get_checked_out_branch_name() == "already/mine"
+
+
+def test_get_checked_out_branch_name_falls_back_for_a_record_written_before_the_field(
+    test_agent: BaseAgent,
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A created branch is the only branch such a record ever knew."""
+    data_path = local_provider.host_dir / "agents" / str(test_agent.id) / "data.json"
+    data = json.loads(data_path.read_text())
+    data.pop("checked_out_branch_name", None)
+    data["created_branch_name"] = "mngr/legacy-agent"
+    data_path.write_text(json.dumps(data, indent=2))
+
+    assert test_agent.get_checked_out_branch_name() == "mngr/legacy-agent"
+
+
+# =========================================================================
 # get_is_start_on_boot / set_is_start_on_boot tests
 # =========================================================================
 

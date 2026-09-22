@@ -37,6 +37,7 @@ from imbue.mngr.hosts.common import get_agent_state_dir_path
 from imbue.mngr.hosts.common import is_macos
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.host import _AGENT_LAUNCH_SCRIPT_NAME
+from imbue.mngr.hosts.host import _DETACHED_HEAD_REF
 from imbue.mngr.hosts.tmux import TmuxSessionTarget
 from imbue.mngr.hosts.tmux import TmuxWindowTarget
 from imbue.mngr.hosts.tmux import capture_tmux_pane_content
@@ -2088,6 +2089,17 @@ def _create_minimal_agent(host: Host, temp_dir: Path, work_dir: Path | None = No
 # File Transfer Tests (create_agent_work_dir and helpers)
 
 
+def _branch_on_disk(path: Path) -> str:
+    """The branch ``path``'s checkout is on, as git reports it (``HEAD`` when detached)."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=path,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def _init_git_repo(path: Path, commit_message: str = "Initial commit") -> None:
     """Helper to initialize a git repo from pre-existing files.
 
@@ -2540,6 +2552,183 @@ def test_create_work_dir_generates_new_branch(
     )
     assert result.returncode == 0
     assert result.stdout.strip() == "test/new-branch-test"
+
+
+def test_create_work_dir_reports_the_branch_it_checked_out_without_creating_one(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """Attaching to a pre-existing branch reports it, while claiming to have created nothing.
+
+    These two answers must differ. Teardown deletes ``created_branch_name``, so it has
+    to stay None for a branch the user already had; but a caller asking where this
+    agent's commits land still needs a name, and before ``checked_out_branch_name``
+    existed there was none to be had in exactly this case.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_existing_branch"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("content")
+    _init_git_repo(source_path)
+    subprocess.run(["git", "branch", "already/mine"], cwd=source_path, check=True, capture_output=True)
+
+    options = CreateAgentOptions(
+        name=AgentName("existing-branch-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=temp_dir / "target_existing_branch",
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(base_branch="already/mine"),
+    )
+
+    result = host.create_agent_work_dir(host, source_path, options)
+
+    assert result.created_branch_name is None
+    assert result.checked_out_branch_name == "already/mine"
+    assert _branch_on_disk(result.path) == "already/mine"
+
+
+def test_create_work_dir_reports_a_created_branch_as_both(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """When mngr cuts the branch, it is both the created and the checked-out one."""
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_both_branch"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("content")
+    _init_git_repo(source_path)
+
+    options = CreateAgentOptions(
+        name=AgentName("both-branch-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=temp_dir / "target_both_branch",
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(new_branch_name="mngr/both-branch-test"),
+    )
+
+    result = host.create_agent_work_dir(host, source_path, options)
+
+    assert result.created_branch_name == "mngr/both-branch-test"
+    assert result.checked_out_branch_name == "mngr/both-branch-test"
+
+
+def test_git_transfer_records_the_branch_the_target_is_actually_on(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """A detached source names no branch, so the answer has to come from the target.
+
+    With no explicit base branch the fallback is the source's current branch, read
+    from ``git rev-parse --abbrev-ref HEAD`` -- which prints the literal "HEAD" for a
+    detached repo, and an empty string for a repo with no commits yet. Neither is a
+    branch, so neither may be recorded as one; reading the value back off the target
+    after the checkout gets this right by construction, whatever the request was.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_detached"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("content")
+    _init_git_repo(source_path)
+    subprocess.run(["git", "checkout", "--detach", "HEAD"], cwd=source_path, check=True, capture_output=True)
+
+    target_path = temp_dir / "target_detached"
+    options = CreateAgentOptions(
+        name=AgentName("detached-source-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(),
+    )
+
+    created_branch_name, checked_out_branch_name = host._transfer_git_repo(host, source_path, target_path, options)
+
+    assert created_branch_name is None
+    assert checked_out_branch_name != _DETACHED_HEAD_REF
+    assert checked_out_branch_name == _branch_on_disk(target_path)
+    # Whatever it is, it is a branch that exists -- which the request itself was not.
+    branch_exists = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{checked_out_branch_name}"],
+        cwd=target_path,
+        capture_output=True,
+        text=True,
+    )
+    assert branch_exists.returncode == 0
+    assert (target_path / "file.txt").read_text() == "content"
+
+
+def test_git_transfer_records_no_branch_when_a_commit_ref_leaves_the_target_detached(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """``--branch`` takes any checkout target, and a commit is not a branch.
+
+    Recording the requested string would put a ref that does not exist in front of a
+    caller asking where this agent's work lands. Answering "unknown" makes such a
+    caller say so (default-workspace-template's launch-sync raises rather than
+    publishing a branch it cannot vouch for) instead of merging from nowhere.
+    """
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_commit_ref"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("content")
+    _init_git_repo(source_path)
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=source_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    target_path = temp_dir / "target_commit_ref"
+    options = CreateAgentOptions(
+        name=AgentName("commit-ref-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=target_path,
+        transfer_mode=TransferMode.GIT_MIRROR,
+        git=AgentGitOptions(base_branch=head_sha),
+    )
+
+    created_branch_name, checked_out_branch_name = host._transfer_git_repo(host, source_path, target_path, options)
+
+    assert created_branch_name is None
+    assert checked_out_branch_name is None
+    assert _branch_on_disk(target_path) == _DETACHED_HEAD_REF
+
+
+def test_create_work_dir_records_no_branch_for_a_detached_worktree(
+    host_with_temp_dir: tuple[Host, Path],
+    setup_git_config: None,
+) -> None:
+    """Worktree mode detaches on a commit ref too, and must report that the same way."""
+    host, temp_dir = host_with_temp_dir
+
+    source_path = temp_dir / "source_detached_worktree"
+    source_path.mkdir()
+    (source_path / "file.txt").write_text("content")
+    _init_git_repo(source_path)
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=source_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    options = CreateAgentOptions(
+        name=AgentName("detached-worktree-test"),
+        agent_type=AgentTypeName("generic"),
+        command=CommandString("sleep 1"),
+        target_path=temp_dir / "target_detached_worktree",
+        transfer_mode=TransferMode.GIT_WORKTREE,
+        git=AgentGitOptions(base_branch=head_sha),
+    )
+
+    result = host.create_agent_work_dir(host, source_path, options)
+
+    assert result.created_branch_name is None
+    assert result.checked_out_branch_name is None
+    assert _branch_on_disk(result.path) == _DETACHED_HEAD_REF
 
 
 @pytest.mark.rsync
