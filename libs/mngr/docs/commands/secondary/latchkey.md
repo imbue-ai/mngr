@@ -60,11 +60,13 @@ Pipe the ``env`` values into ``mngr create --host-env KEY=VALUE``
 so every agent on the host inherits the same gateway wiring, then
 call ``mngr latchkey link-permissions`` with the
 ``opaque_permissions_path`` and the canonical host id once
-``mngr create`` returns it. The gateway URL is always the constant
-agent-side loopback URL (``http://127.0.0.1:1989``); there is no
-on-host (DEV) mode -- a running ``mngr latchkey forward`` is
-expected to bridge the agent's loopback port to the selected desktop or VPS
-gateway.
+``mngr create`` returns it. The gateway URL is a constant: the
+agent-side loopback URL (``http://127.0.0.1:1989``) for a desktop
+gateway, which a running ``mngr latchkey forward`` is expected to
+bridge to the desktop gateway, or the outer-host URL
+(``http://host.docker.internal:1989``) for a VPS gateway, which the
+agent's container reaches directly over its docker bridge. There is
+no on-host (DEV) mode.
 
 **Usage:**
 
@@ -215,7 +217,7 @@ $ mngr latchkey register-agent --host-id $HOST_ID --agent-id $AGENT_ID
 
 ## mngr latchkey forward
 
-Run the shared Latchkey gateway and reverse-tunnel it into every discovered agent.
+Run the shared Latchkey gateway and wire a gateway into every discovered agent.
 
 Long-running foreground process that:
 
@@ -226,10 +228,11 @@ Long-running foreground process that:
    original port) if the subprocess dies mid-session, so a crashed
    gateway does not silently take agent traffic down.
 3. Spawns ``mngr observe --discovery-only --quiet`` and exposes exactly
-   one gateway at each agent's fixed loopback URL: the desktop gateway
-   for local workspaces, or the VPS gateway for remote workspaces. The
-   latter forwards Minds-owned extension routes back to the desktop over
-   a separate VPS-loopback tunnel.
+   one gateway at each agent's fixed URL: the desktop gateway,
+   reverse-tunneled onto the loopback of a local agent's host, or the VPS
+   gateway, which a remote agent's container reaches over its docker bridge as
+   ``host.docker.internal`` and which forwards Minds-owned extension
+   routes back to the desktop over a separate VPS-loopback tunnel.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics
@@ -240,9 +243,9 @@ Long-running foreground process that:
    every reverse tunnel stay up) so a provider-set change made by an
    embedder takes effect without a full restart.
 
-No filtering flags: every discovered agent gets a tunnel. The plugin
-emits stderr-only logs; stdout stays empty for the lifetime of the
-process.
+No filtering flags: every discovered agent gets its gateway wired. The
+plugin emits stderr-only logs; stdout stays empty for the lifetime of
+the process.
 
 **Usage:**
 

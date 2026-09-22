@@ -2572,8 +2572,9 @@ class AgentCreator(MutableModel):
                 # from the start, avoiding any post-create re-provisioning
                 # step. Every launch mode is ``is_tunneled=True`` since the
                 # only on-host launch mode (DEV) was removed -- all remaining
-                # modes reach the gateway via the reverse tunnel
-                # ``LatchkeyDiscoveryHandler`` sets up post-discovery.
+                # modes reach a gateway ``LatchkeyDiscoveryHandler`` wires up
+                # post-discovery (the desktop gateway reverse-tunneled in, or
+                # the VPS-resident gateway on the container's outer host).
                 #
                 # ``prepare_agent_latchkey`` raises on infrastructure
                 # failures (latchkey CLI broken, on-disk write failed,

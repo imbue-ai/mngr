@@ -2800,8 +2800,9 @@ class ImbueCloudProvider(BaseProviderInstance):
         # ``config.container_ssh_port``; an external client reaches it at the
         # lease's ``container_ssh_port`` (equal for an OVH VPS, but a distinct
         # box-forwarded port for a slice). A service running *on the outer host*
-        # (the VPS-resident latchkey gateway) must reverse-tunnel into the
-        # container on the fixed publish port, not the external one.
+        # that still has to reverse-tunnel into the container (the VPS-resident
+        # latchkey gateway, for a container that predates its docker-bridge
+        # route) must do so on the fixed publish port, not the external one.
         return self.config.container_ssh_port
 
     @contextmanager

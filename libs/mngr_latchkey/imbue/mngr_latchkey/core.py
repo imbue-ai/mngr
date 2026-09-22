@@ -156,12 +156,16 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # (:mod:`imbue.mngr_latchkey.account_scopes`) read.
 LATCHKEY_MIN_VERSION: Final[str] = "3.15.0"
 
-# Fixed port that every containerized/VM/VPS agent sees on its own 127.0.0.1
-# when reaching the Latchkey gateway. A per-agent SSH reverse tunnel bridges
-# this to the dynamic shared-gateway port on the desktop host, so the
-# ``LATCHKEY_GATEWAY`` env var injected at ``mngr create`` time can be the
-# same constant URL for every agent. Matches the documented default of the
-# upstream ``latchkey gateway`` CLI (``1989``).
+# Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
+# gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
+# SSH reverse tunnel bridges this to the dynamic shared-gateway port on the
+# desktop host); a VPS-gateway agent sees it on its outer host, at
+# :data:`imbue.mngr.primitives.OUTER_HOST_HOSTNAME_IN_CONTAINER` (the VPS
+# provider creates every container with the ``--add-host`` mapping that resolves
+# it to the docker bridge address the VPS-resident gateway binds). Either way
+# the ``LATCHKEY_GATEWAY`` env var injected at ``mngr create`` time is a
+# constant URL. Matches the documented default of the upstream
+# ``latchkey gateway`` CLI (``1989``).
 AGENT_SIDE_LATCHKEY_PORT: Final[int] = 1989
 
 # Sentinel path passed to ``latchkey gateway create-jwt --no-validate`` when

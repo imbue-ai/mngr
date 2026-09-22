@@ -26,6 +26,7 @@ from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.primitives import OUTER_HOST_HOSTNAME_IN_CONTAINER
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
@@ -50,6 +51,13 @@ LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
 
 # Default image when no user customization
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
+
+# The ``docker run`` mapping that makes the container resolve its outer host by
+# name. ``host-gateway`` is the docker daemon's placeholder for its bridge
+# address, so the mapping needs no address known ahead of time. mngr_latchkey
+# relies on the name to point a VPS-gateway agent at the gateway its outer host
+# runs.
+OUTER_HOST_ADD_HOST_ARGS: Final[tuple[str, str]] = ("--add-host", f"{OUTER_HOST_HOSTNAME_IN_CONTAINER}:host-gateway")
 
 # Path inside the agent container where the unified host volume is mounted.
 # The container sees three top-level entries under this mount: host_state.json,
@@ -855,8 +863,14 @@ def run_container(
     extra_args: Sequence[str],
     entrypoint_cmd: str,
 ) -> str:
-    """Run a detached docker container on outer. Returns the container id."""
-    args: list[str] = ["run", "-d", "--name", name]
+    """Run a detached docker container on outer. Returns the container id.
+
+    Every container is created with the ``--add-host`` mapping that makes
+    :data:`OUTER_HOST_HOSTNAME_IN_CONTAINER` resolve to the outer's docker
+    bridge address, so services the outer binds there (the VPS-resident latchkey
+    gateway) are reachable from inside by a constant name.
+    """
+    args: list[str] = ["run", "-d", "--name", name, *OUTER_HOST_ADD_HOST_ARGS]
     for host_bind, container_port in port_mappings.items():
         args.extend(["-p", f"{host_bind}:{container_port}"])
     for vol in volumes:

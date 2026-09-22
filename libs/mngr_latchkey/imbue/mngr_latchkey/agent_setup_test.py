@@ -11,13 +11,17 @@ import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Final
+from uuid import uuid4
 
 import pytest
 from pydantic import JsonValue
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.hosts.host import Host
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import OUTER_HOST_HOSTNAME_IN_CONTAINER
 from imbue.mngr_latchkey.agent_setup import AgentLatchkeySetup
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
@@ -26,8 +30,11 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVE
 from imbue.mngr_latchkey.agent_setup import ENV_MINDS_VIA_DESKTOP_URL_PREFIX
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
+from imbue.mngr_latchkey.agent_setup import VIA_DESKTOP_URL_PREFIX
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
+from imbue.mngr_latchkey.agent_setup import _does_hosts_file_name_outer_host
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
+from imbue.mngr_latchkey.agent_setup import fall_back_to_reverse_tunneled_gateway_url
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import maybe_recover_host_permissions_for_agent
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -253,7 +260,11 @@ def test_prepare_vps_gateway_omits_workspace_permissions_override(tmp_path: Path
         gateway_location=LatchkeyGatewayLocation.VPS,
     )
 
-    assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+    # The VPS gateway listens on the outer host's docker bridge, which the
+    # container reaches by docker's conventional name for its host; a desktop
+    # workspace keeps the loopback URL its reverse tunnel serves.
+    assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://{OUTER_HOST_HOSTNAME_IN_CONTAINER}:{AGENT_SIDE_LATCHKEY_PORT}"
+    assert OUTER_HOST_HOSTNAME_IN_CONTAINER == "host.docker.internal"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
     assert setup.opaque_permissions_path is not None
@@ -806,3 +817,103 @@ def test_register_heals_missing_custom_service_schemas_for_an_already_registered
     register_agent_for_host(tmp_path, host_id, agent_id)
 
     assert json.loads(path.read_text())["schemas"]["claude-ai"] == ADDITIONAL_SERVICE_SCHEMAS["claude-ai"]
+
+
+_OUTER_HOST_MAPPING_HOSTS_FILE: Final[str] = (
+    "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n"
+    f"172.17.0.1\t{OUTER_HOST_HOSTNAME_IN_CONTAINER}\n172.17.0.7\tc0ffee1234ab\n"
+)
+_NO_OUTER_HOST_MAPPING_HOSTS_FILE: Final[str] = (
+    "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost\n172.17.0.7\tc0ffee1234ab\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("hosts_file_content", "is_expected_to_resolve"),
+    [
+        (_OUTER_HOST_MAPPING_HOSTS_FILE, True),
+        (_NO_OUTER_HOST_MAPPING_HOSTS_FILE, False),
+        ("", False),
+        # The name may be an alias rather than the canonical name of its line.
+        (f"172.17.0.1 gateway {OUTER_HOST_HOSTNAME_IN_CONTAINER}\n", True),
+        # A commented-out mapping resolves nothing.
+        (f"# 172.17.0.1 {OUTER_HOST_HOSTNAME_IN_CONTAINER}\n", False),
+        # The name must be a whole field, not a prefix of a longer one.
+        (f"172.17.0.1 {OUTER_HOST_HOSTNAME_IN_CONTAINER}.example\n", False),
+        # An address alone maps nothing.
+        (f"{OUTER_HOST_HOSTNAME_IN_CONTAINER}\n", False),
+    ],
+)
+def test_does_hosts_file_name_outer_host_recognizes_a_docker_add_host_mapping(
+    hosts_file_content: str, is_expected_to_resolve: bool
+) -> None:
+    assert _does_hosts_file_name_outer_host(hosts_file_content) is is_expected_to_resolve
+
+
+def _write_hosts_file(tmp_path: Path, content: str) -> Path:
+    hosts_file_path = tmp_path / "hosts"
+    hosts_file_path.write_text(content)
+    return hosts_file_path
+
+
+def test_fall_back_to_reverse_tunneled_gateway_url_rewrites_outer_host_url_when_container_lacks_mapping(
+    local_host: Host, tmp_path: Path
+) -> None:
+    """A VPS-gateway agent in a container without the mapping is pointed at the URL the reverse tunnel serves."""
+    local_host.set_env_vars(
+        prepare_agent_latchkey(None, is_tunneled=True, gateway_location=LatchkeyGatewayLocation.VPS).env
+    )
+    hosts_file_path = _write_hosts_file(tmp_path, _NO_OUTER_HOST_MAPPING_HOSTS_FILE)
+
+    did_fall_back = fall_back_to_reverse_tunneled_gateway_url(local_host, hosts_file_path)
+
+    assert did_fall_back is True
+    assert local_host.get_env_var(ENV_LATCHKEY_GATEWAY) == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+    # Only the URL changes: the rest of the wiring is what a VPS-gateway agent needs either way.
+    assert local_host.get_env_var(ENV_MINDS_VIA_DESKTOP_URL_PREFIX) == VIA_DESKTOP_URL_PREFIX
+    assert local_host.get_env_var(ENV_LATCHKEY_DISABLE_COUNTING) == "1"
+
+
+def test_fall_back_to_reverse_tunneled_gateway_url_keeps_outer_host_url_when_container_resolves_it(
+    local_host: Host, tmp_path: Path
+) -> None:
+    vps_gateway_env = prepare_agent_latchkey(None, is_tunneled=True, gateway_location=LatchkeyGatewayLocation.VPS).env
+    local_host.set_env_vars(vps_gateway_env)
+    hosts_file_path = _write_hosts_file(tmp_path, _OUTER_HOST_MAPPING_HOSTS_FILE)
+
+    did_fall_back = fall_back_to_reverse_tunneled_gateway_url(local_host, hosts_file_path)
+
+    assert did_fall_back is False
+    assert (
+        local_host.get_env_var(ENV_LATCHKEY_GATEWAY)
+        == f"http://{OUTER_HOST_HOSTNAME_IN_CONTAINER}:{AGENT_SIDE_LATCHKEY_PORT}"
+    )
+    assert local_host.get_env_vars() == dict(vps_gateway_env)
+
+
+def test_fall_back_to_reverse_tunneled_gateway_url_leaves_a_desktop_gateway_url_alone_without_reading_hosts_file(
+    local_host: Host, tmp_path: Path
+) -> None:
+    """A loopback URL already names what the reverse tunnel serves, so the hosts file is not even consulted."""
+    desktop_gateway_env = prepare_agent_latchkey(
+        None, is_tunneled=True, gateway_location=LatchkeyGatewayLocation.DESKTOP
+    ).env
+    local_host.set_env_vars(desktop_gateway_env)
+    missing_hosts_file_path = tmp_path / "missing-hosts"
+
+    did_fall_back = fall_back_to_reverse_tunneled_gateway_url(local_host, missing_hosts_file_path)
+
+    assert did_fall_back is False
+    assert local_host.get_env_vars() == dict(desktop_gateway_env)
+
+
+def test_fall_back_to_reverse_tunneled_gateway_url_is_a_no_op_for_a_host_without_latchkey_wiring(
+    local_host: Host, tmp_path: Path
+) -> None:
+    local_host.set_env_vars({"UNRELATED_VAR": uuid4().hex})
+    missing_hosts_file_path = tmp_path / "missing-hosts"
+
+    did_fall_back = fall_back_to_reverse_tunneled_gateway_url(local_host, missing_hosts_file_path)
+
+    assert did_fall_back is False
+    assert ENV_LATCHKEY_GATEWAY not in local_host.get_env_vars()

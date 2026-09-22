@@ -56,12 +56,15 @@ class _StubOuter(MutableModel):
         self.written.append(_Written(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
 
 
+# The docker bridge address the caller resolved for the stub VM.
+_LISTEN_HOST = "172.17.0.1"
+
+
 def _outer(result: CommandResult | None = None, is_local: bool = False) -> OuterHostInterface:
-    # Default: every command succeeds and the bridge-address probe resolves, so
-    # provisioning runs to completion. Tests that exercise a failure pass their
-    # own result.
+    # Default: every command succeeds, so provisioning runs to completion.
+    # Tests that exercise a failure pass their own result.
     if result is None:
-        result = CommandResult(stdout="172.17.0.1\n", stderr="", success=True)
+        result = CommandResult(stdout="", stderr="", success=True)
     stub = _StubOuter(result=result, is_local=is_local)
     return cast(OuterHostInterface, stub)
 
@@ -72,7 +75,7 @@ def _stub(outer: OuterHostInterface) -> _StubOuter:
 
 def test_provision_installs_pins_version_and_verifies_checksum() -> None:
     outer = _outer()
-    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), _LISTEN_HOST)
     install_command = _stub(outer).recorded[0].command
     assert OWNER_EXEC_VERSION in install_command
     assert "sha256sum -c" in install_command
@@ -81,7 +84,7 @@ def test_provision_installs_pins_version_and_verifies_checksum() -> None:
 
 def test_provision_writes_vm_audience_config() -> None:
     outer = _outer()
-    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), _LISTEN_HOST)
     config = next(w for w in _stub(outer).written if w.path.endswith("config.toml"))
     text = config.content.decode("utf-8")
     assert 'role = "vm"' in text
@@ -92,28 +95,19 @@ def test_provision_writes_vm_audience_config() -> None:
     assert config.is_atomic is True
 
 
-def test_provision_binds_to_the_resolved_docker_bridge_address() -> None:
-    # When the docker bridge address resolves, the daemon binds there (off a
-    # VPS's public interface) rather than 0.0.0.0.
-    outer = _outer(result=CommandResult(stdout="172.17.0.1\n", stderr="", success=True))
-    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+def test_provision_binds_to_the_given_docker_bridge_address() -> None:
+    # The daemon binds the bridge address the caller resolved (off a VPS's
+    # public interface) rather than 0.0.0.0, and does not probe for it itself.
+    outer = _outer()
+    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), "172.18.0.1")
     config = next(w for w in _stub(outer).written if w.path.endswith("config.toml"))
-    assert 'listen_host = "172.17.0.1"' in config.content.decode("utf-8")
-
-
-def test_provision_fails_closed_when_bridge_unresolved() -> None:
-    # If the docker bridge address cannot be resolved, provisioning must fail
-    # rather than bind a wildcard (which on a VPS would be publicly reachable).
-    outer = _outer(result=CommandResult(stdout="", stderr="", success=True))
-    with pytest.raises(OwnerExecVmError, match="wildcard"):
-        provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
-    # Nothing was written, so no wildcard-bound config exists.
-    assert not any(w.path.endswith("config.toml") for w in _stub(outer).written)
+    assert 'listen_host = "172.18.0.1"' in config.content.decode("utf-8")
+    assert not any("addr show docker0" in r.command for r in _stub(outer).recorded)
 
 
 def test_provision_writes_restart_always_systemd_unit_with_memory_cap() -> None:
     outer = _outer()
-    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), _LISTEN_HOST)
     unit = next(w for w in _stub(outer).written if w.path.endswith("owner-exec-vm.service"))
     text = unit.content.decode("utf-8")
     assert "Restart=always" in text
@@ -123,13 +117,13 @@ def test_provision_writes_restart_always_systemd_unit_with_memory_cap() -> None:
 
 def test_provision_starts_the_daemon() -> None:
     outer = _outer()
-    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), _LISTEN_HOST)
     assert any("systemctl" in r.command and "owner-exec-vm" in r.command for r in _stub(outer).recorded)
 
 
 def test_provision_is_a_no_op_on_a_local_outer() -> None:
     outer = _outer(is_local=True)
-    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+    provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), _LISTEN_HOST)
     assert _stub(outer).recorded == []
     assert _stub(outer).written == []
 
@@ -137,4 +131,4 @@ def test_provision_is_a_no_op_on_a_local_outer() -> None:
 def test_provision_raises_when_install_fails() -> None:
     outer = _outer(result=CommandResult(stdout="", stderr="no arch build", success=False))
     with pytest.raises(OwnerExecVmError, match="install owner-exec"):
-        provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"))
+        provision_owner_exec_vm(outer, HostId("host-0123456789abcdef0123456789abcdef"), _LISTEN_HOST)

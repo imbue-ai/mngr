@@ -1,6 +1,6 @@
 """High-level helpers for wiring latchkey into a freshly-created agent.
 
-The lifecycle for a new agent has three latchkey-aware steps:
+The lifecycle for a new agent has four latchkey-aware steps:
 
 1. *Before* ``mngr create``: allocate an opaque permissions handle,
    materialize it with a deny-by-default baseline, and assemble the env vars
@@ -9,15 +9,23 @@ The lifecycle for a new agent has three latchkey-aware steps:
    the remote gateway's synchronized default permissions file instead. See
    :func:`prepare_agent_latchkey`.
 
-2. *After* ``mngr create`` returns the canonical host id: replace the
+2. *Inside* ``mngr create``, once the host exists and its env is written but
+   before the agent starts (the plugin's ``on_host_created`` hook): a
+   VPS-gateway agent whose container cannot resolve the outer host is pointed
+   back at the loopback URL the reverse tunnel serves. See
+   :func:`fall_back_to_reverse_tunneled_gateway_url`.
+
+3. *After* ``mngr create`` returns the canonical host id: replace the
    opaque handle with a symlink to the canonical host-keyed
    ``latchkey_permissions.json`` so the desktop's permission-grant flow
    writes to the canonical path while the gateway reads through the
    symlink. See :func:`finalize_host_permissions`.
 
-3. (Out of scope here.) When the agent is later discovered, the
-   :class:`LatchkeyDiscoveryHandler` ensures the shared gateway is up
-   and reverse-tunnels it into the agent for non-DEV launches.
+4. (Out of scope here.) When the agent is later discovered, the
+   :class:`LatchkeyDiscoveryHandler` wires up the gateway the agent was
+   created for: the shared desktop gateway, reverse-tunneled into a
+   desktop-gateway agent, or the VPS-resident gateway, provisioned where a
+   VPS-gateway agent's container reaches it over its docker bridge.
 
 Both helpers raise on failure (``LatchkeyError`` from the upstream
 CLI, ``LatchkeyStoreError`` from on-disk persistence). Callers decide
@@ -36,7 +44,10 @@ from collections.abc import Mapping
 from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import assert_never
+from urllib.parse import urlsplit
 
+from loguru import logger
 from pydantic import Field
 from pydantic import JsonValue
 
@@ -44,8 +55,11 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
+from imbue.imbue_common.pure import pure
+from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import OUTER_HOST_HOSTNAME_IN_CONTAINER
 from imbue.mngr_latchkey.baseline_permissions import ADDITIONAL_SERVICE_SCHEMAS
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.baseline_permissions import MINDS_API_PROXY_PER_AGENT_PATH_PREFIX
@@ -124,6 +138,87 @@ class LatchkeyGatewayLocation(UpperCaseStrEnum):
 
     DESKTOP = auto()
     VPS = auto()
+
+
+# The host in the ``LATCHKEY_GATEWAY`` URL of an agent that reaches its gateway
+# over a reverse SSH tunnel: the tunnel binds the agent's own loopback.
+_REVERSE_TUNNELED_GATEWAY_HOST: Final[str] = "127.0.0.1"
+
+# Where a container's name resolution is decided: docker materializes every
+# creation-time ``--add-host`` mapping here.
+CONTAINER_HOSTS_FILE_PATH: Final[Path] = Path("/etc/hosts")
+
+
+def _tunneled_gateway_host(gateway_location: LatchkeyGatewayLocation) -> str:
+    """The host in a tunneled agent's fixed ``LATCHKEY_GATEWAY`` URL.
+
+    A desktop gateway is reverse-tunneled onto the agent's own loopback; a VPS
+    gateway listens on the outer host's docker bridge, which the container
+    reaches by docker's name for its host.
+    """
+    match gateway_location:
+        case LatchkeyGatewayLocation.DESKTOP:
+            return _REVERSE_TUNNELED_GATEWAY_HOST
+        case LatchkeyGatewayLocation.VPS:
+            return OUTER_HOST_HOSTNAME_IN_CONTAINER
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+@pure
+def _build_tunneled_gateway_url(gateway_host: str) -> str:
+    return f"http://{gateway_host}:{AGENT_SIDE_LATCHKEY_PORT}"
+
+
+@pure
+def _does_hosts_file_name_outer_host(hosts_file_content: str) -> bool:
+    """Whether a ``hosts(5)`` file maps :data:`OUTER_HOST_HOSTNAME_IN_CONTAINER` to an address."""
+    for line in hosts_file_content.splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) >= 2 and OUTER_HOST_HOSTNAME_IN_CONTAINER in fields[1:]:
+            return True
+    return False
+
+
+# CLEANUP: drop this fallback (and the ``on_host_created`` hook that applies it)
+# together with the VPS->container reverse tunnel in ``remote/provisioning.py``,
+# once no outer host that creates containers without the
+# ``host.docker.internal`` mapping remains.
+def fall_back_to_reverse_tunneled_gateway_url(
+    host: OnlineHostInterface,
+    hosts_file_path: Path,
+    # whether the host's ``LATCHKEY_GATEWAY`` was rewritten
+) -> bool:
+    """Point an agent whose container cannot resolve the outer host at the reverse-tunneled gateway URL.
+
+    :func:`prepare_agent_latchkey` decides ``LATCHKEY_GATEWAY`` before the host
+    exists, from the gateway location alone, while whether the container
+    resolves ``host.docker.internal`` is decided by the outer host that created
+    it: one that predates the mapping creates containers without it, and a
+    pre-baked container cannot gain it later. Called once the host env is
+    written and before the agent starts, so an agent in such a container names
+    its own loopback instead, where the remote provisioning pass serves the
+    gateway over the reverse tunnel it registers for exactly these containers.
+    A host whose URL does not name the outer host is left untouched without
+    reading the hosts file.
+    """
+    # The host env is read once and written back whole, so the rewrite costs
+    # one read and one write on a remote host rather than two reads.
+    env_vars = host.get_env_vars()
+    gateway_url = env_vars.get(ENV_LATCHKEY_GATEWAY)
+    if gateway_url is None or urlsplit(gateway_url).hostname != OUTER_HOST_HOSTNAME_IN_CONTAINER:
+        return False
+    if _does_hosts_file_name_outer_host(host.read_text_file(hosts_file_path)):
+        return False
+    tunneled_url = _build_tunneled_gateway_url(_REVERSE_TUNNELED_GATEWAY_HOST)
+    logger.info(
+        "Container of host {} cannot resolve {}; pointing its agents at the reverse-tunneled gateway URL {}",
+        host.get_name(),
+        OUTER_HOST_HOSTNAME_IN_CONTAINER,
+        tunneled_url,
+    )
+    host.set_env_vars({**env_vars, ENV_LATCHKEY_GATEWAY: tunneled_url})
+    return True
 
 
 # Exact prefix/suffix wrapping each agent id inside an ``anyOf`` entry's
@@ -379,13 +474,21 @@ def prepare_agent_latchkey(
     ``is_tunneled`` selects how the agent reaches the gateway:
 
     * ``True`` (containers, VMs, VPS, leased hosts): the agent's
-      ``LATCHKEY_GATEWAY`` points at the constant agent-side loopback
-      ``http://127.0.0.1:<AGENT_SIDE_LATCHKEY_PORT>``. A reverse SSH
-      tunnel set up at agent-discovery time bridges this to the
-      gateway's dynamic host port. The gateway is *not* started here --
-      the discovery handler does that on its own when the agent shows
-      up. (Starting the gateway eagerly would force every ``mngr create``
-      to spawn a gateway even for tests that never exercise latchkey.)
+      ``LATCHKEY_GATEWAY`` is a constant URL on ``AGENT_SIDE_LATCHKEY_PORT``.
+      A desktop-gateway agent gets it on its own loopback
+      (``http://127.0.0.1:<port>``), which a reverse SSH tunnel set up at
+      agent-discovery time bridges to the gateway's dynamic host port. A
+      VPS-gateway agent gets it on its outer host
+      (``http://host.docker.internal:<port>``), where the VPS-resident
+      gateway listens on the docker bridge; the container resolves that
+      name because the VPS provider creates it with the matching
+      ``--add-host`` mapping (a container created without it is pointed
+      back at the loopback URL inside ``mngr create``; see
+      :func:`fall_back_to_reverse_tunneled_gateway_url`). The gateway is
+      *not* started here -- the discovery handler does that on its own when
+      the agent shows up. (Starting the gateway eagerly would force every
+      ``mngr create`` to spawn a gateway even for tests that never exercise
+      latchkey.)
       ``concurrency_group`` is ignored in this mode.
     * ``False`` (DEV / on-bare-host agents): the agent runs on the same
       host as the gateway and reaches it directly. We have to start the
@@ -428,7 +531,7 @@ def prepare_agent_latchkey(
     if not is_tunneled and gateway_location is LatchkeyGatewayLocation.VPS:
         raise LatchkeyError("A VPS latchkey gateway requires a tunneled host")
     if is_tunneled:
-        gateway_url = f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+        gateway_url = _build_tunneled_gateway_url(_tunneled_gateway_host(gateway_location))
     elif latchkey is None:
         # No live port to inject and no Latchkey to ask -- caller asked
         # for the empty case.

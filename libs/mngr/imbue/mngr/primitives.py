@@ -20,6 +20,14 @@ from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import PositiveInt
 
+# Hostname at which a container reaches its outer host (the machine running its
+# docker daemon). Docker's conventional name for the host: Docker Desktop
+# resolves it natively, and on Linux a container created with
+# ``--add-host host.docker.internal:host-gateway`` resolves it to the daemon's
+# bridge address. Shared by the provider that creates containers with that
+# mapping and the plugins that bind outer-host services at the bridge address.
+OUTER_HOST_HOSTNAME_IN_CONTAINER: Final[str] = "host.docker.internal"
+
 # === Enums ===
 
 

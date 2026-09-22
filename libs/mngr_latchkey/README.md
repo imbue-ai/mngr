@@ -22,6 +22,13 @@ mngr latchkey admin-jwt          # mint a wildcard permissions-override JWT for 
 mngr latchkey gateway-info       # print the running gateway's URL + listen password as JSON
 ```
 
+The plugin also hooks `mngr create`: once a new host's env is written and
+before any agent starts, a host whose `LATCHKEY_GATEWAY` names
+`host.docker.internal` but whose container cannot resolve that name (one
+created before containers carried the mapping) is pointed at
+`http://127.0.0.1:1989` instead, where the reverse SSH tunnel serves the
+gateway.
+
 `mngr latchkey forward` spawns the shared gateway eagerly on startup
 and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). Any in-flight
 agents lose their gateway endpoint until the next `mngr latchkey
@@ -584,9 +591,13 @@ for the agent's `latchkey_permissions.json`.
 
 ### Remote desktop-gateway proxy extension
 
-Remote workspaces expose the VPS-resident gateway at the same
-`http://127.0.0.1:1989` URL local workspaces use. Third-party requests terminate
-there so the VPS can inject the credentials its own store holds. The VPS gateway
+Remote workspaces reach the VPS-resident gateway at
+`http://host.docker.internal:1989`: the gateway binds the VPS's docker bridge
+address (never a public interface), and the workspace container resolves that
+name to it because the VPS provider creates every container with the matching
+`--add-host` mapping. It is the same fixed port local workspaces use on their
+own loopback. Third-party requests terminate there so the VPS can inject the
+credentials its own store holds. The VPS gateway
 loads one dedicated `desktop_gateway_proxy.mjs` extension for the endpoint
 families whose state remains on the user's computer: `/permissions`,
 `/permission-requests`, and `/minds-api-proxy` (including all subpaths). It
@@ -856,7 +867,9 @@ setup = prepare_agent_latchkey(
 )
 # setup.env: LATCHKEY_GATEWAY[_PASSWORD,_DISABLE_COUNTING]
 # Desktop-gateway setups also include LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE.
-# LATCHKEY_GATEWAY is always http://127.0.0.1:1989 for tunneled workspaces.
+# LATCHKEY_GATEWAY is a constant per location: http://127.0.0.1:1989 for a
+# desktop gateway (reverse-tunneled in), http://host.docker.internal:1989 for
+# a VPS gateway (reached over the container's docker bridge).
 # Discovery realizes the desktop or VPS location selected before creation.
 # setup.opaque_permissions_path: pass to finalize_host_permissions later
 

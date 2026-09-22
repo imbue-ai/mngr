@@ -10,15 +10,19 @@ credentials at all:
    ``ssh://root@127.0.0.1:<port>`` makes mngr treat this machine's own Docker
    daemon as a *remote* outer host. Latchkey's remote-vs-local decision is
    purely connector-based (``OuterHost.is_local``), so every genuinely-remote
-   code path runs: VPS gateway provisioning, the VPS->container reverse
-   tunnel, and the credential/permission remote-state sync.
+   code path runs: VPS gateway provisioning and the credential/permission
+   remote-state sync. The workspace container is created with the
+   ``host.docker.internal`` mapping the VPS provider adds to every container
+   (passed as a start arg here, since the docker provider does not), so it
+   reaches the gateway over its docker bridge exactly as a VPS workspace does.
 2. A workspace (Docker host + agent) is created through the same CLI flow
    minds' agent creator uses: ``mngr latchkey create-agent-env`` ->
    ``mngr create --host-env ...`` -> ``mngr latchkey link-permissions``.
 3. ``mngr latchkey forward`` (the supervisor minds spawns) discovers the
-   agent, provisions the VPS-resident gateway on the workspace's one fixed
-   gateway URL, tunnels the desktop gateway onto the VPS for extension
-   forwarding, and seeds the machine's own permissions file.
+   agent, provisions the VPS-resident gateway on the VPS's docker bridge
+   address (the workspace's one fixed gateway URL names it), tunnels the
+   desktop gateway onto the VPS for extension forwarding, and seeds the
+   machine's own permissions file.
 
 Asserted end-to-end, from *inside* the workspace via ``mngr exec``:
 
@@ -27,7 +31,8 @@ a. ``GET /permissions/self`` succeeds on ``$LATCHKEY_GATEWAY`` with the
    desktop-forwarding extension.
 b. A native ``/gateway/...`` request is served by that same VPS gateway and
    its listen password is wired to the desktop-derived value. Nothing listens
-   on the retired port 1990.
+   on the retired port 1990, nothing is tunneled onto the container's own
+   loopback port, and no VPS->container reverse tunnel is registered.
 c. Pushing the workspace's state to its machine the way the desktop app does
    -- open the workspace's outer host through its provider and hand the
    machine a grant (the ``slack-api`` scope granted in the local canonical
@@ -73,6 +78,7 @@ from imbue.minds.desktop_client.latchkey.machine_access import _load_provider_co
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.main import reset_plugin_manager
 from imbue.mngr.primitives import HostId
+from imbue.mngr.primitives import OUTER_HOST_HOSTNAME_IN_CONTAINER
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.registry import reset_backend_registry
 from imbue.mngr.utils.polling import poll_until
@@ -91,12 +97,15 @@ from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote.provisioning import LATCHKEY_VERSION
+from imbue.mngr_latchkey.remote.provisioning import SUPERVISOR_CONFD_DIR
+from imbue.mngr_latchkey.remote.provisioning import TUNNEL_CONF_FILENAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_vps.container_setup import OUTER_HOST_ADD_HOST_ARGS
 
 # Opt-in gate; see the module docstring for why this is not enabled by default.
 _OPT_IN_ENV_VAR: Final[str] = "MNGR_LATCHKEY_E2E_TESTS"
@@ -127,6 +136,16 @@ pytestmark = [
 # The fake VPS is this machine's loopback, reached as root over the throwaway sshd.
 _VPS_SSH_HOST: Final[str] = "127.0.0.1"
 
+# The one fixed gateway URL a VPS workspace carries: its outer host, by docker's
+# conventional name for it, on the fixed agent-side port.
+_WORKSPACE_GATEWAY_URL: Final[str] = f"http://{OUTER_HOST_HOSTNAME_IN_CONTAINER}:{AGENT_SIDE_LATCHKEY_PORT}"
+
+# The ``docker run`` mapping that makes the container resolve that name, as a
+# single start arg. The VPS provider adds it to every container it creates; the
+# docker provider this test stands in a VPS with does not, so the create passes
+# it explicitly.
+_OUTER_HOST_START_ARG: Final[str] = "=".join(OUTER_HOST_ADD_HOST_ARGS)
+
 # Paths the remote-gateway provisioning writes on the "VPS" (= this machine,
 # as root). Mirrors mngr_latchkey.remote.provisioning's remote layout: the remote
 # LATCHKEY_DIRECTORY is ``$HOME/.latchkey`` for the root ssh user.
@@ -134,6 +153,9 @@ _VPS_LATCHKEY_DIR: Final[str] = "/root/.latchkey"
 _VPS_PERMISSIONS_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/permissions.json"
 _VPS_CREDENTIALS_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/credentials.json.enc"
 _VPS_SUPERVISOR_CONF_GLOB: Final[str] = "/etc/supervisor/conf.d/latchkey-*.conf"
+# The reverse-tunnel drop-in provisioning registers only for a container that
+# cannot resolve the outer host; this test's container can, so it must not exist.
+_VPS_TUNNEL_CONF_PATH: Final[str] = str(SUPERVISOR_CONFD_DIR / TUNNEL_CONF_FILENAME)
 
 # Latchkey scope granted in step (c). Must be a scope the bundled
 # services.json catalog maps back to the ``slack`` service, so the
@@ -157,12 +179,15 @@ _POLL_INTERVAL_SECONDS: Final[float] = 3.0
 # the status is extractable from ``mngr exec`` output even if mngr adds its
 # own lines around the remote command's stdout. The pattern deliberately
 # excludes ``000``: that is curl's ``%{http_code}`` placeholder for "no HTTP
-# transaction completed" (e.g. connection refused while the reverse tunnel is
+# transaction completed" (e.g. connection refused while the VPS gateway is
 # still being provisioned), which the pollers must treat as not-yet-reachable
 # rather than as a response. The probes cannot key off exit codes instead:
 # ``mngr exec`` does not reliably propagate the remote command's exit status.
 _HTTP_STATUS_MARKER: Final[str] = "LK_E2E_HTTP_STATUS:"
 _HTTP_STATUS_PATTERN: Final[re.Pattern[str]] = re.compile(re.escape(_HTTP_STATUS_MARKER) + r"([1-9]\d{2})")
+# What a probe of a port nothing listens on prints: the marker (so the probe
+# is known to have run) followed by curl's no-transaction placeholder.
+_CLOSED_PORT_STATUS: Final[str] = f"{_HTTP_STATUS_MARKER}000"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -623,14 +648,25 @@ def _poll_workspace_probe(
     return last_result[-1]
 
 
-def _curl_gateway_command(port: int, headers: dict[str, str], request_path: str) -> str:
-    """Build an in-container curl command against a loopback gateway port.
+def _curl_gateway_command(gateway_url: str, headers: dict[str, str], request_path: str) -> str:
+    """Build an in-container curl command against a gateway URL.
 
     ``-f`` makes 4xx/5xx exit non-zero so pollers can key off the exit code;
     the body is printed on success.
     """
     header_args = " ".join(f"-H {shlex.quote(f'{name}: {value}')}" for name, value in headers.items())
-    return f"curl -fsS -m 10 {header_args} http://127.0.0.1:{port}{request_path}"
+    return f"curl -fsS -m 10 {header_args} {gateway_url}{request_path}"
+
+
+def _closed_port_probe_command(port: int) -> str:
+    """Build an in-container curl command whose output says whether anything answers on the container's loopback ``port``.
+
+    Prints ``_CLOSED_PORT_STATUS`` when nothing listens there (curl still prints
+    its ``-w`` line on a refused connection) and a real status behind the
+    marker when something does, so the caller reads the output rather than the
+    exit status ``mngr exec`` does not reliably propagate.
+    """
+    return f"curl -sS -m 2 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' http://127.0.0.1:{port}/"
 
 
 def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: Path) -> None:
@@ -679,7 +715,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             agent_env_payload = json.loads(agent_env_result.stdout.strip().splitlines()[-1])
             latchkey_env: dict[str, str] = agent_env_payload["env"]
             opaque_path = agent_env_payload["opaque_permissions_path"]
-            assert latchkey_env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
+            assert latchkey_env[ENV_LATCHKEY_GATEWAY] == _WORKSPACE_GATEWAY_URL
             assert "LATCHKEY_GATEWAY_SECONDARY" not in latchkey_env
             assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in latchkey_env
 
@@ -700,6 +736,8 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 "--no-connect",
                 "--format",
                 "jsonl",
+                "--start-arg",
+                _OUTER_HOST_START_ARG,
                 *host_env_args,
                 "--",
                 "sleep",
@@ -730,7 +768,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert env_probe.returncode == 0, f"printenv probe failed:\n{env_probe.stderr}"
             # mngr exec appends a "Command succeeded on agent ..." status line
             # to stdout, so the env value is the first line only.
-            assert env_probe.stdout.splitlines()[0].strip() == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}", (
+            assert env_probe.stdout.splitlines()[0].strip() == _WORKSPACE_GATEWAY_URL, (
                 f"unexpected {ENV_LATCHKEY_GATEWAY} value:\n{env_probe.stdout}"
             )
 
@@ -756,7 +794,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
 
             # -- (a) the VPS gateway forwards desktop-owned extension routes --
             desktop_self_command = _curl_gateway_command(
-                AGENT_SIDE_LATCHKEY_PORT,
+                _WORKSPACE_GATEWAY_URL,
                 {"X-Latchkey-Gateway-Password": password},
                 "/permissions/self",
             )
@@ -785,7 +823,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             vps_gateway_probe_command = (
                 f"curl -sS -m 10 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' "
                 f"-H {shlex.quote(f'X-Latchkey-Gateway-Password: {password}')} "
-                f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}/gateway/https://example.com/"
+                f"{_WORKSPACE_GATEWAY_URL}/gateway/https://example.com/"
             )
             vps_gateway_probe = _poll_workspace_probe(
                 env,
@@ -797,7 +835,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             )
             good_password_status_match = _HTTP_STATUS_PATTERN.search(vps_gateway_probe.stdout)
             assert good_password_status_match is not None, (
-                f"VPS gateway never became reachable on 127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT} inside the workspace:\n"
+                f"VPS gateway never became reachable at {_WORKSPACE_GATEWAY_URL} inside the workspace:\n"
                 f"stdout:\n{vps_gateway_probe.stdout}\nstderr:\n{vps_gateway_probe.stderr}\n"
                 f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
@@ -806,7 +844,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             wrong_password_command = (
                 f"curl -sS -m 10 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' "
                 f"-H {shlex.quote('X-Latchkey-Gateway-Password: definitely-wrong-95173')} "
-                f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}/gateway/https://example.com/"
+                f"{_WORKSPACE_GATEWAY_URL}/gateway/https://example.com/"
             )
             wrong_password_probe = _exec_in_workspace(env, repo, agent_address, wrong_password_command)
             wrong_password_status_match = _HTTP_STATUS_PATTERN.search(wrong_password_probe.stdout)
@@ -818,13 +856,11 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 "VPS gateway answered identical status codes for right and wrong gateway passwords "
                 f"({good_password_status_match.group(1)}); it is not enforcing the shared password"
             )
-            retired_port_probe = _exec_in_workspace(
-                env,
-                repo,
-                agent_address,
-                "curl -fsS -m 2 http://127.0.0.1:1990/ >/dev/null",
+            retired_port_probe = _exec_in_workspace(env, repo, agent_address, _closed_port_probe_command(1990))
+            assert _CLOSED_PORT_STATUS in retired_port_probe.stdout, (
+                "the retired secondary gateway port 1990 is still listening (or the probe did not run):\n"
+                f"stdout:\n{retired_port_probe.stdout}\nstderr:\n{retired_port_probe.stderr}"
             )
-            assert retired_port_probe.returncode != 0, "the retired secondary gateway port 1990 is still listening"
 
             # -- (c) the desktop's synchronous pushes and read of the machine --
             # Precondition: provisioning seeded the deny-all baseline
@@ -835,6 +871,23 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 poll_interval=_POLL_INTERVAL_SECONDS,
             )
             assert initial_sync_ok, f"provisioning never seeded {_VPS_PERMISSIONS_PATH} on the VPS"
+            # The provisioning pass is complete once the permissions file is
+            # seeded (it is written after the gateway is wired), so the route it
+            # took is settled: the container reached the gateway over its docker
+            # bridge, and no VPS->container reverse tunnel was registered nor
+            # anything tunneled onto the container's own loopback port.
+            assert _run_on_vps(ssh_config_path, f"test -f {_VPS_TUNNEL_CONF_PATH}").returncode != 0, (
+                f"provisioning registered the reverse tunnel {_VPS_TUNNEL_CONF_PATH} on the VPS for a container "
+                "that resolves its outer host"
+            )
+            loopback_port_probe = _exec_in_workspace(
+                env, repo, agent_address, _closed_port_probe_command(AGENT_SIDE_LATCHKEY_PORT)
+            )
+            assert _CLOSED_PORT_STATUS in loopback_port_probe.stdout, (
+                f"something is serving the container's own loopback port {AGENT_SIDE_LATCHKEY_PORT} (or the probe "
+                f"did not run); the workspace's gateway is reached at {_WORKSPACE_GATEWAY_URL} and nothing should "
+                f"be tunneled in:\nstdout:\n{loopback_port_probe.stdout}\nstderr:\n{loopback_port_probe.stderr}"
+            )
             initial_permissions = _run_on_vps(ssh_config_path, f"cat {_VPS_PERMISSIONS_PATH}")
             assert _GRANTED_SCOPE not in initial_permissions.stdout, (
                 f"VPS permissions already contain {_GRANTED_SCOPE} before the grant:\n{initial_permissions.stdout}"

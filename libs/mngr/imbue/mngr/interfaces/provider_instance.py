@@ -646,8 +646,10 @@ class ProviderInstanceInterface(MutableModel, ABC):
         Returns ``None`` by default, meaning the externally-routable port is also
         the outer-host-loopback port (callers fall back to that). Providers whose
         topology splits publish from connect (e.g. imbue_cloud slices) override
-        this so a service running *on the outer host* (the VPS-resident latchkey
-        gateway) can reverse-tunnel into the container on the correct port.
+        this so a service running *on the outer host* that still has to
+        reverse-tunnel into the container (the VPS-resident latchkey gateway, for
+        a container that predates its docker-bridge route) does so on the
+        correct port.
         """
         return None
 

@@ -5,11 +5,17 @@ Minds-managed agents access third-party services (Slack, GitHub, Google Drive,
 describes how the desktop client surfaces permission decisions to the user
 and how the agent receives the answer.
 
-Every workspace sees exactly one gateway at the same loopback URL. Local
-workspaces use the desktop-resident gateway. Remote workspaces use the
-VPS-resident gateway for third-party calls; its bundled forwarding extension
-proxies `/permissions`, `/permission-requests`, and `/minds-api-proxy` requests
-back to the desktop gateway over an SSH tunnel. This keeps the permission queue,
+Every workspace sees exactly one gateway at one fixed URL, decided when the
+workspace is created. Local workspaces use the desktop-resident gateway,
+reverse-tunneled onto their own loopback (`http://127.0.0.1:1989`). Remote
+workspaces use the VPS-resident gateway for third-party calls, reached over the
+container's docker bridge as `http://host.docker.internal:1989`; its bundled
+forwarding extension proxies `/permissions`, `/permission-requests`, and
+`/minds-api-proxy` requests back to the desktop gateway over an SSH tunnel. (A
+remote workspace whose container predates the `host.docker.internal` mapping,
+such as one adopted from a pool host baked by an older mngr, is pointed at
+`http://127.0.0.1:1989` when it is created and reaches the same VPS-resident
+gateway over a reverse SSH tunnel instead.) This keeps the permission queue,
 permissions files, and Minds API on the user's computer without requiring a
 second gateway URL or a different agent skill.
 

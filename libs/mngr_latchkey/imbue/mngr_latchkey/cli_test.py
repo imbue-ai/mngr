@@ -278,7 +278,8 @@ def test_create_agent_env_vps_location_omits_permissions_override(
 
     assert result.exit_code == 0, result.output
     env = json.loads(result.output)["env"]
-    assert env["LATCHKEY_GATEWAY"] == "http://127.0.0.1:1989"
+    # A VPS workspace reaches its gateway on its outer host, not on its own loopback.
+    assert env["LATCHKEY_GATEWAY"] == "http://host.docker.internal:1989"
     assert env["LATCHKEY_GATEWAY_PASSWORD"]
     assert "LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE" not in env
 

@@ -15,8 +15,9 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 
 Agents reach the Minds API via the latchkey gateway's bundled
 ``minds-api-proxy`` extension rather than over a per-agent reverse SSH
-tunnel; the supervisor handles the reverse SSH tunnel used to expose
-the gateway itself into each agent's container.
+tunnel; the supervisor wires a gateway into each agent's container (the
+desktop gateway reverse-tunneled in, or the VPS-resident gateway
+provisioned where the container reaches it over its docker bridge).
 """
 
 import os

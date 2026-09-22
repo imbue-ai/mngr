@@ -47,6 +47,7 @@ User Machine                              VPS
 - **SSH host keys via cloud-init**: Host keys are generated locally and injected into the VPS via cloud-init `user_data`, eliminating TOFU (trust-on-first-use).
 - **Per-host docker volume on a btrfs subvolume**: Each VPS has exactly one mngr-managed Docker named volume (`mngr-host-vol-<host_id_hex>`), created with `--driver=local --opt type=none --opt device=/mngr-btrfs/<host_id_hex> --opt o=bind`. The `device=` path is a real btrfs subvolume on a loop-mounted btrfs filesystem (image file `/var/lib/mngr-btrfs.img`, mounted at `/mngr-btrfs` via `/etc/fstab`), which makes the per-host data eligible for `btrfs subvolume snapshot -r` for consistent snapshots. mngr reads and writes metadata (`host_state.json`, `agents/<agent_id>.json`, `host_dir/`) directly on the subvolume by extracting `Options.device` from `docker volume inspect`. Docker itself keeps default `data-root=/var/lib/docker` and `storage-driver=overlay2` (on the ext4 root); only this single volume's storage lives on btrfs.
 - **Separate SSH keypairs**: The VPS and container each have their own SSH keypair for defense in depth.
+- **Outer host reachable by name**: Every container is created with `--add-host host.docker.internal:host-gateway`, so a service the VPS binds on its docker bridge address (the `mngr_latchkey` VPS-resident gateway) is reachable from inside the container as `host.docker.internal` without an address known at create time.
 
 ## Modules
 

@@ -214,7 +214,8 @@ def setup_forward_sentry(log_folder: Path) -> None:
         integrations=[],
         is_error_reporting_enabled=lambda: read_forward_sentry_consent(consent_file_path).report_unexpected_errors,
         s3_attachment_bucket=config.s3_attachment_bucket,
-        # The daemon reverse-tunnels the gateway into every agent via paramiko; its transport thread
+        # The daemon holds paramiko reverse tunnels (the desktop gateway into each local agent, and
+        # onto each VPS for its gateway's forwarding extension); paramiko's transport thread
         # logs ``Error reading SSH protocol banner`` (and similar) at ERROR whenever a target goes
         # offline and the health check retries. Ignore those stdlib loggers so Sentry is not flooded
         # with already-handled connection-failure noise -- exactly the flood this daemon produced.

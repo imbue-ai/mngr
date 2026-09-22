@@ -50,6 +50,10 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 # Stand-in for the key a machine keeps its own credential store under.
 MACHINE_KEY = "machine-key-5518"
 
+# The docker bridge address a stub machine resolves by default: where its
+# owner-exec daemon and latchkey gateway bind.
+DEFAULT_DOCKER_BRIDGE_ADDRESS = "172.17.0.1"
+
 # The variable block a single-round-trip machine script opens with: every
 # payload it carries is assigned to a ``_lk_*`` shell variable before the body.
 _SCRIPT_VARIABLE_LINE = re.compile(r"^(_lk_[a-z0-9_]+)=(.*)$")
@@ -89,6 +93,17 @@ class StubOuter(MutableModel):
         default=None, description="Pre-existing ~/.latchkey/config.json content on the VPS (None means absent)"
     )
     container_name: str = Field(default="mngr-ws", description="Container name returned for the 'docker ps' lookup")
+    docker_bridge_address: str = Field(
+        default=DEFAULT_DOCKER_BRIDGE_ADDRESS,
+        description="Address the docker-bridge probe resolves to; empty for a machine with no docker bridge.",
+    )
+    container_extra_hosts: tuple[str, ...] = Field(
+        default=("host.docker.internal:host-gateway",),
+        description=(
+            "The ``--add-host`` mappings the container was created with, as 'docker inspect' reports them. "
+            "Empty for a container created before the outer-host mapping existed."
+        ),
+    )
     is_remote_latchkey_dir_present: bool = Field(
         default=False,
         description="Whether ~/.latchkey already exists on the VPS (i.e. an older build provisioned it)",
@@ -127,17 +142,22 @@ class StubOuter(MutableModel):
     ) -> CommandResult:
         self.recorded.append(RecordedCommand(command=command, timeout_seconds=timeout_seconds))
         # Only the dedicated $HOME-resolution probe gets the home response; the
-        # container lookup returns the configured name; the owner-exec vm
-        # docker-bridge probe resolves to a bridge address (so the vm daemon
-        # provisioning that provision_remote_gateway now runs succeeds instead of
-        # failing closed); everything else (install/gateway/keypair/tunnel
-        # scripts) returns the configured result.
+        # container lookup returns the configured name and the container
+        # inspection its creation-time extra hosts; the docker-bridge probe
+        # (owner-exec vm daemon + gateway listen host) resolves to a bridge
+        # address, so neither fails closed unless the configured result is a
+        # failure; everything else (install/gateway/keypair/tunnel scripts)
+        # returns the configured result.
         if command.strip() == 'echo "$HOME"':
             return CommandResult(stdout=f"{self.home}\n", stderr="", success=True)
         if command.startswith("docker ps"):
             return CommandResult(stdout=f"{self.container_name}\n", stderr="", success=True)
-        if "addr show docker0" in command:
-            return CommandResult(stdout="172.17.0.1\n", stderr="", success=True)
+        if command.startswith("docker inspect") and self.result.success:
+            # ``docker inspect`` renders a container's absent extra hosts as ``null``.
+            extra_hosts_json = json.dumps(list(self.container_extra_hosts)) if self.container_extra_hosts else "null"
+            return CommandResult(stdout=f"{extra_hosts_json}\n", stderr="", success=True)
+        if "addr show docker0" in command and self.result.success:
+            return CommandResult(stdout=f"{self.docker_bridge_address}\n", stderr="", success=True)
         if _SCRIPT_OUTCOME_PREFIX in command:
             return self._run_machine_script(command)
         if "latchkey auth" in command:

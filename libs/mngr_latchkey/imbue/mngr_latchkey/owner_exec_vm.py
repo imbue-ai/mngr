@@ -30,10 +30,10 @@ from imbue.mngr_latchkey.core import LatchkeyError
 OWNER_EXEC_VERSION: Final[str] = "v0.2.2"
 OWNER_EXEC_REPO: Final[str] = "imbue-ai/owner-exec"
 
-# The port the daemon listens on. It binds at the address resolved by
-# _resolve_listen_host (the docker bridge gateway, so the workspace container
-# reaches it while nothing off-box can); the request signature is the gate
-# regardless.
+# The port the daemon listens on. It binds at the docker bridge address the
+# caller resolved (see :mod:`imbue.mngr_latchkey.docker_bridge`: the agent's
+# container reaches it while nothing off-box can); the request signature is the
+# gate regardless.
 VM_EXEC_PORT: Final[int] = 8794
 
 _INSTALL_PATH: Final[str] = "/usr/local/bin/owner-exec"
@@ -91,38 +91,6 @@ def _build_install_script(version: str) -> str:
     )
 
 
-# Resolve the docker bridge address on the VM (the container's default gateway,
-# e.g. 172.17.0.1). The daemon binds ONLY this address, so it lives on the
-# internal docker bridge and is never reachable on the VM's public interface --
-# critical on a VPS, where the VM itself has a public IP. It must never fall
-# back to a wildcard bind (0.0.0.0 / ::), so an unresolvable bridge address
-# fails provisioning outright rather than exposing the daemon publicly.
-_RESOLVE_BRIDGE_ADDRESS_SCRIPT: Final[str] = (
-    "ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1"
-)
-
-# Wildcard bind addresses the daemon must never be configured with.
-_WILDCARD_LISTEN_HOSTS: Final[frozenset[str]] = frozenset({"", "0.0.0.0", "::", "[::]", "*"})
-
-
-def _resolve_listen_host(host: OuterHostInterface) -> str:
-    """The docker bridge address to bind to. Raises rather than binding a wildcard.
-
-    The container reaches the daemon at exactly this address (its default
-    gateway). If it cannot be resolved we fail closed -- binding a wildcard on
-    a VPS would put the daemon on the public interface, which the signature
-    gate makes survivable but which we categorically do not want.
-    """
-    result = host.execute_idempotent_command(_RESOLVE_BRIDGE_ADDRESS_SCRIPT, timeout_seconds=_COMMAND_TIMEOUT_SECONDS)
-    bridge_address = result.stdout.strip()
-    if not result.success or bridge_address in _WILDCARD_LISTEN_HOSTS:
-        raise OwnerExecVmError(
-            "Could not resolve the docker bridge address on VM {}; refusing to bind owner-exec to a "
-            "public/wildcard interface (stderr: {})".format(host.get_name(), result.stderr.strip() or "empty output")
-        )
-    return bridge_address
-
-
 def _build_config_toml(host_id: HostId, listen_host: str) -> str:
     """The vm-role daemon config: audience vm:<host-id>, grants off, host-key signing."""
     audience = f"vm:{host_id}"
@@ -165,9 +133,13 @@ def _build_systemd_unit() -> str:
     )
 
 
-def provision_owner_exec_vm(host: OuterHostInterface, host_id: HostId) -> None:
+def provision_owner_exec_vm(host: OuterHostInterface, host_id: HostId, listen_host: str) -> None:
     """Install + configure + (re)start the VM-resident owner-exec daemon.
 
+    ``listen_host`` is the outer's docker bridge address (see
+    :func:`imbue.mngr_latchkey.docker_bridge.resolve_docker_bridge_address`,
+    which refuses to yield a wildcard): the daemon binds exactly that address,
+    where the agent's container reaches it while nothing off-box can.
     Idempotent and version-gated. A local outer (e.g. a local docker daemon on
     the user's own machine) is skipped: the vm daemon exists only on genuinely
     remote outers. Raises :class:`OwnerExecVmError` on any failure.
@@ -189,7 +161,6 @@ def provision_owner_exec_vm(host: OuterHostInterface, host_id: HostId) -> None:
 
     # Config + unit are written atomically; the daemon reads the host key and
     # authorized_keys per request, so a rotation is picked up without a restart.
-    listen_host = _resolve_listen_host(host)
     host.write_file(
         Path(_CONFIG_PATH), _build_config_toml(host_id, listen_host).encode("utf-8"), mode="0644", is_atomic=True
     )

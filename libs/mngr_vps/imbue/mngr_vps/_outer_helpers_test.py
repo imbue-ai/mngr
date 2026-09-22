@@ -327,6 +327,10 @@ def test_run_container_command_includes_all_pieces() -> None:
     )
     cmd = _stub(outer).recorded[0].command
     assert cmd.startswith("docker run -d --name my-container")
+    # Every container resolves its outer host by docker's conventional name, so
+    # a service the outer binds on its docker bridge (the VPS-resident latchkey
+    # gateway) is reachable from inside without an address known at create time.
+    assert "--add-host host.docker.internal:host-gateway" in cmd
     assert "-p 127.0.0.1:8080:80" in cmd
     assert "-v /host/data:/data:rw" in cmd
     assert "--label com.imbue.mngr.host-id=host-abc" in cmd
