@@ -24,7 +24,6 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_helpers import taken_host_names_on_provider
-from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.mngr.primitives import AgentId
@@ -207,7 +206,6 @@ def _build_client_with_in_flight_create_attempt(tmp_path: Path, provider: str, n
     agent_creator = _FixedInFlightAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds-data"),
         root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         fixed_provider=provider,
         fixed_names=names,

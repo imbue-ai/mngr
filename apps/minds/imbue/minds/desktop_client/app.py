@@ -87,6 +87,7 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
 from imbue.minds.desktop_client.report_collector import submit_report_with_attachments
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -121,6 +122,7 @@ from imbue.minds.desktop_client.ui_api import serve_spa_index
 from imbue.minds.desktop_client.ui_api_inbox import build_notification_card
 from imbue.minds.desktop_client.ui_api_inbox import displayable_pending_requests
 from imbue.minds.desktop_client.ui_api_inbox import primary_agent_ids_by_workspace_name
+from imbue.minds.desktop_client.ui_api_inbox import workspace_name_for_request
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
 from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
@@ -1318,7 +1320,7 @@ def _build_requests_payload(
     pending_requests: PendingRequestsInterface | None,
     backend_resolver: BackendResolverInterface,
 ) -> dict[str, Any]:
-    """Build the content-based requests payload pushed over the chrome SSE.
+    """Build the pending requests summary pushed over the UI channel.
 
     The chrome's live request UI (badge, panel refresh) must react to any
     change in the *set* of pending requests, not merely its size. A bare
@@ -1337,7 +1339,13 @@ def _build_requests_payload(
     """
     pending = displayable_pending_requests(pending_requests, backend_resolver)
     request_ids = [req.request_id for req in pending]
-    return {"count": len(request_ids), "request_ids": request_ids}
+    primary_ids = primary_agent_ids_by_workspace_name(backend_resolver)
+    workspace_ids = {
+        primary_id
+        for req in pending
+        if (primary_id := primary_ids.get(workspace_name_for_request(req, backend_resolver))) is not None
+    }
+    return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
 
 
 # System-interface health probing
@@ -1376,7 +1384,7 @@ def _handle_account_trim_backups(user_id: str) -> Response:
         account_email=str(account.email),
         cli=cli,
         paths=paths,
-        notification_dispatcher=get_state().notification_dispatcher,
+        notification_feed=get_state().notification_feed,
     )
     return make_response(status_code=303, headers={"Location": "/accounts"})
 
@@ -1792,7 +1800,11 @@ def _derive_ui_requests_message(
 ) -> UiRequestsMessage:
     with app.app_context():
         payload = _build_requests_payload(get_state().pending_requests, backend_resolver)
-        return UiRequestsMessage(count=payload["count"], request_ids=tuple(payload["request_ids"]))
+        return UiRequestsMessage(
+            count=payload["count"],
+            request_ids=tuple(payload["request_ids"]),
+            workspace_agent_ids=tuple(payload["workspace_agent_ids"]),
+        )
 
 
 # How a recorded response's status becomes a feed outcome. A status outside
@@ -1834,6 +1846,13 @@ def _derive_ui_notifications_message(
         return feed.reconcile(
             pending_cards=pending_cards,
             responses_by_request_id=responses_by_request_id,
+            # An agent message whose workspace is gone has nowhere to land, so
+            # it leaves the feed -- but dropping it is unrecoverable, so this is
+            # the restorable set (live plus the persisted last-good topology,
+            # both minus hosts observed DESTROYED) rather than the live one: a
+            # partial or failed listing is not evidence that a workspace is
+            # gone, and a flap must not destroy an unread message.
+            known_workspace_agent_ids={str(aid) for aid in backend_resolver.list_restorable_workspace_ids()},
         )
 
 
@@ -2402,7 +2421,18 @@ def create_desktop_client(
         get_connected_focused_workspace_agent_ids=_ConnectedFocusedWorkspaceAgentIdsReader(
             broadcaster=ui_channel_broadcaster
         ),
+        cleared_request_ids_path=None if paths is None else paths.data_dir / "cleared_notification_requests.json",
+        # An append or clear changes the feed outside the reconcile, so it has
+        # to wake the publisher itself for the frame to go out.
+        on_change=ui_publisher.notify_change,
     )
+    # The creator was built before the feed existed (it predates the app), so
+    # its backup-setup failures are bound to the feed here, the same way the
+    # stop-kind tracker's change callback is bound to the publisher above.
+    if agent_creator is not None:
+        agent_creator.report_backup_setup_failure = _BackupSetupFailureReporter(
+            notification_feed=notification_feed, backend_resolver=backend_resolver
+        )
 
     # Folder syncs shell out to long-lived ``mngr pair`` subprocesses, which
     # the root concurrency group owns; without one there is nowhere to run
@@ -2652,8 +2682,35 @@ class _NotificationDispatchPreferencesReader(FrozenModel):
         # One atomic read (not two separate locked getters): a concurrent
         # set_notification_prefs() write landing between two separate calls could
         # otherwise produce an (is_enabled, style) pair never actually persisted together.
-        is_enabled, style, _is_os_hint_dismissed = self.minds_config.get_notification_prefs()
+        is_enabled, style = self.minds_config.get_notification_prefs()
         return NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
+
+
+class _BackupSetupFailureReporter(FrozenModel):
+    """Lands a detached backup-setup task's final failure for a workspace in the notification feed.
+
+    Resolves the workspace's display name and accent at report time (the
+    creator does not hold the resolver), so the entry reads like every other
+    workspace-scoped one and its click lands on that workspace's backups page.
+    """
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+
+    notification_feed: NotificationFeed = Field(frozen=True, description="The feed the event is appended to")
+    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Resolves the workspace's display")
+
+    def __call__(self, agent_id: AgentId, detail: str) -> None:
+        workspace_name = self.backend_resolver.get_workspace_name(agent_id) or str(agent_id)[:8]
+        accent = self.backend_resolver.get_workspace_color(agent_id) or DEFAULT_WORKSPACE_COLOR
+        self.notification_feed.append_system_event(
+            SystemEventCard(
+                title="Backup setup failed",
+                body=detail,
+                workspace_agent_id=str(agent_id),
+                workspace_name=workspace_name,
+                workspace_accent=accent,
+            )
+        )
 
 
 class _ConnectedFocusedWorkspaceAgentIdsReader(FrozenModel):

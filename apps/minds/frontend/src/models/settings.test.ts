@@ -21,7 +21,6 @@ const BASE_OVERVIEW: SettingsOverview = settingsOverview();
 const BASE_PREFS: NotificationPrefs = {
   is_enabled: true,
   style: "both",
-  is_os_hint_dismissed: false,
   version: "np-1",
 };
 
@@ -169,20 +168,19 @@ describe("SettingsModel", () => {
     await model.setNotificationPrefs({
       is_enabled: true,
       style: "os",
-      is_os_hint_dismissed: false,
     });
 
     expect(writes).toEqual([
       {
         url: "/ui/api/settings/notifications",
         ifMatch: "np-1",
-        body: { is_enabled: true, style: "os", is_os_hint_dismissed: false },
+        body: { is_enabled: true, style: "os" },
       },
     ]);
     expect(model.notificationPrefs()).toEqual({
       is_enabled: true,
       style: "os",
-      is_os_hint_dismissed: false,
+      has_chosen: true,
       version: "np-2",
     });
     // The app-wide applied prefs (which gate arrivals) follow the write.
@@ -205,14 +203,12 @@ describe("SettingsModel", () => {
     served = {
       is_enabled: false,
       style: "cards",
-      is_os_hint_dismissed: true,
       version: "np-9",
     };
 
     await model.setNotificationPrefs({
       is_enabled: true,
       style: "both",
-      is_os_hint_dismissed: false,
     });
 
     expect(model.notificationPrefs()).toEqual(served);
@@ -240,7 +236,6 @@ describe("SettingsModel", () => {
     await model.setNotificationPrefs({
       is_enabled: false,
       style: "both",
-      is_os_hint_dismissed: false,
     });
     expect(model.notificationPrefsError).toContain("network error");
 
@@ -248,7 +243,6 @@ describe("SettingsModel", () => {
     await model.setNotificationPrefs({
       is_enabled: false,
       style: "both",
-      is_os_hint_dismissed: false,
     });
     expect(model.notificationPrefsError).toBe("");
     expect(model.notificationPrefs().is_enabled).toBe(false);
@@ -275,13 +269,44 @@ describe("SettingsModel", () => {
     await model.setNotificationPrefs({
       is_enabled: false,
       style: "both",
-      is_os_hint_dismissed: false,
     });
 
     expect(model.notificationPrefsError).toBe(
       "notifications are not available yet",
     );
     expect(model.notificationPrefs().is_enabled).toBe(true);
+  });
+
+  it("reports whether the test notification could reach the OS, and a failure to send one", async () => {
+    let status = 200;
+    let isElectron = true;
+    const model = new SettingsModel(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/settings/notifications/test")) {
+          expect(init?.method).toBe("POST");
+          return jsonResponse({ is_electron: isElectron }, status);
+        }
+        return jsonResponse({
+          ...BASE_OVERVIEW,
+          notification_prefs: BASE_PREFS,
+        });
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.sendTestNotification();
+    expect(model.testNotificationResult).toContain("Sent.");
+    expect(model.isTestNotificationBusy).toBe(false);
+
+    isElectron = false;
+    await model.sendTestNotification();
+    expect(model.testNotificationResult).toContain("need the desktop app");
+
+    status = 503;
+    await model.sendTestNotification();
+    expect(model.testNotificationResult).toContain("HTTP 503");
   });
 
   it("clears the open-failed flag on a successful OS-settings open", async () => {
@@ -336,7 +361,10 @@ describe("SettingsModel", () => {
   });
 });
 
-function updateStateAt(channel: UpdateChannel, currentVersion: string): UpdateState {
+function updateStateAt(
+  channel: UpdateChannel,
+  currentVersion: string,
+): UpdateState {
   return {
     channel,
     currentVersion,
@@ -394,7 +422,10 @@ describe("SettingsModel release channels", () => {
 
       await model.requestChannel("stable");
 
-      expect(model.pendingChannelSwitch).toEqual({ channel: "stable", targetVersion: "0.4.12" });
+      expect(model.pendingChannelSwitch).toEqual({
+        channel: "stable",
+        targetVersion: "0.4.12",
+      });
       expect(switches).toEqual([]);
       expect(model.updateState?.channel).toBe("alpha");
     });
@@ -448,7 +479,10 @@ describe("SettingsModel release channels", () => {
     // No version means no comparison, so wouldPark is false -- taking that as
     // "safe to switch" would write the preference and leave every later check
     // failing against a feed that serves nothing.
-    const unpublished = { ...PEEKED, beta: { version: null, wouldPark: false, error: "404" } };
+    const unpublished = {
+      ...PEEKED,
+      beta: { version: null, wouldPark: false, error: "404" },
+    };
     const { surface, switches } = nativeStub(RUNNING, unpublished);
     await withMindsNative(surface, async () => {
       const model = new SettingsModel(undefined, () => {});
@@ -486,7 +520,11 @@ describe("SettingsModel release channels", () => {
       expect(secondVisit.updateState?.status).toEqual(parked);
       // The rest of the state survives the merge.
       expect(secondVisit.updateState?.currentVersion).toBe("0.4.30");
-      expect(secondVisit.updateState?.available).toEqual(["stable", "beta", "alpha"]);
+      expect(secondVisit.updateState?.available).toEqual([
+        "stable",
+        "beta",
+        "alpha",
+      ]);
       expect(firstVisit.updateState?.status.type).toBe("up-to-date");
     });
   });
@@ -503,7 +541,11 @@ describe("SettingsModel release channels", () => {
       await otherWindow.loadUpdateState();
       expect(otherWindow.updateState?.channel).toBe("alpha");
 
-      pushUpdateStatus?.({ type: "up-to-date", channel: "stable", currentVersion: "0.4.30" });
+      pushUpdateStatus?.({
+        type: "up-to-date",
+        channel: "stable",
+        currentVersion: "0.4.30",
+      });
 
       expect(otherWindow.updateState?.channel).toBe("stable");
     });
@@ -516,7 +558,10 @@ describe("SettingsModel release channels", () => {
       const model = new SettingsModel(undefined, () => {});
       await model.loadUpdateState();
 
-      pushUpdateStatus?.({ type: "error", message: "MINDS_ROOT_NAME is unreadable" });
+      pushUpdateStatus?.({
+        type: "error",
+        message: "MINDS_ROOT_NAME is unreadable",
+      });
 
       expect(model.updateState?.channel).toBe("alpha");
       expect(model.updateState?.status.type).toBe("error");
@@ -527,7 +572,10 @@ describe("SettingsModel release channels", () => {
     // `checking` and `disabled` carry no time. Letting them overwrite it would
     // blank the line for the duration of every check, which is exactly when the
     // user is looking at it.
-    const { surface } = nativeStub({ ...RUNNING, lastCheckedAt: "2026-08-13T23:53:00.000Z" }, PEEKED);
+    const { surface } = nativeStub(
+      { ...RUNNING, lastCheckedAt: "2026-08-13T23:53:00.000Z" },
+      PEEKED,
+    );
     await withMindsNative(surface, async () => {
       const model = new SettingsModel(undefined, () => {});
       await model.loadUpdateState();
@@ -561,10 +609,17 @@ describe("SettingsModel release channels", () => {
   });
 
   it("re-peeks on an on-demand check, so a channel published since the load stops reading unavailable", async () => {
-    let peeked: Record<string, PeekedChannel> = { ...PEEKED, beta: { version: null, wouldPark: false, error: "404" } };
+    let peeked: Record<string, PeekedChannel> = {
+      ...PEEKED,
+      beta: { version: null, wouldPark: false, error: "404" },
+    };
     const afterCheck: UpdateState = {
       ...RUNNING,
-      status: { type: "update-available", channel: "alpha", feedVersion: "0.4.31" },
+      status: {
+        type: "update-available",
+        channel: "alpha",
+        feedVersion: "0.4.31",
+      },
     };
     const surface = {
       getUpdateState: async () => RUNNING,
@@ -608,7 +663,11 @@ describe("SettingsModel release channels", () => {
       setUpdateChannel: async () => RUNNING,
       checkForUpdates: async () => ({
         ...RUNNING,
-        status: { type: "update-available" as const, channel: "alpha" as const, feedVersion: "0.4.31" },
+        status: {
+          type: "update-available" as const,
+          channel: "alpha" as const,
+          feedVersion: "0.4.31",
+        },
       }),
       onUpdateStatus: (callback: (status: UpdateStatus) => void) => {
         pushUpdateStatus = callback;
@@ -695,12 +754,18 @@ describe("SettingsModel release channels", () => {
     // The app-updates half of the panel is desktop-only, but the panel itself
     // is not: the machine-update window applies to every build.
     await withMindsNative(null, async () => {
-      const names = new SettingsModel(undefined, () => {}).visibleSections.map((section) => section.name);
+      const names = new SettingsModel(undefined, () => {}).visibleSections.map(
+        (section) => section.name,
+      );
       expect(names).toContain("updates");
       expect(names).toContain("error-reporting");
     });
     await withMindsNative(nativeStub(RUNNING, PEEKED).surface, async () => {
-      expect(new SettingsModel(undefined, () => {}).visibleSections.map((s) => s.name)).toContain("updates");
+      expect(
+        new SettingsModel(undefined, () => {}).visibleSections.map(
+          (s) => s.name,
+        ),
+      ).toContain("updates");
     });
   });
 });

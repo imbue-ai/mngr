@@ -4,13 +4,9 @@
 // state machine; DOM ids are preserved for the Playwright renderer-contract
 // specs.
 //
-// The bell is the chrome's one "something needs you" signal: its badge counts
-// UNRESOLVED notifications (a request counts until it is approved, denied, or
-// closed -- resolution-based, never "unseen"), and its feed is where an ask is
-// found again out of context. This supersedes the earlier "deliberately no
-// requests entry" stance: the popup is still the only review surface, but the
-// bell is the way back to it -- so requests no longer have to dot every
-// breadcrumb and switcher row to be found.
+// The bell counts notification reminders. The Permissions tab separately
+// stays badged while its workspace has unanswered requests, even after the
+// user opens or clears their reminders.
 
 import m from "mithril";
 // Inlined: the built bundle is served under /_static/ui/, a prefix Vite does
@@ -94,15 +90,12 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       const workspaceName = isWorkspace
         ? (workspaces.accentEntry(context.workspaceAnyId ?? "")?.name ?? "…")
         : "";
-      // A request from THIS workspace never toasts (the in-chat card already
-      // shows it) and never counts toward the bell's badge alone standing out
-      // here, so the key tab carries its own dot -- the one on-screen cue that
-      // this machine is waiting on you, visible without opening the panel.
+      // The permission badge tracks pending requests, not dismissible reminders.
       const currentWorkspaceAgentId = isWorkspace
         ? workspaces.toAgentScopedId(context.workspaceAnyId ?? "")
         : null;
       const hasCurrentWorkspaceRequest =
-        shell.stores.notifications.hasUnresolvedForWorkspace(
+        shell.stores.requests.hasPendingForWorkspace(
           currentWorkspaceAgentId,
         );
       const isDesktop = electronBridge.isDesktop;
@@ -426,97 +419,52 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
   };
 }
 
-/** The notification bell + its unresolved-count badge, and the one-time
- * "enable system notifications" hint below it (browser mode only). Clicking
- * opens the feed overlay (putting away whatever modal is up), forwarding the
- * displayed workspace so the feed floats over it (kept mounted), exactly as
- * Get help forwards ?workspace. */
+/** The notification bell + its unresolved-count badge. Clicking opens the
+ * feed overlay (putting away whatever modal is up), forwarding the displayed
+ * workspace so the feed floats over it (kept mounted), exactly as Get help
+ * forwards ?workspace. */
 function notificationsBell(
   shell: ShellState,
   popupHiddenClass: string,
 ): m.Children {
   const unresolvedCount = shell.stores.notifications.unresolvedCount;
   const isOpen = shell.isNotificationsOpen;
-  // `?? null` guards the fake shells tests cast in without the controller.
-  const notificationsUi = shell.notificationsUi ?? null;
-  const isOsHintShown =
-    notificationsUi !== null && notificationsUi.shouldShowOsHint();
-  return m("span", { class: "relative" }, [
-    m(
-      TitlebarButton,
-      {
-        id: "notifications-toggle",
-        "aria-label": "Notifications",
-        "data-tooltip": "Notifications",
-        "aria-expanded": isOpen ? "true" : "false",
-        tone: "muted",
-        // relative for the badge's own absolute positioning.
-        extra: "relative " + popupHiddenClass,
-        // The switch, not a bare open: a CENTERED app modal (Mind settings,
-        // Accounts) leaves this button reachable, and the feed's backdrop
-        // draws under a later-DOM modal's at the same z -- so the modal must
-        // be put away first or the feed raises beneath it, dimmed and
-        // unclickable.
-        onclick: () => shell.switchToNotifications(),
-      },
-      [
-        m(Icon16, { name: "bell" }),
-        unresolvedCount > 0
-          ? m(
-              "span",
-              // -top-1: the titlebar only gives the button 5px of clearance
-              // above it, less than the 14px-tall badge needs to fully clear
-              // the icon -- a wider offset (e.g. -top-2.5) pushes the badge
-              // above the window's own top edge, off screen. -top-1 is the
-              // deepest offset that stays on screen, at the cost of a few px
-              // of corner overlap with the icon (a common badge treatment,
-              // and far short of the double-digit overlap the old
-              // line-height bug caused). flex (not a bare inline span)
-              // shrink-wraps this wrapper to the badge's own 14px box
-              // instead of the surrounding line-height, which otherwise
-              // inflates it and pushes the badge down past the intended
-              // offset (the same bug the permissions-tab dot above had).
-              { class: "pointer-events-none absolute -top-1 -right-1 flex" },
-              m(Badge, { id: "notifications-badge", count: unresolvedCount }),
-            )
-          : null,
-      ],
-    ),
-    isOsHintShown && notificationsUi !== null
-      ? m(
-          "div#notifications-os-hint",
-          {
-            class:
-              "absolute top-full right-0 mt-1 flex items-center gap-1 rounded-md border border-subtle " +
-              "bg-surface-primary px-2 py-1 whitespace-nowrap shadow-raised type-helper text-secondary",
-          },
-          [
-            m(
-              "button",
-              {
-                type: "button",
-                class: "cursor-pointer hover:text-primary",
-                onclick: () =>
-                  void notificationsUi.requestOsPermissionFromHint(),
-              },
-              "Enable system notifications?",
-            ),
-            m(
-              "button",
-              {
-                type: "button",
-                "aria-label": "Dismiss",
-                class:
-                  "inline-flex h-4 w-4 shrink-0 cursor-pointer items-center justify-center rounded-sm " +
-                  "text-tertiary hover:bg-fill-hover hover:text-primary",
-                onclick: () => void notificationsUi.dismissOsHint(),
-              },
-              m(Icon16, { name: "close", size: "sm" }),
-            ),
-          ],
-        )
-      : null,
-  ]);
+  return m(
+    TitlebarButton,
+    {
+      id: "notifications-toggle",
+      "aria-label": "Notifications",
+      "data-tooltip": "Notifications",
+      "aria-expanded": isOpen ? "true" : "false",
+      tone: "muted",
+      // relative for the badge's own absolute positioning.
+      extra: "relative " + popupHiddenClass,
+      // The switch, not a bare open: a CENTERED app modal (Mind settings,
+      // Accounts) leaves this button reachable, and the feed's backdrop
+      // draws under a later-DOM modal's at the same z -- so the modal must
+      // be put away first or the feed raises beneath it, dimmed and
+      // unclickable.
+      onclick: () => shell.switchToNotifications(),
+    },
+    [
+      m(Icon16, { name: "bell" }),
+      unresolvedCount > 0
+        ? m(
+            "span",
+            // -top-1: the titlebar gives the button only 5px of clearance,
+            // less than the 14px badge needs to clear the icon, and a wider
+            // offset (e.g. -top-2.5) pushes the badge off the window's top
+            // edge. -top-1 is the deepest offset that stays on screen, at the
+            // cost of a few px of corner overlap. flex (not a bare inline
+            // span) shrink-wraps the wrapper to the badge's own 14px box
+            // rather than the surrounding line-height, which would inflate it
+            // and push the badge past the intended offset.
+            { class: "pointer-events-none absolute -top-1 -right-1 flex" },
+            m(Badge, { id: "notifications-badge", count: unresolvedCount }),
+          )
+        : null,
+    ],
+  );
 }
 
 /** Open the options overlay on `tab` -- or, when that tab's overlay is

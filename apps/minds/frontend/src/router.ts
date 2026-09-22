@@ -132,11 +132,12 @@ export function mountRouter(root: Element, shell: ShellState): void {
 export function navigateExternalUrl(shell: ShellState, url: string): void {
   const workspaceAnyId = parseWorkspaceIdFromUrl(url);
   if (workspaceAnyId !== null) {
-    // An OS-notification click deep-links /workspace/<id>?review=<request-id>,
-    // and enterWorkspace routes with no query -- so the review param must be
-    // forwarded here or the click could never open the request it names (the
-    // shell's route-changed handling consumes it).
-    shell.enterWorkspace(workspaceAnyId, reviewQueryOf(url));
+    // An OS-notification click deep-links /workspace/<id>?review=<request-id>
+    // (or ?chat=<chat-agent-id> for an agent message), and enterWorkspace
+    // routes with no query -- so the param must be forwarded here or the
+    // click could never open what it names (the shell's route-changed
+    // handling consumes it).
+    shell.enterWorkspace(workspaceAnyId, deepLinkQueryOf(url));
     return;
   }
   try {
@@ -179,12 +180,12 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
   }
 }
 
-/** The ``?review=`` param to carry into the workspace route, when `urlString`
- * is a workspace-display deep link that names one; empty otherwise. Scoped to
- * the display shape on purpose: the other URL shapes parseWorkspaceIdFromUrl
- * accepts (workspace origins, /goto bridges) are not SPA routes and a review
- * param on them means nothing here. */
-function reviewQueryOf(urlString: string): Record<string, string> {
+/** The ``?review=`` or ``?chat=`` param to carry into the workspace route,
+ * when `urlString` is a workspace-display deep link that names one; empty
+ * otherwise. Scoped to the display shape on purpose: the other URL shapes
+ * parseWorkspaceIdFromUrl accepts (workspace origins, /goto bridges) are not
+ * SPA routes and such a param on them means nothing here. */
+function deepLinkQueryOf(urlString: string): Record<string, string> {
   try {
     const base =
       typeof window !== "undefined"
@@ -192,8 +193,12 @@ function reviewQueryOf(urlString: string): Record<string, string> {
         : "http://localhost";
     const parsed = new URL(urlString, base);
     if (workspaceDisplayIdFromPath(parsed.pathname) === null) return {};
-    const review = parsed.searchParams.get("review");
-    return review === null || review === "" ? {} : { review };
+    const query: Record<string, string> = {};
+    for (const name of ["review", "chat"]) {
+      const value = parsed.searchParams.get(name);
+      if (value !== null && value !== "") query[name] = value;
+    }
+    return query;
   } catch {
     return {};
   }

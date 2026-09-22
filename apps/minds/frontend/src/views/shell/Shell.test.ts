@@ -1,4 +1,5 @@
 import m from "mithril";
+import { RequestsStore } from "../../models/requests";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShellState } from "./shell-state";
 import { NoticeBand } from "./NoticeBand";
@@ -7,6 +8,7 @@ import { ToastLayer } from "./ToastLayer";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { UpdateModal } from "../components/UpdateModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
+import type { UiNotificationEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
@@ -94,6 +96,7 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
     closeAppOverlay: () => true,
     displayedWorkspaceAgentId: () => WORKSPACE_ID,
     stores: {
+      requests: { hasPendingForWorkspace: () => false },
       workspaces: {
         toAgentScopedId: (anyId: string) => anyId,
         entryByAnyId: () => null,
@@ -107,7 +110,6 @@ function makeShell(overrides: Partial<ShellState> = {}): FakeShell {
       notifications: {
         entries: [],
         unresolvedCount: 0,
-        hasUnresolvedForWorkspace: () => false,
       },
       updates: updatesStoreStub("UP_TO_DATE"),
     },
@@ -281,6 +283,32 @@ describe("Shell request popup layer", () => {
     );
   });
 
+  it("keeps the raised permission badge while a dismissed reminder still has a pending request", () => {
+    const { state } = makeShell();
+    const requests = new RequestsStore();
+    requests.applyRequestsMessage({
+      count: 1,
+      request_ids: ["evt-a"],
+      workspace_agent_ids: [WORKSPACE_ID],
+    });
+    state.stores.requests = requests;
+    stubTitlebar();
+    const root = renderShell(state, "/inbox", m("div#request-popup"), {
+      workspaceParam: null,
+    });
+    const rendered = renderOverlay(appOverlay(root) as AnyVnode);
+    expect(
+      collectVnodes(raisedStrip(rendered)).some(
+        (vnode) => attrsOf(vnode).id === "permissions-badge-raised",
+      ),
+    ).toBe(true);
+    expect(
+      collectVnodes(raisedStrip(rendered)).some(
+        (vnode) => attrsOf(vnode).id === "notifications-badge-raised",
+      ),
+    ).toBe(false);
+  });
+
   it("draws all five titlebar icons, not just the one the popup is", () => {
     // The popup covers the titlebar's icons, so drawing only its own key took
     // the other four off screen for as long as it was open.
@@ -338,12 +366,10 @@ describe("Shell request popup layer", () => {
     const root = renderShell(state, "/inbox", m("div#request-popup"), {
       workspaceParam: null,
     });
-    const panel = collectVnodes(renderOverlay(appOverlay(root) as AnyVnode)).find(
-      (vnode) => attrsOf(vnode).id === "app-overlay-panel",
-    );
-    expect(String(attrsOf(panel as AnyVnode).className)).toContain(
-      "w-[600px]",
-    );
+    const panel = collectVnodes(
+      renderOverlay(appOverlay(root) as AnyVnode),
+    ).find((vnode) => attrsOf(vnode).id === "app-overlay-panel");
+    expect(String(attrsOf(panel as AnyVnode).className)).toContain("w-[600px]");
   });
 
   it("keeps the routed page as the surface itself on a plain workspace route", () => {
@@ -407,6 +433,7 @@ describe("Shell notifications overlay", () => {
       isNotificationsOpen: true,
       closeNotifications: () => undefined,
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
@@ -419,10 +446,9 @@ describe("Shell notifications overlay", () => {
         },
         updates: updatesStoreStub("UP_TO_DATE"),
         notifications: {
-        entries: [],
-        unresolvedCount: 0,
-        hasUnresolvedForWorkspace: () => false,
-      },
+          entries: [],
+          unresolvedCount: 0,
+        },
       },
     } as unknown as Partial<ShellState>);
   }
@@ -637,9 +663,9 @@ describe("Shell help overlay", () => {
       "notifications",
       "help",
     ]);
-    expect(attrsOf(raisedIcon(rendered, "help") as AnyVnode)["aria-selected"]).toBe(
-      "true",
-    );
+    expect(
+      attrsOf(raisedIcon(rendered, "help") as AnyVnode)["aria-selected"],
+    ).toBe("true");
   });
 
   it("takes the same body shape the feed takes, so the two headers sit on one line", () => {
@@ -730,6 +756,7 @@ describe("Shell notice band wiring", () => {
     // network rather than as its own failure.
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
@@ -757,7 +784,11 @@ describe("Shell notice band wiring", () => {
   });
 
   it.each([
-    ["reading it as out of date raises the version band", false, "This machine is running an older version of Mind."],
+    [
+      "reading it as out of date raises the version band",
+      false,
+      "This machine is running an older version of Mind.",
+    ],
     [
       "a run in flight replaces that with what the run is doing",
       true,
@@ -768,6 +799,7 @@ describe("Shell notice band wiring", () => {
     // surfaces disagreeing about one machine.
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
@@ -789,7 +821,9 @@ describe("Shell notice band wiring", () => {
     );
 
     const band = collectVnodes(root).find((vnode) => vnode.tag === NoticeBand);
-    expect(attrsOf(band as AnyVnode).payload).toMatchObject({ message: expectedMessage });
+    expect(attrsOf(band as AnyVnode).payload).toMatchObject({
+      message: expectedMessage,
+    });
   });
 
   it("covers a machine whose update is landing with a card nothing dismisses", () => {
@@ -798,6 +832,7 @@ describe("Shell notice band wiring", () => {
     // switcher stays reachable.
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({ name: "oldie" }),
@@ -812,18 +847,29 @@ describe("Shell notice band wiring", () => {
       },
     } as unknown as Partial<ShellState>);
 
-    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
 
-    const modal = collectVnodes(root).find((vnode) => vnode.tag === UpdateApplyModal);
-    expect(attrsOf(modal as AnyVnode)).toMatchObject({ workspaceName: "oldie" });
+    const modal = collectVnodes(root).find(
+      (vnode) => vnode.tag === UpdateApplyModal,
+    );
+    expect(attrsOf(modal as AnyVnode)).toMatchObject({
+      workspaceName: "oldie",
+    });
     const card = renderRoot(UpdateApplyModal, { workspaceName: "oldie" });
     expect(allText(card)).toContain("Updating oldie");
-    expect(collectVnodes(card).some((vnode) => vnode.tag === "button")).toBe(false);
+    expect(collectVnodes(card).some((vnode) => vnode.tag === "button")).toBe(
+      false,
+    );
   });
 
   it("does not cover a machine while its update is only preparing", () => {
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
@@ -838,9 +884,15 @@ describe("Shell notice band wiring", () => {
       },
     } as unknown as Partial<ShellState>);
 
-    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#content"));
+    const root = renderShell(
+      state,
+      `/workspace/${WORKSPACE_ID}`,
+      m("div#content"),
+    );
 
-    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateApplyModal)).toBe(false);
+    expect(
+      collectVnodes(root).some((vnode) => vnode.tag === UpdateApplyModal),
+    ).toBe(false);
   });
 
   it("draws an out-of-date machine without raising the update modal over it", () => {
@@ -849,6 +901,7 @@ describe("Shell notice band wiring", () => {
     let openedAgentId: string | null = null;
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
@@ -874,7 +927,9 @@ describe("Shell notice band wiring", () => {
     );
 
     expect(openedAgentId).toBeNull();
-    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateModal)).toBe(false);
+    expect(collectVnodes(root).some((vnode) => vnode.tag === UpdateModal)).toBe(
+      false,
+    );
   });
 
   it("speaks the device's own condition over a machine nothing has convicted yet", () => {
@@ -884,6 +939,7 @@ describe("Shell notice band wiring", () => {
     // wrong rather than nothing at all.
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({
@@ -921,6 +977,7 @@ describe("Shell notice band wiring", () => {
     // type-check, compile, and give every on-device machine a no-network band.
     const { state } = makeShell({
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => ({
@@ -963,10 +1020,12 @@ describe("Shell toast layer", () => {
     const liveEntry = notificationEntry("n1");
     const { state } = makeShell({
       notificationsUi: {
-        liveToastEntries: (entries: unknown) => entries,
+        liveToastItems: (entries: UiNotificationEntry[]) =>
+          entries.map((entry) => ({ id: entry.id, entry })),
         dismissToast: (id: string) => dismissed.push(id),
       } as unknown as ShellState["notificationsUi"],
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,
@@ -989,7 +1048,9 @@ describe("Shell toast layer", () => {
 
     const toastLayer = findToastLayer(root);
     expect(toastLayer).toBeDefined();
-    expect(attrsOf(toastLayer as AnyVnode).toasts).toEqual([liveEntry]);
+    expect(attrsOf(toastLayer as AnyVnode).toasts).toEqual([
+      { id: "n1", entry: liveEntry },
+    ]);
 
     (attrsOf(toastLayer as AnyVnode).onDismiss as (id: string) => void)("n1");
     expect(dismissed).toEqual(["n1"]);
@@ -1000,7 +1061,7 @@ describe("Shell toast layer", () => {
     // floating cards would be redundant with it (see Shell.ts's own comment).
     const { state } = makeShell({
       notificationsUi: {
-        liveToastEntries: () => {
+        liveToastItems: () => {
           throw new Error(
             "must not read live toasts while the feed overlay is open",
           );
@@ -1009,6 +1070,7 @@ describe("Shell toast layer", () => {
       } as unknown as ShellState["notificationsUi"],
       isNotificationsOpen: true,
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         workspaces: {
           toAgentScopedId: (anyId: string) => anyId,
           entryByAnyId: () => null,

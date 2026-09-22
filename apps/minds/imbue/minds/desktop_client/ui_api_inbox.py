@@ -9,8 +9,6 @@ importing it from ``app.py`` would be a circular import (``app`` imports
 ``ui_api`` imports this module).
 """
 
-from datetime import datetime
-from datetime import timezone
 from enum import auto
 from typing import Final
 from typing import Literal
@@ -24,11 +22,13 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.backend_resolver import CHAT_ID_LABEL
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.pending_requests import PendingRequestsInterface
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.notification_feed import AgentMessageCard
 from imbue.minds.desktop_client.notification_feed import PendingNotificationCard
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -143,6 +143,16 @@ def _resolved_workspace_accent(backend_resolver: BackendResolverInterface, agent
     return stored if stored is not None else DEFAULT_WORKSPACE_COLOR
 
 
+def workspace_name_for_request(req: StreamedPermissionRequest, backend_resolver: BackendResolverInterface) -> str:
+    """Resolve the same workspace name for request cards and pending-request badges."""
+    parsed_id = AgentId(req.agent_id)
+    ws_name = backend_resolver.get_workspace_name(parsed_id)
+    if ws_name:
+        return ws_name
+    info = backend_resolver.get_agent_display_info(parsed_id)
+    return info.agent_name if info else req.agent_id[:16]
+
+
 def _build_inbox_card(
     req: StreamedPermissionRequest,
     handler: RequestEventHandler | None,
@@ -157,11 +167,7 @@ def _build_inbox_card(
         # wrong (it cannot be rendered or resolved without a handler).
         kind_label = "request"
         display_name = ""
-    parsed_id = AgentId(req.agent_id)
-    ws_name = backend_resolver.get_workspace_name(parsed_id) or ""
-    if not ws_name:
-        info = backend_resolver.get_agent_display_info(parsed_id)
-        ws_name = info.agent_name if info else req.agent_id[:16]
+    ws_name = workspace_name_for_request(req, backend_resolver)
     # Accent follows the homepage tile for the workspace: requests are filed
     # by the system-services sibling agent, so resolve through the
     # user-facing agent that shares the workspace name.
@@ -227,9 +233,7 @@ def build_notification_card(
     card = _build_inbox_card(req, handler, backend_resolver, primary_agent_id_by_ws_name)
     return PendingNotificationCard(
         request_id=card.id,
-        # The gateway record carries no timestamp; first sight of the request
-        # here is when it starts existing for notification purposes.
-        requested_at=datetime.now(timezone.utc).isoformat(),
+        requested_at=None if req.created_at is None else req.created_at.isoformat(),
         # display_name is empty only for unknown request kinds; the kind label
         # ("request") keeps those rows from rendering a blank headline.
         title=card.display_name or card.kind_label,
@@ -238,6 +242,41 @@ def build_notification_card(
         workspace_name=card.ws_name,
         workspace_accent=card.accent,
         service_name=_request_service_name(req, handler),
+    )
+
+
+def build_agent_message_card(
+    agent_id: AgentId,
+    body: str,
+    backend_resolver: BackendResolverInterface,
+) -> AgentMessageCard:
+    """Feed-input display fields for a chat agent's message.
+
+    The sending agent names itself through the resolver; its workspace (the primary
+    agent whose tile the user sees, and whose accent the row wears) is found
+    by workspace name, exactly as a request card resolves the sibling agent
+    that filed it. An agent the resolver does not know keeps the raw id as its
+    name and carries no workspace, so the entry still records the message.
+    The click target is the agent's stable chat id, so a chat that moves to
+    another agent keeps receiving its notifications in the same conversation.
+    """
+    chat_id = backend_resolver.get_agent_label(agent_id, CHAT_ID_LABEL) or str(agent_id)
+    info = backend_resolver.get_agent_display_info(agent_id)
+    chat_name = info.agent_name if info is not None else str(agent_id)
+    workspace_name = backend_resolver.get_workspace_name(agent_id) or ""
+    primary_agent_id_str = primary_agent_ids_by_workspace_name(backend_resolver).get(workspace_name)
+    accent = (
+        _resolved_workspace_accent(backend_resolver, AgentId(primary_agent_id_str))
+        if primary_agent_id_str is not None
+        else DEFAULT_WORKSPACE_COLOR
+    )
+    return AgentMessageCard(
+        chat_agent_id=chat_id,
+        chat_name=chat_name,
+        body=body,
+        workspace_agent_id=primary_agent_id_str or "",
+        workspace_name=workspace_name or chat_name,
+        workspace_accent=accent,
     )
 
 

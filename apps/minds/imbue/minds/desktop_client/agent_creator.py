@@ -63,9 +63,6 @@ from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.pending_create_attempts import CREATE_ATTEMPT_ID_HOST_LABEL
 from imbue.minds.desktop_client.pending_create_attempts import FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
@@ -1867,11 +1864,12 @@ class AgentCreator(MutableModel):
             "(or cancel) in-flight work."
         ),
     )
-    notification_dispatcher: NotificationDispatcher = Field(
-        frozen=True,
+    report_backup_setup_failure: Callable[[AgentId, str], None] | None = Field(
+        default=None,
         description=(
-            "Dispatcher for surfacing failures from background tasks (e.g. the detached "
-            "backup-provisioning task) to the user as OS notifications."
+            "Surfaces a detached backup-provisioning task giving up on a workspace to the user "
+            "(the notification feed, in the app). Bound by create_desktop_client once the feed "
+            "exists; None only logs."
         ),
     )
     lima_image_gate: LimaImageCreateGate | None = Field(
@@ -2993,7 +2991,7 @@ class AgentCreator(MutableModel):
         readiness probe has already passed, but a slow host's ``mngr exec`` can
         still race the agent's reachability for a while after that. Transient
         failures are retried quietly (debug-logged per attempt); only if the
-        whole budget is exhausted do we surface an OS notification. Either way
+        whole budget is exhausted do we surface it to the user. Either way
         this is non-fatal to the already-created workspace -- the user can
         configure backups later -- and it never blocks the create call.
         """
@@ -3030,17 +3028,11 @@ class AgentCreator(MutableModel):
                 agent_id,
                 self.backup_setup_retry_budget_seconds,
             )
-            self.notification_dispatcher.dispatch(
-                NotificationRequest(
-                    title="Backup setup failed",
-                    message=(
-                        f"Couldn't configure backups for '{str(agent_id)[:8]}'. "
-                        f"The workspace is running; backups are not yet set up. Error: {exc}"
-                    ),
-                    urgency=NotificationUrgency.NORMAL,
-                ),
-                agent_display_name=str(agent_id)[:8],
-            )
+            if self.report_backup_setup_failure is not None:
+                self.report_backup_setup_failure(
+                    agent_id,
+                    f"The workspace is running; backups are not yet set up. Error: {exc}",
+                )
 
     def _build_redirect_url(self, agent_id: AgentId) -> str:
         """Build the absolute URL the UI should navigate to after the create attempt.

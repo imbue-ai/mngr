@@ -269,13 +269,7 @@ def run(
 
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     is_electron = os.getenv("MINDS_ELECTRON") == "1"
-    # The master notifications toggle is read live on every dispatch, so a
-    # Settings change silences (or re-enables) every producer without a
-    # restart -- agent-sent notifications and backup failures included.
-    notification_dispatcher = NotificationDispatcher.create(
-        is_electron=is_electron,
-        is_enabled_provider=minds_config.get_notifications_enabled,
-    )
+    notification_dispatcher = NotificationDispatcher(is_electron=is_electron)
     backend_resolver = MngrCliBackendResolver(
         last_good_agents_path=paths.data_dir / "last_good_agent_topology.json",
     )
@@ -686,7 +680,6 @@ def run(
         imbue_cloud_cli=imbue_cloud_cli,
         latchkey=latchkey,
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
         system_interface_health_tracker=system_interface_health_tracker,

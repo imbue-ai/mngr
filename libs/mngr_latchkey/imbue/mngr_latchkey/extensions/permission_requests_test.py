@@ -29,6 +29,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Generator
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Final
 
@@ -1636,6 +1638,34 @@ def test_get_returns_all_pending_requests(node_extension: tuple[str, Path, Path]
     decoded = [json.loads(line) for line in lines]
     types = {entry["request_type"] for entry in decoded}
     assert types == {"predefined", "file-sharing"}
+
+
+def test_get_relists_a_request_with_the_time_it_was_filed(node_extension: tuple[str, Path, Path]) -> None:
+    """A consumer that reconnects later reads when the request was filed, not when it was listed."""
+    base_url, latchkey_directory, _ = node_extension
+    filed_after = datetime.now(timezone.utc)
+    status, create_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"]},
+        },
+    )
+    assert status == 201
+    filed_before = datetime.now(timezone.utc)
+
+    _, _, body = _http(f"{base_url}/permission-requests")
+    (line,) = [line for line in body.decode("utf-8").splitlines() if line.strip()]
+    listed_created_at = json.loads(line)["created_at"]
+    stored = next((latchkey_directory / "permission_requests" / "v3").iterdir())
+
+    assert listed_created_at == json.loads(create_body)["created_at"]
+    assert listed_created_at == json.loads(stored.read_text())["created_at"]
+    # The gateway stamps milliseconds, so truncate the lower bound to match.
+    truncated_filed_after = filed_after.replace(microsecond=filed_after.microsecond // 1000 * 1000)
+    assert truncated_filed_after <= datetime.fromisoformat(listed_created_at) <= filed_before
 
 
 # -- POST /permission-requests/approve/<id> --

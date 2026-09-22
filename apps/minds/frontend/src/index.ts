@@ -10,13 +10,14 @@ import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { setPendingHelpLaunch } from "./models/help";
 import { onboardingProgress } from "./models/onboarding";
 import {
+  NotificationGestures,
   NotificationsUiController,
-  setReviewGestureContext,
 } from "./models/notificationsUi";
 import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
 import { installTooltips } from "./views/shell/tooltips";
+import { setRelayedWindowFocus } from "./window-focus";
 
 // Stage the pre-filled agent-report launch, then route to the help page
 // (which consumes it). Shared by the plain-browser open_help path and the
@@ -60,22 +61,13 @@ function main(): void {
   shell.mngrForwardOrigin = bootContext.seed.mngrForwardOrigin;
   onboardingProgress.seed(bootContext.seed.isOnboardingComplete);
 
-  // Arrival behavior for the notification feed (toasts, dock badge, the OS
-  // hint); the store itself stays a dumb wire mirror.
-  const notificationsUi = new NotificationsUiController({
-    onScreenWorkspaceAgentId: () => {
-      const displayed = shell.displayedWorkspaceAnyId;
-      return displayed === null
-        ? null
-        : bootContext.stores.workspaces.toAgentScopedId(displayed);
-    },
-    isFeedOverlayOpen: () => shell.isNotificationsOpen,
-  });
-  shell.notificationsUi = notificationsUi;
-  // The review gesture's view of the world: it navigates only to machines
-  // that are actually enterable, lands mid-create machines on their own
-  // creating page, and otherwise opens the popup over the current surface.
-  setReviewGestureContext({
+  // Arrival behavior for the notification feed (toasts, dock badge); the
+  // store itself stays a dumb wire mirror.
+  // The open gestures' view of the world: the review gesture navigates only
+  // to machines that are actually enterable, lands mid-create machines on
+  // their own creating page, and otherwise opens the popup over the current
+  // surface; the chat gesture asks the displayed workspace's frame directly.
+  const gestures = new NotificationGestures({
     toAgentScopedId: (anyId) =>
       bootContext.stores.workspaces.toAgentScopedId(anyId),
     createAttemptStateOf: (agentScopedId) => {
@@ -90,23 +82,27 @@ function main(): void {
     },
     openInPlace: (requestId) => shell.openInbox({ selected: requestId }),
     currentRoutePath: () => shell.currentRoutePath(),
+    focusChat: (workspaceAgentId, chatAgentId) =>
+      shell.requestFocusChat(workspaceAgentId, chatAgentId),
   });
+  const notificationsUi = new NotificationsUiController({
+    isFeedOverlayOpen: () => shell.isNotificationsOpen,
+    onEntryOpened: () => shell.closeNotifications(),
+    gestures,
+  });
+  shell.notificationsUi = notificationsUi;
   // The bootstrap snapshot is old news: seed the seen set silently (no
   // flashes for it) and tell the dock badge the starting count.
   notificationsUi.seedFromSnapshot(bootContext.stores.notifications);
   // Prefs (enabled + style) gate arrivals; the defaults stand until this
   // lands or the settings modal pushes fresher ones.
   void notificationsUi.loadPrefs();
-  // Cards flash only in the focused window, so refreshing prefs at focus-gain
-  // closes the cross-window staleness gap (prefs changed in another window or
-  // tab) without a new wire frame. loadPrefs dedupes concurrent loads and
-  // discards a response that a newer local write outran. The catch-up flush
-  // is chained onto the load (rather than fired alongside it) so it reads the
-  // refreshed prefs, not whatever was applied before this window lost focus.
+  // Refreshing prefs at focus-gain closes the cross-window staleness gap
+  // (prefs changed in another window or tab) without a new wire frame.
+  // loadPrefs dedupes concurrent loads and discards a response that a newer
+  // local write outran.
   window.addEventListener("focus", () => {
-    void notificationsUi
-      .loadPrefs()
-      .then(() => notificationsUi.handleWindowFocusGained());
+    void notificationsUi.loadPrefs();
   });
 
   // Seed the accent before first paint so a workspace-scoped boot never
@@ -177,8 +173,22 @@ function main(): void {
   // a window showing the asking workspace while alt-tabbed away should still
   // get an OS banner. Neither route nor workspace changes on a bare
   // focus/blur, so this can't piggyback on setClientState's own call sites.
+  // The window's own events only fire while keyboard focus sits in this
+  // document (not inside the workspace iframe); in the desktop app, main
+  // relays every window focus and blur, which is the signal that holds.
   window.addEventListener("focus", () => channel.notifyFocusChanged());
   window.addEventListener("blur", () => channel.notifyFocusChanged());
+  electronBridge.onWindowFocusChanged((isFocused) => {
+    setRelayedWindowFocus(isFocused);
+    m.redraw();
+    channel.notifyFocusChanged();
+    if (isFocused) void notificationsUi.loadPrefs();
+  });
+  // A one-off message from main (the "couldn't open link" fallback) flashes
+  // as an in-app toast in the window it happened in.
+  electronBridge.onToast((toast) => {
+    notificationsUi.showTransientToast(toast.title, toast.body);
+  });
 
   // Register the shared page-level context BEFORE mounting so page
   // components (which the router mounts without attrs) can read the stores.
@@ -238,6 +248,12 @@ function main(): void {
     document.body.appendChild(document.createElement("div"));
   root.id = "app";
   mountRouter(root, shell);
+  // Register after the router: preload may immediately drain clicks received
+  // during bootstrap, and their shared action can navigate synchronously.
+  electronBridge.onOpenNotification((entry) => {
+    notificationsUi.openEntryHere(entry);
+    m.redraw();
+  });
   // Delegated hover/focus tooltips for the [data-tooltip] chrome (titlebar
   // buttons, etc.); one document-level install survives mithril's re-renders.
   installTooltips();

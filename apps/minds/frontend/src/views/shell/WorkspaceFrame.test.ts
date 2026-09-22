@@ -11,7 +11,9 @@ import {
 describe("WORKSPACE_ORIGIN_FAMILY", () => {
   it("accepts the canonical agent-keyed content origins", () => {
     expect(
-      WORKSPACE_ORIGIN_FAMILY.test("agent-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost"),
+      WORKSPACE_ORIGIN_FAMILY.test(
+        "agent-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost",
+      ),
     ).toBe(true);
     expect(
       WORKSPACE_ORIGIN_FAMILY.test(
@@ -22,14 +24,20 @@ describe("WORKSPACE_ORIGIN_FAMILY", () => {
 
   it("still accepts a legacy host-keyed origin awaiting the redirect heal", () => {
     expect(
-      WORKSPACE_ORIGIN_FAMILY.test("host-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost"),
+      WORKSPACE_ORIGIN_FAMILY.test(
+        "host-0f3c2b71a4de49b1a2c3d4e5f6a7b8c9.localhost",
+      ),
     ).toBe(true);
   });
 
   it("rejects origins outside the workspace families", () => {
     expect(WORKSPACE_ORIGIN_FAMILY.test("localhost")).toBe(false);
-    expect(WORKSPACE_ORIGIN_FAMILY.test("evil-agent-abc.example.com")).toBe(false);
-    expect(WORKSPACE_ORIGIN_FAMILY.test("agent-abc.localhost.example.com")).toBe(false);
+    expect(WORKSPACE_ORIGIN_FAMILY.test("evil-agent-abc.example.com")).toBe(
+      false,
+    );
+    expect(
+      WORKSPACE_ORIGIN_FAMILY.test("agent-abc.localhost.example.com"),
+    ).toBe(false);
   });
 });
 
@@ -81,6 +89,7 @@ function makeContract() {
     OPEN_SHARE_SETTINGS: "minds:open-share-settings",
     CLOSE_ACTIVE_TAB: "minds:close-active-tab",
     PERMISSION_RESOLUTIONS: "minds:permission-resolutions",
+    WORKSPACE_READY: "minds:workspace-ready",
     REQUEST_ID_PATTERN,
   } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
 }
@@ -93,6 +102,7 @@ function makeHandlers() {
   const popupOpens: (string | null)[] = [];
   const acks: string[] = [];
   let frontCount = 0;
+  let readyCount = 0;
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
@@ -102,6 +112,9 @@ function makeHandlers() {
     },
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
+    onWorkspaceReady: () => {
+      readyCount += 1;
+    },
   });
   return {
     contract,
@@ -110,10 +123,18 @@ function makeHandlers() {
     popupOpens,
     acks,
     frontCount: () => frontCount,
+    readyCount: () => readyCount,
   };
 }
 
 describe("buildEmbedHandlers", () => {
+  it("reports a workspace's readiness announcement, which is what releases a held chat ask", () => {
+    const { contract, handlers, readyCount, navigations } = makeHandlers();
+    handlers[contract.WORKSPACE_READY]({});
+    expect(readyCount()).toBe(1);
+    expect(navigations).toEqual([]);
+  });
+
   it("opens the review popup on the request the workspace asked to review", () => {
     // The chat card's "Review & respond" must land on THAT request, not on
     // whatever else happens to be pending. Opening the popup is the shell's
@@ -168,7 +189,10 @@ describe("buildEmbedHandlers", () => {
     const { contract, handlers, navigations } = makeHandlers();
     handlers[contract.OPEN_SHARE_SETTINGS]({});
     expect(navigations).toEqual([
-      { path: `/workspace/${WORKSPACE_AGENT_ID}/options`, params: { tab: "share" } },
+      {
+        path: `/workspace/${WORKSPACE_AGENT_ID}/options`,
+        params: { tab: "share" },
+      },
     ]);
   });
 

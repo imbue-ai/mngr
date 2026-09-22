@@ -80,6 +80,8 @@
  *         - ``effect``     (precomputed ``{rules?, schemas?}`` object that
  *                          POST ``/permission-requests/approve/<id>``
  *                          will splice into the target permissions.json)
+ *         - ``created_at`` (ISO-8601 UTC time the request was filed; absent
+ *                          on records written before it was introduced)
  *
  *   GET    /permission-requests
  *       List all pending permission requests as newline-delimited JSON
@@ -1986,6 +1988,7 @@ async function handleCreateRequest(request, response, context) {
     payload: body.payload,
     target,
     effect,
+    created_at: new Date().toISOString(),
   };
   writeJsonFileAtomic(filePath, persisted, 0o600);
   notifyNewRequest(persisted);

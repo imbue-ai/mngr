@@ -1,5 +1,14 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// The backend page can finish loading before its async bootstrap registers
+// the notification action. Keep clicks until that handler is installed.
+let notificationListener = null;
+const pendingNotifications = [];
+ipcRenderer.on('open-notification', (_event, entry) => {
+  if (notificationListener) notificationListener(entry);
+  else pendingNotifications.push(entry);
+});
+
 // The slim native bridge. The window's page is the Mithril SPA served by the
 // app server; it owns navigation, modals, and all content handling in-page
 // (frontend/src/electron-bridge.ts is the typed facade over this object).
@@ -49,6 +58,12 @@ contextBridge.exposeInMainWorld('mindsNative', {
 
   // Multi-window (desktop-only concept).
   openWorkspaceInNewWindow: (agentId) => ipcRenderer.send('open-workspace-in-new-window', agentId),
+  openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
+  onOpenNotification: (callback) => {
+    notificationListener = callback;
+    for (const entry of pendingNotifications.splice(0)) callback(entry);
+    ipcRenderer.send('notification-listener-ready');
+  },
 
   // Release channels. Desktop-only: the web UI has no binary to update, so the
   // Settings section that uses these renders only when mindsNative is present.
@@ -84,5 +99,18 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // chrome page's own listeners.
   onEscapePressed: (callback) => {
     ipcRenderer.on('escape-pressed', () => callback());
+  },
+  // This window's own focus and blur, as main sees them: the page cannot see
+  // them itself while keyboard focus sits inside the workspace iframe.
+  onWindowFocusChanged: (callback) => {
+    ipcRenderer.on('window-focus-changed', (_event, isFocused) => callback(Boolean(isFocused)));
+  },
+  // A one-off in-app toast main wants shown here (the "couldn't open link"
+  // fallback after the address was copied).
+  onToast: (callback) => {
+    ipcRenderer.on('show-toast', (_event, toast) => {
+      if (!toast || typeof toast.title !== 'string' || typeof toast.body !== 'string') return;
+      callback({ title: toast.title, body: toast.body });
+    });
   },
 });

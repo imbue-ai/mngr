@@ -4,7 +4,11 @@
 
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PeekedChannel, UpdateState, UpdateStatus } from "../../../electron-bridge";
+import type {
+  PeekedChannel,
+  UpdateState,
+  UpdateStatus,
+} from "../../../electron-bridge";
 import { resetNotificationPrefsForTests } from "../../../models/notificationsUi";
 import {
   SETTINGS_SECTIONS,
@@ -73,11 +77,14 @@ interface ElementVnode {
 
 /** The channel radios in the rendered tree, in the order the panel lists them. */
 function channelRadios(node: unknown): Record<string, unknown>[] {
-  if (node === null || node === undefined || typeof node !== "object") return [];
+  if (node === null || node === undefined || typeof node !== "object")
+    return [];
   if (Array.isArray(node)) return node.flatMap(channelRadios);
   const vnode = node as ElementVnode;
   const own =
-    vnode.tag === "input" && vnode.attrs !== null && vnode.attrs.name === "update-channel"
+    vnode.tag === "input" &&
+    vnode.attrs !== null &&
+    vnode.attrs.name === "update-channel"
       ? [vnode.attrs]
       : [];
   return [...own, ...channelRadios(vnode.children)];
@@ -100,9 +107,13 @@ describe("the Updates panel", () => {
     // panel redraws identically to up-to-date, and a switch that just parked the
     // user looks like a click that did nothing.
     await withMindsNative({}, async () => {
-      const text = panelText(updatesModel({ updateState: { ...ON_STABLE, status: PARKED } }));
+      const text = panelText(
+        updatesModel({ updateState: { ...ON_STABLE, status: PARKED } }),
+      );
 
-      expect(text).toContain("You're ahead of Stable and will get updates when it catches up.");
+      expect(text).toContain(
+        "You're ahead of Stable and will get updates when it catches up.",
+      );
       expect(text).not.toContain("not receiving updates");
       expect(text).not.toContain("Switch to alpha");
       expect(text).toContain("You're on Mind 0.4.30.");
@@ -114,9 +125,11 @@ describe("the Updates panel", () => {
     // interpolating the raw name reads as a different thing from the control it
     // is about.
     await withMindsNative({}, async () => {
-      expect(panelText(updatesModel({ updateState: { ...ON_STABLE, status: PARKED } }))).not.toContain(
-        "stable is at",
-      );
+      expect(
+        panelText(
+          updatesModel({ updateState: { ...ON_STABLE, status: PARKED } }),
+        ),
+      ).not.toContain("stable is at");
     });
   });
 
@@ -149,7 +162,10 @@ describe("the Updates panel", () => {
     ];
     await withMindsNative({}, async () => {
       for (const [name, status, sentence] of cases) {
-        expect(panelText(updatesModel({ updateState: { ...ON_STABLE, status } })), name).toContain(sentence);
+        expect(
+          panelText(updatesModel({ updateState: { ...ON_STABLE, status } })),
+          name,
+        ).toContain(sentence);
       }
     });
   });
@@ -158,20 +174,35 @@ describe("the Updates panel", () => {
     // The two common outcomes -- up to date, and ahead of this channel -- both
     // redraw the panel to the strings it already showed. Without the time, a
     // check that worked is indistinguishable from a button that does nothing.
-    const justNow = { ...ON_STABLE, lastCheckedAt: new Date(Date.now() - 5_000).toISOString() };
-    const minutesAgo = { ...ON_STABLE, lastCheckedAt: new Date(Date.now() - 8 * 60_000).toISOString() };
+    const justNow = {
+      ...ON_STABLE,
+      lastCheckedAt: new Date(Date.now() - 5_000).toISOString(),
+    };
+    const minutesAgo = {
+      ...ON_STABLE,
+      lastCheckedAt: new Date(Date.now() - 8 * 60_000).toISOString(),
+    };
     // Checks run every ten minutes, so this far back means they stopped, and
     // the time it happened beats counting the days since.
-    const longAgo = { ...ON_STABLE, lastCheckedAt: new Date(Date.now() - 3 * 86_400_000).toISOString() };
+    const longAgo = {
+      ...ON_STABLE,
+      lastCheckedAt: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+    };
     await withMindsNative({}, async () => {
-      expect(panelText(updatesModel({ updateState: justNow }))).toContain("Checked just now.");
-      expect(panelText(updatesModel({ updateState: minutesAgo }))).toContain("Checked 8 mins ago.");
+      expect(panelText(updatesModel({ updateState: justNow }))).toContain(
+        "Checked just now.",
+      );
+      expect(panelText(updatesModel({ updateState: minutesAgo }))).toContain(
+        "Checked 8 mins ago.",
+      );
       const stale = panelText(updatesModel({ updateState: longAgo }));
       expect(stale).toContain("Checked at");
       expect(stale).not.toContain("days ago");
       // Nothing to report before the first check, and not while one is running.
       expect(panelText(updatesModel({}))).not.toContain("Checked");
-      expect(panelText(updatesModel({ updateState: justNow, isUpdateBusy: true }))).not.toContain("Checked");
+      expect(
+        panelText(updatesModel({ updateState: justNow, isUpdateBusy: true })),
+      ).not.toContain("Checked");
     });
   });
 
@@ -182,7 +213,9 @@ describe("the Updates panel", () => {
 
       expect(text.indexOf("Stable")).toBeLessThan(text.indexOf("Beta"));
       expect(text.indexOf("Beta")).toBeLessThan(text.indexOf("Alpha"));
-      expect(channelRadios(renderRoot(SettingsSections, { model }))).toHaveLength(3);
+      expect(
+        channelRadios(renderRoot(SettingsSections, { model })),
+      ).toHaveLength(3);
     });
   });
 
@@ -198,7 +231,9 @@ describe("the Updates panel", () => {
       expect(text).not.toContain("Beta");
       expect(text).not.toContain("Alpha");
       expect(text).not.toContain("Internal channels");
-      expect(channelRadios(renderRoot(SettingsSections, { model }))).toHaveLength(1);
+      expect(
+        channelRadios(renderRoot(SettingsSections, { model })),
+      ).toHaveLength(1);
     });
   });
 
@@ -208,7 +243,11 @@ describe("the Updates panel", () => {
     // channel. Leaving it out renders a list with nothing selected and the
     // channel actually in use named nowhere.
     await withMindsNative({}, async () => {
-      const stranded: UpdateState = { ...ON_STABLE, channel: "alpha", available: ["stable"] };
+      const stranded: UpdateState = {
+        ...ON_STABLE,
+        channel: "alpha",
+        available: ["stable"],
+      };
       const model = updatesModel({ updateState: stranded });
       const radios = channelRadios(renderRoot(SettingsSections, { model }));
 
@@ -222,7 +261,9 @@ describe("the Updates panel", () => {
     await withMindsNative({}, async () => {
       const model = updatesModel({});
       const root = renderRoot(SettingsSections, { model });
-      const details = collectVnodes(root).filter((vnode) => vnode.tag === "details");
+      const details = collectVnodes(root).filter(
+        (vnode) => vnode.tag === "details",
+      );
 
       expect(panelText(model)).toContain("Internal channels");
       expect(details).toHaveLength(1);
@@ -239,7 +280,9 @@ describe("the Updates panel", () => {
       const onAlpha: UpdateState = { ...ON_STABLE, channel: "alpha" };
       const model = updatesModel({ updateState: onAlpha });
       const root = renderRoot(SettingsSections, { model });
-      const details = collectVnodes(root).filter((vnode) => vnode.tag === "details");
+      const details = collectVnodes(root).filter(
+        (vnode) => vnode.tag === "details",
+      );
       const radios = channelRadios(root);
 
       expect(details).toHaveLength(1);
@@ -265,7 +308,12 @@ describe("the Updates panel", () => {
     // feed is not the same as having nothing to install.
     await withMindsNative({}, async () => {
       const text = panelText(
-        updatesModel({ updateState: { ...ON_STABLE, status: { type: "error", message: "ENOTFOUND" } } }),
+        updatesModel({
+          updateState: {
+            ...ON_STABLE,
+            status: { type: "error", message: "ENOTFOUND" },
+          },
+        }),
       );
 
       expect(text).toContain("Couldn't check for updates.");
@@ -293,7 +341,10 @@ describe("the Updates panel", () => {
     // The model refuses this switch too, but only if the click gets there.
     // Disabling the radio is what stops a user selecting a channel that would
     // serve them nothing.
-    const unpublishedAlpha = { ...PEEKED, alpha: { version: null, wouldPark: false, error: "404" } };
+    const unpublishedAlpha = {
+      ...PEEKED,
+      alpha: { version: null, wouldPark: false, error: "404" },
+    };
     await withMindsNative({}, async () => {
       const model = updatesModel({ peekedChannels: unpublishedAlpha });
       const text = panelText(model);
@@ -315,7 +366,9 @@ describe("the Updates panel", () => {
       const loading = updatesModel({ updateState: null });
 
       expect(panelText(loading)).toContain("Reading the update state...");
-      expect(panelText(loading)).not.toContain("Updates are managed by the desktop app.");
+      expect(panelText(loading)).not.toContain(
+        "Updates are managed by the desktop app.",
+      );
     });
   });
 
@@ -323,17 +376,26 @@ describe("the Updates panel", () => {
     // Falling through to the browser copy would show a desktop user "Updates
     // are managed by the desktop app." with no version, channel, or reason.
     await withMindsNative({}, async () => {
-      const broken = updatesModel({ updateState: null, updateError: "MINDS_ROOT_NAME is unreadable" });
+      const broken = updatesModel({
+        updateState: null,
+        updateError: "MINDS_ROOT_NAME is unreadable",
+      });
 
-      expect(panelText(broken)).toContain("Could not read the update state: MINDS_ROOT_NAME is unreadable");
-      expect(panelText(broken)).not.toContain("Updates are managed by the desktop app.");
+      expect(panelText(broken)).toContain(
+        "Could not read the update state: MINDS_ROOT_NAME is unreadable",
+      );
+      expect(panelText(broken)).not.toContain(
+        "Updates are managed by the desktop app.",
+      );
     });
   });
 
   it("states the cost of a parking switch before it is committed", async () => {
     await withMindsNative({}, async () => {
       const text = panelText(
-        updatesModel({ pendingChannelSwitch: { channel: "stable", targetVersion: "0.4.12" } }),
+        updatesModel({
+          pendingChannelSwitch: { channel: "stable", targetVersion: "0.4.12" },
+        }),
       );
 
       expect(text).toContain("Switch to Stable?");
@@ -348,16 +410,29 @@ describe("the Updates panel", () => {
     // FORWARD to 0.5.0 despite the switch, and the wait for stable gets longer
     // rather than shorter. Saying only "still installs" leaves the user
     // expecting to land on the version they can see.
-    const staged = { ...ON_STABLE, channel: "alpha" as const, downloadedVersion: "0.5.0" };
-    const pendingChannelSwitch = { channel: "stable" as const, targetVersion: "0.4.12" };
+    const staged = {
+      ...ON_STABLE,
+      channel: "alpha" as const,
+      downloadedVersion: "0.5.0",
+    };
+    const pendingChannelSwitch = {
+      channel: "stable" as const,
+      targetVersion: "0.4.12",
+    };
     await withMindsNative({}, async () => {
-      const text = panelText(updatesModel({ updateState: staged, pendingChannelSwitch }));
+      const text = panelText(
+        updatesModel({ updateState: staged, pendingChannelSwitch }),
+      );
 
-      expect(text).toContain("Mind 0.5.0 is already downloaded and will still install when you restart");
+      expect(text).toContain(
+        "Mind 0.5.0 is already downloaded and will still install when you restart",
+      );
       expect(text).toContain("you will stay on it until Stable passes it");
       // With nothing staged there is nothing to warn about, so the sentence must
       // not be unconditional.
-      expect(panelText(updatesModel({ pendingChannelSwitch }))).not.toContain("already downloaded");
+      expect(panelText(updatesModel({ pendingChannelSwitch }))).not.toContain(
+        "already downloaded",
+      );
     });
   });
 
@@ -374,7 +449,10 @@ describe("the Updates panel", () => {
     };
     await withMindsNative({}, async () => {
       const text = panelText(
-        updatesModel({ updateState: staged, pendingChannelSwitch: { channel: "stable", targetVersion: "0.4.12" } }),
+        updatesModel({
+          updateState: staged,
+          pendingChannelSwitch: { channel: "stable", targetVersion: "0.4.12" },
+        }),
       );
 
       expect(text).toContain("Mind 0.5.0 is already downloaded");
@@ -390,10 +468,16 @@ describe("the Updates panel", () => {
       const downloading = updatesModel({
         updateState: {
           ...ON_STABLE,
-          status: { type: "update-available", channel: "stable", feedVersion: "0.5.0" },
+          status: {
+            type: "update-available",
+            channel: "stable",
+            feedVersion: "0.5.0",
+          },
         },
       });
-      expect(renderedText(renderRoot(SettingsSections, { model: downloading }))).toContain("Downloading 0.5.0");
+      expect(
+        renderedText(renderRoot(SettingsSections, { model: downloading })),
+      ).toContain("Downloading 0.5.0");
       expect(isCheckDisabled(downloading)).toBe(true);
       // Idle, it is live again.
       expect(isCheckDisabled(updatesModel())).toBe(false);
@@ -405,9 +489,13 @@ describe("the Updates panel", () => {
     // come back for a version already dismissed -- leaving a finished download
     // with no way to install it short of quitting by hand.
     await withMindsNative({}, async () => {
-      expect(panelText(updatesModel({ updateState: { ...ON_STABLE, downloadedVersion: "0.5.0" } }))).toContain(
-        "Restart now",
-      );
+      expect(
+        panelText(
+          updatesModel({
+            updateState: { ...ON_STABLE, downloadedVersion: "0.5.0" },
+          }),
+        ),
+      ).toContain("Restart now");
       expect(panelText(updatesModel())).not.toContain("Restart now");
     });
   });
@@ -526,7 +614,9 @@ describe("SettingsSections layout", () => {
     // overflow never bites however the card above them is shaped.
     await withMindsNative({}, async () => {
       const row = renderSections()[0];
-      expect(classTokensOf(row)).toEqual(expect.arrayContaining(["flex-1", "min-h-0"]));
+      expect(classTokensOf(row)).toEqual(
+        expect.arrayContaining(["flex-1", "min-h-0"]),
+      );
       expect(classTokensOf(row)).not.toContain("items-start");
     });
   });
@@ -557,7 +647,9 @@ describe("SettingsSections layout", () => {
     // do: the entries come from the shared recipe, not a fifth one.
     await withMindsNative({}, async () => {
       const [nav] = columns();
-      const entries = collectVnodes(nav).filter((vnode) => vnode.tag === "button");
+      const entries = collectVnodes(nav).filter(
+        (vnode) => vnode.tag === "button",
+      );
       expect(entries).toHaveLength(SETTINGS_SECTIONS.length);
       for (const entry of entries) {
         expect(classTokensOf(entry)).toEqual(
@@ -572,7 +664,6 @@ const NOTIFICATIONS_OVERVIEW: SettingsOverview = settingsOverview({
   notification_prefs: {
     is_enabled: true,
     style: "cards",
-    is_os_hint_dismissed: false,
     version: "np-1",
   },
 });
@@ -632,7 +723,6 @@ describe("SettingsSections notifications panel", () => {
     (model.overview as SettingsOverview).notification_prefs = {
       is_enabled: false,
       style: "both",
-      is_os_hint_dismissed: false,
       version: "np-1",
     };
     const panel = renderSections(model);
@@ -643,8 +733,9 @@ describe("SettingsSections notifications panel", () => {
     ).toBe(false);
   });
 
-  it("writes the picked style and asks the browser for permission in browser mode", async () => {
-    // Browser mode: no window.mindsNative. Permission undecided.
+  it("writes the picked style without asking the browser for anything", async () => {
+    // OS delivery is the desktop app's alone: no Web Notification permission
+    // prompt, in browser mode or anywhere else.
     vi.stubGlobal("window", {});
     const requestPermission = vi.fn(async () => "granted");
     vi.stubGlobal("Notification", { permission: "default", requestPermission });
@@ -658,10 +749,33 @@ describe("SettingsSections notifications panel", () => {
       (vnode) => attrsOf(vnode).id === "notification-style-os",
     );
     (attrsOf(osRadio as AnyVnode).onclick as () => void)();
-    expect(writtenBodies).toEqual([
-      { is_enabled: true, style: "os", is_os_hint_dismissed: false },
-    ]);
-    expect(requestPermission).toHaveBeenCalledTimes(1);
+    expect(writtenBodies).toEqual([{ is_enabled: true, style: "os" }]);
+    expect(requestPermission).not.toHaveBeenCalled();
+  });
+
+  it("offers a test notification in desktop mode and shows what came of it", async () => {
+    vi.stubGlobal("window", {
+      mindsNative: { platform: "darwin", openNotificationSettings: vi.fn() },
+    });
+    const model = await notificationsModel();
+    (model.overview as SettingsOverview).notification_prefs = {
+      is_enabled: true,
+      style: "both",
+      version: "np-1",
+    };
+    model.testNotificationResult = "Sent.";
+
+    const panel = renderSections(model);
+
+    const button = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).id === "notifications-send-test",
+    );
+    expect(button).toBeDefined();
+    expect(allText(button)).toBe("Send test notification");
+    const status = collectVnodes(panel).find(
+      (vnode) => attrsOf(vnode).role === "status",
+    );
+    expect(allText(status)).toBe("Sent.");
   });
 
   it("offers to open OS notification settings in desktop mode whenever system delivery is selected", async () => {
@@ -673,7 +787,6 @@ describe("SettingsSections notifications panel", () => {
     (model.overview as SettingsOverview).notification_prefs = {
       is_enabled: true,
       style: "both",
-      is_os_hint_dismissed: false,
       version: "np-1",
     };
 
@@ -683,7 +796,10 @@ describe("SettingsSections notifications panel", () => {
       allText(vnode).includes("Open System Settings"),
     );
     expect(notice).toBeDefined();
-    const button = collectVnodes(panel).find((vnode) => vnode.tag === Button);
+    const button = collectVnodes(panel).find(
+      (vnode) =>
+        vnode.tag === Button && allText(vnode) === "Open System Settings",
+    );
     expect(button).toBeDefined();
     (attrsOf(button as AnyVnode).onclick as () => void)();
     expect(openNotificationSettings).toHaveBeenCalledTimes(1);
@@ -700,7 +816,6 @@ describe("SettingsSections notifications panel", () => {
     (model.overview as SettingsOverview).notification_prefs = {
       is_enabled: true,
       style: "both",
-      is_os_hint_dismissed: false,
       version: "np-1",
     };
 
@@ -718,22 +833,24 @@ describe("SettingsSections notifications panel", () => {
   it.each([
     ["the style is cards-only", { style: "cards" as const }],
     ["notifications are off", { is_enabled: false, style: "both" as const }],
-  ])("does not offer to open OS settings when %s", async (_label, overrides) => {
-    vi.stubGlobal("window", {
-      mindsNative: { platform: "darwin", openNotificationSettings: vi.fn() },
-    });
-    const model = await notificationsModel();
-    (model.overview as SettingsOverview).notification_prefs = {
-      is_enabled: true,
-      is_os_hint_dismissed: false,
-      version: "np-1",
-      ...overrides,
-    };
+  ])(
+    "does not offer to open OS settings when %s",
+    async (_label, overrides) => {
+      vi.stubGlobal("window", {
+        mindsNative: { platform: "darwin", openNotificationSettings: vi.fn() },
+      });
+      const model = await notificationsModel();
+      (model.overview as SettingsOverview).notification_prefs = {
+        is_enabled: true,
+        version: "np-1",
+        ...overrides,
+      };
 
-    const panel = renderSections(model);
+      const panel = renderSections(model);
 
-    expect(allText(panel)).not.toContain("Open System Settings");
-  });
+      expect(allText(panel)).not.toContain("Open System Settings");
+    },
+  );
 
   it("does not offer to open OS settings in browser mode", async () => {
     vi.stubGlobal("window", {});
@@ -741,7 +858,6 @@ describe("SettingsSections notifications panel", () => {
     (model.overview as SettingsOverview).notification_prefs = {
       is_enabled: true,
       style: "both",
-      is_os_hint_dismissed: false,
       version: "np-1",
     };
 
@@ -758,7 +874,6 @@ describe("SettingsSections notifications panel", () => {
     await model.setNotificationPrefs({
       is_enabled: false,
       style: "cards",
-      is_os_hint_dismissed: false,
     });
     const panel = renderSections(model);
     const alert = collectVnodes(panel).find(

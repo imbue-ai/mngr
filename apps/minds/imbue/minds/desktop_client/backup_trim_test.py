@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 from pydantic import AnyUrl
-from pydantic import Field
 
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
@@ -18,11 +17,13 @@ from imbue.minds.desktop_client.backup_trim import run_backup_trim
 from imbue.minds.desktop_client.backup_trim import select_snapshot_ids_to_forget
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.minds_config import NotificationStyle
+from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
+from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.restic_cli import ResticSnapshot
 from imbue.minds.desktop_client.restic_cli import forget_snapshots
 from imbue.minds.desktop_client.restic_cli import list_snapshots
+from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_for_value
 
@@ -163,17 +164,6 @@ def test_run_backup_trim_reports_untrimmable_buckets_when_still_over(tmp_path: P
     assert cli.cleanup_grant_call_count == 1
 
 
-class _RecordingNotificationDispatcher(NotificationDispatcher):
-    """Dispatcher stand-in that records (title, message) pairs instead of showing anything."""
-
-    dispatched: list[tuple[str | None, str]] = Field(
-        default_factory=list, description="(title, message) per dispatch call"
-    )
-
-    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
-        self.dispatched.append((request.title, request.message))
-
-
 class _CrashingImbueCloudCli(FakeImbueCloudCli):
     """Fake whose recheck_storage raises an exception type the trim run does not expect."""
 
@@ -193,21 +183,37 @@ def _wait_until_not_running(manager: BackupTrimManager, user_id: str) -> BackupT
     return finished
 
 
-def _wait_for_dispatch(dispatcher: _RecordingNotificationDispatcher) -> list[tuple[str | None, str]]:
+def _make_feed() -> NotificationFeed:
+    return NotificationFeed(
+        notification_dispatcher=None,
+        get_dispatch_preferences=lambda: NotificationDispatchPreferences(
+            is_enabled=True, style=NotificationStyle.BOTH
+        ),
+        get_connected_focused_workspace_agent_ids=lambda: (),
+    )
+
+
+def _wait_for_system_events(feed: NotificationFeed) -> list[tuple[str, str, str]]:
     """The trim thread flips the status to its terminal state BEFORE it notifies, so a run
-    that has stopped running has not necessarily dispatched yet."""
+    that has stopped running has not necessarily appended its event yet. Returns
+    (title, body, workspace_agent_id) per system event in the feed."""
 
-    def _dispatched() -> list[tuple[str | None, str]] | None:
-        return dispatcher.dispatched or None
+    def _events() -> list[tuple[str, str, str]] | None:
+        events = [
+            (entry.title, entry.body, entry.workspace_agent_id)
+            for entry in feed.reconcile((), {}).entries
+            if entry.kind == NotificationKind.SYSTEM_EVENT
+        ]
+        return events or None
 
-    dispatched, _poll_count, _elapsed = poll_for_value(_dispatched, timeout=10.0, poll_interval=0.01)
-    assert dispatched is not None, "the finished trim run never dispatched its notification"
-    return dispatched
+    events, _poll_count, _elapsed = poll_for_value(_events, timeout=10.0, poll_interval=0.01)
+    assert events is not None, "the finished trim run never appended its system event"
+    return events
 
 
 def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: Path) -> None:
     manager = BackupTrimManager()
-    dispatcher = _RecordingNotificationDispatcher(is_electron=False)
+    feed = _make_feed()
     cli = make_fake_imbue_cloud_cli()
     cli.storage_recheck_results = [{"is_over_quota": False, "usage_bytes": 10, "limit_bytes": 100}]
     started = manager.start_trim(
@@ -215,12 +221,15 @@ def test_backup_trim_manager_start_trim_records_success_and_notifies(tmp_path: P
         account_email="a@example.com",
         cli=cli,
         paths=InstallationPaths(data_dir=tmp_path),
-        notification_dispatcher=dispatcher,
+        notification_feed=feed,
     )
     assert started is True
     outcome = _wait_until_not_running(manager, "user-1")
     assert outcome.state == BackupTrimState.SUCCEEDED
-    assert _wait_for_dispatch(dispatcher) == [("Backup cleanup finished", outcome.detail)]
+    # Account-level: no workspace, so the entry carries none and names the account.
+    assert _wait_for_system_events(feed) == [("Backup cleanup finished", outcome.detail, "")]
+    (entry,) = feed.reconcile((), {}).entries
+    assert entry.workspace_name == "a@example.com"
 
 
 def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) -> None:
@@ -231,7 +240,7 @@ def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) 
         account_email="a@example.com",
         cli=make_fake_imbue_cloud_cli(),
         paths=InstallationPaths(data_dir=tmp_path),
-        notification_dispatcher=None,
+        notification_feed=None,
     )
     assert started is False
     status = manager.get_status("user-1")
@@ -242,20 +251,20 @@ def test_backup_trim_manager_refuses_second_start_while_running(tmp_path: Path) 
 def test_backup_trim_manager_records_failure_and_notifies(tmp_path: Path) -> None:
     """A typed CLI failure lands as a failed status plus the failure notification."""
     manager = BackupTrimManager()
-    dispatcher = _RecordingNotificationDispatcher(is_electron=False)
+    feed = _make_feed()
     # No fake recheck results configured -> the CLI raises ImbueCloudCliError.
     manager._run(
         user_id="user-1",
         account_email="a@example.com",
         cli=make_fake_imbue_cloud_cli(),
         paths=InstallationPaths(data_dir=tmp_path),
-        notification_dispatcher=dispatcher,
+        notification_feed=feed,
     )
     status = manager.get_status("user-1")
     assert status is not None
     assert status.state == BackupTrimState.FAILED
     assert "Backup cleanup failed" in status.detail
-    assert _wait_for_dispatch(dispatcher) == [("Backup cleanup failed", status.detail)]
+    assert _wait_for_system_events(feed) == [("Backup cleanup failed", status.detail, "")]
 
 
 def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) -> None:
@@ -268,7 +277,7 @@ def test_backup_trim_manager_flips_unexpected_crash_to_failed(tmp_path: Path) ->
             account_email="a@example.com",
             cli=_CrashingImbueCloudCli(connector_url=AnyUrl("http://connector.invalid")),
             paths=InstallationPaths(data_dir=tmp_path),
-            notification_dispatcher=None,
+            notification_feed=None,
         )
     status = manager.get_status("user-1")
     assert status is not None

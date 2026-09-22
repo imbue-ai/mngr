@@ -27,7 +27,8 @@ const {
 const { startRelaunchAfterExit } = require('./linux-relaunch');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
-const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('./surface-routing');
+const { parseWorkspaceId } = require('./surface-routing');
+const { linkFallbackFor, nativeNotificationOptionsFor, routeNotificationClick } = require('./notifications');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 const updater = require('./updater');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
@@ -497,6 +498,7 @@ function createBundle() {
     chromeLoadRetryCount: 0,
     chromeLoadRetryPendingUrl: null,
     chromeLoadFailedUrl: null,
+    pendingNotificationEntries: [],
     showInactiveOnFirstShow: false,
     _maximizedByUs: false,
     _boundsBeforeMaximize: null,
@@ -540,11 +542,22 @@ function createBundle() {
 function wireBundleWindowEvents(bundle) {
   const { window: win } = bundle;
 
+  // Relay every focus and blur to the page: the renderer only sees the
+  // top-level window's own focus events while keyboard focus sits in the
+  // chrome document, so with focus inside the workspace iframe a switch to
+  // another app and back goes unseen there. Main's window events fire
+  // reliably, and the backend's OS-banner gate reads the page's report.
+  const relayFocus = (isFocused) => {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) return;
+    try { win.webContents.send('window-focus-changed', isFocused); } catch { /* noop */ }
+  };
   win.on('focus', () => {
     const idx = mruWindows.indexOf(bundle);
     if (idx >= 0) mruWindows.splice(idx, 1);
     mruWindows.unshift(bundle);
+    relayFocus(true);
   });
+  win.on('blur', () => relayFocus(false));
 
   win.on('maximize', () => { bundle._maximizedByUs = true; });
   win.on('unmaximize', () => { bundle._maximizedByUs = false; });
@@ -782,7 +795,7 @@ function applyExternalLinkHandling(wc) {
     setImmediate(() => {
       shell.openExternal(url).catch((err) => {
         console.warn('[external-link] failed to open', url, err);
-        notifyOpenFailed(url);
+        notifyOpenFailed(url, wc);
       });
     });
   };
@@ -800,23 +813,18 @@ function applyExternalLinkHandling(wc) {
   });
 }
 
-function notifyOpenFailed(url) {
-  let scheme = '';
+// The address is copied either way; the explanation is an in-app toast in
+// the window the click happened in (never a system notification: nothing
+// left the app, and the reader is right there).
+function notifyOpenFailed(url, wc) {
+  const fallback = linkFallbackFor(url);
+  clipboard.writeText(fallback.clipboardText);
+  if (!wc || wc.isDestroyed()) return;
   try {
-    scheme = new URL(url).protocol.replace(':', '');
-  } catch {
-    // Unparseable url -- fall through with an empty scheme and copy verbatim.
+    wc.send('show-toast', { title: fallback.title, body: fallback.body });
+  } catch (err) {
+    console.warn('[external-link] could not show the fallback toast:', err && err.message);
   }
-  const isAddressScheme = scheme === 'mailto' || scheme === 'tel';
-  const payload = isAddressScheme ? url.slice(url.indexOf(':') + 1) : url;
-  clipboard.writeText(payload);
-  const what = scheme === 'mailto' ? 'email address'
-    : scheme === 'tel' ? 'phone number'
-    : 'link';
-  new Notification({
-    title: "Couldn't open link",
-    body: `No app is set up to handle this ${what}. It has been copied to your clipboard.`,
-  }).show();
 }
 
 function wireBundleShowLogic(bundle) {
@@ -2146,10 +2154,30 @@ function flushPendingDeeplink() {
   handleDeeplink(url);
 }
 
+// Both native banners and the card/feed IPC enter here. Source is null for
+// a native click; an in-app click can defer its local gesture to its renderer.
+function openNotificationDestination(url, source = null, entry = null) {
+  return routeNotificationClick(url ? toAbsoluteUrl(url) : null, source, {
+    findWindow: mostRecentBundleForWorkspace,
+    mostRecentWindow: getMostRecentWindow,
+    focus: focusBundleFromNotificationClick,
+    navigate: navigateBundle,
+    openEntry: entry ? (target) => {
+      if (isOnBackendPage(target) && !target.window.webContents.isLoading()) {
+        target.window.webContents.send('open-notification', entry);
+      } else {
+        // Keep the action until the new page has registered its listener.
+        target.pendingNotificationEntries.push(entry);
+        navigateBundle(target, url || '/');
+      }
+    } : undefined,
+  });
+}
+
 function handleNotification(event) {
-  const agentName = event.agent_name || 'Agent';
-  const title = event.title || `Notification from ${agentName}`;
-  console.log(`[notification] received: title=${JSON.stringify(title)} agent=${agentName}`);
+  const options = nativeNotificationOptionsFor(event, process.platform);
+  const title = options.title;
+  console.log(`[notification] received: title=${JSON.stringify(title)} subtitle=${JSON.stringify(event.subtitle || '')}`);
   if (!Notification.isSupported()) {
     // No JS-level "ask for permission" exists for Electron's native
     // Notification module -- macOS owns that decision entirely (System
@@ -2163,10 +2191,7 @@ function handleNotification(event) {
     console.warn('[notification] Notification.isSupported() is false -- the OS cannot show native notifications here; skipping .show()');
     return;
   }
-  const notification = new Notification({
-    title,
-    body: event.message,
-  });
+  const notification = new Notification(options);
   // 'show' fires once the OS has actually presented the banner -- the one
   // signal that distinguishes "displayed" from "silently declined" (macOS
   // exposes no permission-check API to app code, so this is the closest
@@ -2180,39 +2205,7 @@ function handleNotification(event) {
   notification.on('failed', () => {
     console.warn(`[notification] failed to display (OS-reported): ${JSON.stringify(title)}`);
   });
-  notification.on('click', () => {
-    const url = event.url;
-    if (!url) {
-      const mru = getMostRecentWindow();
-      if (mru) focusBundleFromNotificationClick(mru);
-      return;
-    }
-    const absolute = toAbsoluteUrl(url);
-    const agentId = parseWorkspaceId(absolute);
-    if (agentId) {
-      // The most-recently-focused window already showing this workspace, else
-      // navigate the most recent window (never auto-open a new one).
-      const showingBundle = mostRecentBundleForWorkspace(agentId);
-      const target = showingBundle || getMostRecentWindow();
-      if (target) {
-        focusBundleFromNotificationClick(target);
-        if (showingBundle === null) navigateBundle(target, absolute);
-      }
-    } else {
-      // Notification deep links use the SPA's /workspace/<agent-id>?review=
-      // route -- a chrome-page path, not a workspace origin, so
-      // parseWorkspaceId above cannot see it. Match the path id against each
-      // window's tracked workspace so the window already on that workspace is
-      // the one focused -- and still navigated: it needs the ?review= param
-      // to open the review popup. Anything else falls back to the MRU window.
-      const routeId = parseSpaWorkspaceRouteId(absolute);
-      const target = (routeId && mostRecentBundleForWorkspace(routeId)) || getMostRecentWindow();
-      if (target) {
-        focusBundleFromNotificationClick(target);
-        navigateBundle(target, absolute);
-      }
-    }
-  });
+  notification.on('click', () => openNotificationDestination(event.url, null, event.entry));
   notification.show();
   console.log(`[notification] .show() called for ${JSON.stringify(title)} -- if no banner appeared, check System Settings > Notifications for this app`);
 }
@@ -2421,6 +2414,21 @@ ipcMain.on('open-workspace-in-new-window', (_event, agentId) => {
   // already shows the workspace (two windows on one workspace is allowed).
   const url = wrapperUrlForWorkspace(agentId);
   if (url) openNewWindow(url);
+});
+
+ipcMain.handle('open-notification-in-existing-window', (event, route, entry) => {
+  const source = getBundleFromEvent(event);
+  // This IPC only accepts local notification destinations, never external URLs.
+  if (!source || typeof route !== 'string' || !route.startsWith('/workspace/')) return false;
+  return openNotificationDestination(route, source, entry);
+});
+
+ipcMain.on('notification-listener-ready', (event) => {
+  const target = getBundleFromEvent(event);
+  if (!target || !isOnBackendPage(target)) return;
+  for (const entry of target.pendingNotificationEntries.splice(0)) {
+    target.window.webContents.send('open-notification', entry);
+  }
 });
 
 // Reload after the window showed the crash strip: back to the failed URL if a

@@ -1,25 +1,28 @@
 """Tests for the notification feed's reconcile semantics and OS dispatch gating."""
 
+import json
 from datetime import datetime
 from datetime import timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationDispatcher
+from imbue.minds.desktop_client.notification_feed import AgentMessageCard
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
 from imbue.minds.desktop_client.notification_feed import PendingNotificationCard
+from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
+from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import UiNotificationsMessage
 
 
-def _make_recording_dispatcher(is_electron: bool = True) -> RecordingNotificationDispatcher:
-    # Electron by default: the feed only OS-dispatches on the Electron channel
-    # (in browser mode the renderer owns OS delivery).
-    return RecordingNotificationDispatcher(is_electron=is_electron, is_macos=False)
+def _make_recording_dispatcher() -> RecordingNotificationDispatcher:
+    return RecordingNotificationDispatcher(is_electron=True)
 
 
 def _at(minute: int) -> datetime:
@@ -41,6 +44,7 @@ def _make_feed(
     style: NotificationStyle = NotificationStyle.BOTH,
     constructed_at: datetime = _CONSTRUCTED_AT,
     connected_workspace_agent_ids: tuple[str, ...] = (),
+    cleared_request_ids_path: Path | None = None,
 ) -> NotificationFeed:
     preferences = NotificationDispatchPreferences(is_enabled=is_enabled, style=style)
     return NotificationFeed(
@@ -48,12 +52,13 @@ def _make_feed(
         get_dispatch_preferences=lambda: preferences,
         get_connected_focused_workspace_agent_ids=lambda: connected_workspace_agent_ids,
         constructed_at=constructed_at,
+        cleared_request_ids_path=cleared_request_ids_path,
     )
 
 
 def _card(
     request_id: str,
-    requested_at: str = _ts(0),
+    requested_at: str | None = _ts(0),
     title: str = "Gmail",
     body: str = "Needs to read your inbox to triage email.",
     workspace_agent_id: str = "agent-" + "a" * 32,
@@ -371,8 +376,8 @@ def test_a_request_filed_after_the_feed_came_up_dispatches_amid_backfill() -> No
         {},
     )
 
-    ((request, _),) = dispatcher.dispatched
-    assert request.title == "alpha asks — Slack"
+    (request,) = dispatcher.dispatched
+    assert request.subtitle == "Slack"
 
 
 def test_a_request_filed_exactly_at_construction_counts_as_backfill() -> None:
@@ -394,6 +399,18 @@ def test_an_unparseable_requested_at_records_the_entry_silently() -> None:
     assert dispatcher.dispatched == []
 
 
+def test_a_request_with_no_filing_time_records_the_entry_silently() -> None:
+    """A record the gateway wrote before it stamped filing times is one that predates this launch."""
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    message = feed.reconcile((_card("evt-1", requested_at=None),), {})
+
+    assert _entry_ids(message) == ["evt-1"]
+    assert datetime.fromisoformat(message.entries[0].created_at) > _CONSTRUCTED_AT
+    assert dispatcher.dispatched == []
+
+
 def test_a_naive_requested_at_is_assumed_utc() -> None:
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)
@@ -411,17 +428,6 @@ def test_the_gateway_z_suffixed_timestamp_format_parses_and_dispatches() -> None
     feed.reconcile((_card("evt-1", requested_at="2026-08-18T12:05:00.123456Z"),), {})
 
     assert len(dispatcher.dispatched) == 1
-
-
-def test_a_non_electron_dispatcher_never_receives_feed_dispatches() -> None:
-    """In browser mode the renderer owns OS delivery; the server side must stay silent."""
-    dispatcher = _make_recording_dispatcher(is_electron=False)
-    feed = _make_feed(dispatcher=dispatcher, style=NotificationStyle.BOTH)
-
-    message = feed.reconcile((_card("evt-1"),), {})
-
-    assert message.unresolved_count == 1
-    assert dispatcher.dispatched == []
 
 
 def test_no_dispatch_when_a_focused_connected_window_displays_the_asking_workspace() -> None:
@@ -475,18 +481,18 @@ def test_a_recreated_entry_after_eviction_does_not_dispatch_again() -> None:
     assert len(dispatcher.dispatched) == 1
 
 
-def test_dispatched_request_carries_the_em_dash_title_and_review_deep_link() -> None:
+def test_dispatched_request_lays_out_workspace_title_headline_subtitle_and_review_deep_link() -> None:
     dispatcher = _make_recording_dispatcher()
     feed = _make_feed(dispatcher=dispatcher)
     agent_id = "agent-" + "a" * 32
 
     feed.reconcile((_card("evt-1"),), {})
 
-    ((request, agent_display_name),) = dispatcher.dispatched
-    assert request.title == "alpha asks — Gmail"
-    assert request.message == "Needs to read your inbox to triage email."
+    (request,) = dispatcher.dispatched
+    assert request.title == "alpha"
+    assert request.subtitle == "Gmail"
+    assert request.body == "Needs to read your inbox to triage email."
     assert request.url == f"/workspace/{agent_id}?review=evt-1"
-    assert agent_display_name == "alpha"
 
 
 def test_dispatched_request_falls_back_to_a_stock_body_when_the_rationale_is_empty() -> None:
@@ -495,8 +501,8 @@ def test_dispatched_request_falls_back_to_a_stock_body_when_the_rationale_is_emp
 
     feed.reconcile((_card("evt-1", body=""),), {})
 
-    ((request, _),) = dispatcher.dispatched
-    assert request.message == "Waiting on your review."
+    (request,) = dispatcher.dispatched
+    assert request.body == "Waiting on your review."
 
 
 def test_dispatched_request_omits_the_deep_link_when_the_workspace_is_unresolvable() -> None:
@@ -505,8 +511,298 @@ def test_dispatched_request_omits_the_deep_link_when_the_workspace_is_unresolvab
 
     feed.reconcile((_card("evt-1", workspace_agent_id=""),), {})
 
-    ((request, _),) = dispatcher.dispatched
+    (request,) = dispatcher.dispatched
     assert request.url is None
+
+
+# Agent messages and system events
+
+_WORKSPACE_ID = "agent-" + "a" * 32
+_CHAT_ID = "agent-" + "c" * 32
+
+
+def _agent_message(
+    body: str = "Finished the migration; 3 tables moved.",
+    workspace_agent_id: str = _WORKSPACE_ID,
+    chat_agent_id: str = _CHAT_ID,
+) -> AgentMessageCard:
+    return AgentMessageCard(
+        chat_agent_id=chat_agent_id,
+        chat_name="Migration chat",
+        body=body,
+        workspace_agent_id=workspace_agent_id,
+        workspace_name="alpha",
+        workspace_accent="#aabbcc",
+    )
+
+
+def _system_event(workspace_agent_id: str = _WORKSPACE_ID, title: str = "Backup setup failed") -> SystemEventCard:
+    return SystemEventCard(
+        title=title,
+        body="Couldn't reach the backup host.",
+        workspace_agent_id=workspace_agent_id,
+        workspace_name="alpha" if workspace_agent_id else "me@example.com",
+        workspace_accent="#aabbcc",
+    )
+
+
+def test_an_agent_message_enters_the_feed_unresolved_and_counts_toward_the_badge() -> None:
+    feed = _make_feed()
+    changes: list[int] = []
+    feed.on_change = lambda: changes.append(1)
+
+    entry = feed.append_agent_message(_agent_message(), sent_at=_at(5))
+    message = feed.reconcile((), {})
+
+    assert entry.kind == NotificationKind.AGENT_MESSAGE
+    assert message.unresolved_count == 1
+    (listed,) = message.entries
+    assert listed.id == entry.id
+    assert listed.title == "Migration chat"
+    assert listed.body == "Finished the migration; 3 tables moved."
+    assert listed.chat_agent_id == _CHAT_ID
+    assert listed.workspace_agent_id == _WORKSPACE_ID
+    assert listed.created_at == _ts(5)
+    assert listed.outcome is None
+    # The append is a change the publisher has to hear about on its own.
+    assert changes == [1]
+
+
+def test_navigating_to_a_workspace_reads_only_its_agent_messages() -> None:
+    feed = _make_feed()
+    other_workspace = "agent-" + "b" * 32
+    feed.append_agent_message(_agent_message())
+    kept = feed.append_agent_message(_agent_message(workspace_agent_id=other_workspace))
+    kept_event = feed.append_system_event(_system_event())
+
+    assert feed.mark_workspace_read(_WORKSPACE_ID) is True
+    message = feed.reconcile((), {})
+
+    assert {entry.id for entry in message.entries} == {kept.id, kept_event.id}
+    assert feed.mark_workspace_read(_WORKSPACE_ID) is False
+    assert feed.mark_workspace_read("") is False
+
+
+def test_an_agent_message_whose_workspace_left_the_list_drops_out() -> None:
+    feed = _make_feed()
+    feed.append_agent_message(_agent_message())
+    still_here = feed.append_agent_message(_agent_message(workspace_agent_id="agent-" + "b" * 32))
+    unresolved = feed.append_agent_message(_agent_message(workspace_agent_id=""))
+    system_event = feed.append_system_event(_system_event())
+
+    message = feed.reconcile((), {}, known_workspace_agent_ids={"agent-" + "b" * 32})
+
+    # Only agent messages follow their workspace out; the system event about
+    # the gone workspace stays until cleared, and so does a message whose
+    # workspace never resolved (it had none to leave).
+    assert {entry.id for entry in message.entries} == {still_here.id, unresolved.id, system_event.id}
+
+
+def test_a_system_event_enters_the_feed_and_clearing_it_removes_it() -> None:
+    feed = _make_feed()
+
+    entry = feed.append_system_event(_system_event(), happened_at=_at(3))
+    listed = feed.reconcile((), {}).entries
+
+    assert entry.kind == NotificationKind.SYSTEM_EVENT
+    assert [e.id for e in listed] == [entry.id]
+    assert listed[0].title == "Backup setup failed"
+    assert listed[0].created_at == _ts(3)
+    assert feed.clear(entry.id) is True
+    assert feed.reconcile((), {}).entries == ()
+
+
+def test_clearing_a_request_hides_it_for_good_while_the_request_stays_pending() -> None:
+    feed = _make_feed()
+    feed.reconcile((_card("evt-1"), _card("evt-2")), {})
+
+    assert feed.clear("evt-1") is True
+    message = feed.reconcile((_card("evt-1"), _card("evt-2")), {})
+
+    # The reconcile keeps seeing the pending request, but the cleared entry
+    # never comes back -- and it no longer counts.
+    assert _entry_ids(message) == ["evt-2"]
+    assert message.unresolved_count == 1
+    assert feed.clear("evt-1") is False
+
+
+def test_cleared_requests_stay_cleared_in_a_feed_built_after_a_restart(tmp_path: Path) -> None:
+    cleared_path = tmp_path / "cleared.json"
+    feed = _make_feed(cleared_request_ids_path=cleared_path)
+    feed.reconcile((_card("evt-1"), _card("evt-2"), _card("evt-3")), {})
+    feed.clear("evt-1")
+    feed.clear_all()
+    feed.reconcile((_card("evt-4"),), {})
+
+    restarted = _make_feed(cleared_request_ids_path=cleared_path)
+    message = restarted.reconcile((_card("evt-1"), _card("evt-2"), _card("evt-3"), _card("evt-4")), {})
+
+    assert _entry_ids(message) == ["evt-4"]
+
+
+def test_an_unreadable_cleared_requests_file_starts_the_feed_with_nothing_cleared(tmp_path: Path) -> None:
+    cleared_path = tmp_path / "cleared.json"
+    cleared_path.write_text("not json")
+
+    message = _make_feed(cleared_request_ids_path=cleared_path).reconcile((_card("evt-1"),), {})
+
+    assert _entry_ids(message) == ["evt-1"]
+
+
+def test_clearing_an_agent_message_or_system_event_removes_it() -> None:
+    feed = _make_feed()
+    message_entry = feed.append_agent_message(_agent_message())
+    event_entry = feed.append_system_event(_system_event())
+
+    assert feed.clear(message_entry.id) is True
+    assert feed.clear(event_entry.id) is True
+
+    assert feed.reconcile((), {}).entries == ()
+
+
+def test_clear_all_empties_the_feed_receipts_included() -> None:
+    feed = _make_feed()
+    feed.reconcile((_card("evt-1"), _card("evt-2")), {})
+    feed.reconcile((_card("evt-2"),), {"evt-1": NotificationOutcome.APPROVED})
+    feed.append_agent_message(_agent_message())
+    feed.append_system_event(_system_event())
+
+    assert feed.clear_all() is True
+    message = feed.reconcile((_card("evt-2"),), {"evt-1": NotificationOutcome.APPROVED})
+
+    assert message.entries == ()
+    assert message.unresolved_count == 0
+    assert feed.clear_all() is False
+
+
+def test_unresolved_count_spans_every_kind() -> None:
+    feed = _make_feed()
+    feed.reconcile((_card("evt-1"),), {})
+    feed.append_agent_message(_agent_message())
+    feed.append_system_event(_system_event())
+
+    message = feed.reconcile((_card("evt-1"),), {})
+
+    assert message.unresolved_count == 3
+    assert [entry.kind for entry in message.entries] == [
+        NotificationKind.SYSTEM_EVENT,
+        NotificationKind.AGENT_MESSAGE,
+        NotificationKind.PERMISSION_REQUEST,
+    ]
+
+
+def test_eviction_across_kinds_drops_only_resolved_requests() -> None:
+    """Agent messages and system events are unresolved until read, so the cap never evicts them."""
+    feed = _make_feed()
+    feed.reconcile((_card("evt-old"),), {})
+    feed.reconcile((), {"evt-old": NotificationOutcome.APPROVED})
+    for _ in range(50):
+        feed.append_agent_message(_agent_message())
+
+    message = feed.reconcile((), {})
+
+    assert "evt-old" not in _entry_ids(message)
+    assert len(message.entries) == 50
+
+
+def test_an_agent_message_dispatches_the_chat_deep_link_with_the_workspace_as_title() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    entry = feed.append_agent_message(_agent_message())
+
+    (request,) = dispatcher.dispatched
+    assert request.title == "alpha"
+    assert request.subtitle == "Migration chat"
+    assert request.body == "Finished the migration; 3 tables moved."
+    assert request.url == f"/workspace/{_WORKSPACE_ID}?chat={_CHAT_ID}"
+    assert request.entry == entry
+
+
+def test_native_banner_event_carries_the_feed_entry_for_the_shared_open_action(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    feed = _make_feed(dispatcher=NotificationDispatcher(is_electron=True))
+    entry = feed.append_system_event(_system_event(workspace_agent_id=""))
+
+    (event,) = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert event["entry"] == entry.model_dump(mode="json")
+    assert event["url"] == "/accounts"
+
+
+def test_a_workspace_system_event_dispatches_a_link_to_its_backups_page() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    feed.append_system_event(_system_event())
+
+    (request,) = dispatcher.dispatched
+    assert request.subtitle == "Backup setup failed"
+    assert request.url == f"/workspace/{_WORKSPACE_ID}/backups"
+
+
+def test_an_account_level_system_event_titles_itself_with_the_account_and_links_to_accounts() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher)
+
+    feed.append_system_event(_system_event(workspace_agent_id="", title="Backup cleanup finished"))
+
+    (request,) = dispatcher.dispatched
+    assert request.title == "me@example.com"
+    assert request.url == "/accounts"
+
+
+def test_an_agent_message_is_not_silenced_as_startup_backfill() -> None:
+    """The backfill cutoff is a request rule: a message older than the feed is still news."""
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, constructed_at=_at(30))
+
+    feed.append_agent_message(_agent_message(), sent_at=_at(0))
+
+    assert len(dispatcher.dispatched) == 1
+
+
+def test_an_agent_message_for_the_workspace_on_screen_in_a_focused_window_stays_silent() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=(_WORKSPACE_ID,))
+
+    feed.append_agent_message(_agent_message())
+    feed.append_agent_message(_agent_message(workspace_agent_id="agent-" + "b" * 32))
+
+    assert [request.url for request in dispatcher.dispatched] == [
+        f"/workspace/{'agent-' + 'b' * 32}?chat={_CHAT_ID}",
+    ]
+
+
+def test_an_account_level_event_fires_whatever_windows_are_focused() -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, connected_workspace_agent_ids=(_WORKSPACE_ID,))
+
+    feed.append_system_event(_system_event(workspace_agent_id=""))
+
+    assert len(dispatcher.dispatched) == 1
+
+
+@pytest.mark.parametrize(
+    ("is_enabled", "style", "is_dispatch_expected"),
+    [
+        (True, NotificationStyle.BOTH, True),
+        (True, NotificationStyle.OS, True),
+        (True, NotificationStyle.CARDS, False),
+        (False, NotificationStyle.BOTH, False),
+    ],
+)
+def test_appended_entries_obey_the_master_toggle_and_style(
+    is_enabled: bool, style: NotificationStyle, is_dispatch_expected: bool
+) -> None:
+    dispatcher = _make_recording_dispatcher()
+    feed = _make_feed(dispatcher=dispatcher, is_enabled=is_enabled, style=style)
+
+    feed.append_agent_message(_agent_message())
+    feed.append_system_event(_system_event())
+
+    assert (len(dispatcher.dispatched) == 2) is is_dispatch_expected
 
 
 def test_feed_rejects_a_naive_constructed_at() -> None:

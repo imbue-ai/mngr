@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from flask import Flask
 from flask.testing import FlaskClient
 from pydantic import AnyUrl
 from pydantic import Field
@@ -62,14 +63,15 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import ChatInWorkspaceResolver
 from imbue.minds.desktop_client.testing import capture_error_logs
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import restic_backup_a_file
+from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationKind
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationStatus
@@ -182,7 +184,6 @@ class _StatusReportingAgentCreator(_RecordingAgentCreator):
 def _client_with_agent_creator(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
     *,
     resolver: BackendResolverInterface | None = None,
     agent_creator: AgentCreator | None = None,
@@ -204,7 +205,6 @@ def _client_with_agent_creator(
         agent_creator = AgentCreator(
             paths=InstallationPaths(data_dir=tmp_path / "minds"),
             root_concurrency_group=root_concurrency_group,
-            notification_dispatcher=notification_dispatcher,
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
         )
     app = create_desktop_client(
@@ -223,14 +223,146 @@ def _client_with_agent_creator(
 def _make_recording_creator(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> _RecordingAgentCreator:
     return _RecordingAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
+
+
+def _feed_entries(app: Flask) -> tuple[UiNotificationEntry, ...]:
+    with app.app_context():
+        feed = get_state().notification_feed
+    assert feed is not None
+    return feed.reconcile((), {}).entries
+
+
+def _client_with_chat(
+    tmp_path: Path, workspace_agent_id: AgentId, chat_agent_id: AgentId
+) -> tuple[FlaskClient, Flask]:
+    resolver = ChatInWorkspaceResolver(
+        url_by_agent_and_service={}, workspace_agent_id=workspace_agent_id, chat_agent_id=chat_agent_id
+    )
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+        mngr_caller=RecordingMngrCaller(),
+    )
+    return app.test_client(), app
+
+
+def test_agent_notification_lands_in_the_feed_as_an_agent_message(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_agent_id = AgentId()
+    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+
+    response = client.post(
+        f"/api/v1/agents/{chat_agent_id}/notifications",
+        json={"message": "The migration finished; 3 tables moved."},
+        headers=_auth_header(),
+    )
+
+    assert response.status_code == 200
+    (entry,) = _feed_entries(app)
+    assert entry.kind == "agent_message"
+    assert entry.is_resolved is False
+    assert entry.title == "Migration chat"
+    assert entry.body == "The migration finished; 3 tables moved."
+    assert entry.chat_agent_id == str(chat_agent_id)
+    assert entry.workspace_agent_id == str(workspace_agent_id)
+    assert entry.workspace_name == "alpha"
+
+
+def test_agent_notification_title_becomes_a_prefix_on_the_body(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_agent_id = AgentId()
+    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+
+    response = client.post(
+        f"/api/v1/agents/{chat_agent_id}/notifications",
+        json={"message": "all green", "title": "Test run"},
+        headers=_auth_header(),
+    )
+
+    assert response.status_code == 200
+    (entry,) = _feed_entries(app)
+    assert entry.body == "Test run: all green"
+
+
+def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_id = AgentId()
+    members = (AgentId(), AgentId())
+    resolver = make_resolver_with_data(
+        json.dumps(
+            {
+                "agents": [
+                    {
+                        "id": str(workspace_agent_id),
+                        "name": "system-services",
+                        "labels": {"is_primary": "true", "workspace_display_name": "alpha", "color": "#123456"},
+                    },
+                    *[
+                        {
+                            "id": str(member),
+                            "name": "migration-chat",
+                            "labels": {
+                                "chat_id": str(chat_id),
+                                "chat_seq": str(seq),
+                                "workspace_display_name": "alpha",
+                            },
+                        }
+                        for seq, member in enumerate(members, start=1)
+                    ],
+                ]
+            }
+        )
+    )
+    app = create_desktop_client(
+        auth_store=FileAuthStore(data_directory=tmp_path / "auth"),
+        backend_resolver=resolver,
+        http_client=None,
+        paths=InstallationPaths(data_dir=tmp_path / "minds"),
+        minds_api_key=_TEST_KEY,
+        mngr_caller=RecordingMngrCaller(),
+    )
+
+    for member in members:
+        response = app.test_client().post(
+            f"/api/v1/agents/{member}/notifications",
+            json={"message": f"Finished work on {member}"},
+            headers=_auth_header(),
+        )
+        assert response.status_code == 200
+
+    entries = _feed_entries(app)
+    assert len(entries) == 2
+    assert chat_id not in resolver.list_known_agent_ids()
+    for entry in entries:
+        assert entry.chat_agent_id == str(chat_id)
+        assert entry.workspace_agent_id == str(workspace_agent_id)
+        assert entry.workspace_name == "alpha"
+        assert entry.workspace_accent == "#123456"
+        assert entry.title == "migration-chat"
+
+
+def test_agent_notification_without_a_message_is_rejected(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_agent_id = AgentId()
+    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+
+    response = client.post(
+        f"/api/v1/agents/{chat_agent_id}/notifications",
+        json={"message": ""},
+        headers=_auth_header(),
+    )
+
+    assert response.status_code == 400
+    assert _feed_entries(app) == ()
 
 
 def test_list_workspaces_returns_known_workspaces(tmp_path: Path) -> None:
@@ -756,12 +888,11 @@ def test_create_workspace_without_agent_creator_returns_501(tmp_path: Path) -> N
 def test_create_workspace_imbue_cloud_without_any_account_returns_signup_redirect(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # IMBUE_CLOUD with no account selected AND no accounts existing at all is the
     # no-account backstop: the route returns a 400 carrying the sign-up redirect
     # target so the create page navigates there (mirrors the old form's 303).
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -776,14 +907,13 @@ def test_create_workspace_imbue_cloud_without_any_account_returns_signup_redirec
 def test_create_workspace_imbue_cloud_with_account_unselected_returns_field_error(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # IMBUE_CLOUD with no account selected but accounts that DO exist must ask the
     # user to pick one (a field error on account_id), not redirect to sign-up.
     cli = _fake_sharing_cli()
     cli.add_account(user_id="11111111-1111-1111-1111-111111111111", email="owner@example.com")
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher, session_store=store)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, session_store=store)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -800,11 +930,10 @@ def test_create_workspace_imbue_cloud_with_account_unselected_returns_field_erro
 def test_create_workspace_empty_git_url_returns_field_error(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # A missing repository URL is a field-level validation error so the create
     # page can render the message inline next to the git_url input.
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": ""})
 
@@ -817,12 +946,11 @@ def test_create_workspace_empty_git_url_returns_field_error(
 def test_create_workspace_invalid_host_name_returns_field_error(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # A submitted name that normalizes to an empty slug (here all punctuation)
     # surfaces as a 400 keyed to the host_name field (rather than a deferred
     # FAILED on the creating page).
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -837,7 +965,6 @@ def test_create_workspace_invalid_host_name_returns_field_error(
 def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # With no host_name and ``workspace-1`` already known, the route resolves the
     # next free ``workspace-N`` (workspace-2) before handing off to the creator.
@@ -845,10 +972,8 @@ def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
     resolver = make_resolver_with_data(
         make_agents_json(existing_id, labels={"is_primary": "true"}, host_name="workspace-1"),
     )
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, resolver=resolver, agent_creator=creator
-    )
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, resolver=resolver, agent_creator=creator)
 
     response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
 
@@ -859,7 +984,6 @@ def test_create_workspace_auto_names_next_workspace_when_host_name_omitted(
 def test_create_operation_status_includes_status_text(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # The create-operation status carries a human-readable status_text (the stage
     # caption the creating page renders), derived from status + launch_mode.
@@ -867,7 +991,6 @@ def test_create_operation_status_includes_status_text(
     creator = _StatusReportingAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         fixed_info=AgentCreateAttemptInfo(
             create_attempt_id=create_attempt_id,
@@ -875,9 +998,7 @@ def test_create_operation_status_includes_status_text(
             launch_mode=LaunchMode.DOCKER,
         ),
     )
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
-    )
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
     response = client.get(f"/api/v1/workspaces/operations/create/{create_attempt_id}", headers=_auth_header())
 
@@ -895,7 +1016,6 @@ def test_create_operation_status_includes_status_text(
 def test_create_operation_status_carries_error_kind_for_classified_failures(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # A failed create attempt whose error was classified (e.g. a private GitHub repo
     # the local git credentials cannot see) reports the machine-readable kind
@@ -905,7 +1025,6 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
     creator = _StatusReportingAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         fixed_info=AgentCreateAttemptInfo(
             create_attempt_id=create_attempt_id,
@@ -915,9 +1034,7 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
             error_kind=CreateAttemptErrorKind.GITHUB_AUTH_REQUIRED,
         ),
     )
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
-    )
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
     response = client.get(f"/api/v1/workspaces/operations/create/{create_attempt_id}", headers=_auth_header())
 
@@ -931,15 +1048,12 @@ def test_create_operation_status_carries_error_kind_for_classified_failures(
 def test_create_workspace_full_surface_returns_202_and_threads_fields(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # The full create field surface (color, explicit name, branch, ...) is
     # accepted: a 202 with an operation handle, and the fields are passed through
     # to the creator.
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
-    )
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -993,12 +1107,11 @@ def test_timezone_requires_auth(tmp_path: Path) -> None:
 def test_create_workspace_ignores_stale_ai_provider_field(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # The AI provider moved into the workspace's own sign-in modal. A stale
     # client still sending ai_provider (even a value that used to require an
     # API key) must be accepted -- the field is silently ignored.
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -1012,12 +1125,11 @@ def test_create_workspace_ignores_stale_ai_provider_field(
 def test_create_workspace_rejects_invalid_backup_provider(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # A malformed backup_provider is a structural (enum) failure, so spectree
     # rejects it up front with the uniform 422 contract, before any background
     # create attempt is started.
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -1033,12 +1145,11 @@ def test_create_workspace_rejects_invalid_backup_provider(
 def test_create_workspace_rejects_imbue_cloud_backup_without_account(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # imbue_cloud *backups* (independent of the compute/AI provider) need an
     # account; without one the shared backup-request builder rejects it with a
     # 400 that mentions the account, before any background create attempt starts.
-    client = _client_with_agent_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -3432,17 +3543,13 @@ class _NameConflictAgentCreator(_RecordingAgentCreator):
 def test_create_workspace_in_flight_name_conflict_returns_409(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     creator = _NameConflictAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, agent_creator=creator
-    )
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, agent_creator=creator)
 
     response = client.post(
         "/api/v1/workspaces",
@@ -3469,7 +3576,6 @@ class _InFlightNamesRecordingCreator(_RecordingAgentCreator):
 def test_create_workspace_auto_namer_avoids_in_flight_names(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # ``workspace-1`` is known to discovery and ``workspace-2`` is held by a
     # live in-flight create attempt (invisible to discovery); the auto-namer must
@@ -3481,13 +3587,10 @@ def test_create_workspace_auto_namer_avoids_in_flight_names(
     creator = _InFlightNamesRecordingCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         fixed_in_flight_names=("workspace-2",),
     )
-    client = _client_with_agent_creator(
-        tmp_path, root_concurrency_group, notification_dispatcher, resolver=resolver, agent_creator=creator
-    )
+    client = _client_with_agent_creator(tmp_path, root_concurrency_group, resolver=resolver, agent_creator=creator)
 
     response = client.post("/api/v1/workspaces", headers=_auth_header(), json={"git_url": "https://example/repo"})
 
@@ -3498,18 +3601,16 @@ def test_create_workspace_auto_namer_avoids_in_flight_names(
 def test_create_workspace_threads_account_id_to_start_create_attempt(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # The account id must reach start_create_attempt so the pending-create-attempt record
     # (the crash-safe association) can carry it.
     fake_cli = make_fake_imbue_cloud_cli()
     fake_cli.add_account(user_id="user-77120", email="user-77120@example.com")
     session_store = make_session_store_for_test(tmp_path / "sessions", cli=fake_cli)
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
     client = _client_with_agent_creator(
         tmp_path,
         root_concurrency_group,
-        notification_dispatcher,
         agent_creator=creator,
         session_store=session_store,
     )
@@ -3527,16 +3628,14 @@ def test_create_workspace_threads_account_id_to_start_create_attempt(
 def test_create_workspace_marks_onboarding_complete(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     # Starting any create is the point past which the first-run start flow is no
     # longer useful, so the front door records it for every surface.
     minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
-    creator = _make_recording_creator(tmp_path, root_concurrency_group, notification_dispatcher)
+    creator = _make_recording_creator(tmp_path, root_concurrency_group)
     client = _client_with_agent_creator(
         tmp_path,
         root_concurrency_group,
-        notification_dispatcher,
         agent_creator=creator,
         minds_config=minds_config,
     )

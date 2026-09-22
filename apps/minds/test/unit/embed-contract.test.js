@@ -118,6 +118,47 @@ test('workspace endpoint validates the permission-resolutions payload', () => {
   ]);
 });
 
+test('workspace endpoint validates the focus-chat chat id against the agent-id shape', () => {
+  // A chat's id is its first agent's id, so it takes that shape.
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.FOCUS_CHAT]: (msg) => seen.push(msg.chatId) },
+  });
+  const deliver = (payload) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.FOCUS_CHAT, ...payload } });
+  deliver({ chatId: 'agent-0a1b2c' });
+  deliver({ chatId: '../escape' });
+  deliver({ chatId: '' });
+  deliver({});
+  // The pre-rename field name is not a chat id any more.
+  deliver({ agentId: 'agent-0a1b2c' });
+  assert.deepStrictEqual(seen, ['agent-0a1b2c']);
+});
+
+test('embedder endpoint accepts a workspace readiness announcement', () => {
+  const frameWin = makeWindowDouble();
+  let readyCount = 0;
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    handlers: {
+      [contract.WORKSPACE_READY]: () => {
+        readyCount += 1;
+      },
+    },
+  });
+  win.deliver({ source: frameWin, origin: 'http://ws', data: { type: contract.WORKSPACE_READY } });
+  // Wrong direction: the workspace side never honours its own outbound type.
+  contract.createWorkspaceEndpoint({
+    handlers: {
+      [contract.WORKSPACE_READY]: () => {
+        readyCount += 1;
+      },
+    },
+  });
+  win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.WORKSPACE_READY } });
+  assert.strictEqual(readyCount, 1);
+});
+
 test('embedder endpoint requires the frame source and a matching origin', () => {
   const frameWin = makeWindowDouble();
   const seen = [];

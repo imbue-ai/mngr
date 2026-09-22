@@ -1,8 +1,8 @@
-// The shared notification sentence: accent dot + workspace name + the ask,
-// with an optional service brand mark and a clamped secondary line. One
-// component so the feed overlay's rows and the toast cards read as the same
-// notification wherever it flashes (the prototype shares PermissionNotice the
-// same way).
+// The shared notification sentence: accent dot + workspace name + the
+// headline, with an optional service brand mark and a clamped secondary
+// line. One component so the feed overlay's rows and the toast cards read as
+// the same notification wherever it flashes (the prototype shares
+// PermissionNotice the same way).
 
 import m from "mithril";
 import type { UiNotificationEntry } from "../../channel/messages";
@@ -21,6 +21,19 @@ export function timeAgo(createdAtIso: string, nowMs: number): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.round(hours / 24)}d ago`;
+}
+
+/** The icon each kind is marked with wherever rows are listed by kind. */
+export const KIND_ICON_NAME: Record<UiNotificationEntry["kind"], string> = {
+  permission_request: "key",
+  agent_message: "message-square",
+  system_event: "info",
+};
+
+/** What joins the workspace name to the headline: a request is the
+ * workspace asking for something; a message or event is simply about it. */
+function kindJoiner(kind: UiNotificationEntry["kind"]): string {
+  return kind === "permission_request" ? " asks — " : " — ";
 }
 
 export interface NotificationLineParts {
@@ -49,7 +62,7 @@ export function notificationLine({
           style: `background-color: ${entry.workspace_accent}`,
         }),
         m("span", { class: "font-semibold" }, entry.workspace_name),
-        " asks — ",
+        kindJoiner(entry.kind),
         entry.service_name !== ""
           ? m(
               "span",

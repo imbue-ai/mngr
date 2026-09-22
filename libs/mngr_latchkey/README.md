@@ -516,8 +516,8 @@ consume the stream and approve/delete on resolution.
   caller-supplied fields plus the `target` permissions.json (taken
   from the extension context) and a precomputed `effect`
   (`{rules?, schemas?}`) that an approval would splice into
-  `target`, and returns the full persisted record. Available to
-  agents.
+  `target`, stamps the filing time as `created_at` (ISO-8601 UTC),
+  and returns the full persisted record. Available to agents.
 * `GET /permission-requests` returns the current queue as
   newline-delimited JSON. Each line carries the full persisted
   shape. Add `?follow=true` to keep the connection open and stream

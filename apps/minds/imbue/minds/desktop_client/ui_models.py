@@ -218,6 +218,10 @@ class UiRequestsMessage(FrozenModel):
     type: Literal["requests"] = "requests"
     count: int = Field(description="Number of displayable pending requests")
     request_ids: tuple[str, ...] = Field(description="Pending request event ids in deterministic order")
+    workspace_agent_ids: tuple[str, ...] = Field(
+        default=(),
+        description="Workspace primary agent ids with pending requests, independent of notification dismissal",
+    )
 
 
 class NotificationOutcome(LowerCaseStrEnum):
@@ -233,32 +237,52 @@ class NotificationOutcome(LowerCaseStrEnum):
     CLOSED = auto()
 
 
+class NotificationKind(LowerCaseStrEnum):
+    """What produced a feed entry (the lowercase values are the wire strings).
+
+    A PERMISSION_REQUEST mirrors a pending latchkey request and resolves into
+    a receipt; an AGENT_MESSAGE is a chat agent's note to the user; a
+    SYSTEM_EVENT is something the app itself did (a backup outcome). The two
+    latter kinds leave the feed when read or cleared and never become receipts.
+    """
+
+    PERMISSION_REQUEST = auto()
+    AGENT_MESSAGE = auto()
+    SYSTEM_EVENT = auto()
+
+
 class UiNotificationEntry(FrozenModel):
     """One durable entry in the notification feed.
 
     Display fields are snapshotted at creation so a row still renders after
-    the source request is gone (resolved, or its workspace destroyed).
+    its source is gone (a resolved request, a destroyed workspace).
     """
 
-    id: str = Field(description="The request event id; unique per entry")
-    kind: Literal["permission_request"] = Field(
-        default="permission_request",
-        description="What produced the entry; permission requests are the only kind today",
-    )
+    id: str = Field(description="Unique per entry (the request event id for permission requests)")
+    kind: NotificationKind = Field(description="What produced the entry")
     created_at: str = Field(
-        description="ISO-8601 UTC timestamp of when the underlying request was filed "
-        "(the request event's own timestamp, so ordering and relative times survive restarts)"
+        description="ISO-8601 UTC timestamp of when the entry's event happened "
+        "(a request's own filing timestamp, so ordering and relative times survive restarts)"
     )
-    is_resolved: bool = Field(description="Whether the underlying request has been resolved")
+    is_resolved: bool = Field(
+        description="Whether the entry still needs the user (counts toward the badge while False)"
+    )
     outcome: NotificationOutcome | None = Field(
-        description="How the request resolved; None while unresolved, "
+        description="How a permission request resolved; None while unresolved and for every other kind, "
         "closed when it was auto-resolved because the request vanished (e.g. workspace destroyed)"
     )
-    title: str = Field(description="Headline snapshotted at creation (matches the review dialog's)")
-    body: str = Field(description="Secondary line snapshotted at creation; may be empty")
-    request_id: str = Field(description="The originating request event id; opens the review flow while pending")
-    workspace_agent_id: str = Field(description="Origin workspace's agent id; '' when unresolvable")
-    workspace_name: str = Field(description="Origin workspace's display name, snapshotted at creation")
+    title: str = Field(description="Headline snapshotted at creation (request title, chat name, or event name)")
+    body: str = Field(description="Detail line snapshotted at creation; may be empty")
+    request_id: str = Field(description="The originating request event id for permission requests; '' otherwise")
+    chat_agent_id: str = Field(
+        default="", description="Stable chat destination for an agent message (agent id for older chats); '' otherwise"
+    )
+    workspace_agent_id: str = Field(
+        description="Origin workspace's agent id; '' when unresolvable or for an account-level system event"
+    )
+    workspace_name: str = Field(
+        description="Origin workspace's display name (the account for an account-level event), snapshotted at creation"
+    )
     workspace_accent: str = Field(description="Origin workspace's ``#rrggbb`` accent, snapshotted at creation")
     service_name: str = Field(description="Catalog service for the brand mark; '' when none")
 
@@ -272,7 +296,7 @@ class UiNotificationsMessage(FrozenModel):
 
     type: Literal["notifications"] = "notifications"
     entries: tuple[UiNotificationEntry, ...] = Field(description="Every feed entry, in display order")
-    unresolved_count: int = Field(description="Number of unresolved entries")
+    unresolved_count: int = Field(description="Number of unresolved entries of every kind (the badge count)")
     is_snapshot: bool = Field(
         default=False,
         description="Whether this frame is the connect-time replay of current state rather than a live edge",

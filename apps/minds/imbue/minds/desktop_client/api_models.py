@@ -235,11 +235,10 @@ class TimezoneResponse(FrozenModel):
 
 
 class AgentNotificationRequest(ApiRequestModel):
-    """Body for sending a desktop notification on behalf of an agent."""
+    """Body for notifying the user from a chat agent (lands in the app's notification feed)."""
 
-    message: str = Field(description="Notification body text")
-    title: str | None = Field(default=None, description="Optional notification title")
-    urgency: str | None = Field(default=None, description="One of: low, normal (default), critical")
+    message: str = Field(description="Free-text notification body")
+    title: str | None = Field(default=None, description="Optional title, shown as a prefix on the body")
 
 
 class EstablishSshRequest(ApiRequestModel):

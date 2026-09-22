@@ -247,7 +247,7 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
               onSelectIcon ?? ((id) => openTitlebarPopup(shell, id)),
             unresolvedCount: shell.stores.notifications.unresolvedCount,
             hasWorkspaceRequestDot:
-              shell.stores.notifications.hasUnresolvedForWorkspace(
+              shell.stores.requests.hasPendingForWorkspace(
                 shell.displayedWorkspaceAgentId(),
               ),
             agentId: shell.displayedWorkspaceAgentId(),

@@ -15,7 +15,12 @@
 
 import m from "mithril";
 import { electronBridge } from "../electron-bridge";
-import type { PeekedChannel, UpdateChannel, UpdateState, UpdateStatus } from "../electron-bridge";
+import type {
+  PeekedChannel,
+  UpdateChannel,
+  UpdateState,
+  UpdateStatus,
+} from "../electron-bridge";
 import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
 import {
   DEFAULT_NOTIFICATION_PREFS,
@@ -40,10 +45,7 @@ export interface SettingsOverview {
 }
 
 export type SettingsSection =
-  | "notifications"
-  | "error-reporting"
-  | "updates"
-  | "backups";
+  "notifications" | "error-reporting" | "updates" | "backups";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -94,7 +96,9 @@ let isUpdateStatusRegistered = false;
 function ensureUpdateStatusRegistered(): void {
   if (isUpdateStatusRegistered) return;
   isUpdateStatusRegistered = true;
-  electronBridge.onUpdateStatus((status) => activeUpdateStatusForwarder?.(status));
+  electronBridge.onUpdateStatus((status) =>
+    activeUpdateStatusForwarder?.(status),
+  );
 }
 
 export interface MasterPasswordResult {
@@ -114,7 +118,10 @@ export class SettingsModel {
   updateState: UpdateState | null = null;
   peekedChannels: Record<string, PeekedChannel> = {};
   /** Set when a switch would park the user; cleared by confirm or cancel. */
-  pendingChannelSwitch: { channel: UpdateChannel; targetVersion: string | null } | null = null;
+  pendingChannelSwitch: {
+    channel: UpdateChannel;
+    targetVersion: string | null;
+  } | null = null;
   isUpdateBusy = false;
   /** An install from the panel is running and the app has not quit yet. */
   isUpdateInstalling = false;
@@ -127,6 +134,11 @@ export class SettingsModel {
    * can tell the reader the automatic open didn't work rather than leaving
    * the button looking like it silently did nothing. */
   notificationOsSettingsOpenFailed = false;
+  /** What the last "Send test notification" press came back with, for the
+   * panel to show beside the button: "" before any press or while one is in
+   * flight. */
+  testNotificationResult = "";
+  isTestNotificationBusy = false;
   masterPasswordError = "";
   masterPasswordResults: MasterPasswordResult[] | null = null;
   isMasterPasswordAllOk = false;
@@ -279,7 +291,6 @@ export class SettingsModel {
   async setNotificationPrefs(next: {
     is_enabled: boolean;
     style: NotificationStyle;
-    is_os_hint_dismissed: boolean;
   }): Promise<void> {
     const overview = this.overview;
     if (overview === null) return;
@@ -301,6 +312,7 @@ export class SettingsModel {
         const applied: NotificationPrefs = {
           ...current,
           ...next,
+          has_chosen: true,
           version: result.version,
         };
         // Merge onto the CURRENT overview, not the pre-await `overview`
@@ -330,6 +342,36 @@ export class SettingsModel {
       this.notificationPrefsError =
         "Could not update notifications (network error).";
     }
+    this.redraw();
+  }
+
+  /** Push one banner through the real OS path so the reader can see
+   * whether system notifications reach them at all. The backend answers
+   * whether it even runs inside the desktop shell; outside it nothing can
+   * reach the OS, and the panel says so instead of leaving the button
+   * looking like it silently did nothing. */
+  async sendTestNotification(): Promise<void> {
+    this.isTestNotificationBusy = true;
+    this.testNotificationResult = "";
+    this.redraw();
+    try {
+      const response = await this.fetchImpl(
+        "/ui/api/settings/notifications/test",
+        { method: "POST", credentials: "same-origin" },
+      );
+      if (response.ok) {
+        const result = (await response.json()) as { is_electron: boolean };
+        this.testNotificationResult = result.is_electron
+          ? "Sent. If no banner appeared, check your system's notification settings for Mind."
+          : "Nothing to send to: system notifications need the desktop app.";
+      } else {
+        this.testNotificationResult = `Could not send a test notification (HTTP ${response.status}).`;
+      }
+    } catch {
+      this.testNotificationResult =
+        "Could not send a test notification (network error).";
+    }
+    this.isTestNotificationBusy = false;
     this.redraw();
   }
 
@@ -447,7 +489,8 @@ export class SettingsModel {
     const channel = status.channel ?? this.updateState.channel;
     // Statuses that are not a settled check (`checking`, `disabled`) carry no
     // time, and must not erase the one the last real check reported.
-    const lastCheckedAt = status.lastCheckedAt ?? this.updateState.lastCheckedAt;
+    const lastCheckedAt =
+      status.lastCheckedAt ?? this.updateState.lastCheckedAt;
     this.updateState = { ...this.updateState, channel, status, lastCheckedAt };
     this.redraw();
   }
@@ -464,7 +507,8 @@ export class SettingsModel {
    * every check from then on would fail against a feed that serves nothing.
    */
   async requestChannel(channel: UpdateChannel): Promise<void> {
-    if (this.updateState === null || channel === this.updateState.channel) return;
+    if (this.updateState === null || channel === this.updateState.channel)
+      return;
     this.isUpdateBusy = true;
     this.updateError = "";
     this.redraw();

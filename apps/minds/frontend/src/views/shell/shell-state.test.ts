@@ -204,7 +204,9 @@ describe("ShellState.rememberPageBehindOverlay", () => {
     shell.rememberPageBehindOverlay();
     vi.stubGlobal("window", { history: { length: 1, back: () => undefined } });
     land(shell, `/help?workspace=${WORKSPACE_ID}&assist=0`);
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
 
     expect(shell.closeAppOverlay()).toBe(true);
 
@@ -285,6 +287,106 @@ describe("ShellState.closeAppOverlay", () => {
     expect(shell.closeAppOverlay()).toBe(true);
 
     expect(back).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ShellState chat deep link and focus-chat relay", () => {
+  const flush = () => Promise.resolve();
+
+  it("consumes ?chat= once: strips it by replacement and asks the frame for the chat", async () => {
+    const shell = makeShell();
+    const sent: [string, string][] = [];
+    shell.registerFocusChatSender((workspaceAgentId, chatAgentId) => {
+      sent.push([workspaceAgentId, chatAgentId]);
+      return true;
+    });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?chat=agent-cc33`);
+    await flush();
+
+    expect(routeSet).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}`,
+      undefined,
+      { replace: true },
+    );
+    expect(sent).toEqual([[WORKSPACE_ID, "agent-cc33"]]);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?chat=agent-cc33`);
+    await flush();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("holds the ask while the frame is not ready and sends it on the frame's load", async () => {
+    const shell = makeShell();
+    const sent: [string, string][] = [];
+    let isFrameReady = false;
+    shell.registerFocusChatSender((workspaceAgentId, chatAgentId) => {
+      if (!isFrameReady) return false;
+      sent.push([workspaceAgentId, chatAgentId]);
+      return true;
+    });
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    land(shell, `/workspace/${WORKSPACE_ID}?chat=agent-cc33`);
+    await flush();
+    expect(sent).toEqual([]);
+
+    isFrameReady = true;
+    shell.flushPendingFocusChat();
+    expect(sent).toEqual([[WORKSPACE_ID, "agent-cc33"]]);
+    // Sent once: a second load does not repeat it.
+    shell.flushPendingFocusChat();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("puts the feed overlay away on an in-place ask, which changes no route", () => {
+    const shell = makeShell();
+    shell.registerFocusChatSender(() => true);
+    shell.openNotifications();
+
+    shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
+
+    expect(shell.isNotificationsOpen).toBe(false);
+  });
+
+  it("drops a frame's sender on unregister only when it is still the registered one", () => {
+    const shell = makeShell();
+    const first = (): boolean => true;
+    const second = (): boolean => true;
+    shell.registerFocusChatSender(first);
+    shell.registerFocusChatSender(second);
+    shell.unregisterFocusChatSender(first);
+    // The successor's sender still takes the ask.
+    shell.requestFocusChat(WORKSPACE_ID, "agent-cc33");
+    shell.unregisterFocusChatSender(second);
+    // With nothing registered the ask is held for the next frame.
+    shell.requestFocusChat(WORKSPACE_ID, "agent-dd44");
+    const sent: string[] = [];
+    shell.registerFocusChatSender((_workspaceAgentId, chatAgentId) => {
+      sent.push(chatAgentId);
+      return true;
+    });
+    shell.flushPendingFocusChat();
+    expect(sent).toEqual(["agent-dd44"]);
+  });
+
+  it("tells the notifications controller which workspace was displayed, once per navigation", () => {
+    const shell = makeShell();
+    const displayed: string[] = [];
+    shell.notificationsUi = {
+      handleWorkspaceDisplayed: (id: string) => displayed.push(id),
+      clearLiveToasts: () => undefined,
+    } as unknown as ShellState["notificationsUi"];
+
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    land(shell, "/create");
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+
+    expect(displayed).toEqual([WORKSPACE_ID, WORKSPACE_ID]);
   });
 });
 
@@ -1197,7 +1299,10 @@ describe("ShellState.handleEscape", () => {
 describe("ShellState update modal", () => {
   type UpdateActivity = "IDLE" | "RUNNING" | "APPLYING";
 
-  function applyUpdateActivity(shell: ShellState, activity: UpdateActivity): void {
+  function applyUpdateActivity(
+    shell: ShellState,
+    activity: UpdateActivity,
+  ): void {
     shell.stores.updates.applyUpdatesMessage({
       type: "workspace_updates",
       updates: {
@@ -1296,10 +1401,15 @@ describe("ShellState update modal", () => {
 });
 
 describe("enterWorkspaceOrRecover", () => {
-  function shellWithMachine(liveness: string): { shell: ShellState; routeSet: ReturnType<typeof vi.fn> } {
+  function shellWithMachine(liveness: string): {
+    shell: ShellState;
+    routeSet: ReturnType<typeof vi.fn>;
+  } {
     const shell = new ShellState(createEmptyStores());
     shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     const entry = shell.stores.workspaces.entryByAnyId("agent-aa11");
     if (entry === null) throw new Error("fixture machine missing");
     shell.enterWorkspaceOrRecover(entry, liveness);
@@ -1323,8 +1433,13 @@ describe("enterWorkspaceOrRecover", () => {
   it("sends an unhealthy machine to Recovery without a start", () => {
     const shell = new ShellState(createEmptyStores());
     shell.stores.workspaces.applyWorkspacesMessage(workspacesMessage());
-    shell.stores.health.applyHealthMessage({ agent_id: "agent-aa11", status: "stuck" });
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    shell.stores.health.applyHealthMessage({
+      agent_id: "agent-aa11",
+      status: "stuck",
+    });
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     const entry = shell.stores.workspaces.entryByAnyId("agent-aa11");
     if (entry === null) throw new Error("fixture machine missing");
     shell.enterWorkspaceOrRecover(entry, "RUNNING");

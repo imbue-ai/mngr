@@ -1,5 +1,6 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RequestsStore } from "../../models/requests";
 import { NotificationsStore } from "../../models/notifications";
 import type { ShellState } from "./shell-state";
 import { Titlebar } from "./Titlebar";
@@ -40,6 +41,7 @@ interface RenderTitlebarOptions {
   /** Records the shell's switchToNotifications calls. */
   switchToNotifications?: () => void;
   notificationEntries?: UiNotificationEntry[];
+  pendingWorkspaceIds?: string[];
   /** Runs against the first render; the same instance is then rendered again. */
   afterFirstRender?: (root: AnyVnode) => void;
   /** The route the second render runs under; defaults to `routePath`. */
@@ -65,9 +67,18 @@ function renderTitlebar(
         accentEntry: () => ({ name: "alpha" }),
         toAgentScopedId: (anyId: string) => anyId,
       },
-      requests: { count: 0 },
-      // A real store, so the key-tab dot tests exercise the store's own
-      // waiting-request derivation rather than a fake's copy of it.
+      // Real stores keep the request badge independent from the reminder feed.
+      requests: (() => {
+        const store = new RequestsStore();
+        store.applyRequestsMessage({
+          count: (options.pendingWorkspaceIds ?? []).length,
+          request_ids: (options.pendingWorkspaceIds ?? []).map(
+            (id) => `request-${id}`,
+          ),
+          workspace_agent_ids: options.pendingWorkspaceIds ?? [],
+        });
+        return store;
+      })(),
       notifications: (() => {
         const store = new NotificationsStore();
         store.applyNotificationsMessage({
@@ -92,7 +103,10 @@ function renderTitlebar(
   const render = (path: string): AnyVnode =>
     (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
       instance,
-      m(instance, { shell, routePath: path } as unknown as m.Attributes) as m.Vnode,
+      m(instance, {
+        shell,
+        routePath: path,
+      } as unknown as m.Attributes) as m.Vnode,
     ) as unknown as AnyVnode;
   const first = render(routePath);
   if (options.afterFirstRender === undefined) return first;
@@ -286,12 +300,11 @@ describe("Titlebar workspace tab strip", () => {
     expect(attrsOf(icon as AnyVnode).name).toBe("key");
   });
 
-  it("dots the Permissions tab when the current workspace has an unresolved request", () => {
+  it("keeps the Permissions badge after the request notification has been dismissed", () => {
     const button = tabButton(
       renderTitlebar("", {
-        notificationEntries: [
-          notificationEntry("n1", { workspace_agent_id: WORKSPACE_ID }),
-        ],
+        pendingWorkspaceIds: [WORKSPACE_ID],
+        notificationEntries: [],
       }),
       "ws-tab-permissions",
     );
@@ -322,9 +335,7 @@ describe("Titlebar workspace tab strip", () => {
 
     const elsewhere = tabButton(
       renderTitlebar("", {
-        notificationEntries: [
-          notificationEntry("n2", { workspace_agent_id: "agent-zz99" }),
-        ],
+        pendingWorkspaceIds: ["agent-zz99"],
       }),
       "ws-tab-permissions",
     );
@@ -408,7 +419,9 @@ describe("Titlebar on a creation page", () => {
   it("shows no dialog until a tab is pressed", () => {
     const root = renderTitlebar("", { routePath: CREATING_PATH });
     expect(
-      collectVnodes(root).find((vnode) => attrsOf(vnode).id === "creating-not-yet-dialog"),
+      collectVnodes(root).find(
+        (vnode) => attrsOf(vnode).id === "creating-not-yet-dialog",
+      ),
     ).toBeUndefined();
   });
 
@@ -423,7 +436,9 @@ describe("Titlebar on a creation page", () => {
       rerenderRoutePath: `/workspace/${WORKSPACE_ID}`,
     });
     expect(
-      collectVnodes(root).find((vnode) => attrsOf(vnode).id === "creating-not-yet-dialog"),
+      collectVnodes(root).find(
+        (vnode) => attrsOf(vnode).id === "creating-not-yet-dialog",
+      ),
     ).toBeUndefined();
   });
 });

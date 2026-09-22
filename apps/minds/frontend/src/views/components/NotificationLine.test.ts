@@ -67,6 +67,31 @@ describe("notificationLine", () => {
     expect(bolded).toEqual(["alpha", "Slack access"]);
   });
 
+  it("joins a message or event to its workspace with a plain dash, not 'asks'", () => {
+    const messageLine = notificationLine({
+      entry: entry({
+        kind: "agent_message",
+        title: "Build chat",
+        request_id: "",
+      }),
+    }) as unknown as AnyVnode;
+    const messageText = allText(messageLine);
+    expect(messageText).toContain(" — ");
+    expect(messageText).toContain("Build chat");
+    expect(messageText).not.toContain("asks");
+    const eventLine = notificationLine({
+      entry: entry({
+        kind: "system_event",
+        title: "Backup setup failed",
+        request_id: "",
+      }),
+    }) as unknown as AnyVnode;
+    const eventText = allText(eventLine);
+    expect(eventText).toContain(" — ");
+    expect(eventText).toContain("Backup setup failed");
+    expect(eventText).not.toContain("asks");
+  });
+
   it("clamps the body to two lines and drops the line when the body is empty", () => {
     const withBody = notificationLine({
       entry: entry(),

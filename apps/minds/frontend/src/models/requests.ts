@@ -15,9 +15,19 @@ import {
 
 export class RequestsStore {
   requestIds: readonly string[] = [];
+  private workspaceAgentIds: readonly string[] = [];
+
+  /** Pending permissions survive clearing or opening their notification reminders. */
+  hasPendingForWorkspace(workspaceAgentId: string | null): boolean {
+    return (
+      workspaceAgentId !== null &&
+      this.workspaceAgentIds.includes(workspaceAgentId)
+    );
+  }
 
   applyRequestsMessage(message: UiRequestsMessage): void {
     this.requestIds = message.request_ids;
+    this.workspaceAgentIds = message.workspace_agent_ids ?? [];
     // Fetch what reviewing each of these will need as soon as we know they are
     // pending, rather than when one is opened. The app holds the request from
     // here on, so every way in -- the in-chat card's button, a "Waiting on

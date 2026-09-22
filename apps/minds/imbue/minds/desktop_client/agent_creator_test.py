@@ -60,8 +60,6 @@ from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clon
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -1147,19 +1145,6 @@ def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> Non
     assert (dest / "f").read_text() == "on branch\n"
 
 
-class _RecordingNotificationDispatcher(NotificationDispatcher):
-    """Test-only NotificationDispatcher that records dispatch calls instead of dispatching."""
-
-    _recorded: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
-
-    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
-        self._recorded.append((request, agent_display_name))
-
-    @property
-    def recorded(self) -> list[tuple[NotificationRequest, str]]:
-        return self._recorded
-
-
 def _make_test_creator(
     tmp_path,
     *,
@@ -1169,7 +1154,7 @@ def _make_test_creator(
     poll_interval_seconds: float = 0.05,
     probe_timeout_seconds: float = 0.5,
     system_interface_health_tracker: SystemInterfaceHealthTracker | None = None,
-    notification_dispatcher: NotificationDispatcher | None = None,
+    report_backup_setup_failure: Callable[[AgentId, str], None] | None = None,
     backup_setup_retry_budget_seconds: float = 0.0,
     backup_setup_retry_wait_seconds: float = 0.0,
     pending_create_attempt_store: PendingCreateAttemptStore | None = None,
@@ -1182,8 +1167,7 @@ def _make_test_creator(
     return AgentCreator(
         paths=paths,
         root_concurrency_group=cg,
-        notification_dispatcher=notification_dispatcher
-        or NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
+        report_backup_setup_failure=report_backup_setup_failure,
         mngr_forward_port=mngr_forward_port,
         mngr_forward_preauth_cookie=preauth_cookie,
         workspace_ready_timeout_seconds=timeout_seconds,
@@ -1203,27 +1187,28 @@ def test_provision_backups_notifies_user_after_retry_budget_exhausted(tmp_path) 
 
     Uses an API_KEY request with no RESTIC_REPOSITORY, which fails deterministically
     (no network) on every attempt. With a zero-second budget the loop makes a single
-    attempt, then gives up and dispatches exactly one notification -- and must not let
+    attempt, then gives up and reports exactly one failure -- and must not let
     the exception escape the detached-thread entry point.
     """
-    dispatcher = _RecordingNotificationDispatcher(is_electron=False, is_macos=False)
+    reported: list[tuple[AgentId, str]] = []
     creator = _make_test_creator(
         tmp_path,
-        notification_dispatcher=dispatcher,
+        report_backup_setup_failure=lambda agent_id, detail: reported.append((agent_id, detail)),
         backup_setup_retry_budget_seconds=0.0,
         backup_setup_retry_wait_seconds=0.0,
     )
     request = BackupSetupRequest(backup_provider=BackupProvider.API_KEY, api_key_env_text="")
+    agent_id = AgentId.generate()
 
     creator._provision_backups(
-        agent_id=AgentId.generate(),
+        agent_id=agent_id,
         host_id="host-00000000000000000000000000000000",
         backup_request=request,
     )
 
-    assert len(dispatcher.recorded) == 1
-    notification, _agent_display_name = dispatcher.recorded[0]
-    assert notification.title == "Backup setup failed"
+    ((reported_agent_id, detail),) = reported
+    assert reported_agent_id == agent_id
+    assert detail.startswith("The workspace is running; backups are not yet set up.")
 
 
 def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None:
@@ -1426,14 +1411,12 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     assert any("did not become ready" in line for line in drained)
 
 
-# ---------------------------------------------------------------------------
 # Create-time credential regression tests
 #
 # AI-provider selection moved out of the create flow entirely: workspaces boot
 # unauthenticated and sign in through the workspace's own provider chooser. These
 # guard the removal -- create attempt must never mint a LiteLLM key (the mint moved
 # to the desktop app's /settings/ai-keys page; see ai_keys_test.py).
-# ---------------------------------------------------------------------------
 
 
 def _make_fake_repo(tmp_path: Path) -> Path:
@@ -1450,7 +1433,6 @@ def _make_creator_with_cli(tmp_path: Path, cli: RecordingImbueCloudCli) -> Agent
     return AgentCreator(
         paths=InstallationPaths(data_dir=tmp_path),
         root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         imbue_cloud_cli=cli,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
     )
@@ -1579,9 +1561,7 @@ def test_build_mngr_create_command_no_extra_pass_host_env_when_unset(monkeypatch
     assert "FEATURE_X" not in joined
 
 
-# ---------------------------------------------------------------------------
 # Pending-create-attempt records, create-attempt-id host label, and in-flight name guard
-# ---------------------------------------------------------------------------
 
 
 def test_build_mngr_create_command_stamps_create_attempt_id_host_label_for_lima() -> None:
@@ -1679,7 +1659,6 @@ def _make_parked_creator(
     return _ParkedAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds-data"),
         root_concurrency_group=cg,
-        notification_dispatcher=NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False),
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         pending_create_attempt_store=pending_create_attempt_store,
     )

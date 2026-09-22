@@ -302,7 +302,7 @@ cross-component behavior.
    `restic_backup_a_file`.)
 6. **Cross-workspace notification route** [snapshot] -- `POST
    /api/v1/agents/<id>/notifications` for the resumed workspace returns `ok` and
-   dispatches (assert via a recording dispatcher).
+   lands an agent-message entry for that workspace in the notification feed.
 
 ### 2.2 Electron-driven (one more real lifecycle)
 

@@ -39,16 +39,18 @@ test('parseWorkspaceId matches the workspace origins and the /goto bridge only',
   assert.equal(parseWorkspaceId('/create'), null);
 });
 
-test('parseSpaWorkspaceRouteId matches only the SPA /workspace/<id> route', () => {
-  // The shape notification deep links carry: /workspace/<agent-id>?review=<request-id>.
+test('parseSpaWorkspaceRouteId matches the SPA /workspace/<id> routes', () => {
+  // The shapes notification deep links carry: /workspace/<agent-id>?review=
+  // (a request), ?chat= (an agent message), /backups (a system event).
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}?review=req-1`), AGENT);
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}?chat=agent-0000`), AGENT);
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}/backups`), AGENT);
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}`), AGENT);
   // A host-scoped id counts too (a route may carry it before discovery
   // re-confirms the agent alias), as does a trailing slash.
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${HOST}/`), HOST);
-  // Workspace-SCOPED sub-screens are not the workspace route.
-  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}/settings`), null);
-  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}/options`), null);
+  // The id must be the whole path segment.
+  assert.equal(parseSpaWorkspaceRouteId(`${BASE}/workspace/${AGENT}zz`), null);
   // The shapes parseWorkspaceId owns are not this route.
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/goto/${HOST}/`), null);
   assert.equal(parseSpaWorkspaceRouteId(`http://${HOST}.localhost:8080/`), null);

@@ -1,6 +1,6 @@
 # The minds embed contract
 
-Version: 3 (tracks `CONTRACT_VERSION` in
+Version: 5 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The minds chrome (the "embedder") displays workspace content in a
@@ -45,7 +45,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v3)
+## Message inventory (v5)
 
 ### workspace -> embedder
 
@@ -56,6 +56,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
 | `minds:open-share-settings` | `{ serviceName }` | Open the shell's workspace-options panel on its Share tab, focused on that service. Fire-and-forget (no ack). |
+| `minds:workspace-ready` | `{}` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. |
 
 ### embedder -> workspace
 
@@ -64,6 +65,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the focused window. |
 | `minds:open-ai-keys-ack` | `{}` | A minds chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
+| `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. The workspace raises a window already showing the chat, wherever it is; otherwise it points the viewer's pinned chat window at the chat; otherwise it opens the chat in a window of its own. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
 
 The ack's semantic is "a minds chrome is present" -- NOT "the desktop app is
 present". Plain-browser chrome acks too.
@@ -105,10 +107,12 @@ payloads -- to the console.
 - The Electron main process re-validates ids with its own copies of the
   shape patterns before building URLs (never trust the renderer). Those
   constants live in `electron/main.js` and mirror this module's.
-- Workspace health/readiness/URL state flows through the minds backend's
-  `/ui/ws` WebSocket channel, not through postMessage: the shell derives
-  titlebar state from its own route plus the channel, identically in Electron
-  and browser mode.
+- Workspace health and URL state flow through the minds backend's `/ui/ws`
+  WebSocket channel, not through postMessage: the shell derives titlebar state
+  from its own route plus the channel, identically in Electron and browser
+  mode. (`minds:workspace-ready` above is not that signal. It reports a
+  different fact -- that one *document* has its endpoint listening -- which
+  nothing but that document can report, the WebSocket channel included.)
 
 ## Version history
 
@@ -136,3 +140,18 @@ payloads -- to the console.
   well-shaped name for a service the shell does not recognize falls back to
   the whole-machine share (`ShareModel.selectTarget`'s existing behavior for
   an unknown target).
+- **4** -- added `focus-chat` (embedder -> workspace): the landing half of
+  an agent message's notification click. The chrome navigates to the
+  message's workspace and asks it to show the chat by chat id (a chat's id is
+  its first agent's id); where the workspace puts it is the workspace's own
+  choice, stated in the inventory table. A workspace on an older template
+  never receives the ask and the user simply lands on the workspace.
+- **5** -- added `workspace-ready` (workspace -> embedder): the workspace
+  announces that its endpoint is listening. The embedder holds a `focus-chat`
+  ask until it arrives, rather than guessing when a freshly-mounted frame's
+  page is live -- a send into a document whose listener is not up yet is lost,
+  and a frame's `load` event does not mean the page has run. Both halves of
+  `focus-chat` shipped in v4, so every workspace that handles it also
+  announces readiness. The `permission-resolutions` snapshot still goes on
+  frame load (and once more shortly after), since v3 workspaces announce
+  nothing.

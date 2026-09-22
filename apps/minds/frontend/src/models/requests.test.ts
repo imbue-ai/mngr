@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { NotificationsStore } from "./notifications";
 import { RequestsStore } from "./requests";
-import { forgetWarmedRequestDetails, readWarmedRequestDetail } from "./requestDetailPrefetch";
+import {
+  forgetWarmedRequestDetails,
+  readWarmedRequestDetail,
+} from "./requestDetailPrefetch";
 
 afterEach(() => {
   forgetWarmedRequestDetails();
@@ -45,7 +49,10 @@ describe("RequestsStore", () => {
   it("does not re-fetch a request it is already holding", () => {
     // The channel repeats the pending set on every push, so this is the common
     // case, and each fetch behind it is a latchkey probe on the machine.
-    const fetch = vi.fn(async () => ({ ok: true, json: async () => ({ detail: { kind: "predefined" } }) }));
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ detail: { kind: "predefined" } }),
+    }));
     vi.stubGlobal("window", { fetch });
     const store = new RequestsStore();
 
@@ -66,4 +73,23 @@ describe("RequestsStore", () => {
     expect(store.requestIds).toEqual(["evt-a"]);
     expect(readWarmedRequestDetail("evt-a")).toBeNull();
   });
+});
+
+it("keeps the workspace permission badge when the notification feed is cleared, until the request resolves", () => {
+  const requests = new RequestsStore();
+  const notifications = new NotificationsStore();
+  requests.applyRequestsMessage({
+    ...requestsMessage(["evt-a"]),
+    workspace_agent_ids: ["agent-aa11"],
+  });
+  notifications.applyNotificationsMessage({ entries: [], unresolved_count: 0 });
+  expect(notifications.unresolvedCount).toBe(0);
+  expect(requests.hasPendingForWorkspace("agent-aa11")).toBe(true);
+  expect(requests.hasPendingForWorkspace("agent-bb22")).toBe(false);
+  expect(requests.hasPendingForWorkspace(null)).toBe(false);
+  requests.applyRequestsMessage({
+    ...requestsMessage([]),
+    workspace_agent_ids: [],
+  });
+  expect(requests.hasPendingForWorkspace("agent-aa11")).toBe(false);
 });

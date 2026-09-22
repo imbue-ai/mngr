@@ -7,14 +7,15 @@
 // desktop-only and has no jinja original.
 
 import m from "mithril";
-import type { PeekedChannel, UpdateChannel, UpdateState } from "../../../electron-bridge";
+import type {
+  PeekedChannel,
+  UpdateChannel,
+  UpdateState,
+} from "../../../electron-bridge";
 import type { SettingsModel, SettingsSection } from "../../../models/settings";
 import { CHANNEL_COPY } from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
 import type { NotificationStyle } from "../../../models/notificationsUi";
-import {
-  maybeRequestOsPermissionForStyle,
-} from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
@@ -68,36 +69,52 @@ const NOTIFICATION_STYLE_OPTIONS: {
 
 /** System banners are the OS's call to make, and it never tells app code
  * whether it is delivering them -- so this stands whenever OS delivery is
- * selected, as the one place to go when banners do not appear. Surfaces the
- * open itself failing (e.g. no known settings command on this Linux desktop
+ * selected, as the one place to go when banners do not appear: a test push
+ * through the real path, and the OS's own settings pane. Surfaces the open
+ * itself failing (e.g. no known settings command on this Linux desktop
  * environment) rather than leaving the button looking like it silently did
  * nothing. */
 function notificationOsPermissionNotice(model: SettingsModel): m.Vnode {
   return m(
     Notice,
     { variant: "warn", extra: "flex flex-col gap-2" },
-    m(
-      "div",
-      { class: "flex items-center justify-between gap-3" },
-      [
+    m("div", { class: "flex items-center justify-between gap-3" }, [
+      m(
+        "span",
+        {},
+        "System banners come from your operating system. If they don't " +
+          "appear, check its notification settings for minds.",
+      ),
+      m("span", { class: "flex shrink-0 items-center gap-2" }, [
         m(
-          "span",
-          {},
-          "System banners come from your operating system. If they don't " +
-            "appear, check its notification settings for minds.",
+          Button,
+          {
+            variant: "secondary",
+            size: "md",
+            id: "notifications-send-test",
+            disabled: model.isTestNotificationBusy,
+            onclick: () => void model.sendTestNotification(),
+          },
+          "Send test notification",
         ),
         m(
           Button,
           {
             variant: "secondary",
             size: "md",
-            extra: "shrink-0",
             onclick: () => void model.openNotificationOsSettings(),
           },
           "Open System Settings",
         ),
-      ],
-    ),
+      ]),
+    ]),
+    model.testNotificationResult !== ""
+      ? m(
+          "span",
+          { class: "type-helper", role: "status" },
+          model.testNotificationResult,
+        )
+      : null,
     model.notificationOsSettingsOpenFailed
       ? m(
           "span",
@@ -117,17 +134,7 @@ function notificationsPanel(model: SettingsModel): m.Children {
     is_enabled: boolean;
     style: NotificationStyle;
   }): void => {
-    // An OS-reaching choice is the user gesture the browser permission
-    // prompt needs (plain-browser mode only): must fire synchronously with
-    // the click, not after the write's await below, or the browser may no
-    // longer treat it as within the same user-activation window.
-    if (next.is_enabled) maybeRequestOsPermissionForStyle(next.style);
-    void (async () => {
-      await model.setNotificationPrefs({
-        ...next,
-        is_os_hint_dismissed: prefs.is_os_hint_dismissed,
-      });
-    })();
+    void model.setNotificationPrefs(next);
   };
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Notifications"),
@@ -152,8 +159,8 @@ function notificationsPanel(model: SettingsModel): m.Children {
           m(
             "span",
             { class: "block type-helper text-tertiary" },
-            "When an agent asks for a permission, surface it beyond its machine's own chat. " +
-              "The bell's feed and count always record it either way.",
+            "When an agent asks for a permission or reports back, or a backup needs your attention, " +
+              "surface it beyond the bell. The bell's feed and count always record it either way.",
           ),
         ]),
         m("input", {
@@ -289,23 +296,33 @@ function errorReportingPanel(model: SettingsModel): m.Children {
 }
 
 /** Whole hours only: the setting means "while I am asleep". */
-const HOUR_OPTIONS: number[] = Array.from({ length: 24 }, (_unused, hour) => hour);
+const HOUR_OPTIONS: number[] = Array.from(
+  { length: 24 },
+  (_unused, hour) => hour,
+);
 
 function formatHour(hour: number): string {
   const suffix = hour < 12 ? "AM" : "PM";
   return `${hour % 12 || 12}:00 ${suffix}`;
 }
 
-function hourSelect(id: string, value: number, onchange: (hour: number) => void): m.Children {
+function hourSelect(
+  id: string,
+  value: number,
+  onchange: (hour: number) => void,
+): m.Children {
   return m(
     "select",
     {
       id,
       class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
       value: String(value),
-      onchange: (event: Event) => onchange(Number((event.target as HTMLSelectElement).value)),
+      onchange: (event: Event) =>
+        onchange(Number((event.target as HTMLSelectElement).value)),
     },
-    HOUR_OPTIONS.map((hour) => m("option", { value: String(hour) }, formatHour(hour))),
+    HOUR_OPTIONS.map((hour) =>
+      m("option", { value: String(hour) }, formatHour(hour)),
+    ),
   );
 }
 
@@ -327,14 +344,34 @@ function machineUpdatesSection(model: SettingsModel): m.Children {
         "in the next one.",
     ),
     m("div", { class: "flex items-center gap-2 py-3 border-b border-subtle" }, [
-      m("label", { class: "type-body text-primary", for: "update-window-start" }, "Between"),
-      hourSelect("update-window-start", startHour, (hour) => void model.setUpdateWindow(hour, endHour)),
-      m("label", { class: "type-body text-primary", for: "update-window-end" }, "and"),
-      hourSelect("update-window-end", endHour, (hour) => void model.setUpdateWindow(startHour, hour)),
+      m(
+        "label",
+        { class: "type-body text-primary", for: "update-window-start" },
+        "Between",
+      ),
+      hourSelect(
+        "update-window-start",
+        startHour,
+        (hour) => void model.setUpdateWindow(hour, endHour),
+      ),
+      m(
+        "label",
+        { class: "type-body text-primary", for: "update-window-end" },
+        "and",
+      ),
+      hourSelect(
+        "update-window-end",
+        endHour,
+        (hour) => void model.setUpdateWindow(startHour, hour),
+      ),
       m("span", { class: "type-helper text-tertiary" }, "local time"),
     ]),
     model.updateWindowError
-      ? m("p", { class: "type-helper text-important mt-3", role: "alert" }, model.updateWindowError)
+      ? m(
+          "p",
+          { class: "type-helper text-important mt-3", role: "alert" },
+          model.updateWindowError,
+        )
       : null,
   ]);
 }
@@ -468,7 +505,11 @@ function updateStatusLine(model: SettingsModel): m.Children {
   }
   const status = state.status;
   if (status.type === "error") {
-    return m(Notice, { variant: "warn" }, `Update check failed: ${status.message}`);
+    return m(
+      Notice,
+      { variant: "warn" },
+      `Update check failed: ${status.message}`,
+    );
   }
   if (status.type === "update-downloaded") {
     return m(Notice, { variant: "info" }, `Mind ${status.version} is downloaded. ${installInstruction(state)}`);
@@ -569,7 +610,11 @@ function channelSwitchDialog(model: SettingsModel): m.Children {
     Modal,
     { isOpen: true, onClose: () => model.cancelChannelSwitch() },
     [
-      m("h3", { class: "type-heading-md text-primary mb-2" }, `Switch to ${label}?`),
+      m(
+        "h3",
+        { class: "type-heading-md text-primary mb-2" },
+        `Switch to ${label}?`,
+      ),
       m(
         "p",
         { class: "type-body text-secondary mb-3" },
@@ -588,8 +633,16 @@ function channelSwitchDialog(model: SettingsModel): m.Children {
           )
         : null,
       m("div", { class: "flex gap-2 justify-end" }, [
-        m(Button, { variant: "secondary", onclick: () => model.cancelChannelSwitch() }, "Cancel"),
-        m(Button, { onclick: () => void model.confirmChannelSwitch() }, "Switch"),
+        m(
+          Button,
+          { variant: "secondary", onclick: () => model.cancelChannelSwitch() },
+          "Cancel",
+        ),
+        m(
+          Button,
+          { onclick: () => void model.confirmChannelSwitch() },
+          "Switch",
+        ),
       ]),
     ],
   );
@@ -624,7 +677,8 @@ function formatChecked(iso: string): string {
  */
 function visibleChannels(state: UpdateState): typeof CHANNEL_COPY {
   return CHANNEL_COPY.filter(
-    (channel) => state.available.includes(channel.name) || state.channel === channel.name,
+    (channel) =>
+      state.available.includes(channel.name) || state.channel === channel.name,
   );
 }
 
@@ -649,16 +703,26 @@ function channelRow(
     },
     [
       m("span", [
-        m("span", { class: "type-body text-primary font-semibold" }, channel.label),
+        m(
+          "span",
+          { class: "type-body text-primary font-semibold" },
+          channel.label,
+        ),
         // Mid-canary a channel serves two versions at once, so there is no
         // single one to put beside its name.
         m(
           "span",
           { class: "block type-helper text-tertiary" },
-          [channel.blurb, channelVersionText(peeked)].filter((part) => part !== null).join(" "),
+          [channel.blurb, channelVersionText(peeked)]
+            .filter((part) => part !== null)
+            .join(" "),
         ),
         isUnavailable
-          ? m("span", { class: "block type-helper text-warning" }, "Unavailable right now.")
+          ? m(
+              "span",
+              { class: "block type-helper text-warning" },
+              "Unavailable right now.",
+            )
           : null,
       ]),
       m("input", {
@@ -728,21 +792,37 @@ function updatesPanel(model: SettingsModel): m.Children {
       // somebody else's business -- and the menu bar's "Check for Updates..."
       // lands here from oninit, before the read has resolved.
       model.updateError !== ""
-        ? m(Notice, { variant: "warn" }, `Could not read the update state: ${model.updateError}`)
-        : m("p", { class: "type-body text-secondary" }, "Reading the update state..."),
+        ? m(
+            Notice,
+            { variant: "warn" },
+            `Could not read the update state: ${model.updateError}`,
+          )
+        : m(
+            "p",
+            { class: "type-body text-secondary" },
+            "Reading the update state...",
+          ),
       machineUpdatesSection(model),
     ]);
   }
   const visible = visibleChannels(state);
   const listed = visible.filter((channel) => channel.name !== INTERNAL_CHANNEL);
-  const concealed = visible.filter((channel) => channel.name === INTERNAL_CHANNEL);
+  const concealed = visible.filter(
+    (channel) => channel.name === INTERNAL_CHANNEL,
+  );
   return m("section", [
     m("h2", { class: "type-heading-lg text-primary mb-2" }, "Updates"),
-    m("p", { class: "type-body text-secondary" }, `You're on Mind ${state.currentVersion}.`),
+    m(
+      "p",
+      { class: "type-body text-secondary" },
+      `You're on Mind ${state.currentVersion}.`,
+    ),
     updateStandingLine(model),
     updateStatusLine(model),
     ...listed.map((channel) => channelRow(model, state, channel)),
-    concealed.length > 0 ? internalChannelDisclosure(model, state, concealed) : null,
+    concealed.length > 0
+      ? internalChannelDisclosure(model, state, concealed)
+      : null,
     state.available.length === 1
       ? m(
           "p",
@@ -751,7 +831,11 @@ function updatesPanel(model: SettingsModel): m.Children {
         )
       : null,
     model.updateError !== ""
-      ? m("p", { class: "type-body text-important mt-3", role: "alert" }, model.updateError)
+      ? m(
+          "p",
+          { class: "type-body text-important mt-3", role: "alert" },
+          model.updateError,
+        )
       : null,
     m("div", { class: "mt-4 flex items-center gap-3" }, [
       // The floating card carries the same control, but it is dismissible and
@@ -776,7 +860,8 @@ function updatesPanel(model: SettingsModel): m.Children {
         Button,
         {
           variant: "secondary",
-          disabled: model.isUpdateBusy || state.status.type === "update-available",
+          disabled:
+            model.isUpdateBusy || state.status.type === "update-available",
           onclick: () => void model.checkForUpdatesNow(),
         },
         model.isUpdateBusy ? "Checking..." : "Check now",
@@ -786,7 +871,11 @@ function updatesPanel(model: SettingsModel): m.Children {
       // indistinguishable from one that does nothing. Reported by the main
       // process, so the background checks it runs on its own count too.
       state.lastCheckedAt != null && !model.isUpdateBusy
-        ? m("span", { class: "type-helper text-tertiary" }, `Checked ${formatChecked(state.lastCheckedAt)}.`)
+        ? m(
+            "span",
+            { class: "type-helper text-tertiary" },
+            `Checked ${formatChecked(state.lastCheckedAt)}.`,
+          )
         : null,
     ]),
     machineUpdatesSection(model),
@@ -822,7 +911,9 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
               ),
               ...model.visibleSections
                 .filter((section) => section.group === group)
-                .map((section) => navButton(model, section.name, section.label)),
+                .map((section) =>
+                  navButton(model, section.name, section.label),
+                ),
             ]),
           ),
           content: [

@@ -29,9 +29,9 @@
 // contract by ADDING types, never by changing the meaning or payload of an
 // existing one. CONTRACT_VERSION below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "3";
+export const CONTRACT_VERSION = "5";
 
-// -- Message types ----------------------------------------------------------
+// Message types
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -52,6 +52,12 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 // workspace -> embedder: open the shell's workspace-options panel on its
 // Share tab, focused on that app. Payload: { serviceName }.
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
+// workspace -> embedder: this document's endpoint is listening, so anything
+// the embedder held for it can be sent now. Payload: {}. Sent once per page
+// load, after the workspace registers its handlers. Without it the embedder
+// cannot tell a loaded frame from one whose page has not run its listener
+// yet, since a send into a not-yet-listening document is simply lost.
+export const WORKSPACE_READY = "minds:workspace-ready";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
@@ -66,13 +72,22 @@ export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
 // unsolicited entry the moment the user resolves a request in the shell's
 // review popup, flipping the card ahead of the transcript's own notice.
 export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
+// embedder -> workspace: the user opened a chat's notification; show that
+// chat. Payload: { chatId } -- the chat's id (its first agent's id). The
+// workspace raises a window already showing the chat, wherever it is, else
+// points the viewer's pinned chat window at it, else opens it in a window of
+// its own. Sent only to a workspace that has announced WORKSPACE_READY, which
+// every workspace handling this type does; a workspace on an older template
+// announces nothing, never receives the ask, and the user just lands on the
+// workspace.
+export const FOCUS_CHAT = "minds:focus-chat";
 
 // Upper bound on entries per message, bounding the work it can demand; the
 // snapshot carries the newest verdicts and older cards fall back to the
 // transcript's own resolution notices.
 export const MAX_PERMISSION_RESOLUTION_ENTRIES = 64;
 
-// -- Payload validation ------------------------------------------------------
+// Payload validation
 
 // Request ids are server-issued (`evt-<uuid hex>`). Only a conservative
 // charset + length is accepted so a malicious page cannot smuggle path or
@@ -111,6 +126,9 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [OPEN_SHARE_SETTINGS]: function (data) {
     return typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName);
   },
+  [WORKSPACE_READY]: function () {
+    return true;
+  },
 };
 
 function isResolutionEntryValid(entry) {
@@ -131,9 +149,13 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     if (data.resolutions.length > MAX_PERMISSION_RESOLUTION_ENTRIES) return false;
     return data.resolutions.every(isResolutionEntryValid);
   },
+  [FOCUS_CHAT]: function (data) {
+    // A chat's id is its first agent's id, so it takes the agent-id shape.
+    return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
+  },
 };
 
-// -- Debug logging -----------------------------------------------------------
+// Debug logging
 
 function isDebugLoggingEnabled() {
   try {
@@ -151,7 +173,7 @@ function debugLog(side, direction, type, origin) {
   console.debug('[embed-contract ' + side + '] ' + direction + ' ' + type + (origin ? ' (' + origin + ')' : ''));
 }
 
-// -- Endpoints ---------------------------------------------------------------
+// Endpoints
 
 function dispatchValidated(validators, handlers, data, side, origin) {
   const validator = validators[data.type];

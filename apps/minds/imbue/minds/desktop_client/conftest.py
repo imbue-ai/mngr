@@ -554,15 +554,8 @@ def root_concurrency_group() -> Iterator[ConcurrencyGroup]:
 
 @pytest.fixture
 def notification_dispatcher() -> NotificationDispatcher:
-    """``NotificationDispatcher`` wired to the tkinter channel in tests.
-
-    Tests generally do not exercise the dispatch path; this fixture just
-    satisfies the required ``AgentCreator.notification_dispatcher`` field.
-    Pass ``is_electron=False`` so no ``emit_event`` JSONL lines leak into the
-    test's stdout. ``NotificationDispatcher.create`` skips tkinter setup when
-    ``tkinter_module`` is ``None``, which is what we want for unit tests.
-    """
-    return NotificationDispatcher.create(is_electron=False, tkinter_module=None, is_macos=False)
+    """A ``NotificationDispatcher`` outside Electron, so no ``emit_event`` JSONL lines leak into the test's stdout."""
+    return NotificationDispatcher(is_electron=False)
 
 
 @pytest.fixture

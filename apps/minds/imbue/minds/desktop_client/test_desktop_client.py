@@ -1051,7 +1051,7 @@ class _AllAgentsKnownStaticResolver(StaticBackendResolver):
 def test_build_requests_payload_empty_inbox() -> None:
     """An empty inbox yields a zero count and no pending ids."""
     resolver = _AllAgentsKnownStaticResolver(url_by_agent_and_service={})
-    expected = {"count": 0, "request_ids": []}
+    expected = {"count": 0, "request_ids": [], "workspace_agent_ids": []}
     assert _build_requests_payload(None, resolver) == expected
     assert _build_requests_payload(StaticPendingRequests(), resolver) == expected
 

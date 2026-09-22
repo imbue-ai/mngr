@@ -34,6 +34,7 @@ import threading
 from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -345,6 +346,11 @@ class StreamedPermissionRequest(FrozenModel):
             "approved. Carried here mainly for traceability; the desktop client does not have "
             "to interpret it."
         ),
+    )
+    # CLEANUP: make this required once no pending request on disk can predate the field.
+    created_at: datetime | None = Field(
+        default=None,
+        description="When the request was filed; None for a record written before the gateway stamped it",
     )
 
 

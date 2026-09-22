@@ -40,6 +40,13 @@ export interface WaitingRequestList {
   hasWaitingRequests(): boolean;
 }
 
+/** Sends a focus-chat ask into the mounted frame; false when the frame's page
+ * is not listening or not on that workspace, so the shell holds the ask. */
+export type FocusChatSender = (
+  workspaceAgentId: string,
+  chatAgentId: string,
+) => boolean;
+
 /** The mounted workspace content iframe, as the shell addresses it. */
 export interface WorkspaceFrameHandle {
   /** The workspace the frame is navigated to, or null before it is first armed. */
@@ -127,6 +134,18 @@ export class ShellState {
    * the same param and re-open the popup. Cleared once a review-less route is
    * seen (i.e. the strip landed), so a later deep link consumes afresh. */
   private consumedReviewKey: string | null = null;
+  /** The ``?chat=`` deep link already consumed, keyed by route+id; same
+   * reasoning as ``consumedReviewKey``. */
+  private consumedChatKey: string | null = null;
+  /** A chat the displayed workspace should show once its page is listening.
+   * Set by `requestFocusChat` when the frame cannot take the ask yet (its
+   * page has not announced itself, or it is not on that workspace) and
+   * flushed when the announcement arrives. */
+  private pendingFocusChat: {
+    workspaceAgentId: string;
+    chatAgentId: string;
+  } | null = null;
+  private focusChatSender: FocusChatSender | null = null;
   /** The last ``selected`` request id `openInbox` pushed a NEW /inbox entry
    * for, and when. `openInbox` already replaces in place once the route IS
    * `/inbox` -- this guards the window before that lands: `currentRoutePath`
@@ -260,7 +279,8 @@ export class ShellState {
    */
   rememberPageBehindOverlay(): void {
     const route = m.route.get() ?? "";
-    this.pageRouteBehindOverlay = recoveryWorkspaceIdFromPath(route.split("?")[0]) !== null ? route : null;
+    this.pageRouteBehindOverlay =
+      recoveryWorkspaceIdFromPath(route.split("?")[0]) !== null ? route : null;
   }
 
   /** Register the mounted Permissions pane's list, and drop it on the way out
@@ -285,6 +305,45 @@ export class ShellState {
   /** Register the mounted workspace frame's contract sender. */
   registerPermissionResolvedSender(sender: PermissionResolvedSender): void {
     this.permissionResolvedSender = sender;
+  }
+
+  registerFocusChatSender(sender: FocusChatSender): void {
+    this.focusChatSender = sender;
+  }
+
+  /** Drop `sender` if it is still the registered one (a frame torn down after
+   * its successor registered must not clear the successor's). */
+  unregisterFocusChatSender(sender: FocusChatSender): void {
+    if (this.focusChatSender === sender) this.focusChatSender = null;
+  }
+
+  /** Ask the workspace to show one of its chats (an agent message's click).
+   * Sent now when the mounted page is that workspace's and listening;
+   * otherwise held until it announces itself, which calls
+   * `flushPendingFocusChat`.
+   * Fire-and-forget: a workspace that does not know the message just stays
+   * where it is. A newer ask replaces an older unsent one. Landing in a chat
+   * is leaving the feed, like a row's route jump, so the popover closes even
+   * though the in-place ask changes no route. */
+  requestFocusChat(workspaceAgentId: string, chatAgentId: string): void {
+    this.closeNotifications();
+    const sender = this.focusChatSender;
+    if (sender !== null && sender(workspaceAgentId, chatAgentId)) {
+      this.pendingFocusChat = null;
+      return;
+    }
+    this.pendingFocusChat = { workspaceAgentId, chatAgentId };
+  }
+
+  /** The mounted page announced that it is listening: send the ask it was
+   * holding, if it is for the workspace now on screen. An ask for some other
+   * workspace stays held (the reader may be on their way there). */
+  flushPendingFocusChat(): void {
+    const pending = this.pendingFocusChat;
+    const sender = this.focusChatSender;
+    if (pending === null || sender === null) return;
+    if (sender(pending.workspaceAgentId, pending.chatAgentId))
+      this.pendingFocusChat = null;
   }
 
   /** Drop `sender` if it is still the registered one (a frame torn down after
@@ -636,7 +695,37 @@ export class ShellState {
       this.openUpdateAgentId = null;
     }
     this.consumeReviewParam(path, search);
+    this.consumeChatParam(path, search);
+    // Arriving on a workspace reads its agent messages: the chat is right
+    // there. Keyed on the navigation, not the redraw, so the app is not
+    // told on every render.
+    if (!isSameRoute && agentScoped !== null)
+      this.notificationsUi?.handleWorkspaceDisplayed(agentScoped);
     this.channel?.setClientState(path, agentScoped);
+  }
+
+  /** Consume a ``?chat=<chat-agent-id>`` param on the workspace surface --
+   * the landing half of an agent message's click (a feed row, a toast, the
+   * OS banner's deep link). Consumed once per landing like ``?review=``: the
+   * param is stripped with a history-replacing route set, and the workspace
+   * is asked to show the chat once its frame is up. */
+  private consumeChatParam(path: string, search: string): void {
+    const chatAgentId = new URLSearchParams(search).get("chat");
+    if (chatAgentId === null || chatAgentId === "") {
+      this.consumedChatKey = null;
+      return;
+    }
+    const workspaceAnyId = workspaceDisplayIdFromPath(path);
+    if (workspaceAnyId === null) return;
+    const key = `${path}?chat=${chatAgentId}`;
+    if (this.consumedChatKey === key) return;
+    this.consumedChatKey = key;
+    const agentScoped = this.stores.workspaces.toAgentScopedId(workspaceAnyId);
+    // Deferred past this render for the same reason as consumeReviewParam.
+    queueMicrotask(() => {
+      m.route.set(`/workspace/${agentScoped}`, undefined, { replace: true });
+      this.requestFocusChat(agentScoped, chatAgentId);
+    });
   }
 
   /** Consume a ``?review=<request-id>`` param on the workspace surface -- the

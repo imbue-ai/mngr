@@ -1,6 +1,7 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { UiNotificationEntry } from "../../channel/messages";
+import type { ToastItem } from "../../models/notificationsUi";
 import type { AnyVnode } from "../../testing";
 import {
   allText,
@@ -8,7 +9,7 @@ import {
   classesOf,
   classTokensOf,
   collectVnodes,
-  notificationEntry as entry,
+  notificationEntry,
 } from "../../testing";
 import type { ToastLayerAttrs } from "./ToastLayer";
 import {
@@ -38,7 +39,16 @@ function renderComponentVnode(vnode: AnyVnode): AnyVnode {
   );
 }
 
+// Cards this file mounted, with the vnode to hand their onremove. A card
+// closed mid-test leaves its exit timer pending, and mithril would have run
+// onremove (which clears it); without that the timer fires after the file is
+// done and redraws a page that is no longer mounted.
+const mountedCards: { instance: m.Component; vnode: m.Vnode }[] = [];
+
 afterEach(() => {
+  for (const { instance, vnode } of mountedCards.splice(0)) {
+    (instance.onremove as unknown as (v: m.Vnode) => void)(vnode);
+  }
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -102,15 +112,23 @@ describe("toast stack layout math", () => {
   });
 });
 
+/** A feed entry's flash, as the controller hands it to the layer. */
+function entry(
+  id: string,
+  overrides: Partial<UiNotificationEntry> = {},
+): ToastItem {
+  return { id, entry: notificationEntry(id, overrides) };
+}
+
 function makeAttrs(
-  toasts: UiNotificationEntry[],
+  toasts: ToastItem[],
   overrides: Partial<ToastLayerAttrs> = {},
 ): ToastLayerAttrs {
   return {
     toasts,
     isReconnecting: false,
     onDismiss: () => undefined,
-    onReview: () => undefined,
+    onOpen: () => undefined,
     ...overrides,
   };
 }
@@ -164,15 +182,11 @@ describe("ToastLayer", () => {
     // A collapsed peeking slot (not the front) still forces itself
     // unclickable via its own inline style, which wins over the class.
     expect(
-      (attrsOf(wrappers[1]).style as Record<string, string>)[
-        "pointer-events"
-      ],
+      (attrsOf(wrappers[1]).style as Record<string, string>)["pointer-events"],
     ).toBe("none");
     // The front card carries no such override: the class stands.
     expect(
-      (attrsOf(wrappers[0]).style as Record<string, string>)[
-        "pointer-events"
-      ],
+      (attrsOf(wrappers[0]).style as Record<string, string>)["pointer-events"],
     ).toBeUndefined();
   });
 
@@ -259,14 +273,14 @@ describe("ToastLayer", () => {
 interface RenderCardOptions {
   isReducedMotion?: boolean;
   isPaused?: boolean;
-  onReview?: (workspaceAgentId: string, requestId: string) => void;
+  onOpen?: (item: ToastItem) => void;
 }
 
 /** Mounts a ToastCard (paused if `options.isPaused`) and returns a
  * `setPaused` driver that replays the real mithril lifecycle for every call
  * after the mount: onupdate fires with the new attrs. */
 function mountCard(
-  card: UiNotificationEntry,
+  item: ToastItem,
   onDismiss: () => void,
   options: RenderCardOptions = {},
 ): { root: AnyVnode; setPaused: (isPaused: boolean) => AnyVnode } {
@@ -274,17 +288,18 @@ function mountCard(
   let isMounted = false;
   const setPaused = (isPaused: boolean): AnyVnode => {
     const vnode = m(instance, {
-      entry: card,
+      item,
       isReducedMotion: options.isReducedMotion ?? false,
       isPaused,
       onDismiss,
-      onReview: options.onReview ?? (() => undefined),
+      onOpen: options.onOpen ?? (() => undefined),
     } as unknown as m.Attributes) as m.Vnode;
     const rendered = (
       instance.view as unknown as (v: m.Vnode) => AnyVnode
     ).call(instance, vnode);
     if (!isMounted) {
       isMounted = true;
+      mountedCards.push({ instance, vnode });
       (instance.oncreate as unknown as (v: m.Vnode) => void)(vnode);
     } else {
       (instance.onupdate as unknown as (v: m.Vnode) => void)(vnode);
@@ -295,32 +310,56 @@ function mountCard(
 }
 
 describe("ToastCard", () => {
-  it("is a status card whose whole body reviews the request and dismisses the flash", () => {
+  it("is a status card whose whole body opens the entry and dismisses the flash", () => {
     let dismissed = 0;
-    const reviewed: [string, string][] = [];
+    const opened: string[] = [];
     const { root } = mountCard(entry("n1"), () => (dismissed += 1), {
       isReducedMotion: true,
-      onReview: (workspaceAgentId, requestId) =>
-        reviewed.push([workspaceAgentId, requestId]),
+      onOpen: (item) => opened.push(item.id),
     });
     expect(attrsOf(root).role).toBe("status");
-    // The review gesture is a real button (keyboard/screen-reader
+    // The open gesture is a real button (keyboard/screen-reader
     // accessible, like NotificationsPage.ts's feedRow), not the div itself.
-    const reviewButton = collectVnodes(root).find(
-      (vnode) => vnode.tag === "button" && attrsOf(vnode)["aria-label"] !== "Dismiss",
+    const openButton = collectVnodes(root).find(
+      (vnode) =>
+        vnode.tag === "button" && attrsOf(vnode)["aria-label"] !== "Dismiss",
     );
-    expect(reviewButton).toBeDefined();
-    (attrsOf(reviewButton as AnyVnode).onclick as () => void)();
-    expect(reviewed).toEqual([["agent-aa11", "req-n1"]]);
+    expect(openButton).toBeDefined();
+    (attrsOf(openButton as AnyVnode).onclick as () => void)();
+    expect(opened).toEqual(["n1"]);
     expect(dismissed).toBe(1);
   });
 
-  it("gives the corner X a label and keeps its click from also reviewing", () => {
+  it("renders a transient message plainly, whose body click only dismisses", () => {
+    let dismissed = 0;
+    let opened = 0;
+    const { root } = mountCard(
+      {
+        id: "t1",
+        entry: null,
+        title: "Couldn't open link",
+        body: "Copied instead.",
+      },
+      () => (dismissed += 1),
+      { isReducedMotion: true, onOpen: () => (opened += 1) },
+    );
+    expect(allText(root)).toContain("Couldn't open link");
+    expect(allText(root)).toContain("Copied instead.");
+    const bodyButton = collectVnodes(root).find(
+      (vnode) =>
+        vnode.tag === "button" && attrsOf(vnode)["aria-label"] !== "Dismiss",
+    );
+    (attrsOf(bodyButton as AnyVnode).onclick as () => void)();
+    expect(opened).toBe(0);
+    expect(dismissed).toBe(1);
+  });
+
+  it("gives the corner X a label and keeps its click from also opening", () => {
     let dismissed = 0;
     let reviewed = 0;
     const { root } = mountCard(entry("n1"), () => (dismissed += 1), {
       isReducedMotion: true,
-      onReview: () => (reviewed += 1),
+      onOpen: () => (reviewed += 1),
     });
     const dismissButton = collectVnodes(root).find(
       (vnode) => attrsOf(vnode)["aria-label"] === "Dismiss",

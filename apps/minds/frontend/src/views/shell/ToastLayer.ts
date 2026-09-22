@@ -17,7 +17,7 @@
 // scale choreography -- a plain list whose cards appear and disappear at once.
 
 import m from "mithril";
-import type { UiNotificationEntry } from "../../channel/messages";
+import type { ToastItem } from "../../models/notificationsUi";
 import { Icon16 } from "../components/Icon";
 import { notificationLine } from "../components/NotificationLine";
 
@@ -112,20 +112,23 @@ export function toastMoreTopPx(frontHeightPx: number, count: number): number {
 }
 
 interface ToastCardAttrs {
-  entry: UiNotificationEntry;
+  item: ToastItem;
   isReducedMotion: boolean;
   /** True while the pointer is over the stack: freezes the auto-dismiss
    * countdown so nothing vanishes out from under a reader who is mid-hover. */
   isPaused: boolean;
   onDismiss: () => void;
-  onReview: (workspaceAgentId: string, requestId: string) => void;
+  /** The feed entry's click (what its feed row does). Not called for a
+   * transient message, which has nowhere to go. */
+  onOpen: (item: ToastItem) => void;
 }
 
 /** One toast card: role="status" for the live-region announcement, with the
- * whole body wrapped in a real button (the uniform review gesture, keyboard
+ * whole body wrapped in a real button (the entry's own open gesture, keyboard
  * accessible like `NotificationsPage.ts`'s `feedRow`) and a corner X that
- * only retires the flash. Owns its own enter/exit motion and the TOAST_MS
- * auto-dismiss timer. */
+ * only retires the flash. A transient message renders its title and body
+ * plainly and its whole body is the dismissal. Owns its own enter/exit
+ * motion and the TOAST_MS auto-dismiss timer. */
 export function ToastCard(): m.Component<ToastCardAttrs> {
   // Drives both the enter (first paint hidden-above -> slide down) and the
   // exit (slide up + fade). False until the hidden first paint has landed.
@@ -223,7 +226,7 @@ export function ToastCard(): m.Component<ToastCardAttrs> {
     },
     view(vnode) {
       latestAttrs = vnode.attrs;
-      const { entry, isReducedMotion, onReview } = vnode.attrs;
+      const { item, isReducedMotion, onOpen } = vnode.attrs;
       const motion = isReducedMotion
         ? ""
         : " transition-all duration-200 ease-out " +
@@ -232,7 +235,7 @@ export function ToastCard(): m.Component<ToastCardAttrs> {
         "div",
         {
           role: "status",
-          "data-toast-id": entry.id,
+          "data-toast-id": item.id,
           class:
             "pointer-events-auto relative rounded-lg border border-subtle " +
             "bg-surface-primary shadow-overlay hover:border-strong" +
@@ -247,14 +250,26 @@ export function ToastCard(): m.Component<ToastCardAttrs> {
                 "flex w-full cursor-pointer flex-col py-2.5 pr-8 pl-3 text-left " +
                 "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
               onclick: () => {
-                // The card acts like the feed row, from anywhere: hop to the
-                // asking machine and open the review popup over it. The flash
+                // The card acts like the feed row, from anywhere. The flash
                 // retires either way.
-                onReview(entry.workspace_agent_id, entry.request_id);
+                if (item.entry !== null) onOpen(item);
                 close();
               },
             },
-            notificationLine({ entry }),
+            item.entry !== null
+              ? notificationLine({ entry: item.entry })
+              : m("div", { class: "min-w-0 flex-1" }, [
+                  m(
+                    "div",
+                    { class: "type-body text-primary font-semibold" },
+                    item.title,
+                  ),
+                  m(
+                    "p",
+                    { class: "mt-0.5 type-helper text-secondary line-clamp-2" },
+                    item.body,
+                  ),
+                ]),
           ),
           m(
             "button",
@@ -279,10 +294,10 @@ export function ToastCard(): m.Component<ToastCardAttrs> {
 }
 
 interface ToastStackItemAttrs {
-  entryId: string;
+  toastId: string;
   style: Record<string, string>;
   padBottomPx: number;
-  onHeight: (entryId: string, heightPx: number) => void;
+  onHeight: (toastId: string, heightPx: number) => void;
 }
 
 /** One positioned slot in the stack. Reports its card's measured height up so
@@ -302,8 +317,8 @@ export function ToastStackItem(): m.Component<ToastStackItemAttrs> {
       const measured = (vnode.dom as HTMLElement)
         .firstElementChild as HTMLElement | null;
       if (measured === null) return;
-      const { entryId, onHeight } = vnode.attrs;
-      const report = (): void => onHeight(entryId, measured.offsetHeight);
+      const { toastId, onHeight } = vnode.attrs;
+      const report = (): void => onHeight(toastId, measured.offsetHeight);
       report();
       if (typeof ResizeObserver !== "undefined") {
         observer = new ResizeObserver(report);
@@ -335,27 +350,27 @@ export interface ToastLayerAttrs {
   /** The toasts to show, newest first. Pass an empty array (rather than a
    * conditional mount) whenever they should be suppressed -- e.g. the bell's
    * feed overlay is open, where the floating cards would be redundant. */
-  toasts: readonly UiNotificationEntry[];
+  toasts: readonly ToastItem[];
   /** Whether the "Reconnecting…" chip is showing, so the stack starts below
    * it instead of overlapping. */
   isReconnecting: boolean;
-  onDismiss: (entryId: string) => void;
-  onReview: (workspaceAgentId: string, requestId: string) => void;
+  onDismiss: (toastId: string) => void;
+  onOpen: (item: ToastItem) => void;
 }
 
 export function ToastLayer(): m.Component<ToastLayerAttrs> {
   let isExpanded = false;
   const heightsById = new Map<string, number>();
 
-  function onHeight(entryId: string, heightPx: number): void {
-    if (heightsById.get(entryId) === heightPx) return;
-    heightsById.set(entryId, heightPx);
+  function onHeight(toastId: string, heightPx: number): void {
+    if (heightsById.get(toastId) === heightPx) return;
+    heightsById.set(toastId, heightPx);
     m.redraw();
   }
 
   return {
     view(vnode) {
-      const { toasts, isReconnecting, onDismiss, onReview } = vnode.attrs;
+      const { toasts, isReconnecting, onDismiss, onOpen } = vnode.attrs;
       if (toasts.length === 0) {
         // mouseleave never fires on element removal, so a stack that empties
         // while hovered (timers, dismissals) would otherwise leave isExpanded
@@ -385,14 +400,14 @@ export function ToastLayer(): m.Component<ToastLayerAttrs> {
         return m(
           "div#toast-layer",
           { class: layerClass + " flex flex-col gap-2", ...hoverHandlers },
-          toasts.map((entry) =>
+          toasts.map((item) =>
             m(ToastCard, {
-              key: entry.id,
-              entry,
+              key: item.id,
+              item,
               isReducedMotion: true,
               isPaused: isExpanded,
-              onDismiss: () => onDismiss(entry.id),
-              onReview,
+              onDismiss: () => onDismiss(item.id),
+              onOpen,
             }),
           ),
         );
@@ -404,12 +419,12 @@ export function ToastLayer(): m.Component<ToastLayerAttrs> {
         toasts.map((_, index) => heightOf(index)),
       );
       const overflow = toastOverflowCount(count, isExpanded);
-      const children: m.Children[] = toasts.map((entry, index) =>
+      const children: m.Children[] = toasts.map((item, index) =>
         m(
           ToastStackItem,
           {
-            key: entry.id,
-            entryId: entry.id,
+            key: item.id,
+            toastId: item.id,
             style: isExpanded
               ? expandedToastStyle(index, count, openTops[index])
               : collapsedToastStyle(index, count, heightOf(0)),
@@ -417,11 +432,11 @@ export function ToastLayer(): m.Component<ToastLayerAttrs> {
             onHeight,
           },
           m(ToastCard, {
-            entry,
+            item,
             isReducedMotion: false,
             isPaused: isExpanded,
-            onDismiss: () => onDismiss(entry.id),
-            onReview,
+            onDismiss: () => onDismiss(item.id),
+            onOpen,
           }),
         ),
       );

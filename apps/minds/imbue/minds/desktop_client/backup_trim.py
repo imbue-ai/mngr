@@ -32,12 +32,12 @@ from imbue.minds.desktop_client.backup_env_store import backup_env_dir
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
+from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.notification_feed import SystemEventCard
 from imbue.minds.desktop_client.restic_cli import ResticSnapshot
 from imbue.minds.desktop_client.restic_cli import forget_snapshots
 from imbue.minds.desktop_client.restic_cli import list_snapshots
+from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.errors import BackupProvisioningError
 
 # Each round forgets the oldest half of every reachable repo's snapshots, so
@@ -246,7 +246,7 @@ class BackupTrimManager(MutableModel):
         account_email: str,
         cli: ImbueCloudCli,
         paths: InstallationPaths,
-        notification_dispatcher: NotificationDispatcher | None,
+        notification_feed: NotificationFeed | None,
     ) -> bool:
         """Start a trim run on a detached thread; returns False when one is already running."""
         with self.status_lock:
@@ -263,7 +263,7 @@ class BackupTrimManager(MutableModel):
                 "account_email": account_email,
                 "cli": cli,
                 "paths": paths,
-                "notification_dispatcher": notification_dispatcher,
+                "notification_feed": notification_feed,
             },
             name=f"backup-trim-{user_id[:8]}",
             daemon=True,
@@ -282,7 +282,7 @@ class BackupTrimManager(MutableModel):
         account_email: str,
         cli: ImbueCloudCli,
         paths: InstallationPaths,
-        notification_dispatcher: NotificationDispatcher | None,
+        notification_feed: NotificationFeed | None,
     ) -> None:
         try:
             is_under_quota, detail = run_backup_trim(
@@ -310,14 +310,18 @@ class BackupTrimManager(MutableModel):
                         state=BackupTrimState.FAILED, detail="Backup cleanup stopped unexpectedly; see the logs."
                     )
         outcome = self.get_status(user_id)
-        if notification_dispatcher is not None and outcome is not None:
-            notification_dispatcher.dispatch(
-                NotificationRequest(
+        if notification_feed is not None and outcome is not None:
+            # Account-level: the cleanup concerns the account's quota, not one
+            # workspace, so the entry names the account and its click lands on
+            # the accounts page the cleanup was started from.
+            notification_feed.append_system_event(
+                SystemEventCard(
                     title="Backup cleanup finished"
                     if outcome.state == BackupTrimState.SUCCEEDED
                     else "Backup cleanup failed",
-                    message=outcome.detail,
-                    urgency=NotificationUrgency.NORMAL,
-                ),
-                agent_display_name=account_email,
+                    body=outcome.detail,
+                    workspace_agent_id="",
+                    workspace_name=account_email,
+                    workspace_accent=DEFAULT_WORKSPACE_COLOR,
+                )
             )

@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.ui_api_create import register_create_routes
 from imbue.minds.desktop_client.ui_api_folder_syncs import register_folder_sync_routes
 from imbue.minds.desktop_client.ui_api_inbox import register_inbox_routes
 from imbue.minds.desktop_client.ui_api_lifecycle import register_lifecycle_routes
+from imbue.minds.desktop_client.ui_api_notifications import register_notification_routes
 from imbue.minds.desktop_client.ui_api_onboarding import register_onboarding_routes
 from imbue.minds.desktop_client.ui_api_options import register_options_routes
 from imbue.minds.desktop_client.ui_api_permissions import register_permissions_routes
@@ -267,6 +268,7 @@ def create_ui_blueprint() -> Blueprint:
     register_folder_sync_routes(blueprint)
     register_lifecycle_routes(blueprint)
     register_inbox_routes(blueprint)
+    register_notification_routes(blueprint)
     register_onboarding_routes(blueprint)
     register_update_routes(blueprint)
     return blueprint

@@ -47,9 +47,9 @@ function render(stripX: number | null): AnyVnode {
     // count off the shell; nothing else in these geometry cases needs one.
     shell: {
       stores: {
+        requests: { hasPendingForWorkspace: () => false },
         notifications: {
           unresolvedCount: 0,
-          hasUnresolvedForWorkspace: () => false,
         },
       },
       displayedWorkspaceAgentId: () => AGENT_ID,

@@ -30,7 +30,6 @@ from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_attempt_discard import CreateAttemptDiscardStatus
 from imbue.minds.desktop_client.create_attempt_discard import read_discard
-from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -96,7 +95,6 @@ class _FixedLiveCreateAttemptAgentCreator(AgentCreator):
 def _make_client_with_store(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
     live_create_attempt_id_str: str | None = None,
     mngr_binary: str = "mngr",
 ) -> tuple[FlaskClient, PendingCreateAttemptStore, AgentCreator]:
@@ -106,7 +104,6 @@ def _make_client_with_store(
         creator = AgentCreator(
             paths=InstallationPaths(data_dir=tmp_path / "minds"),
             root_concurrency_group=root_concurrency_group,
-            notification_dispatcher=notification_dispatcher,
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
             pending_create_attempt_store=store,
         )
@@ -115,7 +112,6 @@ def _make_client_with_store(
             live_create_attempt_id_str=live_create_attempt_id_str,
             paths=InstallationPaths(data_dir=tmp_path / "minds"),
             root_concurrency_group=root_concurrency_group,
-            notification_dispatcher=notification_dispatcher,
             system_interface_health_tracker=SystemInterfaceHealthTracker(),
             pending_create_attempt_store=store,
         )
@@ -137,9 +133,8 @@ def _make_client_with_store(
 def test_workspace_list_payload_carries_create_attempt_entries(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     interrupted_id = _create_attempt_id()
     store.write_record(_record(interrupted_id, PendingCreateAttemptState.IN_FLIGHT))
 
@@ -159,9 +154,8 @@ def test_workspace_list_payload_carries_create_attempt_entries(
 def test_dismiss_create_attempt_deletes_the_record(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     create_attempt_id = _create_attempt_id()
     store.write_record(_record(create_attempt_id, PendingCreateAttemptState.FAILED, error="boom"))
 
@@ -176,9 +170,8 @@ def test_dismiss_create_attempt_deletes_the_record(
 def test_discard_without_leftover_host_completes_and_deletes_the_record(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     create_attempt_id = _create_attempt_id()
     # A non-labeled provider (modal) skips the host lookup entirely.
     store.write_record(_record(create_attempt_id, PendingCreateAttemptState.IN_FLIGHT))
@@ -217,7 +210,6 @@ def _write_fake_listing_mngr(tmp_path: Path, hosts_payload: dict[str, object]) -
 def test_discard_with_leftover_labeled_host_destroys_it_and_finalizes(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """The labeled-provider (lima) path end to end: the route looks the
     leftover host up by its create-attempt-id label, spawns the detached destroy,
@@ -237,9 +229,7 @@ def test_discard_with_leftover_labeled_host_destroys_it_and_finalizes(
             ]
         },
     )
-    client, store, _creator = _make_client_with_store(
-        tmp_path, root_concurrency_group, notification_dispatcher, mngr_binary=mngr_binary
-    )
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, mngr_binary=mngr_binary)
     store.write_record(
         _record(
             create_attempt_id,
@@ -277,13 +267,12 @@ def test_discard_with_leftover_labeled_host_destroys_it_and_finalizes(
 def test_discard_and_dismiss_refuse_a_live_create_attempt_with_409(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """A still-running create attempt can be neither discarded nor dismissed: its
     record (and half-built host) belong to the live create."""
     create_attempt_id = _create_attempt_id()
     client, store, _creator = _make_client_with_store(
-        tmp_path, root_concurrency_group, notification_dispatcher, live_create_attempt_id_str=create_attempt_id
+        tmp_path, root_concurrency_group, live_create_attempt_id_str=create_attempt_id
     )
     store.write_record(_record(create_attempt_id, PendingCreateAttemptState.IN_FLIGHT))
 
@@ -298,12 +287,11 @@ def test_discard_and_dismiss_refuse_a_live_create_attempt_with_409(
 def test_discard_of_a_done_record_is_refused_with_409(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """A DONE record's workspace exists (its host still carries the
     create-attempt-id label), so a discard would destroy a healthy workspace; the
     route must refuse and leave the record to the discovery sweep."""
-    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     create_attempt_id = _create_attempt_id()
     store.write_record(
         _record(
@@ -325,9 +313,8 @@ def test_discard_of_a_done_record_is_refused_with_409(
 def test_discard_of_unknown_create_attempt_returns_404(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
-    client, _store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, _store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
 
     response = client.post(f"/api/v1/workspaces/create-attempts/{_create_attempt_id()}/discard")
 
@@ -337,10 +324,9 @@ def test_discard_of_unknown_create_attempt_returns_404(
 def test_discard_status_reports_failed_without_finalizing_when_the_wrapper_died(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     """A non-DONE discard status is reported as-is and finalizes nothing."""
-    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group, notification_dispatcher)
+    client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
     create_attempt_id = _create_attempt_id()
     store.write_record(_record(create_attempt_id, PendingCreateAttemptState.IN_FLIGHT))
     # Simulate a discard whose wrapper died without writing an exit code:
@@ -373,7 +359,6 @@ class _FixedLogSinkAgentCreator(AgentCreator):
 def test_create_operation_log_stream_replays_history_for_every_reader(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
-    notification_dispatcher: NotificationDispatcher,
 ) -> None:
     create_attempt_id = CreateAttemptId()
     log_sink = CreateAttemptLogSink()
@@ -383,7 +368,6 @@ def test_create_operation_log_stream_replays_history_for_every_reader(
     creator = _FixedLogSinkAgentCreator(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
-        notification_dispatcher=notification_dispatcher,
         system_interface_health_tracker=SystemInterfaceHealthTracker(),
         fixed_create_attempt_id_str=str(create_attempt_id),
         fixed_log_sink=log_sink,

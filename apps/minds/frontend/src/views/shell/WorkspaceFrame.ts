@@ -12,6 +12,7 @@ import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
 import type {
+  FocusChatSender,
   PermissionResolvedSender,
   ShellState,
   WorkspaceFrameHandle,
@@ -28,6 +29,8 @@ interface EmbedContractModule {
   OPEN_SHARE_SETTINGS: string;
   CLOSE_ACTIVE_TAB: string;
   PERMISSION_RESOLUTIONS: string;
+  FOCUS_CHAT: string;
+  WORKSPACE_READY: string;
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -90,6 +93,8 @@ export interface EmbedHandlerDeps {
    * over. */
   workspaceAgentId: () => string;
   openRequestPopup: (requestId: string | null) => void;
+  /** The mounted page announced that its endpoint is listening. */
+  onWorkspaceReady: () => void;
 }
 
 /** The message-type -> handler map the embedder endpoint dispatches through.
@@ -98,9 +103,17 @@ export interface EmbedHandlerDeps {
 export function buildEmbedHandlers(
   deps: EmbedHandlerDeps,
 ): Record<string, (message: Record<string, unknown>) => void> {
-  const { contract, navigate, sendAck, bringAppToFront, workspaceAgentId, openRequestPopup } =
-    deps;
-  const handlers: Record<string, (message: Record<string, unknown>) => void> = {};
+  const {
+    contract,
+    navigate,
+    sendAck,
+    bringAppToFront,
+    workspaceAgentId,
+    openRequestPopup,
+    onWorkspaceReady,
+  } = deps;
+  const handlers: Record<string, (message: Record<string, unknown>) => void> =
+    {};
   handlers[contract.OPEN_REQUEST_MODAL] = (message) => {
     openRequestPopup(
       requestIdFromMessage(message, contract.REQUEST_ID_PATTERN),
@@ -117,21 +130,30 @@ export function buildEmbedHandlers(
     // (ai_keys.py dual-accepts a legacy host id too, which is what workspaces
     // running pre-workspace-id template code still send in `hostId`): prefer
     // the coordinate the workspace sent, else this surface's workspace id.
-    const messageCoordinate = typeof message.hostId === "string" && message.hostId ? message.hostId : null;
-    navigate("/settings/ai-keys", { workspace: messageCoordinate ?? workspaceAgentId() });
+    const messageCoordinate =
+      typeof message.hostId === "string" && message.hostId
+        ? message.hostId
+        : null;
+    navigate("/settings/ai-keys", {
+      workspace: messageCoordinate ?? workspaceAgentId(),
+    });
     sendAck(contract.OPEN_AI_KEYS_ACK);
   };
   handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
     // Float the options panel's Share tab over this machine (kept mounted),
     // focused on the asking app. A name the share pane does not recognize
     // falls back to the whole-machine share (ShareModel.selectTarget).
-    const serviceName = typeof message.serviceName === "string" ? message.serviceName : null;
+    const serviceName =
+      typeof message.serviceName === "string" ? message.serviceName : null;
     navigate(
       `/workspace/${workspaceAgentId()}/options`,
-      serviceName === null ? { tab: "share" } : { tab: "share", target: serviceName },
+      serviceName === null
+        ? { tab: "share" }
+        : { tab: "share", target: serviceName },
     );
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
+  handlers[contract.WORKSPACE_READY] = () => onWorkspaceReady();
   return handlers;
 }
 
@@ -200,14 +222,24 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let onFrameLoad: (() => void) | null = null;
   let snapshotResendTimer: ReturnType<typeof setTimeout> | null = null;
   let permissionResolvedSender: PermissionResolvedSender | null = null;
+  let focusChatSender: FocusChatSender | null = null;
   let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
+  // Whether the page the frame currently holds has announced that its
+  // endpoint is listening; a send before that is lost, so a focus-chat ask
+  // waits in the shell until it arrives. Cleared at the navigation, the only
+  // moment that is neither too early nor too late: leaving it to the frame's
+  // load event keeps the outgoing page's readiness standing for the whole
+  // load, and that event fires after the new page has already announced
+  // itself -- which it does once.
+  let isMountedPageReady = false;
 
   function armFrame(shell: ShellState, workspaceAnyId: string): void {
     if (frameElement === null) return;
     armedWorkspaceAnyId = workspaceAnyId;
     const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId);
     if (frameElement.getAttribute("src") !== expected) {
+      isMountedPageReady = false;
       frameElement.src = expected;
     }
   }
@@ -219,6 +251,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   // at the workspace root rather than wherever its own app had routed itself.
   function reloadFrame(shell: ShellState): void {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
+    isMountedPageReady = false;
     frameElement.src =
       shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId);
   }
@@ -257,10 +290,17 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           navigate: (path, params) => m.route.set(path, params),
           sendAck: (type) => endpoint?.send(type),
           bringAppToFront: () => electronBridge.bringAppToFront(),
-          workspaceAgentId: () => shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
+          workspaceAgentId: () =>
+            shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
           openRequestPopup: (requestId) => {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();
+          },
+          onWorkspaceReady: () => {
+            isMountedPageReady = true;
+            // A chat ask held while the page was not listening -- a fresh
+            // mount, or a click from another workspace -- goes now.
+            shell.flushPendingFocusChat();
           },
         });
         endpoint = loaded.createEmbedderEndpoint({
@@ -294,6 +334,17 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           });
         };
         shell.registerPermissionResolvedSender(permissionResolvedSender);
+        focusChatSender = (workspaceAgentId, chatAgentId) => {
+          if (
+            shell.stores.workspaces.toAgentScopedId(mountedAnyId()) !==
+            workspaceAgentId
+          )
+            return false;
+          if (!isMountedPageReady) return false;
+          endpoint?.send(loaded.FOCUS_CHAT, { chatId: chatAgentId });
+          return true;
+        };
+        shell.registerFocusChatSender(focusChatSender);
         // Every (re)load of the workspace page starts it with an empty verdict
         // cache; push its snapshot so no card offers Approve/Deny for a
         // request decided while the page was not live. Sent twice (idempotent)
@@ -332,6 +383,10 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           permissionResolvedSender,
         );
         permissionResolvedSender = null;
+      }
+      if (focusChatSender !== null) {
+        vnode.attrs.shell.unregisterFocusChatSender(focusChatSender);
+        focusChatSender = null;
       }
       // Clear the shell's handle only if it is still ours, so this teardown can
       // never unhook a frame that is actually mounted.

@@ -1,340 +1,56 @@
-"""Notification dispatch for the minds desktop client.
+"""OS-banner dispatch for the minds desktop client.
 
-Routes notifications to either Electron (stdout JSONL), native macOS
-notifications, or a tkinter toast popup depending on the runtime context.
+The one delivery channel is the Electron main process: a ``notification``
+JSONL event on stdout, which main renders as a native notification and routes
+the click of. Outside Electron (a bare ``minds run``) nothing reaches the OS;
+the in-app feed still records every entry.
 """
-
-import platform
-import threading
-from collections.abc import Callable
-from enum import auto
-from types import ModuleType
-from typing import Any
 
 from loguru import logger
 from pydantic import Field
-from pydantic import PrivateAttr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.ui_models import UiNotificationEntry
 from imbue.minds.primitives import OutputFormat
 from imbue.minds.utils.output import emit_event
 
-_IS_MACOS: bool = platform.system() == "Darwin"
-
-# tkinter is an optional dependency: not available on all platforms (e.g. headless servers).
-# Load it at module level so the failure is immediate and predictable, but tolerate absence.
-_TKINTER: ModuleType | None
-try:
-    _TKINTER = __import__("tkinter")
-except ImportError:
-    _TKINTER = None
-
-
-class NotificationUrgency(UpperCaseStrEnum):
-    """Urgency level for a user notification."""
-
-    LOW = auto()
-    NORMAL = auto()
-    CRITICAL = auto()
-
-
-class DispatchChannel(UpperCaseStrEnum):
-    """Channel a NotificationDispatcher routes a notification to.
-
-    Electron takes priority when the server is running inside the desktop app;
-    otherwise macOS native notifications are used on Darwin, and tkinter toasts
-    elsewhere.
-    """
-
-    ELECTRON = auto()
-    MACOS = auto()
-    TKINTER = auto()
-
-
-def _select_dispatch_channel(is_electron: bool, is_macos: bool) -> DispatchChannel:
-    """Pick the dispatch channel for the given platform flags.
-
-    Priority: Electron > macOS native > tkinter toast.
-    """
-    if is_electron:
-        return DispatchChannel.ELECTRON
-    if is_macos:
-        return DispatchChannel.MACOS
-    return DispatchChannel.TKINTER
-
 
 class NotificationRequest(FrozenModel):
-    """A notification to display to the user."""
+    """One OS banner, laid out the way Slack lays its banners out."""
 
-    message: str = Field(description="Notification body text")
-    title: str | None = Field(default=None, description="Optional notification title")
-    urgency: NotificationUrgency = Field(
-        default=NotificationUrgency.NORMAL,
-        description="Urgency level (low, normal, critical)",
-    )
+    title: str = Field(description="Top line: the workspace (or account) the banner is about")
+    subtitle: str = Field(description="Second line: the headline (chat name, request title, or event name)")
+    body: str = Field(description="Detail text")
     url: str | None = Field(
         default=None,
-        description="URL to navigate to when the notification is clicked",
+        description="SPA path the click lands on; None just raises the app",
     )
-
-
-_URGENCY_COLOR_BY_LEVEL: dict[NotificationUrgency, str] = {
-    NotificationUrgency.LOW: "#22c55e",
-    NotificationUrgency.NORMAL: "#eab308",
-    NotificationUrgency.CRITICAL: "#ef4444",
-}
-
-
-def _dispatch_electron_notification(
-    request: NotificationRequest,
-    agent_display_name: str,
-) -> None:
-    """Write notification as JSONL to stdout for the Electron main process."""
-    data: dict[str, str] = {
-        "message": request.message,
-        "urgency": str(request.urgency),
-        "agent_name": agent_display_name,
-    }
-    if request.title is not None:
-        data["title"] = request.title
-    if request.url is not None:
-        data["url"] = request.url
-    logger.debug("Emitting notification event for Electron: title={!r} agent={}", request.title, agent_display_name)
-    emit_event("notification", data, OutputFormat.JSONL)
-
-
-def _build_toast_widgets(
-    root: Any,
-    title: str,
-    message: str,
-    urgency: NotificationUrgency,
-    agent_display_name: str,
-    tk: ModuleType,
-) -> tuple[Any, Any]:
-    """Build the widget tree for a toast notification window.
-
-    Returns (frame, content) where frame is the outermost container and
-    content holds the text labels (used for click binding).
-    """
-    urgency_color = _URGENCY_COLOR_BY_LEVEL.get(urgency, "#eab308")
-
-    frame = tk.Frame(root, bg="#1e293b", padx=12, pady=8)
-    frame.pack(fill=tk.BOTH, expand=True)
-
-    indicator = tk.Frame(frame, bg=urgency_color, width=4)
-    indicator.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
-
-    content = tk.Frame(frame, bg="#1e293b")
-    content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    tk.Label(
-        content,
-        text=f"From: {agent_display_name}",
-        fg="#94a3b8",
-        bg="#1e293b",
-        font=("sans-serif", 9),
-        anchor="w",
-    ).pack(fill=tk.X)
-
-    tk.Label(
-        content,
-        text=title,
-        fg="#f1f5f9",
-        bg="#1e293b",
-        font=("sans-serif", 11, "bold"),
-        anchor="w",
-    ).pack(fill=tk.X)
-
-    tk.Label(
-        content,
-        text=message,
-        fg="#cbd5e1",
-        bg="#1e293b",
-        font=("sans-serif", 10),
-        anchor="w",
-        wraplength=280,
-        justify=tk.LEFT,
-    ).pack(fill=tk.X, pady=(4, 0))
-
-    tk.Label(
-        content,
-        text="Click to dismiss",
-        fg="#64748b",
-        bg="#1e293b",
-        font=("sans-serif", 8),
-        anchor="w",
-    ).pack(fill=tk.X, pady=(4, 0))
-
-    return frame, content
-
-
-def _position_toast_window(root: Any, width: int = 320) -> None:
-    """Position a toast window in the bottom-right corner of the screen."""
-    root.update_idletasks()
-    height = root.winfo_reqheight()
-    screen_width = root.winfo_screenwidth()
-    screen_height = root.winfo_screenheight()
-    x_position = screen_width - width - 20
-    y_position = screen_height - height - 60
-    root.geometry(f"{width}x{height}+{x_position}+{y_position}")
-
-
-def _run_tkinter_toast(
-    title: str,
-    message: str,
-    urgency: NotificationUrgency,
-    agent_display_name: str,
-    tk: ModuleType,
-) -> None:
-    """Create and display a tkinter toast window. Runs on a background thread."""
-    try:
-        root = tk.Tk()
-        root.overrideredirect(True)
-        root.attributes("-topmost", True)
-
-        frame, content = _build_toast_widgets(root, title, message, urgency, agent_display_name, tk)
-        _position_toast_window(root)
-
-        root.bind("<Button-1>", lambda _event: root.destroy())
-        frame.bind("<Button-1>", lambda _event: root.destroy())
-        for child in content.winfo_children():
-            child.bind("<Button-1>", lambda _event: root.destroy())
-
-        root.mainloop()
-    except (tk.TclError, OSError, RuntimeError) as e:
-        logger.warning("Failed to show tkinter notification: {}", e)
-
-
-def _show_tkinter_toast(
-    request: NotificationRequest,
-    agent_display_name: str,
-    tk: ModuleType | None,
-) -> None:
-    """Show a small always-on-top toast window in the bottom-right corner."""
-    if tk is None:
-        logger.warning("tkinter not available, cannot show notification toast")
-        return
-    display_title = request.title or "Notification"
-    thread = threading.Thread(
-        target=_run_tkinter_toast,
-        args=(display_title, request.message, request.urgency, agent_display_name, tk),
-        daemon=True,
-        name="tkinter-toast",
+    entry: UiNotificationEntry | None = Field(
+        default=None,
+        description="Feed entry to open and acknowledge through the renderer's shared notification action",
     )
-    thread.start()
-
-
-def _run_macos_notification_subprocess(script: str) -> None:
-    """Run an AppleScript notification command via osascript on a background thread."""
-    cg = ConcurrencyGroup(name="macos-notification")
-    try:
-        with cg:
-            cg.run_process_to_completion(
-                command=["osascript", "-e", script],
-                is_checked_after=False,
-            )
-    except (OSError, ExceptionGroup) as e:
-        logger.warning("Failed to show macOS notification: {}", e)
-
-
-def _escape_applescript_text(value: str) -> str:
-    """Escape text for embedding in an AppleScript double-quoted string literal.
-
-    Backslashes must be escaped BEFORE double quotes: otherwise text containing
-    a backslash-quote sequence would end up with an escaped backslash followed
-    by a bare quote, terminating the literal early and letting the rest of the
-    (agent-controlled) text run as AppleScript code.
-    """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
-def _build_osascript_notification(
-    request: NotificationRequest,
-    agent_display_name: str,
-) -> str:
-    """Build the AppleScript command that displays a native macOS notification."""
-    display_title = request.title or f"Notification from {agent_display_name}"
-    escaped_title = _escape_applescript_text(display_title)
-    escaped_message = _escape_applescript_text(request.message)
-    escaped_subtitle = _escape_applescript_text(f"From: {agent_display_name}")
-    return f'display notification "{escaped_message}" with title "{escaped_title}" subtitle "{escaped_subtitle}"'
-
-
-def _dispatch_macos_notification(
-    request: NotificationRequest,
-    agent_display_name: str,
-) -> None:
-    """Display a native macOS notification via osascript on a background thread."""
-    script = _build_osascript_notification(request, agent_display_name)
-    thread = threading.Thread(
-        target=_run_macos_notification_subprocess,
-        args=(script,),
-        daemon=True,
-        name="macos-notification",
-    )
-    thread.start()
 
 
 class NotificationDispatcher(FrozenModel):
-    """Routes notifications to Electron, macOS native, or tkinter based on runtime context."""
+    """Hands banners to the Electron main process over stdout."""
 
-    is_electron: bool = Field(description="Whether the server is running inside Electron")
-    is_macos: bool = Field(default=_IS_MACOS, description="Whether running on macOS")
-    # _tk stores the resolved tkinter module. Set at construction time to the
-    # module-level _TKINTER value, or injected via NotificationDispatcher.create()
-    # to allow testing without tkinter side effects.
-    _tk: ModuleType | None = PrivateAttr(default=None)
-    # The master notifications toggle, consulted live on every dispatch (so a
-    # Settings change applies without a restart). None means always enabled,
-    # which keeps minimal apps and tests working without a MindsConfig.
-    _is_enabled_provider: Callable[[], bool] | None = PrivateAttr(default=None)
+    is_electron: bool = Field(description="Whether the server is running inside the desktop app")
 
-    def model_post_init(self, __context: object) -> None:
-        """Resolve the tkinter module from the module-level auto-detection."""
-        self._tk = _TKINTER
-
-    @classmethod
-    def create(
-        cls,
-        is_electron: bool,
-        tkinter_module: ModuleType | None = _TKINTER,
-        is_macos: bool = _IS_MACOS,
-        is_enabled_provider: Callable[[], bool] | None = None,
-    ) -> "NotificationDispatcher":
-        """Create a NotificationDispatcher with explicit platform overrides.
-
-        Pass tkinter_module=None to disable tkinter toasts (e.g. in tests or on
-        headless servers where tkinter is unavailable).
-
-        ``is_enabled_provider`` is the user's master notifications toggle,
-        consulted before every dispatch; when it returns False the
-        notification is silently dropped. None means always enabled.
-        """
-        dispatcher = cls(is_electron=is_electron, is_macos=is_macos)
-        dispatcher._tk = tkinter_module
-        dispatcher._is_enabled_provider = is_enabled_provider
-        return dispatcher
-
-    def dispatch(
-        self,
-        request: NotificationRequest,
-        agent_display_name: str,
-    ) -> None:
-        """Send a notification to the user via the appropriate channel.
-
-        Returns without dispatching when the injected master toggle says
-        notifications are disabled. Priority: Electron > macOS native >
-        tkinter toast.
-        """
-        if self._is_enabled_provider is not None and not self._is_enabled_provider():
+    def dispatch(self, request: NotificationRequest) -> None:
+        """Emit the banner for Electron, or log why nothing reached the OS."""
+        if not self.is_electron:
+            logger.debug("notification {!r}: not running inside Electron, nothing reaches the OS", request.subtitle)
             return
-        channel = _select_dispatch_channel(is_electron=self.is_electron, is_macos=self.is_macos)
-        match channel:
-            case DispatchChannel.ELECTRON:
-                _dispatch_electron_notification(request, agent_display_name)
-            case DispatchChannel.MACOS:
-                _dispatch_macos_notification(request, agent_display_name)
-            case DispatchChannel.TKINTER:
-                _show_tkinter_toast(request, agent_display_name, tk=self._tk)
+        data: dict[str, object] = {
+            "title": request.title,
+            "subtitle": request.subtitle,
+            "body": request.body,
+        }
+        if request.url is not None:
+            data["url"] = request.url
+        if request.entry is not None:
+            data["entry"] = request.entry.model_dump(mode="json")
+        logger.debug(
+            "Emitting notification event for Electron: title={!r} subtitle={!r}", request.title, request.subtitle
+        )
+        emit_event("notification", data, OutputFormat.JSONL)

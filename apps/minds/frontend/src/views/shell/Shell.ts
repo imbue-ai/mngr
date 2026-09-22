@@ -24,15 +24,20 @@ import {
   overlayBehindWorkspaceId,
 } from "./classify";
 import { noticeBandFor } from "./notice-band";
-import { standingUpdateNotice, updateRunOutcome, updateRunPhase } from "../../models/updates";
+import {
+  standingUpdateNotice,
+  updateRunOutcome,
+  updateRunPhase,
+} from "../../models/updates";
 import { NoticeBand } from "./NoticeBand";
 import { NotificationsPage } from "../pages/NotificationsPage";
 import type { OverlayShellAttrs } from "./OverlayShell";
 import { ANCHORED_CARD_CLASS, OverlayShell } from "./OverlayShell";
-import { openReviewRoute } from "../../models/notificationsUi";
 import { SidebarMenu } from "./SidebarMenu";
 import { Titlebar } from "./Titlebar";
 import { ToastLayer } from "./ToastLayer";
+import { NotificationChoiceCard } from "./NotificationChoiceCard";
+import { resolveWindowFocus } from "../../window-focus";
 import { Wash } from "./Wash";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { LocalPageNotice } from "./LocalPageNotice";
@@ -320,7 +325,9 @@ export function Shell(): m.Component<ShellAttrs> {
         overlayContent = content;
       }
       const overlay =
-        overlayAttrs === null ? null : m(OverlayShell, overlayAttrs, overlayContent);
+        overlayAttrs === null
+          ? null
+          : m(OverlayShell, overlayAttrs, overlayContent);
 
       // The band speaks for whichever machine is painted, so it is keyed to the
       // surface rather than the route: the workspace route's own frame, and
@@ -355,12 +362,23 @@ export function Shell(): m.Component<ShellAttrs> {
       const standingNotice =
         agentScoped === null
           ? "none"
-          : standingUpdateNotice(shell.stores.updates.forAgent(agentScoped), shell.stores.updates.isUpdating(agentScoped));
+          : standingUpdateNotice(
+              shell.stores.updates.forAgent(agentScoped),
+              shell.stores.updates.isUpdating(agentScoped),
+            );
       // The band is where a run reports itself to the reader inside the
       // machine, who cannot see the row badge.
-      const published = agentScoped === null ? null : shell.stores.updates.publishedFor(agentScoped);
+      const published =
+        agentScoped === null
+          ? null
+          : shell.stores.updates.publishedFor(agentScoped);
       const updatePhase =
-        agentScoped === null ? "none" : updateRunPhase(published, shell.stores.updates.isUpdating(agentScoped));
+        agentScoped === null
+          ? "none"
+          : updateRunPhase(
+              published,
+              shell.stores.updates.isUpdating(agentScoped),
+            );
       const updateOutcome = updateRunOutcome(published);
       const band = noticeBandFor(
         health,
@@ -372,7 +390,10 @@ export function Shell(): m.Component<ShellAttrs> {
           deviceEnvironment: shell.stores.health.appEnvironmentCondition(),
           // So the band can tell the user's own bounce, which narrates itself,
           // from the app's unattended start, which must not hide the device.
-          recoveryKind: agentScoped === null ? null : shell.stores.health.recoveryKindFor(agentScoped),
+          recoveryKind:
+            agentScoped === null
+              ? null
+              : shell.stores.health.recoveryKindFor(agentScoped),
           // Which scopes that app-global condition to the machines it can
           // explain: one on an on-device backend answers over loopback with the
           // wifi off. A row we have no entry for keeps the conservative default.
@@ -381,7 +402,9 @@ export function Shell(): m.Component<ShellAttrs> {
           liveness: entry?.liveness ?? "",
           stopKind: entry?.stop_kind ?? "",
           updateRunPhase: updatePhase,
-          updateHoldDetail: published?.is_hold_recorded ? (published.hold_detail ?? "") : null,
+          updateHoldDetail: published?.is_hold_recorded
+            ? (published.hold_detail ?? "")
+            : null,
           updateRunOutcome: updateOutcome,
           standingUpdateNotice: standingNotice,
         },
@@ -474,13 +497,29 @@ export function Shell(): m.Component<ShellAttrs> {
               // retires them).
               toasts: shell.isNotificationsOpen
                 ? []
-                : shell.notificationsUi.liveToastEntries(
+                : shell.notificationsUi.liveToastItems(
                     shell.stores.notifications.entries,
                   ),
               isReconnecting,
               onDismiss: (id) => shell.notificationsUi?.dismissToast(id),
-              onReview: openReviewRoute,
+              onOpen: (item) => {
+                if (item.entry !== null)
+                  shell.notificationsUi?.openEntry(item.entry);
+              },
             })
+          : null,
+        shell.notificationsUi?.shouldChooseNotificationStyle &&
+        electronBridge.isDesktop &&
+        resolveWindowFocus(undefined) &&
+        !isCaptureMode
+          ? m(
+              "div",
+              {
+                class:
+                  "fixed bottom-4 left-4 z-[150] w-[390px] max-w-[calc(100vw-2rem)]",
+              },
+              m(NotificationChoiceCard, { controller: shell.notificationsUi }),
+            )
           : null,
         // Bottom right, out of the way: the update is not urgent, and the app
         // stays fully usable with it on screen.

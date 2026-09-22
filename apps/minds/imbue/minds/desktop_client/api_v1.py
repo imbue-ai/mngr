@@ -139,9 +139,6 @@ from imbue.minds.desktop_client.host_timezone import read_host_timezone
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
-from imbue.minds.desktop_client.notification import NotificationDispatcher
-from imbue.minds.desktop_client.notification import NotificationRequest
-from imbue.minds.desktop_client.notification import NotificationUrgency
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
@@ -159,6 +156,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
 from imbue.minds.desktop_client.ui_models import UiOpenHelpMessage
 from imbue.minds.desktop_client.ui_models import UiWorkspaceRefreshMessage
 from imbue.minds.desktop_client.workspace_create import build_backup_request_or_error
@@ -223,10 +221,10 @@ _CREATE_ATTEMPT_DISCARD_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=AgentNotificationRequest, resp=json_response_model(OkResponse))
 def _handle_notification(agent_id: str) -> OkResponse | Response:
-    """Send a notification on behalf of the named agent."""
-    dispatcher: NotificationDispatcher | None = get_state().notification_dispatcher
-    if dispatcher is None:
-        return _json_error("Notification dispatch not configured", 501)
+    """Land a chat agent's message in the notification feed (bell, badge, toast, OS banner)."""
+    feed = get_state().notification_feed
+    if feed is None:
+        return _json_error("Notification feed not configured", 501)
 
     # Structure (object shape + ``message`` present and a string) is enforced by
     # the spectree model; the remaining checks here are value-semantic.
@@ -234,25 +232,10 @@ def _handle_notification(agent_id: str) -> OkResponse | Response:
     message = body.get("message")
     if not message:
         return _json_error("'message' field is required and must be a string", 400)
-
     title = body.get("title")
-    urgency_str = body.get("urgency") or "NORMAL"
-    try:
-        urgency = NotificationUrgency(urgency_str.upper())
-    except (ValueError, AttributeError):
-        return _json_error(f"Invalid urgency: {urgency_str}. Must be one of: low, normal, critical", 400)
+    text = f"{title}: {message}" if title else message
 
-    parsed_agent_id = AgentId(agent_id)
-    notification_request = NotificationRequest(
-        message=message,
-        title=title,
-        urgency=urgency,
-    )
-
-    agent_info = get_state().backend_resolver.get_agent_display_info(parsed_agent_id)
-    agent_display_name = agent_info.agent_name if agent_info else str(parsed_agent_id)
-
-    dispatcher.dispatch(notification_request, agent_display_name)
+    feed.append_agent_message(build_agent_message_card(AgentId(agent_id), text, get_state().backend_resolver))
     return OkResponse(ok=True)
 
 

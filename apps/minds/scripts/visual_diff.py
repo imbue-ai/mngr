@@ -62,6 +62,7 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
+from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
@@ -115,7 +116,7 @@ _PLAYWRIGHT_EXCEPTIONS: Final[tuple[type[BaseException], ...]] = (
 )
 
 
-# -- Shared capture helpers -----------------------------------------------
+# Shared capture helpers
 
 
 class _QuietStaticHandler(http.server.SimpleHTTPRequestHandler):
@@ -207,7 +208,7 @@ def _capture_full_page_screenshot(page: Any, path: Path, is_full_page_reliable: 
         page.set_viewport_size({"width": VIEWPORT_W, "height": VIEWPORT_H})
 
 
-# -- SPA capture subcommand ------------------------------------------------
+# SPA capture subcommand
 
 # Default SPA routes to capture, with a stable slug per route (scenario name
 # is ``spa_<slug>``). One place, overridable via --routes. Stub pages are
@@ -339,6 +340,7 @@ def _build_spa_fixture_bootstrap() -> UiBootstrap:
             entries=(
                 UiNotificationEntry(
                     id="req-00000000000000000000000000000001",
+                    kind=NotificationKind.PERMISSION_REQUEST,
                     created_at="2026-01-01T00:00:00+00:00",
                     is_resolved=False,
                     outcome=None,
@@ -602,7 +604,7 @@ def _do_capture_spa(label: str, routes: list[str] | None, is_build_skipped: bool
     return output_dir
 
 
-# -- Compare subcommand --------------------------------------------------
+# Compare subcommand
 
 
 def _read_png_dimensions(path: Path) -> tuple[int, int] | None:
@@ -980,9 +982,6 @@ def _render_report(label_a: str, label_b: str, rows: list[dict[str, Any]]) -> st
     )
     parts.append("</body></html>")
     return "".join(parts)
-
-
-# -- main ----------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:

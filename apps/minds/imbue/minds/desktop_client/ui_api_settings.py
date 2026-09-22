@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
+from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
@@ -51,8 +52,8 @@ class UiNotificationPrefs(FrozenModel):
     """The notification-prefs record on the settings overview."""
 
     is_enabled: bool = Field(description="Master notifications toggle (gates every OS nudge the app sends)")
-    style: NotificationStyle = Field(description="Delivery style for feed-backed notifications")
-    is_os_hint_dismissed: bool = Field(description="Whether the one-time OS-notification hint was dismissed")
+    style: NotificationStyle = Field(description="Delivery style for every feed entry")
+    has_chosen: bool = Field(description="Whether notification preferences have been explicitly saved")
     version: str = Field(description="If-Match version for the notification-prefs write")
 
 
@@ -61,7 +62,14 @@ class UiNotificationPrefsWrite(FrozenModel):
 
     is_enabled: bool = Field(description="New master-toggle value")
     style: NotificationStyle = Field(description="New delivery style")
-    is_os_hint_dismissed: bool = Field(description="New hint-dismissed value")
+
+
+class UiTestNotificationResult(FrozenModel):
+    """Answer to the test-notification push."""
+
+    is_electron: bool = Field(
+        description="Whether the app is running inside the desktop shell, the only place a banner can reach the OS"
+    )
 
 
 class UiSettingsOverview(FrozenModel):
@@ -182,17 +190,14 @@ def compute_error_reporting_version(report_unexpected_errors: bool) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
-def compute_notification_prefs_version(is_enabled: bool, style: str, is_os_hint_dismissed: bool) -> str:
+def compute_notification_prefs_version(is_enabled: bool, style: str, has_chosen: bool) -> str:
     """The If-Match version of the notification-prefs record: a hash of its stored values.
 
     A per-record version (rather than folding these values into the
     error-reporting version) keeps each record's writes from 412-ing pages
     that only touched the other record.
     """
-    canonical = json.dumps(
-        {"is_enabled": is_enabled, "is_os_hint_dismissed": is_os_hint_dismissed, "style": style},
-        sort_keys=True,
-    )
+    canonical = json.dumps({"is_enabled": is_enabled, "style": style, "has_chosen": has_chosen}, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
@@ -202,14 +207,15 @@ def _current_notification_prefs() -> UiNotificationPrefs:
     if minds_config is None:
         is_enabled = True
         style: NotificationStyle = DEFAULT_NOTIFICATION_STYLE
-        is_os_hint_dismissed = False
+        # No settings storage: there is nowhere to save a choice.
+        has_chosen = True
     else:
-        is_enabled, style, is_os_hint_dismissed = minds_config.get_notification_prefs()
+        is_enabled, style, has_chosen = minds_config.get_notification_prefs_with_choice()
     return UiNotificationPrefs(
         is_enabled=is_enabled,
         style=style,
-        is_os_hint_dismissed=is_os_hint_dismissed,
-        version=compute_notification_prefs_version(is_enabled, style, is_os_hint_dismissed),
+        has_chosen=has_chosen,
+        version=compute_notification_prefs_version(is_enabled, style, has_chosen),
     )
 
 
@@ -328,7 +334,6 @@ def _apply_notification_prefs_write(
         compute_version=compute_notification_prefs_version,
         is_enabled=write.is_enabled,
         style=write.style,
-        is_os_hint_dismissed=write.is_os_hint_dismissed,
     )
 
 
@@ -344,6 +349,28 @@ def _handle_notification_prefs_write() -> Response:
         write_model_type=UiNotificationPrefsWrite,
         apply_versioned_write=_apply_notification_prefs_write,
     )
+
+
+def _handle_test_notification() -> Response:
+    """POST /ui/api/settings/notifications/test: push one banner through the real OS path.
+
+    Deliberately ignores the stored preferences: the button exists to find
+    out whether banners reach the OS at all, which is the question the
+    reader has when a preference looks right and nothing appears.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    dispatcher = get_state().notification_dispatcher
+    if dispatcher is None:
+        return _error_response("Notification dispatch is not configured", 503)
+    dispatcher.dispatch(
+        NotificationRequest(
+            title="Mind",
+            subtitle="Test notification",
+            body="System notifications are reaching you.",
+        )
+    )
+    return _json_response(UiTestNotificationResult(is_electron=dispatcher.is_electron))
 
 
 def _handle_update_window_write() -> Response:
@@ -495,6 +522,7 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings", view_func=_handle_settings_overview)
     blueprint.add_url_rule("/api/settings/error-reporting", view_func=_handle_error_reporting_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
     blueprint.add_url_rule("/api/accounts", view_func=_handle_accounts_detail)
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)

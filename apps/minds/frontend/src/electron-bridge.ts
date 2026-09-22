@@ -6,6 +6,8 @@
 // the native file picker, focus, multi-window -- everything else the legacy
 // `window.minds` bridge carried is now owned by the SPA itself.
 
+import type { UiNotificationEntry } from "./channel/messages";
+
 export interface FilePickerOptions {
   title?: string;
   defaultPath?: string;
@@ -19,7 +21,15 @@ export interface FilePickerOptions {
 export type UpdateChannel = "stable" | "beta" | "alpha";
 
 export interface UpdateStatus {
-  type: "idle" | "checking" | "up-to-date" | "parked" | "update-available" | "update-downloaded" | "error" | "disabled";
+  type:
+    | "idle"
+    | "checking"
+    | "up-to-date"
+    | "parked"
+    | "update-available"
+    | "update-downloaded"
+    | "error"
+    | "disabled";
   channel?: UpdateChannel;
   currentVersion?: string;
   /** What the channel serves. Below currentVersion exactly when parked. */
@@ -91,10 +101,21 @@ interface MindsNativeSurface {
   openNotificationSettings(): Promise<boolean>;
   bringAppToFront(): void;
   openWorkspaceInNewWindow(agentId: string): void;
+  openNotificationInExistingWindow?(
+    route: string,
+    entry: UiNotificationEntry,
+  ): Promise<boolean>;
+  onOpenNotification?(callback: (entry: UiNotificationEntry) => void): void;
   onNavigate(callback: (url: string) => void): void;
   onOpenOverlay(callback: (cmd: unknown) => void): void;
   onCloseActiveTab(callback: () => void): void;
   onEscapePressed(callback: () => void): void;
+  // Main relays each window's own focus and blur (the signal the renderer
+  // cannot see while keyboard focus sits inside the workspace iframe).
+  onWindowFocusChanged?(callback: (isFocused: boolean) => void): void;
+  // Main asks this window to flash a plain in-app toast (the "couldn't open
+  // link" fallback).
+  onToast?(callback: (toast: { title: string; body: string }) => void): void;
   // Renderer -> main shell-event relay (workspace_stopped, focus requests).
   // Added alongside the SPA shell; older preloads lack it, hence optional.
   sendShellEvent?(event: { type: string } & Record<string, unknown>): void;
@@ -167,6 +188,16 @@ export const electronBridge = {
   openWorkspaceInNewWindow(agentId: string): void {
     native()?.openWorkspaceInNewWindow(agentId);
   },
+  /** Null when unavailable; false when this window should handle the click. */
+  openNotificationInExistingWindow(
+    route: string,
+    entry: UiNotificationEntry,
+  ): Promise<boolean> | null {
+    return native()?.openNotificationInExistingWindow?.(route, entry) ?? null;
+  },
+  onOpenNotification(callback: (entry: UiNotificationEntry) => void): void {
+    native()?.onOpenNotification?.(callback);
+  },
   onNavigate(callback: (url: string) => void): void {
     native()?.onNavigate(callback);
   },
@@ -178,6 +209,12 @@ export const electronBridge = {
   },
   onEscapePressed(callback: () => void): void {
     native()?.onEscapePressed(callback);
+  },
+  onWindowFocusChanged(callback: (isFocused: boolean) => void): void {
+    native()?.onWindowFocusChanged?.(callback);
+  },
+  onToast(callback: (toast: { title: string; body: string }) => void): void {
+    native()?.onToast?.(callback);
   },
   sendShellEvent(event: { type: string } & Record<string, unknown>): void {
     native()?.sendShellEvent?.(event);

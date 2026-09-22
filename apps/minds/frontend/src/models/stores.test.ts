@@ -197,11 +197,11 @@ describe("RequestsStore", () => {
     const store = new RequestsStore();
     store.applyRequestsMessage(requestsMessage([]));
     store.applyRequestsMessage(requestsMessage(["evt-brand-new"]));
-    expect(Object.keys(store)).toEqual(["requestIds"]);
+    expect(Object.keys(store)).toEqual(["requestIds", "workspaceAgentIds"]);
     const methods = Object.getOwnPropertyNames(
       Object.getPrototypeOf(store),
     ).filter((name) => name !== "constructor");
-    expect(methods).toEqual(["applyRequestsMessage"]);
+    expect(methods).toEqual(["hasPendingForWorkspace", "applyRequestsMessage"]);
   });
 });
 

@@ -62,6 +62,23 @@ def _style_from_raw(data: dict[str, object]) -> NotificationStyle:
     return DEFAULT_NOTIFICATION_STYLE
 
 
+def _write_notification_prefs_into_raw(data: dict[str, object], is_enabled: bool, style: NotificationStyle) -> None:
+    """Set the notification-prefs keys on an already-loaded config dict (the caller writes it)."""
+    data["notifications_enabled"] = is_enabled
+    data["notification_style"] = str(style)
+    # CLEANUP: drop this pop once every install has written its prefs at least
+    # once on a build without the browser-mode OS-permission hint (the key was
+    # retired with that hint).
+    data.pop("notification_os_hint_dismissed", None)
+
+
+def _has_notification_choice(data: dict[str, object]) -> bool:
+    """Existing saved preferences count as a choice, including on older installs."""
+    return data.get("notification_style") in tuple(NotificationStyle) or isinstance(
+        data.get("notifications_enabled"), bool
+    )
+
+
 def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
     """Return ``value`` as a concretely-typed ``dict[str, object]``, or None if it isn't a mapping.
 
@@ -277,40 +294,33 @@ class MindsConfig(MutableModel):
             self._write_raw(data)
             return compute_version(enabled)
 
-    def get_notifications_enabled(self) -> bool:
-        """Return whether notification nudges are enabled at all. Default: True.
+    def get_notification_prefs(self) -> tuple[bool, NotificationStyle]:
+        """Return ``(is_enabled, style)`` from one atomic read.
 
-        The master switch for every OS notification the app sends (feed-backed
-        request nudges, agent-sent notifications, backup failures). Read live
-        at dispatch time so a Settings change applies without an app restart.
-        The feed itself always records entries regardless of this switch.
+        Reading the fields via separate locked calls could observe a
+        concurrent writer's update to only one of them -- a combination that
+        :meth:`set_notification_prefs` never actually persisted together. One
+        lock acquisition here mirrors that write's atomicity on the read side.
         """
-        return self._get_bool("notifications_enabled", default=True)
+        is_enabled, style, _has_chosen = self.get_notification_prefs_with_choice()
+        return is_enabled, style
 
-    def get_notification_prefs(self) -> tuple[bool, NotificationStyle, bool]:
-        """Return ``(is_enabled, style, is_os_hint_dismissed)`` from one atomic read.
-
-        Reading the fields via separate locked calls (as each getter does on
-        its own) could observe a concurrent writer's update to only some of
-        them -- a combination that :meth:`set_notification_prefs` never
-        actually persisted together. One lock acquisition here mirrors that
-        write's atomicity on the read side.
-        """
+    def get_notification_prefs_with_choice(self) -> tuple[bool, NotificationStyle, bool]:
+        """Read the preferences and whether the user has chosen them in one snapshot."""
         with self._lock:
             data = self._read_raw()
             return (
                 _bool_from_raw(data, "notifications_enabled", True),
                 _style_from_raw(data),
-                _bool_from_raw(data, "notification_os_hint_dismissed", False),
+                _has_notification_choice(data),
             )
 
     def set_notification_prefs(
         self,
         is_enabled: bool,
         style: NotificationStyle,
-        is_os_hint_dismissed: bool,
     ) -> None:
-        """Persist all three notification preferences in one read-modify-write.
+        """Persist both notification preferences in one read-modify-write.
 
         A single lock acquisition and a single atomic file write, so two
         concurrent writers can never interleave into a record that mixes one
@@ -318,9 +328,7 @@ class MindsConfig(MutableModel):
         """
         with self._lock:
             data = self._read_raw()
-            data["notifications_enabled"] = is_enabled
-            data["notification_style"] = str(style)
-            data["notification_os_hint_dismissed"] = is_os_hint_dismissed
+            _write_notification_prefs_into_raw(data, is_enabled, style)
             self._write_raw(data)
 
     def set_notification_prefs_if_version_matches(
@@ -329,7 +337,6 @@ class MindsConfig(MutableModel):
         compute_version: Callable[[bool, NotificationStyle, bool], str],
         is_enabled: bool,
         style: NotificationStyle,
-        is_os_hint_dismissed: bool,
     ) -> str | None:
         """Atomically compare-and-swap the notification-prefs record under one lock hold.
 
@@ -348,11 +355,8 @@ class MindsConfig(MutableModel):
             data = self._read_raw()
             current_is_enabled = _bool_from_raw(data, "notifications_enabled", True)
             current_style = _style_from_raw(data)
-            current_is_os_hint_dismissed = _bool_from_raw(data, "notification_os_hint_dismissed", False)
-            if compute_version(current_is_enabled, current_style, current_is_os_hint_dismissed) != expected_version:
+            if compute_version(current_is_enabled, current_style, _has_notification_choice(data)) != expected_version:
                 return None
-            data["notifications_enabled"] = is_enabled
-            data["notification_style"] = str(style)
-            data["notification_os_hint_dismissed"] = is_os_hint_dismissed
+            _write_notification_prefs_into_raw(data, is_enabled, style)
             self._write_raw(data)
-            return compute_version(is_enabled, style, is_os_hint_dismissed)
+            return compute_version(is_enabled, style, True)

@@ -82,6 +82,7 @@ export function notificationEntry(
     title: "Slack access",
     body: "wants to read messages",
     request_id: `req-${id}`,
+    chat_agent_id: "",
     workspace_agent_id: "agent-aa11",
     workspace_name: "alpha",
     workspace_accent: "#aabbcc",
@@ -91,7 +92,9 @@ export function notificationEntry(
 }
 
 /** The `/ui/api/settings` payload. */
-export function settingsOverview(overrides: Partial<SettingsOverview> = {}): SettingsOverview {
+export function settingsOverview(
+  overrides: Partial<SettingsOverview> = {},
+): SettingsOverview {
   return {
     is_master_password_set: false,
     report_unexpected_errors: true,
@@ -191,9 +194,10 @@ export async function withMindsNative(
   } finally {
     if (original === undefined) delete globals.window;
     else globals.window = original;
-  }}
+  }
+}
 
-// -- Walking a rendered vnode tree ------------------------------------------
+// Walking a rendered vnode tree
 //
 // View tests assert against the tree a component returns rather than a mounted
 // DOM, so they need to find nodes in it. One set of walkers for every suite:

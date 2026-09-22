@@ -37,8 +37,10 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client.auth import FileAuthStore
+from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
+from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -757,16 +759,46 @@ class RefusingSpawnMngrCaller(RecordingMngrCaller):
 
 
 class RecordingNotificationDispatcher(NotificationDispatcher):
-    """Dispatcher double that records dispatch calls instead of hitting any OS channel."""
+    """Dispatcher double that records dispatch calls instead of writing the Electron event."""
 
-    _dispatched: list[tuple[NotificationRequest, str]] = PrivateAttr(default_factory=list)
+    _dispatched: list[NotificationRequest] = PrivateAttr(default_factory=list)
 
-    def dispatch(self, request: NotificationRequest, agent_display_name: str) -> None:
-        self._dispatched.append((request, agent_display_name))
+    def dispatch(self, request: NotificationRequest) -> None:
+        self._dispatched.append(request)
 
     @property
-    def dispatched(self) -> list[tuple[NotificationRequest, str]]:
+    def dispatched(self) -> list[NotificationRequest]:
         return self._dispatched
+
+
+class ChatInWorkspaceResolver(StaticBackendResolver):
+    """Resolver shaped like production: a workspace's primary agent and a chat agent sharing its name.
+
+    The chat names itself "Migration chat"; both agents report the workspace
+    name "alpha", and only the primary agent carries the workspace's accent.
+    """
+
+    workspace_agent_id: AgentId = Field(description="The primary agent whose tile is on screen.")
+    chat_agent_id: AgentId = Field(description="A chat agent living in that workspace.")
+
+    def list_known_agent_ids(self) -> tuple[AgentId, ...]:
+        return (self.workspace_agent_id, self.chat_agent_id)
+
+    def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
+        return (self.workspace_agent_id,)
+
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        return "alpha" if agent_id in self.list_known_agent_ids() else None
+
+    def get_workspace_color(self, agent_id: AgentId) -> str | None:
+        return "#123456" if agent_id == self.workspace_agent_id else None
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        if agent_id == self.chat_agent_id:
+            return AgentDisplayInfo(agent_name="Migration chat", host_id="host-" + "0" * 32)
+        if agent_id == self.workspace_agent_id:
+            return AgentDisplayInfo(agent_name="alpha", host_id="host-" + "0" * 32)
+        return None
 
 
 class SuppressionAnnouncingTracker(SystemInterfaceHealthTracker):
