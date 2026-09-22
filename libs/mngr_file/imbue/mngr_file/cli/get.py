@@ -21,9 +21,10 @@ from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
+from imbue.mngr_file.cli.target import is_directory
+from imbue.mngr_file.cli.target import parse_relative_to
 from imbue.mngr_file.cli.target import resolve_file_target
 from imbue.mngr_file.cli.target import resolve_full_path
-from imbue.mngr_file.data_types import PathRelativeTo
 
 
 class _FileGetCliOptions(CommonCliOptions):
@@ -79,27 +80,39 @@ def _emit_saved_result(
         case OutputFormat.JSONL:
             emit_event("file_read", data, OutputFormat.JSONL)
         case OutputFormat.HUMAN:
-            write_human_line("Wrote {} bytes to {}", size, output_path)
+            write_human_line("Wrote {} bytes from {} to {}", size, file_path, output_path)
         case _ as unreachable:
             assert_never(unreachable)
 
 
-def _read_file(host: HostFileReadInterface, path: Path) -> bytes:
+def _no_file_error(path: Path) -> MngrError:
+    return MngrError(f"No file at {path}. Use 'mngr file list' to see what is there.")
+
+
+def _directory_error(path: Path) -> MngrError:
+    return MngrError(
+        f"{path} is a directory, not a file. Use 'mngr rsync' to transfer a directory, "
+        f"or 'mngr file list' to see what it holds."
+    )
+
+
+def _read_file(host: HostFileReadInterface, path: Path, host_dir: Path) -> bytes:
     """Read ``path``, reporting the two ordinary addressing mistakes as user-facing errors.
 
-    Every readable host signals these the same way -- a local read, an SFTP read
-    and a volume read all raise the builtin ``OSError`` subclasses -- so the
-    translation belongs here rather than per backend.
+    A read of a missing path or a directory fails in the terms of whatever reaches
+    the machine -- a filesystem raises ``OSError``, a storage service such as a
+    Modal volume raises errors of its own -- so the path is classified through the
+    host interface before it is read.
     """
+    if not host.path_exists(path):
+        raise _no_file_error(path)
+    if is_directory(host, path, host_dir):
+        raise _directory_error(path)
     try:
         return host.read_file(path)
-    except FileNotFoundError as e:
-        raise MngrError(f"No file at {path}. Use 'mngr file list' to see what is there.") from e
     except IsADirectoryError as e:
-        raise MngrError(
-            f"{path} is a directory, not a file. Use 'mngr rsync' to transfer a directory, "
-            f"or 'mngr file list' to see what it holds."
-        ) from e
+        # A listing classifies a symlink to a directory as a link, so only the read reveals it.
+        raise _directory_error(path) from e
 
 
 @file_group.command(name="get")
@@ -136,7 +149,7 @@ def file_get(ctx: click.Context, **kwargs: Any) -> None:
         command_class=_FileGetCliOptions,
     )
 
-    relative_to = PathRelativeTo(opts.relative_to.upper())
+    relative_to = parse_relative_to(opts.target, opts.relative_to)
 
     # Resolve target
     with log_span("Resolving file target"):
@@ -149,14 +162,20 @@ def file_get(ctx: click.Context, **kwargs: Any) -> None:
     # Read file through the unified readable-host interface (online or volume-backed).
     with log_span("Reading file"):
         full_path = resolve_full_path(resolved.base_path, opts.path)
-        content = _read_file(resolved.host, full_path)
+        content = _read_file(resolved.host, full_path, resolved.host_dir)
         display_path = full_path
 
     # Output
     if opts.output is not None:
-        output_path = Path(opts.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(content)
+        output_path = Path(opts.output).absolute()
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(content)
+        except IsADirectoryError as e:
+            raise MngrError(f"Cannot save to {output_path}: it is a directory.") from e
+        except (NotADirectoryError, FileExistsError) as e:
+            # Creating the parents of a path fails this way when one of them is a file.
+            raise MngrError(f"Cannot save to {output_path}: a directory leading to it is a file.") from e
         _emit_saved_result(display_path, output_path, len(content), output_opts)
     else:
         _emit_get_result(display_path, content, output_opts)

@@ -1,6 +1,8 @@
+import os
 from pathlib import Path
 from typing import assert_never
 
+import click
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -27,6 +29,7 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr_file.data_types import FileType
 from imbue.mngr_file.data_types import PathRelativeTo
 
 
@@ -37,6 +40,34 @@ def resolve_full_path(base_path: Path, user_path: str) -> Path:
     if parsed.is_absolute():
         return parsed
     return base_path / parsed
+
+
+def is_directory(host: HostFileReadInterface, path: Path, host_dir: Path) -> bool:
+    """Whether ``path`` names a directory, judged from its parent's listing, which every readable host answers alike.
+
+    The path is normalized lexically first, as a volume-backed host does, so ``..``
+    components name the directory they lead to. The host directory itself is the
+    root of a stopped host's storage, whose parent cannot be listed.
+    """
+    normalized = Path(os.path.normpath(path))
+    if normalized == host_dir:
+        return True
+    return any(
+        entry.file_type == FileType.DIRECTORY and Path(entry.path).name == normalized.name
+        for entry in host.list_directory(normalized.parent)
+    )
+
+
+@pure
+def parse_relative_to(target: AgentOrHostAddress, relative_to: str) -> PathRelativeTo:
+    """Parse the ``--relative-to`` choice, refusing as a usage error a base that only an agent has on a host target."""
+    parsed = PathRelativeTo(relative_to.upper())
+    if parsed == PathRelativeTo.STATE and not isinstance(target, AgentAddress):
+        raise click.BadParameter(
+            "state is only valid for agent targets. Host targets always use MNGR_HOST_DIR as the base path.",
+            param_hint="--relative-to",
+        )
+    return parsed
 
 
 @pure
@@ -71,6 +102,10 @@ class ResolveFileTargetResult(FrozenModel):
     @property
     def is_online(self) -> bool:
         return isinstance(self.host, OnlineHostInterface)
+
+    @property
+    def host_dir(self) -> Path:
+        return _host_dir_of(self.host)
 
 
 def resolve_file_target(

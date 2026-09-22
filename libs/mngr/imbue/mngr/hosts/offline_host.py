@@ -451,8 +451,8 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
             relative = candidate.relative_to(self.host_dir)
         except ValueError as e:
             raise MngrError(
-                f"Path {candidate} is not under host_dir {self.host_dir}; "
-                "OfflineHostWithVolume can only read files within the host's volume."
+                f"{candidate} is outside the host directory {self.host_dir}; "
+                "only files under the host directory can be reached while the host is not running."
             ) from e
         text = str(relative)
         return "" if text == "." else text
@@ -512,8 +512,18 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
 
         Returns VolumeFiles with absolute ``path`` values under ``host_dir`` so
         the addressing matches online hosts.
+
+        Existence is checked first because a storage service (e.g. a Modal
+        volume) raises its own error type when listing a missing path, where a
+        filesystem volume returns nothing; each volume answers ``path_exists``
+        in its own terms, so a missing directory is an empty list on all of them.
+        The volume root is not probed: it always exists, and an object store
+        has no key for it.
         """
-        return self._list_volume_dir(self._to_volume_path(path), recursive)
+        volume_path = self._to_volume_path(path)
+        if volume_path and not self.host_volume.path_exists(volume_path):
+            return []
+        return self._list_volume_dir(volume_path, recursive)
 
     def _list_volume_dir(self, volume_path: str, recursive: bool) -> list[VolumeFile]:
         try:

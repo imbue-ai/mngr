@@ -25,11 +25,12 @@ from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
+from imbue.mngr_file.cli.target import is_directory
+from imbue.mngr_file.cli.target import parse_relative_to
 from imbue.mngr_file.cli.target import resolve_file_target
 from imbue.mngr_file.cli.target import resolve_full_path
 from imbue.mngr_file.data_types import FileEntry
 from imbue.mngr_file.data_types import FileType
-from imbue.mngr_file.data_types import PathRelativeTo
 
 _DEFAULT_DISPLAY_FIELDS: Final[tuple[str, ...]] = (
     "name",
@@ -208,7 +209,7 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=True,
     )
 
-    relative_to = PathRelativeTo(opts.relative_to.upper())
+    relative_to = parse_relative_to(opts.target, opts.relative_to)
 
     # Resolve target
     with log_span("Resolving file target"):
@@ -239,11 +240,15 @@ def file_list(ctx: click.Context, **kwargs: Any) -> None:
 
     # List files through the unified readable-host interface (online or volume-backed).
     with log_span("Listing files"):
+        # A named path is classified before it is listed: listing a file fails in the terms
+        # of whatever storage serves a stopped host. The base directory is not probed
+        # through its parent, which a stopped host may not reach.
+        if directory != resolved.base_path and (
+            not resolved.host.path_exists(directory) or not is_directory(resolved.host, directory, resolved.host_dir)
+        ):
+            raise MngrError(f"No directory at {directory}.")
         volume_files = resolved.host.list_directory(directory, recursive=opts.recursive)
-        # list_directory answers a missing directory and an empty one identically, so
-        # tell them apart before reporting "(empty)". The probe costs a round trip, so
-        # it is only paid when the listing came back empty.
-        if not volume_files and not resolved.host.path_exists(directory):
+        if not volume_files and directory == resolved.base_path and not resolved.host.path_exists(directory):
             raise MngrError(f"No directory at {directory}.")
     entries = [_volume_file_to_entry(vf) for vf in volume_files]
 

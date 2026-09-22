@@ -1,10 +1,15 @@
+from pathlib import Path
+from uuid import uuid4
+
 import pluggy
+import pytest
 from click.testing import CliRunner
 
 from imbue.mngr_file.cli.get import file_get
 from imbue.mngr_file.cli.group import file_group
 from imbue.mngr_file.cli.list import file_list
 from imbue.mngr_file.cli.put import file_put
+from imbue.mngr_file.testing import read_tree
 
 # The --help tests below are intentionally shallow smoke checks that the expected
 # options are advertised in help output. The command/subcommand registration is
@@ -70,22 +75,47 @@ def test_file_list_rejects_missing_target_with_usage_error() -> None:
     assert "Missing argument" in result.output
 
 
+@pytest.mark.witnesses("template-refused-where-the-outcome-is-content")
+@pytest.mark.witnesses(
+    "named-output-formats",
+    partial="checks only that get, whose outcome is a file's bytes, refuses a template",
+)
 def test_get_rejects_a_format_template(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    temp_host_dir: Path,
 ) -> None:
     """A template names the fields of a record, and a read's outcome is the file's own bytes.
 
     Rendering a template in its place would replace the content the user asked
     for rather than describe it, so ``get`` is the one subcommand that refuses
-    one. The rejection comes from ``setup_command_context``, which runs before
-    any target is resolved, so no host or agent has to exist for this to hold.
+    one. Saving the read into the addressed directory makes a read that did
+    happen show up as a change there, and addressing a path with no file behind
+    it makes an attempted read refuse that path instead.
     """
+    directory = temp_host_dir / f"template-refused-{uuid4().hex}"
+    directory.mkdir()
+    (directory / "f.txt").write_bytes(b"content that must not be read")
+    before = read_tree(directory)
+
     result = cli_runner.invoke(
         file_get,
-        ["@localhost", "some-path", "--format", "{name}"],
+        [
+            "@localhost",
+            f"{directory.name}/f.txt",
+            "--output",
+            str(directory / "copy.txt"),
+            "--format",
+            "{path}",
+        ],
         obj=plugin_manager,
     )
 
+    missing_result = cli_runner.invoke(
+        file_get, ["@localhost", f"{directory.name}/missing.txt", "--format", "{path}"], obj=plugin_manager
+    )
+
     assert result.exit_code == 2, result.output
-    assert "Format template strings are not supported" in result.output
+    assert b"content that must not be read" not in result.stdout_bytes
+    assert read_tree(directory) == before
+    assert missing_result.exit_code == 2, missing_result.output

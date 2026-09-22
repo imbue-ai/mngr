@@ -24,9 +24,9 @@ from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import AgentOrHostAddress
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr_file.cli.group import file_group
+from imbue.mngr_file.cli.target import parse_relative_to
 from imbue.mngr_file.cli.target import resolve_file_target
 from imbue.mngr_file.cli.target import resolve_full_path
-from imbue.mngr_file.data_types import PathRelativeTo
 
 
 class _FilePutCliOptions(CommonCliOptions):
@@ -77,7 +77,7 @@ def _emit_put_result(
     "--input",
     "-i",
     "input",
-    type=click.Path(exists=True),
+    type=click.Path(exists=True, dir_okay=False),
     default=None,
     help="Read from a local file instead of stdin",
 )
@@ -113,7 +113,7 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
         is_format_template_supported=True,
     )
 
-    relative_to = PathRelativeTo(opts.relative_to.upper())
+    relative_to = parse_relative_to(opts.target, opts.relative_to)
 
     # Resolve target
     with log_span("Resolving file target"):
@@ -145,7 +145,15 @@ def file_put(ctx: click.Context, **kwargs: Any) -> None:
         if not isinstance(host, HostFileWriteInterface):
             raise MngrError(f"Host for target '{opts.target}' does not support writing files.")
         full_path = resolve_full_path(resolved.base_path, opts.path)
-        host.write_file(full_path, content, mode=opts.mode)
+        try:
+            host.write_file(full_path, content, mode=opts.mode)
+        except IsADirectoryError as e:
+            raise MngrError(
+                f"{full_path} is a directory, not a file. Use 'mngr rsync' to transfer a directory."
+            ) from e
+        except (NotADirectoryError, FileExistsError) as e:
+            # Creating the parents of a path fails this way when one of them is a file.
+            raise MngrError(f"Cannot write {full_path}: a directory leading to it is a file.") from e
         display_path = full_path
 
     if output_opts.format_template is not None:

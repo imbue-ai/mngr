@@ -126,7 +126,7 @@ mngr file put [OPTIONS] TARGET PATH
 
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
-| `--input`, `-i` | path | Read from a local file instead of stdin | None |
+| `--input`, `-i` | file | Read from a local file instead of stdin | None |
 
 ## Path Resolution
 
