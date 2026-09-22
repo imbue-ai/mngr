@@ -822,12 +822,13 @@ class ImbueCloudProvider(BaseProviderInstance):
         # connector is unreachable" apart from "auth/account problem": a
         # transport-level failure (connection refused, DNS, timeout -- the
         # flaky-wifi / connector-down case, whether raised raw by httpx or as
-        # the client's typed unreachable error once its bounded retry is
-        # exhausted) becomes ProviderUnavailableError, which recovery UIs
-        # treat as "don't bother restarting, just retry". A connector status
-        # error (ImbueCloudConnectorError) or an auth failure
-        # (ImbueCloudAuthError) keeps its own type and falls through to the
-        # generic "can't reach your workspace" handling instead. The curated
+        # the client's typed unreachable error, which also covers the
+        # connector's own auth-upstream-down 503) becomes
+        # ProviderUnavailableError, which recovery UIs treat as "don't bother
+        # restarting, just retry". Any other connector status error
+        # (ImbueCloudConnectorError) or an auth failure (ImbueCloudAuthError)
+        # keeps its own type and falls through to the generic "can't reach
+        # your workspace" handling instead. The curated
         # user_help_text keeps ProviderUnavailableError from telling a cloud
         # user to "start Docker".
         try:

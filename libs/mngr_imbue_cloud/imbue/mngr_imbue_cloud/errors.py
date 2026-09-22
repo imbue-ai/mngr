@@ -11,12 +11,15 @@ class ImbueCloudConnectorError(ImbueCloudError):
 
 
 class ImbueCloudUnreachableError(ImbueCloudConnectorError):
-    """Raised when the connector could not be reached at the transport level (after bounded retries).
+    """Raised when the connector gave no usable answer: unreachable at the transport level, or its auth upstream down.
 
-    Distinct from its parent so callers can tell "no response ever arrived"
-    (DNS failure, connect/read timeout -- the flaky-network case, worth
-    surfacing as ProviderUnavailableError) apart from "the connector answered
-    with an error status".
+    Covers a transport failure after bounded retries (DNS failure,
+    connect/read timeout -- the flaky-network case) and the connector's
+    structured ``auth_upstream_unavailable`` 503 (its SuperTokens core failed
+    the session check). Distinct from its parent so callers can tell
+    "temporarily unavailable, retry" (worth surfacing as
+    ProviderUnavailableError) apart from "the connector answered with an
+    error status about this request".
     """
 
 

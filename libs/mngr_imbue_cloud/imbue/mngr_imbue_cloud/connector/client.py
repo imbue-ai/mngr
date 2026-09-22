@@ -254,6 +254,22 @@ class ImbueCloudConnectorClient(MutableModel):
                 str(detail.get("message", "This account is suspended. Contact support@imbue.com."))
             )
 
+    def _raise_if_auth_upstream_unavailable(self, response: httpx.Response) -> None:
+        """Raise the transport-style unreachable error when a 503 carries the connector's ``auth_upstream_unavailable`` detail.
+
+        The connector answers it when its SuperTokens core is down mid-session
+        check: nothing about the account or the request is wrong, so callers
+        treat it exactly like not reaching the connector at all (a retryable
+        ``ProviderUnavailableError`` in the provider, never a sign-out).
+        """
+        if response.status_code != 503:
+            return
+        detail = _detail_dict_from_response(response)
+        if detail is not None and detail.get("code") == "auth_upstream_unavailable":
+            raise ImbueCloudUnreachableError(
+                str(detail.get("message", "The Imbue Cloud authentication service is temporarily unavailable."))
+            )
+
     def _raise_if_workspace_held(self, response: httpx.Response) -> None:
         """Raise the typed hold error when a 409 carries the connector's ``workspace_under_maintenance`` or ``workspace_retired`` detail.
 
@@ -289,17 +305,16 @@ class ImbueCloudConnectorClient(MutableModel):
     def _check(self, response: httpx.Response, exc_cls: type[Exception]) -> dict[str, Any]:
         """Raise ``exc_cls`` on non-2xx, otherwise return parsed JSON.
 
-        Special-cases the structured quota rejection ->
-        ImbueCloudQuotaExceededError (and the grant-budget rejection ->
-        ImbueCloudCleanupGrantBudgetError), then 401/403 ->
-        ImbueCloudAuthError so callers can treat them uniformly across all
-        endpoints.
+        The connector's structured refusals (the ``_raise_if_*`` helpers) are
+        mapped to their typed errors first, then 401/403 -> ImbueCloudAuthError,
+        so callers can treat them uniformly across all endpoints.
         """
         self._raise_if_client_too_old(response)
         self._raise_if_quota_exceeded(response)
         self._raise_if_grant_budget_exhausted(response)
         self._raise_if_email_not_verified(response)
         self._raise_if_account_suspended(response)
+        self._raise_if_auth_upstream_unavailable(response)
         if response.status_code in (401, 403):
             raise ImbueCloudAuthError(f"Unauthenticated ({response.status_code}): {response.text[:300]}")
         if response.status_code in (200, 201, 202, 204):
@@ -630,6 +645,10 @@ class ImbueCloudConnectorClient(MutableModel):
             json=body,
             timeout=self.timeout_seconds,
         )
+        # The lease route's own 503 means the pool is exhausted; the
+        # connector's structured auth-outage 503 must not read that way (it
+        # would send the provider down the slow path for nothing).
+        self._raise_if_auth_upstream_unavailable(response)
         if response.status_code == 503:
             try:
                 detail = response.json().get("detail", "No matching pool host available.")
@@ -1054,6 +1073,7 @@ class ImbueCloudConnectorClient(MutableModel):
         """Validate a bucket-route response, mapping status codes to typed errors."""
         self._raise_if_client_too_old(response)
         self._raise_if_quota_exceeded(response)
+        self._raise_if_auth_upstream_unavailable(response)
         if response.status_code in (200, 201, 204):
             if not response.content:
                 return {}
