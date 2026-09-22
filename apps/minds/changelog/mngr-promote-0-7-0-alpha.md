@@ -1,0 +1,1 @@
+- Promote minds 0.7.0 (ToDesktop build `260922up2yn3io8`) to the alpha desktop channel at 100%, listing both `mac` and `linux` (the first Linux-capable build), and point all three web channels (stable, beta, alpha) at `minds-v0.7.0`. Beta and stable desktop channels stay on 0.6.2.

@@ -50,11 +50,11 @@ rollout_percentage = 100
 platforms = ["mac"]
 
 [channels.alpha]
-build_id = "260917ohslvgoyj"
-version = "0.6.2"
-fallback_branch = "minds-v0.6.2"
+build_id = "260922up2yn3io8"
+version = "0.7.0"
+fallback_branch = "minds-v0.7.0"
 rollout_percentage = 100
-platforms = ["mac"]
+platforms = ["mac", "linux"]
 
 # Which default-workspace-template tag browser-created workspaces pin to, per
 # channel. The hosted web chrome's create (the connector's POST /hosts/claim)
@@ -71,10 +71,10 @@ platforms = ["mac"]
 # stable). The publish refuses a tag that is not on the template remote.
 
 [web_channels.stable]
-template_ref = "minds-v0.6.2"
+template_ref = "minds-v0.7.0"
 
 [web_channels.beta]
-template_ref = "minds-v0.6.2"
+template_ref = "minds-v0.7.0"
 
 [web_channels.alpha]
-template_ref = "minds-v0.6.2"
+template_ref = "minds-v0.7.0"
