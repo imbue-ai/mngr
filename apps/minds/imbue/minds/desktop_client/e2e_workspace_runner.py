@@ -976,16 +976,18 @@ _CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
 _CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/(agent-[0-9a-f]+)/?$")
 _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
 # A fresh workspace opens on the welcome chat the creation page seeded; the desktop's launcher
-# (behind the taskbar's search field) carries one tile per app launch path. The shell renders
-# the tiles from its app list once that has arrived, so the tiles can still be on their way when
-# the backdrop is first visible.
+# (the menu behind the taskbar's field) carries one row per app launch path, each marked
+# ``data-launch="<app>:<launch>"``. The chat's ``new`` is the menu's primary free-text row, which
+# with nothing typed runs the launch path with no text and starts an empty chat in the chat's
+# pinned window. The shell renders the rows from its app list once that has arrived, so the
+# rows can still be on their way when the backdrop is first visible.
 _LAUNCHER_FIELD_SELECTOR: Final[str] = "[data-launcher-field]"
-_LAUNCHER_INPUT_SELECTOR: Final[str] = "[data-launcher-field] input"
+_LAUNCHER_INPUT_SELECTOR: Final[str] = "[data-launcher-field] textarea"
 _LAUNCHER_OVERLAY_SELECTOR: Final[str] = "[data-launcher-overlay]"
-_NEW_CHAT_TILE_SELECTOR: Final[str] = '.launcher-tile[data-launch="chat:new"]'
-_NEW_TERMINAL_TILE_SELECTOR: Final[str] = '.launcher-tile[data-launch="terminal:new"]'
-_LAUNCHER_TILE_TIMEOUT_SECONDS: Final[int] = 60
-# How long the shell gets to frame the new chat's page after the tile is pressed.
+_NEW_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:new"]'
+_NEW_TERMINAL_ROW_SELECTOR: Final[str] = '[data-launch="terminal:new"]'
+_LAUNCHER_ROW_TIMEOUT_SECONDS: Final[int] = 60
+# How long the shell gets to frame the new chat's page after the row is pressed.
 _NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
 # Terminal windows' pages are cross-origin iframes at the terminal service's own
 # origin (service-per-origin): the terminal's origin label is ``terminal-<rand>``
@@ -995,7 +997,7 @@ _NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
 # service whose name merely starts with "terminal".
 _TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
 # The welcome chat's composer is on its page before any agent exists, but the shell frames
-# the chat only once its app list has arrived, and a chat minted from a tile is created
+# the chat only once its app list has arrived, and a chat minted from a row is created
 # asynchronously (a sign-in through its provider chooser launches it), so a chat input can
 # take a while to appear on a fresh first boot.
 _CHAT_INPUT_TIMEOUT_SECONDS: Final[int] = 240
@@ -1199,18 +1201,18 @@ def _chat_frame(workspace: Page | Frame, timeout_seconds: float) -> Frame:
 def start_new_chat_from_launcher(
     workspace: Page | Frame, timeout_seconds: float = _NEW_CHAT_FRAME_TIMEOUT_SECONDS
 ) -> Frame:
-    """Run the chat app's ``new`` launch path from the launcher's tile and return the frame of the chat it opened.
+    """Run the chat app's ``new`` launch path from the launcher's row and return the frame of the chat it opened.
 
-    The desktop opens a window of the chat app at the launch path; the chat root there mints a chat
-    (or offers the provider chooser when nothing is signed in) and frames its page. A workspace opens
-    on the welcome chat the creation page seeded, so the new chat is the frame that was not there
-    before the press.
+    The desktop points the chat's pinned window at the launch path (or opens a window there when the
+    desktop has none); the chat root there mints a chat (or offers the provider chooser when nothing
+    is signed in) and frames its page. A workspace opens on the welcome chat the creation page
+    seeded, so the new chat is the frame that was not there before the press.
     """
-    # The tile arrives with the shell's app list, which is also what frames the welcome chat, so
-    # the chats already open are counted only once the tile is on screen.
-    visible_tile_selector = _reveal_launcher_tile(workspace, _NEW_CHAT_TILE_SELECTOR)
+    # The row arrives with the shell's app list, which is also what frames the welcome chat, so
+    # the chats already open are counted only once the row is on screen.
+    visible_row_selector = _reveal_launcher_row(workspace, _NEW_CHAT_ROW_SELECTOR)
     known_chat_ids = frozenset(chat_id for _frame, chat_id in _chat_frames_with_ids(workspace))
-    workspace.click(visible_tile_selector)
+    workspace.click(visible_row_selector)
     logger.info("Started a new chat from the launcher; waiting up to {:.0f}s for its frame", timeout_seconds)
     return _chat_frame_other_than(workspace, known_chat_ids, timeout_seconds)
 
@@ -1227,7 +1229,7 @@ def _message_welcome_chat(page: Page | Frame, token: str) -> None:
 
 
 def _start_new_chat(page: Page | Frame) -> None:
-    """The full flow's launcher step: start a second chat from the launcher's tile and wait for its composer."""
+    """The full flow's launcher step: start a second chat from the launcher's row and wait for its composer."""
     chat = start_new_chat_from_launcher(page)
     chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
     logger.info("The chat started from the launcher shows its composer at {}", chat.url)
@@ -1283,10 +1285,10 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     await_chat_reply(chat, page, token)
 
 
-def _reveal_launcher_tile(workspace: Page | Frame, tile_selector: str) -> str:
-    """Bring a launcher tile on screen, opening the launcher first when it is not showing; returns the selector
-    naming the tile there."""
-    # The launcher opens from the taskbar's search field: focusing its input on a laptop, or
+def _reveal_launcher_row(workspace: Page | Frame, row_selector: str) -> str:
+    """Bring a launcher row on screen, opening the launcher first when it is not showing; returns the selector
+    naming the row there."""
+    # The launcher opens from the taskbar's search field: focusing its text area on a laptop, or
     # pressing the field itself where the compact layout renders it as a bare button. The shell
     # renders the taskbar together with the backdrop the caller has already waited for, so probing
     # for the input is enough to tell the two layouts apart.
@@ -1297,21 +1299,21 @@ def _reveal_launcher_tile(workspace: Page | Frame, tile_selector: str) -> str:
             else _LAUNCHER_FIELD_SELECTOR
         )
         workspace.click(opener)
-    # Tiles render only inside the overlay, so scoping the wait to the showing one also confirms
-    # the opener brought the launcher up.
-    visible_tile_selector = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {tile_selector}"
-    workspace.wait_for_selector(visible_tile_selector, state="visible", timeout=_LAUNCHER_TILE_TIMEOUT_SECONDS * 1000)
-    return visible_tile_selector
+    # Rows render only inside the menu, so scoping the wait to the showing one also confirms the
+    # opener brought the launcher up.
+    visible_row_selector = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {row_selector}"
+    workspace.wait_for_selector(visible_row_selector, state="visible", timeout=_LAUNCHER_ROW_TIMEOUT_SECONDS * 1000)
+    return visible_row_selector
 
 
-def _press_launcher_tile(workspace: Page | Frame, tile_selector: str) -> None:
-    """Run an app launch path from the launcher's tile, opening the launcher first when it is not showing."""
-    workspace.click(_reveal_launcher_tile(workspace, tile_selector))
+def _press_launcher_row(workspace: Page | Frame, row_selector: str) -> None:
+    """Run an app launch path from the launcher's row, opening the launcher first when it is not showing."""
+    workspace.click(_reveal_launcher_row(workspace, row_selector))
 
 
 def open_terminal_from_launcher(workspace: Page | Frame) -> None:
     """Run the terminal app's ``new`` launch path from the launcher and wait for the terminal's frame."""
-    _press_launcher_tile(workspace, _NEW_TERMINAL_TILE_SELECTOR)
+    _press_launcher_row(workspace, _NEW_TERMINAL_ROW_SELECTOR)
     workspace.wait_for_selector(_TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
     logger.info("Terminal iframe present")
 

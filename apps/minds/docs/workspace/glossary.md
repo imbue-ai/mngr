@@ -18,7 +18,7 @@ Key concepts in the minds system:
 - **app**: something the user can open as a window on the desktop and interact with.
   Lives under `system/apps/<package>/` in the workspace, runs as a supervisord program, and registers its port in `data/.state/apps.toml` via `system/scripts/forward_port.py`.
   Each app gets a local URL (via the desktop client) and, while sharing is enabled, a shared URL (via the workspace's share through the self-hosted relay).
-  The built-in apps are the chat, the terminal, the file viewer, and the browser; the system interface is the shell that hosts their windows.
+  The built-in apps are the chat, the terminal, the file viewer, the browser, and Getting Started (the page of starting points and templates a fresh workspace opens beside its chat); the system interface is the shell that hosts their windows.
   Never "application" -- always "app".
 
 - **service**: a background supervisord program with no window (host-backup, the share-gateway, the app watcher).

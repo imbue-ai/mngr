@@ -14,8 +14,8 @@ from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_FIELD_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_CHAT_TILE_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_TERMINAL_TILE_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_CHAT_ROW_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_TERMINAL_ROW_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
@@ -237,7 +237,7 @@ _WORKSPACE_AGENT_ID = "agent-0123456789abcdef0123456789abcdef"
 _WORKSPACE_SHELL_URL = f"https://{_WORKSPACE_AGENT_ID}.localhost:8421/"
 _CHAT_AGENT_ID = "agent-fedcba9876543210fedcba9876543210"
 _CHAT_PAGE_URL = f"https://chat-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost:8421/{_CHAT_AGENT_ID}"
-# The welcome chat the creation page seeded, which a fresh workspace opens on before any tile is pressed.
+# The welcome chat the creation page seeded, which a fresh workspace opens on before any row is pressed.
 _WELCOME_CHAT_ID = "agent-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f"
 _WELCOME_CHAT_PAGE_URL = f"https://chat-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost:8421/{_WELCOME_CHAT_ID}"
 _TERMINAL_PAGE_URL = f"https://terminal-x7k9q2w1.{_WORKSPACE_AGENT_ID}.localhost:8421/"
@@ -280,7 +280,7 @@ def test_chat_frame_is_found_under_the_chat_root_the_desktop_frames() -> None:
 
 
 def test_chat_frame_polls_until_the_chat_attaches() -> None:
-    # The shell frames the chat's page after the tile is pressed, so it is not
+    # The shell frames the chat's page after the row is pressed, so it is not
     # there on the first scan; the poll runs through Playwright's own wait.
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeWorkspaceFrame(child_frame_lists=[[], [chat]])
@@ -306,11 +306,11 @@ class _FakeLauncherWorkspace(_FakeWorkspaceFrame):
     """A workspace frame under the desktop's launcher contract.
 
     The launcher opens from the taskbar's search field (its input, or the field itself where the
-    compact layout renders it as a button: ``has_launcher_input``) and its tiles are in the DOM
-    only while its overlay shows; a tile wait succeeds only when it is scoped to the showing
-    overlay, the way the runner issues it. Records the selectors clicked; ``existing_chats`` are open from the start (the welcome chat a
-    fresh workspace opens on), and the chat frame joins them only after the New Chat tile is
-    pressed, the way the shell frames it.
+    compact layout renders it as a button: ``has_launcher_input``) and its rows are in the DOM
+    only while its menu shows; a row wait succeeds only when it is scoped to the showing menu,
+    the way the runner issues it. Records the selectors clicked; ``existing_chats`` are open
+    from the start (the welcome chat a fresh workspace opens on), and the chat frame joins them
+    only after the New Chat row is pressed, the way the shell frames it.
     """
 
     def __init__(
@@ -337,18 +337,18 @@ class _FakeLauncherWorkspace(_FakeWorkspaceFrame):
 
     def wait_for_selector(self, selector: str, state: str, timeout: float) -> None:
         if not selector.startswith(f"{_LAUNCHER_OVERLAY_SELECTOR}:visible ") or not self._is_launcher_showing:
-            raise PlaywrightTimeoutError(f"no visible launcher carries a tile matching {selector!r}")
+            raise PlaywrightTimeoutError(f"no visible launcher carries a row matching {selector!r}")
 
     def click(self, selector: str) -> None:
         self.clicked.append(selector)
         if selector in (_LAUNCHER_INPUT_SELECTOR, _LAUNCHER_FIELD_SELECTOR):
             self._is_launcher_showing = True
-        if selector == f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_CHAT_TILE_SELECTOR}":
+        if selector == f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_CHAT_ROW_SELECTOR}":
             self._child_frame_lists = [[*self._existing_chats, self._chat]]
 
 
 class _FakeTerminalLauncherWorkspace(_FakeLauncherWorkspace):
-    """The launcher fake for the terminal tile: records what it waits for, since the terminal's page is a plain iframe."""
+    """The launcher fake for the terminal row: records what it waits for, since the terminal's page is a plain iframe."""
 
     def __init__(self, *, is_launcher_showing: bool) -> None:
         super().__init__(is_launcher_showing=is_launcher_showing, existing_chats=[], chat=_FakeFrame(urls=[]))
@@ -358,37 +358,37 @@ class _FakeTerminalLauncherWorkspace(_FakeLauncherWorkspace):
         self.waited_for.append(selector)
 
 
-_VISIBLE_NEW_CHAT_TILE_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_CHAT_TILE_SELECTOR}"
-_VISIBLE_NEW_TERMINAL_TILE_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_TERMINAL_TILE_SELECTOR}"
+_VISIBLE_NEW_CHAT_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_CHAT_ROW_SELECTOR}"
+_VISIBLE_NEW_TERMINAL_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_TERMINAL_ROW_SELECTOR}"
 
 
-def test_open_terminal_presses_the_terminal_tile_and_waits_for_its_frame() -> None:
+def test_open_terminal_presses_the_terminal_row_and_waits_for_its_frame() -> None:
     workspace = _FakeTerminalLauncherWorkspace(is_launcher_showing=True)
     open_terminal_from_launcher(cast(Frame, workspace))
-    assert workspace.clicked == [_VISIBLE_NEW_TERMINAL_TILE_SELECTOR]
-    assert workspace.waited_for == [_VISIBLE_NEW_TERMINAL_TILE_SELECTOR, _TERMINAL_IFRAME_SELECTOR]
+    assert workspace.clicked == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR]
+    assert workspace.waited_for == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR, _TERMINAL_IFRAME_SELECTOR]
 
 
 def test_open_terminal_opens_the_launcher_first_when_it_is_not_showing() -> None:
     workspace = _FakeTerminalLauncherWorkspace(is_launcher_showing=False)
     open_terminal_from_launcher(cast(Frame, workspace))
-    assert workspace.clicked == [_LAUNCHER_INPUT_SELECTOR, _VISIBLE_NEW_TERMINAL_TILE_SELECTOR]
+    assert workspace.clicked == [_LAUNCHER_INPUT_SELECTOR, _VISIBLE_NEW_TERMINAL_ROW_SELECTOR]
 
 
-def test_start_new_chat_presses_the_tile_and_returns_the_chat_frame_it_opens() -> None:
+def test_start_new_chat_presses_the_row_and_returns_the_chat_frame_it_opens() -> None:
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeLauncherWorkspace(is_launcher_showing=True, existing_chats=[], chat=chat)
     assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_VISIBLE_NEW_CHAT_TILE_SELECTOR]
+    assert workspace.clicked == [_VISIBLE_NEW_CHAT_ROW_SELECTOR]
 
 
 def test_start_new_chat_opens_the_launcher_first_when_it_is_not_showing() -> None:
-    # A workspace showing only its windows has no tile on screen; the taskbar's search field
+    # A workspace showing only its windows has no row on screen; the taskbar's search field
     # opens the launcher that carries it.
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeLauncherWorkspace(is_launcher_showing=False, existing_chats=[], chat=chat)
     assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_LAUNCHER_INPUT_SELECTOR, _VISIBLE_NEW_CHAT_TILE_SELECTOR]
+    assert workspace.clicked == [_LAUNCHER_INPUT_SELECTOR, _VISIBLE_NEW_CHAT_ROW_SELECTOR]
 
 
 def test_start_new_chat_opens_the_launcher_from_the_field_itself_when_it_has_no_input() -> None:
@@ -398,12 +398,12 @@ def test_start_new_chat_opens_the_launcher_from_the_field_itself_when_it_has_no_
         is_launcher_showing=False, existing_chats=[], chat=chat, has_launcher_input=False
     )
     assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
-    assert workspace.clicked == [_LAUNCHER_FIELD_SELECTOR, _VISIBLE_NEW_CHAT_TILE_SELECTOR]
+    assert workspace.clicked == [_LAUNCHER_FIELD_SELECTOR, _VISIBLE_NEW_CHAT_ROW_SELECTOR]
 
 
-def test_start_new_chat_returns_the_chat_the_tile_opened_and_not_the_welcome_chat_already_open() -> None:
+def test_start_new_chat_returns_the_chat_the_row_opened_and_not_the_welcome_chat_already_open() -> None:
     # A fresh workspace opens on the welcome chat the creation page seeded, so a chat frame is
-    # open (and first in frame order) before the tile is pressed; the chat the press starts
+    # open (and first in frame order) before the row is pressed; the chat the press starts
     # is the frame that was not there before.
     welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL])
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
@@ -415,15 +415,15 @@ def test_start_new_chat_returns_the_chat_the_tile_opened_and_not_the_welcome_cha
 def test_start_new_chat_tells_the_welcome_chat_apart_by_its_id_when_its_url_changes_after_the_press() -> None:
     # The chat page reports its own URL back to the shell, so the welcome chat's frame URL can
     # pick up a query string or trailing slash between the pre-press snapshot and the poll; it
-    # is still the same chat, and only the tile-minted one is new.
+    # is still the same chat, and only the row-minted one is new.
     welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL, f"{_WELCOME_CHAT_PAGE_URL}/?tab=1"])
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
     workspace = _FakeLauncherWorkspace(is_launcher_showing=True, existing_chats=[welcome], chat=chat)
     assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
 
 
-class _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheTile(_FakeLauncherWorkspace):
-    """The launcher fake on a workspace still booting: the welcome chat's frame appears at the moment the tile
+class _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheRow(_FakeLauncherWorkspace):
+    """The launcher fake on a workspace still booting: the welcome chat's frame appears at the moment the row
     comes on screen, since the shell renders both from the same app-list arrival."""
 
     def __init__(self, *, welcome: _FakeFrame, chat: _FakeFrame) -> None:
@@ -436,10 +436,10 @@ class _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheTile(_FakeLauncherWorksp
         self._child_frame_lists = [[self._welcome]]
 
 
-def test_start_new_chat_does_not_take_a_welcome_chat_framed_during_the_tile_wait_for_the_new_chat() -> None:
+def test_start_new_chat_does_not_take_a_welcome_chat_framed_during_the_row_wait_for_the_new_chat() -> None:
     welcome = _FakeFrame(urls=[_WELCOME_CHAT_PAGE_URL])
     chat = _FakeFrame(urls=[_CHAT_PAGE_URL])
-    workspace = _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheTile(welcome=welcome, chat=chat)
+    workspace = _FakeLauncherWorkspaceFramingTheWelcomeChatWithTheRow(welcome=welcome, chat=chat)
     assert start_new_chat_from_launcher(cast(Frame, workspace), timeout_seconds=5) is cast(Frame, chat)
 
 
