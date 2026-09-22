@@ -20,14 +20,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 
 
 def _find_repo_root() -> Path:
-    """Locate the mngr checkout root in both standalone and vendored layouts.
-
-    The mngr monorepo may be vendored inside another git repository (e.g. as a
-    subtree under ``system/vendor/mngr``), in which case the nearest ``.git``
-    ancestor is the *outer* repo, not the mngr root. The ``scripts/install.sh``
-    these tests exercise identifies the actual mngr checkout root, so look for
-    that first and only fall back to the nearest ``.git`` ancestor.
-    """
+    """Locate the mngr checkout root: the nearest ancestor carrying ``scripts/install.sh``, else the nearest ``.git``."""
     for candidate in [_THIS_DIR, *_THIS_DIR.parents]:
         if (candidate / "scripts" / "install.sh").exists():
             return candidate

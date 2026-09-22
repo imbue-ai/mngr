@@ -389,11 +389,8 @@ def test_prevent_bash_without_strict_mode() -> None:
     ``sigwinch_panes.sh`` alongside the per-session SIGWINCH client-attached hook
     raised that count from 11 to 12.
 
-    The helper scans the whole git repository containing ``_REPO_ROOT``. When
-    this checkout is vendored inside another git repository (e.g. as a subtree
-    under ``system/vendor/mngr``), that repository is the outer one, so scope
-    the result to scripts under the mngr checkout itself; in a standalone
-    checkout the filter is a no-op.
+    The helper scans the whole git repository containing ``_REPO_ROOT``; the
+    result is scoped to scripts under the mngr checkout itself.
     """
     checkout_root = _REPO_ROOT.resolve()
     violations = [

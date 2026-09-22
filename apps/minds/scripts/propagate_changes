@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# propagate_changes -- sync code changes into a running minds agent and restart
+# propagate_changes -- sync template changes into a running minds agent and restart
 #
-# Syncs the local mngr repo into the template's system/vendor/mngr/, then syncs the
-# full template into the agent's work_dir (container or local), rebuilds the
-# frontend, restarts the agent, and restarts the Electron desktop client.
+# Syncs the default-workspace-template worktree into the agent's work_dir (container
+# or local), rebuilds the frontend, restarts the agent, and restarts the Electron
+# desktop client. The workspace keeps running the mngr the template pins.
 #
 # Usage:
 #   # Remote (Docker container):
@@ -119,42 +119,43 @@ else
     exit 1
 fi
 
-# Shared rsync exclusions
-#
-# `:- .gitignore` is rsync's dir-merge filter: it reads .gitignore at each
-# directory level under the source and applies its "-" (exclude) rules.
-# That covers __pycache__, .venv, node_modules, .test_output, .mypy_cache,
-# .ruff_cache, .pytest_cache, .external_worktrees, and anything else listed
-# in the source repo's gitignore. We layer two manual excludes on top for
-# things gitignore deliberately doesn't list:
-#   - .git: gitignore never lists it (git's internal dir).
-#   - uv.lock: committed at the mngr root on purpose, but each install
-#     context regenerates its own.
-# Both rsync sources (mngr monorepo for step 1, default workspace template for step 2/3)
-# carry their own .gitignore at the root, so the same filter applies cleanly
-# to all three rsync calls below.
+# `:- .gitignore` is rsync's dir-merge filter, applying each .gitignore under the
+# source; .git is in no .gitignore.
 RSYNC_EXCLUDES=(
     --filter=':- .gitignore'
     --exclude='.git'
-    --exclude='uv.lock'
 )
 
-# Step 1: Sync mngr repo into template's system/vendor/mngr/
-echo "[1/4] Syncing mngr repo into template system/vendor/mngr/..."
-rsync -a --delete \
-    "${RSYNC_EXCLUDES[@]}" \
-    "${MNGR_REPO_ROOT}/" "${TEMPLATE_DIR}/system/vendor/mngr/"
-echo "      Done."
+# Apple's openrsync, which recent macOS ships as /usr/bin/rsync, has no --filter
+# and fails the sync below with a confusing error. See apps/minds/docs/dev-setup.md.
+if rsync --version 2>&1 | grep -qi openrsync; then
+    echo "ERROR: your 'rsync' is Apple's openrsync, which lacks the" >&2
+    echo "       --filter=':- .gitignore' support this sync needs." >&2
+    echo "       Install GNU rsync and put it ahead of /usr/bin on PATH:" >&2
+    echo "         brew install rsync" >&2
+    echo "         rsync --version | head -1   # must NOT say 'openrsync'" >&2
+    exit 2
+fi
 
-# Step 2 (parallel): Agent update + Desktop client restart
+# Agent update and desktop client restart run in parallel.
 
 # Track background PIDs for parallel execution
 AGENT_PID=""
 ELECTRON_PID=""
 
-# Track A: Agent stop -> sync -> frontend build -> start
+# Run a shell command from the agent's workspace root (over ssh in remote mode).
+run_in_workspace() {
+    if [[ "${MODE}" == "remote" ]]; then
+        ssh -p "${SSH_PORT}" -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+            "${SSH_USER}@${SSH_HOST}" "cd /home/user/workspace && $1" 2>&1
+    else
+        (cd "${LOCAL_TARGET}" && bash -c "$1") 2>&1
+    fi
+}
+
+# Track A: agent stop -> sync -> frontend build -> start
 agent_update() {
-    echo "[2/4] Stopping agent '${AGENT_NAME}'..."
+    echo "[1/3] Stopping agent '${AGENT_NAME}'..."
     if ! uv run --directory "${MNGR_REPO_ROOT}" mngr stop "${AGENT_NAME}" 2>&1; then
         echo "ERROR: Failed to stop agent '${AGENT_NAME}'. Known agents:" >&2
         printf '  %s\n' $(list_mngr_agent_names) >&2
@@ -173,7 +174,7 @@ agent_update() {
     # .claude/settings.local.json is generated per-agent at create time and
     # holds mngr's UserPromptSubmit hook; without protection, --delete removes
     # it and send_message then hangs the 90s submission-signal timeout.
-    echo "[3/4] Syncing template into agent work_dir..."
+    echo "[2/3] Syncing template into agent work_dir..."
     if [[ "${MODE}" == "remote" ]]; then
         rsync -avz --delete \
             "${RSYNC_EXCLUDES[@]}" \
@@ -192,21 +193,16 @@ agent_update() {
     fi
     echo "      Done."
 
-    echo "[3.5/4] Rebuilding system_interface frontend..."
-    if [[ "${MODE}" == "remote" ]]; then
-        ssh -p "${SSH_PORT}" -i "${SSH_KEY}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-            "${SSH_USER}@${SSH_HOST}" "cd /home/user/workspace/system/apps/system_interface/frontend && npm run build" 2>&1
-    else
-        (cd "${LOCAL_TARGET}/system/apps/system_interface/frontend" && npm run build) 2>&1
-    fi
+    echo "[2.5/3] Rebuilding system_interface frontend..."
+    run_in_workspace "cd system/apps/system_interface/frontend && npm run build"
     echo "      Frontend rebuilt."
 
-    echo "[4/4] Starting agent '${AGENT_NAME}'..."
+    echo "[3/3] Starting agent '${AGENT_NAME}'..."
     uv run --directory "${MNGR_REPO_ROOT}" mngr start "${AGENT_NAME}" 2>&1
     echo "      Agent started."
 }
 
-# Track B: Desktop client stop and restart
+# Track B: desktop client stop and restart
 
 electron_stop() {
     local electron_pid
@@ -250,6 +246,21 @@ electron_start() {
     done
 
     export MINDS_WORKSPACE_GIT_URL="${TEMPLATE_DIR}"
+    # An exported MINDS_WORKSPACE_BRANCH wins, so the error below names a remedy that works.
+    if [[ -z "${MINDS_WORKSPACE_BRANCH:-}" ]]; then
+        local template_branch
+        # Declared on its own line: `local x="$(cmd)"` would report `local`'s status, hiding a failure.
+        if ! template_branch="$(bash "${MNGR_REPO_ROOT}/scripts/current_branch.sh" "${TEMPLATE_DIR}")"; then
+            echo "ERROR: Could not read the branch of ${TEMPLATE_DIR} (detached HEAD, or not a git repo)." >&2
+            echo "       Check that worktree out on a branch, or export MINDS_WORKSPACE_BRANCH yourself," >&2
+            echo "       then re-run propagate_changes." >&2
+            return 1
+        fi
+        export MINDS_WORKSPACE_BRANCH="${template_branch}"
+    fi
+    # Explicit opt-in so the desktop client honors the MINDS_WORKSPACE_* vars
+    # on any tier (the form ignores them otherwise; see _operator_workspace_default).
+    export MINDS_USE_LOCAL_WORKSPACE_DEFAULTS=1
 
     # Select apps/minds's pinned Node (.nvmrc) so the restarted client passes
     # npm's engine-strict check; the detached Popen below inherits this PATH.

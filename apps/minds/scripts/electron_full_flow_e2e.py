@@ -65,9 +65,9 @@ def main() -> None:
     os.environ["MINDS_DOCKER_RUNTIME_DEFAULT"] = "RUNC"
     os.environ["MNGR__PROVIDERS__MODAL__IS_ENABLED"] = "false"
 
-    # Materialize the paired DEFAULT_WORKSPACE_TEMPLATE worktree (clone paired branch or main + vendor
-    # this mngr checkout) if it is not already present, then resolve it. A
-    # pre-existing operator worktree is left untouched.
+    # Materialize the paired DEFAULT_WORKSPACE_TEMPLATE worktree (clone the paired branch, else
+    # main) if it is not already present, then resolve it. A pre-existing operator worktree is
+    # left untouched; either way the workspace runs the mngr the tree pins.
     materialize_paired_default_workspace_template_worktree()
     default_workspace_template_path = resolve_default_workspace_template_path()
     workspace_name = f"flowtest-{get_short_random_string()}"

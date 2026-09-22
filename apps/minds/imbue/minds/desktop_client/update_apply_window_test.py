@@ -103,7 +103,7 @@ def test_a_probe_that_never_ran_is_not_read_as_no_run() -> None:
 
 
 def test_a_broken_in_container_mngr_leaves_the_agent_liveness_unknown() -> None:
-    """An apply replaces the vendored mngr under itself, so its failure is expected mid-apply."""
+    """An apply reinstalls the in-container mngr under itself, so its failure is expected mid-apply."""
     probe = parse_update_run_probe(update_run_probe_stdout(run=applying_record_json(), agents=None), _CHAT)
 
     assert probe.is_apply_in_progress is True

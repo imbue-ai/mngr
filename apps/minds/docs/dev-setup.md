@@ -70,8 +70,8 @@ Imbue developers who iterate on mngr, the workspace template, and the minds
 services together use the private operator tooling on top of it, all of
 which lives outside the public mirror:
 
-- [ ] **GNU rsync** (macOS) -- `just minds-start` syncs your working tree
-      into the default-workspace-template worktree with
+- [ ] **GNU rsync** (macOS) -- `apps/minds/scripts/propagate_changes` syncs the
+      default-workspace-template worktree into a running container with
       `rsync --filter=':- .gitignore'`, a GNU rsync feature. Recent macOS
       ships Apple's `openrsync` as `/usr/bin/rsync`, which doesn't support
       it, so the sync fails. Install GNU rsync ahead of `/usr/bin` on `PATH`:
@@ -128,11 +128,10 @@ read it directly) for the actual commands. It covers the whole loop:
   `vault login` and bootstrap + deploy your dev env
   (`minds-admin env activate --create --deploy dev-<your-user>` -> `minds-admin env deploy`).
 - **Every startup** (fresh shell) -- activate the env, then `just minds-start`,
-  which re-syncs your live mngr into the worktree's `system/vendor/mngr/` and launches
-  Electron. Activation is what points the app at a dev or staging env instead
+  which launches Electron. You create your first agent from the login URL it
+  prints. Activation is what points the app at a dev or staging env instead
   of production: it exports `MINDS_ROOT_NAME` / `MNGR_HOST_DIR` /
   `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` for that env.
 - **Iterate** against a running agent with `apps/minds/scripts/propagate_changes`.
 
-The skill has the exact commands, the every-Create `system/vendor/mngr/` sync, and how
-to find a running container's SSH port/key.
+The skill has the exact commands and how to find a running container's SSH port/key.

@@ -123,11 +123,10 @@ def rsync_worktree_over_clone(
     Why: ``git clone file://<worktree>`` produces a build context with a
     proper standalone ``.git`` directory (vs the worktree's 93-byte
     gitlink file), but it only ships *committed* files. Callers that
-    rely on uncommitted edits being in the build context (e.g. the
-    minds desktop client's ``--mngr-source``-equivalent path, and
-    ``mngr_vps``'s docker-build-context assembly) need to
-    overlay the worktree's working tree on top of the clone to recover
-    them.
+    rely on uncommitted edits being in the build context (the minds
+    desktop client's local-worktree Create path, and ``mngr_vps``'s
+    docker-build-context assembly) need to overlay the worktree's
+    working tree on top of the clone to recover them.
 
     Preserves the clone's ``.git`` (excluded from the rsync) and skips
     the usual caches / virtualenvs / installed node_modules so the

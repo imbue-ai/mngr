@@ -13,8 +13,9 @@ default-workspace-template enforce that confinement, so this file plus that
 module are the entire surface to review.
 
 The chrome page loads the module from `/_static/embed_contract.js`; the
-workspace UI (system_interface) imports the same file from its vendored mngr
-tree (`system/vendor/mngr/apps/minds/imbue/minds/desktop_client/static/embed_contract.js`),
+workspace UI (system_interface) bundles the same file, fetched at build time from
+the mngr commit the template pins into
+`system/vendor/mngr-assets/apps/minds/imbue/minds/desktop_client/static/embed_contract.js`,
 so both sides always ship from one source of truth (skew is possible between
 releases; see Compatibility).
 

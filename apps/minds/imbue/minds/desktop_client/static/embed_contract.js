@@ -4,11 +4,11 @@
 //
 // This module is the single source of truth for that boundary, on both sides:
 // the chrome page imports it from `/_static/embed_contract.js`, and the
-// workspace UI (system_interface, in default-workspace-template) imports the
-// same file from its vendored mngr tree. Raw `postMessage` /
-// `addEventListener('message')` usage outside this module is forbidden by
-// ratchet tests in both repos, so the whole message surface stays greppable
-// and auditable here. The prose contract lives in
+// workspace UI (system_interface, in default-workspace-template) bundles the
+// same file, fetched at build time from the mngr commit the template pins.
+// Raw `postMessage` / `addEventListener('message')` usage outside this module
+// is forbidden by ratchet tests in both repos, so the whole message surface
+// stays greppable and auditable here. The prose contract lives in
 // `apps/minds/docs/embed-contract.md` -- update both together.
 //
 // Security model (the three invariants; see the doc for the full argument):

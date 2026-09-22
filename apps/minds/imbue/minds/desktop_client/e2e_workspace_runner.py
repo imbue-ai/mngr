@@ -192,8 +192,8 @@ def ensure_minds_env_defaults(setenv: Callable[[str, str], None]) -> None:
 
     Also points the create form at the present paired DEFAULT_WORKSPACE_TEMPLATE worktree (the same
     ``MINDS_WORKSPACE_*`` env vars ``just minds-start`` sets), so ``mngr create``
-    builds from that worktree's branch with the vendored mngr under test rather
-    than the released ``FALLBACK_BRANCH`` tag. That step runs regardless of the
+    builds from that worktree's branch (which pins its own mngr) rather than
+    the released ``FALLBACK_BRANCH`` tag. That step runs regardless of the
     ``MINDS_ROOT_NAME`` early return below.
     """
     _ensure_paired_workspace_env(setenv)
@@ -221,9 +221,8 @@ def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
 
     When the materialized worktree exists, set the ``just minds-start`` env vars
     so ``mngr create`` builds from that worktree's branch (not the released
-    ``FALLBACK_BRANCH`` tag) with the vendored mngr under test. No-op when the
-    worktree is absent (the consumer surfaces that) or when a var is already set
-    (an explicit override wins).
+    ``FALLBACK_BRANCH`` tag). No-op when the worktree is absent (the consumer
+    surfaces that) or when a var is already set (an explicit override wins).
     """
     if not (
         DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE.is_dir()

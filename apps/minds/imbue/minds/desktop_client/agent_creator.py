@@ -2495,8 +2495,7 @@ class AgentCreator(MutableModel):
                             parent_cg=self.root_concurrency_group,
                         )
                         # Rsync the worktree's working directory over so that
-                        # uncommitted changes (e.g. a locally-rsynced
-                        # system/vendor/mngr/) are included in the Docker build context.
+                        # uncommitted changes are included in the Docker build context.
                         _rsync_worktree_over_clone(
                             resolved_path,
                             clone_target,

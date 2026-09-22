@@ -2,11 +2,10 @@
 
 Workspace-creation tests (the minds snapshot bake + resume, the create+chat
 acceptance test, the full-flow harness) build their Docker workspace from a DEFAULT_WORKSPACE_TEMPLATE
-working tree. To let a coordinated mngr+DEFAULT_WORKSPACE_TEMPLATE change be tested together, this
-module reproduces the ``just minds-start`` debug state ahead of time: it clones
-the *paired* DEFAULT_WORKSPACE_TEMPLATE branch (the default-workspace-template-remote branch whose name matches the current
-mngr branch, else DEFAULT_WORKSPACE_TEMPLATE ``main``) and vendors this mngr checkout's HEAD into the
-tree's ``system/vendor/mngr`` so the workspace container runs the mngr code under test.
+working tree. To let a minds-app change be tested against its paired DEFAULT_WORKSPACE_TEMPLATE
+change, this module clones the *paired* DEFAULT_WORKSPACE_TEMPLATE branch (the default-workspace-template-remote
+branch whose name matches the current mngr branch, else DEFAULT_WORKSPACE_TEMPLATE ``main``). The
+workspace container runs the mngr that tree pins.
 
 The materialize step runs where git works -- the CI runner (before the snapshot
 image is staged) or a local machine -- never inside the crippled snapshot
@@ -19,7 +18,6 @@ script can import it on the runner without pulling in the Electron toolchain.
 """
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Final
@@ -35,10 +33,6 @@ DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE: Final[Path] = (
 )
 _DEFAULT_WORKSPACE_TEMPLATE_REMOTE: Final[str] = "https://github.com/imbue-ai/default-workspace-template.git"
 _DEFAULT_WORKSPACE_TEMPLATE_FALLBACK_BRANCH: Final[str] = "main"
-
-
-class DefaultWorkspaceTemplateWorktreeError(RuntimeError):
-    """Raised when the paired DEFAULT_WORKSPACE_TEMPLATE worktree cannot be materialized."""
 
 
 def _current_mngr_branch() -> str | None:
@@ -134,31 +128,6 @@ def _write_pytest_config_opt_in(settings_path: Path) -> None:
     settings_path.write_text(f"is_allowed_in_pytest = true\n\n{existing}")
 
 
-def _vendor_mngr_into_default_workspace_template(default_workspace_template_dir: Path) -> None:
-    """Replace ``default_workspace_template_dir/system/vendor/mngr`` with an archive of this mngr checkout's HEAD.
-
-    Mirrors ``just sync-vendor-mngr``: ``git archive HEAD`` of the mngr repo into
-    ``system/vendor/mngr`` so the workspace container runs the mngr under test rather
-    than whatever mngr the DEFAULT_WORKSPACE_TEMPLATE ref vendored. Requires the mngr checkout's git to
-    work, so it runs only on the runner / a local machine, never in the sandbox.
-    """
-    vendor = default_workspace_template_dir / "system" / "vendor" / "mngr"
-    if not vendor.parent.is_dir():
-        raise DefaultWorkspaceTemplateWorktreeError(
-            f"DEFAULT_WORKSPACE_TEMPLATE clone at {default_workspace_template_dir} has no system/vendor/ directory to sync mngr into"
-        )
-    archive = subprocess.run(
-        ["git", "-C", str(_REPO_ROOT), "archive", "--format=tar", "HEAD"],
-        check=True,
-        stdout=subprocess.PIPE,
-        timeout=180,
-    )
-    if vendor.exists():
-        shutil.rmtree(vendor)
-    vendor.mkdir(parents=True)
-    subprocess.run(["tar", "-x", "-C", str(vendor)], input=archive.stdout, check=True, timeout=180)
-
-
 def materialize_paired_default_workspace_template_worktree(
     destination: Path = DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE,
     *,
@@ -167,16 +136,15 @@ def materialize_paired_default_workspace_template_worktree(
     """Materialize a paired-branch DEFAULT_WORKSPACE_TEMPLATE working tree at ``destination`` if absent.
 
     Clones the paired DEFAULT_WORKSPACE_TEMPLATE branch (``mngr_branch`` or :func:`_current_mngr_branch`
-    if it exists on the DEFAULT_WORKSPACE_TEMPLATE remote, else ``main``), vendors this mngr checkout's
-    HEAD into ``system/vendor/mngr``, writes the pytest config opt-in, and commits both
-    so the create flow's ``git checkout -B <branch> FETCH_HEAD`` transfers them
-    into the workspace container cleanly (FETCH_HEAD is aligned to the commit so
-    that checkout is a content-preserving no-op).
+    if it exists on the DEFAULT_WORKSPACE_TEMPLATE remote, else ``main``), writes the pytest config
+    opt-in, and commits it so the create flow's ``git checkout -B <branch> FETCH_HEAD`` transfers
+    it into the workspace container cleanly (FETCH_HEAD is aligned to the commit so that checkout
+    is a content-preserving no-op). The workspace runs the mngr the template pins.
 
     An existing ``destination`` is left untouched -- an operator's ``minds-start``
     worktree is never clobbered, and re-runs are idempotent. Runs only where git
-    works; genuine failures (clone / vendor / commit) propagate loudly rather
-    than silently falling back to the released DEFAULT_WORKSPACE_TEMPLATE tag.
+    works; genuine failures (clone / commit) propagate loudly rather than silently
+    falling back to the released DEFAULT_WORKSPACE_TEMPLATE tag.
     """
     if destination.exists():
         logger.info("DEFAULT_WORKSPACE_TEMPLATE worktree already present at {}; leaving it untouched", destination)
@@ -222,7 +190,6 @@ def materialize_paired_default_workspace_template_worktree(
         text=True,
         timeout=300,
     )
-    _vendor_mngr_into_default_workspace_template(destination)
     _write_pytest_config_opt_in(destination / ".mngr" / "settings.toml")
     _run_git(destination, ["add", "-A"])
     _run_git(
@@ -235,11 +202,11 @@ def materialize_paired_default_workspace_template_worktree(
             "commit",
             "-q",
             "-m",
-            "test: vendor mngr HEAD + pytest opt-in",
+            "test: pytest opt-in",
         ],
     )
     # Align FETCH_HEAD to the commit so the create flow's ``checkout -B <ref>
-    # FETCH_HEAD`` (run in this clone) is a no-op that keeps the vendored mngr
-    # and opt-in. Fetching from ``.`` is local-only.
+    # FETCH_HEAD`` (run in this clone) is a no-op that keeps the opt-in.
+    # Fetching from ``.`` is local-only.
     _run_git(destination, ["fetch", "--no-tags", ".", "HEAD"])
     return destination

@@ -1021,8 +1021,7 @@ def test_worktree_overlay_preserves_uncommitted_edits(tmp_path: Path) -> None:
     origin = tmp_path / "origin"
     _make_origin_repo_with_branch(origin, "testing")
 
-    # A real git worktree on "testing" with an UNCOMMITTED edit (stands in for
-    # minds-start's locally-rsynced system/vendor/mngr/ changes).
+    # A real git worktree on "testing" with an UNCOMMITTED edit.
     worktree = tmp_path / "wt"
     _git(origin, "worktree", "add", "-q", str(worktree), "testing")
     (worktree / "f").write_text("uncommitted edit\n")
