@@ -28,6 +28,7 @@ from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.mngr.agents.base_agent import BaseAgent
 from imbue.mngr.config.data_types import AgentTypeConfig
 from imbue.mngr.config.data_types import EnvVar
@@ -94,7 +95,9 @@ from imbue.mngr.primitives import TmuxWidth
 from imbue.mngr.primitives import TmuxWindowSize
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr.utils.testing import HostSubclassT
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import get_cleanup_failures
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import make_local_host_of_class
@@ -1824,6 +1827,36 @@ def test_execute_idempotent_command_raises_command_timeout_error_on_local_timeou
     # Opt-in: the same timeout is raised loudly as CommandTimeoutError.
     with pytest.raises(CommandTimeoutError):
         local_host.execute_idempotent_command("sleep 10", timeout_seconds=1, raise_on_timeout=True)
+
+
+def test_host_keeps_a_secret_bearing_command_and_its_parameters_out_of_the_logs(local_host: Host) -> None:
+    """Neither the command body nor the env it resolved is traced inside the scope."""
+    secret_command = "echo marker-27594"
+    with capture_loguru(level="TRACE") as log_output:
+        with commands_kept_out_of_logs("a script carrying a key"):
+            result = local_host.execute_idempotent_command(secret_command, env={"SECRET_KEY": "marker-73160"})
+    assert result.success
+    logged = log_output.getvalue()
+    assert "marker-27594" not in logged
+    assert "marker-73160" not in logged
+    assert f"<a script carrying a key, {len(secret_command)} bytes, not logged>" in logged
+
+
+def test_a_timeout_error_names_the_stand_in_rather_than_the_command_it_withholds(local_host: Host) -> None:
+    """The loud timeout error carries the command's text, so the scope has to reach it too."""
+    secret_command = "echo marker-63108 >/dev/null && sleep 10"
+    with commands_kept_out_of_logs("a script carrying a key"):
+        with pytest.raises(CommandTimeoutError) as timeout_error:
+            local_host.execute_idempotent_command(secret_command, timeout_seconds=1, raise_on_timeout=True)
+    stand_in = f"<a script carrying a key, {len(secret_command)} bytes, not logged>"
+    assert "marker-63108" not in str(timeout_error.value)
+    assert stand_in in str(timeout_error.value)
+    # The backend's own timeout error is chained onto this one, so a traceback render or a
+    # Sentry report reaches it too -- it has to withhold the command just as loudly.
+    cause = timeout_error.value.__cause__
+    assert isinstance(cause, ProcessTimeoutError)
+    assert "marker-63108" not in str(cause)
+    assert cause.display_command == stand_in
 
 
 class _FakeLockChannel:

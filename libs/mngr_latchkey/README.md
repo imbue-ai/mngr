@@ -347,6 +347,15 @@ one go. Nothing is queued: an exchange either succeeds before its caller
 returns or raises `RemoteGatewayError`, so an embedder (the minds desktop app)
 can block a user's click on it and report what the machine said.
 
+Those scripts never reach the logs. Each one embeds what it is moving -- a
+credential store, the key the machine is to re-encrypt one under, or the policy
+being applied -- so its text is as sensitive as what it carries, and at a whole
+base64-encoded store on one line it is far too big to read anyway. Each is run
+inside `commands_kept_out_of_logs` (`imbue.mngr.utils.command_logging`), so the
+host layer traces a stand-in naming the kind of script and its size in place of
+the command, and pyinfra's own echo of the command it is about to run is
+dropped along with it.
+
 `refresh` also settles which side wins, and for both halves the answer is the
 machine. The credentials are obviously its own -- only it can rotate the tokens
 it holds. The policy is its own for a less obvious reason: the user may have

@@ -27,10 +27,12 @@ from imbue.mngr.colors import TRACE_COLOR
 from imbue.mngr.colors import WARNING_COLOR
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr.utils.logging import BufferedMessage
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.mngr.utils.logging import LoggingSuppressor
 from imbue.mngr.utils.logging import _ParamikoToLoguruHandler
+from imbue.mngr.utils.logging import _PyinfraToLoguruHandler
 from imbue.mngr.utils.logging import _format_user_message
 from imbue.mngr.utils.logging import _is_expected_paramiko_thread_exception
 from imbue.mngr.utils.logging import _patched_transport_log
@@ -920,3 +922,41 @@ def test_suppress_warnings_installs_threading_excepthook() -> None:
     finally:
         threading.excepthook = original
         mngr_logging_module._IS_THREADING_EXCEPTHOOK_INSTALLED["installed"] = False
+
+
+def _emit_pyinfra_record(handler: _PyinfraToLoguruHandler, message: str) -> None:
+    """Create and emit a logging record through the pyinfra handler."""
+    record = logging.LogRecord(
+        name="pyinfra.connectors.ssh",
+        level=logging.DEBUG,
+        pathname="ssh.py",
+        lineno=396,
+        msg=message,
+        args=(),
+        exc_info=None,
+    )
+    handler.emit(record)
+
+
+def test_pyinfra_handler_forwards_unrecognized_messages_at_trace() -> None:
+    handler = _PyinfraToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="TRACE")
+    try:
+        _emit_pyinfra_record(handler, "Running command on vps-1: (pty=False) sh -c 'echo marker-30281'")
+        assert any("marker-30281" in message for message in messages)
+    finally:
+        logger.remove(handler_id)
+
+
+def test_pyinfra_handler_drops_its_command_echo_while_commands_are_kept_out_of_logs() -> None:
+    """Pyinfra's SSH connector quotes the command it runs, so the scope has to silence it too."""
+    handler = _PyinfraToLoguruHandler()
+    messages: list[str] = []
+    handler_id = logger.add(lambda msg: messages.append(msg), level="TRACE")
+    try:
+        with commands_kept_out_of_logs("a script carrying a key"):
+            _emit_pyinfra_record(handler, "Running command on vps-1: (pty=False) sh -c 'echo marker-64920'")
+        assert not any("marker-64920" in message for message in messages)
+    finally:
+        logger.remove(handler_id)

@@ -4,9 +4,8 @@ Both provisioning a machine's gateway and moving credentials to and from it
 run shell commands on the machine over its outer host. The pieces they share
 live here: where the machine keeps its latchkey directory, where its gateway
 secrets live (a RAM-backed tmpfs directory, so a reboot wipes them rather than
-ever leaving the encryption key on the persistent disk), and how a ``latchkey``
-invocation is run under the machine's own key without that key ever appearing
-in a process listing.
+ever leaving the encryption key on the persistent disk), how that key is read
+back and written, and how a script the machine runs reports a failure.
 """
 
 import shlex
@@ -21,7 +20,6 @@ from pydantic import SkipValidation
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
-from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
 # Name of the latchkey directory on the VPS, under the remote user's home. The
@@ -84,6 +82,12 @@ GATEWAY_LISTEN_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
 # them -- unlike the machine's own secrets above, which are adopted.
 DESKTOP_GATEWAY_PASSWORD_FILENAME: Final[str] = "desktop_gateway_password"
 DESKTOP_PERMISSIONS_OVERRIDE_FILENAME: Final[str] = "desktop_permissions_override"
+
+# What the logs say in place of a machine script that carries secret material. Such a script
+# embeds what it is moving -- a credential store, or the key the machine is to re-encrypt it
+# under -- so its text is exactly as sensitive as the store itself, and it is artificially large
+# besides (a whole store, base64-encoded, on one line).
+SECRET_BEARING_SCRIPT_LOG_REASON: Final[str] = "a latchkey machine script carrying secret material"
 
 # Why an operation against a machine is refused when the key its gateway runs
 # under is not the one this computer recorded.
@@ -213,53 +217,17 @@ def write_machine_key_to_secrets_dir(host: OuterHostInterface, machine_key: Secr
     )
 
 
-def run_remote_latchkey(
-    host: OuterHostInterface,
-    setup: str,
-    command: str,
-    *,
-    out_key: SecretStr,
-    failure_description: str,
-) -> None:
-    """Run a ``latchkey`` command on the machine, under its own encryption key.
-
-    The key is read from its tmpfs file by the shell rather than passed as an
-    argument or an environment assignment we transmit, so it never appears in a
-    process listing on the machine. ``out_key`` -- the key a ``re-encrypt``
-    should write *out* with -- is the one secret that does travel, and it goes in
-    a shell variable (``$_lk_out_key``) that the command pipes to the CLI's
-    stdin, never in argv. ``setup`` is whatever shell has to run first.
-    """
-    key_file_q = shlex.quote(str(TMPFS_SECRETS_DIR / GATEWAY_ENCRYPTION_KEY_FILENAME))
-    lines = [
-        "set -e",
-        f'LATCHKEY_ENCRYPTION_KEY="$(cat {key_file_q})"',
-        "export LATCHKEY_ENCRYPTION_KEY",
-        f"_lk_out_key={shlex.quote(out_key.get_secret_value())}",
-        setup,
-        command,
-    ]
-    run_remote_command(host, "\n".join(lines), failure_description=failure_description, is_secret_bearing=True)
-
-
 def run_remote_command(
     host: OuterHostInterface,
     script: str,
     *,
     failure_description: str,
-    is_secret_bearing: bool = False,
 ) -> None:
     """Run ``script`` on the machine, raising with its own explanation if it fails."""
     result = host.execute_idempotent_command(script, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
     if not result.success:
         detail = result.stderr.strip() or result.stdout.strip()
-        raise RemoteGatewayError(
-            "Failed to {} on VPS {}: {}".format(
-                failure_description,
-                host.get_name(),
-                summarize_latchkey_failure(detail, "the command reported no reason") if is_secret_bearing else detail,
-            )
-        )
+        raise RemoteGatewayError("Failed to {} on VPS {}: {}".format(failure_description, host.get_name(), detail))
 
 
 def remove_remote_path(host: OuterHostInterface, path: Path) -> None:

@@ -36,6 +36,7 @@ from imbue.mngr_latchkey.remote._transfer import _outcome_marker
 from imbue.mngr_latchkey.remote._transfer import build_machine_read_script
 from imbue.mngr_latchkey.remote._transfer import build_machine_script
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
+from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
 from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
 from imbue.mngr_latchkey.remote._transfer import push_permissions_snapshot
@@ -442,6 +443,29 @@ def test_a_permissions_snapshot_costs_one_remote_command_and_no_home_probe(tmp_p
     assert len(as_stub(outer).recorded) == 1
     assert as_stub(outer).written == []
     assert as_stub(outer).machine_permissions == _SLACK_ANY
+
+
+def test_a_permissions_snapshot_is_run_without_its_script_reaching_the_logs() -> None:
+    """The snapshot script carries the whole policy the machine is to enforce, and is huge besides."""
+    host_id = HostId.generate()
+    outer = stub_machine({})
+
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY)
+
+    assert [entry.is_kept_out_of_logs for entry in as_stub(outer).recorded] == [True]
+
+
+def test_reading_a_machine_runs_without_its_script_reaching_the_logs(tmp_path: Path) -> None:
+    """The read script carries the key the machine re-encrypts its store under."""
+    host_id = HostId.generate()
+    outer = stub_machine({"slack": ["a@example.com"]})
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
+
+    fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+
+    recorded = as_stub(outer).recorded
+    assert recorded != []
+    assert all(entry.is_kept_out_of_logs for entry in recorded)
 
 
 def test_a_permissions_snapshot_this_build_cannot_read_never_reaches_the_machine(tmp_path: Path) -> None:

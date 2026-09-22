@@ -60,6 +60,7 @@ from imbue.mngr_latchkey.remote.provisioning import _build_extension_install_scr
 from imbue.mngr_latchkey.remote.provisioning import _build_supervisor_program_config
 from imbue.mngr_latchkey.remote.provisioning import _does_container_need_reverse_tunnel
 from imbue.mngr_latchkey.remote.provisioning import _does_container_resolve_outer_host
+from imbue.mngr_latchkey.remote.provisioning import _does_key_open_the_machine_store
 from imbue.mngr_latchkey.remote.provisioning import _ensure_bridge_services_firewalled
 from imbue.mngr_latchkey.remote.provisioning import _ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote.provisioning import _ensure_latchkey_gateway_reachable_from_container
@@ -919,6 +920,19 @@ def _outer_with_preexisting_latchkey_dir(is_present: bool) -> OuterHostInterface
     )
 
 
+def _outer_with_machine_store(machine_store_key: str, machine_accounts: dict[str, list[str]]) -> OuterHostInterface:
+    """A provisioned machine already holding a credential store, readable only under its own key."""
+    return cast(
+        OuterHostInterface,
+        StubOuter(
+            result=CommandResult(stdout="", stderr="", success=True),
+            is_remote_latchkey_dir_present=True,
+            machine_accounts=machine_accounts,
+            machine_store_key=machine_store_key,
+        ),
+    )
+
+
 def test_resolve_machine_encryption_key_mints_a_key_of_its_own_for_a_fresh_machine(tmp_path: Path) -> None:
     """A machine's credentials are readable by that machine and the desktops managing it, not by every VPS."""
     latchkey_directory = tmp_path / "latchkey"
@@ -988,15 +1002,7 @@ def test_resolve_machine_encryption_key_verifies_the_desktop_key_against_a_reboo
     latchkey_directory.mkdir()
     host_id = HostId.generate()
     desktop_key = load_or_create_encryption_key(latchkey_directory)
-    outer = cast(
-        OuterHostInterface,
-        StubOuter(
-            result=CommandResult(stdout="", stderr="", success=True),
-            is_remote_latchkey_dir_present=True,
-            machine_accounts={"slack": ["a@example.com"]},
-            machine_store_key=desktop_key.get_secret_value(),
-        ),
-    )
+    outer = _outer_with_machine_store(desktop_key.get_secret_value(), {"slack": ["a@example.com"]})
 
     key = _resolve_machine_encryption_key(outer, latchkey_directory, host_id)
 
@@ -1005,20 +1011,26 @@ def test_resolve_machine_encryption_key_verifies_the_desktop_key_against_a_reboo
     assert as_stub(outer).machine_accounts == {"slack": ["a@example.com"]}
 
 
+def test_a_candidate_key_is_probed_without_its_script_reaching_the_logs(tmp_path: Path) -> None:
+    """The probe carries the candidate key in the script body, so it is withheld like any other."""
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    desktop_key = load_or_create_encryption_key(latchkey_directory)
+    outer = _outer_with_machine_store(desktop_key.get_secret_value(), {"slack": ["a@example.com"]})
+
+    assert _does_key_open_the_machine_store(outer, desktop_key)
+
+    probes = [entry for entry in as_stub(outer).recorded if "auth list --offline" in entry.command]
+    assert len(probes) == 1
+    assert probes[0].is_kept_out_of_logs
+
+
 def test_resolve_machine_encryption_key_abandons_a_store_nobody_present_can_read(tmp_path: Path) -> None:
     """Provisioned by a computer that is gone, rebooted since: signing in again is possible, waiting is not."""
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     host_id = HostId.generate()
-    outer = cast(
-        OuterHostInterface,
-        StubOuter(
-            result=CommandResult(stdout="", stderr="", success=True),
-            is_remote_latchkey_dir_present=True,
-            machine_accounts={"slack": ["lost@example.com"]},
-            machine_store_key="a-key-only-the-lost-computer-held",
-        ),
-    )
+    outer = _outer_with_machine_store("a-key-only-the-lost-computer-held", {"slack": ["lost@example.com"]})
 
     key = _resolve_machine_encryption_key(outer, latchkey_directory, host_id)
 

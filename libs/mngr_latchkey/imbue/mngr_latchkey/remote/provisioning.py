@@ -64,6 +64,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OUTER_HOST_HOSTNAME_IN_CONTAINER
+from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
@@ -100,6 +101,7 @@ from imbue.mngr_latchkey.remote._machine import REMOTE_FILE_MODE as REMOTE_FILE_
 # plugin read the gateway's logs under this directory.
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME as REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_TIMEOUT_SECONDS
+from imbue.mngr_latchkey.remote._machine import SECRET_BEARING_SCRIPT_LOG_REASON
 from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR as TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote._machine import read_machine_gateway_password_from_secrets_dir
 from imbue.mngr_latchkey.remote._machine import read_machine_key_from_secrets_dir
@@ -1584,7 +1586,8 @@ def _does_key_open_the_machine_store(host: OuterHostInterface, candidate_key: Se
             "latchkey auth list --offline >/dev/null",
         )
     )
-    result = host.execute_idempotent_command(script, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
+    with commands_kept_out_of_logs(SECRET_BEARING_SCRIPT_LOG_REASON):
+        result = host.execute_idempotent_command(script, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
     if not result.success:
         logger.debug(
             "Ruled out a candidate key for the store on VPS {}: {}",

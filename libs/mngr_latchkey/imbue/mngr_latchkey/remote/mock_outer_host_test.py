@@ -28,6 +28,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.command_logging import is_command_logging_suppressed
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
@@ -64,6 +65,9 @@ class RecordedCommand(MutableModel):
 
     command: str = Field(description="The command string passed to the outer host")
     timeout_seconds: float | None = Field(default=None, description="Timeout passed in (if any)")
+    is_kept_out_of_logs: bool = Field(
+        default=False, description="Whether the command was issued inside a commands_kept_out_of_logs scope"
+    )
 
 
 class WrittenFile(MutableModel):
@@ -140,7 +144,13 @@ class StubOuter(MutableModel):
         env: Mapping[str, str] | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
-        self.recorded.append(RecordedCommand(command=command, timeout_seconds=timeout_seconds))
+        self.recorded.append(
+            RecordedCommand(
+                command=command,
+                timeout_seconds=timeout_seconds,
+                is_kept_out_of_logs=is_command_logging_suppressed(),
+            )
+        )
         # Only the dedicated $HOME-resolution probe gets the home response; the
         # container lookup returns the configured name and the container
         # inspection its creation-time extra hosts; the docker-bridge probe

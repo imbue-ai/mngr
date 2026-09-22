@@ -28,6 +28,7 @@ from imbue.mngr.colors import TRACE_COLOR
 from imbue.mngr.colors import WARNING_COLOR
 from imbue.mngr.colors import should_use_color
 from imbue.mngr.primitives import LogLevel
+from imbue.mngr.utils.command_logging import is_command_logging_suppressed
 
 # Default event type and source for mngr CLI logs
 _DEFAULT_EVENT_TYPE: Final[str] = "mngr"
@@ -204,12 +205,19 @@ class _PyinfraToLoguruHandler(logging.Handler):
     already handles (e.g., connection status, command execution). This handler
     silently drops the standard operational messages (matched by _PYINFRA_NOISE_RE)
     and forwards everything else to loguru at TRACE level so that unexpected
-    pyinfra output is still visible when debugging.
+    pyinfra output is still visible when debugging. The one exception is a
+    ``commands_kept_out_of_logs`` scope, for whose length nothing pyinfra says is
+    forwarded at all.
     """
 
     def emit(self, record: logging.LogRecord) -> None:
         msg = record.getMessage()
         if _PYINFRA_NOISE_RE.search(msg):
+            return
+        # The SSH connector quotes the whole command it is about to run, so a command being kept
+        # out of the logs would leak through here. Everything pyinfra says is forwarded no higher
+        # than TRACE, so dropping the lot for the length of that scope costs nothing worth keeping.
+        if is_command_logging_suppressed():
             return
         logger.trace("[pyinfra] {}", msg)
 

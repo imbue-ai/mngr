@@ -74,6 +74,8 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.utils.command_logging import loggable_command
+from imbue.mngr.utils.command_logging import withheld_command_label
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
 
 
@@ -893,6 +895,7 @@ class OuterHost(OuterHostInterface):
             is_checked_after=False,
             cwd=cwd_path,
             env=full_env,
+            name=withheld_command_label(command.get_raw_value()),
         )
         if _raise_on_timeout and finished.is_timed_out:
             # check() inspects is_timed_out before the return code, so this raises
@@ -1128,7 +1131,7 @@ class OuterHost(OuterHostInterface):
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         """Execute a command and return the result."""
-        logger.trace("Executing command on outer host {}: {}", self.id, command)
+        logger.trace("Executing command on outer host {}: {}", self.id, loggable_command(command))
         if user is not None:
             raise NotImplementedError("OuterHost does not support su user; pass an SSH user via the connector instead")
         success, output = self._run_shell_command(
@@ -1245,6 +1248,7 @@ class OuterHost(OuterHostInterface):
             cwd=cwd,
             env=full_env,
             on_output=accumulator,
+            name=withheld_command_label(command),
         )
         return CommandResult(
             stdout=accumulator.stdout,

@@ -35,6 +35,8 @@ from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.providers.ssh_utils import create_pyinfra_host
+from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
+from imbue.mngr.utils.testing import capture_loguru
 
 
 def test_outer_host_satisfies_outer_host_interface(local_outer_host: OuterHost) -> None:
@@ -159,6 +161,24 @@ def test_outer_host_local_executes_command(local_outer_host: OuterHost) -> None:
     result = local_outer_host.execute_idempotent_command("echo hello-from-outer")
     assert result.success
     assert "hello-from-outer" in result.stdout
+
+
+def test_outer_host_logs_the_command_it_runs(local_outer_host: OuterHost) -> None:
+    """Ordinarily the command text is traced in full -- the control for the suppression test."""
+    with capture_loguru(level="TRACE") as log_output:
+        local_outer_host.execute_idempotent_command("echo marker-51803")
+    assert "marker-51803" in log_output.getvalue()
+
+
+def test_outer_host_keeps_a_secret_bearing_command_out_of_the_logs(local_outer_host: OuterHost) -> None:
+    secret_command = "echo marker-84416"
+    with capture_loguru(level="TRACE") as log_output:
+        with commands_kept_out_of_logs("a script carrying a key"):
+            result = local_outer_host.execute_idempotent_command(secret_command)
+    assert result.success
+    logged = log_output.getvalue()
+    assert "marker-84416" not in logged
+    assert f"<a script carrying a key, {len(secret_command)} bytes, not logged>" in logged
 
 
 def test_outer_host_list_directory_local(local_outer_host: OuterHost, tmp_path: Path) -> None:

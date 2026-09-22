@@ -101,6 +101,8 @@ from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import TransferMode
+from imbue.mngr.utils.command_logging import is_command_logging_suppressed
+from imbue.mngr.utils.command_logging import loggable_command
 from imbue.mngr.utils.deps import SSH
 from imbue.mngr.utils.env_utils import build_source_env_shell_commands
 from imbue.mngr.utils.env_utils import parse_env_file
@@ -743,10 +745,13 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         """
         # Clamp to any active per-host read budget so a wedged command self-terminates within it.
         timeout_seconds = remaining_read_timeout(timeout_seconds)
-        logger.trace("Executing command on host {}: {}", self.id, command)
-        logger.trace(
-            "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
-        )
+        logger.trace("Executing command on host {}: {}", self.id, loggable_command(command))
+        # The resolved parameters -- an env mapping above all -- can carry the same secret the
+        # command body does, so a command being kept out of the logs takes them with it.
+        if not is_command_logging_suppressed():
+            logger.trace(
+                "Resolved command parameters: user={}, cwd={}, env={}, timeout={}", user, cwd, env, timeout_seconds
+            )
         try:
             success, output = self._run_shell_command(
                 StringCommand(command),
@@ -761,7 +766,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # local backend, the raw socket.timeout from the SSH backend. Without the
             # flag each backend reports the timeout itself (a failed result locally, a
             # HostConnectionError over SSH).
-            raise CommandTimeoutError(f"Command timed out after {timeout_seconds}s: {command}") from e
+            raise CommandTimeoutError(
+                f"Command timed out after {timeout_seconds}s: {loggable_command(command)}"
+            ) from e
         return CommandResult(
             stdout=output.stdout,
             stderr=output.stderr,

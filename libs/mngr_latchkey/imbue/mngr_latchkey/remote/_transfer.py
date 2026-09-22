@@ -50,6 +50,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
@@ -65,6 +66,7 @@ from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_FILE_MODE
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_TIMEOUT_SECONDS
+from imbue.mngr_latchkey.remote._machine import SECRET_BEARING_SCRIPT_LOG_REASON
 from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote._mirror import clear_machine_credentials
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
@@ -754,7 +756,8 @@ def _run_machine_script(
         RemoteGatewayError: when the script fails, or finishes without naming
             an outcome (which means it did not run to either of its ends).
     """
-    result = host.execute_idempotent_command(script, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
+    with commands_kept_out_of_logs(SECRET_BEARING_SCRIPT_LOG_REASON):
+        result = host.execute_idempotent_command(script, timeout_seconds=REMOTE_LATCHKEY_TIMEOUT_SECONDS)
     if not result.success:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RemoteGatewayError(
