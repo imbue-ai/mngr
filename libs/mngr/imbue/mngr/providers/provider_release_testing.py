@@ -423,6 +423,11 @@ def run_provider_release_trip1(
                     "host",
                     timeout=_LIFECYCLE_TIMEOUT_SECONDS,
                 )
+                # `mngr file get` either serves the bytes or refuses with one stated Error: line
+                # on stderr, so a nonzero exit is the read's own verdict, not a crash to decode.
+                assert offline_read.returncode == 0, (
+                    f"offline host_dir read failed while the host was stopped:\n{offline_read.stderr}"
+                )
                 assert marker_token in offline_read.stdout, (
                     f"offline host_dir read did not serve the marker while the host was stopped:\n"
                     f"{offline_read.stdout}"
