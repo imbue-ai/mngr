@@ -24,6 +24,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
 from imbue.mngr_latchkey.forward_supervisor import _descendant_processes
 from imbue.mngr_latchkey.forward_supervisor import is_forward_owned_by
+from imbue.mngr_latchkey.forward_supervisor import live_forward_owner
 from imbue.mngr_latchkey.forward_supervisor import owning_forward_process
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
@@ -1030,6 +1031,34 @@ def test_owning_forward_process_ignores_an_owner_record_nobody_backs(tmp_path: P
         assert owning_forward_process(unowned_data_dir) is None
     finally:
         _terminate_orphan(forward)
+
+
+def test_live_forward_owner_reports_the_holders_record_and_nothing_once_it_departs(tmp_path: Path) -> None:
+    """The record comes back only while its forward still holds the directory.
+
+    This is what a consumer waiting for the gateway port reads, so a record
+    whose forward is gone must not answer at all: its port names a gateway that
+    no longer listens, and its absence is how a restart in flight is told from
+    a gateway that is up.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    forward = _spawn_orphan_fake_forward(fake_binary, latchkey_directory)
+    data_dir = plugin_data_dir(latchkey_directory)
+    try:
+        _wait_for_forward_ready(data_dir, forward.pid)
+        update_forward_owner_gateway_port(data_dir, 54321)
+        owner = live_forward_owner(data_dir)
+        assert owner is not None
+        assert owner.pid == forward.pid
+        assert owner.gateway_port == 54321
+    finally:
+        # Returns once the forward has actually exited, so the kernel has
+        # dropped its lock by the time the reads below run.
+        _terminate_orphan(forward)
+    # The departed forward's record is still on disk, port and all.
+    assert load_forward_owner(data_dir) is not None
+    assert live_forward_owner(data_dir) is None
 
 
 def test_owning_forward_process_survives_a_directory_containing_a_space(tmp_path: Path) -> None:

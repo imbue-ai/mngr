@@ -55,10 +55,10 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.custom_services import LoginFlow
 from imbue.mngr_latchkey.custom_services import Scheme
 from imbue.mngr_latchkey.custom_services import validate_login_flow
-from imbue.mngr_latchkey.forward_supervisor import is_forward_owned_by
+from imbue.mngr_latchkey.forward_supervisor import live_forward_owner
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
-from imbue.mngr_latchkey.store import load_forward_owner
+from imbue.mngr_latchkey.store import forward_log_path
 
 # Header names baked into the upstream gateway's wire contract.
 _HEADER_PASSWORD: Final[str] = "X-Latchkey-Gateway-Password"
@@ -447,7 +447,7 @@ class LatchkeyGatewayClient(MutableModel):
         return self._base_url
 
     def _wait_for_gateway_port(self) -> LatchkeyForwardOwner:
-        """Block until the supervised ``mngr latchkey forward`` stamps its bound gateway port.
+        """Block until the live ``mngr latchkey forward`` stamps its bound gateway port.
 
         The supervisor records itself as the directory's owner when it claims
         the ownership lock, carrying no port yet, and rewrites that record once
@@ -455,6 +455,14 @@ class LatchkeyGatewayClient(MutableModel):
         port. We poll until the port becomes non-None (or the timeout expires)
         so subsequent minds startup steps can build the gateway URL
         deterministically without racing the supervisor's own startup.
+
+        What is polled is the *live* owner's record, never one a departed
+        forward left behind: minds terminates and respawns the supervisor on
+        every start (see ``_restart_mngr_latchkey_forward_supervisor``), and the
+        record only names the new forward once that forward claims the
+        directory -- an ``mngr`` cold start later. A caller arriving in that
+        window is early, not broken, so an unowned directory is waited out like
+        any other not-yet-bound state and only the deadline is fatal.
         """
         if self._latchkey is None:
             raise LatchkeyGatewayInitializationError(
@@ -467,16 +475,7 @@ class LatchkeyGatewayClient(MutableModel):
         timer.start()
         try:
             while not deadline.is_set():
-                owner = load_forward_owner(plugin_dir)
-                if owner is not None and not is_forward_owned_by(plugin_dir, owner.pid):
-                    # The forward this is waiting on no longer owns the
-                    # directory: it died before binding, or the discovery
-                    # watchdog restarted it. Either way the pid being waited on
-                    # is gone, so fail rather than poll it out to the timeout.
-                    raise LatchkeyGatewayInitializationError(
-                        "The ``mngr latchkey forward`` supervisor we spawned has died before binding its "
-                        f"gateway port; check {plugin_dir}/latchkey_forward.log for details.",
-                    )
+                owner = live_forward_owner(plugin_dir)
                 if owner is not None and owner.gateway_port is not None:
                     return owner
                 # Use the same event as the deadline so we wake up promptly
@@ -487,8 +486,9 @@ class LatchkeyGatewayClient(MutableModel):
         finally:
             timer.cancel()
         raise LatchkeyGatewayInitializationError(
-            f"Timed out after {_GATEWAY_PORT_WAIT_SECONDS:.1f}s waiting for ``mngr latchkey forward`` to stamp "
-            f"its bound gateway port onto {plugin_dir}; is the supervisor stuck?",
+            f"Timed out after {_GATEWAY_PORT_WAIT_SECONDS:.1f}s waiting for a live ``mngr latchkey forward`` to "
+            f"bind its gateway port and stamp it onto {plugin_dir}; check {forward_log_path(plugin_dir)} for "
+            "details.",
         )
 
     def _build_headers(self) -> dict[str, str]:

@@ -5,8 +5,10 @@ so each test can stub the gateway's HTTP layer without any real I/O.
 """
 
 import json
+import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Final
 
 import httpx
 import pytest
@@ -19,6 +21,15 @@ from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import WorkspaceRequestPayload
 from imbue.mngr_latchkey.account_scopes import build_account_grant
+from imbue.mngr_latchkey.store import acquire_forward_lock
+from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
+from imbue.mngr_latchkey.testing import make_full_fake_latchkey
+
+# How long the restart-window test leaves initialization waiting with nothing
+# owning the latchkey directory. A few of the wait's poll intervals is all it
+# takes to tell waiting apart from giving up.
+_RESTART_WINDOW_SECONDS: Final[float] = 1.0
+_INITIALIZATION_TIMEOUT_SECONDS: Final[float] = 10.0
 
 
 def _build_client(handler: Callable[[httpx.Request], httpx.Response]) -> LatchkeyGatewayClient:
@@ -539,3 +550,55 @@ def test_iter_permission_requests_invalidates_on_connect_error() -> None:
     # State cleared -- next call cannot build a URL.
     with pytest.raises(LatchkeyGatewayClientError):
         list(client.iter_permission_requests())
+
+
+def test_ensure_initialized_waits_out_a_supervisor_restart(tmp_path: Path) -> None:
+    """A caller arriving while the supervisor is being restarted waits for the new gateway.
+
+    minds terminates and respawns ``mngr latchkey forward`` on every start, and
+    the terminated forward's record -- bound port and all -- stays on disk until
+    the new one claims the directory an ``mngr`` cold start later. A gateway
+    read landing in that window is early, not broken, so it has to wait for the
+    fresh forward instead of reporting the supervisor gone.
+    """
+    latchkey = make_full_fake_latchkey(tmp_path)
+    plugin_dir = latchkey.plugin_data_dir
+    # The state a restart passes through: the departed forward's record beside
+    # a lock nobody holds. Its pid is this live test process, so only the lock
+    # can say the forward behind it is gone.
+    departed_lock = acquire_forward_lock(plugin_dir)
+    assert departed_lock is not None
+    update_forward_owner_gateway_port(plugin_dir, 41111)
+    departed_lock.release()
+
+    client = LatchkeyGatewayClient.from_latchkey(latchkey)
+    initialization_errors: list[BaseException] = []
+    is_initialized = threading.Event()
+
+    def _initialize() -> None:
+        try:
+            client.ensure_initialized()
+        except LatchkeyGatewayClientError as e:
+            initialization_errors.append(e)
+        finally:
+            is_initialized.set()
+
+    initializer = threading.Thread(target=_initialize, name="gateway-client-init-test", daemon=True)
+    initializer.start()
+    try:
+        assert not is_initialized.wait(timeout=_RESTART_WINDOW_SECONDS), (
+            f"initialization gave up during the restart window: {initialization_errors}"
+        )
+        # The fresh forward claims the directory and binds its gateway.
+        fresh_lock = acquire_forward_lock(plugin_dir)
+        assert fresh_lock is not None
+        try:
+            update_forward_owner_gateway_port(plugin_dir, 42222)
+            assert is_initialized.wait(timeout=_INITIALIZATION_TIMEOUT_SECONDS), (
+                "initialization never picked up the fresh forward's gateway port"
+            )
+            assert initialization_errors == []
+        finally:
+            fresh_lock.release()
+    finally:
+        initializer.join(timeout=_INITIALIZATION_TIMEOUT_SECONDS)

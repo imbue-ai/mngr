@@ -217,6 +217,16 @@ class FakeLatchkey(Latchkey):
             raise LatchkeyJwtMintError("FakeLatchkey: configure jwt before calling create_permissions_override_jwt")
         return self._jwt
 
+    def create_admin_permissions_jwt(self) -> str:
+        # The real mint shells out *and* materializes the admin permissions
+        # file; the fake does neither, so callers that only need admin
+        # credentials (the desktop client's gateway client) stay off disk.
+        if self._jwt_error is not None:
+            raise self._jwt_error
+        if self._jwt is None:
+            raise LatchkeyJwtMintError("FakeLatchkey: configure jwt before calling create_admin_permissions_jwt")
+        return self._jwt
+
     def stop_gateway(self) -> None:
         # Record the call so tests can verify ``mngr latchkey forward``'s
         # coupled-lifetime shutdown semantics without spawning a real

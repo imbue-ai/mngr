@@ -103,6 +103,25 @@ def owning_forward_process(plugin_data_dir: Path) -> psutil.Process | None:
     return None if owned is None else owned[0]
 
 
+def live_forward_owner(plugin_data_dir: Path) -> LatchkeyForwardOwner | None:
+    """Return the record published by the live forward owning this directory.
+
+    The record beside the lock outlives the forward it names -- it is replaced
+    only when the *next* forward claims the directory -- so reading it alone
+    cannot tell a running forward from one that was terminated minutes ago.
+    Pairing the read with the lock is what makes the answer the current owner's
+    own record, and ``None`` what it says about a directory nobody owns,
+    whether because a forward is only just being spawned or because none is
+    coming.
+
+    See :func:`owning_forward_process` for what makes the ownership answer
+    sound; this is the same one read of the directory, reported as the record
+    rather than the process.
+    """
+    owned = _owning_forward(plugin_data_dir)
+    return None if owned is None else owned[1]
+
+
 def is_forward_owned_by(plugin_data_dir: Path, pid: int) -> bool:
     """Return whether the live forward owning this directory is ``pid``."""
     forward_process = owning_forward_process(plugin_data_dir)
