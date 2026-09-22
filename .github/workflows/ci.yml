@@ -28,9 +28,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - uses: extractions/setup-just@v2
-      # Binaries the test subset shells out to (the private CI's offload
-      # image bundles these).
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq restic
+      # The restic minds bundles, staged where the minds tests look for it.
+      - run: |
+          node -e "const b = require('./apps/minds/scripts/download-binaries.js'); b.BINARIES.restic.download('apps/minds/resources', b.getPlatformArch()).catch((e) => { console.error(e); process.exit(1); })"
+          apps/minds/resources/restic/restic version
       # --locked also validates the committed public uv.lock against the tree.
       - run: uv sync --locked --all-packages
       # The three --deselect entries fail only in this runner environment;

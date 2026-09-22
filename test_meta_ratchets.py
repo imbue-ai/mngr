@@ -27,8 +27,8 @@ from scripts.changelog_projects import pyproject_projects
 
 _REPO_ROOT = Path(__file__).parent
 
-# The public mirror carries only the open-source subset; ratchets over private
-# ops assets apply only in the source-of-truth repo (identified by mirror/).
+# The public mirror carries only the open-source subset; ratchets over private-only
+# paths apply only in the source-of-truth repo (identified by mirror/).
 _IS_SOURCE_OF_TRUTH = (_REPO_ROOT / "mirror").exists()
 
 # Projects that are excluded from ratchet requirements (scheduled for deletion).
@@ -133,9 +133,6 @@ def _extract_test_function_names(file_path: Path) -> frozenset[str]:
     )
 
 
-# --- Meta: ensure every project has ratchets ---
-
-
 def test_every_project_has_test_ratchets_file() -> None:
     """Ensure each project (except excluded ones) has a test_ratchets.py file."""
     missing: list[str] = []
@@ -195,9 +192,6 @@ def test_all_test_ratchets_files_have_same_tests() -> None:
             mismatches.append("\n".join(parts))
 
     assert len(mismatches) == 0, "test_ratchets.py files have different test functions:\n" + "\n".join(mismatches)
-
-
-# --- Repo-wide ratchets (run once, not per-project) ---
 
 
 @pytest.mark.flaky
@@ -322,6 +316,7 @@ def test_cli_docs_are_up_to_date() -> None:
 _NUMBERED_MIGRATION_RE = re.compile(r"^(\d+)_.+\.sql$")
 
 
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="numbered SQL migrations are absent on the public mirror")
 def test_numbered_sql_migrations_have_unique_numbers() -> None:
     """Ensure no migrations/ directory holds two ``NNN_*.sql`` files with the same number.
 
@@ -796,9 +791,6 @@ def test_every_project_with_tests_has_coverage_config() -> None:
     )
 
 
-# --- Meta: ensure every project has the changelog layout files ---
-
-
 @pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="the synthetic dev project is absent on the public mirror")
 def test_every_project_has_changelog_layout() -> None:
     """Ensure every project (libs/<name>, apps/<name>, and the synthetic dev)
@@ -1045,6 +1037,7 @@ def _assert_root_ty_probe_can_see_exclusions(paths_that_must_stay_checked: froze
     )
 
 
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="standalone projects are absent on the public mirror")
 @pytest.mark.timeout(120)
 def test_standalone_project_ty_carve_outs_are_checked_by_the_root_workspace() -> None:
     """Whatever a standalone project excludes from its own type check must be checked here.
@@ -1155,9 +1148,6 @@ def test_top_level_coverage_omit_covers_subproject_omits() -> None:
     assert len(errors) == 0, (
         "Top-level [tool.coverage.run].omit is missing entries for files that subprojects omit:\n" + "\n".join(errors)
     )
-
-
-# --- Meta: offload CI config performance invariants ---
 
 
 @pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="offload configs are absent on the public mirror")
@@ -1438,8 +1428,6 @@ def test_wire_types_files_contain_only_wire_models_and_wire_enums() -> None:
         "so connector response shapes stay forward compatible:\n" + "\n".join(f"  - {v}" for v in violations)
     )
 
-
-# --- Machine/workspace terminology (see specs/machine-workspace-naming/decisions.md) ---
 
 # Non-test .py files under these globs are mngr-level: they speak host/agent and must
 # not use the minds-level machine/workspace vocabulary or reference minds itself.

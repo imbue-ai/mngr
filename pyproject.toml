@@ -168,7 +168,9 @@ default-flags-ide=["report"]
 format-command="uv run ruff format --force-exclude --config pyproject.toml --stdin-filename {filename}"
 
 [tool.ty.src]
-exclude = ["scripts/style_guide.py", "contrib/", "apps/minds/scripts/"]
+# apps/minds/hatch_build.py imports hatchling, which exists only inside
+# hatchling's isolated build environment, never in the dev venv.
+exclude = ["scripts/style_guide.py", "contrib/", "apps/minds/scripts/", "apps/minds/hatch_build.py"]
 
 [tool.ty.environment]
 extra-paths = ["scripts"]
@@ -293,7 +295,13 @@ layers = [
     "imbue.mngr_imbue_cloud.slices",
     "imbue.mngr_imbue_cloud.connector",
     "imbue.mngr_imbue_cloud.config",
+    "imbue.mngr_imbue_cloud.interfaces",
     "imbue.mngr_imbue_cloud.data_types",
     "imbue.mngr_imbue_cloud.errors",
     "imbue.mngr_imbue_cloud.primitives",
+]
+# ``slices.gen2_scripts`` is a leaf package that lower layers may import.
+ignore_imports = [
+    "imbue.mngr_imbue_cloud.interfaces -> imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands",
+    "imbue.mngr_imbue_cloud.primitives -> imbue.mngr_imbue_cloud.slices.gen2_scripts.regions",
 ]
