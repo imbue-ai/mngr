@@ -85,18 +85,18 @@ function getResticPath() {
 }
 
 /**
- * Path to the bundled "dispatch curl" that the latchkey gateway runs as
- * its ``LATCHKEY_CURL``, shipped from the datalib release into
+ * Path to the bundled curl router that the latchkey gateway runs as its
+ * ``LATCHKEY_CURL``, shipped from the latchkey-curl-shims release into
  * ``resources/curl/`` by scripts/download-binaries.js (alongside the
- * Chrome-impersonating ``latchkey-curl-impersonate`` it fronts).
+ * Chrome-impersonating ``curl-impersonate`` it fronts).
  *
  * Requests carrying the marker header ``X-Imbue-Impersonate:`` are routed
  * to the impersonator (found as a sibling in this same dir), everything
  * else passes through to the system curl -- so one binary serves both
  * impersonating and non-impersonating callers.
  */
-function getLatchkeyCurlDispatchPath() {
-  return path.join(getResourcesDir(), 'curl', 'latchkey-curl-dispatch');
+function getLatchkeyCurlRouterPath() {
+  return path.join(getResourcesDir(), 'curl', 'latchkey-curl-router');
 }
 
 /**
@@ -292,7 +292,7 @@ module.exports = {
   getLatchkeyPath,
   getLatchkeyDirectory,
   getResticPath,
-  getLatchkeyCurlDispatchPath,
+  getLatchkeyCurlRouterPath,
   getMindsRootName,
   getDataDir,
   getMngrHostDir,

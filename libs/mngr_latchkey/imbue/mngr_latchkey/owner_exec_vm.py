@@ -8,7 +8,7 @@ the VM root's ``authorized_keys`` (which the container cannot write), binds the
 audience ``vm:<host-id>``, and signs responses with the VM's SSH host key.
 
 The binary is the pinned static release from ``imbue-ai/owner-exec``, fetched
-and sha256-verified on the VM (the datalib-curl pattern). It is installed and
+and sha256-verified on the VM. It is installed and
 kept current by the same discovery-driven provisioning pass that stands up the
 latchkey gateway; this is a no-op on a local outer.
 """

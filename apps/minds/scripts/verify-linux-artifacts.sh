@@ -30,8 +30,8 @@ RUNNABLE_TOOLS=(
   "restic/restic|version"
   "desync/desync|--help"
   "lima/bin/limactl|--version"
-  "curl/latchkey-curl-dispatch|--version"
-  "curl/latchkey-curl-impersonate|--version"
+  "curl/latchkey-curl-router|--version"
+  "curl/curl-impersonate|--version"
 )
 
 fail() {

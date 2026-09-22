@@ -49,20 +49,20 @@ const DESYNC_VERSION = '1.0.3';
 // lima's host-side TCP forwarder, below the guest docker daemon.
 const LIMA_VERSION = '2.0.3';
 
-// datalib "curl" distribution: the dispatch curl + the Chrome-impersonating
-// curl it fronts (see the `curl-<triple>.tar.gz` release asset).
-// The latchkey gateway runs the dispatch curl as its LATCHKEY_CURL so marked
-// requests get Chrome TLS impersonation. Only macOS arm64 and Linux (x86_64
-// and aarch64) are bundled; there is no impersonation on Windows. The Linux
-// builds are the statically linked musl ones, so they run on any glibc version
-// (and on musl distros) rather than requiring one at least as new as the build
-// host's.
+// latchkey-curl-shims distribution: the curl router + the Chrome-impersonating
+// curl it fronts (see the `latchkey-curl-shims-<triple>.tar.gz` release asset).
+// The latchkey gateway runs the router as its LATCHKEY_CURL so marked
+// requests get Chrome TLS impersonation. Bundled on macOS and Linux; the
+// release has no Windows build, so there is no impersonation there. The
+// Linux build is the statically linked musl one, so it runs on any glibc
+// version (and on musl distros) rather than requiring one at least as new as
+// the build host's.
 //
-// When bumping DATALIB_CURL_VERSION, update the `curl-*` hashes in
-// EXPECTED_SHA256 to match (the tarball filename is version-less, so the
+// When bumping CURL_SHIMS_VERSION, update the `latchkey-curl-shims-*` hashes
+// in EXPECTED_SHA256 to match (the tarball filename is version-less, so the
 // old hash would otherwise be checked against the new bytes and fail).
-const DATALIB_REPO = 'imbue-ai/datalib';
-const DATALIB_CURL_VERSION = 'v0.26.0';
+const CURL_SHIMS_REPO = 'imbue-ai/latchkey-curl-shims';
+const CURL_SHIMS_VERSION = 'v0.4.0';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -99,11 +99,12 @@ const EXPECTED_SHA256 = {
   'lima-2.0.3-Darwin-x86_64.tar.gz':    '0806bcb83a08411e9d878b43b2c4203f1556fe14f9f8ba1e5f0d5d9a3c2c0bd8',
   'lima-2.0.3-Linux-x86_64.tar.gz':     '6838a926d85ed2ddcfd636befb476256a96196516a3b7f36d2af66cde9188d66',
   'lima-2.0.3-Linux-aarch64.tar.gz':    'd0f9c30b82fdbd06b5c951b76bf3378b68cc658aebfe243f777949e131b6ea28',
-  // From the datalib release named by DATALIB_CURL_VERSION
-  // (`curl-<triple>.tar.gz.sha256`).
-  'curl-aarch64-apple-darwin.tar.gz':      '38db8dca3aa4106c653808fce5e2f0d2cf79345f18980ffb89c14b91b642c037',
-  'curl-x86_64-unknown-linux-musl.tar.gz': '7d1cd95bc90869b722aa4cb60181ca71e73186a50ba15002f1848b6266873b72',
-  'curl-aarch64-unknown-linux-musl.tar.gz': '87a9a0a27def2a4a4913ca297c8cc5508e4f0ba6454be22d15d651c0d3cff594',
+  // From the `SHA256SUMS` of the latchkey-curl-shims release named by
+  // CURL_SHIMS_VERSION.
+  'latchkey-curl-shims-aarch64-apple-darwin.tar.gz':      '6c732538997aafd2192905711d71b725cecf468549d605c9daecd6e5f2b0da19',
+  'latchkey-curl-shims-x86_64-apple-darwin.tar.gz':       'f3d729892aa076bcde20876434dd071113ffaa1aa87bf2f7ef86a67d6a25ff46',
+  'latchkey-curl-shims-x86_64-unknown-linux-musl.tar.gz': '7173b301133c4a465174481041ade5c1f8fffac4ae4b86d54cdf4279ac7a0f93',
+  'latchkey-curl-shims-aarch64-unknown-linux-musl.tar.gz': 'afa65e2c795dce9acfd32ad22d732c27509a07382e6db00626a98e1ec93f8f76',
 };
 
 const MAX_REDIRECTS = 5;
@@ -317,27 +318,20 @@ function getLimaDownloadUrl({ platform, arch }) {
 }
 
 /**
- * Map the current platform/arch to the datalib "curl" release tarball, or
- * null for the platforms we don't bundle it on (macOS x86_64, Windows). The
+ * Map the current platform/arch to the latchkey-curl-shims release tarball, or
+ * null on Windows, which the release has no build for. The
  * tarball filename is version-less (stable `releases/download/<tag>/<file>`
- * URLs); the inner dir carries the version.
+ * URLs).
  */
 function getLatchkeyCurlDownloadInfo({ platform, arch }) {
-  let triple = null;
-  if (platform === 'darwin' && arch === 'aarch64') {
-    triple = 'aarch64-apple-darwin';
-  } else if (platform === 'linux' && arch === 'x86_64') {
-    triple = 'x86_64-unknown-linux-musl';
-  } else if (platform === 'linux' && arch === 'aarch64') {
-    triple = 'aarch64-unknown-linux-musl';
-  }
-  if (triple === null) {
+  if (platform !== 'darwin' && platform !== 'linux') {
     return null;
   }
-  const filename = `curl-${triple}.tar.gz`;
+  const triple = platform === 'darwin' ? `${arch}-apple-darwin` : `${arch}-unknown-linux-musl`;
+  const filename = `latchkey-curl-shims-${triple}.tar.gz`;
   return {
     filename,
-    url: `https://github.com/${DATALIB_REPO}/releases/download/${DATALIB_CURL_VERSION}/${filename}`,
+    url: `https://github.com/${CURL_SHIMS_REPO}/releases/download/${CURL_SHIMS_VERSION}/${filename}`,
   };
 }
 
@@ -648,19 +642,19 @@ const GIT_MANIFEST_TARGET_BY_PLATFORM_ARCH = {
 };
 
 /**
- * Bundle the datalib dispatch curl + Chrome-impersonating curl into
- * `<resourcesDir>/curl/`. The latchkey gateway runs the dispatch curl as
- * its LATCHKEY_CURL (wired in electron/backend.js).
+ * Bundle the latchkey curl router + Chrome-impersonating curl into
+ * `<resourcesDir>/curl/`. The latchkey gateway runs the router as its
+ * LATCHKEY_CURL (wired in electron/backend.js).
  *
- * No-op with a warning -- rather than a hard failure -- on the platforms we
- * don't bundle it on (macOS x86_64, Windows); in that case latchkey keeps
+ * No-op with a warning -- rather than a hard failure -- on Windows, which the
+ * release has no build for; in that case latchkey keeps
  * using the system curl. On a bundled platform this behaves like the
  * other bundled binaries: hard-fail on a download error or SHA mismatch.
  */
 async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   const info = getLatchkeyCurlDownloadInfo({ platform, arch });
   if (info === null) {
-    console.log(`[download-binaries] datalib curl is not bundled on ${platform}/${arch}; skipping (latchkey uses system curl).`);
+    console.log(`[download-binaries] the latchkey curl shims are not bundled on ${platform}/${arch}; skipping (latchkey uses system curl).`);
     return;
   }
 
@@ -674,12 +668,12 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
 
   const tarPath = path.join(curlDir, 'curl.tar.gz');
   fs.writeFileSync(tarPath, archive);
-  // The tarball is `curl-<version>-<triple>/<two binaries>`;
+  // The tarball is `latchkey-curl-shims-<triple>/<two binaries + notices>`;
   // strip the single inner dir so the binaries land directly in curlDir.
   execSync(`tar xzf "${tarPath}" -C "${curlDir}" --strip-components=1`, { stdio: 'inherit' });
   fs.unlinkSync(tarPath);
 
-  for (const name of ['latchkey-curl-dispatch', 'latchkey-curl-impersonate']) {
+  for (const name of ['latchkey-curl-router', 'curl-impersonate']) {
     const binPath = path.join(curlDir, name);
     if (!fs.existsSync(binPath)) {
       throw new Error(`${name} not found at ${binPath} after extraction`);
@@ -690,7 +684,7 @@ async function downloadLatchkeyCurl(resourcesDir, { platform, arch }) {
   // so this marker is the only way ensure-binaries.js can tell a stale dev
   // bundle from a current one. Written last: a failed download or SHA
   // mismatch must never leave a marker claiming this version.
-  console.log(`[download-binaries] latchkey curl (dispatch + impersonator) installed in ${curlDir}`);
+  console.log(`[download-binaries] latchkey curl (router + impersonator) installed in ${curlDir}`);
 }
 
 /**
@@ -1135,8 +1129,8 @@ const BINARIES = {
     download: downloadLima,
   },
   curl: {
-    version: () => DATALIB_CURL_VERSION,
-    requiredPath: 'latchkey-curl-dispatch',
+    version: () => CURL_SHIMS_VERSION,
+    requiredPath: 'latchkey-curl-router',
     isSupported: (platformArch) => getLatchkeyCurlDownloadInfo(platformArch) !== null,
     usedInDev: true,
     download: downloadLatchkeyCurl,
@@ -1240,7 +1234,7 @@ module.exports = {
   downloadBinaries,
   downloadGit,
   downloadLatchkeyCurl,
-  DATALIB_CURL_VERSION,
+  CURL_SHIMS_VERSION,
   download,
   classifyExecutable,
   isExecutableForTarget,

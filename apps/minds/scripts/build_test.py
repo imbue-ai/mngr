@@ -38,7 +38,8 @@ from typing import Final
 
 import pytest
 
-from imbue.mngr_latchkey.remote.provisioning import DATALIB_CURL_VERSION as GATEWAY_DATALIB_CURL_VERSION
+from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_SHA256_BY_TRIPLE as GATEWAY_CURL_SHIMS_SHA256_BY_TRIPLE
+from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_VERSION as GATEWAY_CURL_SHIMS_VERSION
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
 
 # The full set of workspace packages bundled into the standalone app. This
@@ -993,10 +994,10 @@ def test_ensure_binaries_replaces_anything_but_the_current_cache_entry() -> None
     )
 
 
-def test_datalib_curl_pin_agrees_with_the_latchkey_gateway() -> None:
-    """Drift guard: the two datalib curl pins must name the same release.
+def test_curl_shims_pin_agrees_with_the_latchkey_gateway() -> None:
+    """Drift guard: the two latchkey-curl-shims pins must name the same release.
 
-    The dispatch curl is fetched from two independent places -- minds bundles
+    The curl router is fetched from two independent places -- minds bundles
     it for the desktop app (``download-binaries.js``) and the latchkey gateway
     installs it on the VPS (``mngr_latchkey.remote.provisioning``) -- and the pin is
     duplicated because the mngr wheel must not read files outside the ``imbue``
@@ -1005,13 +1006,24 @@ def test_datalib_curl_pin_agrees_with_the_latchkey_gateway() -> None:
     with a different curl than the gateway it talks to.
     """
     download_text = _DOWNLOAD_BINARIES_PATH.read_text()
-    match = re.search(r"^const DATALIB_CURL_VERSION = '([^']+)';", download_text, re.MULTILINE)
-    assert match is not None, "Could not find DATALIB_CURL_VERSION in download-binaries.js"
-    assert match.group(1) == GATEWAY_DATALIB_CURL_VERSION, (
-        f"download-binaries.js pins datalib curl {match.group(1)} but "
-        f"mngr_latchkey.remote.provisioning pins {GATEWAY_DATALIB_CURL_VERSION}; "
+    match = re.search(r"^const CURL_SHIMS_VERSION = '([^']+)';", download_text, re.MULTILINE)
+    assert match is not None, "Could not find CURL_SHIMS_VERSION in download-binaries.js"
+    assert match.group(1) == GATEWAY_CURL_SHIMS_VERSION, (
+        f"download-binaries.js pins latchkey-curl-shims {match.group(1)} but "
+        f"mngr_latchkey.remote.provisioning pins {GATEWAY_CURL_SHIMS_VERSION}; "
         "bump both together."
     )
+    # Both sides also pin tarball checksums, and at least the Linux x86_64
+    # tarball is pinned by both.
+    desktop_sha256_by_triple = dict(
+        re.findall(r"'latchkey-curl-shims-([\w-]+)\.tar\.gz':\s+'([0-9a-f]{64})'", download_text)
+    )
+    shared_triples = desktop_sha256_by_triple.keys() & GATEWAY_CURL_SHIMS_SHA256_BY_TRIPLE.keys()
+    assert "x86_64-unknown-linux-musl" in shared_triples
+    for triple in shared_triples:
+        assert desktop_sha256_by_triple[triple] == GATEWAY_CURL_SHIMS_SHA256_BY_TRIPLE[triple], (
+            f"download-binaries.js and mngr_latchkey.remote.provisioning pin different sha256s for {triple}"
+        )
 
 
 def test_linux_installer_pins_the_mngr_vps_gvisor_release() -> None:

@@ -35,7 +35,8 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import WrittenFile
 from imbue.mngr_latchkey.remote.mock_outer_host_test import as_stub
 from imbue.mngr_latchkey.remote.mock_outer_host_test import stub_outer
 from imbue.mngr_latchkey.remote.provisioning import CONTAINER_TUNNEL_KEY_FILENAME
-from imbue.mngr_latchkey.remote.provisioning import DATALIB_CURL_VERSION
+from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_SHA256_BY_TRIPLE
+from imbue.mngr_latchkey.remote.provisioning import CURL_SHIMS_VERSION
 from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote.provisioning import DesktopGatewaySecrets
 from imbue.mngr_latchkey.remote.provisioning import GATEWAY_PROGRAM_NAME
@@ -50,8 +51,8 @@ from imbue.mngr_latchkey.remote.provisioning import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.remote.provisioning import SUPERVISOR_CONFD_DIR
 from imbue.mngr_latchkey.remote.provisioning import TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote.provisioning import TUNNEL_PROGRAM_NAME
-from imbue.mngr_latchkey.remote.provisioning import _CURL_DISPATCH_PATH
 from imbue.mngr_latchkey.remote.provisioning import _CURL_IMPERSONATE_PATH
+from imbue.mngr_latchkey.remote.provisioning import _CURL_ROUTER_PATH
 from imbue.mngr_latchkey.remote.provisioning import _CURL_STAGED_SUFFIX
 from imbue.mngr_latchkey.remote.provisioning import _CURL_VERSION_STAMP_PATH
 from imbue.mngr_latchkey.remote.provisioning import _MINIMUM_NODE_MAJOR_VERSION
@@ -165,48 +166,52 @@ def test_ensure_latchkey_installed_installs_impersonating_curl() -> None:
     outer = stub_outer(CommandResult(stdout="", stderr="", success=True))
     ensure_latchkey_installed(outer)
     command = as_stub(outer).recorded[0].command
-    # Fetches the datalib curl tarball for the VPS arch from the pinned
-    # release, verifies it against the published .sha256, and installs both
-    # the dispatch curl and the impersonator it fronts.
-    assert f"releases/download/{DATALIB_CURL_VERSION}/" in command
-    assert "curl-${_ci_triple}.tar.gz" in command
+    # Fetches the latchkey-curl-shims tarball for the VPS arch from the pinned
+    # release, verifies it against the sha256 pinned here, and installs both
+    # the router and the impersonator it fronts.
+    assert f"github.com/imbue-ai/latchkey-curl-shims/releases/download/{CURL_SHIMS_VERSION}/" in command
+    assert '_ci_tb="latchkey-curl-shims-${_ci_triple}.tar.gz"' in command
     # Every arch the script resolves lands on a statically linked musl build:
-    # the glibc build only runs where glibc is at least as new as datalib's
+    # the glibc build only runs where glibc is at least as new as the release's
     # build host, which rules out older VPS images. Checked over the whole set
     # of ``_ci_triple`` assignments so an arch branch added later cannot
     # quietly reintroduce a gnu triple.
-    assert set(re.findall(r"_ci_triple=(\S+)", command)) == {
+    assert set(re.findall(r"_ci_triple=([^\s;]+)", command)) == {
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl",
     }
-    assert "sha256sum -c" in command
+    # Each arch is checked against its own pinned sum, never one fetched from
+    # the release the tarball came from.
+    assert dict(re.findall(r"_ci_triple=(\S+); _ci_sha256=(\S+)", command)) == dict(CURL_SHIMS_SHA256_BY_TRIPLE)
+    assert 'echo "${_ci_sha256}  ${_ci_tb}" | sha256sum -c -' in command
+    assert ".sha256" not in command
     assert "tar -xzf" in command and "--strip-components=1" in command
     # Both binaries are staged beside their destinations and then renamed into
     # place: overwriting them directly would truncate a file the running
     # gateway may be executing (ETXTBSY), and staging both before swapping
     # either leaves the previous pair untouched if the download, checksum, or
     # staging fails.
-    staged_dispatch = f"{_CURL_DISPATCH_PATH}{_CURL_STAGED_SUFFIX}"
+    staged_router = f"{_CURL_ROUTER_PATH}{_CURL_STAGED_SUFFIX}"
     staged_impersonate = f"{_CURL_IMPERSONATE_PATH}{_CURL_STAGED_SUFFIX}"
-    assert f'install -m 0755 "${{_ci_tmp}}/{_CURL_DISPATCH_PATH.rsplit("/", 1)[1]}" "{staged_dispatch}"' in command
+    assert f'install -m 0755 "${{_ci_tmp}}/{_CURL_ROUTER_PATH.rsplit("/", 1)[1]}" "{staged_router}"' in command
     assert (
         f'install -m 0755 "${{_ci_tmp}}/{_CURL_IMPERSONATE_PATH.rsplit("/", 1)[1]}" "{staged_impersonate}"' in command
     )
     assert f'mv -f "{staged_impersonate}" "{_CURL_IMPERSONATE_PATH}"' in command
-    assert f'mv -f "{staged_dispatch}" "{_CURL_DISPATCH_PATH}"' in command
-    # The dispatch curl -- the one LATCHKEY_CURL names -- is swapped last, so
-    # no request reaches a new dispatch curl fronting an old impersonator.
-    assert command.index(f'mv -f "{staged_impersonate}"') < command.index(f'mv -f "{staged_dispatch}"')
+    assert f'mv -f "{staged_router}" "{_CURL_ROUTER_PATH}"' in command
+    # The router -- the one LATCHKEY_CURL names -- is swapped last, so no
+    # request reaches a new router fronting an old impersonator.
+    assert command.index(f'mv -f "{staged_impersonate}"') < command.index(f'mv -f "{staged_router}"')
     # Version-gated, not presence-gated: the binaries are installed under
     # version-less names, so a VPS that already has an older release's pair
     # must be re-installed rather than skipped -- otherwise a bump only ever
     # reaches hosts that have never been provisioned.
-    assert f"[ ! -x {_CURL_DISPATCH_PATH} ] || " in command
+    assert f"[ ! -x {_CURL_ROUTER_PATH} ] || " in command
     assert f'[ "$(cat {_CURL_VERSION_STAMP_PATH} 2>/dev/null)" != "$_ci_want" ]; then' in command
-    assert f'_ci_want="{DATALIB_CURL_VERSION} ${{_ci_triple}}"' in command
+    assert f'_ci_want="{CURL_SHIMS_VERSION} ${{_ci_triple}}"' in command
     # The stamp is written only after both binaries are swapped in, so an
     # aborted install never leaves a stamp claiming the new version.
-    assert command.index(f'mv -f "{staged_dispatch}"') < command.index(f"> {_CURL_VERSION_STAMP_PATH}")
+    assert command.index(f'mv -f "{staged_router}"') < command.index(f"> {_CURL_VERSION_STAMP_PATH}")
     # Fail-loud like the other components -- no best-effort warning fallback
     # that swallows failures.
     assert "latchkey will use system curl" not in command
@@ -410,11 +415,11 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_the_do
     assert "machine-password" not in run_script
     assert "desktop-password" not in run_script
     assert "desktop-override-jwt" not in run_script
-    # Routes latchkey through the bundled dispatch curl. Unconditional export --
+    # Routes latchkey through the curl router. Unconditional export --
     # provisioning installs the pair fail-loud, so reaching this script at all
-    # guarantees they are there. The dispatch curl finds the impersonator as a
+    # guarantees they are there. The router finds the impersonator as a
     # sibling, so no second env var is exported.
-    assert f"export LATCHKEY_CURL={_CURL_DISPATCH_PATH}" in run_script
+    assert f"export LATCHKEY_CURL={_CURL_ROUTER_PATH}" in run_script
     assert "FRANKWEILER_IMPERSONATE_CURL" not in run_script
     # The wrapper refuses to launch a keyless gateway when the machine's own
     # tmpfs secrets are gone (e.g. wiped by a reboot). The desktop-owned pair is

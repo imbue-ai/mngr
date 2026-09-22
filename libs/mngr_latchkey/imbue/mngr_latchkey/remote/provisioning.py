@@ -125,32 +125,39 @@ from imbue.mngr_latchkey.store import plugin_data_dir
 # Version of the upstream ``latchkey`` CLI to install on the VPS.
 LATCHKEY_VERSION: Final[str] = "3.15.0"
 
-# datalib release the VPS fetches the "dispatch curl" + Chrome-impersonating
-# curl from (``curl-<triple>.tar.gz``). The gateway runs the dispatch curl as
-# its ``LATCHKEY_CURL`` so a caller that sends the ``X-Imbue-Impersonate``
-# marker header gets Chrome TLS impersonation, while every other request
-# passes through to the system curl. The statically linked musl build is
-# fetched rather than the glibc one, so it runs on any VPS image regardless of
-# how old its glibc is. The fetch is fail-loud, like every other component of
-# the install: a network failure, a checksum mismatch, or a host arch datalib
-# doesn't build fails provisioning. The gateway run script exports
+# latchkey-curl-shims release the VPS fetches the curl router + the
+# Chrome-impersonating curl from (``latchkey-curl-shims-<triple>.tar.gz``). The
+# gateway runs the router as its ``LATCHKEY_CURL``: a request carrying the
+# ``X-Imbue-Impersonate`` marker header gets Chrome TLS impersonation, and every
+# other request passes through to the system curl. The statically linked musl
+# build is fetched rather than the glibc one, so it runs on any VPS image
+# regardless of how old its glibc is. The fetch is fail-loud, like every other
+# component of the install: a network failure, a checksum mismatch, or a host
+# arch with no build fails provisioning. The gateway run script exports
 # ``LATCHKEY_CURL`` unconditionally and so depends on that -- pointing latchkey
 # at a curl that isn't there would break every request, not just impersonating
 # ones.
-_DATALIB_REPO: Final[str] = "imbue-ai/datalib"
-DATALIB_CURL_VERSION: Final[str] = "v0.26.0"
+_CURL_SHIMS_REPO: Final[str] = "imbue-ai/latchkey-curl-shims"
+CURL_SHIMS_VERSION: Final[str] = "v0.4.0"
+# sha256 of each tarball a VPS can fetch, from the release's ``SHA256SUMS``.
+# Pinned here rather than downloaded beside the tarball, so a tarball replaced
+# on the release fails the install instead of verifying against its own sum.
+CURL_SHIMS_SHA256_BY_TRIPLE: Final[Mapping[str, str]] = {
+    "x86_64-unknown-linux-musl": "7173b301133c4a465174481041ade5c1f8fffac4ae4b86d54cdf4279ac7a0f93",
+    "aarch64-unknown-linux-musl": "afa65e2c795dce9acfd32ad22d732c27509a07382e6db00626a98e1ec93f8f76",
+}
 # Where the two binaries land on the VPS. ``/usr/local/bin`` is already on the
-# gateway run script's PATH, and the dispatch curl finds the impersonator as a sibling.
-_CURL_IMPERSONATE_INSTALL_DIR: Final[str] = "/usr/local/bin"
-_CURL_DISPATCH_BIN: Final[str] = "latchkey-curl-dispatch"
-_CURL_IMPERSONATE_BIN: Final[str] = "latchkey-curl-impersonate"
-_CURL_DISPATCH_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/{_CURL_DISPATCH_BIN}"
-_CURL_IMPERSONATE_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/{_CURL_IMPERSONATE_BIN}"
+# gateway run script's PATH, and the router finds the impersonator as a sibling.
+_CURL_SHIMS_INSTALL_DIR: Final[str] = "/usr/local/bin"
+_CURL_ROUTER_BIN: Final[str] = "latchkey-curl-router"
+_CURL_IMPERSONATE_BIN: Final[str] = "curl-impersonate"
+_CURL_ROUTER_PATH: Final[str] = f"{_CURL_SHIMS_INSTALL_DIR}/{_CURL_ROUTER_BIN}"
+_CURL_IMPERSONATE_PATH: Final[str] = f"{_CURL_SHIMS_INSTALL_DIR}/{_CURL_IMPERSONATE_BIN}"
 # The curl the gateway run script this build writes names as ``LATCHKEY_CURL``
 # (the one ``ensure_latchkey_installed`` puts on the machine), for a caller
 # that replays a run script written by another build and must give it a curl
 # at the path it expects.
-LATCHKEY_CURL_PATH: Final[str] = _CURL_DISPATCH_PATH
+LATCHKEY_CURL_PATH: Final[str] = _CURL_ROUTER_PATH
 # Suffix the new binaries are staged under before being renamed over the old
 # ones. Overwriting them in place would truncate a file the gateway may be
 # executing right then, which fails with ETXTBSY ("Text file busy"); a rename
@@ -158,12 +165,17 @@ LATCHKEY_CURL_PATH: Final[str] = _CURL_DISPATCH_PATH
 # old inode. Staging both before swapping either also means a failure while
 # downloading, verifying, or staging leaves the previous pair untouched.
 _CURL_STAGED_SUFFIX: Final[str] = ".new"
-# Records which datalib release and target triple the installed pair came from.
-# The binaries are installed under fixed, version-less names, so without this
+# Records which release and target triple the installed pair came from. The
+# binaries are installed under fixed, version-less names, so without this
 # stamp a presence check would leave an already-provisioned VPS on whatever
 # build it first received -- exactly the hosts a bump is meant to reach. A
 # dotfile in ``/usr/local/bin`` is never picked up by a PATH lookup.
-_CURL_VERSION_STAMP_PATH: Final[str] = f"{_CURL_IMPERSONATE_INSTALL_DIR}/.latchkey-curl-version"
+_CURL_VERSION_STAMP_PATH: Final[str] = f"{_CURL_SHIMS_INSTALL_DIR}/.latchkey-curl-version"
+# ``uname -m`` patterns, as ``case`` alternatives, and the build each selects.
+_CURL_SHIMS_TRIPLE_BY_UNAME_PATTERN: Final[tuple[tuple[str, str], ...]] = (
+    ("x86_64", "x86_64-unknown-linux-musl"),
+    ("aarch64|arm64", "aarch64-unknown-linux-musl"),
+)
 
 # Port on the VPS loopback where the desktop gateway is reverse-tunneled. The
 # VPS-only extension forwards Minds-owned endpoint families here.
@@ -363,8 +375,8 @@ def _build_ensure_installed_script(
 ) -> str:
     """Build an idempotent POSIX-sh script that installs curl, Node.js, supervisor, and latchkey.
 
-    It also installs the datalib "dispatch" curl + the Chrome-impersonating
-    curl it fronts (see :data:`DATALIB_CURL_VERSION`).
+    It also installs the curl router + the Chrome-impersonating curl it fronts
+    (see :data:`CURL_SHIMS_VERSION`).
 
     Each component is gated behind a presence check -- except Node.js, the
     latchkey CLI, and the curl pair, which are gated behind a *version* check.
@@ -397,38 +409,39 @@ def _build_ensure_installed_script(
             "  apt-get update",
             "  apt-get install -y curl",
             "fi",
-            # Install the Chrome-impersonating "dispatch" curl + the
-            # impersonator it fronts from the datalib release, so marked
-            # latchkey requests (X-Imbue-Impersonate header) clear Cloudflare.
-            # Fail-loud under ``set -e`` like every other component here.
+            # Install the curl router + the Chrome-impersonating curl it fronts
+            # from the latchkey-curl-shims release, so marked latchkey requests
+            # (X-Imbue-Impersonate header) clear Cloudflare. Fail-loud under
+            # ``set -e`` like every other component here.
             '_ci_arch="$(uname -m)"',
             'case "$_ci_arch" in',
-            "  x86_64) _ci_triple=x86_64-unknown-linux-musl ;;",
-            "  aarch64|arm64) _ci_triple=aarch64-unknown-linux-musl ;;",
+            *(
+                f"  {arch_pattern}) _ci_triple={triple}; _ci_sha256={CURL_SHIMS_SHA256_BY_TRIPLE[triple]} ;;"
+                for arch_pattern, triple in _CURL_SHIMS_TRIPLE_BY_UNAME_PATTERN
+            ),
             '  *) echo "no impersonating curl build for arch $_ci_arch" >&2; exit 1 ;;',
             "esac",
             # Reinstall whenever the installed pair came from a different
             # release or triple (a host that predates the stamp, or has no
             # curl at all, reads as an empty string and so never matches).
             # ``$(cat ...)`` drops the stamp's trailing newline.
-            f'_ci_want="{DATALIB_CURL_VERSION} ${{_ci_triple}}"',
-            f"if [ ! -x {_CURL_DISPATCH_PATH} ] || "
+            f'_ci_want="{CURL_SHIMS_VERSION} ${{_ci_triple}}"',
+            f"if [ ! -x {_CURL_ROUTER_PATH} ] || "
             f'[ "$(cat {_CURL_VERSION_STAMP_PATH} 2>/dev/null)" != "$_ci_want" ]; then',
-            '  _ci_tb="curl-${_ci_triple}.tar.gz"',
-            f'  _ci_url="https://github.com/{_DATALIB_REPO}/releases/download/{DATALIB_CURL_VERSION}/${{_ci_tb}}"',
+            '  _ci_tb="latchkey-curl-shims-${_ci_triple}.tar.gz"',
+            f'  _ci_url="https://github.com/{_CURL_SHIMS_REPO}/releases/download/{CURL_SHIMS_VERSION}/${{_ci_tb}}"',
             '  _ci_tmp="$(mktemp -d)"',
             '  curl -fsSL --retry 3 --retry-delay 2 -o "${_ci_tmp}/${_ci_tb}" "$_ci_url"',
-            '  curl -fsSL --retry 2 -o "${_ci_tmp}/${_ci_tb}.sha256" "${_ci_url}.sha256"',
-            '  (cd "${_ci_tmp}" && sha256sum -c "${_ci_tb}.sha256" >/dev/null)',
+            '  (cd "${_ci_tmp}" && echo "${_ci_sha256}  ${_ci_tb}" | sha256sum -c - >/dev/null)',
             '  tar -xzf "${_ci_tmp}/${_ci_tb}" -C "${_ci_tmp}" --strip-components=1',
             # Staged beside their destinations, then renamed into place: see
-            # :data:`_CURL_STAGED_SUFFIX`. The dispatch curl is swapped last
-            # because it is the one ``LATCHKEY_CURL`` names, so no request ever
-            # reaches a new dispatch curl fronting an old impersonator.
-            f'  install -m 0755 "${{_ci_tmp}}/{_CURL_DISPATCH_BIN}" "{_CURL_DISPATCH_PATH}{_CURL_STAGED_SUFFIX}"',
+            # :data:`_CURL_STAGED_SUFFIX`. The router is swapped last because
+            # it is the one ``LATCHKEY_CURL`` names, so no request ever reaches
+            # a new router fronting an old impersonator.
+            f'  install -m 0755 "${{_ci_tmp}}/{_CURL_ROUTER_BIN}" "{_CURL_ROUTER_PATH}{_CURL_STAGED_SUFFIX}"',
             f'  install -m 0755 "${{_ci_tmp}}/{_CURL_IMPERSONATE_BIN}" "{_CURL_IMPERSONATE_PATH}{_CURL_STAGED_SUFFIX}"',
             f'  mv -f "{_CURL_IMPERSONATE_PATH}{_CURL_STAGED_SUFFIX}" "{_CURL_IMPERSONATE_PATH}"',
-            f'  mv -f "{_CURL_DISPATCH_PATH}{_CURL_STAGED_SUFFIX}" "{_CURL_DISPATCH_PATH}"',
+            f'  mv -f "{_CURL_ROUTER_PATH}{_CURL_STAGED_SUFFIX}" "{_CURL_ROUTER_PATH}"',
             # Stamped only once both binaries are in place: a failed download,
             # checksum, or swap aborts under ``set -e`` before reaching this,
             # so the stamp never claims a release the host isn't running.
@@ -501,7 +514,7 @@ def ensure_latchkey_installed(host: OuterHostInterface) -> None:
 
     Idempotent: each component is installed only when missing, or -- for
     latchkey and the impersonating curl pair -- when the installed version
-    differs from :data:`LATCHKEY_VERSION` / :data:`DATALIB_CURL_VERSION`.
+    differs from :data:`LATCHKEY_VERSION` / :data:`CURL_SHIMS_VERSION`.
     Raises :class:`RemoteGatewayError` if the install fails.
     """
     script = _build_ensure_installed_script(LATCHKEY_VERSION, _NODE_MAJOR_VERSION, _MINIMUM_NODE_MAJOR_VERSION)
@@ -895,11 +908,11 @@ def _build_gateway_run_script(
             f"export {GATEWAY_LISTEN_HOST_ENV_VAR}={shlex.quote(listen_host)}",
             "export LATCHKEY_DISABLE_COUNTING=1",
             f"export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL={shlex.quote(desktop_gateway_url)}",
-            # Route latchkey through the bundled dispatch curl (installed by
+            # Route latchkey through the curl router (installed by
             # _build_ensure_installed_script): requests carrying the
             # X-Imbue-Impersonate marker header get Chrome TLS impersonation
             # via the sibling impersonator, everything else uses system curl.
-            f"export LATCHKEY_CURL={_CURL_DISPATCH_PATH}",
+            f"export LATCHKEY_CURL={_CURL_ROUTER_PATH}",
             f"exec latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES}",
             "",
         )
