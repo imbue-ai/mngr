@@ -42,6 +42,7 @@ from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_OS_FORK
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PANDAS_IMPORT
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PER_FILE_HOST_UPLOAD
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_PYTEST_MARK_INTEGRATION
+from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RAW_CONCURRENCY_GROUP_EXECUTOR
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RELATIVE_IMPORTS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_RETURNS_IN_DOCSTRINGS
 from imbue.imbue_common.ratchet_testing.common_ratchets import PREVENT_SETATTR
@@ -386,6 +387,12 @@ def check_direct_subprocess(
 ) -> None:
     chunks = check_ratchet_rule(PREVENT_DIRECT_SUBPROCESS, source_dir, excluded_patterns)
     assert len(chunks) <= max_count, PREVENT_DIRECT_SUBPROCESS.format_failure(chunks)
+
+
+def check_raw_concurrency_group_executor(source_dir: Path, max_count: int) -> None:
+    excluded = _SELF_EXCLUSION + TEST_FILE_PATTERNS + ("thread_cleanup.py",)
+    chunks = check_ratchet_rule(PREVENT_RAW_CONCURRENCY_GROUP_EXECUTOR, source_dir, excluded)
+    assert len(chunks) <= max_count, PREVENT_RAW_CONCURRENCY_GROUP_EXECUTOR.format_failure(chunks)
 
 
 # --- Modal images ---

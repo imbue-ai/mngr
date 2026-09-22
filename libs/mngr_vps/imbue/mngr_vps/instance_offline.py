@@ -13,7 +13,6 @@ from loguru import logger
 from pydantic import ConfigDict
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.errors import HostConnectionError
@@ -37,6 +36,7 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.ssh_utils import add_host_to_known_hosts
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_vps.container_setup import download_directory_from_outer
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import translate_outer_concurrency_errors
@@ -173,7 +173,6 @@ class OfflineCapableVpsProvider(VpsProvider):
     behavior differs.
     """
 
-    # =========================================================================
     # Cloud stop/start lifecycle (idle-pause + resume)
     #
     # The base ``VpsProvider`` stop/start act only on the inner placement (the
@@ -183,7 +182,6 @@ class OfflineCapableVpsProvider(VpsProvider):
     # supply the small cloud-API hooks. Keeping the record-write + external mirror
     # in a single place means a resumed host's offline view is always refreshed, on
     # every provider (a per-provider copy once dropped the Azure mirror).
-    # =========================================================================
 
     def stop_host(
         self,
@@ -608,7 +606,6 @@ class OfflineCapableVpsProvider(VpsProvider):
         ):
             download_directory_from_outer(outer, cg, str(host_dir_on_outer), local_dir)
 
-    # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
     #
     # An idle container should stop the whole instance (so a paused agent costs
@@ -617,7 +614,6 @@ class OfflineCapableVpsProvider(VpsProvider):
     # ``.path`` unit observes it and runs a oneshot ``.service`` that stops the
     # instance. The install sequence and the sentinel-touch script are shared
     # here; the ``.service`` body (poweroff vs Azure ARM deallocate) is a hook.
-    # =========================================================================
 
     def _provider_instance_kind(self) -> str:
         """Human-readable name for this provider's machine, used only in unit ``Description=``.
@@ -709,7 +705,6 @@ class OfflineCapableVpsProvider(VpsProvider):
                 outer.execute_idempotent_command(f"systemctl enable --now {IDLE_WATCHER_UNIT_NAME}.path")
         logger.info("Idle self-stop watcher installed for host {}", host_id)
 
-    # =========================================================================
     # Host-side offline host_dir capability (select-once backend)
     #
     # Offline host_dir is a bucket feature: a provider mirrors host_dir to an object
@@ -717,7 +712,6 @@ class OfflineCapableVpsProvider(VpsProvider):
     # ``HostDirBackend`` once (bucket-backed when enabled + present, else the no-op
     # ``NullHostDirBackend``), so the call sites below never re-test the feature flag
     # or bucket presence. GCP has no object store and keeps the no-op default.
-    # =========================================================================
 
     @property
     def _host_dir_backend(self) -> HostDirBackend:
@@ -793,9 +787,7 @@ class OfflineCapableVpsProvider(VpsProvider):
         host_id = host.id if isinstance(host, HostInterface) else host
         return self._host_dir_backend.volume(host_id)
 
-    # =========================================================================
     # Post-finalize provisioning (best-effort idle watcher)
-    # =========================================================================
 
     def _post_finalize_steps(self, *, host_id: HostId, vps_ip: str) -> list[tuple[str, Callable[[], None]]]:
         """Extra best-effort post-finalize steps a provider prepends to the shared list.
@@ -1171,9 +1163,7 @@ def _write_files_concurrently(volume: Volume, files: Mapping[str, bytes]) -> Non
     for index, (path, content) in enumerate(items):
         chunks[index % worker_count][path] = content
     with ConcurrencyGroup(name="host-dir-capture-upload") as cg:
-        with ConcurrencyGroupExecutor(
-            parent_cg=cg, name="host-dir-capture-upload", max_workers=worker_count
-        ) as executor:
+        with mngr_executor(parent_cg=cg, name="host-dir-capture-upload", max_workers=worker_count) as executor:
             futures = [executor.submit(volume.write_files, chunk) for chunk in chunks]
     # Surface a worker's failure *outside* the ConcurrencyGroup block: re-raising it
     # inside would let the group's __exit__ wrap it in a ConcurrencyExceptionGroup,

@@ -19,7 +19,6 @@ from loguru import logger
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessError
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
@@ -36,6 +35,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_sshd_command
 from imbue.mngr.providers.ssh_utils import clear_host_from_known_hosts
 from imbue.mngr.utils.git_utils import rsync_worktree_over_clone
 from imbue.mngr.utils.ssh import quote_ssh_option_value_for_shell
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.errors import ContainerSetupError
 from imbue.mngr_vps.errors import VpsProvisioningError
@@ -516,7 +516,7 @@ def provision_snapshot_helper_on_outer(
         translate_outer_concurrency_errors("provision the snapshot helper on the host"),
         log_span("Provisioning snapshot helper on outer (host_id={})", host_id),
     ):
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=cg,
             name="snapshot_helper_phase_a",
             max_workers=5,
@@ -549,7 +549,7 @@ def provision_snapshot_helper_on_outer(
         for future in phase_a_futures:
             future.result()
 
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=cg,
             name="snapshot_helper_phase_b",
             max_workers=2,

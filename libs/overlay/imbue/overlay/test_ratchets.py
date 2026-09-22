@@ -257,6 +257,10 @@ def test_prevent_bare_tmux_targets() -> None:
     rc.check_bare_tmux_targets(_DIR, snapshot(0))
 
 
+def test_prevent_raw_concurrency_group_executor() -> None:
+    rc.check_raw_concurrency_group_executor(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 

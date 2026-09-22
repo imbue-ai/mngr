@@ -51,7 +51,6 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
@@ -118,6 +117,7 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.file_utils import read_json_dict
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.ssh import build_ssh_connect_command
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.config import get_provider_data_dir
 from imbue.mngr_imbue_cloud.connector.auth_helper import get_active_token
@@ -950,7 +950,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         cache_lock = Lock()
         if leased:
             with log_span("Reading outer listings from {} leased host(s) in parallel", len(leased)):
-                with ConcurrencyGroupExecutor(
+                with mngr_executor(
                     parent_cg=cg,
                     name=f"{type(self).__name__}-discover_outer_listing",
                     max_workers=min(len(leased), _DISCOVERY_MAX_WORKERS),

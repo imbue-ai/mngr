@@ -33,7 +33,6 @@ from tenacity import stop_after_attempt
 from tenacity import wait_exponential
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import info_span
 from imbue.imbue_common.logging import log_span
@@ -112,6 +111,7 @@ from imbue.mngr.providers.ssh_host_setup import build_start_volume_sync_command
 from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.utils.ssh import build_ssh_connect_command
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
@@ -890,9 +890,7 @@ class ModalProviderInstance(BaseProviderInstance):
 
             futures: list[Future[HostRecord | None]] = []
             future_by_host_id: dict[HostId, Future[list[dict[str, Any]]]] = {}
-            with ConcurrencyGroupExecutor(
-                parent_cg=cg, name="modal_list_all_host_records", max_workers=32
-            ) as executor:
+            with mngr_executor(parent_cg=cg, name="modal_list_all_host_records", max_workers=32) as executor:
                 # List files in the /hosts/ directory on the volume
                 with log_span("Listing /hosts/ directory on state volume"):
                     try:
@@ -2513,9 +2511,7 @@ log "=== Shutdown script completed ==="
         # Fetch sandboxes and host records in parallel since they are independent.
         # This reduces discover_hosts latency by ~1.5s by overlapping the network calls.
         try:
-            with ConcurrencyGroupExecutor(
-                parent_cg=cg, name=f"modal_discover_hosts_{self.name}", max_workers=2
-            ) as executor:
+            with mngr_executor(parent_cg=cg, name=f"modal_discover_hosts_{self.name}", max_workers=2) as executor:
                 sandboxes_future = executor.submit(self._list_sandboxes)
                 host_records_future = executor.submit(self._list_all_host_records, cg)
 
@@ -2538,7 +2534,7 @@ log "=== Shutdown script completed ==="
                 continue
 
         host_futures_with_records: list[Future[tuple[HostInterface | None, HostState | None]]] = []
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
         ) as executor:
             # First, process host records (includes both running and stopped hosts)
@@ -2568,7 +2564,7 @@ log "=== Shutdown script completed ==="
         # Second, include any running sandboxes that don't have host records yet
         # (handles eventual consistency of volume or legacy sandboxes)
         other_host_futures: list[tuple[HostId, Future[Host | None]]] = []
-        with ConcurrencyGroupExecutor(
+        with mngr_executor(
             parent_cg=cg, name=f"modal_discover_hosts_{self.name}_missing_records", max_workers=2
         ) as executor:
             for host_id, sandbox in running_sandbox_by_host_id.items():
@@ -2668,7 +2664,7 @@ log "=== Shutdown script completed ==="
             # Fetch tags for all sandboxes in parallel
             with log_span("Fetching tags for {} sandbox(es)", len(sandboxes)):
                 tag_futures: list[Future[dict[str, str]]] = []
-                with ConcurrencyGroupExecutor(parent_cg=cg, name="fetch_sandbox_tags", max_workers=32) as executor:
+                with mngr_executor(parent_cg=cg, name="fetch_sandbox_tags", max_workers=32) as executor:
                     for sandbox in sandboxes:
                         tag_futures.append(executor.submit(sandbox.get_tags))
 
@@ -2731,7 +2727,7 @@ log "=== Shutdown script completed ==="
         with log_span("Modal discover_hosts_and_agents for provider={}", self.name):
             try:
                 with log_span("Parallel fetch: sandbox IDs + host/agent records"):
-                    with ConcurrencyGroupExecutor(
+                    with mngr_executor(
                         parent_cg=cg, name=f"modal_discover_hosts_and_agents_{self.name}", max_workers=3
                     ) as executor:
                         running_ids_future = executor.submit(self._list_running_host_ids, cg)

@@ -501,6 +501,22 @@ PREVENT_OS_FORK = RegexRatchetRule(
     ),
 )
 
+PREVENT_RAW_CONCURRENCY_GROUP_EXECUTOR = RegexRatchetRule(
+    rule_name="raw ConcurrencyGroupExecutor construction",
+    rule_description=(
+        "Do not construct ConcurrencyGroupExecutor directly in production code. In mngr and its "
+        "plugins, use mngr_executor from imbue.mngr.utils.thread_cleanup instead: it has the same "
+        "submit API and destroys each worker thread's gevent Hub when the task finishes. Any worker "
+        "that runs a host command (pyinfra reads its output with gevent greenlets) otherwise leaves "
+        "its Hub behind, pinning a pipe pair and the task's object graph for the life of the process "
+        "-- unbounded growth in long-running callers like `mngr observe`, which fan out on every "
+        "poll. This rule only sees the executor: a short-lived thread started any other way "
+        "(start_new_thread, ThreadPoolExecutor, threading.Thread) that runs host commands must call "
+        "cleanup_thread_local_resources() in a finally block itself."
+    ),
+    pattern_string=r"(?<!class )\bConcurrencyGroupExecutor\(",
+)
+
 PREVENT_IMPORTLIB_IMPORT_MODULE = RegexRatchetRule(
     rule_name="importlib.import_module usage",
     rule_description="Always use normal top-level imports instead of importlib.import_module",

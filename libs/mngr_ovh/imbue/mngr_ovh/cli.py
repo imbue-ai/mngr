@@ -17,12 +17,12 @@ from click_option_group import optgroup
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
 from imbue.mngr.config.data_types import CommonCliOptions
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_ovh.client import OvhVpsClient
 from imbue.mngr_ovh.client import build_ovh_client
 from imbue.mngr_ovh.config import OvhProviderConfig
@@ -161,7 +161,7 @@ def _collect_rows_in_parallel(
     rows: list[dict[str, str]] = []
     with (
         cg,
-        ConcurrencyGroupExecutor(
+        mngr_executor(
             parent_cg=cg,
             name="mngr-ovh-list-fetch",
             max_workers=min(_MAX_PARALLEL_VPS_FETCHES, max(1, len(service_names))),

@@ -23,7 +23,6 @@ from pydantic import PrivateAttr
 from pyinfra.api import Host as PyinfraHost
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
-from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
@@ -94,6 +93,7 @@ from imbue.mngr.providers.ssh_utils import resolve_per_host_client_keypair
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.ssh import build_ssh_connect_command
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_vps.bare_realizer import BareRealizer
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.build_args import extract_git_depth
@@ -475,9 +475,7 @@ class VpsProvider(BaseProviderInstance):
         per-provider ``super()`` coordination.
         """
 
-    # =========================================================================
     # Key Management
-    # =========================================================================
 
     def _key_dir(self) -> Path:
         """Directory for SSH keys for this provider instance."""
@@ -548,9 +546,7 @@ class VpsProvider(BaseProviderInstance):
     def _container_known_hosts_path(self) -> Path:
         return self._key_dir() / CONTAINER_KNOWN_HOSTS_NAME
 
-    # =========================================================================
     # Outer host helper
-    # =========================================================================
 
     @contextmanager
     def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:
@@ -577,18 +573,14 @@ class VpsProvider(BaseProviderInstance):
         finally:
             outer.disconnect()
 
-    # =========================================================================
     # Host Store
-    # =========================================================================
     # The substrate opens the store via ``self._realizer.open_host_store(outer,
     # host_id)``; where the ``host_state.json`` + ``agents/`` layout physically
     # lives is the realizer's concern (the container realizer resolves the
     # per-host docker volume's bind-source path; the bare realizer points at a
     # fixed root-disk directory).
 
-    # =========================================================================
     # Host Object Construction
-    # =========================================================================
 
     def _create_host_object(
         self,
@@ -676,9 +668,7 @@ class VpsProvider(BaseProviderInstance):
         except MngrError as e:
             logger.warning("Failed to sync certified data to VPS host volume: {}", e)
 
-    # =========================================================================
     # VPS Provisioning
-    # =========================================================================
 
     def _wait_for_cloud_init(self, outer: OuterHostInterface, timeout_seconds: float) -> None:
         """Wait for cloud-init to finish (Docker installed, marker file present)."""
@@ -688,9 +678,7 @@ class VpsProvider(BaseProviderInstance):
         """Wait for sshd on the VPS to be ready."""
         wait_for_sshd(hostname=vps_ip, port=22, timeout_seconds=timeout_seconds)
 
-    # =========================================================================
     # Core Lifecycle: create_host
-    # =========================================================================
 
     def create_host(
         self,
@@ -1325,9 +1313,7 @@ class VpsProvider(BaseProviderInstance):
         ``raise_if_vps_migration_arg``, ``raise_if_unknown_provider_arg``).
         """
 
-    # =========================================================================
     # Core Lifecycle: stop_host
-    # =========================================================================
 
     def stop_host(
         self,
@@ -1384,9 +1370,7 @@ class VpsProvider(BaseProviderInstance):
         self._host_record_cache[host_id] = updated_record
         logger.info("Host {} stopped", host_id)
 
-    # =========================================================================
     # Core Lifecycle: start_host
-    # =========================================================================
 
     def start_host(
         self,
@@ -1428,9 +1412,7 @@ class VpsProvider(BaseProviderInstance):
         logger.info("Host {} started", host_id)
         return host_obj
 
-    # =========================================================================
     # Core Lifecycle: destroy_host
-    # =========================================================================
 
     def destroy_host(self, host: HostInterface | HostId) -> None:
         """Destroy a VPS-backed host permanently.
@@ -1561,9 +1543,7 @@ class VpsProvider(BaseProviderInstance):
         with self._make_outer_for_vps_ip(host_record.vps_ip) as outer:
             yield outer
 
-    # =========================================================================
     # Discovery
-    # =========================================================================
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
         if isinstance(host, HostId) and host in self._host_by_id_cache:
@@ -1892,7 +1872,7 @@ class VpsProvider(BaseProviderInstance):
         with log_span("Reading records from {} VPS instance(s) in parallel", len(vps_ips)):
             cg = ConcurrencyGroup(name=cg_name)
             with cg:
-                with ConcurrencyGroupExecutor(
+                with mngr_executor(
                     parent_cg=cg,
                     name=f"{cg_name}_read_records",
                     max_workers=min(len(vps_ips), 32),
@@ -1939,9 +1919,7 @@ class VpsProvider(BaseProviderInstance):
                 return record
         return None
 
-    # =========================================================================
     # Optimized Listing
-    # =========================================================================
 
     def get_host_and_agent_details(
         self,
@@ -2208,9 +2186,7 @@ class VpsProvider(BaseProviderInstance):
             plugin={},
         )
 
-    # =========================================================================
     # Snapshots
-    # =========================================================================
 
     def create_snapshot(
         self,
@@ -2306,9 +2282,7 @@ class VpsProvider(BaseProviderInstance):
         self._host_record_cache[host_id] = updated_record
         logger.info("Deleted snapshot {} for host {}", snapshot_id, host_id)
 
-    # =========================================================================
     # Tags
-    # =========================================================================
 
     def get_host_tags(self, host: HostInterface | HostId) -> dict[str, str]:
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -2370,9 +2344,7 @@ class VpsProvider(BaseProviderInstance):
         """
         del host_record, name
 
-    # =========================================================================
     # Volumes
-    # =========================================================================
 
     def list_volumes(self) -> list[VolumeInfo]:
         return []
@@ -2380,9 +2352,7 @@ class VpsProvider(BaseProviderInstance):
     def delete_volume(self, volume_id: VolumeId) -> None:
         pass
 
-    # =========================================================================
     # Resources
-    # =========================================================================
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
         return HostResources(
@@ -2392,9 +2362,7 @@ class VpsProvider(BaseProviderInstance):
             gpu=None,
         )
 
-    # =========================================================================
     # Connector
-    # =========================================================================
 
     def get_connector(self, host: HostInterface | HostId) -> PyinfraHost:
         resolved = self.get_host(host.id if isinstance(host, HostInterface) else host)
@@ -2402,9 +2370,7 @@ class VpsProvider(BaseProviderInstance):
             return resolved.connector.host
         raise MngrError("Cannot get connector for offline host")
 
-    # =========================================================================
     # Agent Data Persistence
-    # =========================================================================
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         host_record = self._find_host_record(host_id)

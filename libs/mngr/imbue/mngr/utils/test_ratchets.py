@@ -308,6 +308,10 @@ def test_prevent_direct_subprocess() -> None:
     rc.check_direct_subprocess(_DIR, snapshot(15), excluded_patterns=excluded)
 
 
+def test_prevent_raw_concurrency_group_executor() -> None:
+    rc.check_raw_concurrency_group_executor(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 

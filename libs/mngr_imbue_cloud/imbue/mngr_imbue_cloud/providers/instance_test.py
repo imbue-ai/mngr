@@ -14,8 +14,10 @@ from threading import Lock
 from typing import Any
 from typing import cast
 
+import gevent
 import httpx
 import pytest
+from gevent.hub import Hub
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
@@ -995,6 +997,39 @@ def test_discover_hosts_and_agents_caches_every_hosts_listing_under_concurrency(
     for lease in leases:
         host_id = HostId(lease.host_id)
         assert provider._listing_raw_cache[host_id] == raw_by_host_id[host_id]
+
+
+class _HubCreatingDiscoveryProvider(_MultiHostDiscoveryProvider):
+    """Records the gevent Hub each per-host read creates on its worker thread,
+    standing in for the pyinfra command the real outer listing runs."""
+
+    _hubs: list[Hub] = []
+
+    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+        with self._in_flight_lock:
+            self._hubs.append(gevent.get_hub())
+        return super()._collect_listing_raw_via_outer(lease)
+
+
+# this tests: IF each host's read touches gevent on its worker thread (as pyinfra does)
+# THEN: every one of those per-thread hubs is destroyed by the time discovery returns
+def test_discover_hosts_and_agents_destroys_each_worker_threads_gevent_hub(temp_mngr_ctx: MngrContext) -> None:
+    """A hub left behind by a discovery worker pins a pipe pair and its object graph for the
+    life of the process; a long-running ``mngr observe`` polls this every 30s, so it grows
+    without bound."""
+    leases = [_make_lease(HostId.generate()) for _ in range(3)]
+    provider = _HubCreatingDiscoveryProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _leases=leases,
+        _raw_by_host_id={HostId(lease.host_id): _running_raw() for lease in leases},
+        _hubs=[],
+    )
+
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    assert len(provider._hubs) == len(leases)
+    assert all(hub.loop is None for hub in provider._hubs), "a discovery worker thread left its gevent Hub alive"
 
 
 class _LogCapture:
