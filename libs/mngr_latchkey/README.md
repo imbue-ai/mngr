@@ -596,19 +596,27 @@ Remote workspaces reach the VPS-resident gateway at
 address (never a public interface), and the workspace container resolves that
 name to it because the VPS provider creates every container with the matching
 `--add-host` mapping. It is the same fixed port local workspaces use on their
-own loopback. Third-party requests terminate there so the VPS can inject the
-credentials its own store holds. The VPS gateway
-loads one dedicated `desktop_gateway_proxy.mjs` extension for the endpoint
-families whose state remains on the user's computer: `/permissions`,
-`/permission-requests`, and `/minds-api-proxy` (including all subpaths). It
-forwards those requests to the desktop gateway over a desktop-to-VPS reverse
-tunnel, authenticating that hop with the desktop's own gateway password and a
-dedicated desktop-target permissions JWT -- both of which *replace* whatever the
-caller sent, since the caller's password authenticates it to the VPS gateway and
-its override would let it choose the policy the desktop evaluates it against.
-Native VPS requests carry no override and are authorized by the machine's own
-`~/.latchkey/permissions.json` (seeded at provisioning, then rewritten by the
-full permission snapshot the desktop pushes on every edit).
+own loopback. Provisioning also loads an nftables policy on the VPS (table
+`inet mngr_bridge_services`, boot-persistent through a systemd oneshot) that
+drops traffic to the gateway's port -- and the owner-exec daemon's, which binds
+the same address -- unless it arrives on the docker bridge interface or on
+loopback; without it Linux would deliver a packet for the bridge address that
+reached the public interface to the bound socket all the same. The same policy
+drops any other new connection arriving from the docker bridge, so those two
+ports are all the workspace can reach on its VPS (not its sshd, for one).
+Third-party requests terminate there so the VPS can inject the credentials its
+own store holds. The VPS gateway loads one dedicated `desktop_gateway_proxy.mjs`
+extension for the endpoint families whose state remains on the user's computer:
+`/permissions`, `/permission-requests`, and `/minds-api-proxy` (including all
+subpaths). It forwards those requests to the desktop gateway over a
+desktop-to-VPS reverse tunnel, authenticating that hop with the desktop's own
+gateway password and a dedicated desktop-target permissions JWT -- both of which
+*replace* whatever the caller sent, since the caller's password authenticates it
+to the VPS gateway and its override would let it choose the policy the desktop
+evaluates it against. Native VPS requests carry no override and are authorized
+by the machine's own `~/.latchkey/permissions.json` (seeded at provisioning,
+then rewritten by the full permission snapshot the desktop pushes on every
+edit).
 
 Those two desktop-owned secrets are handed to the extension as *paths* into the
 machine's tmpfs secrets directory (`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE`,

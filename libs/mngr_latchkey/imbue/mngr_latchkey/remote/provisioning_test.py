@@ -20,7 +20,9 @@ from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_FIREWALL_UNIT_NAME
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
@@ -58,6 +60,7 @@ from imbue.mngr_latchkey.remote.provisioning import _build_extension_install_scr
 from imbue.mngr_latchkey.remote.provisioning import _build_supervisor_program_config
 from imbue.mngr_latchkey.remote.provisioning import _does_container_need_reverse_tunnel
 from imbue.mngr_latchkey.remote.provisioning import _does_container_resolve_outer_host
+from imbue.mngr_latchkey.remote.provisioning import _ensure_bridge_services_firewalled
 from imbue.mngr_latchkey.remote.provisioning import _ensure_container_tunnel_keypair
 from imbue.mngr_latchkey.remote.provisioning import _ensure_latchkey_gateway_reachable_from_container
 from imbue.mngr_latchkey.remote.provisioning import (
@@ -633,6 +636,15 @@ def test_resolve_bridge_listen_host_refuses_a_machine_with_no_docker_bridge() ->
         _resolve_bridge_listen_host(outer)
 
 
+def test_ensure_bridge_services_firewalled_refuses_a_machine_the_firewall_cannot_be_applied_on() -> None:
+    # Failing closed: without the policy the bridge-bound services would answer
+    # a packet for the bridge address arriving on the VPS's public interface.
+    outer = stub_outer(CommandResult(stdout="", stderr="E: Unable to locate package nftables", success=False))
+    with pytest.raises(RemoteGatewayError, match="without the firewall.*Unable to locate package nftables"):
+        _ensure_bridge_services_firewalled(outer)
+    assert as_stub(outer).written == []
+
+
 def test_does_container_resolve_outer_host_reads_the_creation_time_mapping() -> None:
     assert _does_container_resolve_outer_host(
         cast(OuterHostInterface, StubOuter(container_extra_hosts=("host.docker.internal:host-gateway",))), "mngr-ws"
@@ -732,16 +744,22 @@ def test_provision_remote_gateway_runs_full_sequence_on_the_outer_host(tmp_path:
     )
     commands = _recorded_commands_text(outer)
     written = _written_content_text(outer)
-    # Install latchkey + supervisor, resolve the docker bridge address, register
-    # the gateway supervisord program bound there, and find + inspect the
-    # container. It carries the outer-host mapping and no tunnel was ever
-    # registered on this VPS, so no tunnel is wired: no keypair is minted and
-    # nothing is exec'd into the container.
+    # Install latchkey + supervisor, resolve the docker bridge address, fence
+    # the bridge-bound ports before either service starts, register the gateway
+    # supervisord program bound there, and find + inspect the container. It
+    # carries the outer-host mapping and no tunnel was ever registered on this
+    # VPS, so no tunnel is wired: no keypair is minted and nothing is exec'd
+    # into the container.
     assert "npm install -g latchkey@" in commands
     assert "apt-get install -y supervisor" in commands
     # One round trip resolves the bridge address for the owner-exec daemon and
     # the gateway alike.
     assert commands.count("addr show docker0") == 1
+    assert "apt-get install -y nftables" in commands
+    assert f"tcp dport {{ {OUTER_PORT}, {VM_EXEC_PORT} }} counter drop" in written
+    assert commands.index(f"systemctl enable --now {BRIDGE_SERVICES_FIREWALL_UNIT_NAME}") < commands.index(
+        "owner-exec"
+    )
     assert "docker ps -a --filter" in commands
     assert "com.imbue.mngr.host-id=" in commands
     assert "docker inspect" in commands

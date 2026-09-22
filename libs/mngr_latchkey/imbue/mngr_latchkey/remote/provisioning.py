@@ -8,7 +8,9 @@ The VPS-resident gateway binds the VPS's docker bridge address, which the
 agent's container reaches by the constant name ``host.docker.internal``: the
 VPS provider creates every container with the matching ``--add-host`` mapping,
 and the agent's ``LATCHKEY_GATEWAY`` names that host. Nothing bridges the
-two; the docker bridge is the route. The gateway is a long-running process that
+two; the docker bridge is the route, and an nftables policy applied before
+either bridge-bound service starts keeps it the only route (see
+:mod:`imbue.mngr_latchkey.docker_bridge`). The gateway is a long-running process that
 must survive crashes and VM pause/resume, so rather than spawn it detached
 (``nohup`` + a PID-file guard) it is registered as a ``supervisord`` program:
 ``supervisord`` is installed from the distro package and auto-restarts it if it
@@ -75,9 +77,12 @@ from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.docker_bridge import DockerBridgeAddressError
+from imbue.mngr_latchkey.docker_bridge import DockerBridgeFirewallError
+from imbue.mngr_latchkey.docker_bridge import ensure_bridge_services_firewalled
 from imbue.mngr_latchkey.docker_bridge import resolve_docker_bridge_address
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.owner_exec_vm import provision_owner_exec_vm
 from imbue.mngr_latchkey.remote._machine import DESKTOP_GATEWAY_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
@@ -1013,6 +1018,22 @@ def _resolve_bridge_listen_host(host: OuterHostInterface) -> str:
         ) from e
 
 
+def _ensure_bridge_services_firewalled(host: OuterHostInterface) -> None:
+    """Keep the gateway's and the owner-exec daemon's ports reachable from the docker bridge only, and vice versa.
+
+    Why binding the bridge address is not enough on its own is spelled out in
+    :mod:`imbue.mngr_latchkey.docker_bridge`. Applied before either service
+    starts; raises :class:`RemoteGatewayError` when it cannot be.
+    """
+    try:
+        ensure_bridge_services_firewalled(host, (OUTER_PORT, VM_EXEC_PORT))
+    except DockerBridgeFirewallError as e:
+        raise RemoteGatewayError(
+            "Refusing to start the latchkey gateway and the owner-exec daemon on VPS {} without the firewall "
+            "that keeps them on the docker bridge: {}".format(host.get_name(), e)
+        ) from e
+
+
 @pure
 def _do_extra_hosts_resolve_outer_host(extra_hosts: Sequence[str] | None) -> bool:
     """Whether a container's creation-time ``--add-host`` mappings (its inspect's ``HostConfig.ExtraHosts``) name the outer host.
@@ -1599,7 +1620,9 @@ def provision_remote_gateway(
     """Stand up a VPS-resident latchkey gateway where the agent's container can reach it.
 
     Runs the full remote-gateway sequence on the agent's outer host (the VPS):
-    install the latchkey CLI and supervisord, then register the gateway as a
+    fence the bridge-bound ports off every interface but the docker bridge and
+    loopback (see :func:`_ensure_bridge_services_firewalled`), install the
+    latchkey CLI and supervisord, then register the gateway as a
     supervisord program bound to the VPS's docker bridge address (with this
     machine's own encryption key so it can decrypt the credentials it is given,
     and its own listen password so it accepts the traffic of the agents on
@@ -1634,6 +1657,7 @@ def provision_remote_gateway(
         )
         return
     listen_host = _resolve_bridge_listen_host(host)
+    _ensure_bridge_services_firewalled(host)
     # Stand up the VM-resident owner-exec daemon first: it is independent of the
     # latchkey gateway (a web workspace uses it to configure the VM, including to
     # provision latchkey), and piggybacking on this pass is how every remote

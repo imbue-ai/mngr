@@ -9,8 +9,10 @@ Every workspace sees exactly one gateway at one fixed URL, decided when the
 workspace is created. Local workspaces use the desktop-resident gateway,
 reverse-tunneled onto their own loopback (`http://127.0.0.1:1989`). Remote
 workspaces use the VPS-resident gateway for third-party calls, reached over the
-container's docker bridge as `http://host.docker.internal:1989`; its bundled
-forwarding extension proxies `/permissions`, `/permission-requests`, and
+container's docker bridge as `http://host.docker.internal:1989` (an nftables
+policy on the VPS keeps that port reachable from the bridge and the VPS's own
+loopback only, and the bridge from reaching anything else on the VPS); its
+bundled forwarding extension proxies `/permissions`, `/permission-requests`, and
 `/minds-api-proxy` requests back to the desktop gateway over an SSH tunnel. (A
 remote workspace whose container predates the `host.docker.internal` mapping,
 such as one adopted from a pool host baked by an older mngr, is pointed at

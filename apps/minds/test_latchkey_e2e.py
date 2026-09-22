@@ -32,7 +32,9 @@ a. ``GET /permissions/self`` succeeds on ``$LATCHKEY_GATEWAY`` with the
 b. A native ``/gateway/...`` request is served by that same VPS gateway and
    its listen password is wired to the desktop-derived value. Nothing listens
    on the retired port 1990, nothing is tunneled onto the container's own
-   loopback port, and no VPS->container reverse tunnel is registered.
+   loopback port, no VPS->container reverse tunnel is registered, and the
+   nftables policy keeping the gateway's port on the docker bridge is loaded
+   on the VPS.
 c. Pushing the workspace's state to its machine the way the desktop app does
    -- open the workspace's outer host through its provider and hand the
    machine a grant (the ``slack-api`` scope granted in the local canonical
@@ -44,9 +46,13 @@ c. Pushing the workspace's state to its machine the way the desktop app does
 
 Gating: this test is deliberately invasive on the machine that runs it (it
 needs passwordless ``sudo`` to run a root sshd, apt-installs ``supervisor``
-on the "VPS" = this machine, npm-installs the latchkey CLI globally as root,
-and writes under ``/root/.latchkey`` + ``/etc/supervisor/conf.d/``), so it is
-opt-in via ``MNGR_LATCHKEY_E2E_TESTS=1``. CI sets the variable in the
+and ``nftables`` on the "VPS" = this machine, npm-installs the latchkey CLI
+globally as root, writes under ``/root/.latchkey`` + ``/etc/supervisor/conf.d/``,
+and leaves an enabled nftables policy -- ``/etc/nftables.d/`` plus the
+``mngr-bridge-services-firewall`` systemd unit -- dropping the gateway's and
+owner-exec's ports off ``docker0``/loopback and every other new connection any
+container on this machine opens into it over ``docker0``), so it is opt-in via
+``MNGR_LATCHKEY_E2E_TESTS=1``. CI sets the variable in the
 ``test-minds-release`` job (the ``run_minds_release_tests`` manual dispatch),
 which runs on a throwaway GitHub ubuntu runner. Once opted in, missing
 prerequisites are hard *failures*, not skips, so a broken CI environment can
@@ -92,6 +98,8 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
+from imbue.mngr_latchkey.docker_bridge import DOCKER_BRIDGE_INTERFACE_NAME
 from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
@@ -165,8 +173,8 @@ _GRANTED_SERVICE: Final[str] = "slack"
 
 # Subprocess budgets. The docker host-image build (debian-slim + a handful of
 # apt packages) plus container start dominates the create; VPS provisioning
-# (apt-get install supervisor + npm install -g latchkey, as root over ssh)
-# dominates the forward-driven phase.
+# (apt-get install nftables + supervisor, npm install -g latchkey, as root over
+# ssh) dominates the forward-driven phase.
 _NPM_INSTALL_TIMEOUT_SECONDS: Final[float] = 300.0
 _CREATE_TIMEOUT_SECONDS: Final[int] = 900
 _QUICK_MNGR_TIMEOUT_SECONDS: Final[int] = 120
@@ -879,6 +887,23 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert _run_on_vps(ssh_config_path, f"test -f {_VPS_TUNNEL_CONF_PATH}").returncode != 0, (
                 f"provisioning registered the reverse tunnel {_VPS_TUNNEL_CONF_PATH} on the VPS for a container "
                 "that resolves its outer host"
+            )
+            bridge_firewall = _run_on_vps(ssh_config_path, f"nft list table inet {BRIDGE_SERVICES_NFT_TABLE}")
+            assert bridge_firewall.returncode == 0, (
+                f"the nftables table {BRIDGE_SERVICES_NFT_TABLE} is not loaded on the VPS:\n"
+                f"stdout:\n{bridge_firewall.stdout}\nstderr:\n{bridge_firewall.stderr}"
+            )
+            assert f'iifname != "{DOCKER_BRIDGE_INTERFACE_NAME}"' in bridge_firewall.stdout, (
+                f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table carries no docker-bridge rule:\n{bridge_firewall.stdout}"
+            )
+            gateway_port_in_dport_set = rf"\bdport \{{[^}}]*\b{AGENT_SIDE_LATCHKEY_PORT}\b[^}}]*\}}"
+            assert re.search(gateway_port_in_dport_set, bridge_firewall.stdout), (
+                f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table does not cover the gateway port:\n{bridge_firewall.stdout}"
+            )
+            bridge_new_connection_drop = rf'iifname "{DOCKER_BRIDGE_INTERFACE_NAME}" ct state new counter .*\bdrop\b'
+            assert re.search(bridge_new_connection_drop, bridge_firewall.stdout), (
+                f"the loaded {BRIDGE_SERVICES_NFT_TABLE} table does not drop the container's other new connections "
+                f"into the VPS:\n{bridge_firewall.stdout}"
             )
             loopback_port_probe = _exec_in_workspace(
                 env, repo, agent_address, _closed_port_probe_command(AGENT_SIDE_LATCHKEY_PORT)
