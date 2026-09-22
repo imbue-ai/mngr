@@ -88,10 +88,6 @@ class HostInterface(MutableModel, ABC):
         """Return the name of the provider instance this host belongs to."""
         ...
 
-    # =========================================================================
-    # Activity Configuration
-    # =========================================================================
-
     @abstractmethod
     def get_activity_config(self) -> ActivityConfig:
         """Return the activity configuration for idle detection on this host."""
@@ -101,10 +97,6 @@ class HostInterface(MutableModel, ABC):
     def set_activity_config(self, config: ActivityConfig) -> None:
         """Update the activity configuration for idle detection on this host."""
         ...
-
-    # =========================================================================
-    # Certified Data
-    # =========================================================================
 
     @abstractmethod
     def get_certified_data(self) -> CertifiedHostData:
@@ -120,10 +112,6 @@ class HostInterface(MutableModel, ABC):
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
         """Return the certified plugin data for the given plugin name."""
         ...
-
-    # =========================================================================
-    # Provider-Derived Information
-    # =========================================================================
 
     @abstractmethod
     def get_seconds_since_stopped(self) -> float | None:
@@ -149,10 +137,6 @@ class HostInterface(MutableModel, ABC):
     def get_tags(self) -> dict[str, str]:
         """Return all metadata tags associated with this host."""
         ...
-
-    # =========================================================================
-    # Agent Information
-    # =========================================================================
 
     @abstractmethod
     def discover_agents(self, timeout_seconds: float | None = None) -> list[DiscoveredAgent]:
@@ -188,10 +172,6 @@ class HostInterface(MutableModel, ABC):
         """
         ...
 
-    # =========================================================================
-    # Agent-Derived Information
-    # =========================================================================
-
     @abstractmethod
     def get_state(self) -> HostState:
         """Return the current lifecycle state of this host."""
@@ -206,6 +186,16 @@ class HostInterface(MutableModel, ABC):
     def get_build_log(self) -> str | None:
         """Return the build log if this host failed during creation, or None."""
         ...
+
+    def connect(self) -> None:
+        """Establish this host's connection now, rather than on the next operation.
+
+        The inverse of ``disconnect``. Call it when a later operation must ride a
+        connection that already exists -- e.g. across a window in which the host's
+        endpoint will not complete new handshakes. Online host implementations should
+        override this to open SSH or other network connections. The default is a no-op
+        for offline hosts.
+        """
 
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
@@ -447,6 +437,15 @@ class OuterHostInterface(HostFileReadInterface, HostFileWriteInterface, ABC):
         """
         return (None, None)
 
+    def connect(self) -> None:
+        """Establish this host's connection now, rather than on the next operation.
+
+        The inverse of ``disconnect``. Call it when a later operation must ride a
+        connection that already exists -- e.g. across a window in which the host's
+        endpoint will not complete new handshakes. Implementations that hold network
+        connections should override this to open them; the default is a no-op.
+        """
+
     def disconnect(self) -> None:
         """Disconnect from this host, releasing any held connections.
 
@@ -511,10 +510,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     when the outer is itself mngr-managed.
     """
 
-    # =========================================================================
-    # Activity Times (aggregated across all agents on this host)
-    # =========================================================================
-
     @abstractmethod
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
         """
@@ -533,10 +528,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     def get_reported_activity_content(self, activity_type: ActivitySource) -> str | None:
         """Return the content associated with the last activity of the given type, or None."""
         ...
-
-    # =========================================================================
-    # Cooperative Locking
-    # =========================================================================
 
     @abstractmethod
     @contextmanager
@@ -561,10 +552,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         """Check whether the host lock is currently held (via a non-blocking flock probe)."""
         ...
 
-    # =========================================================================
-    # Certified Data
-    # =========================================================================
-
     @abstractmethod
     def set_plugin_data(self, plugin_name: str, data: dict[str, Any]) -> None:
         """Update the certified plugin data for the given plugin name."""
@@ -575,18 +562,10 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         """Return an offline representation of this host for use when the host is unreachable."""
         ...
 
-    # =========================================================================
-    # Agent-Derived Information
-    # =========================================================================
-
     @abstractmethod
     def get_idle_seconds(self) -> float:
         """Return the number of seconds since the host was last considered active."""
         ...
-
-    # =========================================================================
-    # Reported Plugin Data
-    # =========================================================================
 
     @abstractmethod
     def get_reported_plugin_state_file_data(self, plugin_name: str, filename: str) -> str:
@@ -607,10 +586,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     def get_reported_plugin_state_files(self, plugin_name: str) -> list[str]:
         """Return a list of all reported state file names for the given plugin."""
         ...
-
-    # =========================================================================
-    # Environment
-    # =========================================================================
 
     @abstractmethod
     def get_host_env_path(self) -> Path:
@@ -642,10 +617,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         """Build a shell prefix that sources host and agent env files if they exist."""
         ...
 
-    # =========================================================================
-    # Provider-Derived Information
-    # =========================================================================
-
     @abstractmethod
     def read_boot_info(self) -> HostBootInfo:
         """Read the host's boot time and uptime together in a single host-side probe.
@@ -674,10 +645,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
     def remove_tags(self, keys: Sequence[str]) -> None:
         """Remove tags by key."""
         ...
-
-    # =========================================================================
-    # Agent Information
-    # =========================================================================
 
     @abstractmethod
     def get_agent_env_path(self, agent: AgentInterface) -> Path:
@@ -796,10 +763,6 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         without an external agent store, or when no copy exists for the id.
         """
         ...
-
-    # =========================================================================
-    # Outer Host Access
-    # =========================================================================
 
     @contextmanager
     def outer_host(self) -> Iterator[OuterHostInterface | None]:
@@ -1171,11 +1134,6 @@ class CreateAgentOptions(FrozenModel):
         description="Whether this is an update of an existing agent (idempotent create). "
         "When True, existing work_dir and state are updated rather than created from scratch.",
     )
-
-
-# =========================================================================
-# Host Option Types (parallel to Agent option types above)
-# =========================================================================
 
 
 class NewHostBuildOptions(FrozenModel):

@@ -787,6 +787,10 @@ class OuterHost(OuterHostInterface):
             except (OSError, SSHException):
                 pass
 
+    def connect(self) -> None:
+        """Connect the pyinfra host if it is not connected already."""
+        self._ensure_connected()
+
     def disconnect(self) -> None:
         """Disconnect the pyinfra host if connected."""
         self._close_paramiko_client()

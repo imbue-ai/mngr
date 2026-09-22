@@ -1179,7 +1179,7 @@ class ModalProviderInstance(BaseProviderInstance):
         retry=retry_if_exception_type(ModalProxyError),
         reraise=True,
     )
-    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int = 50) -> tuple[str, int]:
+    def _get_ssh_info_from_sandbox(self, sandbox: SandboxInterface, *, tunnel_timeout: int) -> tuple[str, int]:
         """Extract SSH connection info from a running sandbox.
 
         ``tunnel_timeout`` is forwarded to the Modal SDK's ``tunnels()`` call
@@ -1339,7 +1339,7 @@ class ModalProviderInstance(BaseProviderInstance):
                     mngr_ctx=self.mngr_ctx,
                     on_updated_host_data=None,
                 )
-                host._ensure_connected()
+                host.connect()
 
                 # Record BOOT activity for idle detection
                 set_boot_thread = concurrency_group.start_new_thread(host.record_activity, (ActivitySource.BOOT,))
@@ -2062,7 +2062,7 @@ log "=== Shutdown script completed ==="
             with info_span("Creating initial snapshot for host...", host_id=str(host.id)):
                 sandbox = self._find_sandbox_by_host_id(host.id)
                 assert sandbox is not None, "Sandbox must exist for online host"
-                self._create_initial_snapshot(sandbox, host.id)
+                self._create_initial_snapshot(sandbox, host)
 
     @handle_modal_auth_error
     def stop_host(
@@ -2084,7 +2084,7 @@ log "=== Shutdown script completed ==="
         if sandbox and create_snapshot:
             try:
                 with log_span("Creating snapshot before termination", host_id=str(host_id)):
-                    self.create_snapshot(host_id, SnapshotName("stop"))
+                    self.create_snapshot(host, SnapshotName("stop"))
             except (MngrError, ModalProxyError) as e:
                 logger.warning("Failed to create snapshot before termination: {}", e)
 
@@ -3183,7 +3183,7 @@ log "=== Shutdown script completed ==="
     def _record_snapshot(
         self,
         sandbox: SandboxInterface,
-        host_id: HostId,
+        host: HostInterface,
         name: SnapshotName,
     ) -> SnapshotId:
         """Create a filesystem snapshot and record it in the host record.
@@ -3192,11 +3192,19 @@ log "=== Shutdown script completed ==="
         and create_snapshot. It reads the host record from the volume, creates
         a filesystem snapshot via Modal, records the snapshot metadata in the
         host record, and writes the updated host record back to the volume.
+
+        The caller's own host records the snapshot, over a connection established
+        before the snapshot runs. A snapshot can leave the sandbox's tunnel unable to
+        complete *new* SSH handshakes, while a connection opened beforehand keeps
+        working straight through it, so recording the snapshot must not need a new one.
         """
+        host_id = host.id
         # Read existing host record from volume
         host_record = self._read_host_record(host_id, use_cache=False)
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
+
+        host.connect()
 
         # Create the filesystem snapshot
         with log_span("Creating filesystem snapshot", name=str(name)):
@@ -3222,25 +3230,6 @@ log "=== Shutdown script completed ==="
                 list(host_record.certified_host_data.snapshots) + [new_snapshot],
             ),
         )
-        updated_host_record = host_record.model_copy_update(
-            to_update(
-                host_record.field_ref().certified_host_data,
-                updated_certified_data,
-            ),
-        )
-        host = self._get_host(host_id, host_record=updated_host_record)
-        if isinstance(host, OnlineHostInterface):
-            # A Modal filesystem snapshot transiently breaks new connections through the
-            # sandbox's tunnels: for a window afterwards (longer when Modal is under
-            # load), the tunnel edge accepts TCP and then closes it without an SSH
-            # banner. The certified-data write below opens a fresh SSH connection, so
-            # re-verify the tunnel with a full handshake probe first, just like host
-            # creation does after boot. This also means create/snapshot only returns
-            # once the tunnel is healthy again, so follow-up commands don't hit the
-            # same window.
-            ssh_host, ssh_port = self._get_ssh_info_from_sandbox(sandbox)
-            with log_span("Waiting for the SSH tunnel to recover after the snapshot"):
-                self._wait_for_sshd(ssh_host, ssh_port, host_id, self.config.ssh_connect_timeout)
         host.set_certified_data(updated_certified_data)
         logger.debug(
             "Created snapshot: id={}, name={}",
@@ -3253,7 +3242,7 @@ log "=== Shutdown script completed ==="
     def _create_initial_snapshot(
         self,
         sandbox: SandboxInterface,
-        host_id: HostId,
+        host: HostInterface,
     ) -> SnapshotId:
         """Create an initial snapshot of a newly created host.
 
@@ -3261,7 +3250,7 @@ log "=== Shutdown script completed ==="
         is True, ensuring the host can be restarted after being stopped.
         The initial state after SSH setup is captured as the "initial" snapshot.
         """
-        return self._record_snapshot(sandbox, host_id, SnapshotName("initial"))
+        return self._record_snapshot(sandbox, host, SnapshotName("initial"))
 
     @handle_modal_auth_error
     def create_snapshot(
@@ -3281,13 +3270,17 @@ log "=== Shutdown script completed ==="
         if sandbox is None:
             raise HostNotFoundError(self.name, host_id)
 
+        # Resolve the host before the snapshot, so a caller that passed only an id
+        # still records the snapshot over a connection that predates it.
+        snapshot_host = host if isinstance(host, HostInterface) else self._get_host(host_id)
+
         # Generate snapshot name if not provided
         if name is None:
             timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
             name = SnapshotName(f"snapshot-{timestamp}")
 
         with log_span("Creating snapshot for Modal sandbox", host_id=str(host_id)):
-            snapshot_id = self._record_snapshot(sandbox, host_id, name)
+            snapshot_id = self._record_snapshot(sandbox, snapshot_host, name)
         logger.info("Created snapshot: id={}, name={}", snapshot_id, name)
         return snapshot_id
 

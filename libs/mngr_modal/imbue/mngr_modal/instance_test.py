@@ -27,6 +27,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import UserId
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.constants import MODAL_TEST_APP_PREFIX
@@ -52,10 +53,6 @@ from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.testing import FakeModalInterface
 from imbue.modal_proxy.testing import FakeSandbox
-
-# =============================================================================
-# Unit tests for sandbox tag helper functions
-# =============================================================================
 
 
 def test_build_sandbox_tags_with_no_user_tags() -> None:
@@ -246,11 +243,6 @@ def expired_credentials_modal_provider(
     return make_expired_credentials_modal_provider(temp_mngr_ctx, app_name)
 
 
-# =============================================================================
-# Basic property tests (no network required)
-# =============================================================================
-
-
 def test_modal_provider_name(modal_provider: ModalProviderInstance) -> None:
     """Modal provider should have the correct name."""
     assert modal_provider.name == ProviderInstanceName("modal-test")
@@ -353,11 +345,6 @@ def test_handle_modal_auth_error_decorator_converts_auth_error_to_modal_auth_err
     # The error must carry the actual provider instance name (not the default "modal"),
     # so a custom-named Modal instance is attributed correctly in `mngr list`.
     assert exc_info.value.provider_name == ProviderInstanceName("modal-test-expired")
-
-
-# =============================================================================
-# discover_hosts and stopped host tests (unit tests with mocked volume)
-# =============================================================================
 
 
 def _make_host_record(
@@ -599,11 +586,6 @@ def test_discover_hosts_prefers_running_sandbox_over_host_record(
     mock_from_record.assert_not_called()
 
 
-# =============================================================================
-# Build args parsing tests (no network required)
-# =============================================================================
-
-
 def test_parse_build_args_empty(modal_provider: ModalProviderInstance) -> None:
     """Empty build args should return default config."""
     config = modal_provider._parse_build_args(None)
@@ -754,11 +736,6 @@ def test_parse_build_args_secrets_with_other_args(modal_provider: ModalProviderI
     assert config.secrets == ("TOKEN1", "TOKEN2")
 
 
-# =============================================================================
-# Build args: --cidr-allowlist and --offline
-# =============================================================================
-
-
 def test_parse_build_args_cidr_allowlist_default_is_empty(modal_provider: ModalProviderInstance) -> None:
     """cidr_allowlist should default to empty tuple."""
     config = modal_provider._parse_build_args([])
@@ -862,11 +839,6 @@ def test_effective_cidr_allowlist_cidrs_override_offline(modal_provider: ModalPr
     assert config.effective_cidr_allowlist == ["10.0.0.0/8"]
 
 
-# =============================================================================
-# Tests for volume build args
-# =============================================================================
-
-
 def test_parse_build_args_single_volume(modal_provider: ModalProviderInstance) -> None:
     """Should parse a single --volume argument."""
     config = modal_provider._parse_build_args(["--volume=my-data:/data"])
@@ -941,11 +913,6 @@ def test_parse_volume_spec_invalid_empty_parts() -> None:
         _parse_volume_spec(":/path")
     with pytest.raises(MngrError):
         _parse_volume_spec("name:")
-
-
-# =============================================================================
-# Tests for config-level defaults in _parse_build_args
-# =============================================================================
 
 
 def make_modal_provider_with_config_defaults(
@@ -1099,11 +1066,6 @@ def test_modal_provider_config_user_id_can_be_set() -> None:
     assert config.user_id == UserId("custom-user-id")
 
 
-# =============================================================================
-# Tests for _build_modal_secrets_from_env helper function
-# =============================================================================
-
-
 def test_build_modal_secrets_from_env_empty_list() -> None:
     """Empty list of env vars should return empty list of secrets."""
     mock_iface = MagicMock()
@@ -1165,11 +1127,6 @@ def test_build_modal_secrets_from_env_partial_missing_vars(monkeypatch: pytest.M
     assert "SET_VAR" not in error_message
 
 
-# =============================================================================
-# Tests for _create_shutdown_script helper method
-# =============================================================================
-
-
 def test_create_shutdown_script_generates_correct_content(
     modal_provider: ModalProviderInstance,
 ) -> None:
@@ -1220,9 +1177,47 @@ def test_create_shutdown_script_generates_correct_content(
     assert written_modes[expected_path] == "755"
 
 
-# =============================================================================
-# Tests for persist_agent_data and remove_persisted_agent_data
-# =============================================================================
+def test_record_snapshot_records_through_the_given_host_over_a_pre_existing_connection(
+    modal_provider: ModalProviderInstance,
+) -> None:
+    """Recording a snapshot must use the caller's host, connected before the snapshot runs.
+
+    A snapshot can leave the sandbox's tunnel unable to complete new SSH handshakes, so
+    resolving a host here, or connecting after the snapshot, would need one at the worst
+    possible moment.
+    """
+    host_id = HostId.generate()
+    host_record = _make_host_record(host_id)
+    events: list[str] = []
+
+    class MockSandbox(FakeSandbox):
+        def snapshot_filesystem(self, timeout: int = 120) -> Any:
+            events.append("snapshot")
+            return super().snapshot_filesystem(timeout)
+
+    class MockHost:
+        id = host_id
+
+        def connect(self) -> None:
+            events.append("connect")
+
+        def set_certified_data(self, data: CertifiedHostData) -> None:
+            events.append("set_certified_data")
+            recorded_data.append(data)
+
+    recorded_data: list[CertifiedHostData] = []
+    sandbox = MockSandbox(sandbox_id="sb-record-snapshot")
+
+    with patch.object(modal_provider, "_read_host_record", return_value=host_record):
+        snapshot_id = modal_provider._record_snapshot(sandbox, cast(Any, MockHost()), SnapshotName("initial"))
+
+    assert str(snapshot_id) == "snap-sb-record-snapshot-1"
+    assert events == ["connect", "snapshot", "set_certified_data"]
+    assert [snapshot.name for snapshot in recorded_data[0].snapshots] == ["initial"]
+    assert modal_provider._host_by_id_cache == {}, (
+        "Recording the snapshot resolved a host of its own, which would open a second SSH "
+        "connection through the tunnel the snapshot has just disrupted"
+    )
 
 
 def test_persist_agent_data_writes_to_volume(
@@ -1308,11 +1303,6 @@ def test_remove_persisted_agent_data_handles_file_not_found(
     # Verify the method was called
     expected_path = f"/hosts/{host_id}/{agent_id}.json"
     mock_volume.remove_file.assert_called_once_with(expected_path, recursive=False)
-
-
-# =============================================================================
-# Tests for is_host_volume_created=False behavior
-# =============================================================================
 
 
 def _make_modal_provider_without_host_volume(
@@ -1517,11 +1507,6 @@ def test_is_host_volume_created_defaults_to_true() -> None:
     assert config.is_host_volume_created is True
 
 
-# =============================================================================
-# Tests for _list_all_host_and_agent_records
-# =============================================================================
-
-
 def test_list_all_host_and_agent_records_returns_empty_when_volume_empty(
     modal_provider: ModalProviderInstance,
 ) -> None:
@@ -1635,11 +1620,6 @@ def test_list_all_host_and_agent_records_skips_none_host_records(
     assert host_records == []
 
 
-# =============================================================================
-# Tests for _list_running_host_ids
-# =============================================================================
-
-
 def test_list_running_host_ids_returns_empty_when_no_sandboxes(
     modal_provider: ModalProviderInstance,
 ) -> None:
@@ -1686,11 +1666,6 @@ def test_list_running_host_ids_skips_sandboxes_without_host_id_tag(
     result = modal_provider._list_running_host_ids(modal_provider.mngr_ctx.concurrency_group)
 
     assert result == {host_id}
-
-
-# =============================================================================
-# Tests for discover_hosts_and_agents (optimized modal implementation)
-# =============================================================================
 
 
 def test_discover_hosts_and_agents_returns_agents_from_volume_data(
@@ -1794,11 +1769,6 @@ def test_discover_hosts_and_agents_ignores_running_sandbox_without_host_record(
     assert len(result) == 0
 
 
-# =============================================================================
-# Docker Build Args Tests
-# =============================================================================
-
-
 def test_parse_build_args_docker_build_arg(modal_provider: ModalProviderInstance) -> None:
     """Should parse --docker-build-arg arguments."""
     config = modal_provider._parse_build_args(["--docker-build-arg=CLAUDE_CODE_VERSION=2.1.50"])
@@ -1849,11 +1819,6 @@ def test_substitute_dockerfile_build_args_raises_for_bad_format() -> None:
     dockerfile = 'FROM python:3.11-slim\nARG FOO=""\n'
     with pytest.raises(MngrError, match="KEY=VALUE format"):
         _substitute_dockerfile_build_args(dockerfile, ("no-equals-sign",))
-
-
-# =============================================================================
-# Tests for check_host_name_is_unique
-# =============================================================================
 
 
 _TEST_PROVIDER_NAME = ProviderInstanceName("modal-test")
@@ -1934,11 +1899,6 @@ def test_check_host_name_is_unique_raises_when_name_exists_on_failed_host() -> N
         )
 
 
-# =============================================================================
-# Tests for terminate-failure surfacing in stop_host / destroy_host
-# =============================================================================
-
-
 class _TerminateFailingSandbox(FakeSandbox):
     """A FakeSandbox whose terminate() always fails, simulating a Modal sandbox
     that could not be torn down (and is thus still running -- a billing orphan)."""
@@ -1982,13 +1942,6 @@ def test_destroy_host_surfaces_terminate_failure(
 
     with pytest.raises(CleanupFailedGroup):
         testing_provider.destroy_host(host_id)
-
-
-# =============================================================================
-# Agent-ref resolution: live for running hosts, state volume for offline hosts.
-# (The core of the destroy/start resolution fix -- agents created in-sandbox are
-# never written to the volume, so a running host must be read live.)
-# =============================================================================
 
 
 def test_discover_agent_refs_reads_live_for_running_host(modal_provider: ModalProviderInstance) -> None:

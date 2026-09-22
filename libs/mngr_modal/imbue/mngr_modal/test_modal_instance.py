@@ -236,7 +236,7 @@ def test_get_and_set_host_tags(real_modal_provider: ModalProviderInstance) -> No
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
 def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -> None:
-    """Should be able to create and list snapshots."""
+    """Should be able to create and list snapshots, over the caller's own connection."""
     with created_host(real_modal_provider, HostName("test-host")) as host:
         # Initially there are no snapshots (is_snapshotted_after_create=False by default in tests)
         snapshots = real_modal_provider.list_snapshots(host)
@@ -252,6 +252,12 @@ def test_create_and_list_snapshots(real_modal_provider: ModalProviderInstance) -
         assert snapshots[0].id == snapshot_id
         assert snapshots[0].name == SnapshotName("test-snapshot")
         assert snapshots[0].recency_idx == 0
+
+        assert real_modal_provider._host_by_id_cache == {}, (
+            "Snapshotting resolved a host of its own instead of using the caller's, so it "
+            "opened a second SSH connection through the tunnel it had just disrupted"
+        )
+        assert host.execute_idempotent_command("true").success
 
 
 @pytest.mark.acceptance
@@ -478,11 +484,6 @@ def test_get_host_by_name_not_found_raises_error(real_modal_provider: ModalProvi
         real_modal_provider.get_host(HostName("nonexistent-host"))
 
 
-# =============================================================================
-# Tests for is_snapshotted_after_create configuration
-# =============================================================================
-
-
 @pytest.mark.acceptance
 @pytest.mark.flaky
 @pytest.mark.timeout(300)
@@ -571,10 +572,6 @@ def test_restart_fails_after_hard_kill_without_initial_snapshot(
         if host:
             real_modal_provider._delete_host_record(host.id)
 
-
-# =============================================================================
-# Network restriction tests
-# =============================================================================
 
 # Dockerfile with all packages pre-installed for network-restricted tests.
 # When --offline or restrictive --cidr-allowlist is used, the sandbox cannot
@@ -689,11 +686,6 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
         )
         assert result.success
         assert "blocked" in result.stdout
-
-
-# =============================================================================
-# Host Volume Tests
-# =============================================================================
 
 
 # Flaky: a fresh sandbox can fail to come online inside the provider's bring-up
