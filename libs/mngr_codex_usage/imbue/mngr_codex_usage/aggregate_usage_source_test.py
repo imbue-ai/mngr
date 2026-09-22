@@ -24,7 +24,7 @@ def _codex_event(
         "event_id": event_id,
         "cost": None,
         "tokens": tokens,
-        "model": "openai/gpt-5.2-codex",
+        "model": "openai/gpt-6-astra",
         "cost_mode": "SUBSCRIPTION" if rate_limits is not None else "API_KEY",
     }
     if rate_limits is not None:
@@ -58,8 +58,8 @@ def test_codex_hookimpl_takes_freshest_cumulative_and_estimates_cost() -> None:
     )
     assert snapshot is not None
     record = snapshot.sessions[0]
-    # Freshest = 1,000,000 input * gpt-5.2-codex input price 1.75e-6 = 1.75.
-    assert record.cost.total_cost_usd == pytest.approx(1.75)
+    # Freshest = 1,000,000 input * gpt-6-astra input price 1e-5 = 10.0.
+    assert record.cost.total_cost_usd == pytest.approx(10.0)
     assert record.cost_provenance == CostProvenance.ESTIMATED
     assert record.cost_mode == CostMode.API_KEY
 

@@ -83,13 +83,6 @@ _OPUS_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     cache_creation_input_token_cost=0.00000625,
     cache_read_input_token_cost=0.0000005,
 )
-# Opus 4.1 and the original Opus 4 predate the Opus price drop and cost 3x.
-_OPUS_LEGACY_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.000015,
-    output_cost_per_token=0.000075,
-    cache_creation_input_token_cost=0.00001875,
-    cache_read_input_token_cost=0.0000015,
-)
 _SONNET_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.000003,
     output_cost_per_token=0.000015,
@@ -128,12 +121,6 @@ _GPT5_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     cache_read_input_token_cost=0.000000025,
     cache_creation_input_token_cost=0.0,
 )
-_CODEX_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.0000015,
-    output_cost_per_token=0.000006,
-    cache_read_input_token_cost=0.000000375,
-    cache_creation_input_token_cost=0.0,
-)
 _GPT6_ASTRA_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.00001,
     output_cost_per_token=0.00005,
@@ -164,26 +151,17 @@ MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-opus-4-7": _OPUS_PRICES,
     "anthropic/claude-opus-4-6": _OPUS_PRICES,
     "anthropic/claude-opus-4-5": _OPUS_PRICES,
-    "anthropic/claude-opus-4-1": _OPUS_LEGACY_PRICES,
-    "anthropic/claude-opus-4-20250514": _OPUS_LEGACY_PRICES,
     "anthropic/claude-sonnet-4-6": _SONNET_PRICES,
     "anthropic/claude-sonnet-4-5": _SONNET_PRICES,
-    "anthropic/claude-sonnet-4-20250514": _SONNET_PRICES,
     "anthropic/claude-haiku-4-5": _HAIKU_PRICES,
     "anthropic/claude-haiku-4-5-20251001": _HAIKU_PRICES,
-    # OpenAI / Codex models (codex reports model ids like "gpt-5.2-codex").
+    # OpenAI / Codex models (codex reports model ids like "gpt-5.3-codex").
     "openai/gpt-6-astra": _GPT6_ASTRA_PRICES,
     "openai/gpt-5": _GPT5_PRICES,
     "openai/gpt-5.1": _GPT5_PRICES,
-    "openai/gpt-5-codex": _GPT5_PRICES,
-    "openai/gpt-5.1-codex": _GPT5_PRICES,
-    "openai/gpt-5.1-codex-max": _GPT5_PRICES,
     "openai/gpt-5.2": _GPT52_PRICES,
-    "openai/gpt-5.2-codex": _GPT52_PRICES,
     "openai/gpt-5.3-codex": _GPT52_PRICES,
     "openai/gpt-5-mini": _GPT5_MINI_PRICES,
-    "openai/gpt-5.1-codex-mini": _GPT5_MINI_PRICES,
-    "openai/codex-mini-latest": _CODEX_MINI_PRICES,
     "openai/o3": _O3_PRICES,
     "openai/o4-mini": _O4_MINI_PRICES,
 }

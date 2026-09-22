@@ -32,14 +32,6 @@ def test_compute_cost_all_none_tokens_is_zero_for_known_model() -> None:
     assert compute_cost("anthropic/claude-opus-4-8", TokenSnapshot()) == pytest.approx(0.0)
 
 
-def test_legacy_opus_costs_three_times_current_opus() -> None:
-    tokens = TokenSnapshot(input=10_000, output=2_000, cache_read=500, cache_creation=100)
-    current = compute_cost("anthropic/claude-opus-4-8", tokens)
-    legacy = compute_cost("anthropic/claude-opus-4-1", tokens)
-    assert current is not None and legacy is not None
-    assert legacy == pytest.approx(current * 3)
-
-
 def test_all_pricing_keys_are_provider_qualified() -> None:
     # The canonical key is "<provider>/<model>"; a bare model name must not appear.
     for key in MODEL_PRICING:
