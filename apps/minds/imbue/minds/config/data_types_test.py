@@ -220,8 +220,16 @@ def test_management_plane_config_parses_a_full_document() -> None:
             "wireguard": {
                 "listen_port": 51820,
                 "operators": [
-                    {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
-                    {"name": "alex", "public_key": "opkey2=", "address": "10.112.0.3"},
+                    {
+                        "name": "josh",
+                        "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                        "address": "10.112.0.2",
+                    },
+                    {
+                        "name": "alex",
+                        "public_key": "aAWhPfhifGs/d9CO0mkiyJc96qHKK8mmeiM7UXSAi3g=",
+                        "address": "10.112.0.3",
+                    },
                 ],
             },
             "modal_proxy": {
@@ -255,8 +263,16 @@ def test_management_plane_config_rejects_duplicate_operator_addresses() -> None:
             {
                 "wireguard": {
                     "operators": [
-                        {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
-                        {"name": "alex", "public_key": "opkey2=", "address": "10.112.0.2"},
+                        {
+                            "name": "josh",
+                            "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                            "address": "10.112.0.2",
+                        },
+                        {
+                            "name": "alex",
+                            "public_key": "aAWhPfhifGs/d9CO0mkiyJc96qHKK8mmeiM7UXSAi3g=",
+                            "address": "10.112.0.2",
+                        },
                     ],
                 },
             }
@@ -271,8 +287,16 @@ def test_management_plane_config_rejects_duplicate_operator_names() -> None:
             {
                 "wireguard": {
                     "operators": [
-                        {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
-                        {"name": "josh", "public_key": "opkey2=", "address": "10.112.0.3"},
+                        {
+                            "name": "josh",
+                            "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                            "address": "10.112.0.2",
+                        },
+                        {
+                            "name": "josh",
+                            "public_key": "aAWhPfhifGs/d9CO0mkiyJc96qHKK8mmeiM7UXSAi3g=",
+                            "address": "10.112.0.3",
+                        },
                     ],
                 },
             }
@@ -285,8 +309,16 @@ def test_management_plane_config_rejects_duplicate_operator_public_keys() -> Non
             {
                 "wireguard": {
                     "operators": [
-                        {"name": "josh", "public_key": "opkey1=", "address": "10.112.0.2"},
-                        {"name": "alex", "public_key": "opkey1=", "address": "10.112.0.3"},
+                        {
+                            "name": "josh",
+                            "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                            "address": "10.112.0.2",
+                        },
+                        {
+                            "name": "alex",
+                            "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                            "address": "10.112.0.3",
+                        },
                     ],
                 },
             }
@@ -319,17 +351,79 @@ def test_management_overlay_for_tier_rejects_an_unknown_tier() -> None:
         management_overlay_for_tier("karaoke")
 
 
+@pytest.mark.parametrize(
+    "malformed_key",
+    [
+        # A 45-character paste with a stray '=': only base64 characters, so a charset check passes it.
+        "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw==",
+        # 44 characters that decode to 32 bytes but are not canonical (the final group's padding bits
+        # are set); wg refuses it, so a length check alone is not enough.
+        "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCx=",
+        # Valid base64, but not 32 bytes.
+        "c2hvcnQ=",
+        "opkey1=",
+        # Not base64 at all.
+        "not a key",
+    ],
+)
+def test_management_plane_config_rejects_operator_public_keys_that_are_not_wireguard_keys(malformed_key: str) -> None:
+    # The on-box wg check only catches such a key once a sync has reached a
+    # box; the loader refuses it before it can be committed or pushed at all.
+    with pytest.raises(ValidationError, match="is not a WireGuard public key"):
+        ManagementPlaneConfig.model_validate(
+            {"wireguard": {"operators": [{"name": "gabriel", "public_key": malformed_key, "address": "10.112.0.4"}]}}
+        )
+
+
+def test_management_plane_config_accepts_a_32_byte_base64_operator_public_key() -> None:
+    config = ManagementPlaneConfig.model_validate(
+        {
+            "wireguard": {
+                "operators": [
+                    {
+                        "name": "josh",
+                        "public_key": "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw=",
+                        "address": "10.112.0.2",
+                    }
+                ]
+            }
+        }
+    )
+
+    assert str(config.wireguard.operators[0].public_key) == "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw="
+
+
 def test_management_plane_config_rejects_operator_values_that_cannot_render_on_one_line() -> None:
     # name and public_key are rendered verbatim into the box's wg0.conf inside
     # a root-executed prep heredoc, so multi-line (or non-base64-key) values
     # must be rejected at parse time.
     with pytest.raises(ValidationError, match="must be a single line"):
         ManagementPlaneConfig.model_validate(
-            {"wireguard": {"operators": [{"name": "josh\nevil", "public_key": "opkey1=", "address": "10.112.0.2"}]}}
+            {
+                "wireguard": {
+                    "operators": [
+                        {
+                            "name": "josh\nevil",
+                            "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                            "address": "10.112.0.2",
+                        }
+                    ]
+                }
+            }
         )
     with pytest.raises(ValidationError, match="base64"):
         ManagementPlaneConfig.model_validate(
-            {"wireguard": {"operators": [{"name": "josh", "public_key": "opkey1=\nevil", "address": "10.112.0.2"}]}}
+            {
+                "wireguard": {
+                    "operators": [
+                        {
+                            "name": "josh",
+                            "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=\nevil",
+                            "address": "10.112.0.2",
+                        }
+                    ]
+                }
+            }
         )
 
 

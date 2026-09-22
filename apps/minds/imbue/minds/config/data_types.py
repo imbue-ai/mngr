@@ -1,5 +1,5 @@
+import base64
 import json
-import re
 from collections.abc import Mapping
 from enum import auto
 from functools import cached_property
@@ -20,6 +20,7 @@ from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
+from imbue.imbue_common.pure import pure
 from imbue.minds.errors import DeployLifecycleConfigError
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.errors import ManagementPlaneConfigError
@@ -566,10 +567,27 @@ def management_overlay_for_tier(tier: str) -> ManagementOverlayAllocation:
     return ManagementOverlayAllocation(tier=NonEmptyStr(tier), overlay=overlay)
 
 
-# WireGuard keys are base64; anything outside this charset (in particular
-# whitespace and newlines) cannot be a key and would corrupt the rendered
-# wg0.conf, which is written inside a root-executed prep heredoc.
-_WIREGUARD_PUBLIC_KEY_CHARSET_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9+/=]+$")
+# A WireGuard key is exactly 32 bytes of Curve25519 material, base64-encoded
+# (44 characters). `wg` refuses anything else at interface bring-up, and the
+# rendered wg0.conf is written inside a root-executed prep heredoc, so a value
+# that is not a key (a paste with stray padding, whitespace, a newline) must be
+# rejected here, before it can reach a box.
+_WIREGUARD_KEY_BYTE_LENGTH: Final[int] = 32
+
+
+@pure
+def is_wireguard_key(value: str) -> bool:
+    """Whether ``value`` is the canonical base64 form of exactly one 32-byte WireGuard key.
+
+    ``wg`` requires the two padding bits of the final base64 group to be zero,
+    so a 44-character string that decodes to 32 bytes but does not re-encode to
+    itself is refused on-box; it is refused here too.
+    """
+    try:
+        decoded = base64.b64decode(value, validate=True)
+    except ValueError:
+        return False
+    return len(decoded) == _WIREGUARD_KEY_BYTE_LENGTH and base64.b64encode(decoded).decode("ascii") == value
 
 
 class WireguardOperatorConfig(FrozenModel):
@@ -597,10 +615,12 @@ class WireguardOperatorConfig(FrozenModel):
         # rendered script. Reject at parse time.
         if "\n" in self.name or "\r" in self.name:
             raise ManagementPlaneConfigError(f"operator name {str(self.name)!r} must be a single line")
-        if not _WIREGUARD_PUBLIC_KEY_CHARSET_PATTERN.match(self.public_key):
+        if not is_wireguard_key(self.public_key):
             raise ManagementPlaneConfigError(
-                f"operator '{self.name}' public_key {str(self.public_key)!r} must contain only "
-                "base64 characters (a WireGuard public key)"
+                f"operator '{self.name}' public_key {str(self.public_key)!r} is not a WireGuard public key "
+                f"(the canonical base64 form of exactly {_WIREGUARD_KEY_BYTE_LENGTH} bytes: 44 characters ending in one "
+                "'=', as `wg` itself accepts; "
+                "re-derive it with `wg pubkey < <private key>`)"
             )
         return self
 

@@ -97,9 +97,11 @@ name = "hynek"
 public_key = "kourKwkC4VkX9RS0nuPeJHo9hUGQTV7lpzAGyXtbrSQ="
 address = "10.112.0.3"
 
+# Gabriel's operator key (the private half lives on his machine at
+# ~/.mindsadmin/dev/wireguard.key).
 [[management_plane.wireguard.operators]]
 name = "gabriel"
-public_key = "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw=="
+public_key = "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw="
 address = "10.112.0.4"
 
 # The tier's Modal Proxy: created once in the minds-dev Modal workspace,

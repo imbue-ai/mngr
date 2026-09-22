@@ -57,6 +57,14 @@ name = "josh"
 public_key = "sKtd/fSa3DfKcluRhv3ial/nShb4MUiKOfvGkmkyrWU="
 address = "10.64.0.2"
 
+# Gabriel's operator key (the private half lives on his machine at
+# ~/.mindsadmin/production/wireguard.key; the same keypair as his dev and
+# staging entries).
+[[management_plane.wireguard.operators]]
+name = "gabriel"
+public_key = "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw="
+address = "10.64.0.3"
+
 # The tier's Modal Proxy: created 2026-09-13 in the minds-production Modal
 # workspace's 'main' environment, in Modal's us-east region.
 [management_plane.modal_proxy]

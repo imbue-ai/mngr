@@ -50,10 +50,17 @@ name = "josh"
 public_key = "nDHMg2pb4j8/CIxK6fSzhA9rxa5noN77kTeU2baLjF4="
 address = "10.96.0.2"
 
+# Gabriel's operator key (the private half lives on his machine at
+# ~/.mindsadmin/staging/wireguard.key; the same keypair as his dev entry).
+[[management_plane.wireguard.operators]]
+name = "gabriel"
+public_key = "Ux1S91tQAYjU5lMVdc7ab7dGFebbziqFwiCvvfQfvCw="
+address = "10.96.0.3"
+
 [[management_plane.wireguard.operators]]
 name = "weishi"
 public_key = "xevh4GJnrPfWU+J2Npp8o85cfK1kVMQlLOX3lICWhjk="
-address = "10.96.0.3"
+address = "10.96.0.4"
 
 # The tier's Modal Proxy: created 2026-09-13 in the minds-staging Modal
 # workspace's 'main' environment, in Modal's us-east region (next to Modal's

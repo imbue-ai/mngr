@@ -151,7 +151,17 @@ def test_management_plane_loader_rejects_an_operator_outside_the_tier_operator_b
     # The block membership check lives in the loader (only it knows the tier);
     # an address in the tier's BOX range would eventually collide with a box.
     config = ManagementPlaneConfig.model_validate(
-        {"wireguard": {"operators": [{"name": "josh", "public_key": "opkey1=", "address": "10.112.1.5"}]}}
+        {
+            "wireguard": {
+                "operators": [
+                    {
+                        "name": "josh",
+                        "public_key": "wee0+EFoclrCL2Pdf3oT3dKtL3Z2W2Tr9JsbvLzqwLc=",
+                        "address": "10.112.1.5",
+                    }
+                ]
+            }
+        }
     )
 
     with pytest.raises(EnvConfigError, match="operator block"):
