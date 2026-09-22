@@ -2,13 +2,15 @@
 
 Subclasses mngr's ``Host`` so the standard ``mngr create --provider
 imbue_cloud_<account> --new-host`` pipeline can adopt a pool host's
-pre-baked agent when one exists, and fall back to mngr's standard
-create flow when it doesn't (e.g. after ``mngr destroy`` has wiped the
-previous agent's state on the leased container). Adoption is purely an
-optimization that skips a slow file-transfer + provisioning round when
-we can. The workspace identity lives on the *host name*; the adopted
-agent keeps the bake's name (a constant such as ``system-services``)
-verbatim.
+pre-baked agent when its state is on disk (the fast path), and fall back
+to mngr's standard create flow when it is not (the slow path's rebuilt
+container, or a leased container whose agent state ``mngr destroy`` wiped
+on an earlier cycle). Adoption is purely an optimization that skips a slow
+file-transfer + provisioning round when we can. On either path the
+services agent comes out with the lease's ``agent_id``: that id is the
+leased host's durable identity on the connector, whose record stub, share
+coordinate, and lease-record sweep are all keyed by it. The adopted agent
+keeps the bake's name (a constant such as ``system-services``) verbatim.
 
 Overrides:
 
@@ -22,9 +24,12 @@ Overrides:
   fallback path where ``data.json`` is missing, pins ``options.agent_id``
   to the pre-baked id before delegating to ``super()``.
 - ``create_agent_work_dir`` and ``provision_agent`` short-circuit to a
-  no-transfer + minimal-provision path *only* when the pre-baked
-  agent's ``data.json`` is still on disk; otherwise they delegate to
-  ``super()`` and let mngr do a full create + provision.
+  no-transfer + minimal-provision path *only* when the bake's agent
+  state was still on disk; otherwise they delegate to ``super()`` and
+  let mngr do a full create + provision. ``provision_agent`` cannot judge
+  that from disk alone -- the pinned-id full create has by then written a
+  ``data.json`` at the pre-baked id -- so ``create_agent_state`` records
+  which path it took on the host object.
 """
 
 import json as _json
@@ -35,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.mngr.config.agent_config_registry import resolve_agent_type
 from imbue.mngr.config.data_types import MngrContext
@@ -71,10 +77,10 @@ class ImbueCloudHost(Host):
     """A leased pool host.
 
     The pre-baked agent's id is captured at lease time so
-    ``create_agent_state`` can adopt that agent (keeping the bake's name
-    and id) instead of generating a fresh ``data.json``. The workspace
-    identity is carried by the host name; the agent name is whatever the
-    bake wrote (typically a constant such as ``system-services``).
+    ``create_agent_state`` either adopts that agent (keeping the bake's name
+    and id) or, when its state is gone, creates the agent afresh at that same
+    id instead of minting a new one. The agent name is whatever the bake
+    wrote (typically a constant such as ``system-services``).
     """
 
     # ``pre_baked_agent_id`` is inherited from the base ``Host`` class
@@ -87,6 +93,13 @@ class ImbueCloudHost(Host):
         frozen=True,
         description="Database id of this lease (UUID returned by /hosts/lease).",
     )
+
+    # Set by ``create_agent_state`` when it found no baked agent state and ran
+    # the full create at the pinned id. ``provision_agent`` needs it because
+    # that create writes a ``data.json`` at the pre-baked id, so by the time
+    # provisioning runs the on-disk check alone would mistake the fresh state
+    # for the bake's and skip the full provisioning the container still needs.
+    _is_agent_created_without_baked_state: bool = PrivateAttr(default=False)
 
     def set_env_vars(self, env: Mapping[str, str]) -> None:
         """Merge ``env`` into the pre-baked ``/mngr/env`` instead of overwriting.
@@ -163,12 +176,14 @@ class ImbueCloudHost(Host):
         ``<MNGR_PREFIX><name>`` tmux session reference still resolves).
         Everything else (``name``, ``additional_commands``, ``create_time``,
         ``work_dir``, ``agent_type``, the agent UUID baked into the
-        ``--session-id`` fallback) is preserved verbatim from the bake --
-        the workspace identity now lives on the *host*, not on the agent.
+        ``--session-id`` fallback) is preserved verbatim from the bake: that
+        UUID is the lease's ``agent_id``, the identity the connector knows
+        the host by, and the name is not part of it.
 
-        Falls back to ``super()`` when ``pre_baked_agent_id`` is unset or
-        the on-disk ``data.json`` is missing -- e.g. after ``mngr destroy``
-        wiped the previous lease cycle's state and we need a full create.
+        Falls back to ``super()`` when ``pre_baked_agent_id`` is unset, and
+        to ``super()`` with the id pinned to ``pre_baked_agent_id`` when the
+        on-disk ``data.json`` is missing (the slow path's rebuilt container,
+        or a lease whose earlier cycle ``mngr destroy`` wiped).
         """
         if self.pre_baked_agent_id is None:
             return super().create_agent_state(
@@ -185,12 +200,12 @@ class ImbueCloudHost(Host):
 
         existing = self._read_pre_baked_data()
         if existing is None:
-            # Lease said pre-baked, but the file is gone -- previous cycle's
-            # ``mngr destroy`` cleaned the agent state. Fall through to the
-            # standard create path so mngr writes a fresh ``data.json`` (this
-            # path will lose the bake's ``additional_commands``; if that
-            # matters here we want a louder failure mode, but that's a
-            # different conversation than the lease-adopt happy path).
+            # No baked agent state on disk: the slow path's rebuilt container,
+            # or a leased container whose state an earlier ``mngr destroy``
+            # wiped. Run the standard create with the id pinned to the
+            # lease's, so the host keeps the agent identity the connector knows
+            # it by; the template's create supplies the agent's commands.
+            self._is_agent_created_without_baked_state = True
             options_with_id = options.model_copy(update={"agent_id": self.pre_baked_agent_id})
             return super().create_agent_state(
                 work_dir_path,
@@ -199,11 +214,9 @@ class ImbueCloudHost(Host):
                 checked_out_branch_name=checked_out_branch_name,
             )
 
-        # Hydrate the agent class with the bake's name; minds no longer
-        # renames the pre-baked agent (the workspace identity lives on the
-        # host now). ``options.name`` is the minds-supplied default agent
-        # name ("system-services"), kept around for non-imbue_cloud modes;
-        # for adoption we ignore it.
+        # Hydrate the agent class with the bake's name, kept verbatim: the
+        # caller's ``options.name`` is only the default for the non-adopt
+        # paths, and nothing derives an identity from the agent's name.
         agent_type = AgentTypeName(str(existing.get("type", "claude")))
         resolved = resolve_agent_type(agent_type, self.mngr_ctx.config)
         baked_work_dir = Path(str(existing.get("work_dir", str(work_dir_path))))
@@ -228,9 +241,7 @@ class ImbueCloudHost(Host):
             initial_message=options.initial_message,
         )
 
-        # Merge labels: bake's defaults + minds' user-supplied (latter wins).
-        # The workspace identity lives on the host name (and the host id), not
-        # on a label; we don't re-derive it from any agent name.
+        # Merge labels: the bake's defaults plus the caller's (the latter win).
         merged_labels: dict[str, str] = dict(existing.get("labels") or {})
         merged_labels.update(options.label_options.labels)
 
@@ -278,12 +289,15 @@ class ImbueCloudHost(Host):
         (the LiteLLM key flows through ``--pass-host-env`` for minds, so
         we have to look at host env, not just agent env).
 
-        When the pre-baked agent state has been wiped (``mngr destroy``
-        on a previous lease cycle, etc.), fall through to mngr's standard
-        ``provision_agent`` so packages/file transfers/agent-type provisioning
-        run from scratch.
+        When ``create_agent_state`` found no baked agent state (the slow
+        path's rebuilt container, or a lease whose earlier cycle ``mngr
+        destroy`` wiped) it created the agent afresh at the pre-baked id, so
+        a ``data.json`` now sits there without the bake's packages behind it;
+        the flag it set, or a still-missing ``data.json``, sends this through
+        mngr's standard ``provision_agent`` so packages/file transfers/agent-type
+        provisioning run from scratch.
         """
-        if self._read_pre_baked_data() is None:
+        if self._is_agent_created_without_baked_state or self._read_pre_baked_data() is None:
             super().provision_agent(agent, options, mngr_ctx)
             return
         agent_env = self._collect_agent_env_vars(agent, options)

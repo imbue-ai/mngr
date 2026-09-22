@@ -397,7 +397,7 @@ class _FakeImbueCloudProvider(_NoWorkspacesMixin, ImbueCloudProvider):
     def _wait_for_container_sshd(self, leased: LeasedHostInfo) -> None:
         self._waited_for.append(leased.vps_address)
 
-    def _build_host_object(self, lease: LeasedHostInfo, *, adopt_pre_baked_agent: bool = True) -> ImbueCloudHost:
+    def _build_host_object(self, lease: LeasedHostInfo) -> ImbueCloudHost:
         assert self._built is not None
         return self._built
 
@@ -2154,3 +2154,31 @@ def test_destroy_host_of_a_workspace_the_connector_does_not_know_runs_local_clea
 
     assert client.release_calls == []
     assert provider._cleanup_calls == [host_id]
+
+
+# this tests: IF a host object is built from a lease (any create path, the slow path's rebuilt container included)
+# THEN: the lease's agent id rides along as the pre-baked id, so the services agent is created at that id
+def test_build_host_object_always_pins_the_lease_agent_id(temp_mngr_ctx: MngrContext) -> None:
+    """The agent id the connector knows the lease by (record stub, share coordinate, the
+    lease-record sweep's join) is the pool row's agent id. A slow-path rebuild
+    that let mngr mint a fresh id left every one of those out of step (a
+    record-less lease, a duplicate list entry), so the id must be pinned on
+    every path -- the host decides adopt-vs-full-create from its on-disk state,
+    never from this object."""
+    provider = ImbueCloudProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        host_dir=Path("/tmp/imbue-cloud-test-host-dir"),
+        config=ImbueCloudProviderConfig(account=ImbueCloudAccount("alice@example.com")),
+    )
+    host_id = HostId.generate()
+    # An OVH-style lease (container port equal to the configured publish
+    # port) so no slice adoption is attempted: the build stays local.
+    lease = _make_lease(host_id).model_copy_update(
+        to_update(_make_lease(host_id).field_ref().container_ssh_port, provider.config.container_ssh_port)
+    )
+
+    host = provider._build_host_object(lease)
+
+    assert host.pre_baked_agent_id == AgentId(lease.agent_id)
+    assert host.id == host_id

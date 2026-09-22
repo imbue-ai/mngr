@@ -1543,15 +1543,17 @@ class ImbueCloudProvider(BaseProviderInstance):
             plugin={},
         )
 
-    def _build_host_object(self, lease: LeasedHostInfo, *, adopt_pre_baked_agent: bool = True) -> ImbueCloudHost:
+    def _build_host_object(self, lease: LeasedHostInfo) -> ImbueCloudHost:
         """Construct the ``ImbueCloudHost`` for a leased host.
 
-        ``adopt_pre_baked_agent`` records whether the leased container still
-        carries the bake's pre-provisioned agent state to adopt. The fast path
-        (and discovery) leaves it True; the slow path passes False because it
-        tore down the baked container and rebuilt it, so there is nothing to
-        adopt -- ``pre_baked_agent_id=None`` then makes ``create_agent_*`` /
-        ``provision_agent`` all fall through to mngr's standard full create.
+        The lease's ``agent_id`` is always carried as ``pre_baked_agent_id``:
+        it is the leased host's durable identity on the connector (its record
+        stub, share coordinate, and lease-record sweep are all keyed by it), so the
+        services agent must come out with that id on every create path. The
+        host decides between adopting the bake's agent state and a full create
+        by whether that state is still on disk (see ``hosts/host.py``): the
+        slow path's rebuilt container has none, so it takes the full create
+        with the id pinned.
         """
         host_id = HostId(lease.host_id)
         agent_id = AgentId(lease.agent_id)
@@ -1600,7 +1602,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             connector=connector,
             provider_instance=self,
             mngr_ctx=self.mngr_ctx,
-            pre_baked_agent_id=agent_id if adopt_pre_baked_agent else None,
+            pre_baked_agent_id=agent_id,
             lease_db_id=host_db_id,
             host_dir_override=self._load_resolved_host_dir(host_id),
         )
@@ -2038,11 +2040,11 @@ class ImbueCloudProvider(BaseProviderInstance):
             self._record_host_key(
                 host_id, lease_result.vps_address, lease_result.container_ssh_port, rebuilt_container_public_key
             )
-            # The container was torn down and rebuilt -- there is no baked agent
-            # state to adopt, so don't mark the host as pre-baked. This makes
-            # mngr run its standard full create + provision (matching this
-            # method's "fresh OVH host" contract) instead of the adopt path.
-            host = self._build_host_object(self._leased_info_from_result(lease_result), adopt_pre_baked_agent=False)
+            # The rebuilt container carries no baked agent state, so the host's
+            # create hooks fall through to mngr's standard full create +
+            # provision (this method's "fresh OVH host" contract) while still
+            # minting the services agent at the lease's agent id.
+            host = self._build_host_object(self._leased_info_from_result(lease_result))
         logger.info(
             "imbue_cloud[{}] SLOW PATH: rebuilt container on leased host {} (lease {}); "
             "mngr will now run full client-side setup",
@@ -2925,7 +2927,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         # locally-updated lease to avoid an extra round-trip.
         updated_lease = lease.model_copy_update(to_update(lease.field_ref().host_name, str(name)))
         self.reset_caches()
-        return self._build_host_object(updated_lease, adopt_pre_baked_agent=False)
+        return self._build_host_object(updated_lease)
 
     # pyinfra connector lookup
 
