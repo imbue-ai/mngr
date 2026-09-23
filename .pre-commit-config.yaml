@@ -31,8 +31,11 @@ repos:
 #        ty scans the whole uv workspace regardless of which files changed, so it does
 #        not take staged filenames (pass_filenames: false) and runs only at pre-push
 #        (a per-commit hook would add a fixed full-workspace scan to every commit).
+#        --all-packages because ty resolves imports against .venv: a bare `uv run` installs only
+#        the root project, so in a fresh worktree (or any venv not synced with --all-packages) ty
+#        reports thousands of unresolved imports from members the push never touched.
         name: "Python type checker (ty)"
-        entry: bash -c 'uv run ty check'
+        entry: bash -c 'uv run --all-packages ty check'
         language: system
         types: [python]
         pass_filenames: false
