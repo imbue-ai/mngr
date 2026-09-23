@@ -6,6 +6,7 @@ import { Button } from "./Button";
 import { Card, cardClass } from "./Card";
 import { Disclosure } from "./Disclosure";
 import { ICONS_12, ICONS_16 } from "./icons";
+import type { IconName } from "./icons";
 import { Modal } from "./Modal";
 import { Notice, noticeClass } from "./Notice";
 import { spinnerClass } from "./Spinner";
@@ -280,7 +281,7 @@ describe("routeLinkAttrs", () => {
 
 describe("icon catalogs", () => {
   it("ports the full 16px set including the titlebar glyphs", () => {
-    for (const name of [
+    const names: IconName[] = [
       "menu",
       "home",
       "inbox",
@@ -291,7 +292,8 @@ describe("icon catalogs", () => {
       "close",
       "check",
       "chevron-down",
-    ]) {
+    ];
+    for (const name of names) {
       expect(ICONS_16[name], name).toBeTruthy();
     }
   });

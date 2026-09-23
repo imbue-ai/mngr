@@ -13,6 +13,7 @@ import { Spinner } from "../../components/Spinner";
 import { Notice } from "../../components/Notice";
 import { Button } from "../../components/Button";
 import { Icon16 } from "../../components/Icon";
+import type { IconName } from "../../components/icons";
 import type { OptionsTab, SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import type { PermissionsModel } from "../../../models/workspacePermissions";
 import { PermissionsTab } from "./PermissionsTab";
@@ -37,8 +38,8 @@ export interface OptionsPanelAttrs {
  * from the workspace list, the titlebar crumb does not name it either. Pinned
  * (shrink-0) above the scrolling pane; the name truncates so a long one never
  * pushes into a second line or crowds the close X. */
-function paneTitle(tab: OptionsTab, name: string): m.Child {
-  const icon = tab === "share" ? "share" : "settings";
+export function paneTitle(tab: OptionsTab, name: string): m.Child {
+  const icon: IconName = tab === "share" ? "user-plus" : "settings";
   const label = tab === "share" ? "Share machine:" : "Machine settings:";
   return m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
     m(Icon16, { name: icon, size: "lg", extra: "shrink-0" }),

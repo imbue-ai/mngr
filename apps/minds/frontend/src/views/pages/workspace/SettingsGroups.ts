@@ -8,6 +8,7 @@ import { getAppContext } from "../../../app-context";
 import { Button } from "../../components/Button";
 import { ColorSwatch } from "../../components/ColorSwatch";
 import { Icon16 } from "../../components/Icon";
+import type { IconName } from "../../components/icons";
 import { machineVerdict } from "../../components/MachineVerdict";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
@@ -30,7 +31,7 @@ import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { workspacePageNoticeFor } from "../../shell/notice-band";
 
-const GROUPS: { id: SettingsGroup; icon: string; label: string }[] = [
+const GROUPS: { id: SettingsGroup; icon: IconName; label: string }[] = [
   { id: "general", icon: "info", label: "General" },
   { id: "account", icon: "user", label: "Account" },
   { id: "backup", icon: "cloud", label: "Backup" },

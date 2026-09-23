@@ -12,6 +12,7 @@ import {
 } from "../components/FormControls";
 import { Icon12, Icon16 } from "../components/Icon";
 import { ICONS_12, ICONS_16 } from "../components/icons";
+import type { Icon12Name, IconName } from "../components/icons";
 import { Link } from "../components/Link";
 import { DialogCloseButton, Modal } from "../components/Modal";
 import { Notice, type NoticeVariant } from "../components/Notice";
@@ -452,7 +453,7 @@ export function DevStyleguide(): m.Component {
               toc: "Icons (16px)",
               title: "Icons -- 16px (Icon16)",
               body: m("div", { class: "grid grid-cols-4 gap-3" }, [
-                ...Object.keys(ICONS_16).map((name) =>
+                ...(Object.keys(ICONS_16) as IconName[]).map((name) =>
                   m("div", { class: "flex items-center gap-2" }, [
                     m(Icon16, { name }),
                     m("code", { class: "type-helper text-secondary" }, name),
@@ -466,7 +467,7 @@ export function DevStyleguide(): m.Component {
               title: "Icons -- 12x12 chrome glyphs (Icon12)",
               body: m("div", { class: "flex gap-6" }, [
                 ...(
-                  Object.keys(ICONS_12) as ("minimize" | "maximize" | "close")[]
+                  Object.keys(ICONS_12) as Icon12Name[]
                 ).map((name) =>
                   m("div", { class: "flex items-center gap-2" }, [
                     m(Icon12, { name }),

@@ -1,5 +1,6 @@
 import m from "mithril";
 import { ICONS_12, ICONS_16 } from "./icons";
+import type { Icon12Name, IconName } from "./icons";
 
 export type Icon16Size = "sm" | "md" | "lg";
 
@@ -10,7 +11,7 @@ const ICON16_SIZES: Record<Icon16Size, string> = {
 };
 
 interface Icon16Attrs extends m.Attributes {
-  name: string;
+  name: IconName;
   size?: Icon16Size;
   extra?: string;
 }
@@ -33,14 +34,14 @@ export function Icon16(): m.Component<Icon16Attrs> {
           fill: "currentColor",
           "aria-hidden": "true",
         },
-        m.trust(ICONS_16[name] ?? ""),
+        m.trust(ICONS_16[name]),
       );
     },
   };
 }
 
 interface Icon12Attrs extends m.Attributes {
-  name: "minimize" | "maximize" | "close";
+  name: Icon12Name;
   extra?: string;
 }
 
@@ -64,7 +65,7 @@ export function Icon12(): m.Component<Icon12Attrs> {
           "stroke-linejoin": "round",
           "aria-hidden": "true",
         },
-        m.trust(ICONS_12[name] ?? ""),
+        m.trust(ICONS_12[name]),
       );
     },
   };

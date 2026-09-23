@@ -17,6 +17,7 @@
 import m from "mithril";
 import { Badge } from "../components/Badge";
 import { Icon16 } from "../components/Icon";
+import type { IconName } from "../components/icons";
 import type { ShellState } from "./shell-state";
 import { isTitlebarPopupRoutePath } from "./classify";
 import type { OptionsTab } from "../../models/workspaceOptions";
@@ -32,7 +33,7 @@ export interface TitlebarPopupIcon {
   id: TitlebarPopupId;
   /** DOM id of the real titlebar button this copy stands in for. */
   buttonId: string;
-  icon: string;
+  icon: IconName;
   label: string;
 }
 

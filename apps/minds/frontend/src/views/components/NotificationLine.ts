@@ -5,6 +5,7 @@
 // PermissionNotice the same way).
 
 import m from "mithril";
+import type { IconName } from "./icons";
 import type { UiNotificationEntry } from "../../channel/messages";
 import { serviceMark } from "./ServiceMark";
 
@@ -24,7 +25,7 @@ export function timeAgo(createdAtIso: string, nowMs: number): string {
 }
 
 /** The icon each kind is marked with wherever rows are listed by kind. */
-export const KIND_ICON_NAME: Record<UiNotificationEntry["kind"], string> = {
+export const KIND_ICON_NAME: Record<UiNotificationEntry["kind"], IconName> = {
   permission_request: "key",
   agent_message: "message-square",
   system_event: "info",
