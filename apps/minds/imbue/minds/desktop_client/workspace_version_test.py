@@ -77,12 +77,22 @@ def test_parse_update_self_ref_ignores_the_templates_own_update_self_commits() -
     assert parse_update_self_ref("update-self: merge upstream template") is None
 
 
-def test_the_update_self_marker_outranks_the_tag() -> None:
-    caller = _GitAnsweringCaller(stdout="update-self: merge upstream template (minds-v0.4.1)\nminds-v0.3.17\n")
+@pytest.mark.parametrize(
+    ("marker_ref", "tag", "expected"),
+    [
+        pytest.param("minds-v0.4.1", "minds-v0.3.17", "minds-v0.4.1", id="marker-outranks-an-older-release-tag"),
+        pytest.param("minds-v0.6.2", "minds-v0.7.0", "minds-v0.7.0", id="a-newer-release-tag-outranks-the-marker"),
+        pytest.param(
+            "minds-v0.7.0-rc.1", "minds-v0.7.0", "minds-v0.7.0", id="a-release-outranks-its-prerelease-marker"
+        ),
+        # A workspace updated to ``main`` still describes an older release; only two releases compare.
+        pytest.param("main", "minds-v0.7.0", "main", id="a-branch-marker-outranks-any-tag"),
+    ],
+)
+def test_the_marker_and_the_tag_rank_by_release(marker_ref: str, tag: str, expected: str) -> None:
+    caller = _GitAnsweringCaller(stdout=f"update-self: merge upstream template ({marker_ref})\n{tag}\n")
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
-
-    assert version == "minds-v0.4.1"
+    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == expected
 
 
 def test_the_marker_and_the_tag_are_read_in_one_exec() -> None:
@@ -367,7 +377,7 @@ def test_the_tag_fetch_stops_once_the_tag_is_local(tmp_path: Path) -> None:
 
 
 def test_a_workspace_with_an_update_self_marker_never_fetches(tmp_path: Path) -> None:
-    """The marker outranks the tag, so a workspace that has one has nothing to gain from the fetch."""
+    """A workspace with a marker already has a version to report, so the read leaves its tags alone."""
     workspace, official = _make_published_template_workspace(tmp_path)
     run_git_for_backup_test(
         workspace, "commit", "-q", "--allow-empty", "-m", "update-self: merge upstream template (minds-v0.5.0)"
@@ -398,6 +408,49 @@ def test_a_workspace_that_cannot_reach_the_official_template_reads_nothing_and_s
     assert caller.shell_returncodes == [0]
     (stderr,) = caller.shell_stderrs
     assert unreachable_url in stderr
+
+
+def _commit_on_day(repo: Path, day: int, *args: str) -> None:
+    """Run a committing git command stamped on its own day.
+
+    ``describe`` walks history in commit-date order, and a fixture whose
+    commits all share one second can make it pick a farther tag.
+    """
+    stamp = f"2026-09-{day:02d}T12:00:00Z"
+    run_git_for_backup_test(repo, *args, env_overrides={"GIT_AUTHOR_DATE": stamp, "GIT_COMMITTER_DATE": stamp})
+
+
+@pytest.mark.witnesses("workspace-updates.updated-workspace-not-re-offered", partial="the version read only")
+def test_a_run_landed_with_an_ordinary_merge_reads_as_the_release_it_landed(tmp_path: Path) -> None:
+    """The shape a run leaves when its lead lands the worker branch with ``--no-ff`` instead of a fast-forward.
+
+    The run's marker ends up on the landing merge's second parent, out of the
+    first-parent marker read's reach, which finds the previous run's instead.
+    The release the run merged is still reachable, so ``describe`` names it.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(workspace)], check=True, capture_output=True, timeout=60)
+    _commit_on_day(workspace, 1, "commit", "-q", "--allow-empty", "-m", "upstream release")
+    run_git_for_backup_test(workspace, "tag", "minds-v0.6.2")
+    _commit_on_day(
+        workspace, 2, "commit", "-q", "--allow-empty", "-m", "update-self: merge upstream template (minds-v0.6.2)"
+    )
+    run_git_for_backup_test(workspace, "checkout", "-q", "-b", "upstream", "minds-v0.6.2")
+    _commit_on_day(workspace, 3, "commit", "-q", "--allow-empty", "-m", "next upstream release")
+    run_git_for_backup_test(workspace, "tag", "minds-v0.7.0")
+    run_git_for_backup_test(workspace, "checkout", "-q", "-b", "mngr/update-self", "main")
+    _commit_on_day(
+        workspace, 4, "merge", "-q", "--no-ff", "-m", "update-self: merge upstream template (minds-v0.7.0)", "upstream"
+    )
+    _commit_on_day(workspace, 5, "commit", "-q", "--allow-empty", "-m", "adapt the workspace to the release")
+    run_git_for_backup_test(workspace, "checkout", "-q", "main")
+    _commit_on_day(workspace, 6, "merge", "-q", "--no-ff", "--no-edit", "mngr/update-self")
+    caller = _LocalGitCaller(repo=workspace, official_url=str(tmp_path / "unused.git"))
+
+    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+
+    assert version == "minds-v0.7.0"
 
 
 @pytest.mark.witnesses("workspace-updates.version-not-recovered-for-an-unrelated-workspace")

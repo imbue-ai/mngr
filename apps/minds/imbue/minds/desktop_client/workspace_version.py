@@ -7,14 +7,14 @@ commits on the workspace's primary branch. So the *current* version and the
 *upgrade history* live in the workspace's git, not in any minds-side record.
 
 Two things in that git can name the current version: the ``update-self:``
-merge subject the skill writes (which outranks) and the nearest reachable
-``minds-v*`` tag. The tag can be missing from a clone that holds the commit it
-points at -- a workspace created from a published template carries the
-template's whole history but none of its tags -- so a read that finds neither,
-in a workspace whose tree came from the template and holds enough history for a
-tag to describe it, adds minds' ``official`` remote, fetches the release tags
-from it and describes again. That is the one thing the read writes into the
-workspace.
+merge subject the skill writes (which outranks, unless the tag names a newer
+release) and the nearest reachable ``minds-v*`` tag. The tag can be missing
+from a clone that holds the commit it points at -- a workspace created from a
+published template carries the template's whole history but none of its tags
+-- so a read that finds neither, in a workspace whose tree came from the
+template and holds enough history for a tag to describe it, adds minds'
+``official`` remote, fetches the release tags from it and describes again.
+That is the one thing the read writes into the workspace.
 
 The hub reads them on demand by running ``git`` inside the (online) workspace
 via ``mngr exec``. This is best-effort: an offline workspace, a workspace that
@@ -36,6 +36,7 @@ from imbue.imbue_common.event_envelope import parse_iso_timestamp
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_NAME
 from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
+from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.mngr.primitives import AgentId
 
@@ -128,9 +129,9 @@ _GIT_ENSURE_OFFICIAL_REMOTE_COMMAND: str = (
 # remote. The marker log and the fetch keep their stderr, the two whose failure
 # is not.
 #
-# The marker outranks the tag, so a workspace that has one has nothing to gain
-# from the fetch -- which is why the condition is both being empty, not the tag
-# alone.
+# A workspace with a marker already has a version to report, so the fetch is
+# only for one with neither -- which is why the condition is both being empty,
+# not the tag alone.
 _GIT_CURRENT_VERSION_COMMAND: str = (
     f'marker="$({shlex.join(_GIT_UPDATE_SELF_ARGS)})"; '
     f"{_GIT_DESCRIBE_INTO_TAG_COMMAND}; "
@@ -163,8 +164,8 @@ class WorkspaceGitVersion(FrozenModel):
 
     current_minds_version: str | None = Field(
         default=None,
-        description="Ref named by the newest ``update-self:`` marker, else the nearest reachable "
-        "``minds-v*`` tag; None when neither can be read",
+        description="Ref named by the newest first-parent ``update-self:`` marker, or the nearest reachable "
+        "``minds-v*`` tag when there is no marker or the tag names a newer release; None when neither can be read",
     )
     upgrade_merges: tuple[UpgradeMerge, ...] = Field(
         default=(),
@@ -188,18 +189,26 @@ def parse_current_version(stdout: str) -> str | None:
     """The version named by the combined marker + ``describe`` output, or None when neither line is there.
 
     The marker outranks the tag: a workspace that updated to ``main`` still
-    describes the release it was created at. The two are told apart by shape:
-    a marker line starts with the marker's subject prefix and a tag never does,
-    so a marker the grep selected but the strict parse rejected is not mistaken
-    for the tag.
+    describes the release it was created at. Except when both name a release and
+    the tag's is newer: the marker is read along the first-parent line only, so
+    a run landed with an ordinary merge leaves its marker on a second parent and
+    the read finds an earlier run's, while ``describe`` still reaches the
+    release that merge brought in. The two are told apart by shape: a marker
+    line starts with the marker's subject prefix and a tag never does, so a
+    marker the grep selected but the strict parse rejected is not mistaken for
+    the tag.
     """
     lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    for line in lines:
-        marker_ref = parse_update_self_ref(line)
-        if marker_ref is not None:
-            return marker_ref
+    marker_ref = next((ref for ref in map(parse_update_self_ref, lines) if ref is not None), None)
     tag_line = next((line for line in lines if not line.startswith(_UPDATE_SELF_SUBJECT_PREFIX)), None)
-    return parse_git_describe(tag_line) if tag_line is not None else None
+    tag_ref = parse_git_describe(tag_line) if tag_line is not None else None
+    if marker_ref is None:
+        return tag_ref
+    marker_version = parse_minds_version(marker_ref)
+    tag_version = parse_minds_version(tag_ref)
+    if marker_version is not None and tag_version is not None and marker_version < tag_version:
+        return tag_ref
+    return marker_ref
 
 
 def parse_upgrade_merges(stdout: str) -> tuple[UpgradeMerge, ...]:

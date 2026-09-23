@@ -1,4 +1,6 @@
+import os
 import subprocess
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -118,9 +120,6 @@ def extract_response(exec_result: subprocess.CompletedProcess[str]) -> str:
     return response_lines[0]
 
 
-# -- Backup-service test helpers (shared by the workspace-script unit tests
-# and the snapshot-resume backup tests) --
-
 _BACKUP_TEST_GIT_IDENTITY: Final[tuple[str, ...]] = (
     "-c",
     "user.name=test",
@@ -129,9 +128,15 @@ _BACKUP_TEST_GIT_IDENTITY: Final[tuple[str, ...]] = (
 )
 
 
-def run_git_for_backup_test(repo: Path, *args: str) -> str:
+def run_git_for_backup_test(repo: Path, *args: str, env_overrides: Mapping[str, str] | None = None) -> str:
     result = subprocess.run(
-        ["git", *_BACKUP_TEST_GIT_IDENTITY, *args], cwd=repo, capture_output=True, text=True, check=True, timeout=60
+        ["git", *_BACKUP_TEST_GIT_IDENTITY, *args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+        env={**os.environ, **env_overrides} if env_overrides is not None else None,
     )
     return result.stdout
 
@@ -246,8 +251,6 @@ def tag_cross_layout_release_content(repo: Path, *, workspace_code_path: str, ta
     run_git_for_backup_test(repo, "checkout", "-q", "main")
 
 
-# -- Workspace-sync e2e (snapshot sandbox + real connector env) ---------------
-#
 # The sync e2e release tests (apps/minds/test_sync_e2e.py) run in the
 # minds-snapshot offload sandbox against a real per-run CI connector env.
 # The env's coordinates + admin secrets are forwarded into the sandbox as
