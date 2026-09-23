@@ -32,8 +32,9 @@
 # defaulted, because every build ToDesktop made before Linux packaging landed
 # carries a Linux manifest whose binaries cannot run there. When a
 # Linux-capable build is promoted to alpha or beta, list it for
-# `["mac", "linux"]`; stable stays `["mac"]` until the manual Linux pass in
-# apps/minds/docs/deploy/next_deploy.md.
+# `["mac", "linux"]`; stable stays `["mac"]` until the first Linux-capable build
+# is promoted to it, and apps/minds/docs/deploy/next_deploy.md lists what that
+# promotion carries with it (the connector's Linux download fallback).
 
 [channels.stable]
 build_id = "260917ohslvgoyj"
