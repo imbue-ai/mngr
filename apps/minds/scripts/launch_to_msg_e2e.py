@@ -92,6 +92,7 @@ from playwright.sync_api import ConsoleMessage
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import WebError
 from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
@@ -1078,7 +1079,39 @@ class _WorkspaceResult(BaseModel):
     total_create_s: float = 0.0
 
 
-def _sign_in_via_provider_chooser(chat: Frame, *, api_key: SecretStr, label: str) -> None:
+# The welcome chat's window in the desktop shell: the chat app's pinned window, the one
+# its auto-open restores. Every other window a fresh workspace opens is unpinned.
+_CHAT_WINDOW = '[data-window-id][data-pinned="true"]'
+
+
+def _raise_chat_window(workspace: Frame, *, label: str) -> None:
+    """Focus the welcome chat's window so pointer clicks reach its page.
+
+    The shell shields every window but the focused one and makes the pages under the
+    shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
+    intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
+    that would raise it. A fresh workspace opens two windows -- the welcome chat and the
+    Getting Started app -- and which lands on top is a race, so take the shell's own
+    two-step: press the shield, then act on the page.
+    """
+    shield = workspace.query_selector(f"{_CHAT_WINDOW} [data-window-shield]")
+    if shield is None:
+        return
+    logger.info("[{}] the welcome chat's window is shielded; pressing the shield to raise it", label)
+    shield.click()
+    workspace.wait_for_selector(f'{_CHAT_WINDOW}[data-focused="true"]', timeout=10_000)
+
+
+def _click_in_chat(workspace: Frame, chat: Frame, selector: str, *, label: str) -> None:
+    """Click ``selector`` in the chat's page, raising its window first if a shield takes the press."""
+    try:
+        chat.click(selector, timeout=10_000)
+    except PlaywrightTimeoutError:
+        _raise_chat_window(workspace, label=label)
+        chat.click(selector, timeout=20_000)
+
+
+def _sign_in_via_provider_chooser(workspace: Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
     """Drive the provider chooser in the welcome chat's own frame through the Anthropic API-key path.
 
     A freshly created workspace has no provider accounts, so the first message sent in
@@ -1091,17 +1124,18 @@ def _sign_in_via_provider_chooser(chat: Frame, *, api_key: SecretStr, label: str
     """
     logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
     chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
+    _raise_chat_window(workspace, label=label)
     # Anthropic's lane, then its API-key method under "Other ways to sign in" --
     # the lane's primary method is the browser sign-in, which needs a human.
-    chat.click("[data-e2e=lane-anthropic]")
+    _click_in_chat(workspace, chat, "[data-e2e=lane-anthropic]", label=label)
     chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
-    chat.click("[data-e2e=method-api_key]")
+    _click_in_chat(workspace, chat, "[data-e2e=method-api_key]", label=label)
     chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
     chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
     logger.info("[{}] submitting the API key through the chooser", label)
-    chat.click("[data-e2e=save-key]")
+    _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
     chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
-    chat.click("[data-e2e=done]")
+    _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
     chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
     logger.info("[{}] signed in via the chooser", label)
 
@@ -1283,7 +1317,7 @@ def _create_workspace_and_first_message(
     inp.fill(FIRST_PROMPT)
     inp.press("Enter")
     if ai_provider == "API_KEY":
-        _sign_in_via_provider_chooser(chat, api_key=anthropic_key, label=label)
+        _sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
     with contextlib.suppress(Exception):
         chat.wait_for_function(
             _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),
