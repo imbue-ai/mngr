@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import socket
@@ -13,6 +14,7 @@ from uuid import uuid4
 import paramiko
 import pytest
 from loguru import logger
+from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import Field
 from pydantic import PrivateAttr
 
@@ -2134,9 +2136,23 @@ def _raised_from(error: BaseException, cause: BaseException) -> BaseException:
         pytest.param(
             SSHTunnelError("SSH transport is not active", SSHTunnelPhase.HOST_CONNECT), True, id="tunnel-host-connect"
         ),
+        pytest.param(ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"), True, id="connection-refused"),
+        pytest.param(
+            NoValidConnectionsError({("203.0.113.9", 22002): ConnectionRefusedError()}),
+            True,
+            id="no-valid-connections",
+        ),
+        pytest.param(OSError(errno.ENETUNREACH, "Network is unreachable"), True, id="network-unreachable"),
+        pytest.param(
+            _raised_from(
+                RemoteGatewayError("Failed to reach the gateway"),
+                NoValidConnectionsError({("203.0.113.9", 22002): ConnectionRefusedError()}),
+            ),
+            True,
+            id="wrapped-no-valid-connections",
+        ),
         pytest.param(HostAuthenticationError("Authentication failed"), False, id="host-authentication-error"),
         pytest.param(SSHTunnelError("No SSH key file", SSHTunnelPhase.LOCAL_SETUP), False, id="tunnel-local-setup"),
-        pytest.param(ConnectionRefusedError(61, "Connection refused"), False, id="connection-refused"),
         pytest.param(RemoteGatewayError("Malformed permissions file"), False, id="remote-gateway-error-alone"),
         pytest.param(HostNotFoundError(ProviderInstanceName("p"), HostId()), False, id="host-not-found"),
     ],
@@ -2220,6 +2236,47 @@ def test_transient_tunnel_failures_report_an_error_only_once_the_streak_reaches_
     info_messages = [message for level, message in captured if level == "INFO" and str(host_id) in message]
     assert len(info_messages) == 2, info_messages
     assert _error_messages_mentioning(captured, host_id) == errors_at_threshold
+
+
+def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_threshold(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """A refused connect counts toward the streak, like the timeout shape beside it.
+
+    It arrives as a ``NoValidConnectionsError``, which is an ``OSError`` rather
+    than an ``SSHException``.
+    """
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    tunnel_manager = _ConfigurableFailureTunnelManager()
+    tunnel_manager._error_to_raise = NoValidConnectionsError(
+        {("203.0.113.9", 22002): ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")}
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    host_side_port = 41989
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=tunnel_manager,
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+        with _captured_log_records() as captured:
+            for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
+                handler._setup_desktop_gateway_reachability_on_vps(
+                    agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port, "local"
+                )
+            errors_before_threshold = _error_messages_mentioning(captured, host_id)
+            for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD):
+                handler._setup_desktop_gateway_reachability_on_vps(
+                    agent_id, host_id, _VPS_OUTER_SSH_INFO, host_side_port, "local"
+                )
+            errors_past_threshold = _error_messages_mentioning(captured, host_id)
+
+    assert errors_before_threshold == []
+    assert len(errors_past_threshold) == 1, errors_past_threshold
+    assert f"{TRANSIENT_FAILURE_REPORT_THRESHOLD} consecutive discovery cycles" in errors_past_threshold[0]
 
 
 def test_non_transient_tunnel_failure_is_reported_as_an_error_at_once(

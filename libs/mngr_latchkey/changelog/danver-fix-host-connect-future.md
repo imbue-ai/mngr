@@ -1,0 +1,3 @@
+Stopped `mngr latchkey forward` from reporting an unreachable workspace host on every discovery cycle.
+
+A VPS-backed workspace whose outer SSH endpoint refused the connection, had no route from this computer, or was off the network had its wiring failure logged at `ERROR` with a traceback every 30 seconds for as long as the supervisor ran. The same host was already reported only once per streak when its connection attempt timed out instead -- which of the two happened was decided by the network's answer, not by anything about the host. Both shapes are now treated alike: noted at `INFO` the first cycle, `DEBUG` after, and reported once at `ERROR` if the host is still unreachable ten cycles later.

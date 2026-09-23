@@ -1,5 +1,6 @@
 """Unit tests for OuterHost and the outer-host accessors."""
 
+import errno
 import shlex
 import stat
 import subprocess
@@ -11,6 +12,7 @@ from typing import cast
 import pytest
 from paramiko import ChannelException
 from paramiko import SSHException
+from paramiko.ssh_exception import NoValidConnectionsError
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
 from pyinfra.api.host import Host as PyinfraHost
@@ -30,6 +32,7 @@ from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -796,6 +799,40 @@ def test_is_transient_ssh_error(exception: BaseException, expected: bool) -> Non
     that was fine died with a raw paramiko traceback instead of reconnecting.
     """
     assert is_transient_ssh_error(exception) is expected
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (NoValidConnectionsError({("203.0.113.9", 22): ConnectionRefusedError()}), True),
+        (ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused"), True),
+        (ConnectionRefusedError(), True),
+        (OSError(errno.EHOSTUNREACH, "No route to host"), True),
+        (OSError(errno.ENETUNREACH, "Network is unreachable"), True),
+        (OSError(errno.EHOSTDOWN, "Host is down"), True),
+        (ConnectionResetError(54, "Connection reset by peer"), False),
+        (OSError("Socket is closed"), False),
+        (OSError(errno.EACCES, "Permission denied"), False),
+    ],
+    ids=[
+        "no-valid-connections",
+        "connection-refused",
+        "connection-refused-without-errno",
+        "host-unreachable",
+        "network-unreachable",
+        "host-down",
+        "connection-reset",
+        "socket-closed",
+        "permission-denied",
+    ],
+)
+def test_is_unreachable_peer_connect_error(exception: OSError, expected: bool) -> None:
+    """Only a connect that never reached a listening peer is matched.
+
+    A connection that was established and then died is a different condition
+    (``is_dead_ssh_connection_error``) and must not match.
+    """
+    assert is_unreachable_peer_connect_error(exception) is expected
 
 
 class _FakeSftpSetupChannel:

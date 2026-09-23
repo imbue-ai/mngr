@@ -15,6 +15,7 @@ a container, or the SSH-reachable docker daemon machine).
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import re
@@ -41,6 +42,7 @@ from paramiko import SSHException
 from paramiko import Transport
 from paramiko.common import cMSG_CHANNEL_REQUEST
 from paramiko.message import Message
+from paramiko.ssh_exception import NoValidConnectionsError
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
@@ -267,6 +269,33 @@ def is_dead_ssh_connection_error(exception: OSError) -> bool:
     of in each of the paths that have to react to it.
     """
     return isinstance(exception, ConnectionResetError) or "Socket is closed" in str(exception)
+
+
+# The errnos a TCP connect fails with when it could not reach the host or its network at
+# all. A refusal is absent because Python already raises that as its own
+# ``ConnectionRefusedError``, whose errno differs between platforms.
+_UNREACHABLE_PEER_ERRNOS: Final[frozenset[int]] = frozenset(
+    (errno.EHOSTUNREACH, errno.EHOSTDOWN, errno.ENETUNREACH, errno.ENETDOWN)
+)
+
+
+@pure
+def is_unreachable_peer_connect_error(exception: OSError) -> bool:
+    """Whether this ``OSError`` is a connect that never reached a listening peer.
+
+    The counterpart to :func:`is_dead_ssh_connection_error`: nothing was ever
+    established here, so there is no connection to tear down and rebuild -- only
+    a host that is not answering yet, or not answering from where this machine
+    is sitting. Which shape the failure arrives in is decided by the network
+    rather than by the host: paramiko folds ``ECONNREFUSED`` and
+    ``EHOSTUNREACH`` into a ``NoValidConnectionsError`` (whose own errno is
+    ``None``, so it has to be matched on the type) and re-raises every other
+    connect failure bare.
+    """
+    return (
+        isinstance(exception, (NoValidConnectionsError, ConnectionRefusedError))
+        or exception.errno in _UNREACHABLE_PEER_ERRNOS
+    )
 
 
 @pure

@@ -150,8 +150,9 @@ Every discovery cycle (30s by default) re-runs each remote host's SSH wiring
 steps -- the desktop-to-VPS tunnel, the desktop-gateway reverse tunnel, and VPS
 gateway provisioning -- until they succeed, so a transient SSH failure (a
 connection reset, a dead transport, a handshake blip, an authentication
-timeout) heals by itself and is only logged at `INFO` the first time and
-`DEBUG` on later cycles. A host that keeps failing that way for
+timeout, or a host that is not answering yet -- whether its SYN is dropped,
+refused, or has no route from this computer) heals by itself and is only logged
+at `INFO` the first time and `DEBUG` on later cycles. A host that keeps failing that way for
 `TRANSIENT_FAILURE_REPORT_THRESHOLD` (10) consecutive cycles while reporting as
 running is logged once at `ERROR` with a traceback (which is what reaches
 Sentry), then retried quietly until it succeeds, at which point a new outage

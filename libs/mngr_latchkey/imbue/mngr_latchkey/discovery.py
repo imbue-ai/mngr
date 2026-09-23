@@ -58,6 +58,7 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
+from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
@@ -148,12 +149,15 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
     True for the transient SSH shapes ``is_transient_ssh_error`` names (a
     reset or closed socket, a dead transport, a paramiko exception, a read
     timeout) anywhere in the error's cause chain, since the outer host and the
-    provisioning code both wrap them before they get here; for a
-    ``HostConnectionError``, which is what those become after the outer host's
-    own retries give up; and for a tunnel failure the tunnel layer attributes
-    to the host rather than to this device. Everything else -- trust material
-    missing on this device, a rejected key, a malformed file -- is a failure no
-    amount of retrying fixes, and is reported at once.
+    provisioning code both wrap them before they get here; for a connect that
+    never reached the host at all (:func:`is_unreachable_peer_connect_error`),
+    which is a host that is booting, restarting or momentarily off this
+    machine's network; for a ``HostConnectionError``, which is what those
+    become after the outer host's own retries give up; and for a tunnel failure
+    the tunnel layer attributes to the host rather than to this device.
+    Everything else -- trust material missing on this device, a rejected key, a
+    malformed file -- is a failure no amount of retrying fixes, and is reported
+    at once.
     """
     for link in _exception_chain(error):
         if isinstance(link, HostAuthenticationError):
@@ -163,6 +167,8 @@ def is_transient_remote_wiring_error(error: BaseException) -> bool:
         if isinstance(link, SSHTunnelError):
             return link.phase is SSHTunnelPhase.HOST_CONNECT
         if is_transient_ssh_error(link):
+            return True
+        if isinstance(link, OSError) and is_unreachable_peer_connect_error(link):
             return True
     return False
 
