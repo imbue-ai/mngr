@@ -28,6 +28,8 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 
 _DEFAULT_HOST_DIR_ENV_VAR = "MNGR_HOST_DIR"
@@ -189,6 +191,12 @@ def handle_imbue_cloud_errors(func):
                 min_version=exc.min_version,
                 sunset_date=exc.sunset_date,
             )
+        except ImbueCloudUserNotFoundError as exc:
+            # A miss is an expected answer (the address may simply have no
+            # account yet), so callers key off the code rather than the text.
+            fail_with_json(str(exc), error_class=type(exc).__name__, code="user_not_found")
+        except ImbueCloudRateLimitedError as exc:
+            fail_with_json(str(exc), error_class=type(exc).__name__, code="rate_limited")
         except ImbueCloudError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__)
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { settle } from "../testing";
+import { settle, shareModelOptions } from "../testing";
 import type {
   MachineSharingResponse,
   SharingGrantsDocument,
@@ -84,19 +84,13 @@ function makeShareModel(
   overrides: Partial<ConstructorParameters<typeof ShareModel>[0]> = {},
 ): { model: ShareModel; requests: RecordedRequest[] } {
   const stub = makeFetchStub(responder);
-  const model = new ShareModel({
-    hostId: "host-" + "a".repeat(32),
-    ownerEmail: OWNER,
-    wholeService: "system_interface",
-    appServices: ["web", "docs"],
-    serviceLabels: { web: "web-r4nd", system_interface: "shell-r4nd" },
-    fetchJson: stub.fetchJson,
-    redraw: () => undefined,
-    setTimer: () => 0,
-    clearTimer: () => undefined,
-    monotonicNowMs: () => 0,
-    ...overrides,
-  });
+  const model = new ShareModel(
+    shareModelOptions({
+      ownerEmail: OWNER,
+      fetchJson: stub.fetchJson,
+      ...overrides,
+    }),
+  );
   return { model, requests: stub.requests };
 }
 
@@ -144,13 +138,103 @@ describe("ShareModel grants document building", () => {
       body: sharingResponse(),
     }));
     await model.load();
-    model.addEntry("friend@example.com");
-    model.addEntry("example.org");
+    // The stub answers the resolve lookup with a body carrying no user_id,
+    // which stages the address as an invite.
+    await model.addEntry("friend@example.com");
+    await model.addEntry("example.org");
 
     const doc = model.buildGrantsDocument({ system_interface: true });
 
+    expect(doc.workspace.users).toEqual([]);
     expect(doc.workspace.emails).toEqual([OWNER, "friend@example.com"]);
     expect(doc.workspace.email_domains).toEqual(["example.org"]);
+  });
+
+  it("stages a resolved address as a user-id grant and keeps its identity for display", async () => {
+    const { model, requests } = makeShareModel((url) => {
+      if (url === "/ui/api/users/resolve")
+        return {
+          ok: true,
+          status: 200,
+          body: {
+            user_id: "user-2",
+            email: "bob@example.com",
+            display_name: "Bob",
+            profile_picture_url: null,
+          },
+        };
+      return { ok: true, status: 200, body: sharingResponse() };
+    });
+    await model.load();
+
+    await model.addEntry("Bob@Example.com");
+
+    const resolve = requests.find(
+      (request) => request.url === "/ui/api/users/resolve",
+    );
+    expect(resolve?.method).toBe("POST");
+    expect(resolve?.body).toEqual({ email: "Bob@Example.com" });
+    expect(model.targetState("system_interface").entries).toEqual([
+      { kind: "user", userId: "user-2" },
+    ]);
+    expect(model.identityFor("user-2")?.display_name).toBe("Bob");
+    const doc = model.buildGrantsDocument({ system_interface: true });
+    expect(doc.workspace.users).toEqual(["user-2"]);
+    expect(doc.workspace.emails).toEqual([OWNER]);
+
+    model.removeEntry({ kind: "user", userId: "user-2" });
+    expect(model.targetState("system_interface").entries).toEqual([]);
+  });
+
+  it("stages an entry under the target it was typed into even if the target changes mid-lookup", async () => {
+    const { model } = makeShareModel((url) => {
+      if (url === "/ui/api/users/resolve")
+        return {
+          ok: true,
+          status: 200,
+          body: { user_id: "user-2", email: "bob@example.com" },
+        };
+      return { ok: true, status: 200, body: sharingResponse() };
+    });
+    await model.load();
+
+    const adding = model.addEntry("bob@example.com");
+    model.selectTarget("web");
+    await adding;
+
+    expect(model.targetState("system_interface").entries).toEqual([
+      { kind: "user", userId: "user-2" },
+    ]);
+    expect(model.targetState("web").entries).toEqual([]);
+  });
+
+  it("reads user-id grants and their identities back from the sharing document", async () => {
+    const { model } = makeShareModel(() => ({
+      ok: true,
+      status: 200,
+      body: sharingResponse({
+        enabled: true,
+        url: "https://m.relay.example/",
+        grants: {
+          workspace: { users: ["user-9"], emails: [OWNER], email_domains: [] },
+          services: {},
+        },
+        identities: {
+          "user-9": {
+            user_id: "user-9",
+            email: "nine@example.com",
+            display_name: null,
+            profile_picture_url: null,
+          },
+        },
+      }),
+    }));
+    await model.load();
+
+    expect(model.targetState("system_interface").entries).toEqual([
+      { kind: "user", userId: "user-9" },
+    ]);
+    expect(model.identityFor("user-9")?.email).toBe("nine@example.com");
   });
 
   it("preserves scopes granted outside the pane verbatim through every write", async () => {
@@ -180,6 +264,7 @@ describe("ShareModel grants document building", () => {
       email_domains: [],
     });
     expect(doc.services["web"]?.emails).toEqual([OWNER]);
+    expect(doc.services["web"]?.users).toEqual([]);
   });
 
   it("keeps staged entries for a disabled target and publishes them on enable", async () => {
@@ -202,7 +287,7 @@ describe("ShareModel grants document building", () => {
     });
     await model.load();
     model.selectTarget("web");
-    model.addEntry("guest@example.com");
+    await model.addEntry("guest@example.com");
     // Staging while off must not write anything.
     expect(putBodies).toHaveLength(0);
 
@@ -210,6 +295,7 @@ describe("ShareModel grants document building", () => {
 
     expect(putBodies).toHaveLength(1);
     expect(putBodies[0].services["web"]).toEqual({
+      users: [],
       emails: [OWNER, "guest@example.com"],
       email_domains: [],
     });
@@ -830,6 +916,8 @@ describe("WorkspaceOptionsModel", () => {
             is_leased_imbue_cloud: false,
             has_account: true,
             account_email: OWNER,
+            account_display_name: "Owner Person",
+            account_profile_picture_url: "https://pictures.example/owner.png",
             current_account: {
               user_id: "u1",
               email: OWNER,
@@ -859,6 +947,11 @@ describe("WorkspaceOptionsModel", () => {
     expect(model.status).toBe("ready");
     expect(model.data?.name).toBe("sunny");
     expect(model.share).not.toBeNull();
+    expect(model.share?.ownerEmail).toBe(OWNER);
+    expect(model.share?.ownerDisplayName).toBe("Owner Person");
+    expect(model.share?.ownerProfilePictureUrl).toBe(
+      "https://pictures.example/owner.png",
+    );
   });
 
   it("rename requires a non-empty name and surfaces server errors", async () => {

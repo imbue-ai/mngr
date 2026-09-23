@@ -57,12 +57,18 @@ Sharing is per-workspace and user-initiated: nothing sharing-related happens at 
 
 #### Request identity handed to in-workspace services
 
-A workspace service learns who is making a request from two headers, set the same way whether the request arrives over the relay (the share-gateway) or over the local desktop forward (`mngr forward`):
+A workspace service learns who is making a request from one header, `X-Imbue-Identity`, set the same way whether the request arrives over the relay (the share-gateway) or over the local desktop forward (`mngr forward`). Its value is a compact JSON object:
 
-- **`X-Share-Owner`** -- always present, `true` or `false`. Over the local forward the single authenticated user is always the owner, so it is always `true`.
-- **`X-Share-Email`** -- present **only when `X-Share-Owner: false`**: the verified email of the non-owner visitor. The owner's own email is never sent per-request. Both sides strip any client-supplied copy of these headers before injecting the authoritative value, so a workspace page cannot forge them.
+- `owner` -- always present, `true` or `false`. Over the local forward the single authenticated user is always the owner, so it is always `true`.
+- `user_id` and `email` -- the requester's account id and email, present only while the workspace is shared and the entry point knows the requester's account: the share-gateway always knows a visitor's (and the owner's, over the relay), and the desktop knows the owner's for the shared workspaces of its signed-in accounts. An unshared workspace's requests carry only the owner flag.
 
-The owner's email is instead delivered out-of-band, and only while the workspace is shared: on share-enable the desktop client writes it to `data/.state/share/owner_email` inside the workspace (removed on unshare), so a service that needs the owner's email reads that file, and its presence also signals that sharing is active. The gateway's own contract and the file location are documented in the default-workspace-template's `system/services/share_gateway/README.md`.
+So exactly two forms leave the desktop: `{"owner":true}` and `{"owner":true,"user_id":"...","email":"..."}`. The header carries no display name or profile picture; whoever needs a profile fetches it from the connector by `user_id`.
+
+The desktop owns this contract (`desktop_client/forward_identity.py`); `mngr forward` knows nothing of it. The desktop writes the header into the proxy's generic per-agent request-headers file at `<data_dir>/forward_headers.json` (passed as `--request-headers-file`): a `"*"` entry stamping `{"owner":true}` on every workspace, plus one entry per shared workspace carrying its owning account's `user_id` and `email` from the plugin's session. Which workspaces are shared comes from the sync service's records listing (`GET /sync/records` reports `shared_agent_ids` beside the records), applied after every workspace-record sync pass, and from this desktop's own share enable/disable, applied immediately so the local view is right without waiting for the next pass. The proxy re-reads the file whenever it changes, strips any client-supplied copy of the header, and stamps the workspace's entry on every forwarded request and WebSocket handshake.
+
+Both entry points strip any client-supplied copy of the header before injecting the authoritative value, so a workspace page cannot forge it. Nothing about the owner is delivered out-of-band anymore: an app that needs to know who is here reads it from requests (see the presence store in the default-workspace-template's `system_interface`). The gateway's own contract is documented in the template's `system/services/share_gateway/README.md`, and the design in [`specs/share-identity-and-presence/spec.md`](../../../specs/share-identity-and-presence/spec.md).
+
+Who may visit is decided by the workspace's grants file (`data/.secrets/share_grants.toml`): `users` (account ids, matched first), `emails` (invites the gateway upgrades to account ids on the invitee's first visit), and `email_domains`. The desktop resolves a typed address to an account when the owner adds it, so a grant survives the grantee changing their email.
 
 # Command line interface
 

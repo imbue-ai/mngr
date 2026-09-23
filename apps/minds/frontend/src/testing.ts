@@ -7,6 +7,7 @@ import type {
   UiWorkspacesMessage,
 } from "./channel/messages";
 import type { SettingsOverview } from "./models/settings";
+import type { ShareModelOptions } from "./models/workspaceOptions";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -101,6 +102,28 @@ export function settingsOverview(
     version: "v-one",
     update_window_start_hour: 2,
     update_window_end_hour: 5,
+    ...overrides,
+  };
+}
+
+/** ShareModel options for a whole-machine share owned by owner@example.com
+ * on host `host-aaaa...`, with a shell and two app services and inert
+ * redraw/timer hooks; tests pass the `fetchJson` stub they want answered. */
+export function shareModelOptions(
+  overrides: Partial<ShareModelOptions> = {},
+): ShareModelOptions {
+  return {
+    hostId: "host-" + "a".repeat(32),
+    ownerEmail: "owner@example.com",
+    ownerDisplayName: null,
+    ownerProfilePictureUrl: null,
+    wholeService: "system_interface",
+    appServices: ["web", "docs"],
+    serviceLabels: { web: "web-r4nd", system_interface: "shell-r4nd" },
+    redraw: () => undefined,
+    setTimer: () => 0,
+    clearTimer: () => undefined,
+    monotonicNowMs: () => 0,
     ...overrides,
   };
 }

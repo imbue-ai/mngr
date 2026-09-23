@@ -81,10 +81,11 @@ from imbue.mngr_forward.primitives import BROWSER_BRIDGE_PATH
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import ParsedForwardHost
-from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
-from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
 from imbue.mngr_forward.primitives import ServiceLabel
 from imbue.mngr_forward.primitives import parse_forward_host
+from imbue.mngr_forward.request_headers import AgentRequestHeaders
+from imbue.mngr_forward.request_headers import NO_REQUEST_HEADERS
+from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
@@ -276,7 +277,7 @@ def _render_index_page(
     return env.get_template("index.html").render(agents=agents, port=port)
 
 
-# -- Auth helpers ----------------------------------------------------------
+# Auth helpers
 
 
 def _append_partitioned_to_last_set_cookie(response: Response) -> None:
@@ -388,19 +389,20 @@ def _unauthenticated_subdomain_response(
     return Response(status_code=302, headers={"Location": location})
 
 
-# -- WebSocket forwarding helpers -----------------------------------------
+# WebSocket forwarding helpers
 
 
 def _connect_backend_websocket(
     ws_url: str,
     subprotocols: list[str],
     tunnel_socket_path: Path | None,
+    request_headers: AgentRequestHeaders,
 ) -> "websockets.asyncio.client.connect":
     ws_subprotocols = [websockets.Subprotocol(s) for s in subprotocols] if subprotocols else None
     # The backend handshake carries only what we set here (client headers are not
-    # forwarded), so stamp the local owner identity -- matching the HTTP path and
-    # the share_gateway contract. There is no inbound copy to strip on this path.
-    additional_headers = {SHARE_OWNER_HEADER: "true"}
+    # forwarded), so there is nothing to strip on this path: the configured
+    # per-agent headers are stamped exactly as on the HTTP path.
+    additional_headers = dict(request_headers.values_by_name)
     if tunnel_socket_path is not None:
         sock = socket_module.socket(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
         try:
@@ -474,7 +476,7 @@ async def _forward_backend_to_client(
         logger.trace("Client WebSocket send error (likely post-disconnect): {}", e)
 
 
-# -- HTTP/WS tunnel helpers -----------------------------------------------
+# HTTP/WS tunnel helpers
 
 
 def _get_tunnel_socket_path(
@@ -608,7 +610,7 @@ def _connect_failure_reason(was_backend_refused: Callable[[], bool]) -> SystemIn
     return SystemInterfaceBackendFailureReason.CONNECT_ERROR
 
 
-# -- HTTP forwarding -------------------------------------------------------
+# HTTP forwarding
 
 
 class _BackendBodyError(MngrForwardError):
@@ -769,6 +771,11 @@ class _StallGuardedStreamingResponse(StreamingResponse):
             await self._close_backend()
 
 
+def _request_headers_for(reader: RequestHeadersFileReader | None, agent_id: AgentId) -> AgentRequestHeaders:
+    """The header edits for a request to one of ``agent_id``'s origins: nothing without a request-headers file."""
+    return NO_REQUEST_HEADERS if reader is None else reader.headers_for_agent(str(agent_id))
+
+
 async def _forward_workspace_http(
     request: Request,
     backend_url: str,
@@ -777,6 +784,7 @@ async def _forward_workspace_http(
     envelope_writer: EnvelopeWriter,
     stall_notice_seconds: float,
     was_backend_refused: Callable[[], bool],
+    request_headers: AgentRequestHeaders,
 ) -> Response:
     """Byte-forward one request to ``backend_url`` and report what happened.
 
@@ -784,6 +792,8 @@ async def _forward_workspace_http(
     :func:`_snapshot_backend_refusals` before this is called: it is what tells a
     connect-time failure over a live tunnel (the host refused the inner port)
     from one that leaves the backend's reachability unknown.
+    ``request_headers`` is what the host application's request-headers file
+    prescribes for this agent (see :func:`_request_headers_for`).
     """
     base = backend_url.rstrip("/")
     path = request.url.path.lstrip("/")
@@ -806,15 +816,13 @@ async def _forward_workspace_http(
         else:
             del headers["cookie"]
 
-    # Stamp the local identity contract. The single authenticated user is always
-    # the workspace owner here, so X-Share-Owner is unconditionally true and no
-    # email is sent (matching the share_gateway contract for owner requests).
-    # Drop any inbound copy first -- Starlette lowercases header keys, so a
-    # forged header only appears in lowercase -- so a backend page cannot spoof
-    # its own ownership or email.
-    headers.pop(SHARE_OWNER_HEADER.lower(), None)
-    headers.pop(SHARE_EMAIL_HEADER.lower(), None)
-    headers[SHARE_OWNER_HEADER] = "true"
+    # Apply the host application's per-agent headers: strip every name the file
+    # mentions anywhere (Starlette lowercases header keys, so an inbound copy
+    # only ever appears in lowercase), then set this agent's values, so a
+    # backend page can never forge a header the file controls.
+    for name in request_headers.names_to_strip:
+        headers.pop(name, None)
+    headers.update(request_headers.values_by_name)
 
     body = await request.body()
     accept = request.headers.get("accept", "")
@@ -1150,7 +1158,7 @@ def _service_unavailable_response(request: Request) -> Response:
     return Response(status_code=503, content="Backend not yet available")
 
 
-# -- Subdomain handlers ---------------------------------------------------
+# Subdomain handlers
 
 
 def _sanitize_next_url(value: str) -> str:
@@ -1301,6 +1309,7 @@ async def _handle_workspace_forward_http(
     stall_notice_seconds: float,
     tunnel_warning_limiter: ForwardWarningRateLimiter,
     unresolved_warning_limiter: ForwardWarningRateLimiter,
+    request_headers_reader: RequestHeadersFileReader | None,
 ) -> Response:
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
@@ -1446,6 +1455,7 @@ async def _handle_workspace_forward_http(
         # Armed here rather than inside the forward, so the count it compares
         # against is read before the request is dialed.
         was_backend_refused=_snapshot_backend_refusals(tunnel_manager, backend_url, target.ssh_info),
+        request_headers=_request_headers_for(request_headers_reader, agent_id),
     )
 
 
@@ -1459,6 +1469,7 @@ async def _handle_workspace_forward_websocket(
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
     unresolved_warning_limiter: ForwardWarningRateLimiter,
+    request_headers_reader: RequestHeadersFileReader | None,
 ) -> None:
     if not _is_authenticated(
         cookies=websocket.cookies,
@@ -1551,7 +1562,10 @@ async def _handle_workspace_forward_websocket(
     is_backend_connected = False
     try:
         backend_ws_conn = _connect_backend_websocket(
-            ws_url=ws_url, subprotocols=subprotocols, tunnel_socket_path=tunnel_socket_path
+            ws_url=ws_url,
+            subprotocols=subprotocols,
+            tunnel_socket_path=tunnel_socket_path,
+            request_headers=_request_headers_for(request_headers_reader, agent_id),
         )
         async with backend_ws_conn as backend_ws:
             is_backend_connected = True
@@ -1638,7 +1652,7 @@ async def _handle_workspace_forward_websocket(
             pass
 
 
-# -- Bare-origin handlers --------------------------------------------------
+# Bare-origin handlers
 
 
 def _handle_login(
@@ -1807,7 +1821,7 @@ def _handle_goto_workspace(
     return Response(status_code=302, headers={"Location": location})
 
 
-# -- App factory + lifespan ------------------------------------------------
+# App factory + lifespan
 
 
 @asynccontextmanager
@@ -1864,6 +1878,7 @@ def create_forward_app(
     browser_bridge_token: str | None = None,
     embedder_origins: tuple[EmbedderOrigin, ...] = (),
     stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
+    request_headers_reader: RequestHeadersFileReader | None = None,
 ) -> FastAPI:
     """Create the FastAPI app for ``mngr forward``.
 
@@ -1892,6 +1907,12 @@ def create_forward_app(
     ``_handle_browser_bridge``); ``embedder_origins`` extends the
     ``frame-ancestors`` policy appended to every proxied workspace response
     beyond the default 'self' + workspace-family deny-external posture.
+
+    ``request_headers_reader`` serves the per-agent headers a host application
+    lists in its request-headers file (``--request-headers-file``): on every
+    forwarded request and WebSocket handshake the names the file mentions are
+    stripped and the agent's entry (or the ``"*"`` default) is set. Without a
+    reader, requests are forwarded with their headers untouched.
     """
     env = _build_jinja_env()
     tunnel_warning_limiter = ForwardWarningRateLimiter()
@@ -1934,6 +1955,7 @@ def create_forward_app(
             stall_notice_seconds=stall_notice_seconds,
             tunnel_warning_limiter=tunnel_warning_limiter,
             unresolved_warning_limiter=unresolved_warning_limiter,
+            request_headers_reader=request_headers_reader,
         )
         # The proxy owns embedding policy for every workspace origin: APPEND a
         # frame-ancestors CSP header (never modify what the service sent --
@@ -2020,6 +2042,7 @@ def create_forward_app(
             allow_host_loopback=allow_host_loopback,
             envelope_writer=envelope_writer,
             unresolved_warning_limiter=unresolved_warning_limiter,
+            request_headers_reader=request_headers_reader,
         )
 
     return app

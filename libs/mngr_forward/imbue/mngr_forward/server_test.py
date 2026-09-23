@@ -62,8 +62,8 @@ from imbue.mngr_forward.errors import MngrForwardError
 from imbue.mngr_forward.primitives import CookieSigningKey
 from imbue.mngr_forward.primitives import MNGR_FORWARD_SESSION_COOKIE_NAME
 from imbue.mngr_forward.primitives import OneTimeCode
-from imbue.mngr_forward.primitives import SHARE_EMAIL_HEADER
-from imbue.mngr_forward.primitives import SHARE_OWNER_HEADER
+from imbue.mngr_forward.request_headers import NO_REQUEST_HEADERS
+from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.server import ForwardWarningRateLimiter
 from imbue.mngr_forward.server import _MAX_TRACKED_WARNING_KEYS
@@ -142,6 +142,7 @@ def _make_forward_app(
     browser_bridge_token: str | None = None,
     embedder_origins: tuple[EmbedderOrigin, ...] = (),
     stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
+    request_headers_reader: RequestHeadersFileReader | None = None,
 ) -> tuple[FastAPI, FileAuthStore, ForwardResolver]:
     """Build a forward app on this module's shared test wiring.
 
@@ -163,6 +164,7 @@ def _make_forward_app(
         browser_bridge_token=browser_bridge_token,
         embedder_origins=embedder_origins,
         stall_notice_seconds=stall_notice_seconds,
+        request_headers_reader=request_headers_reader,
     )
     return app, auth_store, resolver
 
@@ -882,14 +884,75 @@ def test_legacy_service_path_on_non_shell_origin_passes_through(tmp_path: Path) 
     assert response.text == "terminal served this"
 
 
-@pytest.mark.witnesses("forwarding.owner-identity-stamped")
-def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path: Path) -> None:
-    """The proxy stamps X-Share-Owner=true and never trusts a client-supplied identity.
+@pytest.mark.witnesses("forwarding.request-headers-stamped")
+def test_forwarded_request_gets_the_configured_headers_and_drops_inbound_copies(tmp_path: Path) -> None:
+    """The proxy stamps the request-headers file's entry for the agent and never trusts an inbound copy.
 
-    The local user is always the workspace owner, so a forged X-Share-Owner /
-    X-Share-Email on the inbound request must be dropped and the authoritative
-    owner flag injected before the backend sees it.
+    Every name the file mentions anywhere is stripped from the inbound request
+    before the agent's own values are set, so a client (or a page one agent
+    serves) cannot forge a header the file controls -- not even one only some
+    other agent's entry sets.
     """
+    instance_key = _make_test_instance_key()
+    headers_path = tmp_path / "request_headers.json"
+    headers_path.write_text(
+        json.dumps(
+            {
+                "*": {"X-Example-Requester": "anyone"},
+                str(instance_key.agent_id): {"X-Example-Requester": "alice", "X-Example-Tier": "gold"},
+                str(AgentId.generate()): {"X-Example-Other-Agent": "elsewhere"},
+            }
+        )
+    )
+    app, auth_store, resolver = _make_forward_app(
+        tmp_path, request_headers_reader=RequestHeadersFileReader(path=headers_path)
+    )
+    resolver.add_known_agent(instance_key)
+    resolver.update_services(
+        instance_key, {"system_interface": "http://stub-backend"}, {"system_interface-shell111": "system_interface"}
+    )
+
+    seen_headers: dict[str, str] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        seen_headers.clear()
+        seen_headers.update(request.headers)
+        return httpx.Response(200, json={"ok": True})
+
+    cookie = create_session_cookie(auth_store.get_signing_key())
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
+        response = client.get(
+            "/api/health",
+            headers={
+                "accept": "application/json",
+                "X-Example-Requester": "forged",
+                "X-Example-Other-Agent": "forged-too",
+                "X-Client-Sniff": "passes-through",
+            },
+            cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
+        )
+        assert response.status_code == 200
+        assert seen_headers["x-example-requester"] == "alice"
+        assert seen_headers["x-example-tier"] == "gold"
+        # Named only by another agent's entry: stripped, not replaced.
+        assert "x-example-other-agent" not in seen_headers
+        # Headers the file does not mention pass through untouched.
+        assert seen_headers["x-client-sniff"] == "passes-through"
+
+        # The file is re-read when it changes: this agent's entry gone, the
+        # very next request gets the default entry instead.
+        headers_path.write_text(json.dumps({"*": {"X-Example-Requester": "anyone"}}))
+        second = client.get(
+            "/api/health", headers={"accept": "application/json"}, cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie}
+        )
+        assert second.status_code == 200
+        assert seen_headers["x-example-requester"] == "anyone"
+        assert "x-example-tier" not in seen_headers
+
+
+def test_forwarded_request_headers_are_untouched_without_a_request_headers_file(tmp_path: Path) -> None:
+    """With no file configured the proxy neither strips nor stamps anything beyond its own cookie handling."""
     app, auth_store, resolver = _make_forward_app(tmp_path)
     instance_key = _make_test_instance_key()
     resolver.add_known_agent(instance_key)
@@ -908,19 +971,14 @@ def test_forwarded_request_gets_owner_header_and_drops_forged_identity(tmp_path:
         app.state.http_client = httpx.AsyncClient(transport=httpx.MockTransport(_capture), follow_redirects=False)
         response = client.get(
             "/api/health",
-            headers={
-                "accept": "application/json",
-                SHARE_OWNER_HEADER: "false",
-                SHARE_EMAIL_HEADER: "attacker@evil.example",
-            },
+            headers={"accept": "application/json", "X-Example-Requester": "client-supplied"},
             cookies={MNGR_FORWARD_SESSION_COOKIE_NAME: cookie},
         )
     assert response.status_code == 200
-    assert seen_headers[SHARE_OWNER_HEADER.lower()] == "true"
-    assert SHARE_EMAIL_HEADER.lower() not in seen_headers
+    assert seen_headers["x-example-requester"] == "client-supplied"
 
 
-# -- HTTP byte-forwarding fidelity (request/response passthrough) -----------
+# HTTP byte-forwarding fidelity (request/response passthrough)
 #
 # These drive a proxied request through the real forward handler against a
 # ``MockTransport`` backend, so the assertions are on exactly the request the
@@ -3174,20 +3232,18 @@ def test_ws_forward_closes_client_leg_when_backend_closes(tmp_path: Path) -> Non
 @pytest.mark.witnesses(
     "forwarding.ws-no-client-headers",
     partial=(
-        "witnesses that a representative custom client header and forged owner/email identity headers "
-        "do not reach the backend, and that the owner identity is stamped; does not enumerate every "
-        "possible client header (open-world)"
+        "witnesses that a representative custom client header and a client-supplied copy of a configured "
+        "header do not reach the backend, and that the configured headers are stamped; does not enumerate "
+        "every possible client header (open-world)"
     ),
 )
-def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> None:
-    """The WS forward must stamp X-Share-Owner=true and never forward a client-supplied identity.
+def test_ws_forward_stamps_the_configured_headers_on_the_backend_handshake(tmp_path: Path) -> None:
+    """The WS forward must stamp the request-headers file's entry and never forward a client-supplied copy.
 
     The WebSocket analogue of
-    ``test_forwarded_request_gets_owner_header_and_drops_forged_identity``: the
-    single authenticated local user is always the workspace owner, so the
-    backend handshake must carry the authoritative owner flag (and no email)
-    regardless of any forged ``X-Share-Owner`` / ``X-Share-Email`` the client
-    sends -- client headers are not forwarded on this path.
+    ``test_forwarded_request_gets_the_configured_headers_and_drops_inbound_copies``:
+    the backend handshake must carry the agent's configured values regardless of
+    any header the client sends -- client headers are not forwarded on this path.
     """
     captured: dict[str, str | None] = {}
 
@@ -3195,8 +3251,7 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
         # The handshake request is always present inside the handler; assert it
         # so the header reads are not against ``Request | None``.
         assert connection.request is not None
-        captured["owner"] = connection.request.headers.get(SHARE_OWNER_HEADER)
-        captured["email"] = connection.request.headers.get(SHARE_EMAIL_HEADER)
+        captured["requester"] = connection.request.headers.get("X-Example-Requester")
         captured["sniff"] = connection.request.headers.get("x-client-sniff")
         connection.send("hello-from-backend")
 
@@ -3205,9 +3260,14 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
     server_thread = threading.Thread(target=backend_server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        preauth = "preauth-cookie-ws-owner-header"
+        preauth = "preauth-cookie-ws-request-headers"
+        headers_path = tmp_path / "request_headers.json"
+        headers_path.write_text(json.dumps({_TEST_AGENT_ID: {"X-Example-Requester": "alice"}}))
         app, _auth_store, resolver = _make_forward_app(
-            tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True
+            tmp_path,
+            preauth_cookie_value=preauth,
+            allow_host_loopback=True,
+            request_headers_reader=RequestHeadersFileReader(path=headers_path),
         )
         _register_default_service(resolver, f"http://127.0.0.1:{backend_port}")
 
@@ -3216,16 +3276,14 @@ def test_ws_forward_stamps_owner_header_on_backend_handshake(tmp_path: Path) -> 
                 f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws",
                 headers={
                     "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
-                    SHARE_OWNER_HEADER: "false",
-                    SHARE_EMAIL_HEADER: "attacker@evil.example",
+                    "X-Example-Requester": "forged",
                     "x-client-sniff": "should-not-arrive",
                 },
             ) as websocket_session:
                 # Receiving the backend's message guarantees its handler ran and
                 # captured the handshake headers (capture precedes the send).
                 assert websocket_session.receive_text() == "hello-from-backend"
-        assert captured["owner"] == "true"
-        assert captured["email"] is None
+        assert captured["requester"] == "alice"
         # An arbitrary client header does not survive onto the backend handshake.
         assert captured["sniff"] is None
     finally:
@@ -3368,7 +3426,7 @@ def test_ws_without_session_is_refused_before_backend_contact(tmp_path: Path) ->
         backend_server.shutdown()
 
 
-# -- Embedding substrate: cookie attributes, /_bridge, frame-ancestors ------
+# Embedding substrate: cookie attributes, /_bridge, frame-ancestors
 
 
 def test_http2_authenticate_cookie_is_none_and_partitioned(
@@ -3528,7 +3586,7 @@ def test_bare_origin_responses_carry_no_frame_ancestors(
     assert "content-security-policy" not in response.headers
 
 
-# -- ForwardWarningRateLimiter ----------------------------------------------
+# ForwardWarningRateLimiter
 
 
 def test_forward_warning_rate_limiter_logs_the_first_warning_per_key() -> None:
@@ -3598,7 +3656,7 @@ def test_forward_warning_rate_limiter_forgets_lapsed_keys_instead_of_growing_for
     assert limiter.suppressed_repeats_if_should_log("agent-hot|shell") is None
 
 
-# -- Streaming stall/close regression tests --------------------------------
+# Streaming stall/close regression tests
 #
 # Regression tests for the forward pool-saturation wedge: an SSE client leg
 # that went quiet without disconnecting left the ASGI ``send`` blocked forever
@@ -3832,6 +3890,7 @@ async def _run_sse_write_failure_through_the_forward_handler(
                 envelope_writer=EnvelopeWriter(output=envelope_output),
                 stall_notice_seconds=_STALL_NOTICE_SECONDS,
                 was_backend_refused=_never_refused,
+                request_headers=NO_REQUEST_HEADERS,
             )
             with pytest.raises(MngrForwardError):
                 # The ASGI call must unwind on its own once the write fails; the
@@ -3914,6 +3973,7 @@ async def _collect_incremental_sse_deliveries() -> list[dict[str, Any]]:
                 envelope_writer=EnvelopeWriter(output=io.StringIO()),
                 stall_notice_seconds=_STALL_NOTICE_SECONDS,
                 was_backend_refused=_never_refused,
+                request_headers=NO_REQUEST_HEADERS,
             )
             with pytest.raises(MngrForwardError):
                 async with asyncio.timeout(10.0):
@@ -4127,6 +4187,7 @@ async def _run_simultaneous_disconnect_and_handoff(
             envelope_writer=EnvelopeWriter(output=envelope_output),
             stall_notice_seconds=_STALL_NOTICE_SECONDS,
             was_backend_refused=_never_refused,
+            request_headers=NO_REQUEST_HEADERS,
         )
     finally:
         await http_client.aclose()
@@ -4335,7 +4396,7 @@ def test_goto_canonicalizes_a_legacy_host_coordinate(tmp_path: Path) -> None:
     assert response.headers["Location"].startswith(f"http://{_TEST_AGENT_ID}.localhost:18421/_subdomain_auth?")
 
 
-# -- goto-bridge behavior witnesses ---------------------------------------
+# goto-bridge behavior witnesses
 #
 # These drive the whole cookie bridge end to end: the bare origin's
 # ``/goto/<coordinate>/`` route mints a short-lived token bound to one agent

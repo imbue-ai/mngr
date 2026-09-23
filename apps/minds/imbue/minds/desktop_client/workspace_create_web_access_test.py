@@ -115,6 +115,8 @@ def test_enable_web_access_cloud_rows_use_the_client_side_share_create(tmp_path:
             session_store=store,
             backend_resolver=_empty_resolver(),
             client_env_config=_client_env_config(),
+            identity_cache=None,
+            forward_identity=None,
         )
 
     assert cli.create_share_calls == [("owner@example.com", _HOST_ID, None)]
@@ -133,6 +135,8 @@ def test_enable_web_access_raises_for_a_workspace_with_no_account(tmp_path: Path
             session_store=store,
             backend_resolver=_empty_resolver(),
             client_env_config=_client_env_config(),
+            identity_cache=None,
+            forward_identity=None,
         )
     assert cli.shares_by_account == {}
 
@@ -159,6 +163,8 @@ def test_enable_web_access_local_rows_record_the_shell_label(tmp_path: Path) -> 
             session_store=store,
             backend_resolver=resolver,
             client_env_config=_client_env_config(),
+            identity_cache=None,
+            forward_identity=None,
         )
 
     assert cli.create_share_calls == [("owner@example.com", _HOST_ID, "system_interface-abc123")]
@@ -186,6 +192,8 @@ def test_enable_web_access_local_row_resolves_urls_without_an_app_context(tmp_pa
         session_store=store,
         backend_resolver=resolver,
         client_env_config=_client_env_config(),
+        identity_cache=None,
+        forward_identity=None,
     )
 
     # The share.env actually reached the agent, carrying the connector URL

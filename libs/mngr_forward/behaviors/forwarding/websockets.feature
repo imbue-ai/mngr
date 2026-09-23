@@ -51,5 +51,5 @@ Feature: WebSocket forwarding
 
   @ws-no-client-headers
   Rule: The backend WebSocket handshake carries none of the client's headers
-    The proxy opens a fresh connection to the backend, forwarding no header the client sent, and stamps only the local owner identity, exactly as the HTTP path does.
-    A backend therefore never sees the client's headers, and -- since no inbound identity header survives to be trusted -- cannot be made to forge the owner identity.
+    The proxy opens a fresh connection to the backend, forwarding no header the client sent, and stamps only the headers the host application's request-headers file prescribes for the agent, exactly as the HTTP path does.
+    A backend therefore never sees the client's headers, and -- since no inbound copy of a prescribed header survives to be trusted -- cannot be made to forge one.

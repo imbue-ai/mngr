@@ -8,7 +8,7 @@ from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 def test_shares_group_lists_subcommands() -> None:
     result = CliRunner().invoke(shares, ["--help"])
     assert result.exit_code == 0
-    for name in ("create", "delete", "status", "list", "relays"):
+    for name in ("create", "delete", "status", "list", "relays", "set-grantees"):
         assert name in result.output
 
 
@@ -57,3 +57,10 @@ def test_share_to_json_passes_the_chrome_origin_through() -> None:
         state=info.state,
     )
     assert _share_to_json(info_without_chrome, include_token=False)["chrome_origin"] is None
+
+
+def test_set_grantees_help_documents_the_repeatable_user_id_option() -> None:
+    result = CliRunner().invoke(shares, ["set-grantees", "--help"])
+    assert result.exit_code == 0
+    assert "HOST_ID" in result.output
+    assert "--user-id" in result.output

@@ -51,6 +51,7 @@ from imbue.mngr_forward.errors import ForwardTrustError
 from imbue.mngr_forward.primitives import ForwardPort
 from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
+from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.reverse_handler import ReverseTunnelHandler
 from imbue.mngr_forward.server import create_forward_app
@@ -94,6 +95,7 @@ class ForwardCliOptions(CommonCliOptions):
     browser_bridge_token: str | None = None
     embedder_origin: tuple[str, ...] = ()
     trust_ca: bool = False
+    request_headers_file: str | None = None
 
 
 def _parse_reverse_specs(raw: tuple[str, ...]) -> tuple[ReverseTunnelSpec, ...]:
@@ -292,6 +294,17 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
     ),
 )
 @click.option(
+    "--request-headers-file",
+    default=None,
+    help=(
+        "Path to a JSON file of headers to stamp onto every forwarded request and WebSocket "
+        "handshake: an object mapping agent ids (agent-<hex>) to {header name: value} objects, "
+        "with the key '*' holding the headers for every agent not listed. Every header the file "
+        "names anywhere is first deleted from the inbound request, so a page cannot forge one. "
+        "Re-read whenever the file changes; without the flag nothing is stripped or stamped."
+    ),
+)
+@click.option(
     "--trust-ca",
     is_flag=True,
     default=False,
@@ -431,6 +444,9 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         use_http2=opts.use_http2,
         browser_bridge_token=opts.browser_bridge_token,
         embedder_origins=embedder_origins,
+        request_headers_reader=(
+            RequestHeadersFileReader(path=Path(opts.request_headers_file)) if opts.request_headers_file else None
+        ),
     )
 
     ca = load_or_create_local_ca(plugin_state_dir / "ca") if opts.use_http2 else None

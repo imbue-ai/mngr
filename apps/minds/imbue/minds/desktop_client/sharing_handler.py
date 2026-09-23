@@ -18,6 +18,7 @@ import time
 import tomllib
 from collections.abc import Callable
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any
 from typing import Final
 
@@ -26,11 +27,17 @@ from loguru import logger
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.identity_records import IdentityCache
+from imbue.minds.desktop_client.identity_records import IdentityRecord
+from imbue.minds.desktop_client.identity_records import now_utc
+from imbue.minds.desktop_client.identity_records import record_from_cli_identity
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
+from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
@@ -224,13 +231,103 @@ def _pick_preferred_relay_region(cli: ImbueCloudCli, account_email: str) -> str 
     return region
 
 
+_GRANT_LIST_KEYS: Final[tuple[str, ...]] = ("users", "emails", "email_domains")
+
+
 def _grants_have_any_grantee(workspace_grants: dict[str, list[str]], service_grants: dict[str, Any]) -> bool:
-    if workspace_grants.get("emails") or workspace_grants.get("email_domains"):
+    if any(workspace_grants.get(key) for key in _GRANT_LIST_KEYS):
         return True
     for grants in service_grants.values():
-        if grants.get("emails") or grants.get("email_domains"):
+        if any(grants.get(key) for key in _GRANT_LIST_KEYS):
             return True
     return False
+
+
+def _granted_user_ids(
+    workspace_grants: dict[str, list[str]], service_grants: dict[str, dict[str, list[str]]]
+) -> list[str]:
+    """Every user id granted anywhere in the document, deduplicated in first-seen order."""
+    seen: dict[str, None] = {}
+    for scope in (workspace_grants, *service_grants.values()):
+        for user_id in scope.get("users", []):
+            seen.setdefault(user_id, None)
+    return list(seen)
+
+
+def _fetch_identity_from_connector(
+    cli: ImbueCloudCli, account_email: str | None, user_id: str
+) -> IdentityRecord | None:
+    """One ``users show`` lookup under the owner's account; None when the connector knows no such user."""
+    if account_email is None:
+        raise ImbueCloudCliError("No signed-in account to look identities up with")
+    info = cli.show_user(account=account_email, user_id=user_id)
+    return None if info is None else record_from_cli_identity(info)
+
+
+def _resolve_grant_identities(
+    user_ids: Sequence[str],
+    identity_cache: IdentityCache | None,
+    cli: ImbueCloudCli,
+    account_email: str | None,
+) -> dict[str, IdentityRecord]:
+    """The identity record per granted user id, from the cache (fresh) or one connector lookup each.
+
+    Best effort: an id the connector does not know, or a lookup that fails
+    with nothing cached, is simply absent from the result; the Share tab then
+    renders the id itself.
+    """
+    if identity_cache is None:
+        return {}
+    identities: dict[str, IdentityRecord] = {}
+    now = now_utc()
+    for user_id in user_ids:
+        try:
+            record = identity_cache.get_or_fetch(
+                user_id, lambda lookup_id: _fetch_identity_from_connector(cli, account_email, lookup_id), now
+            )
+        except ImbueCloudCliError as exc:
+            logger.debug("Could not resolve the identity of grantee {}: {}", user_id[:8], exc)
+            continue
+        if record is not None:
+            identities[user_id] = record
+    return identities
+
+
+def _publish_grantees(cli: ImbueCloudCli, account_email: str, host_id: str, user_ids: Sequence[str]) -> None:
+    """Mirror the user-id grants to the connector's index and the owner's contacts (best effort).
+
+    Neither write affects who may visit -- the grants file inside the
+    workspace stays the only authority -- so a failure is logged and the next
+    grants save simply retries.
+    """
+    try:
+        cli.set_share_grantees(account=account_email, host_id=host_id, grantee_user_ids=user_ids)
+    except ImbueCloudCliError as exc:
+        logger.warning("Could not update the share's grantee index for {}: {}", host_id, exc)
+    for user_id in user_ids:
+        try:
+            cli.add_contact(account=account_email, user_id=user_id)
+        except ImbueCloudCliError as exc:
+            logger.warning("Could not add grantee {} to the owner's contacts: {}", user_id[:8], exc)
+
+
+def _record_saved_grants(
+    cli: ImbueCloudCli,
+    account_email: str,
+    host_id: str,
+    agent_id: AgentId,
+    user_ids: Sequence[str],
+    forward_identity: ForwardIdentityPublisher | None,
+    owner_account: AccountSession | None,
+) -> None:
+    """After a grants write landed: mirror the grantees to the connector and mark the workspace shared for the forward."""
+    _publish_grantees(cli, account_email, host_id, user_ids)
+    if forward_identity is not None and owner_account is not None:
+        forward_identity.mark_shared(str(agent_id), str(owner_account.user_id))
+
+
+def _owner_account_for(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> AccountSession | None:
+    return session_store.get_account_for_workspace(str(agent_id)) if session_store is not None else None
 
 
 def require_client_env_config() -> ClientEnvConfig:
@@ -280,11 +377,12 @@ def enable_sharing(
     readiness endpoint for end-to-end liveness of the shared hostname.
     """
     if not _grants_have_any_grantee(workspace_grants, service_grants):
-        raise EmptyGrantsError("Sharing requires at least one email or email domain to grant access to.")
-    cli: ImbueCloudCli | None = get_state().imbue_cloud_cli
+        raise EmptyGrantsError("Sharing requires at least one person, email, or email domain to grant access to.")
+    state = get_state()
+    cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
         raise SharingError("imbue_cloud CLI is not configured on this app.")
-    session_store = get_state().session_store
+    session_store = state.session_store
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
     service_labels = resolve_share_target_labels(backend_resolver, agent_id)
@@ -301,6 +399,9 @@ def enable_sharing(
         require_client_env_config(),
         is_cloud_row=_is_imbue_cloud_agent(backend_resolver, agent_id),
         service_labels=service_labels,
+        identity_cache=state.identity_cache,
+        forward_identity=state.forward_identity,
+        owner_account=_owner_account_for(session_store, agent_id),
     )
 
 
@@ -325,8 +426,16 @@ def _enable_sharing_with_cli(
     # returned document so the Share tab builds links from the same labels the
     # connector was told about, or shows a pending state for the ones it lacks.
     service_labels: Mapping[str, str],
+    # The desktop's identity state: the cache renders user-id grants with a
+    # name, the publisher puts the owner's account on the forward's local
+    # requests while the workspace is shared. None disables either.
+    identity_cache: IdentityCache | None,
+    forward_identity: ForwardIdentityPublisher | None,
+    owner_account: AccountSession | None,
 ) -> dict[str, Any]:
     grants_toml = render_grants_toml(workspace_grants, service_grants)
+    user_ids = _granted_user_ids(workspace_grants, service_grants)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
 
     # One exec answers everything the flow needs from the workspace: whether
     # the template ships the share gateway, whether share.env is present, and
@@ -377,12 +486,13 @@ def _enable_sharing_with_cli(
                     "disable sharing for this machine and enable it again."
                 )
             try:
-                # The owner-email file is refreshed alongside, so a share
-                # enabled before that feature existed gains it on a grants edit.
-                provision_share_files_in_agent(agent_id, grants_toml, account_email, None, cli.mngr_caller)
+                provision_share_files_in_agent(agent_id, grants_toml, None, cli.mngr_caller)
             except ShareInjectionError as exc:
                 raise SharingError(str(exc)) from exc
-            return _share_status_document(host_id, existing, workspace_grants, service_grants, service_labels)
+            _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
+            return _share_status_document(
+                host_id, existing, workspace_grants, service_grants, service_labels, identities
+            )
 
     # Local shares with no materials in the workspace pick the relay by
     # measured latency from here (the workspace runs on this machine, so the
@@ -425,10 +535,11 @@ def _enable_sharing_with_cli(
     # Everything lands in one exec, share.env last -- the gateway brings the
     # stack up the moment it appears, so the grants must already be in place.
     try:
-        provision_share_files_in_agent(agent_id, grants_toml, account_email, share_env_text, cli.mngr_caller)
+        provision_share_files_in_agent(agent_id, grants_toml, share_env_text, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
-    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels)
+    _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
+    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
 
 
 def enable_web_access_for_workspace(
@@ -442,6 +553,8 @@ def enable_web_access_for_workspace(
     # in the post-create worker thread, where ``get_state()`` cannot resolve
     # ``current_app``.
     client_env_config: ClientEnvConfig,
+    identity_cache: IdentityCache | None,
+    forward_identity: ForwardIdentityPublisher | None,
 ) -> None:
     """Bring sharing up for a just-created workspace so it is reachable from /web.
 
@@ -465,6 +578,9 @@ def enable_web_access_for_workspace(
         client_env_config,
         is_cloud_row=is_cloud_row,
         service_labels=service_labels,
+        identity_cache=identity_cache,
+        forward_identity=forward_identity,
+        owner_account=_owner_account_for(session_store, agent_id),
     )
 
 
@@ -474,6 +590,7 @@ def _share_status_document(
     workspace_grants: dict[str, list[str]],
     service_grants: dict[str, dict[str, list[str]]],
     service_labels: Mapping[str, str],
+    identities: Mapping[str, IdentityRecord],
 ) -> dict[str, Any]:
     return {
         "host_id": host_id,
@@ -487,20 +604,30 @@ def _share_status_document(
         "cert_not_after": share.cert_not_after,
         "service_labels": dict(service_labels),
         "grants": {"workspace": workspace_grants, "services": service_grants},
+        # The record per granted user id the desktop knows, so the Share tab
+        # renders a name, email, and profile picture instead of a bare id.
+        "identities": {user_id: record.model_dump(mode="json") for user_id, record in identities.items()},
     }
+
+
+def _empty_grant_list() -> dict[str, list[str]]:
+    return {"users": [], "emails": [], "email_domains": []}
 
 
 def _parse_grant_list(value: object) -> dict[str, list[str]]:
-    """Coerce one grants scope read back from the workspace into ``{emails, email_domains}``."""
+    """Coerce one grants scope read back from the workspace into ``{users, emails, email_domains}``.
+
+    ``users`` round-trips verbatim: the gateway writes user ids into it when
+    it upgrades an invite, and a save that dropped them would revoke access.
+    """
     if not isinstance(value, dict):
-        return {"emails": [], "email_domains": []}
+        return _empty_grant_list()
     entries: dict[str, object] = {str(key): entry for key, entry in value.items()}
-    emails = entries.get("emails")
-    email_domains = entries.get("email_domains")
-    return {
-        "emails": [str(email) for email in emails] if isinstance(emails, list) else [],
-        "email_domains": [str(domain) for domain in email_domains] if isinstance(email_domains, list) else [],
-    }
+    parsed: dict[str, list[str]] = {}
+    for key in _GRANT_LIST_KEYS:
+        raw = entries.get(key)
+        parsed[key] = [str(entry) for entry in raw] if isinstance(raw, list) else []
+    return parsed
 
 
 def _parse_grants_toml(
@@ -533,13 +660,14 @@ def get_sharing(
     backend_resolver: BackendResolverInterface,
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
+    identity_cache: IdentityCache | None,
 ) -> dict[str, Any]:
     """Return the machine's sharing document: enabled/domain/status + the grants read from the workspace.
 
     The document also carries the current origin label per share target, from
     which the Share tab builds every link (a target absent from it has no link yet).
     """
-    empty_grants: dict[str, list[str]] = {"emails": [], "email_domains": []}
+    empty_grants = _empty_grant_list()
     disabled: dict[str, Any] = {
         "host_id": host_id,
         "enabled": False,
@@ -550,6 +678,7 @@ def get_sharing(
         "cert_not_after": None,
         "service_labels": {},
         "grants": {"workspace": empty_grants, "services": {}},
+        "identities": {},
     }
     share = get_active_share(host_id, backend_resolver, cli, session_store)
     if cli is None or share is None:
@@ -579,12 +708,27 @@ def get_sharing(
         # an empty policy that the next save would publish over the real one.
         return _unknown_grants_document(host_id, share, service_labels)
     workspace_grants, service_grants = parsed_grants
-    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels)
+    identities = _resolve_grant_identities(
+        _granted_user_ids(workspace_grants, service_grants),
+        identity_cache,
+        cli,
+        _account_email_or_none(session_store, agent_id),
+    )
+    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
+
+
+def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> str | None:
+    """The owning account's email, or None (identity lookups are skipped) when no signed-in account owns the workspace."""
+    try:
+        return resolve_account_email_for_workspace(session_store, agent_id)
+    except SharingError as exc:
+        logger.debug("Skipping grantee identity lookups for {}: {}", agent_id, exc)
+        return None
 
 
 def _unknown_grants_document(host_id: str, share: ShareCliInfo, service_labels: Mapping[str, str]) -> dict[str, Any]:
     """The active share's document with ``grants: None``: the grants could not be read (not "empty")."""
-    document = _share_status_document(host_id, share, {"emails": [], "email_domains": []}, {}, service_labels)
+    document = _share_status_document(host_id, share, _empty_grant_list(), {}, service_labels, {})
     document["grants"] = None
     return document
 
@@ -658,6 +802,7 @@ def disable_sharing(
     backend_resolver: BackendResolverInterface,
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
+    forward_identity: ForwardIdentityPublisher | None,
 ) -> None:
     """Disable sharing for a machine: clear the workspace materials, then delete the connector share.
 
@@ -670,16 +815,22 @@ def disable_sharing(
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
     clear_share_materials_from_agent(agent_id, cli.mngr_caller)
+    if forward_identity is not None:
+        forward_identity.mark_unshared(str(agent_id))
     try:
         existing = cli.get_share_status(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
         raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
-    if existing is None or existing.state != "active":
-        return
-    try:
-        cli.delete_share(account=account_email, host_id=host_id)
-    except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not stop sharing: {describe_connector_failure(exc)}") from exc
+    if existing is not None and existing.state == "active":
+        try:
+            cli.delete_share(account=account_email, host_id=host_id)
+        except ImbueCloudCliError as exc:
+            raise SharingError(f"Could not stop sharing: {describe_connector_failure(exc)}") from exc
+    # Only now does a sync pass agree that the workspace is unshared: a pass
+    # that listed the share before the delete would re-add the entry
+    # `mark_unshared` removed and leave it there until the next tick.
+    if forward_identity is not None:
+        forward_identity.request_sync()
 
 
 def delete_share_for_host(cli: ImbueCloudCli | None, account_email: str, host_id: str) -> None:

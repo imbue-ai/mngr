@@ -9,7 +9,8 @@ import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
 import { TextInput } from "../../components/FormControls";
-import type { ShareModel } from "../../../models/workspaceOptions";
+import type { ShareEntry, ShareModel } from "../../../models/workspaceOptions";
+import { shareEntryKey } from "../../../models/workspaceOptions";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 
 const COPY_FLASH_MS = 1200;
@@ -150,12 +151,18 @@ function renderTargetNav(
           m(
             "div",
             { class: "flex flex-col gap-0.5" },
-            appServices.map((service) => targetButton(service, service, appIcon(service))),
+            appServices.map((service) =>
+              targetButton(service, service, appIcon(service)),
+            ),
           ),
           m("div", { class: "my-1.5 h-px bg-subtle" }),
         ]
       : null,
-    targetButton(wholeService, "Whole machine", m(Icon16, { name: "panels-top-left", extra: "shrink-0" })),
+    targetButton(
+      wholeService,
+      "Whole machine",
+      m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
+    ),
   ];
 }
 
@@ -177,9 +184,15 @@ function renderEditor(
         { class: "type-body font-semibold text-primary" },
         "Who are you sharing with?",
       ),
+      // Every child is keyed and none is a hole: Mithril refuses a children
+      // array that mixes keyed vnodes with unkeyed ones or nulls.
       m("div", { id: "ws-share-emails", class: "mt-3 flex flex-col gap-1.5" }, [
-        ownerEmail ? renderAclRow(share, ownerEmail, true) : null,
-        ...state.entries.map((entry) => renderAclRow(share, entry, false)),
+        ...(ownerEmail
+          ? [m("div", { key: "owner" }, renderOwnerRow(share))]
+          : []),
+        ...state.entries.map((entry) =>
+          m("div", { key: shareEntryKey(entry) }, renderAclRow(share, entry)),
+        ),
       ]),
       m("div", { class: "mt-2 flex items-center gap-2" }, [
         m(TextInput, {
@@ -418,49 +431,149 @@ function shareOwnerEmail(share: ShareModel): string {
   return share.ownerEmail;
 }
 
-function renderAclRow(
-  share: ShareModel,
-  entry: string,
-  isOwner: boolean,
+const ACL_ROW_CLASS =
+  "flex items-center justify-between gap-2 rounded-md border border-subtle bg-fill-subtle px-3 py-2";
+const ACL_ROW_TEXT_CLASS = "type-body text-primary truncate min-w-0";
+
+// Every grantee row leads with the same 24 px box (a picture, a monogram, a
+// dashed placeholder, or a glyph) so the text columns line up down the list.
+const ROW_LEAD_CLASS =
+  "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full";
+
+function renderOwnerRow(share: ShareModel): m.Children {
+  const name = share.ownerDisplayName ?? "";
+  const email = share.ownerEmail;
+  const primary = name || email;
+  return m("div", { id: "ws-share-owner-row", class: ACL_ROW_CLASS }, [
+    m(
+      "span",
+      { class: ACL_ROW_TEXT_CLASS },
+      renderGranteeText(
+        renderProfilePicture(share.ownerProfilePictureUrl, primary),
+        primary,
+        [...(name ? [` (${email})`] : []), " (you)"],
+      ),
+    ),
+  ]);
+}
+
+/** A grantee row's text: the lead box, then the primary text with its
+ * tertiary suffixes, truncated as one line. */
+function renderGranteeText(
+  lead: m.Children,
+  primary: string,
+  suffixes: string[],
 ): m.Children {
-  const isEmail = entry.includes("@");
+  return m("span", { class: "flex items-center gap-2 min-w-0" }, [
+    lead,
+    m("span", { class: "truncate" }, [
+      primary,
+      ...suffixes.map((suffix) =>
+        m("span", { class: "text-tertiary" }, suffix),
+      ),
+    ]),
+  ]);
+}
+
+/** The profile picture, or a monogram from the name/email, for an account row. */
+function renderProfilePicture(
+  pictureUrl: string | null,
+  monogramSeed: string,
+): m.Children {
+  const pictureClass =
+    ROW_LEAD_CLASS + " bg-fill-hover text-tertiary type-helper overflow-hidden";
+  if (pictureUrl) {
+    return m(
+      "span",
+      { class: pictureClass },
+      m("img", {
+        src: pictureUrl,
+        alt: "",
+        class: "h-6 w-6 object-cover",
+      }),
+    );
+  }
   return m(
-    "div",
-    {
-      class:
-        "flex items-center justify-between gap-2 rounded-md border border-subtle bg-fill-subtle px-3 py-2",
-    },
-    [
-      m("span", { class: "type-body text-primary truncate" }, [
-        entry,
-        isOwner ? m("span", { class: "text-tertiary" }, " (you)") : null,
-        !isOwner && !isEmail
-          ? m("span", { class: "text-tertiary" }, " (anyone at this domain)")
-          : null,
-      ]),
-      !isOwner
-        ? m(
-            "button",
-            {
-              type: "button",
-              class:
-                "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
-                "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
-              "aria-label": `Remove ${entry}`,
-              disabled: !share.isEditorEditable,
-              onclick: () => share.removeEntry(entry),
-            },
-            m(Icon16, { name: "close" }),
-          )
-        : null,
-    ],
+    "span",
+    { class: pictureClass },
+    monogramSeed.slice(0, 1).toUpperCase(),
   );
+}
+
+/** The empty dashed circle of an invited address that has no account yet. */
+function renderPendingAccountPlaceholder(): m.Children {
+  return m("span", {
+    class: ROW_LEAD_CLASS + " border border-dashed border-default",
+  });
+}
+
+function renderDomainGlyph(): m.Children {
+  return m(
+    "span",
+    { class: ROW_LEAD_CLASS + " text-tertiary" },
+    m(Icon16, { name: "globe" }),
+  );
+}
+
+function renderEntryText(share: ShareModel, entry: ShareEntry): m.Children {
+  switch (entry.kind) {
+    case "user": {
+      const record = share.identityFor(entry.userId);
+      const name = record?.display_name ?? "";
+      const email = record?.email ?? "";
+      const primary = name || email || entry.userId;
+      const secondary = name && email ? email : "";
+      return renderGranteeText(
+        renderProfilePicture(record?.profile_picture_url ?? null, primary),
+        primary,
+        secondary ? [` (${secondary})`] : [],
+      );
+    }
+    case "email":
+      return renderGranteeText(renderPendingAccountPlaceholder(), entry.email, [
+        " (hasn't signed up yet)",
+      ]);
+    case "domain":
+      return renderGranteeText(renderDomainGlyph(), entry.domain, [
+        " (anyone at this domain)",
+      ]);
+  }
+}
+
+function entryRemovalLabel(share: ShareModel, entry: ShareEntry): string {
+  switch (entry.kind) {
+    case "user":
+      return share.identityFor(entry.userId)?.email ?? entry.userId;
+    case "email":
+      return entry.email;
+    case "domain":
+      return entry.domain;
+  }
+}
+
+function renderAclRow(share: ShareModel, entry: ShareEntry): m.Children {
+  return m("div", { class: ACL_ROW_CLASS }, [
+    m("span", { class: ACL_ROW_TEXT_CLASS }, renderEntryText(share, entry)),
+    m(
+      "button",
+      {
+        type: "button",
+        class:
+          "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
+          "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
+        "aria-label": `Remove ${entryRemovalLabel(share, entry)}`,
+        disabled: !share.isEditorEditable,
+        onclick: () => share.removeEntry(entry),
+      },
+      m(Icon16, { name: "close" }),
+    ),
+  ]);
 }
 
 function addDraftEntry(share: ShareModel, local: ShareTabLocalState): void {
   const entry = local.addEntryDraft.trim();
   if (!entry) return;
-  share.addEntry(entry);
+  void share.addEntry(entry);
   local.addEntryDraft = "";
 }
 

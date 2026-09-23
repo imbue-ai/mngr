@@ -404,6 +404,23 @@ def _record_host_id_or_none(record_host_id: str) -> HostId | None:
         return None
 
 
+class SyncPullOutcome(FrozenModel):
+    """What a records pull that reached the connector reported besides the merged records."""
+
+    shared_agent_ids: tuple[str, ...] = Field(description="The account's actively shared workspaces, by agent id")
+
+
+class ReconcileOutcome(FrozenModel):
+    """The per-account results of one sync pass the scheduler acts on."""
+
+    is_pull_ok_by_user_id: dict[str, bool] = Field(
+        description="user_id -> whether the connector was reached (False also for an unconfigured sync)"
+    )
+    shared_agent_ids_by_user_id: dict[str, tuple[str, ...]] = Field(
+        description="user_id -> the account's shared workspaces; only accounts whose pull reached the connector"
+    )
+
+
 class WorkspaceRecordStore(MutableModel):
     """Owns the per-account replica files and every record push/pull.
 
@@ -838,21 +855,22 @@ class WorkspaceRecordStore(MutableModel):
         with self._lock:
             self._drop_record_unlocked(user_id, workspace_id)
 
-    def pull(self, user_id: str, account_email: str) -> bool:
+    def pull(self, user_id: str, account_email: str) -> SyncPullOutcome | None:
         """Merge the server's records into the replica (local dirty rows win until pushed).
 
-        Returns True when the server was reached and its records merged; False
-        when sync is unconfigured or the connector was unreachable, so callers
-        can distinguish "the account has no records" from "the records could
-        not be fetched".
+        Returns what the server reported alongside the records when it was
+        reached and its records merged; None when sync is unconfigured or the
+        connector was unreachable, so callers can distinguish "the account has
+        no records" from "the records could not be fetched".
         """
         if self.cli is None:
-            return False
+            return None
         try:
-            wire_records = self.cli.sync_records_pull(account_email)
+            pulled = self.cli.sync_records_pull(account_email)
         except ImbueCloudCliError as e:
             logger.warning("Could not pull machine records for {}: {}", account_email, e)
-            return False
+            return None
+        wire_records = pulled.records
         with self._lock:
             self._load_unlocked()
             by_workspace = self._records_by_user_id.setdefault(user_id, {})
@@ -896,7 +914,7 @@ class WorkspaceRecordStore(MutableModel):
                 if workspace_id not in server_workspace_ids and not by_workspace[workspace_id].is_dirty:
                     del by_workspace[workspace_id]
             self._save_unlocked(user_id)
-        return True
+        return SyncPullOutcome(shared_agent_ids=pulled.shared_agent_ids)
 
     def push_dirty(self, user_id: str, account_email: str) -> None:
         for record in self.list_records(user_id):
@@ -1327,7 +1345,7 @@ class WorkspaceRecordStore(MutableModel):
         self,
         accounts: dict[str, str],
         resolver: BackendResolverInterface,
-    ) -> dict[str, bool]:
+    ) -> ReconcileOutcome:
         """The post-discovery sync pass for every signed-in account.
 
         ``accounts`` maps user_id -> account email. Steps per account: pull,
@@ -1335,17 +1353,22 @@ class WorkspaceRecordStore(MutableModel):
         for locally-hosted rows whose name/color changed, push dirty rows, and
         tombstone rows whose host is definitively absent from local discovery.
 
-        Returns per-account pull success (user_id -> True when the connector
-        was reached), so the scheduler's initial-sync tracking can distinguish
-        "the account has no records" from "the records could not be fetched".
+        Reports per-account pull success (so the scheduler's initial-sync
+        tracking can distinguish "the account has no records" from "the
+        records could not be fetched") and, for the accounts whose pull
+        reached the connector, which of their workspaces are shared.
         """
         with log_span("Reconciling machine records"):
             legacy = self.read_legacy_associations()
             is_legacy_fully_converted = True
             is_pull_ok_by_user_id: dict[str, bool] = {}
+            shared_agent_ids_by_user_id: dict[str, tuple[str, ...]] = {}
             for user_id, account_email in accounts.items():
                 self._reconcile_key_bundle(user_id, account_email)
-                is_pull_ok_by_user_id[user_id] = self.pull(user_id, account_email)
+                pull_outcome = self.pull(user_id, account_email)
+                is_pull_ok_by_user_id[user_id] = pull_outcome is not None
+                if pull_outcome is not None:
+                    shared_agent_ids_by_user_id[user_id] = pull_outcome.shared_agent_ids
                 for agent_id in legacy.get(user_id, []):
                     if self.find_active_record(agent_id) is None:
                         record = self.build_record_from_resolver(user_id, agent_id, resolver)
@@ -1376,7 +1399,9 @@ class WorkspaceRecordStore(MutableModel):
                 )
             if legacy and accounts and is_legacy_fully_converted:
                 self._retire_legacy_associations()
-            return is_pull_ok_by_user_id
+            return ReconcileOutcome(
+                is_pull_ok_by_user_id=is_pull_ok_by_user_id, shared_agent_ids_by_user_id=shared_agent_ids_by_user_id
+            )
 
     def _reconcile_key_bundle(self, user_id: str, account_email: str) -> None:
         """Bring this device's key-bundle mirror and the server's bundle into agreement, once per session.

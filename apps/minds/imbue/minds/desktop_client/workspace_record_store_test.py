@@ -181,6 +181,20 @@ def test_pull_merges_server_rows_and_drops_deleted_clean_rows(paths: Installatio
     assert not by_host["host-3"].is_dirty
 
 
+def test_pull_reports_the_accounts_shared_workspaces_alongside_the_records(paths: InstallationPaths) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    store = _make_store(paths, cli)
+    shared_agent_id = _agent_id()
+    cli.shared_agent_ids_by_email[_EMAIL] = {shared_agent_id}
+
+    outcome = store.pull(_user_id(), _EMAIL)
+
+    assert outcome is not None
+    assert outcome.shared_agent_ids == (shared_agent_id,)
+    cli.is_sync_offline = True
+    assert store.pull(_user_id(), _EMAIL) is None
+
+
 def test_pull_keeps_dirty_local_rows(paths: InstallationPaths) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.is_sync_offline = True
@@ -228,7 +242,7 @@ def test_pull_adopts_a_newer_format_server_row_over_dirty_local_changes(paths: I
         }
     }
 
-    assert store.pull(user_id, _EMAIL) is True
+    assert store.pull(user_id, _EMAIL) is not None
 
     (pulled,) = store.list_records(user_id)
     assert pulled.record_format == 2
@@ -964,7 +978,7 @@ def test_state_changing_operations_refuse_a_newer_format_record(paths: Installat
             "record_format": 2,
         }
     }
-    assert store.pull(user_id, _EMAIL) is True
+    assert store.pull(user_id, _EMAIL) is not None
 
     with pytest.raises(WorkspaceRecordTooNewError):
         store.tombstone_record(user_id, _EMAIL, agent_id)

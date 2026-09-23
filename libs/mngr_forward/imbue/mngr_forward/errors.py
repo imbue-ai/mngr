@@ -27,3 +27,11 @@ class ForwardTLSError(MngrForwardError):
 
 class ForwardTrustError(MngrForwardError):
     """Raised when the local CA cannot be installed into the platform trust stores."""
+
+
+class ForwardRequestHeadersError(MngrForwardError, ValueError):
+    """Raised when a request-headers file entry is malformed.
+
+    A key that is neither an agent id nor ``"*"``, a header name that is not a
+    valid token, or a framing / hop-by-hop header the proxy may not set.
+    """

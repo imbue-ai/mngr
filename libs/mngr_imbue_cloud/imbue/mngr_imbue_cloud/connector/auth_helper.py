@@ -101,6 +101,7 @@ def _refresh_locked(
         user_id=session.user_id,
         email=session.email,
         display_name=session.display_name,
+        profile_picture_url=session.profile_picture_url,
         access_token=SecretStr(new_access),
         refresh_token=SecretStr(new_refresh),
         access_token_expires_at=_decode_jwt_exp(new_access),

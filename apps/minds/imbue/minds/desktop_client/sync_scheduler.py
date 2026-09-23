@@ -30,6 +30,7 @@ from imbue.imbue_common.secret_wrapping import SecretWrappingError
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_reaper import BackupReaperManager
 from imbue.minds.desktop_client.dek_store import convert_legacy_password_files
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
@@ -99,6 +100,14 @@ class WorkspaceSyncScheduler(MutableModel):
             "end of every pass; it runs on its own (much longer) cadence internally"
         ),
     )
+    forward_identity: ForwardIdentityPublisher | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Handed each pass's shared-workspace listing, so the proxy's request-headers file "
+            "follows shares enabled or disabled from another device or the web chrome"
+        ),
+    )
     _kick_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _exited_event: threading.Event = PrivateAttr(default_factory=threading.Event)
@@ -157,8 +166,10 @@ class WorkspaceSyncScheduler(MutableModel):
             tracked_user_ids = tuple(self._initial_sync_by_user_id.keys())
         accounts = {str(account.user_id): str(account.email) for account in self.session_store.list_accounts()}
         convert_legacy_password_files(self.record_store.paths, list(accounts.keys()))
-        is_pull_ok_by_user_id = self.record_store.reconcile(accounts, self.resolver)
-        self._resolve_initial_syncs(tracked_user_ids, accounts, is_pull_ok_by_user_id)
+        outcome = self.record_store.reconcile(accounts, self.resolver)
+        self._resolve_initial_syncs(tracked_user_ids, accounts, outcome.is_pull_ok_by_user_id)
+        if self.forward_identity is not None:
+            self.forward_identity.apply_sync_results(outcome.shared_agent_ids_by_user_id)
         # Materialize synced secrets (backup envs + cloud-row SSH material)
         # into their local consumers for every unlocked account. The SSH
         # application (key files + known_hosts pins, applied through the

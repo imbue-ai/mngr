@@ -53,11 +53,13 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudPaidListError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
@@ -69,11 +71,13 @@ from imbue.mngr_imbue_cloud.wire import validate_wire
 from imbue.mngr_imbue_cloud.wire_types import AccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AdminAccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
+from imbue.mngr_imbue_cloud.wire_types import ContactEntry
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
 from imbue.mngr_imbue_cloud.wire_types import PaidListEntry
+from imbue.mngr_imbue_cloud.wire_types import PublicProfile
 from imbue.mngr_imbue_cloud.wire_types import R2BucketCreateResult
 from imbue.mngr_imbue_cloud.wire_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.wire_types import R2KeyInfo
@@ -86,7 +90,9 @@ from imbue.mngr_imbue_cloud.wire_types import ShareRelayMap
 from imbue.mngr_imbue_cloud.wire_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.wire_types import StorageRecheckResult
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
+from imbue.mngr_imbue_cloud.wire_types import SyncRecordsListing
 from imbue.mngr_imbue_cloud.wire_types import SyncWorkspaceRecord
+from imbue.mngr_imbue_cloud.wire_types import UserIdentity
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
@@ -1069,6 +1075,25 @@ class ImbueCloudConnectorClient(MutableModel):
             },
         )
 
+    def set_share_grantees(self, access_token: SecretStr, host_id: str, grantee_user_ids: list[str]) -> int:
+        """Replace the share's desktop-written grantee index with ``grantee_user_ids``; returns the row count.
+
+        Discovery only: the workspace's grants file remains the sole
+        authority over who may visit. Idempotent (a whole-set replace), so
+        transport retries are safe.
+        """
+        response = self._send(
+            "PUT",
+            self._url(f"/shares/{host_id}/grantees"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            json={"grantee_user_ids": grantee_user_ids},
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudShareError)
+        count = body.get("count")
+        return int(count) if isinstance(count, int) else len(grantee_user_ids)
+
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""
         self._raise_if_client_too_old(response)
@@ -1171,6 +1196,93 @@ class ImbueCloudConnectorClient(MutableModel):
             timeout=KEY_OP_TIMEOUT_SECONDS,
         )
         return validate_wire(AccountInfo, self._check(response, ImbueCloudAccountError))
+
+    # Users + contacts (identity records)
+
+    def get_user(self, access_token: SecretStr, user_id: str) -> UserIdentity:
+        """Fetch one user's identity record by id; raises ImbueCloudUserNotFoundError for an unknown id."""
+        response = self._send(
+            "GET",
+            self._url(f"/users/{quote(user_id, safe='')}"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            raise ImbueCloudUserNotFoundError(f"No user with id {user_id}")
+        return validate_wire(UserIdentity, self._check(response, ImbueCloudAccountError))
+
+    def get_public_profile(self, user_id: str) -> PublicProfile:
+        """Fetch a user's public profile (display name + profile picture URL) with no credentials.
+
+        The connector answers nulls, never 404, for an id it has no profile
+        row for, so this cannot tell an unknown user from one with an empty
+        profile -- use :meth:`get_user` when existence matters.
+        """
+        response = self._send(
+            "GET",
+            self._url(f"/users/{quote(user_id, safe='')}/profile"),
+            exc_cls=ImbueCloudAccountError,
+            headers=_client_id_headers(),
+            timeout=self.timeout_seconds,
+        )
+        return validate_wire(PublicProfile, self._check(response, ImbueCloudAccountError))
+
+    def resolve_user_by_email(self, access_token: SecretStr, email: str) -> UserIdentity:
+        """Resolve a verified email to its identity record.
+
+        Raises ImbueCloudUserNotFoundError when no account carries that
+        verified email, and ImbueCloudRateLimitedError when the caller's
+        rolling lookup budget is spent (existing contacts never count).
+        """
+        response = self._send(
+            "GET",
+            self._url("/users/resolve"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            params={"email": email},
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            raise ImbueCloudUserNotFoundError(f"No verified account matches {email}")
+        if response.status_code == 429:
+            raise ImbueCloudRateLimitedError(_detail_from_response(response) or "Too many lookups; try again later")
+        return validate_wire(UserIdentity, self._check(response, ImbueCloudAccountError))
+
+    def list_contacts(self, access_token: SecretStr) -> list[ContactEntry]:
+        response = self._send(
+            "GET",
+            self._url("/contacts"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        body = self._check(response, ImbueCloudAccountError)
+        return parse_wire_entries(ContactEntry, body.get("contacts"), "GET /contacts", ImbueCloudAccountError)
+
+    def add_contact(self, access_token: SecretStr, contact_user_id: str) -> ContactEntry:
+        """Upsert ``contact_user_id`` into the caller's contacts; raises ImbueCloudUserNotFoundError for an unknown id."""
+        response = self._send(
+            "PUT",
+            self._url(f"/contacts/{quote(contact_user_id, safe='')}"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            json={},
+            timeout=self.timeout_seconds,
+        )
+        if response.status_code == 404:
+            raise ImbueCloudUserNotFoundError(f"No user with id {contact_user_id}")
+        return validate_wire(ContactEntry, self._check(response, ImbueCloudAccountError))
+
+    def remove_contact(self, access_token: SecretStr, contact_user_id: str) -> None:
+        response = self._send(
+            "DELETE",
+            self._url(f"/contacts/{quote(contact_user_id, safe='')}"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._check(response, ImbueCloudAccountError)
 
     def set_account_plan(self, access_token: SecretStr, plan: str) -> dict[str, Any]:
         """Switch the account's plan; returns ``{plan_name, entitlements}``.
@@ -1479,6 +1591,10 @@ class ImbueCloudConnectorClient(MutableModel):
     # Workspace sync (records + account key bundle)
 
     def list_sync_records(self, access_token: SecretStr) -> list[SyncWorkspaceRecord]:
+        return list(self.list_sync_records_with_shares(access_token).records)
+
+    def list_sync_records_with_shares(self, access_token: SecretStr) -> SyncRecordsListing:
+        """The caller's records plus the workspace ids of their active shares (empty against an older connector)."""
         response = self._send(
             "GET",
             self._url("/sync/records"),
@@ -1488,7 +1604,15 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         body = self._check(response, ImbueCloudSyncError)
         records = body.get("records", []) if isinstance(body, dict) else body
-        return parse_wire_entries(SyncWorkspaceRecord, records, "GET /sync/records", ImbueCloudSyncError)
+        raw_shared_agent_ids = body.get("shared_agent_ids", []) if isinstance(body, dict) else []
+        if not isinstance(raw_shared_agent_ids, list):
+            raise ImbueCloudSyncError(
+                f"GET /sync/records: expected shared_agent_ids to be a JSON list, got {type(raw_shared_agent_ids).__name__}"
+            )
+        return SyncRecordsListing(
+            records=tuple(parse_wire_entries(SyncWorkspaceRecord, records, "GET /sync/records", ImbueCloudSyncError)),
+            shared_agent_ids=tuple(str(agent_id) for agent_id in raw_shared_agent_ids),
+        )
 
     def put_sync_record(self, access_token: SecretStr, record: SyncWorkspaceRecord) -> SyncWorkspaceRecord:
         """Push one record (CAS on revision); returns the stored row after the write.
@@ -1809,8 +1933,10 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         if isinstance(entry, dict)
     )
     raw_chrome_origin = body.get("chrome_origin")
+    raw_workspace_id = body.get("workspace_id")
     return ShareInfo(
         host_id=str(body.get("host_id", "")),
+        workspace_id=str(raw_workspace_id) if raw_workspace_id else None,
         workspace_domain=str(body.get("workspace_domain", "")),
         region=str(body.get("region", "")),
         state=state or "active",

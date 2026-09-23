@@ -28,6 +28,8 @@ export interface WorkspaceOptionsData {
   is_leased_imbue_cloud: boolean;
   has_account: boolean;
   account_email: string;
+  account_display_name: string | null;
+  account_profile_picture_url: string | null;
   current_account: WorkspaceOptionsAccount | null;
   accounts: WorkspaceOptionsAccount[];
   app_services: string[];
@@ -69,7 +71,19 @@ export function formatPendingMachineSize(
   return parts.join(" · ");
 }
 
+/** One user's identity record as the connector serves it (email only when verified). */
+export interface IdentityRecord {
+  user_id: string;
+  email: string | null;
+  display_name: string | null;
+  profile_picture_url: string | null;
+}
+
 export interface SharingGrantList {
+  /** Grantee account ids (matched first by the gateway). Absent on documents
+   * written before user-id grants existed. */
+  users?: string[];
+  /** Invites: an address the gateway upgrades to an account id on first visit. */
   emails: string[];
   email_domains: string[];
 }
@@ -88,7 +102,31 @@ export interface MachineSharingResponse {
   /** Public origin label per share target, as the backend currently knows
    * them; a target absent here has no link yet. */
   service_labels?: Record<string, string>;
+  /** Identity record per granted account id the backend knows; an id absent
+   * here renders as the bare id. */
+  identities?: Record<string, IdentityRecord>;
 }
+
+/** One staged grantee of a share target: an account, an invited address, or a whole domain. */
+export type ShareEntry =
+  | { kind: "user"; userId: string }
+  | { kind: "email"; email: string }
+  | { kind: "domain"; domain: string };
+
+/** A stable key for an entry (what removal and de-duplication compare). */
+export function shareEntryKey(entry: ShareEntry): string {
+  switch (entry.kind) {
+    case "user":
+      return `user:${entry.userId}`;
+    case "email":
+      return `email:${entry.email}`;
+    case "domain":
+      return `domain:${entry.domain}`;
+  }
+}
+
+/** The route that resolves a typed address to an account (a 404 means "store an invite"). */
+export const RESOLVE_USER_URL = "/ui/api/users/resolve";
 
 /** Response shape of GET /api/v1/workspace-sharing/<id>/readiness. */
 export interface SharingReadinessResponse {
@@ -171,8 +209,8 @@ const READINESS_DEADLINE_MS = 5 * 60_000;
 
 interface ShareTargetState {
   isEnabled: boolean;
-  /** Staged emails/domains (owner excluded); published on enable. */
-  entries: string[];
+  /** Staged grantees (owner excluded); published on enable. */
+  entries: ShareEntry[];
 }
 
 export interface ShareModelOptions {
@@ -180,6 +218,8 @@ export interface ShareModelOptions {
   /** The workspace id keying the sharing API; hostId is the legacy fallback. */
   agentId?: string;
   ownerEmail: string;
+  ownerDisplayName: string | null;
+  ownerProfilePictureUrl: string | null;
   wholeService: string;
   appServices: string[];
   serviceLabels: Record<string, string>;
@@ -207,6 +247,9 @@ export class ShareModel {
   currentTarget: string;
   errorMessage: string | null = null;
   isRetryOffered = false;
+  /** Identity record per account id, merged from every sharing response and
+   * every resolved address, so a user entry renders with a name and profile picture. */
+  identities: Record<string, IdentityRecord> = {};
 
   private readonly options: ShareModelOptions;
   // The label per share target. Seeded from the options snapshot and then
@@ -251,6 +294,14 @@ export class ShareModel {
     return this.options.ownerEmail;
   }
 
+  get ownerDisplayName(): string | null {
+    return this.options.ownerDisplayName;
+  }
+
+  get ownerProfilePictureUrl(): string | null {
+    return this.options.ownerProfilePictureUrl;
+  }
+
   /** The target's registered SVG icon markup, '' when it has none. */
   targetIcon(target: string): string {
     return this.options.serviceIcons?.[target] ?? "";
@@ -271,7 +322,7 @@ export class ShareModel {
 
   targetState(target: string): {
     isEnabled: boolean;
-    entries: readonly string[];
+    entries: readonly ShareEntry[];
   } {
     return this.mutableTargetState(target);
   }
@@ -374,21 +425,68 @@ export class ShareModel {
     this.redraw();
   }
 
-  addEntry(rawEntry: string): void {
-    const entry = rawEntry.trim();
-    if (!entry || entry === this.options.ownerEmail) return;
-    const state = this.mutableTargetState(this.currentTarget);
-    if (!state.entries.includes(entry)) state.entries.push(entry);
+  /** Stage a typed grantee for the current target.
+   *
+   * An address is first resolved to an account so the grant survives the
+   * grantee changing their email; no account (or a lookup failure) stages it
+   * as an invite the gateway upgrades on the invitee's first visit. A bare
+   * domain admits everyone at it. */
+  async addEntry(rawEntry: string): Promise<void> {
+    const trimmed = rawEntry.trim();
+    if (!trimmed || trimmed === this.options.ownerEmail) return;
+    // The entry belongs to the target it was typed into, even if the user
+    // switches targets while the lookup is in flight.
+    const target = this.currentTarget;
+    const entry = trimmed.includes("@")
+      ? await this.resolveAddress(trimmed)
+      : ({ kind: "domain", domain: trimmed } as ShareEntry);
+    if (this.isDisposed) return;
+    const state = this.mutableTargetState(target);
+    const key = shareEntryKey(entry);
+    if (!state.entries.some((existing) => shareEntryKey(existing) === key))
+      state.entries.push(entry);
     this.errorMessage = null;
     if (state.isEnabled) void this.persistEntries();
     this.redraw();
   }
 
-  removeEntry(entry: string): void {
+  removeEntry(entry: ShareEntry): void {
     const state = this.mutableTargetState(this.currentTarget);
-    state.entries = state.entries.filter((existing) => existing !== entry);
+    const key = shareEntryKey(entry);
+    state.entries = state.entries.filter(
+      (existing) => shareEntryKey(existing) !== key,
+    );
     if (state.isEnabled) void this.persistEntries();
     this.redraw();
+  }
+
+  /** The display record for a user entry, when the backend has told us one. */
+  identityFor(userId: string): IdentityRecord | null {
+    return this.identities[userId] ?? null;
+  }
+
+  private async resolveAddress(email: string): Promise<ShareEntry> {
+    const result = await this.fetchJson(RESOLVE_USER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const record = result.ok
+      ? (result.body as Partial<IdentityRecord> | null)
+      : null;
+    if (!record || typeof record.user_id !== "string" || !record.user_id)
+      return { kind: "email", email };
+    this.identities[record.user_id] = {
+      user_id: record.user_id,
+      email: typeof record.email === "string" ? record.email : null,
+      display_name:
+        typeof record.display_name === "string" ? record.display_name : null,
+      profile_picture_url:
+        typeof record.profile_picture_url === "string"
+          ? record.profile_picture_url
+          : null,
+    };
+    return { kind: "user", userId: record.user_id };
   }
 
   /** Enable sharing for the current target. `residualInputText` blocks the
@@ -466,7 +564,7 @@ export class ShareModel {
         ? overrides[target]
         : this.mutableTargetState(target).isEnabled;
     const doc: SharingGrantsDocument = {
-      workspace: { emails: [], email_domains: [] },
+      workspace: { users: [], emails: [], email_domains: [] },
       services: {},
     };
     for (const target of this.knownTargets) {
@@ -508,16 +606,19 @@ export class ShareModel {
   }
 
   private grantListFor(target: string): SharingGrantList {
+    const users: string[] = [];
     const emails = this.options.ownerEmail ? [this.options.ownerEmail] : [];
     const emailDomains: string[] = [];
     for (const entry of this.mutableTargetState(target).entries) {
-      if (entry.includes("@")) {
-        if (!emails.includes(entry)) emails.push(entry);
-      } else if (!emailDomains.includes(entry)) {
-        emailDomains.push(entry);
+      if (entry.kind === "user") {
+        if (!users.includes(entry.userId)) users.push(entry.userId);
+      } else if (entry.kind === "email") {
+        if (!emails.includes(entry.email)) emails.push(entry.email);
+      } else if (!emailDomains.includes(entry.domain)) {
+        emailDomains.push(entry.domain);
       }
     }
-    return { emails, email_domains: emailDomains };
+    return { users, emails, email_domains: emailDomains };
   }
 
   private adoptDocument(body: unknown): void {
@@ -525,8 +626,10 @@ export class ShareModel {
     this.isMachineEnabled = Boolean(data.enabled);
     this.machineUrl = data.url ?? "";
     this.mergeServiceLabels(data.service_labels);
+    for (const [userId, record] of Object.entries(data.identities ?? {}))
+      this.identities[userId] = record;
     const grants = data.grants ?? {
-      workspace: { emails: [], email_domains: [] },
+      workspace: { users: [], emails: [], email_domains: [] },
       services: {},
     };
     const services = grants.services ?? {};
@@ -548,6 +651,7 @@ export class ShareModel {
       if (this.knownTargets.includes(name)) continue;
       if (!scopeGrantsAnyone(scope)) continue;
       this.extraServiceGrants[name] = {
+        ...(scope.users ? { users: [...scope.users] } : {}),
         emails: [...scope.emails],
         email_domains: [...scope.email_domains],
       };
@@ -726,22 +830,34 @@ export function scopeGrantsAnyone(
   scope: SharingGrantList | undefined | null,
 ): boolean {
   return Boolean(
-    scope && (scope.emails.length > 0 || scope.email_domains.length > 0),
+    scope &&
+    ((scope.users?.length ?? 0) > 0 ||
+      scope.emails.length > 0 ||
+      scope.email_domains.length > 0),
   );
 }
 
 export function scopeEntries(
   scope: SharingGrantList | undefined | null,
   ownerEmail: string,
-): string[] {
+): ShareEntry[] {
   if (!scope) return [];
-  const entries = scope.emails.filter((email) => email !== ownerEmail);
-  return [...entries, ...scope.email_domains];
+  const users: ShareEntry[] = (scope.users ?? []).map((userId) => ({
+    kind: "user",
+    userId,
+  }));
+  const emails: ShareEntry[] = scope.emails
+    .filter((email) => email !== ownerEmail)
+    .map((email) => ({ kind: "email", email }));
+  const domains: ShareEntry[] = scope.email_domains.map((domain) => ({
+    kind: "domain",
+    domain,
+  }));
+  return [...users, ...emails, ...domains];
 }
 
 export function documentGrantsAnyone(doc: SharingGrantsDocument): boolean {
-  if (doc.workspace.emails.length > 0 || doc.workspace.email_domains.length > 0)
-    return true;
+  if (scopeGrantsAnyone(doc.workspace)) return true;
   return Object.values(doc.services).some((scope) => scopeGrantsAnyone(scope));
 }
 
@@ -808,6 +924,8 @@ export class WorkspaceOptionsModel {
       hostId: data.host_id || data.agent_id,
       agentId: data.agent_id || this.agentId,
       ownerEmail: data.account_email,
+      ownerDisplayName: data.account_display_name,
+      ownerProfilePictureUrl: data.account_profile_picture_url,
       wholeService: data.whole_service,
       appServices: data.app_services,
       serviceLabels: data.service_labels,

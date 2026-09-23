@@ -106,11 +106,46 @@ def test_options_data_returns_workspace_context(tmp_path: Path) -> None:
     # No session store in this minimal app: unassociated, no accounts offered.
     assert data["has_account"] is False
     assert data["account_email"] == ""
+    assert data["account_display_name"] is None
+    assert data["account_profile_picture_url"] is None
     assert data["accounts"] == []
     # The share targets exclude the shell, interface services, and non-DNS names.
     assert data["app_services"] == ["web"]
     assert data["service_labels"] == {"web": "web-r4nd", "system_interface": "shell-r4nd"}
     assert data["whole_service"] == "system_interface"
+
+
+def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_path: Path) -> None:
+    # The Share tab's owner row renders from these fields alone (no connector
+    # fetch), so the payload must carry exactly what the signed-in account says.
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    user_id = "44444444-4444-4444-4444-444444444444"
+    cli.add_account(
+        user_id=user_id,
+        email="owner@example.com",
+        display_name="Owner Person",
+        profile_picture_url="https://pictures.example/owner.png",
+    )
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    session_store.associate_created_workspace(
+        user_id=user_id, agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=False
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=_seeded_resolver(),
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/options")
+
+    assert response.status_code == 200
+    data = json.loads(response.get_data(as_text=True))
+    assert data["has_account"] is True
+    assert data["account_email"] == "owner@example.com"
+    assert data["account_display_name"] == "Owner Person"
+    assert data["account_profile_picture_url"] == "https://pictures.example/owner.png"
 
 
 def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:

@@ -102,6 +102,8 @@ function harness(respond: (url: string) => Promise<Response> = () => Promise.res
         is_leased_imbue_cloud: false,
         has_account: false,
         account_email: "",
+        account_display_name: null,
+        account_profile_picture_url: null,
         current_account: null,
         accounts: [],
         app_services: [],

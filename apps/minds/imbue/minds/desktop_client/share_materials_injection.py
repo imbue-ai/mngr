@@ -7,11 +7,10 @@ lives next to it at ``data/.secrets/share_grants.toml`` and is re-read by the
 gateway on every request, so a grants update takes effect immediately without
 restarting anything.
 
-We also drop the owner's account email at ``data/.state/share/owner_email`` so
-in-workspace services can learn who owns the workspace (the gateway never
-reveals the owner's email in a per-request header). It exists only while the
-workspace is shared, so its presence doubles as a "this workspace is shared"
-signal; it is removed at unshare alongside the secrets.
+Every writer of the grants file inside the container (this desktop's exec
+writes and the gateway's own invite upgrades) holds an exclusive ``flock`` on
+``share_grants.toml.lock`` around its read-modify-write, so the two never tear
+the document; the later whole-document write still wins.
 
 All files are written via ``mngr exec`` through the shared warm-process
 ``MngrCaller``, base64-encoded in transit so arbitrary emails and tokens never
@@ -20,6 +19,7 @@ need shell quoting.
 
 import base64
 import binascii
+import shlex
 import threading
 from typing import Final
 
@@ -35,10 +35,9 @@ from imbue.mngr.primitives import AgentId
 
 _SHARE_ENV_FILE: Final[str] = "data/.secrets/share.env"
 _SHARE_GRANTS_FILE: Final[str] = "data/.secrets/share_grants.toml"
-# App-readable (non-secret) owner email, present only while the workspace is
-# shared. Lives under data/.state (machine state) rather than data/.secrets so
-# services can read it without touching the relay token beside share.env.
-_SHARE_OWNER_EMAIL_FILE: Final[str] = "data/.state/share/owner_email"
+# The lock every grants-file writer inside the container takes (the gateway's
+# invite upgrade uses fcntl.flock on the same path).
+_SHARE_GRANTS_LOCK_FILE: Final[str] = "data/.secrets/share_grants.toml.lock"
 
 _SHARE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
@@ -104,22 +103,26 @@ def _toml_string_array(values: list[str]) -> str:
 def render_grants_toml(workspace_grants: dict[str, list[str]], service_grants: dict[str, dict[str, list[str]]]) -> str:
     """Render the grants document the workspace gateway evaluates.
 
-    ``workspace_grants`` is ``{"emails": [...], "email_domains": [...]}``;
+    ``workspace_grants`` is ``{"users": [...], "emails": [...], "email_domains": [...]}``;
     ``service_grants`` maps service name to the same shape. Values are emitted
     as TOML string arrays (json-style quoting is valid TOML for plain strings).
+    ``users`` holds grantee user ids (matched first by the gateway); ``emails``
+    entries are invites the gateway upgrades to user ids on first visit.
     """
-    lines = [
-        "[workspace]",
-        f"emails = {_toml_string_array(workspace_grants.get('emails', []))}",
-        f"email_domains = {_toml_string_array(workspace_grants.get('email_domains', []))}",
-    ]
+    lines = ["[workspace]", *_grant_list_lines(workspace_grants)]
     for service_name in sorted(service_grants):
-        grants = service_grants[service_name]
         lines.append("")
         lines.append(f"[services.{_quote_toml_key(service_name)}]")
-        lines.append(f"emails = {_toml_string_array(grants.get('emails', []))}")
-        lines.append(f"email_domains = {_toml_string_array(grants.get('email_domains', []))}")
+        lines.extend(_grant_list_lines(service_grants[service_name]))
     return "\n".join(lines) + "\n"
+
+
+def _grant_list_lines(grants: dict[str, list[str]]) -> list[str]:
+    return [
+        f"users = {_toml_string_array(grants.get('users', []))}",
+        f"emails = {_toml_string_array(grants.get('emails', []))}",
+        f"email_domains = {_toml_string_array(grants.get('email_domains', []))}",
+    ]
 
 
 def _quote_toml_key(key: str) -> str:
@@ -145,31 +148,35 @@ def _atomic_write_clause(relative_path: str, content: str, tmp_var: str) -> str:
     )
 
 
+def _locked_grants_write_clause(grants_toml_text: str) -> str:
+    """The grants write, run under the grants-file lock so it never interleaves with the gateway's upgrade.
+
+    ``flock`` runs the write in a child shell that holds the lock for exactly
+    the duration of the atomic replace; the lock file itself is created on
+    first use (``mkdir -p`` covers a first share).
+    """
+    write_clause = _atomic_write_clause(_SHARE_GRANTS_FILE, grants_toml_text, "tmp_grants")
+    directory = _SHARE_GRANTS_LOCK_FILE.rpartition("/")[0]
+    return f"mkdir -p {directory} && flock {_SHARE_GRANTS_LOCK_FILE} sh -c {shlex.quote(write_clause)}"
+
+
 def provision_share_files_in_agent(
     agent_id: AgentId,
     grants_toml_text: str,
-    owner_email: str,
-    # None means "grants + owner email only" (the grants-only update path);
-    # the running gateway re-reads grants per request, so share.env is
-    # untouched and the tunnel never restarts.
+    # None means "grants only" (the grants-only update path); the running
+    # gateway re-reads grants per request, so share.env is untouched and the
+    # tunnel never restarts.
     share_env_text: str | None,
     mngr_caller: MngrCaller,
 ) -> None:
     """Write all of a share's files into the agent in ONE exec round trip.
 
-    Ordering inside the script matters: the grants document (and the owner
-    email) land BEFORE share.env, because the share-gateway brings the whole
-    stack up the moment share.env appears -- the grants must already be in
-    place by then. The owner-email write is best-effort (services must
-    tolerate its absence), so its clause is wrapped to never fail the exec;
-    the grants and share.env writes are fatal.
+    Ordering inside the script matters: the grants document lands BEFORE
+    share.env, because the share-gateway brings the whole stack up the moment
+    share.env appears -- the grants must already be in place by then. The
+    grants write runs under the grants-file lock (see the module docstring).
     """
-    clauses = [_atomic_write_clause(_SHARE_GRANTS_FILE, grants_toml_text, "tmp_grants")]
-    if owner_email:
-        owner_clause = _atomic_write_clause(_SHARE_OWNER_EMAIL_FILE, owner_email, "tmp_owner")
-        clauses.append(f"{{ {owner_clause} || true; }}")
-    else:
-        logger.debug("Skipping owner-email injection for agent {}: no owner email", agent_id)
+    clauses = [_locked_grants_write_clause(grants_toml_text)]
     if share_env_text is not None:
         clauses.append(_atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
     result = mngr_caller.call(
@@ -284,7 +291,7 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
 
 
 def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> None:
-    """Remove share.env + the grants file + the owner-email file; the share-gateway tears the stack down.
+    """Remove share.env + the grants file; the share-gateway tears the stack down.
 
     Best-effort: a failure leaves stale materials (the connector-side relay
     token is already deleted, so the tunnel's next reconnect is rejected
@@ -295,7 +302,7 @@ def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller)
         [
             "exec",
             str(agent_id),
-            f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE} {_SHARE_OWNER_EMAIL_FILE}",
+            f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE}",
             "--no-start",
         ],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,

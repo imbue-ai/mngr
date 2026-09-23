@@ -37,6 +37,7 @@ from imbue.minds.desktop_client.ui_api_options import register_options_routes
 from imbue.minds.desktop_client.ui_api_permissions import register_permissions_routes
 from imbue.minds.desktop_client.ui_api_settings import register_settings_routes
 from imbue.minds.desktop_client.ui_api_updates import register_update_routes
+from imbue.minds.desktop_client.ui_api_users import register_user_routes
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_channel import run_ui_websocket_connection
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
@@ -271,4 +272,5 @@ def create_ui_blueprint() -> Blueprint:
     register_notification_routes(blueprint)
     register_onboarding_routes(blueprint)
     register_update_routes(blueprint)
+    register_user_routes(blueprint)
     return blueprint

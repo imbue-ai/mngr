@@ -314,6 +314,13 @@ class ShareInfo(WireModel):
     """One workspace's self-hosted share record (the relay-based sharing model)."""
 
     host_id: str = Field(description="The workspace's host coordinate (host-<32hex>)")
+    workspace_id: str | None = Field(
+        default=None,
+        description=(
+            "The workspace the share is keyed by (agent-<32hex>); None on rows old clients created or "
+            "against a connector that predates workspace-keyed shares"
+        ),
+    )
     workspace_domain: str = Field(description="The share's registrable base, host-<hex>.<user>.<region>.<domain>")
     region: str = Field(description="Relay region code the share is served from")
     state: str = Field(description="'active' while shared; 'inactive' after unshare")
@@ -484,6 +491,47 @@ class AccountInfo(WireModel):
     available_plans: tuple[str, ...] = Field(
         default=(), description="Every plan name currently seeded (for plan-selector UIs)"
     )
+    display_name: str | None = Field(
+        default=None,
+        description="The account's user-editable display name; None when unset or against an older connector",
+    )
+    profile_picture_url: str | None = Field(
+        default=None,
+        description="Public URL of the account's profile picture image; None when unset or against an older connector",
+    )
+
+
+class UserIdentity(WireModel):
+    """One user's identity record as the connector serves it (GET /users/{id}, GET /users/resolve, contacts).
+
+    ``email`` is present only when the connector reports it verified; the
+    connector is the only place that check runs, so no client ever sees an
+    unverified address.
+    """
+
+    user_id: SuperTokensUserId = Field(description="SuperTokens user id")
+    email: str | None = Field(default=None, description="The user's verified email, or None when unverified")
+    display_name: str | None = Field(default=None, description="User-editable display name")
+    profile_picture_url: str | None = Field(default=None, description="Public URL of the profile picture image")
+
+
+class PublicProfile(WireModel):
+    """One user's public profile (GET /users/{id}/profile): the record's name and profile picture, never its email.
+
+    Served without authentication and without an existence check, so an id
+    the connector has never seen answers nulls rather than a 404.
+    """
+
+    user_id: SuperTokensUserId = Field(description="SuperTokens user id (echoed from the request path)")
+    display_name: str | None = Field(default=None, description="User-editable display name")
+    profile_picture_url: str | None = Field(default=None, description="Public URL of the profile picture image")
+
+
+class ContactEntry(UserIdentity):
+    """One row of the caller's contacts list (GET /contacts): the contact's identity plus the owner's annotations."""
+
+    trust_level: str = Field(default="known", description="The owner's private trust level for this contact")
+    created_at: str = Field(default="", description="When the contact was added (server timestamp)")
 
 
 class AdminAccountInfo(AccountInfo):
@@ -552,6 +600,24 @@ class SyncWorkspaceRecord(WireModel):
         description=(
             "Server tombstone stamp (response only; set while state is 'destroyed'). Passed through so "
             "clients can age destroyed workspaces' backups against the server's clock."
+        ),
+    )
+
+
+class SyncRecordsListing(WireModel):
+    """GET /sync/records: the caller's records plus the workspace ids of their active shares.
+
+    Assembled by the client from the listing body (the records are parsed
+    entry by entry, so one unparseable row never empties the listing), not
+    validated from it directly.
+    """
+
+    records: tuple[SyncWorkspaceRecord, ...] = Field(default=(), description="Every workspace record of the caller")
+    shared_agent_ids: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "The agent_id (workspace id) of every record whose workspace the caller actively shares; "
+            "empty against a connector too old to report it"
         ),
     )
 

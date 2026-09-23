@@ -151,7 +151,7 @@ def signout_user_via_plugin(user_id: str) -> None:
         except ImbueCloudCliError as exc:
             logger.warning("`mngr imbue_cloud auth signout` failed for {}: {}", signed_out_email, exc)
     session_store.invalidate_identity_cache()
-    _kick_sync_scheduler()
+    _kick_background_syncs()
     wake_ui_state_publisher()
     if signed_out_email and unset_imbue_cloud_provider_for_account(
         signed_out_email, root=MindsRoot.from_environment()
@@ -159,11 +159,11 @@ def signout_user_via_plugin(user_id: str) -> None:
         _bounce_forward_observe()
 
 
-def _kick_sync_scheduler() -> None:
-    """Request an immediate workspace-record sync pass after an auth change."""
-    scheduler = get_state().sync_scheduler
-    if scheduler is not None:
-        scheduler.kick()
+def _kick_background_syncs() -> None:
+    """Request an immediate workspace-record sync pass after an auth change (it also refreshes the forward identity)."""
+    state = get_state()
+    if state.sync_scheduler is not None:
+        state.sync_scheduler.kick()
 
 
 def wake_ui_state_publisher() -> None:
@@ -180,13 +180,11 @@ def wake_ui_state_publisher() -> None:
         publisher.notify_change()
 
 
-# ---------------------------------------------------------------------------
 # The web-login flow: launch the plugin's browser login and track it.
 #
 # Each in-progress flow is tracked by a server-generated key the frontend
 # polls so it can render the "waiting for the browser" modal (with the
 # copy-the-link fallback) without blocking on the subprocess.
-# ---------------------------------------------------------------------------
 
 # Kept above the desktop's web-login subprocess kill deadline
 # (imbue_cloud_cli._WEB_LOGIN_TIMEOUT_SECONDS) so a slow-but-valid browser

@@ -255,7 +255,7 @@ def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: 
     assert "sign-in service" in status.error
 
 
-# -- Route tests --------------------------------------------------------------
+# Route tests
 
 
 def _build_auth_test_client(

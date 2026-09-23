@@ -22,6 +22,7 @@ def shares() -> None:
 def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
     payload: dict[str, object] = {
         "host_id": info.host_id,
+        "workspace_id": info.workspace_id,
         "workspace_domain": info.workspace_domain,
         "region": info.region,
         "state": info.state,
@@ -162,3 +163,30 @@ def list_share_relays(account: str | None, connector_url: str | None) -> None:
     emit_json(
         {"relays": {region: list(endpoints) for region, endpoints in relay_map.relay_endpoints_by_region.items()}}
     )
+
+
+@shares.command(name="set-grantees")
+@click.argument("host_id")
+@click.option(
+    "--user-id",
+    "user_ids",
+    multiple=True,
+    help="A grantee's user id (repeatable); passing none clears the desktop-written index for this share.",
+)
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def set_share_grantees(
+    host_id: str, user_ids: tuple[str, ...], account: str | None, connector_url: str | None
+) -> None:
+    """Replace the share's grantee index (who it was shared with, by user id).
+
+    Discovery only: the workspace's grants file stays the sole authority over
+    who may visit; this index is what lets grantees find the share.
+    """
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    count = client.set_share_grantees(token, host_id, list(user_ids))
+    emit_json({"host_id": host_id, "count": count})

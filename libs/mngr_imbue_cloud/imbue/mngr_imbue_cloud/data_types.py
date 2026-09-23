@@ -398,6 +398,9 @@ class AuthSession(FrozenModel):
     user_id: SuperTokensUserId
     email: ImbueCloudAccount
     display_name: str | None = None
+    profile_picture_url: str | None = Field(
+        default=None, description="Public URL of the account's profile picture image, if any"
+    )
     access_token: SecretStr = Field(description="SuperTokens JWT access token")
     refresh_token: SecretStr | None = Field(default=None, description="SuperTokens refresh token")
     access_token_expires_at: datetime | None = Field(

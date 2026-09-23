@@ -162,7 +162,12 @@ def test_resolve_accounts_url_prefers_flag_then_env_then_none(monkeypatch: pytes
 def _make_auth_response(needs_email_verification: bool) -> AuthRawResponse:
     return AuthRawResponse(
         status="OK",
-        user={"user_id": "user-abc", "email": "alice@imbue.com", "display_name": "Alice"},
+        user={
+            "user_id": "user-abc",
+            "email": "alice@imbue.com",
+            "display_name": "Alice",
+            "profile_picture_url": "https://accounts.example/users/user-abc/profile-picture/abc",
+        },
         # The payload segment is base64url for {"foo":"bar"} -- a decodable JWT
         # body without an exp claim, so expiry decoding yields None.
         tokens={"access_token": "header.eyJmb28iOiJiYXIifQ.sig", "refresh_token": "refresh-tok"},
@@ -177,8 +182,12 @@ def test_persist_auth_response_marks_account_active(tmp_path: Path) -> None:
     payload = _persist_auth_response(_make_auth_response(needs_email_verification=False), account, store)
 
     assert payload["email"] == "alice@imbue.com"
+    assert payload["profile_picture_url"] == "https://accounts.example/users/user-abc/profile-picture/abc"
     session = store.load_by_account(account)
     assert session is not None
+    # The profile picture rides the persisted session so `auth list` can serve it
+    # without a connector round trip.
+    assert session.profile_picture_url == "https://accounts.example/users/user-abc/profile-picture/abc"
     assert store.get_active_account() == account
 
 
@@ -275,6 +284,7 @@ def _store_with_stale_session(tmp_path: Path) -> tuple[ImbueCloudSessionStore, I
         display_name=None,
         access_token="stale-at",
         refresh_token="rt-1",
+        profile_picture_url=None,
     )
     store.save(session)
     return store, account

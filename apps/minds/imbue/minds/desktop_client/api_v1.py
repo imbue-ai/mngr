@@ -96,6 +96,7 @@ from imbue.minds.desktop_client.api_models import CreateWorkspaceRequest
 from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
 from imbue.minds.desktop_client.api_models import EmptyResponse
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
+from imbue.minds.desktop_client.api_models import IdentityRecordResponse
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import OkResponse
@@ -105,6 +106,7 @@ from imbue.minds.desktop_client.api_models import ProviderToggleResponse
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
+from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
@@ -2687,12 +2689,13 @@ def _grants_document_from_request(body: MachineSharingRequest) -> SharingGrantsD
 def _grants_to_plain(
     grants: SharingGrantsDocument,
 ) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]]]:
-    workspace = {"emails": list(grants.workspace.emails), "email_domains": list(grants.workspace.email_domains)}
-    services = {
-        name: {"emails": list(entry.emails), "email_domains": list(entry.email_domains)}
-        for name, entry in grants.services.items()
-    }
+    workspace = _grant_list_to_plain(grants.workspace)
+    services = {name: _grant_list_to_plain(entry) for name, entry in grants.services.items()}
     return workspace, services
+
+
+def _grant_list_to_plain(entry: SharingGrantList) -> dict[str, list[str]]:
+    return {"users": list(entry.users), "emails": list(entry.emails), "email_domains": list(entry.email_domains)}
 
 
 def _optional_str(document: dict[str, object], key: str) -> str | None:
@@ -2723,7 +2726,19 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         cert_not_after=_optional_str(document, "cert_not_after"),
         service_labels=_service_labels(document),
         grants=grants,
+        identities=_identities(document),
     )
+
+
+def _identities(document: dict[str, object]) -> dict[str, IdentityRecordResponse]:
+    raw_identities = document.get("identities")
+    if not isinstance(raw_identities, dict):
+        return {}
+    return {
+        str(user_id): IdentityRecordResponse.model_validate(record)
+        for user_id, record in raw_identities.items()
+        if isinstance(record, dict)
+    }
 
 
 def _service_labels(document: dict[str, object]) -> dict[str, str]:
@@ -2795,7 +2810,9 @@ def _handle_workspace_sharing_readiness(workspace_id: str) -> SharingReadinessRe
 
 def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse:
     state = get_state()
-    document = get_sharing(host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store)
+    document = get_sharing(
+        host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.identity_cache
+    )
     return _sharing_document_to_response(document)
 
 
@@ -2854,7 +2871,9 @@ def _machine_sharing_delete_core(host_id: str) -> MachineSharingResponse | Respo
         # write must not interleave with its materials removal.
         with state.machine_sharing_locks.get_lock(host_id):
             try:
-                disable_sharing(host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store)
+                disable_sharing(
+                    host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.forward_identity
+                )
             finally:
                 state.active_share_cache.invalidate(host_id)
     except SharingError as exc:

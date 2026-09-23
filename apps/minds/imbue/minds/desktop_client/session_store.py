@@ -94,7 +94,8 @@ class AccountSession(FrozenModel):
 
     user_id: SuperTokensUserId = Field(description="SuperTokens user ID")
     email: str = Field(description="User email address")
-    display_name: str | None = Field(default=None, description="Display name from OAuth provider")
+    display_name: str | None = Field(default=None, description="User-editable display name")
+    profile_picture_url: str | None = Field(default=None, description="Public URL of the account's profile picture")
     workspace_ids: list[str] = Field(default_factory=list, description="Agent IDs associated with this account")
     is_active: bool = Field(
         default=False,
@@ -170,7 +171,7 @@ class MultiAccountSessionStore(MutableModel):
     _has_force_refreshed: bool = PrivateAttr(default=False)
     _is_last_identity_read_failed: bool = PrivateAttr(default=False)
 
-    # -- Identity cache (sourced from the plugin) ---------------------------
+    # Identity cache (sourced from the plugin)
 
     @property
     def is_last_identity_read_failed(self) -> bool:
@@ -262,7 +263,7 @@ class MultiAccountSessionStore(MutableModel):
             raise WorkspaceSyncError(f"No signed-in account matches user id {user_id[:8]}")
         return account
 
-    # -- Public read API ----------------------------------------------------
+    # Public read API
 
     def list_accounts(self) -> list[AccountSession]:
         """Return every signed-in account, joined with any workspaces it owns."""
@@ -321,7 +322,7 @@ class MultiAccountSessionStore(MutableModel):
         """Whether at least one account is currently signed in (per the plugin)."""
         return bool(self._identity_by_user_id())
 
-    # -- Public write API (workspace associations) -------------------------
+    # Public write API (workspace associations)
 
     def associate_workspace(self, user_id: str, agent_id: str, resolver: BackendResolverInterface) -> None:
         """Bind ``agent_id`` to ``user_id`` by creating its workspace record (settings semantics).
@@ -393,6 +394,7 @@ def _build_session(account: ImbueCloudAuthAccount, workspace_ids: list[str]) -> 
         user_id=SuperTokensUserId(account.user_id),
         email=account.email,
         display_name=account.display_name,
+        profile_picture_url=account.profile_picture_url,
         workspace_ids=list(workspace_ids),
         is_active=account.is_active,
     )

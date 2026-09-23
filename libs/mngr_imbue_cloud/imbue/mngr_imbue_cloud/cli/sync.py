@@ -65,13 +65,16 @@ def records() -> None:
 @click.option("--connector-url", default=None, help="Override connector URL")
 @handle_imbue_cloud_errors
 def pull_records(account: str | None, connector_url: str | None) -> None:
-    """List all of this account's workspace records. Emits {records: [...]}."""
+    """List all of this account's workspace records. Emits {records: [...], shared_agent_ids: [...]}.
+
+    ``shared_agent_ids`` names the workspaces (record ``agent_id``) this
+    account actively shares; it is empty against a connector too old to report it.
+    """
     client = make_connector_client(connector_url)
     store = make_session_store()
     parsed_account = resolve_account_or_active(store, account)
     token = get_active_token(store, client, parsed_account)
-    items = client.list_sync_records(token)
-    emit_json({"records": [item.model_dump(mode="json") for item in items]})
+    emit_json(client.list_sync_records_with_shares(token).model_dump(mode="json"))
 
 
 @records.command(name="push")

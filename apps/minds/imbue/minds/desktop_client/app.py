@@ -70,6 +70,8 @@ from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
@@ -2281,6 +2283,8 @@ def create_desktop_client(
     sleep_tracker: SleepTracker | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
     device_id: str = "",
+    identity_cache: IdentityCache | None = None,
+    forward_identity: ForwardIdentityPublisher | None = None,
 ) -> Flask:
     """Create the bare-origin minds Flask application.
 
@@ -2493,6 +2497,8 @@ def create_desktop_client(
         workspace_operation_registry=workspace_operation_registry,
         workspace_update_service=workspace_update_service,
         update_scheduler=(workspace_update_machinery.scheduler if workspace_update_machinery is not None else None),
+        identity_cache=identity_cache,
+        forward_identity=forward_identity,
     )
     set_state(app, state)
 

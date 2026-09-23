@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,14 +14,22 @@ from imbue.minds.desktop_client.conftest import SucceedingCreateShareCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.conftest import make_share_probe_result
+from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.identity_records import IdentityCache
+from imbue.minds.desktop_client.identity_records import IdentityRecord
+from imbue.minds.desktop_client.identity_records import now_utc
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import _enable_sharing_with_cli
 from imbue.minds.desktop_client.sharing_handler import _parse_grants_toml
+from imbue.minds.desktop_client.sharing_handler import _resolve_grant_identities
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
+from imbue.minds.desktop_client.sharing_handler import disable_sharing
 from imbue.minds.desktop_client.sharing_handler import pick_lowest_latency_relay_region
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
@@ -133,10 +142,13 @@ def test_pick_lowest_latency_relay_region_skips_measurement_for_a_single_region(
 
 
 def test_grants_toml_roundtrips_through_render_and_parse() -> None:
-    workspace_grants = {"emails": ["bob@example.com"], "email_domains": ["partner.org"]}
+    # ``users`` must survive the round trip verbatim: the gateway writes user
+    # ids into it when it upgrades an invite, and a save that dropped them
+    # would revoke access.
+    workspace_grants = {"users": ["user-1"], "emails": ["bob@example.com"], "email_domains": ["partner.org"]}
     service_grants = {
-        "web": {"emails": ["carol@example.com"], "email_domains": []},
-        "my-app": {"emails": [], "email_domains": ["viewer.dev"]},
+        "web": {"users": [], "emails": ["carol@example.com"], "email_domains": []},
+        "my-app": {"users": ["user-2", "user-3"], "emails": [], "email_domains": ["viewer.dev"]},
     }
 
     rendered = render_grants_toml(workspace_grants, service_grants)
@@ -160,8 +172,17 @@ def test_parse_grants_toml_tolerates_wrong_shapes_as_empty() -> None:
     parsed = _parse_grants_toml("workspace = 'not-a-table'")
     assert parsed is not None
     workspace_grants, service_grants = parsed
-    assert workspace_grants == {"emails": [], "email_domains": []}
+    assert workspace_grants == {"users": [], "emails": [], "email_domains": []}
     assert service_grants == {}
+
+
+def test_parse_grants_toml_reads_a_document_written_before_users_existed() -> None:
+    # A grants file from before this change has no ``users`` key; it reads as
+    # an empty list rather than as malformed.
+    parsed = _parse_grants_toml('[workspace]\nemails = ["a@example.com"]\nemail_domains = []\n')
+    assert parsed is not None
+    workspace_grants, _service_grants = parsed
+    assert workspace_grants == {"users": [], "emails": ["a@example.com"], "email_domains": []}
 
 
 def test_describe_connector_failure_reports_an_expired_session() -> None:
@@ -218,6 +239,92 @@ def test_resolve_agent_for_host_raises_when_neither_discovery_nor_records_know_t
         resolve_agent_for_host(undiscovered, str(HostId.generate()), store)
 
 
+def test_disable_sharing_drops_the_forward_identity_entry_and_requests_a_sync(tmp_path: Path) -> None:
+    agent_id = AgentId.generate()
+    host_id = str(HostId.generate())
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-rec-1", email="rec@example.com")
+    store = make_session_store_for_test(tmp_path, cli=cli)
+    store.associate_created_workspace(
+        user_id="user-rec-1",
+        agent_id=str(agent_id),
+        host_id=host_id,
+        display_name="shared-machine",
+        color=None,
+        is_cloud_row=False,
+    )
+    resolver = StaticBackendResolver(url_by_agent_and_service={})
+    headers_file = ForwardHeadersFile(path=tmp_path / "forward_headers.json")
+    sync_requests: list[str] = []
+    forward_identity = ForwardIdentityPublisher(
+        session_store=store,
+        headers_file=headers_file,
+        on_shared_workspaces_changed=lambda: sync_requests.append("kick"),
+    )
+    forward_identity.mark_shared(str(agent_id), "user-rec-1")
+    assert str(agent_id) in json.loads(headers_file.path.read_text())
+    assert sync_requests == ["kick"]
+
+    disable_sharing(host_id, resolver, cli, store, forward_identity)
+
+    assert list(json.loads(headers_file.path.read_text())) == ["*"]
+    # A sync is requested only once the connector agrees the share is gone, so
+    # the pass it runs cannot re-add the entry from a stale listing.
+    assert sync_requests == ["kick", "kick"]
+
+
+class _UserShowingCli(FakeImbueCloudCli):
+    """Fake CLI answering `users show` from a canned map (an absent id is a miss)."""
+
+    identity_by_user_id: dict[str, UserIdentityCliInfo] = Field(default_factory=dict)
+    is_show_failing: bool = Field(default=False)
+    shown_user_ids: list[str] = Field(default_factory=list, description="Every id `users show` was asked for")
+
+    def show_user(self, *, account: str, user_id: str) -> UserIdentityCliInfo | None:
+        self.shown_user_ids.append(user_id)
+        if self.is_show_failing:
+            raise ImbueCloudCliError("connector down")
+        return self.identity_by_user_id.get(user_id)
+
+
+def test_resolve_grant_identities_serves_fresh_cache_entries_and_fetches_the_rest(tmp_path: Path) -> None:
+    cli = _UserShowingCli(
+        connector_url=FAKE_CONNECTOR_URL,
+        identity_by_user_id={
+            "user-fetched": UserIdentityCliInfo(user_id="user-fetched", email="f@example.com", display_name="Fetched")
+        },
+    )
+    cache = IdentityCache(path=tmp_path / "identity_cache.json")
+    cache.put(IdentityRecord(user_id="user-cached", email="c@example.com"), now_utc())
+
+    identities = _resolve_grant_identities(
+        ["user-cached", "user-fetched", "user-unknown"], cache, cli, "owner@example.com"
+    )
+
+    # The unknown id is simply absent: the Share tab renders the bare id.
+    assert sorted(identities) == ["user-cached", "user-fetched"]
+    assert identities["user-fetched"].display_name == "Fetched"
+    # A fresh cache entry never costs a lookup, and a fetched record is
+    # cached so the next render of the document costs none either.
+    assert cli.shown_user_ids == ["user-fetched", "user-unknown"]
+    cached = cache.get("user-fetched")
+    assert cached is not None and cached.record.email == "f@example.com"
+
+
+def test_resolve_grant_identities_omits_ids_it_cannot_look_up(tmp_path: Path) -> None:
+    cli = _UserShowingCli(connector_url=FAKE_CONNECTOR_URL, is_show_failing=True)
+    cache = IdentityCache(path=tmp_path / "identity_cache.json")
+
+    # A failed lookup with nothing cached drops the id rather than failing the document.
+    assert _resolve_grant_identities(["user-1"], cache, cli, "owner@example.com") == {}
+    assert cli.shown_user_ids == ["user-1"]
+    # Without a signed-in account there is nothing to look up with, so no lookup is attempted.
+    assert _resolve_grant_identities(["user-1"], cache, cli, None) == {}
+    assert cli.shown_user_ids == ["user-1"]
+    # An app running without an identity cache resolves nothing.
+    assert _resolve_grant_identities(["user-1"], None, cli, "owner@example.com") == {}
+
+
 def _enable_sharing_for_test(
     host_id: str, agent_id: AgentId, grants: dict[str, list[str]], cli: ImbueCloudCli, *, is_cloud_row: bool
 ) -> dict[str, Any]:
@@ -232,6 +339,9 @@ def _enable_sharing_for_test(
         _client_env_config(),
         is_cloud_row=is_cloud_row,
         service_labels={},
+        identity_cache=None,
+        forward_identity=None,
+        owner_account=None,
     )
 
 
@@ -251,8 +361,8 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
 
     assert cli.create_share_calls == [("owner@example.com", host_id, None, None, str(agent_id))]
     # Exactly TWO execs touch the workspace: the one-shot state probe and the
-    # combined write of grants + owner email + share.env. Each exec pays a full
-    # mngr process + SSH round trip on a remote host, so the count is the
+    # combined write of grants + share.env. Each exec pays a full mngr
+    # process + SSH round trip on a remote host, so the count is the
     # contract, not an implementation detail.
     exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
     assert len(exec_calls) == 2
@@ -260,7 +370,8 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     assert "system/services/share_gateway" in probe_command
     assert "share_grants.toml" in write_command
     assert "data/.secrets/share.env" in write_command
-    assert "data/.state/share/owner_email" in write_command
+    # The owner's identity rides requests, never a file in the workspace.
+    assert "owner_email" not in write_command
     assert document["enabled"] is True
     assert document["grants"]["workspace"] == grants
 

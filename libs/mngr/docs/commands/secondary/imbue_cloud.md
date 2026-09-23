@@ -707,6 +707,23 @@ mngr imbue_cloud shares relays [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud shares set-grantees
+
+**Usage:**
+
+```text
+mngr imbue_cloud shares set-grantees [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--user-id` | text | A grantee's user id (repeatable); passing none clears the desktop-written index for this share. | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud sync
 
 **Usage:**
@@ -841,6 +858,121 @@ mngr imbue_cloud sync bundle push [OPTIONS]
 
 ```text
 mngr imbue_cloud sync bundle delete [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud users
+
+**Usage:**
+
+```text
+mngr imbue_cloud users [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud users show
+
+**Usage:**
+
+```text
+mngr imbue_cloud users show [OPTIONS] USER_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud users profile
+
+**Usage:**
+
+```text
+mngr imbue_cloud users profile [OPTIONS] USER_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud users resolve
+
+**Usage:**
+
+```text
+mngr imbue_cloud users resolve [OPTIONS] EMAIL
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud contacts
+
+**Usage:**
+
+```text
+mngr imbue_cloud contacts [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud contacts list
+
+**Usage:**
+
+```text
+mngr imbue_cloud contacts list [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud contacts add
+
+**Usage:**
+
+```text
+mngr imbue_cloud contacts add [OPTIONS] USER_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud contacts remove
+
+**Usage:**
+
+```text
+mngr imbue_cloud contacts remove [OPTIONS] USER_ID
 ```
 **Options:**
 

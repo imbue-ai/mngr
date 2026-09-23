@@ -17,6 +17,9 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
+from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.forward_identity import IDENTITY_HEADER
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sync_scheduler import InitialSyncState
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
@@ -164,6 +167,39 @@ def test_brand_new_account_resolves_to_done_with_zero_workspaces(tmp_path: Path)
     assert len(statuses) == 1
     assert statuses[0].state == InitialSyncState.DONE
     assert statuses[0].workspace_count == 0
+
+
+def test_pass_rebuilds_the_forward_headers_file_from_the_pulled_shared_workspaces(tmp_path: Path) -> None:
+    user_id = uuid4().hex
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=user_id, email=email)
+    shared_agent_id = str(AgentId.generate())
+    cli.shared_agent_ids_by_email[email] = {shared_agent_id}
+    record_store, session_store = _make_device(tmp_path, f"headers-{uuid4().hex}", cli)
+    headers_file = ForwardHeadersFile(path=tmp_path / "forward_headers.json")
+    scheduler = WorkspaceSyncScheduler(
+        record_store=record_store,
+        session_store=session_store,
+        resolver=make_resolver_with_data(agents_json=json.dumps({"agents": []})),
+        forward_identity=ForwardIdentityPublisher(session_store=session_store, headers_file=headers_file),
+    )
+
+    scheduler.run_one_pass()
+
+    written = json.loads(headers_file.path.read_text())
+    assert sorted(written) == sorted(["*", shared_agent_id])
+    assert json.loads(written[shared_agent_id][IDENTITY_HEADER]) == {"owner": True, "user_id": user_id, "email": email}
+
+    # A share disabled elsewhere drops out on the next pass; a pull that fails
+    # to reach the connector leaves the last known set in place.
+    cli.shared_agent_ids_by_email[email] = set()
+    cli.is_sync_offline = True
+    scheduler.run_one_pass_guarded()
+    assert shared_agent_id in json.loads(headers_file.path.read_text())
+    cli.is_sync_offline = False
+    scheduler.run_one_pass()
+    assert list(json.loads(headers_file.path.read_text())) == ["*"]
 
 
 def test_stop_blocks_until_in_flight_pass_finishes(tmp_path: Path) -> None:

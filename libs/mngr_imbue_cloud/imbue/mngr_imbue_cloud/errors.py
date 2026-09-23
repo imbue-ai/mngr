@@ -102,6 +102,14 @@ class ImbueCloudAccountError(ImbueCloudError):
     """Raised when an account (plan / entitlements / usage) operation fails."""
 
 
+class ImbueCloudUserNotFoundError(ImbueCloudAccountError):
+    """The connector knows no user for the given id, or no verified account for the given email."""
+
+
+class ImbueCloudRateLimitedError(ImbueCloudAccountError):
+    """The connector refused a lookup because the caller's rolling rate limit is exhausted (HTTP 429)."""
+
+
 class ImbueCloudCleanupGrantBudgetError(ImbueCloudError):
     """Raised when the connector refuses a storage-cleanup grant: the failed-grant budget is exhausted.
 

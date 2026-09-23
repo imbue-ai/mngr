@@ -96,12 +96,15 @@ def _persist_auth_response(
 
     display_name_raw = user.get("display_name")
     display_name = display_name_raw if isinstance(display_name_raw, str) else None
+    profile_picture_url_raw = user.get("profile_picture_url")
+    profile_picture_url = profile_picture_url_raw if isinstance(profile_picture_url_raw, str) else None
     session = make_session_from_tokens(
         user_id=SuperTokensUserId(user_id_raw),
         email=account_from_response,
         display_name=display_name,
         access_token=access_token,
         refresh_token=refresh_token if isinstance(refresh_token, str) else None,
+        profile_picture_url=profile_picture_url,
     )
     store.save(session)
     # Make the most-recently-touched account the active one. This is what
@@ -114,6 +117,7 @@ def _persist_auth_response(
         "user_id": str(session.user_id),
         "email": str(session.email),
         "display_name": session.display_name,
+        "profile_picture_url": session.profile_picture_url,
     }
 
 
@@ -298,8 +302,8 @@ def _revoke_server_sessions(
 def list_accounts() -> None:
     """Emit one JSON object per signed-in account.
 
-    Each entry contains ``user_id``, ``email``, ``display_name``, and
-    ``is_active`` (whether this account is the one ``auth use`` /
+    Each entry contains ``user_id``, ``email``, ``display_name``,
+    ``profile_picture_url``, and ``is_active`` (whether this account is the one ``auth use`` /
     ``auth signin`` last marked active). Used by minds to source account
     identity (account chips, the workspace<->account dropdown, the
     bootstrap reconciliation) without keeping its own on-disk copy.
@@ -320,6 +324,7 @@ def list_accounts() -> None:
                 "user_id": str(session.user_id),
                 "email": str(session.email),
                 "display_name": session.display_name,
+                "profile_picture_url": session.profile_picture_url,
                 "is_active": active == email,
             }
         )
@@ -354,6 +359,7 @@ def status(account: str | None) -> None:
             "user_id": str(session.user_id),
             "email": str(session.email),
             "display_name": session.display_name,
+            "profile_picture_url": session.profile_picture_url,
             "access_token_expires_at": session.access_token_expires_at,
             "near_expiry": near_expiry,
             "has_refresh_token": session.refresh_token is not None,
@@ -415,9 +421,7 @@ def refresh(account: str | None, connector_url: str | None) -> None:
     )
 
 
-# ----------------------------------------------------------------------
 # Browser-based login (the hosted accounts surface + loopback handoff)
-# ----------------------------------------------------------------------
 
 
 class _CallbackCaptureBox:

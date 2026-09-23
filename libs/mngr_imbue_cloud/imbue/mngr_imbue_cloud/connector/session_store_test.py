@@ -120,6 +120,7 @@ def test_make_session_from_tokens_extracts_exp() -> None:
         display_name=None,
         access_token=jwt_with_exp,
         refresh_token=None,
+        profile_picture_url=None,
     )
     assert session.access_token_expires_at is not None
     assert session.access_token_expires_at.year >= 2286

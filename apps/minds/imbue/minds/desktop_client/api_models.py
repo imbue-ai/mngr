@@ -338,10 +338,23 @@ class RestartWorkspaceRequest(ApiRequestModel):
 
 
 class SharingGrantList(FrozenModel):
-    """One sharing scope's allow-list: exact emails plus whole email domains."""
+    """One sharing scope's allow-list: user ids, exact emails (invites), and whole email domains."""
 
-    emails: tuple[str, ...] = Field(default=(), description="Exact email addresses granted access")
+    users: tuple[str, ...] = Field(default=(), description="User ids granted access (matched before emails)")
+    emails: tuple[str, ...] = Field(
+        default=(),
+        description="Exact email addresses granted access; each is an invite the gateway upgrades to a user id",
+    )
     email_domains: tuple[str, ...] = Field(default=(), description="Whole email domains granted access")
+
+
+class IdentityRecordResponse(FrozenModel):
+    """One user's identity record as the connector serves it (email only when verified)."""
+
+    user_id: str = Field(description="SuperTokens user id")
+    email: str | None = Field(default=None, description="Verified email, or None when unverified")
+    display_name: str | None = Field(default=None, description="User-editable display name")
+    profile_picture_url: str | None = Field(default=None, description="Public URL of the profile picture")
 
 
 class SharingGrantsDocument(FrozenModel):
@@ -632,7 +645,7 @@ class SharingReadinessResponse(FrozenModel):
 
 
 class MachineSharingResponse(FrozenModel):
-    """A machine's sharing document: status plus the grants read from the workspace."""
+    """A machine's sharing document: status, the grants read from the workspace, and the grantees' identities."""
 
     host_id: str = Field(description="The machine's host coordinate (host-<hex>)")
     enabled: bool = Field(description="Whether the machine is currently shared")
@@ -662,6 +675,10 @@ class MachineSharingResponse(FrozenModel):
             "shared but the grants read did not land (clients must treat null "
             "as unknown, never as an empty policy)"
         ),
+    )
+    identities: dict[str, IdentityRecordResponse] = Field(
+        default_factory=dict,
+        description="Identity record per granted user id the desktop knows (absent ids render as the bare id)",
     )
 
 

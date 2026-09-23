@@ -463,3 +463,37 @@ def test_show_machine_returns_none_when_the_invocation_fails() -> None:
     cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
 
     assert cli.show_machine("owner@example.com", "host-" + "b" * 32) is None
+
+
+def test_sync_records_pull_reads_the_records_and_shared_agent_ids_object() -> None:
+    agent_id = "agent-" + "a" * 32
+    payload = {"records": [{"agent_id": agent_id, "revision": 1}, "not-a-record"], "shared_agent_ids": [agent_id, 7]}
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps(payload)))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    pulled = cli.sync_records_pull("owner@example.com")
+
+    assert pulled.records == ({"agent_id": agent_id, "revision": 1},)
+    assert pulled.shared_agent_ids == (agent_id,)
+    assert caller.calls[0][:4] == ["imbue_cloud", "sync", "records", "pull"]
+
+
+def test_sync_records_pull_reads_a_listing_without_the_shared_marker_as_nothing_shared() -> None:
+    """The records object of a CLI too old to report shared_agent_ids still parses."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"records": [{"agent_id": "x"}]}))
+    )
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    pulled = cli.sync_records_pull("owner@example.com")
+
+    assert pulled.records == ({"agent_id": "x"},)
+    assert pulled.shared_agent_ids == ()
+
+
+def test_sync_records_pull_raises_on_an_unexpected_shape() -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=json.dumps([{"agent_id": "x"}])))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudCliError, match="sync records pull"):
+        cli.sync_records_pull("owner@example.com")

@@ -66,6 +66,12 @@ from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import SleepTracker
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
 from imbue.minds.desktop_client.forward_cli import start_mngr_forward
+from imbue.minds.desktop_client.forward_identity import FORWARD_HEADERS_FILENAME
+from imbue.minds.desktop_client.forward_identity import ForwardHeadersFile
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.forward_identity import remove_legacy_forward_identity_file
+from imbue.minds.desktop_client.identity_records import IDENTITY_CACHE_FILENAME
+from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.laptop_agent_types_seed import seed_laptop_agent_types_for_minds
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -521,10 +527,25 @@ def run(
         connector_url=str(client_env_config.connector_url),
         concurrency_group=root_concurrency_group,
     )
+    # The X-Imbue-Identity contract the proxy stamps on the owner's local
+    # requests rides the proxy's generic request-headers file; the publisher
+    # rewrites it as shares change (from every sync pass, and immediately on a
+    # local enable/disable). Written before the proxy starts so the owner flag
+    # is stamped from the first request.
+    remove_legacy_forward_identity_file(data_directory)
+    forward_headers_file = ForwardHeadersFile(path=data_directory / FORWARD_HEADERS_FILENAME)
+    forward_identity = ForwardIdentityPublisher(
+        session_store=session_store,
+        headers_file=forward_headers_file,
+        # Bound lazily: the scheduler is built just below and holds this publisher.
+        on_shared_workspaces_changed=lambda: sync_scheduler.kick(),
+    )
+    forward_identity.rebuild()
     sync_scheduler = WorkspaceSyncScheduler(
         record_store=workspace_record_store,
         session_store=session_store,
         resolver=backend_resolver,
+        forward_identity=forward_identity,
         # Newly-materialized SSH material (a cloud workspace unlocked/synced
         # from another install) is picked up lazily by discovery; bouncing the
         # observe child makes the workspace reachable now instead of on the
@@ -550,6 +571,7 @@ def run(
     # them. Seed the mappings into user-scope settings.toml here so subsequent mngr
     # subprocesses resolve `type=chat` / `main` / `worker` -> ClaudeAgent without depending on cwd.
     seed_laptop_agent_types_for_minds(mngr_host_dir)
+    identity_cache = IdentityCache(path=data_directory / IDENTITY_CACHE_FILENAME)
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
         # The chrome page embeds workspace origins in an iframe, so the proxy's
@@ -557,6 +579,7 @@ def run(
         # spellings are listed: Electron navigates by 127.0.0.1 while the
         # printed browser login URL uses localhost.
         embedder_origins=(f"http://localhost:{port}", f"http://127.0.0.1:{port}"),
+        request_headers_file=forward_headers_file.path,
     )
     consumer, preauth_cookie, browser_bridge_token = start_mngr_forward(
         config=forward_config,
@@ -796,6 +819,8 @@ def run(
         sleep_tracker=sleep_tracker,
         sync_scheduler=sync_scheduler,
         device_id=str(device_id),
+        identity_cache=identity_cache,
+        forward_identity=forward_identity,
     )
 
     # Background loop driving the discovery-pipeline watchdog: polls snapshot

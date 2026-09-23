@@ -277,7 +277,7 @@ def consumer() -> EnvelopeStreamConsumer:
     return EnvelopeStreamConsumer(resolver=resolver, started_at=_CONSUMER_STARTED_AT)
 
 
-# --- envelope dispatch ----------------------------------------------------
+# envelope dispatch
 
 
 def test_invalid_json_envelope_is_skipped(consumer: EnvelopeStreamConsumer) -> None:
@@ -297,7 +297,7 @@ def test_envelope_with_non_dict_payload_is_ignored(consumer: EnvelopeStreamConsu
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- observe stream: per-provider snapshot --------------------------------
+# observe stream: per-provider snapshot
 
 
 def test_provider_snapshot_populates_resolver_and_fires_discovered_callbacks(
@@ -724,7 +724,7 @@ def test_shutdown_reports_a_replay_that_never_ended() -> None:
     assert "6x Docker state container is stopped" in lines[0]
 
 
-# --- observe stream: host ssh info ----------------------------------------
+# observe stream: host ssh info
 
 
 def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamConsumer) -> None:
@@ -761,7 +761,7 @@ def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamC
     assert second.known_hosts_path == Path("/tmp/pins/known_hosts")
 
 
-# --- observe stream: agent / host destroyed -------------------------------
+# observe stream: agent / host destroyed
 
 
 def test_agent_destroyed_clears_resolver_services_and_fires_callback(
@@ -815,7 +815,7 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
     assert consumer.resolver.list_known_agent_ids() == ()
 
 
-# --- observe stream: host state threading ---------------------------------
+# observe stream: host state threading
 
 
 def test_provider_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStreamConsumer) -> None:
@@ -890,7 +890,7 @@ def test_provider_snapshot_carries_destroyed_host_state(consumer: EnvelopeStream
     assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.DESTROYED
 
 
-# --- event stream: services / requests ------------------------------------
+# event stream: services / requests
 
 
 def test_event_services_envelope_updates_resolver_services(consumer: EnvelopeStreamConsumer) -> None:
@@ -975,7 +975,7 @@ def test_reverse_tunnel_established_is_silently_ignored(
     _dispatch(consumer, _forward_envelope(payload, agent_id=_AGENT_ID_1))
 
 
-# --- forward stream: system_interface_backend_failure ---------------------
+# forward stream: system_interface_backend_failure
 
 
 def _record_backend_failures(
@@ -1059,7 +1059,7 @@ def test_a_backend_failure_without_an_agent_id_is_dropped(consumer: EnvelopeStre
     assert observed == []
 
 
-# --- forward stream: listening --------------------------------------------
+# forward stream: listening
 
 
 def test_listening_envelope_unblocks_wait_for_listening_with_port(
@@ -1087,7 +1087,7 @@ def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
     assert consumer.wait_for_listening(timeout=0.05) is None
 
 
-# --- terminate ------------------------------------------------------------
+# terminate
 
 
 def test_terminate_calls_terminate_then_returns(consumer: EnvelopeStreamConsumer) -> None:
@@ -1103,7 +1103,7 @@ def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamCon
     consumer.terminate()
 
 
-# --- intentional vs unintentional exit reporting ------------------------------
+# intentional vs unintentional exit reporting
 
 
 def test_intentional_terminate_does_not_report_exit() -> None:
@@ -1162,7 +1162,7 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
         consumer.start(cg)
 
 
-# --- _build_forward_command ----------------------------------------------
+# _build_forward_command
 
 
 def test_build_forward_command_includes_use_http2_flag() -> None:
@@ -1198,7 +1198,20 @@ def test_build_forward_command_threads_includes_and_reverse_specs() -> None:
     assert embedders == ["http://localhost:8420", "http://127.0.0.1:8420"]
 
 
-# --- _redact_secrets ------------------------------------------------------
+def test_build_forward_command_passes_the_request_headers_file_only_when_configured() -> None:
+    """The proxy stamps the desktop's identity header from the file minds maintains; without one it gets no flag."""
+    with_file = _build_forward_command(
+        ForwardSubprocessConfig(request_headers_file=Path("/tmp/minds/forward_headers.json")),
+        preauth_cookie="s",
+        browser_bridge_token="b",
+    )
+    assert with_file[with_file.index("--request-headers-file") + 1] == "/tmp/minds/forward_headers.json"
+
+    without_file = _build_forward_command(ForwardSubprocessConfig(), preauth_cookie="s", browser_bridge_token="b")
+    assert "--request-headers-file" not in without_file
+
+
+# _redact_secrets
 
 
 def test_redact_secrets_masks_preauth_cookie_value() -> None:

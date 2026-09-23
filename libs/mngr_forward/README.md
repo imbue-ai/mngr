@@ -87,22 +87,35 @@ host application (the minds chrome). Two pieces make this work:
 at all, so any page could iframe a workspace origin. The default is now
 deny-external; embedders must be allowlisted via `--embedder-origin`.
 
-## Request identity headers
+## Per-agent request headers
 
-Every forwarded request (HTTP and WebSocket) carries `X-Share-Owner: true`. The
-single authenticated user of a local forward is always the workspace owner, so
-the proxy stamps that flag unconditionally and never sends `X-Share-Email`. Any
-client-supplied copy of `X-Share-Owner` / `X-Share-Email` is dropped before the
-value is set, so an agent-controlled backend page cannot forge its own
-ownership or a caller email.
+A host application can have the proxy stamp headers of its own onto every
+request it forwards, with `--request-headers-file <path>`. The file is one
+JSON object: each key is an agent id (`agent-<hex>`) or `"*"`, and each value
+maps header names to string values:
 
-This is the same contract a shared workspace gets from its in-container
-share-gateway (which additionally sends `X-Share-Email` for non-owner visitors),
-so an in-workspace service reads request identity identically whether it is
-reached locally or over the relay. See the default-workspace-template's
-`system/services/share_gateway/README.md` for the full contract, including how
-the owner's email is delivered (a file present only while shared), which never
-travels as a per-request header.
+```json
+{
+  "*": {"X-Example-Requester": "owner"},
+  "agent-<hex>": {"X-Example-Requester": "owner:alice"}
+}
+```
+
+On every proxied HTTP request and WebSocket handshake to an agent, the proxy
+first deletes any inbound header whose name (case-insensitively) appears
+anywhere in the file -- the union over every entry, so a page served by one
+agent can never smuggle a header another agent's entry controls -- and then
+sets the agent's own entry, else the `"*"` entry, else nothing. Header names
+must be valid tokens and may not be request framing (`Host`,
+`Content-Length`, `Transfer-Encoding`) or hop-by-hop headers (`Connection`,
+`Upgrade`, ...); a file that names one is malformed as a whole.
+
+The file is stat'ed per request and re-parsed when its mtime or size changes,
+so the host application can rewrite it at any time (atomically, to avoid a
+torn read); a malformed file is logged once per change and treated as empty.
+Without the flag nothing is stripped or stamped. The proxy attaches no meaning
+to the headers: what they carry is the host application's contract with the
+services behind its agents.
 
 ## TLS trust for plain browsers
 

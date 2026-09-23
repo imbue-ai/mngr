@@ -159,7 +159,6 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # mid-pass call race its teardown and crash the loop's thread.
     if state.sync_scheduler is not None:
         state.sync_scheduler.stop()
-    # Same reason: these all exec through the shared caller stopped just below.
     update_service = state.workspace_update_service
     if update_service is not None:
         update_service.detector.stop()

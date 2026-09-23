@@ -34,10 +34,13 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceHeldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudWorkspaceRetiredError
 from imbue.mngr_imbue_cloud.errors import WORKSPACE_HELD_MESSAGE
@@ -1116,6 +1119,48 @@ def test_list_sync_records_parses_records(monkeypatch: pytest.MonkeyPatch) -> No
     assert records[0].host_id == "host-1"
     assert records[0].state == "active"
     assert records[0].destroyed_at is None
+
+
+def test_list_sync_records_with_shares_parses_the_shared_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/sync/records"
+        return httpx.Response(
+            200,
+            json={
+                "records": [_sync_record_json(), {**_sync_record_json(host_id="host-2"), "agent_id": "agent-2"}],
+                "shared_agent_ids": ["agent-2"],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+    listing = client.list_sync_records_with_shares(SecretStr("tok"))
+    assert [record.agent_id for record in listing.records] == ["agent-1", "agent-2"]
+    assert listing.shared_agent_ids == ("agent-2",)
+    # The exact JSON object `mngr imbue_cloud sync records pull` prints.
+    dumped = listing.model_dump(mode="json")
+    assert set(dumped) == {"records", "shared_agent_ids"}
+    assert dumped["shared_agent_ids"] == ["agent-2"]
+    assert [record["agent_id"] for record in dumped["records"]] == ["agent-1", "agent-2"]
+
+
+def test_list_sync_records_with_shares_reports_no_shares_against_an_older_connector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _install_mock_httpx(
+        monkeypatch, lambda request: httpx.Response(200, json={"records": [_sync_record_json()]})
+    )
+    listing = client.list_sync_records_with_shares(SecretStr("tok"))
+    assert len(listing.records) == 1
+    assert listing.shared_agent_ids == ()
+
+
+def test_list_sync_records_with_shares_rejects_a_malformed_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _install_mock_httpx(
+        monkeypatch,
+        lambda request: httpx.Response(200, json={"records": [_sync_record_json()], "shared_agent_ids": "agent-1"}),
+    )
+    with pytest.raises(ImbueCloudSyncError):
+        client.list_sync_records_with_shares(SecretStr("tok"))
 
 
 def test_list_sync_records_keeps_the_server_destroyed_at_stamp(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2263,3 +2308,140 @@ def test_account_suspended_403_raises_the_typed_error(monkeypatch: pytest.Monkey
     client = _install_mock_httpx(monkeypatch, handler)
     with pytest.raises(ImbueCloudAccountSuspendedError, match="support@imbue.com"):
         client.auth_device_token("code-1", "verifier-1", "http://127.0.0.1:1234/callback")
+
+
+# Users, contacts, and the share grantee index
+
+
+def test_get_user_parses_the_identity_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/users/user-1"
+        return httpx.Response(
+            200,
+            json={
+                "user_id": "user-1",
+                "email": "alice@imbue.com",
+                "display_name": "Alice",
+                "profile_picture_url": "https://accounts.example/users/user-1/profile-picture/abc",
+                # A newer connector field must be tolerated by shipped clients.
+                "pronouns": "she/her",
+            },
+        )
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    record = client.get_user(SecretStr("tok"), "user-1")
+    assert record.user_id == "user-1"
+    assert record.email == "alice@imbue.com"
+    assert record.display_name == "Alice"
+    assert record.profile_picture_url == "https://accounts.example/users/user-1/profile-picture/abc"
+
+
+def test_get_public_profile_sends_no_credentials_and_tolerates_nulls(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        # httpx decodes the path; the client must have percent-encoded the id.
+        assert request.url.raw_path == b"/users/user%201/profile"
+        assert "authorization" not in request.headers
+        return httpx.Response(200, json={"user_id": "user 1", "display_name": None, "profile_picture_url": None})
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    profile = client.get_public_profile("user 1")
+    assert profile.user_id == "user 1"
+    assert profile.display_name is None
+    assert profile.profile_picture_url is None
+
+
+def test_get_public_profile_parses_a_populated_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_transport(
+        monkeypatch,
+        lambda request: httpx.Response(
+            200,
+            json={
+                "user_id": "user-1",
+                "display_name": "Alice",
+                "profile_picture_url": "https://accounts.example/users/user-1/profile-picture/abc",
+                "pronouns": "she/her",
+            },
+        ),
+    )
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    profile = client.get_public_profile("user-1")
+    assert profile.display_name == "Alice"
+    assert profile.profile_picture_url == "https://accounts.example/users/user-1/profile-picture/abc"
+
+
+def test_get_user_404_raises_the_typed_not_found_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_transport(monkeypatch, lambda request: httpx.Response(404, json={"detail": "No such user"}))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    with pytest.raises(ImbueCloudUserNotFoundError):
+        client.get_user(SecretStr("tok"), "user-missing")
+
+
+def test_resolve_user_by_email_sends_the_address_as_a_query_parameter(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/users/resolve"
+        assert request.url.params["email"] == "Bob@Example.com"
+        return httpx.Response(200, json={"user_id": "user-2", "email": "bob@example.com", "display_name": None})
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    record = client.resolve_user_by_email(SecretStr("tok"), "Bob@Example.com")
+    assert record.user_id == "user-2"
+    assert record.profile_picture_url is None
+
+
+def test_resolve_user_by_email_maps_404_and_429_to_typed_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_transport(monkeypatch, lambda request: httpx.Response(404, json={"detail": "no match"}))
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    with pytest.raises(ImbueCloudUserNotFoundError):
+        client.resolve_user_by_email(SecretStr("tok"), "nobody@example.com")
+
+    _install_fake_transport(
+        monkeypatch,
+        lambda request: httpx.Response(429, json={"detail": {"code": "rate_limited", "message": "slow down"}}),
+    )
+    with pytest.raises(ImbueCloudRateLimitedError):
+        client.resolve_user_by_email(SecretStr("tok"), "nobody@example.com")
+
+
+def test_contacts_round_trip_through_the_contacts_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "contacts": [
+                        {"user_id": "user-2", "email": "bob@example.com", "trust_level": "known", "created_at": "t"}
+                    ]
+                },
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, json={"user_id": "user-3", "email": None, "trust_level": "known"})
+        return httpx.Response(200, json={"deleted": True})
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    contacts = client.list_contacts(SecretStr("tok"))
+    assert [entry.user_id for entry in contacts] == ["user-2"]
+    assert contacts[0].trust_level == "known"
+    added = client.add_contact(SecretStr("tok"), "user-3")
+    assert added.user_id == "user-3"
+    assert added.email is None
+    client.remove_contact(SecretStr("tok"), "user-3")
+    assert seen == [("GET", "/contacts"), ("PUT", "/contacts/user-3"), ("DELETE", "/contacts/user-3")]
+
+
+def test_set_share_grantees_replaces_the_index_and_returns_the_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/shares/host-abc/grantees"
+        assert _json.loads(request.content) == {"grantee_user_ids": ["user-2", "user-3"]}
+        return httpx.Response(200, json={"count": 2})
+
+    _install_fake_transport(monkeypatch, handler)
+    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
+    assert client.set_share_grantees(SecretStr("tok"), "host-abc", ["user-2", "user-3"]) == 2

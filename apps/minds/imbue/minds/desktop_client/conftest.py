@@ -39,6 +39,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
+from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
@@ -181,12 +182,14 @@ class FakeImbueCloudCli(ImbueCloudCli):
         email: str,
         display_name: str | None = None,
         is_active: bool = False,
+        profile_picture_url: str | None = None,
     ) -> None:
         self.accounts_to_return.append(
             ImbueCloudAuthAccount(
                 user_id=user_id,
                 email=email,
                 display_name=display_name,
+                profile_picture_url=profile_picture_url,
                 is_active=is_active,
             )
         )
@@ -281,9 +284,16 @@ class FakeImbueCloudCli(ImbueCloudCli):
         if self.is_sync_offline:
             raise ImbueCloudCliError(f"{command_repr}: connector unreachable (fake offline)")
 
-    def sync_records_pull(self, account: str) -> list[dict[str, object]]:
+    shared_agent_ids_by_email: dict[str, set[str]] = Field(
+        default_factory=dict, description="email -> agent ids the fake connector's shares index lists as shared"
+    )
+
+    def sync_records_pull(self, account: str) -> SyncRecordsPullResult:
         self._check_sync_online("sync records pull")
-        return [dict(record) for record in self.sync_records_by_email.get(account, {}).values()]
+        return SyncRecordsPullResult(
+            records=tuple(dict(record) for record in self.sync_records_by_email.get(account, {}).values()),
+            shared_agent_ids=tuple(sorted(self.shared_agent_ids_by_email.get(account, set()))),
+        )
 
     def sync_record_push(self, account: str, record: Mapping[str, object]) -> dict[str, object]:
         self._check_sync_online("sync records push")

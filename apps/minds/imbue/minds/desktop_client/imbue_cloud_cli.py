@@ -82,6 +82,11 @@ _CLIENT_TOO_OLD_ERROR_CLASS_SIGNAL = "ImbueCloudClientTooOldError"
 # rides inside the relayed connector body.
 _LEASE_ACTIVE_CODE_SIGNAL = "lease_active"
 
+# The structured code `mngr imbue_cloud users resolve|show` and `contacts add`
+# answer with when no account matches; a miss is an expected answer (the
+# address may simply have no account yet), never a failure.
+_USER_NOT_FOUND_CODE_SIGNAL = "user_not_found"
+
 # The plugin's error_class marker for a structured auth rejection, written by
 # ``_persist_auth_response`` in the plugin's auth CLI whenever the connector
 # answers an auth call with a non-OK status. Matched on the parsed body's
@@ -189,7 +194,20 @@ class ImbueCloudAuthAccount(WireModel):
     user_id: str
     email: str
     display_name: str | None = None
+    profile_picture_url: str | None = None
     is_active: bool = False
+
+
+class UserIdentityCliInfo(WireModel):
+    """One user's identity record from `mngr imbue_cloud users show|resolve` or `contacts add`.
+
+    ``email`` is None when the connector holds no verified email for the user.
+    """
+
+    user_id: str
+    email: str | None = None
+    display_name: str | None = None
+    profile_picture_url: str | None = None
 
 
 class LeasedHost(WireModel):
@@ -248,9 +266,12 @@ class ShareCliRelayLogin(WireModel):
 
 
 class ShareCliInfo(WireModel):
-    """Result of `mngr imbue_cloud shares create` / `shares status`."""
+    """Result of `mngr imbue_cloud shares create` / `shares status` / one row of `shares list`."""
 
     host_id: str
+    # The workspace the share is keyed by; None on rows old clients created
+    # (host-keyed legacy shares) or against a connector that predates it.
+    workspace_id: str | None = None
     workspace_domain: str
     region: str
     state: str
@@ -322,6 +343,15 @@ class ActiveShareCache(MutableModel):
     def invalidate(self, host_id: str) -> None:
         with self._lock:
             self._lookup_and_deadline_by_host_id.pop(host_id, None)
+
+
+class SyncRecordsPullResult(FrozenModel):
+    """What `mngr imbue_cloud sync records pull` reports: the account's records and which of its workspaces are shared."""
+
+    records: tuple[dict[str, Any], ...] = Field(description="The account's workspace records, as wire dicts")
+    shared_agent_ids: tuple[str, ...] = Field(
+        description="Agent ids of the account's actively shared workspaces (the connector's shares index)"
+    )
 
 
 class R2BucketKeyMaterial(WireModel):
@@ -529,9 +559,7 @@ class ImbueCloudCli(MutableModel):
         plain_exc.stderr = result.stderr
         raise plain_exc
 
-    # ------------------------------------------------------------------
     # Auth
-    # ------------------------------------------------------------------
 
     def auth_login(
         self,
@@ -619,9 +647,7 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "auth is-verified")
         return _expect_bool_field(body, "verified", "auth is-verified")
 
-    # ------------------------------------------------------------------
     # Hosts (list / release)
-    # ------------------------------------------------------------------
 
     def list_hosts(self, account: str) -> list[LeasedHost]:
         result = self._run(
@@ -696,9 +722,7 @@ class ImbueCloudCli(MutableModel):
         )
         return False
 
-    # ------------------------------------------------------------------
     # LiteLLM keys
-    # ------------------------------------------------------------------
 
     def create_litellm_key(
         self,
@@ -770,9 +794,7 @@ class ImbueCloudCli(MutableModel):
         )
         return self._expect_success(result, "keys litellm show")
 
-    # ------------------------------------------------------------------
     # Shares (self-hosted relays)
-    # ------------------------------------------------------------------
 
     def create_share(
         self,
@@ -830,6 +852,25 @@ class ImbueCloudCli(MutableModel):
             return None
         return ShareCliInfo.model_validate(body)
 
+    def list_shares(self, *, account: str) -> list[ShareCliInfo]:
+        """Every share record of the account (active and inactive)."""
+        result = self._run(
+            ["shares", "list", "--account", account],
+            cg_name="imbue-cloud-shares-list",
+        )
+        body = self._expect_success(result, "shares list")
+        if not isinstance(body, list):
+            raise ImbueCloudCliError("Malformed shares list output: expected a list of share objects")
+        return [ShareCliInfo.model_validate(entry) for entry in body if isinstance(entry, dict)]
+
+    def set_share_grantees(self, *, account: str, host_id: str, grantee_user_ids: Sequence[str]) -> None:
+        """Replace the share's grantee index (discovery only; the grants file stays the authority)."""
+        args = ["shares", "set-grantees", host_id, "--account", account]
+        for user_id in grantee_user_ids:
+            args.extend(["--user-id", user_id])
+        result = self._run(args, cg_name="imbue-cloud-shares-set-grantees")
+        self._expect_success(result, "shares set-grantees")
+
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         """The relay fleet as ``{region: tunnel-control endpoints}`` (for latency-based region picking)."""
         result = self._run(
@@ -844,9 +885,7 @@ class ImbueCloudCli(MutableModel):
             raise ImbueCloudCliError("Malformed shares relays output: expected an endpoint list per region")
         return {str(region): tuple(str(endpoint) for endpoint in endpoints) for region, endpoints in relays.items()}
 
-    # ------------------------------------------------------------------
     # R2 buckets (one per workspace; used to back up the host_dir via restic)
-    # ------------------------------------------------------------------
 
     def create_bucket(
         self,
@@ -918,9 +957,48 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "bucket roll-key")
         return R2BucketKeyMaterial.model_validate(body)
 
-    # ------------------------------------------------------------------
+    # Users + contacts (identity records)
+
+    def _identity_or_none_on_miss(self, result: MngrCallResult, command_repr: str) -> UserIdentityCliInfo | None:
+        """Parse an identity record, mapping the plugin's ``user_not_found`` refusal to None."""
+        if result.returncode != 0:
+            body = _parse_stderr_error_body(result.stderr)
+            if body is not None and body.get("code") == _USER_NOT_FOUND_CODE_SIGNAL:
+                return None
+        parsed = self._expect_success(result, command_repr)
+        if not isinstance(parsed, dict) or not parsed.get("user_id"):
+            raise ImbueCloudCliError(f"Malformed {command_repr} output: expected an identity record")
+        return UserIdentityCliInfo.model_validate(parsed)
+
+    def resolve_user(self, *, account: str, email: str) -> UserIdentityCliInfo | None:
+        """The identity record whose verified email is ``email``, or None when no account matches.
+
+        Raises ``ImbueCloudCliError`` on every other failure, including the
+        connector's rate limit (the caller treats those as "store an invite").
+        """
+        result = self._run(
+            ["users", "resolve", email, "--account", account],
+            cg_name="imbue-cloud-users-resolve",
+        )
+        return self._identity_or_none_on_miss(result, "users resolve")
+
+    def show_user(self, *, account: str, user_id: str) -> UserIdentityCliInfo | None:
+        """The identity record of ``user_id``, or None when the connector knows no such user."""
+        result = self._run(
+            ["users", "show", user_id, "--account", account],
+            cg_name="imbue-cloud-users-show",
+        )
+        return self._identity_or_none_on_miss(result, "users show")
+
+    def add_contact(self, *, account: str, user_id: str) -> None:
+        """Add ``user_id`` to the account's contacts (idempotent; the contact is never notified)."""
+        result = self._run(
+            ["contacts", "add", user_id, "--account", account],
+            cg_name="imbue-cloud-contacts-add",
+        )
+        self._expect_success(result, "contacts add")
+
     # Account (plan + entitlements + usage)
-    # ------------------------------------------------------------------
 
     def get_account_info(self, account: str) -> dict[str, Any]:
         """Return the account's plan, entitlement values, and live usage as a raw dict."""
@@ -967,15 +1045,24 @@ class ImbueCloudCli(MutableModel):
         )
         return self._expect_success(result, "account recheck-storage")
 
-    # ------------------------------------------------------------------
     # Workspace sync (records + key bundle)
-    # ------------------------------------------------------------------
 
-    def sync_records_pull(self, account: str) -> list[dict[str, Any]]:
+    def sync_records_pull(self, account: str) -> SyncRecordsPullResult:
+        """The account's records plus its shared agent ids (absent against a CLI too old to report them)."""
         result = self._run(["sync", "records", "pull", "--account", account], cg_name="imbue-cloud-sync-records-pull")
         body = self._expect_success(result, "sync records pull")
-        records = body.get("records", []) if isinstance(body, dict) else []
-        return [entry for entry in records if isinstance(entry, dict)]
+        if not isinstance(body, dict):
+            raise ImbueCloudCliError(
+                f"Malformed sync records pull output: expected an object, got {_describe_body_shape(body)}"
+            )
+        raw_records = body.get("records", [])
+        raw_shared_agent_ids = body.get("shared_agent_ids", [])
+        if not isinstance(raw_records, list) or not isinstance(raw_shared_agent_ids, list):
+            raise ImbueCloudCliError("Malformed sync records pull output: records and shared_agent_ids must be lists")
+        return SyncRecordsPullResult(
+            records=tuple(entry for entry in raw_records if isinstance(entry, dict)),
+            shared_agent_ids=tuple(agent_id for agent_id in raw_shared_agent_ids if isinstance(agent_id, str)),
+        )
 
     def sync_record_push(self, account: str, record: Mapping[str, Any]) -> dict[str, Any]:
         """Push one record; returns the stored row. Raises ImbueCloudSyncConflictCliError on a 409.

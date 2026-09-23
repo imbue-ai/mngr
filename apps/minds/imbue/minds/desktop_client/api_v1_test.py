@@ -1228,7 +1228,7 @@ def test_destroy_refuses_a_record_written_by_a_newer_app_version(tmp_path: Path)
     }
     store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
     assert store.record_store is not None
-    assert store.record_store.pull("user-1", email) is True
+    assert store.record_store.pull("user-1", email) is not None
     client = _build_client(
         tmp_path,
         _ResolverOnAParseableHost(url_by_agent_and_service={str(agent_id): {}}),
@@ -2293,11 +2293,53 @@ def test_machine_sharing_put_enables_and_injects_materials(tmp_path: Path) -> No
     assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
     assert cli.created_shares == [_TEST_HOST_ID]
-    # The grants + owner email + share.env writes ride over the recording mngr
-    # caller in a single combined exec.
+    # The grants + share.env writes ride over the recording mngr caller in a
+    # single combined exec.
     recorded = _recorded_mngr_calls(cli)
     assert any("share_grants.toml" in " ".join(argv) for argv in recorded)
     assert any("share.env" in " ".join(argv) for argv in recorded)
+    assert not any("owner_email" in " ".join(argv) for argv in recorded)
+
+
+def test_machine_sharing_put_with_user_grants_mirrors_them_to_the_connector(tmp_path: Path) -> None:
+    # A user-id grant is written into the grants file AND mirrored (best
+    # effort) to the connector: the share's grantee index and the owner's
+    # contacts. Neither mirror affects who may visit.
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/machines/{_TEST_HOST_ID}/sharing",
+        headers=_auth_header(),
+        json={"workspace": {"users": ["user-2"], "emails": ["viewer@example.com"], "email_domains": []}},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["grants"]["workspace"]["users"] == ["user-2"]
+    # No identity cache in this app: the grantee renders as a bare id.
+    assert body["identities"] == {}
+    recorded = _recorded_mngr_calls(cli)
+    grantee_calls = [argv for argv in recorded if "set-grantees" in argv]
+    assert grantee_calls == [
+        [
+            "imbue_cloud",
+            "shares",
+            "set-grantees",
+            _TEST_HOST_ID,
+            "--account",
+            "owner@example.com",
+            "--user-id",
+            "user-2",
+        ]
+    ]
+    contact_calls = [argv for argv in recorded if "contacts" in argv]
+    assert contact_calls == [["imbue_cloud", "contacts", "add", "user-2", "--account", "owner@example.com"]]
+    # The grants write (not the probe, which also names the file) runs under
+    # the lock every in-container grants writer takes.
+    locked_writes = [argv for argv in recorded if "flock data/.secrets/share_grants.toml.lock" in " ".join(argv)]
+    assert len(locked_writes) == 1
 
 
 def test_machine_sharing_status_reports_the_share_target_labels(tmp_path: Path) -> None:

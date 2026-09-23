@@ -14,13 +14,15 @@ Feature: HTTP byte-forwarding
     And the Host header names the backend rather than the agent origin
     And the proxy's session cookie is not among the forwarded cookies
 
-  @owner-identity-stamped
-  Scenario: The proxy stamps the local owner identity on every forwarded request
-    The single authenticated user is always the agent's owner, so the proxy marks the request as the owner's and sends no email, dropping any inbound copy of those identity headers first so a backend page cannot forge them.
+  @request-headers-stamped
+  Scenario: The proxy stamps the host application's per-agent headers on every forwarded request
+    An embedding host application may hand the proxy a request-headers file naming, per agent or for every agent, headers to set on the requests it forwards.
+    Every header the file names anywhere is dropped from the inbound request before the agent's own values are set, so a backend page cannot forge one; headers the file does not name pass through untouched.
 
-    When the user's client sends a request to the agent origin
-    Then the backend receives the request marked as coming from the owner
-    And any owner or email identity header on the inbound request was replaced, not passed through
+    Given a request-headers file that names headers for the agent
+    When the user's client sends a request to the agent origin carrying its own copy of one of those headers
+    Then the backend receives the headers the file prescribes for the agent
+    And the client's copy of the named header was replaced, not passed through
 
   @response-preserved
   Scenario: A buffered backend answer returns to the client unchanged

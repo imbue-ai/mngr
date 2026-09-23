@@ -124,6 +124,13 @@ class ForwardSubprocessConfig(FrozenModel):
     )
     mngr_binary: str = Field(default=MNGR_BINARY, description="Path to mngr binary")
     mngr_host_dir: Path = Field(default=_DEFAULT_MNGR_HOST_DIR, description="MNGR_HOST_DIR for the subprocess")
+    request_headers_file: Path | None = Field(
+        default=None,
+        description=(
+            "The file passed as --request-headers-file: the headers the proxy stamps on every forwarded "
+            "request per agent (the desktop writes its X-Imbue-Identity contract there)"
+        ),
+    )
 
 
 class _DroppedPreStartErrorTally(FrozenModel):
@@ -287,7 +294,7 @@ class EnvelopeStreamConsumer(MutableModel):
     _listening_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _listening_port: int | None = PrivateAttr(default=None)
 
-    # -- Public callback registration -------------------------------------
+    # Public callback registration
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every observe-stream agent discovery."""
@@ -327,7 +334,7 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_unexpected_exit_callbacks.append(callback)
 
-    # -- Subprocess lifecycle ---------------------------------------------
+    # Subprocess lifecycle
 
     def attach(self, process: subprocess.Popen[bytes]) -> None:
         """Store a freshly-spawned plugin subprocess.
@@ -410,7 +417,7 @@ class EnvelopeStreamConsumer(MutableModel):
         except OSError as e:
             logger.trace("Error terminating plugin subprocess: {}", e)
 
-    # -- Reader threads ---------------------------------------------------
+    # Reader threads
 
     def _read_stdout_loop(self) -> None:
         process = self._process
@@ -455,7 +462,7 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_unexpected_exit callback failed: {}", e)
 
-    # -- Envelope parsing + dispatch --------------------------------------
+    # Envelope parsing + dispatch
 
     def _handle_envelope_line(self, line: str) -> None:
         stripped = line.strip()
@@ -721,7 +728,7 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_destroyed callback failed for {}: {}", agent_id, e)
 
-    # -- Per-agent event lines (services / requests) ----------------------
+    # Per-agent event lines (services / requests)
 
     def _handle_event_payload(self, agent_id: AgentId, payload: dict[str, Any]) -> None:
         source = payload.get("source", "")
@@ -756,7 +763,7 @@ class EnvelopeStreamConsumer(MutableModel):
             icons_snapshot = dict(icons)
         self.resolver.update_services(agent_id, services_snapshot, labels_snapshot, icons_snapshot)
 
-    # -- Forward-stream payloads ------------------------------------------
+    # Forward-stream payloads
 
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
@@ -813,7 +820,7 @@ class EnvelopeStreamConsumer(MutableModel):
         logger.info("`mngr forward` is listening on port {}", port)
 
 
-# -- start_mngr_forward ----------------------------------------------------
+# start_mngr_forward
 
 
 def start_mngr_forward(
@@ -895,6 +902,8 @@ def _build_forward_command(
         command.extend(["--reverse", spec])
     for origin in config.embedder_origins:
         command.extend(["--embedder-origin", origin])
+    if config.request_headers_file is not None:
+        command.extend(["--request-headers-file", str(config.request_headers_file)])
     return command
 
 

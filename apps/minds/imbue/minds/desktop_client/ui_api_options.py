@@ -93,6 +93,12 @@ class WorkspaceOptionsData(FrozenModel):
     is_leased_imbue_cloud: bool = Field(description="Whether the host lease fixes the account link")
     has_account: bool = Field(description="Whether the workspace is associated with an account")
     account_email: str = Field(description="The associated account's email, '' when unassociated")
+    account_display_name: str | None = Field(
+        default=None, description="The associated account's display name; None when unassociated or unset"
+    )
+    account_profile_picture_url: str | None = Field(
+        default=None, description="Public URL of the associated account's profile picture; None when none"
+    )
     current_account: WorkspaceOptionsAccount | None = Field(default=None, description="The associated account, if any")
     accounts: tuple[WorkspaceOptionsAccount, ...] = Field(description="Every signed-in account (Associate prompt)")
     app_services: tuple[str, ...] = Field(description="Per-app share targets (DNS-safe, non-interface services)")
@@ -220,6 +226,8 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         is_leased_imbue_cloud=is_leased,
         has_account=current_account is not None,
         account_email=current_account.email if current_account else "",
+        account_display_name=current_account.display_name if current_account else None,
+        account_profile_picture_url=current_account.profile_picture_url if current_account else None,
         current_account=_account_entry(current_account) if current_account else None,
         accounts=tuple(_account_entry(account) for account in accounts),
         app_services=tuple(app_services),

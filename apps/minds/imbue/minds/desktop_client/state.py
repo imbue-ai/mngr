@@ -33,6 +33,8 @@ from imbue.minds.desktop_client.discovery_health import DiscoveryHealthWatchdog
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
@@ -264,6 +266,19 @@ class DesktopClientState(MutableModel):
         description=(
             "Short-TTL cache of connector share lookups for the sharing readiness poll "
             "(invalidated by the sharing PUT/DELETE handlers)"
+        ),
+    )
+    identity_cache: IdentityCache | None = Field(
+        default=None,
+        frozen=True,
+        description="Cache of other users' identity records (renders user-id grants); None disables lookups",
+    )
+    forward_identity: ForwardIdentityPublisher | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "Keeps the forward's request-headers file (the X-Imbue-Identity contract) in step with "
+            "which workspaces are shared; None when the app runs without a session store"
         ),
     )
 

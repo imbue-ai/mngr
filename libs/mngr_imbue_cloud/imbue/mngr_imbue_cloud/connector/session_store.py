@@ -175,6 +175,7 @@ class ImbueCloudSessionStore(MutableModel):
             "user_id": str(session.user_id),
             "email": str(session.email),
             "display_name": session.display_name,
+            "profile_picture_url": session.profile_picture_url,
             "access_token": session.access_token.get_secret_value(),
             "refresh_token": (session.refresh_token.get_secret_value() if session.refresh_token is not None else None),
             "access_token_expires_at": (
@@ -308,12 +309,14 @@ def make_session_from_tokens(
     display_name: str | None,
     access_token: str,
     refresh_token: str | None,
+    profile_picture_url: str | None,
 ) -> AuthSession:
     """Build an AuthSession from raw signin/login response tokens."""
     return AuthSession(
         user_id=user_id,
         email=email,
         display_name=display_name,
+        profile_picture_url=profile_picture_url,
         access_token=SecretStr(access_token),
         refresh_token=SecretStr(refresh_token) if refresh_token else None,
         access_token_expires_at=_decode_jwt_exp(access_token),

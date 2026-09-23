@@ -18,6 +18,8 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
+from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
+from imbue.minds.desktop_client.identity_records import IdentityCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -227,6 +229,14 @@ class WebAccessEnabler(MutableModel):
             "while this worker was still enabling never delays the ready signal by the cache TTL."
         ),
     )
+    identity_cache: IdentityCache | None = Field(
+        default=None, frozen=True, description="The desktop's identity cache (captured in the request context)"
+    )
+    forward_identity: ForwardIdentityPublisher | None = Field(
+        default=None,
+        frozen=True,
+        description="Marks the workspace shared for the forward once the share is up (captured in the request context)",
+    )
 
     def __call__(self, agent_id: AgentId, host_id: HostId) -> None:
         try:
@@ -238,6 +248,8 @@ class WebAccessEnabler(MutableModel):
                 session_store=self.session_store,
                 backend_resolver=self.backend_resolver,
                 client_env_config=self.client_env_config,
+                identity_cache=self.identity_cache,
+                forward_identity=self.forward_identity,
             )
         except SharingError as exc:
             logger.warning("Could not enable web access for {}: {}", agent_id, exc)
@@ -316,6 +328,8 @@ def _build_web_access_enabler(launch_mode: LaunchMode, is_web_access_enabled: bo
         backend_resolver=get_state().backend_resolver,
         client_env_config=client_env_config,
         active_share_cache=get_state().active_share_cache,
+        identity_cache=get_state().identity_cache,
+        forward_identity=get_state().forward_identity,
     )
 
 

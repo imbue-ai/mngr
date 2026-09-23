@@ -20,6 +20,12 @@ def test_sync_records_group_lists_subcommands() -> None:
         assert name in result.output
 
 
+def test_records_pull_help_documents_the_shared_marker() -> None:
+    result = CliRunner().invoke(sync, ["records", "pull", "--help"])
+    assert result.exit_code == 0
+    assert "shared_agent_ids" in result.output
+
+
 def test_sync_bundle_group_lists_subcommands() -> None:
     result = CliRunner().invoke(sync, ["bundle", "--help"])
     assert result.exit_code == 0
