@@ -21,6 +21,8 @@
 #
 set -euo pipefail
 
+ORIGINAL_PATH="$PATH"
+
 info()  { printf '\033[1m==> %s\033[0m\n' "$1"; }
 warn()  { printf '\033[1mWARNING: %s\033[0m\n' "$1" >&2; }
 error() { printf '\033[1mERROR: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -91,4 +93,7 @@ mngr config wizard || warn "Configuration wizard did not complete. Run 'mngr con
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 
+if ! (PATH="$ORIGINAL_PATH"; command -v mngr) &>/dev/null; then
+    info "To use mngr, restart your shell or run:  source \"\$HOME/.local/bin/env\""
+fi
 info "Get started with: mngr --help"

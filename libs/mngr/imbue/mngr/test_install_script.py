@@ -122,6 +122,31 @@ def test_install_sh_upgrades_when_mngr_already_installed(tmp_path: Path) -> None
     assert "mngr dependencies --install interactive --scope core" in calls
     assert "mngr extras -i" in calls
     assert "mngr config wizard" in calls
+    assert "To use mngr, restart your shell" not in result.stdout
+
+
+@pytest.mark.timeout(30)
+def test_install_sh_tells_user_to_reload_shell_after_installing_uv(tmp_path: Path) -> None:
+    """When uv is freshly installed, mngr is only on PATH via uv's env file, so the user's shell cannot see it yet."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv_bin_dir = tmp_path / ".local" / "bin"
+    uv_bin_dir.mkdir(parents=True)
+    log_file = tmp_path / "calls.log"
+    log_file.touch()
+
+    # The uv installer is piped through `sh`; `true` stands in for it, since its
+    # results (the binaries and the env file) are laid down up front.
+    write_executable_script(bin_dir / "curl", "#!/usr/bin/env bash\necho true\n")
+    write_executable_script(uv_bin_dir / "uv", _uv_mock(log_file, mngr_already_installed=False))
+    write_executable_script(uv_bin_dir / "mngr", _mngr_mock(log_file))
+    (uv_bin_dir / "env").write_text(f'export PATH="{uv_bin_dir}:$PATH"\n')
+
+    result = _run_install_sh(env=_make_env(bin_dir, tmp_path), cwd=tmp_path)
+
+    assert result.returncode == 0, f"install.sh failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "uv tool install imbue-mngr" in log_file.read_text()
+    assert 'To use mngr, restart your shell or run:  source "$HOME/.local/bin/env"' in result.stdout
 
 
 @pytest.mark.timeout(30)
