@@ -1,5 +1,9 @@
 """Integration tests for the schedule CLI command."""
 
+import os
+from pathlib import Path
+from typing import Final
+
 import click
 import pluggy
 import pytest
@@ -11,6 +15,9 @@ from imbue.mngr_schedule.cli.commands import schedule
 from imbue.mngr_schedule.data_types import ScheduleTriggerDefinition
 from imbue.mngr_schedule.data_types import ScheduledMngrCommand
 from imbue.mngr_schedule.implementations.local.deploy import deploy_local_schedule
+
+# Arbitrary, and unlike any status a real uv, shell, or CLI error path returns.
+_STUB_UV_EXIT_CODE: Final[int] = 91
 
 
 def test_schedule_defaults_to_add_subcommand(
@@ -348,6 +355,23 @@ def test_schedule_add_full_copy_accepted(
 # =============================================================================
 
 
+def _prepend_stub_uv_to_path(stub_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shadow the real ``uv`` with a stub that exits immediately.
+
+    Running a deployed trigger for real creates an agent, which is unbounded
+    work that outlives the test that started it. Deployment snapshots the
+    ambient PATH into run.sh, so a stub found first on PATH at deploy time is
+    what the script later runs: call this before deploying the trigger under
+    test. The rest of PATH stays reachable so the script's shebang still
+    resolves ``bash``.
+    """
+    stub_dir.mkdir()
+    stub_uv = stub_dir / "uv"
+    stub_uv.write_text(f"#!/bin/sh\nexit {_STUB_UV_EXIT_CODE}\n")
+    stub_uv.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub_dir}{os.pathsep}{os.environ['PATH']}")
+
+
 def _deploy_local_trigger(
     mngr_ctx: MngrContext,
     name: str,
@@ -540,16 +564,15 @@ def test_schedule_run_local_nonexistent_trigger(
     assert "No local schedule record found" in result.output
 
 
-# Executing the deployed trigger's run.sh shells out (it tries `mngr create`), whose
-# subprocess startup is slow and variable under CI load and intermittently exceeds the
-# default 10s pytest-timeout. Bump the timeout to absorb the rare slow run.
-@pytest.mark.timeout(30)
 def test_schedule_run_local_deployed_trigger(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
     temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Running a deployed local trigger should attempt to execute the run script."""
+    """Running a deployed local trigger should execute run.sh and propagate its exit code."""
+    _prepend_stub_uv_to_path(tmp_path / "stub-bin", monkeypatch)
     _deploy_local_trigger(temp_mngr_ctx, "test-run-trigger")
 
     result = cli_runner.invoke(
@@ -557,11 +580,8 @@ def test_schedule_run_local_deployed_trigger(
         ["run", "test-run-trigger", "--provider", "local"],
         obj=plugin_manager,
     )
-    # run.sh will fail (mngr create isn't available in test env) but the
-    # command should not error at the CLI level -- it should propagate the
-    # script's exit code. The exit code may be non-zero because the run.sh
-    # itself fails, which is expected.
-    assert isinstance(result.exit_code, int)
+
+    assert result.exit_code == _STUB_UV_EXIT_CODE, f"run failed: {result.output}"
 
 
 # =============================================================================
