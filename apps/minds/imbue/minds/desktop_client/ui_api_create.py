@@ -42,6 +42,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.create_status import expected_create_attempt_duration_seconds
@@ -555,7 +556,9 @@ def _handle_seed_welcome_chat(create_attempt_id: str) -> Response:
     if workspace_agent_id is None:
         return make_json_error_response("The workspace is not ready yet", 409)
     mngr_caller = get_state().mngr_caller or get_default_mngr_caller()
-    outcome = seed_welcome_chat(mngr_caller, workspace_agent_id, welcome_chat)
+    outcome = seed_welcome_chat(
+        mngr_caller, build_agent_address(workspace_agent_id, get_state().backend_resolver), welcome_chat
+    )
     if not outcome.is_seeded:
         return make_json_error_response(
             "Couldn't open the welcome chat in the workspace.", 502, detail=outcome.failure_detail

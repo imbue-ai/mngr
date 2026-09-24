@@ -977,7 +977,7 @@ def test_discover_hosts_and_agents_caches_every_hosts_listing_under_concurrency(
     """Every concurrently-discovered host's raw listing lands in the shared cache
     dict under its own host_id.
 
-    A functional-correctness check, not a proof that ``cache_lock`` specifically
+    A functional-correctness check, not a proof that ``_listing_raw_cache_lock`` specifically
     is load-bearing: CPython's GIL makes same-size dict writes to distinct keys
     effectively atomic already, so this test would likely still pass with the
     lock removed. The lock stays as cheap, correct defensive practice against
@@ -2065,6 +2065,14 @@ class _CannedLifecycleProvider(ImbueCloudProvider):
         return list(self._workspaces)
 
 
+def _stopped_workspace(host_id: HostId) -> WorkspaceInfo:
+    workspace = _make_workspace_info("stopped", with_placement=False)
+    return workspace.model_copy_update(
+        to_update(workspace.field_ref().host_id, str(host_id)),
+        to_update(workspace.field_ref().agent_id, str(AgentId.generate())),
+    )
+
+
 def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_services_agent(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -2075,12 +2083,7 @@ def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_service
     would be dropped by every consumer that recognizes a workspace by the label,
     making a stopped workspace vanish from the workspace list.
     """
-    host_id = HostId.generate()
-    workspace = _make_workspace_info("stopped", with_placement=False)
-    stopped_workspace = workspace.model_copy_update(
-        to_update(workspace.field_ref().host_id, str(host_id)),
-        to_update(workspace.field_ref().agent_id, str(AgentId.generate())),
-    )
+    stopped_workspace = _stopped_workspace(HostId.generate())
     provider = _CannedLifecycleProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
         mngr_ctx=temp_mngr_ctx,
@@ -2182,3 +2185,125 @@ def test_build_host_object_always_pins_the_lease_agent_id(temp_mngr_ctx: MngrCon
 
     assert host.pre_baked_agent_id == AgentId(lease.agent_id)
     assert host.id == host_id
+
+
+# discover_host_and_agents: the single-host read a pinned address (AGENT@HOST_ID.PROVIDER)
+# uses instead of discovery. It must report what discovery would for that host while
+# running the outer-SSH listing of that host alone.
+
+
+class _PinnedReadProvider(ImbueCloudProvider):
+    """Provider stub with canned leases and lifecycle rows, recording which hosts the outer listing was run for."""
+
+    _leases: list[LeasedHostInfo] = []
+    _workspaces: list[WorkspaceInfo] = []
+    _responses_by_host_id: dict[HostId, tuple[dict[str, Any] | None, str | None, bool]] = {}
+    _listed_host_ids: list[HostId] = []
+
+    def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
+        return list(self._leases)
+
+    def _list_workspaces_cached(self) -> list[WorkspaceInfo] | None:
+        return list(self._workspaces)
+
+    def _collect_listing_raw_via_outer(self, lease: LeasedHostInfo) -> tuple[dict[str, Any] | None, str | None, bool]:
+        host_id = HostId(lease.host_id)
+        self._listed_host_ids.append(host_id)
+        return self._responses_by_host_id[host_id]
+
+
+def _make_pinned_read_provider(
+    mngr_ctx: MngrContext,
+    leases: list[LeasedHostInfo],
+    workspaces: list[WorkspaceInfo],
+    responses_by_host_id: Mapping[HostId, tuple[dict[str, Any] | None, str | None, bool]],
+) -> _PinnedReadProvider:
+    return _PinnedReadProvider.model_construct(
+        name=_STICKY_PROVIDER_NAME,
+        mngr_ctx=mngr_ctx,
+        _leases=leases,
+        _workspaces=workspaces,
+        _responses_by_host_id=dict(responses_by_host_id),
+        _listed_host_ids=[],
+    )
+
+
+def test_pinned_read_of_a_running_lease_lists_that_host_alone(temp_mngr_ctx: MngrContext) -> None:
+    leases = [_make_lease(HostId.generate()) for _ in range(3)]
+    pinned_host_id = HostId(leases[1].host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    provider = _make_pinned_read_provider(
+        temp_mngr_ctx,
+        leases,
+        [],
+        {HostId(lease.host_id): (_raw_with_agents([primary]), None, False) for lease in leases},
+    )
+
+    host_ref, agents = provider.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=pinned_host_id)
+
+    assert provider._listed_host_ids == [pinned_host_id]
+    assert (host_ref.host_id, host_ref.host_state) == (pinned_host_id, HostState.RUNNING)
+    assert [str(agent.agent_id) for agent in agents] == [primary["id"]]
+
+
+def test_pinned_read_of_a_stopped_workspace_returns_its_last_known_agents_without_ssh(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    running = _make_pinned_read_provider(
+        temp_mngr_ctx, [lease], [], {host_id: (_raw_with_agents([primary]), None, False)}
+    )
+    running.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=host_id)
+    stopped = _make_pinned_read_provider(temp_mngr_ctx, [], [_stopped_workspace(host_id)], {})
+
+    host_ref, agents = stopped.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=host_id)
+
+    assert stopped._listed_host_ids == []
+    assert host_ref.host_state == HostState.STOPPED
+    assert [str(agent.agent_id) for agent in agents] == [primary["id"]]
+
+
+def test_pinned_read_of_a_host_the_account_does_not_have_is_not_found(temp_mngr_ctx: MngrContext) -> None:
+    lease = _make_lease(HostId.generate())
+    provider = _make_pinned_read_provider(
+        temp_mngr_ctx, [lease], [], {HostId(lease.host_id): (_running_raw(), None, False)}
+    )
+
+    with pytest.raises(HostNotFoundError):
+        provider.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=HostId.generate())
+
+    assert provider._listed_host_ids == []
+
+
+def test_pinned_read_of_an_unreachable_host_falls_back_to_its_last_known_agents(temp_mngr_ctx: MngrContext) -> None:
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    reachable = _make_pinned_read_provider(
+        temp_mngr_ctx, [lease], [], {host_id: (_raw_with_agents([primary]), None, False)}
+    )
+    reachable.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=host_id)
+    unreachable = _make_pinned_read_provider(
+        temp_mngr_ctx, [lease], [], {host_id: (None, "outer SSH unreachable: connection timed out", False)}
+    )
+
+    host_ref, agents = unreachable.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=host_id)
+
+    assert host_ref.host_state == HostState.UNKNOWN
+    assert [str(agent.agent_id) for agent in agents] == [primary["id"]]
+    assert agents[0].certified_data.get("stale") is True
+
+
+def test_pinned_read_records_the_host_dir_the_container_actually_uses(temp_mngr_ctx: MngrContext) -> None:
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    provider = _make_pinned_read_provider(
+        temp_mngr_ctx, [lease], [], {host_id: (_raw_at_host_dir("/mngr"), None, False)}
+    )
+
+    provider.discover_host_and_agents(cg=temp_mngr_ctx.concurrency_group, host_id=host_id)
+
+    later = _make_sequenced_provider(lease, [], temp_mngr_ctx)
+    assert later.to_offline_host(host_id).host_dir == Path("/mngr")

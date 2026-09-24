@@ -16,7 +16,9 @@ from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
 from imbue.minds.desktop_client.testing import account_binding_probe_stdout
+from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
@@ -33,6 +35,7 @@ from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
 
@@ -67,13 +70,15 @@ def _build_service(
     caller: MngrCaller,
     store: WorkspaceUpdateStateStore | None = None,
     started: list[AgentId] | None = None,
+    backend_resolver: MngrCliBackendResolver | None = None,
 ) -> _FixedHostStateService:
     store = store if store is not None else make_update_state_store(tmp_path)
-    backend_resolver = MngrCliBackendResolver()
+    backend_resolver = backend_resolver if backend_resolver is not None else MngrCliBackendResolver()
     apply_window = UpdateApplyWindowManager(
         tracker=SystemInterfaceHealthTracker(),
         store=store,
         mngr_caller=caller,
+        backend_resolver=backend_resolver,
         concurrency_group=concurrency_group,
         dispatch_restart=lambda agent_id: None,
     )
@@ -437,3 +442,23 @@ def test_a_spawn_reported_as_failed_does_not_unlock_a_run_that_has_started(
 
     assert dispatch.outcome is UpdateDispatchOutcome.SPAWN_FAILED
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
+
+
+def test_an_update_probes_its_machine_by_the_host_discovery_placed_it_on(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A bare id would make mngr list every host of the provider first, which can outlast the probe's budget."""
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout=""))
+    service = _build_service(
+        tmp_path,
+        root_concurrency_group,
+        host_state=HostState.RUNNING,
+        caller=caller,
+        backend_resolver=build_resolver_with_system_services(agent_id, AgentId.generate(), host_id=host_id),
+    )
+
+    service.dispatch_update(agent_id)
+
+    assert caller.calls[0][:3] == ["exec", "--agent", f"{agent_id}@{host_id}.{SYSTEM_SERVICES_PROVIDER_NAME}"]

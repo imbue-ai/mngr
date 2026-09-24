@@ -294,6 +294,13 @@ class BackendResolverInterface(MutableModel, ABC):
             return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
         return None
 
+    def find_sole_agent_instance(self, agent_id: AgentId) -> DiscoveredAgent | None:
+        """The one discovered agent whose id is ``agent_id``, or None when discovery places it on no host or several.
+
+        Default implementation returns None. Subclasses that know which host each agent is on should override this.
+        """
+        return None
+
     def get_workspace_name(self, agent_id: AgentId) -> str | None:
         """Return the workspace's human-readable display name, or None.
 
@@ -423,7 +430,7 @@ class StaticBackendResolver(BackendResolverInterface):
         return self.ssh_info_by_agent_id.get(str(agent_id))
 
 
-# -- Parsing helpers --
+# Parsing helpers
 
 
 class ParsedAgentsResult(FrozenModel):
@@ -585,7 +592,7 @@ def parse_service_log_records(text: str) -> list[ServiceLogRecord | ServiceDereg
     return records
 
 
-# -- Last-good agent topology (system-services fallback) --
+# Last-good agent topology (system-services fallback)
 
 
 class _AgentRecord(FrozenModel):
@@ -747,7 +754,7 @@ def _write_last_good_agent_topology(path: Path, topology: _LastGoodAgentTopology
         logger.warning("Could not write last-good agent topology to {}: {}", path, exc)
 
 
-# -- MngrCliBackendResolver --
+# MngrCliBackendResolver
 
 
 # How long an optimistic host-state override is trusted before discovery is
@@ -1659,6 +1666,24 @@ class MngrCliBackendResolver(BackendResolverInterface):
                     if agent.agent_id == agent_id:
                         return _display_info_from_agent(agent)
             return None
+
+    def find_sole_agent_instance(self, agent_id: AgentId) -> DiscoveredAgent | None:
+        """The one discovered agent with this exact id, from the live snapshot or else a lifecycle-transition retention.
+
+        Unlike :meth:`get_agent_display_info`, a chat id never stands in for one of its members here, and an id
+        on more than one host (e.g. mid-migration) yields None rather than a pick.
+        """
+        with self._lock:
+            live_instances = [agent for agent in self._agents_result.discovered_agents if agent.agent_id == agent_id]
+            instances = live_instances or [
+                agent
+                for retention in self._transition_retention_by_host_id.values()
+                for agent in retention.agents
+                if agent.agent_id == agent_id
+            ]
+        if len({agent.host_id for agent in instances}) != 1:
+            return None
+        return instances[0]
 
     def mark_host_lifecycle_transition_started(self, host_id: HostId) -> None:
         """Capture ``host_id``'s current agents so its row survives the transition; fires on-change."""

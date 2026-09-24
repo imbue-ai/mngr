@@ -1057,6 +1057,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # random per-workspace password + injection into the real container.
     configure_backups_for_host(
         agent_id=agent_id,
+        agent_address=str(agent_id),
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_one}"
         ),
@@ -1078,7 +1079,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
         timeout=30,
     )
     assert corrupted.returncode == 0, corrupted.stderr
-    reinject_canonical_env(agent_id=agent_id, paths=paths)
+    reinject_canonical_env(agent_id=agent_id, agent_address=str(agent_id), paths=paths)
     assert read_workspace_env() == canonical_one
     rotated = _exec_in_container(
         container_name, "grep -l garbage /home/user/workspace/data/.secrets/restic.env.*", timeout=30
@@ -1089,6 +1090,7 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
     # canonical env is archived minds-side and the workspace copy replaced.
     change_backup_destination_for_host(
         agent_id=agent_id,
+        agent_address=str(agent_id),
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_two}"
         ),
@@ -1109,20 +1111,21 @@ def test_backup_enable_repair_and_destination_change_on_resumed_workspace(
 
     # Disable: the canonical env is archived and the workspace copy rotated
     # aside, so the backup service reads "not configured" again.
-    disable_backups_for_host(agent_id=agent_id, paths=paths)
+    disable_backups_for_host(agent_id=agent_id, agent_address=str(agent_id), paths=paths)
     assert read_canonical_env(paths, agent_id) is None
     gone = _exec_in_container(container_name, "test -f /home/user/workspace/data/.secrets/restic.env", timeout=30)
     assert gone.returncode != 0, "the workspace restic.env should be rotated aside after disabling"
     archived_after_disable = list((data_dir / "backup_envs").glob(f"{agent_id}.env.*"))
     assert len(archived_after_disable) == 2
     # Disabling again is an idempotent no-op.
-    disable_backups_for_host(agent_id=agent_id, paths=paths)
+    disable_backups_for_host(agent_id=agent_id, agent_address=str(agent_id), paths=paths)
 
     # Re-enable after the disable: fresh provisioning works again (the
     # disable/enable loop is the intended way to reset a workspace's backups).
     repo_three = tmp_path / "restic-repo-3"
     configure_backups_for_host(
         agent_id=agent_id,
+        agent_address=str(agent_id),
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repo_three}"
         ),
@@ -1277,6 +1280,7 @@ def test_backup_restore_rewinds_the_resumed_workspace_in_place(
     # the container), then hand the initialized repository to the container.
     configure_backups_for_host(
         agent_id=agent_id,
+        agent_address=str(agent_id),
         request=BackupSetupRequest(
             backup_provider=BackupProvider.API_KEY, api_key_env_text=f"RESTIC_REPOSITORY={repository}"
         ),

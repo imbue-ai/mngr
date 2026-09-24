@@ -26,6 +26,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
@@ -725,7 +726,9 @@ class WorkspaceUpdateDetector(MutableModel):
             is_fresh = cached is not None and time.monotonic() - cached.read_at_monotonic < self.interval_seconds
             if cached is not None and is_fresh and not cached.is_reread_due:
                 return cached.version_ref
-        version = read_workspace_current_version(agent_id=agent_id, mngr_caller=self.mngr_caller)
+        version = read_workspace_current_version(
+            agent_address=build_agent_address(agent_id, self.backend_resolver), mngr_caller=self.mngr_caller
+        )
         if version is None:
             return cached.version_ref if cached is not None else None
         with self._cache_lock:

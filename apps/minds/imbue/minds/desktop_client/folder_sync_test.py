@@ -81,7 +81,7 @@ def test_pair_argv_never_starts_a_stopped_machine() -> None:
 
 
 def test_workspace_prepare_never_starts_a_stopped_machine() -> None:
-    assert "--no-start" in _build_workspace_prepare_argv("mngr", _spec())
+    assert "--no-start" in _build_workspace_prepare_argv("mngr", _AGENT_ID, _spec())
 
 
 @pytest.mark.parametrize(
@@ -323,7 +323,7 @@ def test_sink_keeps_only_a_bounded_tail_of_a_stream_that_never_ends() -> None:
 
 def test_the_workspace_folder_is_made_under_the_agents_home() -> None:
     """Under the home, not the working directory: that one is a git checkout."""
-    argv = _build_workspace_prepare_argv("mngr", _spec())
+    argv = _build_workspace_prepare_argv("mngr", _AGENT_ID, _spec())
     assert argv[:3] == ["mngr", "exec", _AGENT_ID]
     assert 'mkdir -p "$HOME"/synced_folders/notes' in argv[3]
     assert 'printf %s "$HOME"' in argv[3]
@@ -331,7 +331,7 @@ def test_the_workspace_folder_is_made_under_the_agents_home() -> None:
 
 def test_turning_a_sync_on_brings_back_a_copy_that_was_set_aside() -> None:
     """Resuming a sync should keep the files it had, not re-fetch them."""
-    script = _build_workspace_prepare_argv("mngr", _spec())[3]
+    script = _build_workspace_prepare_argv("mngr", _AGENT_ID, _spec())[3]
     assert 'mv "$HOME"/inactive_synced_folders/notes "$HOME"/synced_folders/notes' in script
     # Only when there is something to move and nothing already in its place.
     assert '[ -e "$HOME"/inactive_synced_folders/notes ]' in script
@@ -340,7 +340,7 @@ def test_turning_a_sync_on_brings_back_a_copy_that_was_set_aside() -> None:
 
 def test_turning_a_sync_off_sets_the_copy_aside_rather_than_deleting_it() -> None:
     """ "Stop syncing this" and "throw the copy away" are different intentions."""
-    script = _build_workspace_deactivate_argv("mngr", _spec())[3]
+    script = _build_workspace_deactivate_argv("mngr", _AGENT_ID, _spec())[3]
     assert 'mv "$HOME"/synced_folders/notes "$HOME"/inactive_synced_folders/notes' in script
     # The copy being set aside is never deleted; only its destination is cleared.
     assert 'rm -rf "$HOME"/synced_folders/notes' not in script
@@ -348,14 +348,14 @@ def test_turning_a_sync_off_sets_the_copy_aside_rather_than_deleting_it() -> Non
 
 def test_setting_a_copy_aside_clears_whatever_is_in_its_way() -> None:
     """Nothing but Minds writes there, so something in the way is a mistake, not a file to keep."""
-    script = _build_workspace_deactivate_argv("mngr", _spec())[3]
+    script = _build_workspace_deactivate_argv("mngr", _AGENT_ID, _spec())[3]
     assert 'rm -rf "$HOME"/inactive_synced_folders/notes' in script
     assert script.index('rm -rf "$HOME"/inactive_synced_folders/notes') < script.index("  mv ")
 
 
 def test_discarding_only_ever_deletes_the_set_aside_copy() -> None:
     """A running sync's files stay where they are; this is the one undoable step."""
-    script = _build_workspace_discard_argv("mngr", _spec())[3]
+    script = _build_workspace_discard_argv("mngr", _AGENT_ID, _spec())[3]
     assert 'rm -rf "$HOME"/inactive_synced_folders/notes' in script
     assert f'rm -rf "$HOME"/{WORKSPACE_SYNC_DIRECTORY}/' not in script
 
@@ -364,11 +364,11 @@ def test_discarding_only_ever_deletes_the_set_aside_copy() -> None:
 def test_an_unsafe_workspace_path_is_refused_before_any_script_is_built(unsafe: str) -> None:
     """These cannot arise from a validated share path; the rm -rf is why it is checked anyway."""
     with pytest.raises(FolderSyncError, match="unsafe workspace path"):
-        _build_workspace_discard_argv("mngr", _spec(workspace_path=unsafe))
+        _build_workspace_discard_argv("mngr", _AGENT_ID, _spec(workspace_path=unsafe))
 
 
 def test_a_workspace_folder_needing_quoting_is_quoted() -> None:
-    argv = _build_workspace_prepare_argv("mngr", _spec(workspace_path="my notes; rm -rf /"))
+    argv = _build_workspace_prepare_argv("mngr", _AGENT_ID, _spec(workspace_path="my notes; rm -rf /"))
     assert "'my notes; rm -rf /'" in argv[3]
 
 
@@ -402,6 +402,6 @@ def test_a_resumed_directory_keeps_its_archive() -> None:
 
 def test_turning_a_sync_on_says_whether_it_resumed_or_started_fresh() -> None:
     """The caller cannot tell from the directory alone, and unison has to be told."""
-    script = _build_workspace_prepare_argv("mngr", _spec())[3]
+    script = _build_workspace_prepare_argv("mngr", _AGENT_ID, _spec())[3]
     assert "MNGR_MINDS_SYNC=resumed" in script
     assert "MNGR_MINDS_SYNC=fresh" in script

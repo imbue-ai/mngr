@@ -34,6 +34,7 @@ from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
 from imbue.imbue_common.sentry.core import get_attachments_uploader
 from imbue.minds.build_info import resolve_git_sha
 from imbue.minds.build_info import resolve_release_id
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.console_log_staging import read_console_tail
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -559,7 +560,7 @@ def _collect_for_report(
     concurrency_group = state.root_concurrency_group
     assert concurrency_group is not None, "collection is only planned when a root concurrency group exists"
     return collect_workspace_diagnostics(
-        agent_id,
+        build_agent_address(agent_id, state.backend_resolver),
         include_logs=include_logs,
         include_transcript=include_transcript,
         staging_dir=staging_dir,

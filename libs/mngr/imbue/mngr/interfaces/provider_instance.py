@@ -28,6 +28,7 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -502,9 +503,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
     # persisted store. See heal_persisted_agent_data.
     _healed_live_agent_ids_by_host_id: dict[HostId, frozenset[AgentId]] = PrivateAttr(default_factory=dict)
 
-    # =========================================================================
     # Capability Properties
-    # =========================================================================
 
     def get_host_name(self, style: HostNameStyle) -> HostName:
         """Generate a name for a new host.
@@ -552,9 +551,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         Use this if you want to ensure that the provider fetches fresh data from the underlying infrastructure on the next operation."""
         ...
 
-    # =========================================================================
     # Core Lifecycle Methods
-    # =========================================================================
 
     @abstractmethod
     def create_host(
@@ -695,9 +692,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Return the minimum age (in seconds) before GC will destroy an online host with no agents."""
         ...
 
-    # =========================================================================
     # Discovery Methods
-    # =========================================================================
 
     @abstractmethod
     def get_host(
@@ -794,6 +789,25 @@ class ProviderInstanceInterface(MutableModel, ABC):
                 )
                 results[host_ref] = offline_agents
         return results
+
+    def discover_host_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        host_id: HostId,
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        """Read one host and its agents, as ``discover_hosts_and_agents`` would report them, without reading the others' agents.
+
+        Raises ``HostNotFoundError`` when discovery would not report the host. The
+        default takes the host from ``discover_hosts``, so it is visible exactly when
+        discovery would show it, and reads only that host's agents, with the same
+        offline fallback discovery uses. Providers whose ``discover_hosts`` connects to
+        every host should override it.
+        """
+        for host_ref in self.discover_hosts(cg=cg, include_destroyed=False):
+            if host_ref.host_id == host_id:
+                agents, _ssh_info = _discover_agents_on_host_with_offline_fallback(self, host_ref)
+                return host_ref, agents
+        raise HostNotFoundError(self.name, host_id)
 
     def read_host_agents_for_bounded_discovery(
         self,
@@ -1036,9 +1050,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         return host_details, agent_details_list
 
-    # =========================================================================
     # Snapshot Methods
-    # =========================================================================
 
     @abstractmethod
     def create_snapshot(
@@ -1066,9 +1078,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Delete a snapshot by its ID."""
         ...
 
-    # =========================================================================
     # Volume Methods
-    # =========================================================================
 
     @abstractmethod
     def list_volumes(self) -> list[VolumeInfo]:
@@ -1120,9 +1130,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         return self.get_volume_for_host(host)
 
-    # =========================================================================
     # Garbage Collection Hooks
-    # =========================================================================
 
     def gc_provider_resources(self, dry_run: bool) -> list[ProviderResourceInfo]:
         """Reclaim orphaned provider-level cloud resources not attached to any live host.
@@ -1137,9 +1145,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """
         return []
 
-    # =========================================================================
     # Host Mutation Methods
-    # =========================================================================
 
     @abstractmethod
     def get_host_tags(
@@ -1185,9 +1191,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Rename a host and return the updated host object."""
         ...
 
-    # =========================================================================
     # Connector Method
-    # =========================================================================
 
     @abstractmethod
     def get_connector(
@@ -1197,9 +1201,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
         """Get the pyinfra connector for executing operations on a host."""
         ...
 
-    # =========================================================================
     # Lifecycle Methods
-    # =========================================================================
 
     def close(self) -> None:
         """Clean up resources held by this provider instance.
@@ -1368,9 +1370,7 @@ class ProviderInstanceInterface(MutableModel, ABC):
 
         self._healed_live_agent_ids_by_host_id[host.id] = fresh_agent_ids
 
-    # =========================================================================
     # Outer Host Access
-    # =========================================================================
 
     def outer_host_id_for(self, host_id: HostId) -> str | None:
         """Return a stable identifier for the actual outer host of ``host_id``.

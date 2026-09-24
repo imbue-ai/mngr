@@ -52,7 +52,6 @@ from imbue.minds.desktop_client.chat_app import ask_chat_app
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
 from imbue.minds.utils.mngr_caller import MngrCaller
-from imbue.mngr.primitives import AgentId
 
 # Two filesystem checks inside an already-running container, so it should
 # return near-instantly; a low ceiling makes an unreachable workspace fail fast.
@@ -159,7 +158,7 @@ def _sentinel(skill_name: str, state: str) -> str:
     return f"MNGR_{skill_name.upper().replace('-', '_')}_SKILL_{state}"
 
 
-def build_skill_support_probe_args(workspace_agent_id: AgentId, skill_name: str) -> list[str]:
+def build_skill_support_probe_args(workspace_address: str, skill_name: str) -> list[str]:
     """Build the ``mngr`` CLI args that probe a workspace for ``skill_name`` and its create defaults.
 
     Runs, in the workspace's work_dir (where ``mngr exec`` lands by default), a
@@ -175,13 +174,13 @@ def build_skill_support_probe_args(workspace_agent_id: AgentId, skill_name: str)
     )
     # --no-start: probes run eagerly (a modal opening, a dispatch), and a
     # support check must never cold-boot a container as a side effect.
-    return ["exec", "--agent", str(workspace_agent_id), check, "--no-start"]
+    return ["exec", "--agent", workspace_address, check, "--no-start"]
 
 
-def probe_skill(mngr_caller: MngrCaller, workspace_agent_id: AgentId, skill_name: str) -> SkillProbe:
-    """Probe ``workspace_agent_id`` for ``skill_name`` and classify the result."""
+def probe_skill(mngr_caller: MngrCaller, workspace_address: str, skill_name: str) -> SkillProbe:
+    """Probe ``workspace_address`` for ``skill_name`` and classify the result."""
     result = mngr_caller.call(
-        build_skill_support_probe_args(workspace_agent_id, skill_name), timeout=_PROBE_TIMEOUT_SECONDS
+        build_skill_support_probe_args(workspace_address, skill_name), timeout=_PROBE_TIMEOUT_SECONDS
     )
     is_local_settings_present = LOCAL_SETTINGS_PRESENT_SENTINEL in result.stdout
     if _sentinel(skill_name, "PRESENT") in result.stdout:
@@ -191,7 +190,7 @@ def probe_skill(mngr_caller: MngrCaller, workspace_agent_id: AgentId, skill_name
     logger.warning(
         "The {} skill probe for machine {} produced no sentinel (exit {}): {}",
         skill_name,
-        workspace_agent_id,
+        workspace_address,
         result.returncode,
         result.stderr.strip(),
     )
@@ -221,7 +220,7 @@ class AccountBinding(FrozenModel):
     )
 
 
-def build_account_binding_probe_args(workspace_agent_id: AgentId) -> list[str]:
+def build_account_binding_probe_args(workspace_address: str) -> list[str]:
     """Build the ``mngr`` CLI args that ask a workspace's resolver which account a new chat should run on.
 
     Runs the template's own resolver, in the workspace's work_dir (where ``mngr
@@ -242,7 +241,7 @@ def build_account_binding_probe_args(workspace_agent_id: AgentId) -> list[str]:
         f"else echo {NO_ACCOUNT_STORE_SENTINEL}; fi"
     )
     # --no-start, like every other probe here: resolving a binding must not cold-boot a container.
-    return ["exec", "--agent", str(workspace_agent_id), probe, "--no-start"]
+    return ["exec", "--agent", workspace_address, probe, "--no-start"]
 
 
 def _parse_account_args(stdout: str) -> tuple[str, ...] | None:
@@ -278,10 +277,10 @@ def _is_well_formed_account_args(args: Sequence[str]) -> bool:
     )
 
 
-def resolve_account_binding(mngr_caller: MngrCaller, workspace_agent_id: AgentId) -> AccountBinding:
-    """Ask ``workspace_agent_id``'s resolver which account a chat spawned in it should run on."""
+def resolve_account_binding(mngr_caller: MngrCaller, workspace_address: str) -> AccountBinding:
+    """Ask ``workspace_address``'s resolver which account a chat spawned in it should run on."""
     result = mngr_caller.call(
-        build_account_binding_probe_args(workspace_agent_id), timeout=_ACCOUNT_PROBE_TIMEOUT_SECONDS
+        build_account_binding_probe_args(workspace_address), timeout=_ACCOUNT_PROBE_TIMEOUT_SECONDS
     )
     if NO_ACCOUNT_STORE_SENTINEL in result.stdout:
         return AccountBinding(state=AccountBindingState.NOT_REQUIRED)
@@ -289,7 +288,7 @@ def resolve_account_binding(mngr_caller: MngrCaller, workspace_agent_id: AgentId
     if args is None:
         logger.warning(
             "The account probe for machine {} produced no sentinel (exit {}): {}",
-            workspace_agent_id,
+            workspace_address,
             result.returncode,
             result.stderr.strip(),
         )
@@ -298,7 +297,7 @@ def resolve_account_binding(mngr_caller: MngrCaller, workspace_agent_id: AgentId
     if exit_code != 0:
         logger.error(
             "The account resolver in machine {} did not complete (exit {}): {}",
-            workspace_agent_id,
+            workspace_address,
             exit_code,
             result.stderr.strip(),
         )
@@ -306,20 +305,18 @@ def resolve_account_binding(mngr_caller: MngrCaller, workspace_agent_id: AgentId
     if not args:
         # The resolver declines silently on stdout; which of its reasons applies is only on stderr.
         logger.warning(
-            "The account resolver in machine {} named no account: {}", workspace_agent_id, result.stderr.strip()
+            "The account resolver in machine {} named no account: {}", workspace_address, result.stderr.strip()
         )
         return AccountBinding(state=AccountBindingState.UNAVAILABLE)
     if not _is_well_formed_account_args(args):
         # An unreadable answer is a broken resolver; splicing it is how a chat ends up bound to nothing.
-        logger.error("The account resolver in machine {} answered {}, which is not readable", workspace_agent_id, args)
+        logger.error("The account resolver in machine {} answered {}, which is not readable", workspace_address, args)
         return AccountBinding(state=AccountBindingState.UNREACHABLE)
     return AccountBinding(state=AccountBindingState.BOUND, create_args=args)
 
 
-def resolve_legacy_account_args(
-    mngr_caller: MngrCaller, workspace_agent_id: AgentId, probe: SkillProbe
-) -> tuple[str, ...]:
-    """The account arguments a create in ``workspace_agent_id`` still needs from this app, if any.
+def resolve_legacy_account_args(mngr_caller: MngrCaller, workspace_address: str, probe: SkillProbe) -> tuple[str, ...]:
+    """The account arguments a create in ``workspace_address`` still needs from this app, if any.
 
     Nothing on a workspace that writes its create defaults: its own mngr binds the
     chat. On one that keeps accounts but writes no file (minds-v0.5.0 through v0.5.2)
@@ -329,7 +326,7 @@ def resolve_legacy_account_args(
     """
     if probe.is_local_settings_present:
         return ()
-    return resolve_account_binding(mngr_caller, workspace_agent_id).create_args
+    return resolve_account_binding(mngr_caller, workspace_address).create_args
 
 
 def generate_chat_name(skill_name: str) -> str:
@@ -351,15 +348,15 @@ def build_create_chat_script_args(*, chat_name: str, message: str) -> list[str]:
 
 
 def build_skill_chat_mngr_args(
-    workspace_agent_id: AgentId, *, chat_name: str, message: str, account_args: Sequence[str] = ()
+    workspace_address: str, *, chat_name: str, message: str, account_args: Sequence[str] = ()
 ) -> list[str]:
     """Build the ``mngr`` CLI args (sans the leading ``mngr``) that spawn a chat seeded with ``message`` with a bare ``mngr create``.
 
     The path for a template whose script cannot create a chat. An ``exec`` targeting the
-    workspace agent by id (a bare id is a valid agent address) whose single COMMAND
-    argument is the inner ``mngr create`` shell string. The chat is grouped with its
-    workspace by living in the same container, so no grouping label is needed. The create
-    names no harness and no account: the workspace's own create defaults supply both.
+    workspace agent's address whose single COMMAND argument is the inner ``mngr create``
+    shell string. The chat is grouped with its workspace by living in the same container,
+    so no grouping label is needed. The create names no harness and no account: the
+    workspace's own create defaults supply both.
 
     ``account_args`` are the resolver's arguments for a workspace that writes no
     create defaults (:func:`resolve_legacy_account_args`); empty otherwise.
@@ -378,7 +375,7 @@ def build_skill_chat_mngr_args(
     return [
         "exec",
         "--agent",
-        str(workspace_agent_id),
+        workspace_address,
         build_in_workspace_mngr_command(inner_parts),
         "--no-start",
     ]
@@ -400,7 +397,7 @@ class SkillChatSpawn(FrozenModel):
 
 def spawn_skill_chat(
     mngr_caller: MngrCaller,
-    workspace_agent_id: AgentId,
+    workspace_address: str,
     *,
     chat_name: str,
     message: str,
@@ -425,7 +422,7 @@ def spawn_skill_chat(
     """
     answer = ask_chat_app(
         mngr_caller,
-        str(workspace_agent_id),
+        workspace_address,
         build_create_chat_script_args(chat_name=chat_name, message=message),
         timeout=_SCRIPT_SPAWN_TIMEOUT_SECONDS,
     )
@@ -436,18 +433,18 @@ def spawn_skill_chat(
         # read as an old template.
         logger.warning(
             "Machine {} gave no verdict on creating chat {} through its chat app ({}); spawning it with a bare create",
-            workspace_agent_id,
+            workspace_address,
             chat_name,
             answer.detail,
         )
-        account_args = resolve_legacy_account_args(mngr_caller, workspace_agent_id, probe)
+        account_args = resolve_legacy_account_args(mngr_caller, workspace_address, probe)
         return _spawn_with_bare_create(
-            mngr_caller, workspace_agent_id, chat_name=chat_name, message=message, account_args=account_args
+            mngr_caller, workspace_address, chat_name=chat_name, message=message, account_args=account_args
         )
     logger.error(
         "Spawning chat {} in machine {} through its chat app failed (script exit {}, exec exit {}): {}",
         chat_name,
-        workspace_agent_id,
+        workspace_address,
         answer.script_exit_code,
         answer.exec_returncode,
         answer.log_detail,
@@ -457,7 +454,7 @@ def spawn_skill_chat(
 
 def _spawn_with_bare_create(
     mngr_caller: MngrCaller,
-    workspace_agent_id: AgentId,
+    workspace_address: str,
     *,
     chat_name: str,
     message: str,
@@ -465,14 +462,14 @@ def _spawn_with_bare_create(
 ) -> SkillChatSpawn:
     """Spawn the chat with a bare ``mngr create`` inside the workspace and wait for it to finish."""
     args = build_skill_chat_mngr_args(
-        workspace_agent_id, chat_name=chat_name, message=message, account_args=account_args
+        workspace_address, chat_name=chat_name, message=message, account_args=account_args
     )
     result = mngr_caller.call(args, timeout=_SPAWN_TIMEOUT_SECONDS)
     if result.returncode != 0:
         logger.error(
             "Spawning chat {} in machine {} exited {}: {}",
             chat_name,
-            workspace_agent_id,
+            workspace_address,
             result.returncode,
             result.stderr.strip(),
         )

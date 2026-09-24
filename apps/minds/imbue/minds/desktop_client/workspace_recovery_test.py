@@ -23,7 +23,6 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
-from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
@@ -68,7 +67,6 @@ from imbue.minds.desktop_client.workspace_recovery import _HOST_RECOVERY_STARTUP
 from imbue.minds.desktop_client.workspace_recovery import _await_system_interface_ready
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_stop_argv
-from imbue.minds.desktop_client.workspace_recovery import _build_recovery_agent_address
 from imbue.minds.desktop_client.workspace_recovery import _did_start_boot_a_host
 from imbue.minds.desktop_client.workspace_recovery import _in_band_provider_outage_reason
 from imbue.minds.desktop_client.workspace_recovery import _is_discovery_fresh
@@ -84,11 +82,9 @@ from imbue.minds.desktop_client.workspace_recovery import run_host_recovery_sequ
 from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
-from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
-from imbue.mngr.api.find import _collect_required_provider_names
 from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentId
@@ -235,42 +231,6 @@ def test_an_unreadable_start_result_is_reported_rather_than_passed_over() -> Non
     # Human output is not JSON, so this is the decode branch specifically -- the
     # other warning arm is for output that parsed but carried no field.
     assert "Could not read" in log_output.getvalue()
-
-
-def test_recovery_agent_address_restricts_discovery_to_one_provider() -> None:
-    """The pinned address must be one ``mngr`` reads as naming a single provider.
-
-    Asserted through mngr's own parser rather than against a literal, because the
-    property that matters is the one ``find_all_agents`` acts on: a provider
-    filter of exactly this agent's provider, so a recovery never pays for -- or
-    fails on -- a provider that could not have hosted it.
-    """
-    services_agent = AgentId.generate()
-    host_id = HostId.generate()
-    address = _build_recovery_agent_address(
-        services_agent,
-        AgentDisplayInfo(agent_name="workspace", host_id=str(host_id), provider_name="imbue_cloud_gabriel-imbue-com"),
-    )
-
-    parsed = parse_agent_address(address)
-    assert parsed.agent == services_agent
-    assert _collect_required_provider_names([parsed]) == (ProviderInstanceName("imbue_cloud_gabriel-imbue-com"),)
-
-
-@pytest.mark.parametrize(
-    "display_info",
-    [
-        pytest.param(None, id="no-discovery-row"),
-        pytest.param(AgentDisplayInfo(agent_name="w", host_id="host-" + "0" * 32), id="no-provider"),
-        pytest.param(
-            AgentDisplayInfo(agent_name="w", host_id="localhost", provider_name="local"), id="placeholder-host"
-        ),
-    ],
-)
-def test_recovery_agent_address_falls_back_to_the_bare_id(display_info: AgentDisplayInfo | None) -> None:
-    """A coordinate discovery cannot supply costs the scoping, never the recovery."""
-    services_agent = AgentId.generate()
-    assert _build_recovery_agent_address(services_agent, display_info) == str(services_agent)
 
 
 def test_run_host_recovery_sequence_pins_the_provider_on_both_steps(tmp_path: Path) -> None:

@@ -38,7 +38,6 @@ from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_
 from imbue.minds.desktop_client.backup_workspace_scripts import OFFICIAL_REMOTE_URL
 from imbue.minds.desktop_client.minds_version import parse_minds_version
 from imbue.minds.utils.mngr_caller import MngrCaller
-from imbue.mngr.primitives import AgentId
 
 # Field separator used in the ``git log`` format string; a tab cannot appear in
 # a commit hash or ISO timestamp, and we only keep the subject's first line.
@@ -241,7 +240,7 @@ def parse_upgrade_merges(stdout: str) -> tuple[UpgradeMerge, ...]:
 
 def read_workspace_current_version(
     *,
-    agent_id: AgentId,
+    agent_address: str,
     mngr_caller: MngrCaller,
 ) -> str | None:
     """Read the version a workspace's own git reports, in one ``mngr exec``.
@@ -251,7 +250,7 @@ def read_workspace_current_version(
     workspace that reports no version has the release tags fetched into it first.
     """
     stdout = _exec_git_in_workspace(
-        agent_id=agent_id,
+        agent_address=agent_address,
         git_command=_GIT_CURRENT_VERSION_COMMAND,
         timeout_seconds=_GIT_VERSION_EXEC_TIMEOUT_SECONDS,
         mngr_caller=mngr_caller,
@@ -261,7 +260,7 @@ def read_workspace_current_version(
 
 def read_workspace_git_version(
     *,
-    agent_id: AgentId,
+    agent_address: str,
     mngr_caller: MngrCaller,
 ) -> WorkspaceGitVersion:
     """Read current version + upgrade history from a workspace's git via ``mngr exec``.
@@ -271,14 +270,14 @@ def read_workspace_git_version(
     than raising, so the version route can always at least report
     ``original_minds_version``.
     """
-    current_version = read_workspace_current_version(agent_id=agent_id, mngr_caller=mngr_caller)
-    merges = _exec_git_merges(agent_id=agent_id, mngr_caller=mngr_caller)
+    current_version = read_workspace_current_version(agent_address=agent_address, mngr_caller=mngr_caller)
+    merges = _exec_git_merges(agent_address=agent_address, mngr_caller=mngr_caller)
     return WorkspaceGitVersion(current_minds_version=current_version, upgrade_merges=merges)
 
 
 def _exec_git_in_workspace(
     *,
-    agent_id: AgentId,
+    agent_address: str,
     git_command: str,
     timeout_seconds: float,
     mngr_caller: MngrCaller,
@@ -299,14 +298,14 @@ def _exec_git_in_workspace(
     # format ``mngr exec`` appends a ``Command succeeded on agent <name>``
     # status line to stdout after the command's own output.
     result = mngr_caller.call(
-        ["exec", "--no-start", str(agent_id), git_command, "--format", "json"],
+        ["exec", "--no-start", agent_address, git_command, "--format", "json"],
         timeout=timeout_seconds,
     )
     if result.is_timed_out or result.returncode != 0:
         logger.debug(
             "{} in machine {} failed (timed_out={}, rc={})",
             git_command,
-            agent_id,
+            agent_address,
             result.is_timed_out,
             result.returncode,
         )
@@ -319,18 +318,18 @@ def _exec_git_in_workspace(
         # Warning (not debug): a zero-exit exec whose ``--format json`` envelope
         # does not parse is a broken mngr output contract, not a normal
         # offline/no-tags fallback.
-        logger.warning("{} in machine {} produced an unparseable exec envelope: {}", git_command, agent_id, e)
+        logger.warning("{} in machine {} produced an unparseable exec envelope: {}", git_command, agent_address, e)
         return None
     if stderr:
         # The command exits clean whatever git made of it, so this is the only
         # record of why a version read came back empty.
-        logger.debug("{} in machine {} wrote to stderr: {}", git_command, agent_id, stderr)
+        logger.debug("{} in machine {} wrote to stderr: {}", git_command, agent_address, stderr)
     return stdout
 
 
-def _exec_git_merges(*, agent_id: AgentId, mngr_caller: MngrCaller) -> tuple[UpgradeMerge, ...]:
+def _exec_git_merges(*, agent_address: str, mngr_caller: MngrCaller) -> tuple[UpgradeMerge, ...]:
     stdout = _exec_git_in_workspace(
-        agent_id=agent_id,
+        agent_address=agent_address,
         git_command=shlex.join(_GIT_MERGES_ARGS),
         timeout_seconds=_GIT_EXEC_TIMEOUT_SECONDS,
         mngr_caller=mngr_caller,

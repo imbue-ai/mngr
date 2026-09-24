@@ -93,10 +93,10 @@ def build_message_chat_command(argv: Sequence[str]) -> str:
 
 
 @pure
-def build_message_chat_args(exec_agent_id: str, script_args: Sequence[str]) -> list[str]:
-    """The ``mngr`` args that run the messaging script with ``script_args`` on ``exec_agent_id``.
+def build_message_chat_args(exec_agent_address: str, script_args: Sequence[str]) -> list[str]:
+    """The ``mngr`` args that run the messaging script with ``script_args`` on ``exec_agent_address``.
 
-    ``exec_agent_id`` is any agent of the workspace; the script finds the chat app from the
+    ``exec_agent_address`` is any agent of the workspace; the script finds the chat app from the
     workspace root, and the chat it acts on is named in ``script_args``. ``mngr exec`` takes
     ONE shell command string after its agents, so the invocation is quoted into a single
     argument. ``--no-start``: asking a chat app must never boot a stopped workspace.
@@ -104,7 +104,7 @@ def build_message_chat_args(exec_agent_id: str, script_args: Sequence[str]) -> l
     return [
         "exec",
         "--agent",
-        exec_agent_id,
+        exec_agent_address,
         build_message_chat_command(script_args),
         "--no-start",
         "--format",
@@ -131,15 +131,15 @@ def _script_failure_detail(inner_stderr: str) -> str:
 
 
 def ask_chat_app(
-    mngr_caller: MngrCaller, exec_agent_id: str, script_args: Sequence[str], *, timeout: float
+    mngr_caller: MngrCaller, exec_agent_address: str, script_args: Sequence[str], *, timeout: float
 ) -> ChatAppAnswer:
-    """Run the messaging script with ``script_args`` inside ``exec_agent_id``'s workspace and read its answer.
+    """Run the messaging script with ``script_args`` inside ``exec_agent_address``'s workspace and read its answer.
 
     The script's last stderr line is its own reason when it ran; when it never did, the
     reason is mngr's ``exec_error`` event or the in-workspace refusal behind the outer
     mngr's chatter (:func:`exec_verdict_detail`).
     """
-    result = mngr_caller.call(build_message_chat_args(exec_agent_id, script_args), timeout=timeout)
+    result = mngr_caller.call(build_message_chat_args(exec_agent_address, script_args), timeout=timeout)
     exit_code = inner_exit_code(inner_stdout_from_exec_result(result.stdout))
     detail = _script_failure_detail(inner_stderr_from_exec_result(result.stdout)) or exec_verdict_detail(result)
     verdict = (

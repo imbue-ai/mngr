@@ -16,6 +16,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.bootstrap import MindsRoot
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.mind_liveness import MindLiveness
 from imbue.minds.desktop_client.mind_liveness import compute_local_mind_liveness_by_agent_id
@@ -120,9 +121,9 @@ def running_local_workspace_entries(backend_resolver: BackendResolverInterface) 
     return _running_entries(backend_resolver, compute_local_mind_liveness_by_agent_id(backend_resolver))
 
 
-def build_stop_hosts_argv(mngr_binary: str, agent_ids: Sequence[AgentId]) -> list[str]:
-    """Build the argv for one variadic ``mngr stop <ids...> --quiet --stop-host``."""
-    return [mngr_binary, "stop", *(str(aid) for aid in agent_ids), "--quiet", "--stop-host"]
+def build_stop_hosts_argv(mngr_binary: str, agent_addresses: Sequence[str]) -> list[str]:
+    """Build the argv for one variadic ``mngr stop <addresses...> --quiet --stop-host``."""
+    return [mngr_binary, "stop", *agent_addresses, "--quiet", "--stop-host"]
 
 
 def stop_workspace_hosts(
@@ -180,7 +181,9 @@ def stop_workspace_hosts(
     if services_agent_ids:
         env = dict(os.environ)
         env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-        argv = build_stop_hosts_argv(mngr_binary, services_agent_ids)
+        argv = build_stop_hosts_argv(
+            mngr_binary, [build_agent_address(aid, backend_resolver) for aid in services_agent_ids]
+        )
         try:
             run_mngr_to_completion(concurrency_group, argv, env)
         except MngrCommandError as exc:

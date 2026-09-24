@@ -29,7 +29,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
-from imbue.mngr.primitives import AgentId
 
 # The template's seeding script, relative to the repo root ``mngr exec`` runs from.
 SEED_SCRIPT_PATH: Final[str] = "system/scripts/seed_welcome_chat.py"
@@ -70,13 +69,13 @@ class WelcomeChatOutcome(FrozenModel):
         return self.chat_id != ""
 
 
-def build_seed_welcome_chat_args(workspace_agent_id: AgentId, welcome_chat: WelcomeChatRequest) -> list[str]:
+def build_seed_welcome_chat_args(workspace_address: str, welcome_chat: WelcomeChatRequest) -> list[str]:
     """The ``mngr`` args that run the template's seeding script in the workspace with the transcript."""
     body = json.dumps(welcome_chat.model_dump(mode="json"))
     encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
     command = shlex.join(["python3", SEED_SCRIPT_PATH, "--transcript-base64", encoded])
     # --no-start: the workspace was just created and is running; seeding must never boot one.
-    return ["exec", "--agent", str(workspace_agent_id), command, "--no-start"]
+    return ["exec", "--agent", workspace_address, command, "--no-start"]
 
 
 def _chat_id_from_stdout(stdout: str) -> str:
@@ -106,11 +105,11 @@ def _failure_detail(result: MngrCallResult) -> str:
 
 
 def seed_welcome_chat(
-    mngr_caller: MngrCaller, workspace_agent_id: AgentId, welcome_chat: WelcomeChatRequest
+    mngr_caller: MngrCaller, workspace_address: str, welcome_chat: WelcomeChatRequest
 ) -> WelcomeChatOutcome:
     """Seed the workspace's first chat with the conversation; the chat's id, or why there is none."""
     result = mngr_caller.call(
-        build_seed_welcome_chat_args(workspace_agent_id, welcome_chat), timeout=SEED_TIMEOUT_SECONDS
+        build_seed_welcome_chat_args(workspace_address, welcome_chat), timeout=SEED_TIMEOUT_SECONDS
     )
     if result.returncode == 0 and not result.is_timed_out:
         chat_id = _chat_id_from_stdout(result.stdout)
@@ -119,5 +118,5 @@ def seed_welcome_chat(
         detail = "the seeding script printed no chat id"
     else:
         detail = _failure_detail(result)
-    logger.warning("Could not seed the welcome chat in workspace {}: {}", workspace_agent_id, detail)
+    logger.warning("Could not seed the welcome chat in workspace {}: {}", workspace_address, detail)
     return WelcomeChatOutcome(failure_detail=detail)

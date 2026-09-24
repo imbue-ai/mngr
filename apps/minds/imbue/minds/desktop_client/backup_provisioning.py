@@ -96,9 +96,7 @@ class BackupSetupRequest(FrozenModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # Pure helpers
-# ---------------------------------------------------------------------------
 
 
 def _render_env_pairs(pairs: list[tuple[str, str]]) -> str:
@@ -134,12 +132,10 @@ def build_canonical_env_content(
     return _CANONICAL_ENV_HEADER + _render_env_pairs(pairs)
 
 
-# ---------------------------------------------------------------------------
 # Remote file injection (impure: drives `mngr exec` on the agent's host)
-# ---------------------------------------------------------------------------
 
 
-def build_backup_exec_argv(agent_id: AgentId, command_str: str) -> list[str]:
+def build_backup_exec_argv(agent_address: str, command_str: str) -> list[str]:
     """The ``mngr exec`` argv for a backup-stack command on the agent's host.
 
     --no-start: ``mngr exec`` auto-starts a stopped host by default, and none of
@@ -148,11 +144,11 @@ def build_backup_exec_argv(agent_id: AgentId, command_str: str) -> list[str]:
     reading that can be stale (a replayed pre-start RUNNING at app startup was
     observed booting a stopped container through this path).
     """
-    return [MNGR_BINARY, "exec", str(agent_id), command_str, "--no-start"]
+    return [MNGR_BINARY, "exec", agent_address, command_str, "--no-start"]
 
 
 def run_mngr_exec_on_agent(
-    agent_id: AgentId,
+    agent_address: str,
     command_str: str,
     *,
     parent_cg: ConcurrencyGroup | None,
@@ -176,7 +172,7 @@ def run_mngr_exec_on_agent(
     # progress appear all at once). ``run_process_to_completion``'s own reader
     # then fires ``on_output`` per line; callers with no ``on_output`` (env
     # injection, gate probe, verification) stay on the non-streaming path.
-    argv = build_backup_exec_argv(agent_id, command_str)
+    argv = build_backup_exec_argv(agent_address, command_str)
     if on_output is not None:
         argv = [*argv, "--stream"]
     with cg:
@@ -189,7 +185,7 @@ def run_mngr_exec_on_agent(
 
 
 def _write_remote_file(
-    agent_id: AgentId,
+    agent_address: str,
     remote_path: str,
     content: str,
     *,
@@ -225,14 +221,14 @@ def _write_remote_file(
         f"{rotate_prefix}"
         f"printf %s '{encoded}' | base64 -d > {quoted_path}{chmod_suffix}"
     )
-    result = run_mngr_exec_on_agent(agent_id, command_str, parent_cg=parent_cg)
+    result = run_mngr_exec_on_agent(agent_address, command_str, parent_cg=parent_cg)
     if result.returncode != 0:
         raise BackupProvisioningError(
-            f"Failed to write {remote_path} on agent {agent_id}: {result.stderr.strip() or result.stdout.strip()}"
+            f"Failed to write {remote_path} on agent {agent_address}: {result.stderr.strip() or result.stdout.strip()}"
         )
 
 
-def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: ConcurrencyGroup | None) -> None:
+def _inject_canonical_env(agent_address: str, content: str, *, parent_cg: ConcurrencyGroup | None) -> None:
     """Inject the canonical restic.env into the workspace's data/.secrets/restic.env.
 
     An existing workspace copy with different content is rotated aside to
@@ -240,7 +236,7 @@ def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: Concurr
     recoverable if something goes wrong.
     """
     _write_remote_file(
-        agent_id,
+        agent_address,
         _RESTIC_ENV_REMOTE_PATH,
         content,
         mode=_RESTIC_ENV_MODE,
@@ -249,9 +245,7 @@ def _inject_canonical_env(agent_id: AgentId, content: str, *, parent_cg: Concurr
     )
 
 
-# ---------------------------------------------------------------------------
 # Bucket provisioning (impure: drives `mngr imbue_cloud bucket ...`)
-# ---------------------------------------------------------------------------
 
 
 def _is_bucket_already_exists_error(error: ImbueCloudCliError) -> bool:
@@ -358,14 +352,14 @@ def _resolve_repository_and_backend_env(
     raise BackupProvisioningError(f"Unhandled backup provider: {request.backup_provider}")
 
 
-# ---------------------------------------------------------------------------
 # Orchestration
-# ---------------------------------------------------------------------------
 
 
 def configure_backups_for_host(
     *,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     request: BackupSetupRequest,
     imbue_cloud_cli: ImbueCloudCli | None,
     paths: InstallationPaths,
@@ -394,7 +388,7 @@ def configure_backups_for_host(
         existing_canonical = read_canonical_env(paths, agent_id)
         if existing_canonical is not None:
             logger.debug("Reusing existing canonical restic.env for agent {}; re-injecting", agent_id)
-            _inject_canonical_env(agent_id, existing_canonical, parent_cg=parent_cg)
+            _inject_canonical_env(agent_address, existing_canonical, parent_cg=parent_cg)
             return
 
         # New buckets are named by the workspace id: the backup is the
@@ -420,13 +414,15 @@ def configure_backups_for_host(
         # Persist the definitive copy first (so a later injection failure still
         # leaves minds able to reach the repo / show status), then inject.
         write_canonical_env(paths, agent_id, canonical_env)
-        _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
+        _inject_canonical_env(agent_address, canonical_env, parent_cg=parent_cg)
         logger.debug("Injected restic backup config into agent {}", agent_id)
 
 
 def reinject_canonical_env(
     *,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     paths: InstallationPaths,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
@@ -439,12 +435,14 @@ def reinject_canonical_env(
     canonical_env = read_canonical_env(paths, agent_id)
     if canonical_env is None:
         raise BackupProvisioningError(f"No canonical restic.env exists for {agent_id}; nothing to re-inject")
-    _inject_canonical_env(agent_id, canonical_env, parent_cg=parent_cg)
+    _inject_canonical_env(agent_address, canonical_env, parent_cg=parent_cg)
 
 
 def disable_backups_for_host(
     *,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     paths: InstallationPaths,
     parent_cg: ConcurrencyGroup | None = None,
 ) -> None:
@@ -465,7 +463,7 @@ def disable_backups_for_host(
             f"{_RESTIC_ENV_REMOTE_PATH}.{datetime.now(timezone.utc).strftime(ENV_ARCHIVE_TIMESTAMP_FORMAT)}"
         )
         command_str = f"if [ -f {quoted_path} ]; then mv {quoted_path} {rotated_path}; fi"
-        result = run_mngr_exec_on_agent(agent_id, command_str, parent_cg=parent_cg)
+        result = run_mngr_exec_on_agent(agent_address, command_str, parent_cg=parent_cg)
         if result.returncode != 0:
             raise BackupProvisioningError(
                 f"Failed to rotate {_RESTIC_ENV_REMOTE_PATH} aside on agent {agent_id}: "
@@ -476,6 +474,8 @@ def disable_backups_for_host(
 def change_backup_destination_for_host(
     *,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     request: BackupSetupRequest,
     imbue_cloud_cli: ImbueCloudCli | None,
     paths: InstallationPaths,
@@ -499,6 +499,7 @@ def change_backup_destination_for_host(
         logger.info("Archived previous canonical restic.env for {} to {}", agent_id, archived_path.name)
     configure_backups_for_host(
         agent_id=agent_id,
+        agent_address=agent_address,
         request=request,
         imbue_cloud_cli=imbue_cloud_cli,
         paths=paths,

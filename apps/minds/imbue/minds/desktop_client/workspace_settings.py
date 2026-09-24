@@ -16,6 +16,7 @@ from typing import Final
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -106,7 +107,7 @@ def set_workspace_color(
 
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
-    argv = [mngr_binary, "label", str(agent_id), "-l", f"color={normalized}"]
+    argv = [mngr_binary, "label", build_agent_address(agent_id, backend_resolver), "-l", f"color={normalized}"]
     try:
         run_mngr_to_completion(concurrency_group, argv, env)
     except MngrCommandError as exc:
@@ -201,7 +202,9 @@ def disassociate_workspace_account(
             try:
                 share = imbue_cloud_cli.get_share_status(account=str(account.email), host_id=host_id)
                 if share is not None and share.state == "active":
-                    clear_share_materials_from_agent(agent_id, imbue_cloud_cli.mngr_caller)
+                    clear_share_materials_from_agent(
+                        build_agent_address(agent_id, backend_resolver), imbue_cloud_cli.mngr_caller
+                    )
                     imbue_cloud_cli.delete_share(account=str(account.email), host_id=host_id)
             except ImbueCloudCliError as exc:
                 logger.warning("Failed to delete the machine share during disassociation: {}", exc)

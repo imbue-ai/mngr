@@ -332,6 +332,7 @@ def _enable_sharing_for_test(
     return _enable_sharing_with_cli(
         host_id,
         agent_id,
+        str(agent_id),
         grants,
         {},
         cli,

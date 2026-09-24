@@ -312,9 +312,7 @@ def provider(temp_mngr_ctx: MngrContext) -> _DiscoveryTestProvider:
     )
 
 
-# =========================================================================
 # _read_records_from_vps -- cache fallback when SSH to a VPS fails
-# =========================================================================
 
 
 def test_read_records_from_vps_falls_back_to_cache_on_host_connection_error(
@@ -481,9 +479,7 @@ def test_read_records_from_vps_keeps_host_when_live_listing_fails(
     assert result.is_running_by_host_id == {}
 
 
-# =========================================================================
 # _discover_host_records_with_agents -- fan-out + aggregation
-# =========================================================================
 
 
 def test_discover_host_records_returns_empty_without_calling_ssh_when_no_vpses(
@@ -541,9 +537,7 @@ def test_discover_host_records_merges_agent_data_by_host_id(
     assert sorted(a["agent_id"] for a in result.live_agent_data_by_host_id[host_id]) == ["a-1", "a-2", "a-3"]
 
 
-# =========================================================================
 # _find_host_record -- cache-first, credential short-circuit, cache population
-# =========================================================================
 
 
 def test_find_host_record_returns_cached_by_id_without_triggering_discovery(
@@ -623,10 +617,8 @@ def test_find_host_record_returns_none_when_discovery_finds_no_match(
     assert host_other in provider._host_record_cache
 
 
-# =========================================================================
 # discover_hosts_and_agents -- a cleanly-stopped container is STOPPED + visible,
 # not CRASHED + hidden (the idle-watcher / `mngr stop` reconnection bug)
-# =========================================================================
 
 
 def test_discover_reports_stopped_and_keeps_visible_when_vps_reachable_but_container_down(
@@ -698,3 +690,20 @@ def test_discover_reports_unreachable_vps_host_as_crashed_when_including_destroy
     assert len(hosts) == 1
     assert hosts[0].host_id == host_id
     assert hosts[0].host_state == HostState.CRASHED
+
+
+def test_a_pinned_read_reports_a_cleanly_stopped_host_as_discovery_does(
+    provider: _DiscoveryTestProvider,
+) -> None:
+    """A pinned ``mngr start AGENT@HOST.PROVIDER`` must see the stopped host that a bare id would."""
+    host_id = HostId.generate()
+    record = _make_record(host_id, "host-stopped", vps_ip="10.0.0.20")
+    provider.hostnames = ["10.0.0.20"]
+    provider.per_vps_records = {
+        "10.0.0.20": _VpsDiscoveryData(records=(record,), is_running_by_host_id={host_id: False})
+    }
+
+    host_ref, agents = provider.discover_host_and_agents(cg=provider.mngr_ctx.concurrency_group, host_id=host_id)
+
+    assert (host_ref.host_id, host_ref.host_state) == (host_id, HostState.STOPPED)
+    assert agents == []

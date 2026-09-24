@@ -15,6 +15,9 @@ from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import AgentName
+from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -169,3 +172,46 @@ def make_offline_host(
         provider_instance=provider,
         mngr_ctx=mngr_ctx,
     )
+
+
+class DiscoveryRecordingProvider(MockProviderInstance):
+    """Mock provider whose offline hosts each hold their own agents, recording which hosts' agents are read."""
+
+    agent_data_by_host_id: dict[HostId, list[dict[str, Any]]] = Field(default_factory=dict)
+    agent_read_host_ids: list[HostId] = Field(default_factory=list)
+    provider_wide_discovery_calls: list[str] = Field(default_factory=list)
+    pinned_read_host_ids: list[HostId] = Field(default_factory=list)
+
+    def add_agent(self, host_id: HostId, agent_id: AgentId, agent_name: AgentName) -> None:
+        self.agent_data_by_host_id.setdefault(host_id, []).append({"id": str(agent_id), "name": str(agent_name)})
+
+    def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
+        self.agent_read_host_ids.append(host_id)
+        return list(self.agent_data_by_host_id.get(host_id, []))
+
+    def discover_hosts(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> list[DiscoveredHost]:
+        return [
+            host_ref
+            for host_ref in super().discover_hosts(cg=cg, include_destroyed=include_destroyed)
+            if include_destroyed or host_ref.host_state != HostState.DESTROYED
+        ]
+
+    def discover_hosts_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        include_destroyed: bool = False,
+    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
+        self.provider_wide_discovery_calls.append("discover_hosts_and_agents")
+        return super().discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
+
+    def discover_host_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        host_id: HostId,
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        self.pinned_read_host_ids.append(host_id)
+        return super().discover_host_and_agents(cg=cg, host_id=host_id)

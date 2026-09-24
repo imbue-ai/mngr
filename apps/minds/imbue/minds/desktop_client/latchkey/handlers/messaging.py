@@ -35,6 +35,7 @@ from imbue.minds.desktop_client.in_workspace_mngr import jsonl_events
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
+from imbue.mngr.api.address_parsers import parse_agent_address
 from imbue.mngr.primitives import AgentId
 
 # Ceiling for one delivery attempt, either way. Generous because an exec pays the outer
@@ -106,16 +107,20 @@ def message_failure_reason(stdout: str) -> str:
 
 
 @pure
-def mngr_message_argv(target: str, text: str) -> list[str]:
-    """The ``mngr exec`` that runs ``mngr message`` to ``target`` inside its own workspace.
+def mngr_message_argv(target_address: str, text: str) -> list[str]:
+    """The ``mngr exec`` that runs ``mngr message`` to ``target_address``'s agent inside its own workspace.
+
+    The inner ``mngr message`` names the bare agent: a host the address pins is the laptop's
+    view of it, and inside the workspace that host is local.
 
     ``-m`` and ``--`` are required: ``mngr message`` treats every positional argument as an
     agent identifier (``nargs=-1``), so passing the text as a positional would be parsed as
     a second agent and the actual message content would be read from stdin (silently empty
     here).
     """
-    inner_command = build_in_workspace_mngr_command(["message", "--format", "jsonl", "-m", text, "--", target])
-    return ["exec", "--agent", target, inner_command, "--no-start", "--format", "jsonl"]
+    inner_target = str(parse_agent_address(target_address).agent)
+    inner_command = build_in_workspace_mngr_command(["message", "--format", "jsonl", "-m", text, "--", inner_target])
+    return ["exec", "--agent", target_address, inner_command, "--no-start", "--format", "jsonl"]
 
 
 class MngrMessageSender(MutableModel):
@@ -153,12 +158,12 @@ class MngrMessageSender(MutableModel):
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
-    def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
+    def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
         """Dispatch the message to ``chat_id`` without blocking the caller, retrying until it lands.
 
-        ``exec_agent_id`` is the agent the chat script runs on: the chat's newest member,
+        ``exec_agent_address`` names the agent the chat script runs on: the chat's newest member,
         which the backend resolver names for a chat id (a seeded chat's id is its seed's, not
-        any agent's). For a chat that is its own first agent it is the chat id itself.
+        any agent's). For a chat that is its own first agent it names the chat id itself.
 
         The send runs on a thread tracked by :attr:`concurrency_group` and
         never raises -- failures are logged. Undelivered attempts retry on the
@@ -168,7 +173,7 @@ class MngrMessageSender(MutableModel):
         """
         self.concurrency_group.start_new_thread(
             self._send_with_retries,
-            args=(str(chat_id), text, str(exec_agent_id)),
+            args=(str(chat_id), text, exec_agent_address),
             name="resolution-nudge-send",
             is_checked=False,
             on_failure=lambda exc: logger.opt(exception=True).error(
@@ -176,7 +181,7 @@ class MngrMessageSender(MutableModel):
             ),
         )
 
-    def _send_with_retries(self, target: str, text: str, exec_agent_id: str) -> bool:
+    def _send_with_retries(self, target: str, text: str, exec_agent_address: str) -> bool:
         """Deliver ``text`` to ``target``, retrying until delivery or shutdown.
 
         The between-attempt waits ride the concurrency group's shutdown
@@ -188,7 +193,7 @@ class MngrMessageSender(MutableModel):
         attempt_index = 0
         is_shutting_down = False
         while not is_shutting_down:
-            if self.deliver(target, text, exec_agent_id):
+            if self.deliver(target, text, exec_agent_address):
                 if attempt_index > 0:
                     logger.info("resolution nudge to target {} delivered after retry", target)
                 return True
@@ -212,7 +217,7 @@ class MngrMessageSender(MutableModel):
         logger.info("resolution nudge retry to target {} abandoned: shutting down", target)
         return False
 
-    def deliver(self, target: str, text: str, exec_agent_id: str) -> bool:
+    def deliver(self, target: str, text: str, exec_agent_address: str) -> bool:
         """Deliver the notice to the chat ``target`` names and return whether it landed.
 
         The chat app's word is final unless it gave none: a notice delivered behind a dialog
@@ -223,7 +228,9 @@ class MngrMessageSender(MutableModel):
         the script, whose chats are their own agents, gets the in-workspace ``mngr message``.
         A stopped workspace is not booted for a notice; the caller waits for it to come up.
         """
-        answer = ask_chat_app(self.mngr_caller, exec_agent_id, [target, "-m", text], timeout=_DELIVER_TIMEOUT_SECONDS)
+        answer = ask_chat_app(
+            self.mngr_caller, exec_agent_address, [target, "-m", text], timeout=_DELIVER_TIMEOUT_SECONDS
+        )
         if answer.verdict is ChatAppVerdict.DELIVERED_BEHIND_DIALOG:
             logger.info("resolution nudge to target {} landed behind a dialog: {}", target, answer.detail)
         if answer.is_delivered:
@@ -234,7 +241,7 @@ class MngrMessageSender(MutableModel):
                 target,
                 answer.detail,
             )
-            return self._deliver_through_mngr_message(exec_agent_id, text)
+            return self._deliver_through_mngr_message(exec_agent_address, text)
         logger.debug(
             "the chat app of target {} did not take the message (script exit {}, exec exit {}): {}",
             target,
@@ -244,10 +251,10 @@ class MngrMessageSender(MutableModel):
         )
         return False
 
-    def _deliver_through_mngr_message(self, target: str, text: str) -> bool:
+    def _deliver_through_mngr_message(self, target_address: str, text: str) -> bool:
         """Send with ``mngr message`` inside the agent's workspace and return whether the TARGET agent received it.
 
-        ``target`` is matched by both commands against agent ids and names, so a
+        ``target_address``'s agent is matched by both commands against agent ids and names, so a
         caller can address an agent by its host name before its canonical id is
         known. Delivery is judged from the inner command's structured ``--format
         jsonl`` output (a ``message_sent`` event) rather than either process's exit
@@ -255,13 +262,13 @@ class MngrMessageSender(MutableModel):
         matches the target, so a caller that retries until the agent exists must
         inspect the output.
         """
-        result = self.mngr_caller.call(mngr_message_argv(target, text), timeout=_DELIVER_TIMEOUT_SECONDS)
+        result = self.mngr_caller.call(mngr_message_argv(target_address, text), timeout=_DELIVER_TIMEOUT_SECONDS)
         inner_stdout = inner_stdout_from_exec_result(result.stdout)
         if stdout_reports_message_delivered(inner_stdout):
             return True
         logger.debug(
             "mngr message to target {} not yet delivered (exit {}): {}",
-            target,
+            target_address,
             result.returncode,
             message_failure_reason(inner_stdout) or exec_log_detail(result),
         )

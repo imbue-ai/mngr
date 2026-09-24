@@ -517,6 +517,8 @@ class ImbueCloudProvider(BaseProviderInstance):
     # or ``docker cp`` (stopped), and consumed by ``get_host_and_agent_details``
     # so the two listing phases share a single outer-SSH round-trip per host.
     _listing_raw_cache: dict[HostId, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    # Guards ``_listing_raw_cache``, which several hosts' listings write in parallel.
+    _listing_raw_cache_lock: Lock = PrivateAttr(default_factory=Lock)
     # host_ids whose adoption was attempted (adopt or verification) this
     # process, so a failed attempt is not hammered on every host build within
     # one process. Successful verification is durable across processes (the
@@ -949,7 +951,6 @@ class ImbueCloudProvider(BaseProviderInstance):
         # mngr_vps's identical-shaped fan-out (instance.py's
         # ``_discover_host_records_with_agents``); results are collected in
         # submission order so this returns the same host ordering as before.
-        cache_lock = Lock()
         if leased:
             with log_span("Reading outer listings from {} leased host(s) in parallel", len(leased)):
                 with mngr_executor(
@@ -957,41 +958,61 @@ class ImbueCloudProvider(BaseProviderInstance):
                     name=f"{type(self).__name__}-discover_outer_listing",
                     max_workers=min(len(leased), _DISCOVERY_MAX_WORKERS),
                 ) as executor:
-                    futures = [executor.submit(self._discover_one_leased_host, entry, cache_lock) for entry in leased]
+                    futures = [executor.submit(self._discover_one_leased_host, entry) for entry in leased]
                 for future in futures:
                     host_ref, agent_refs = future.result()
                     result[host_ref] = agent_refs
         # Non-running workspaces have no box to SSH: surface them from the
         # lifecycle listing alone, re-attaching the last-known agents so the
         # workspace keeps its labels (and its is_primary guard) while stopped.
-        for workspace in self._list_workspaces_cached() or ():
-            if workspace.status == WorkspaceStatus.RUNNING:
+        for lifecycle_entry in self._list_workspaces_cached() or ():
+            if lifecycle_entry.status == WorkspaceStatus.RUNNING:
                 continue
-            host_id = HostId(workspace.host_id)
-            host_ref = DiscoveredHost(
-                host_id=host_id,
-                host_name=HostName(workspace.host_name),
-                provider_name=self.name,
-                host_state=WORKSPACE_HOST_STATE_BY_STATUS[workspace.status],
-            )
-            result[host_ref] = self._load_last_known_agents(host_id) or [
-                _synthesize_services_agent_for_lifecycle_entry(workspace, host_id, self.name)
-            ]
+            host_ref, agent_refs = self._discover_non_running_lifecycle_entry(lifecycle_entry)
+            result[host_ref] = agent_refs
         return result
 
-    def _discover_one_leased_host(
+    def discover_host_and_agents(
         self,
-        entry: LeasedHostInfo,
-        cache_lock: Lock,
+        cg: ConcurrencyGroup,
+        host_id: HostId,
     ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        """Read one host exactly as ``discover_hosts_and_agents`` would, with an outer-SSH listing of that host alone.
+
+        A host the lifecycle listing reports as not running needs no SSH at all: it comes from that listing.
+        """
+        for entry in self._list_leased_hosts_cached():
+            if entry.host_id == str(host_id):
+                return self._discover_one_leased_host(entry)
+        lifecycle_entry = self._find_workspace(host_id)
+        if lifecycle_entry is not None and lifecycle_entry.status != WorkspaceStatus.RUNNING:
+            return self._discover_non_running_lifecycle_entry(lifecycle_entry)
+        raise HostNotFoundError(self.name, host_id)
+
+    def _discover_non_running_lifecycle_entry(
+        self, lifecycle_entry: WorkspaceInfo
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        """Shape a host the lifecycle listing reports as not running into a discovery result."""
+        host_id = HostId(lifecycle_entry.host_id)
+        host_ref = DiscoveredHost(
+            host_id=host_id,
+            host_name=HostName(lifecycle_entry.host_name),
+            provider_name=self.name,
+            host_state=WORKSPACE_HOST_STATE_BY_STATUS[lifecycle_entry.status],
+        )
+        agent_refs = self._load_last_known_agents(host_id) or [
+            _synthesize_services_agent_for_lifecycle_entry(lifecycle_entry, host_id, self.name)
+        ]
+        return host_ref, agent_refs
+
+    def _discover_one_leased_host(self, entry: LeasedHostInfo) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
         """Run one leased host's outer-SSH listing and shape it into a discovery result.
 
-        Runs on a worker thread from ``discover_hosts_and_agents``'s fan-out.
-        ``cache_lock`` guards ``self._listing_raw_cache`` (a plain dict shared
-        across every in-flight host's thread); the sticky-identity and
-        resolved-host-dir persistence calls need no lock of their own since
-        each writes a distinct per-host file. Every leased host is listed: a
-        held lease is a live resource whatever its container is doing.
+        May run concurrently for several hosts: writes to the shared listing
+        cache take ``_listing_raw_cache_lock``, while the sticky-identity and
+        resolved-host-dir persistence calls need no lock since each writes a
+        distinct per-host file. Every leased host is listed: a held lease is a
+        live resource whatever its container is doing.
         """
         host_id = HostId(entry.host_id)
         raw, outer_error, is_auth_failure = self._collect_listing_raw_via_outer(entry)
@@ -1041,13 +1062,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             ]
             # Stash the outer error so get_host_and_agent_details can
             # surface it in failure_reason without re-trying SSH.
-            with cache_lock:
+            with self._listing_raw_cache_lock:
                 self._listing_raw_cache[host_id] = {
                     "outer_ssh_error": outer_error,
                     "outer_ssh_is_auth_failure": is_auth_failure,
                 }
             return host_ref, agent_refs
-        with cache_lock:
+        with self._listing_raw_cache_lock:
             self._listing_raw_cache[host_id] = raw
         # Record which layout this container actually uses while we have a
         # live answer, so the host objects built later (`mngr exec`,

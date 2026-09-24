@@ -42,6 +42,31 @@ hosts; see [agents](agents.md)). When a bare id matches instances on more than
 one host, single-target commands refuse and list every instance; use `ID@HOST`
 (or `ID@HOST.PROVIDER`) to target the exact instance.
 
+## How an address is resolved
+
+Most addresses are resolved by discovery: mngr lists the hosts of every provider
+the address could refer to (or only the named provider, when the address has
+one), then matches the agent among them. That listing can reach every host a
+provider owns, so its cost grows with the number of hosts.
+
+An address that names both a host *id* and a provider, such as
+`agent-...@host-....docker`, skips discovery. mngr asks that provider for that one
+host and matches the agent there. The other hosts are never contacted.
+
+- If the agent is not on that host (it moved, was destroyed, or never lived
+  there), or the host no longer exists, the command fails with "not found" and
+  names the host. mngr does not fall back to searching other hosts, so retry
+  with the bare agent id if you want that.
+- The shortcut applies only when every address given to the command is pinned
+  this way. A host *name* (`NAME@my-host.docker`), a missing provider, or a mix
+  of pinned and unpinned addresses still runs discovery, as does `--all`. It also
+  does not apply to `mngr destroy`, which also has to see destroyed hosts,
+  `mngr stop --stop-host`, which finds the host from mngr's record of where
+  the agent lives, or `AGENT@HOST.PROVIDER:PATH` locations (push, pull, pair,
+  and file transfer), which still run discovery.
+- The VPS providers (aws, gcp, azure, ovh, vultr) still read every VPS to look up
+  one host, so for them a pinned address is correct but not faster.
+
 ## Commands that accept addresses
 
 | Command | Address use |

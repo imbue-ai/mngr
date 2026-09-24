@@ -41,6 +41,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
 from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import env_content_sha256
 from imbue.minds.desktop_client.backup_env_store import parse_restic_env
@@ -290,7 +291,10 @@ def check_backup_service_for_workspace(
         BACKUP_CHECK_SCRIPT, ("--minimum-tag", minimum_backup_tag(), "--agent-id", str(agent_id))
     )
     result = run_mngr_exec_on_agent(
-        agent_id, command_str, parent_cg=parent_cg, timeout_seconds=CHECK_EXEC_TIMEOUT_SECONDS
+        build_agent_address(agent_id, resolver),
+        command_str,
+        parent_cg=parent_cg,
+        timeout_seconds=CHECK_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0 or result.is_timed_out:
         detail = (result.stderr or result.stdout).strip()[-500:]

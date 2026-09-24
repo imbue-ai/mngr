@@ -46,7 +46,7 @@ class _RecordingMessageSender(MngrMessageSender):
     concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
-    def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
+    def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
         self.sent_messages.append((str(chat_id), text))
 
 
@@ -127,7 +127,7 @@ def _build_authenticated_client(
     return client
 
 
-# -- handler.handles_request_type --
+# handler.handles_request_type
 
 
 def test_handler_claims_file_sharing_request_type(tmp_path: Path) -> None:
@@ -147,7 +147,7 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
     assert handler.display_name_for_event(event) == "/home/user/data.txt"
 
 
-# -- apply_grant_request --
+# apply_grant_request
 
 
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:
@@ -457,7 +457,7 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
     assert sender.sent_messages == []
 
 
-# -- apply_deny_request --
+# apply_deny_request
 
 
 def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path) -> None:
@@ -527,7 +527,7 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
     assert len(sender.sent_messages) == 1
 
 
-# -- Wiring through the Flask dispatcher --
+# Wiring through the Flask dispatcher
 
 
 def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path) -> None:

@@ -137,9 +137,11 @@ def _message_impl(ctx: click.Context, **kwargs) -> None:
 
     error_behavior = ErrorBehavior(opts.on_error.upper())
 
-    # Resolve addresses to live agents. find_all_agents narrows discovery to the
-    # providers named by the addresses (full scan only when an address omits
-    # its provider) and raises AgentNotFoundError if any address has no match.
+    # Resolve addresses to live agents. find_all_agents reads only the pinned
+    # hosts when every address pins a host id and provider, otherwise narrows
+    # discovery to the providers named by the addresses (full scan only when an
+    # address omits its provider), and raises AgentNotFoundError if any address
+    # has no match.
     # Treat that as "no agents found": preserve historical exit-0 behavior in
     # CONTINUE mode, surface it in ABORT mode.
     try:

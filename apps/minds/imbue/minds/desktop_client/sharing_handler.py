@@ -26,6 +26,7 @@ import httpx
 from loguru import logger
 
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.identity_records import IdentityCache
@@ -392,6 +393,7 @@ def enable_sharing(
     return _enable_sharing_with_cli(
         host_id,
         agent_id,
+        build_agent_address(agent_id, backend_resolver),
         workspace_grants,
         service_grants,
         cli,
@@ -408,6 +410,8 @@ def enable_sharing(
 def _enable_sharing_with_cli(
     host_id: str,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     workspace_grants: dict[str, list[str]],
     service_grants: dict[str, dict[str, list[str]]],
     cli: ImbueCloudCli,
@@ -441,7 +445,7 @@ def _enable_sharing_with_cli(
     # the template ships the share gateway, whether share.env is present, and
     # the current grants document.
     try:
-        probe = probe_share_state_in_agent(agent_id, cli.mngr_caller)
+        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
 
@@ -486,7 +490,7 @@ def _enable_sharing_with_cli(
                     "disable sharing for this machine and enable it again."
                 )
             try:
-                provision_share_files_in_agent(agent_id, grants_toml, None, cli.mngr_caller)
+                provision_share_files_in_agent(agent_address, grants_toml, None, cli.mngr_caller)
             except ShareInjectionError as exc:
                 raise SharingError(str(exc)) from exc
             _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
@@ -535,7 +539,7 @@ def _enable_sharing_with_cli(
     # Everything lands in one exec, share.env last -- the gateway brings the
     # stack up the moment it appears, so the grants must already be in place.
     try:
-        provision_share_files_in_agent(agent_id, grants_toml, share_env_text, cli.mngr_caller)
+        provision_share_files_in_agent(agent_address, grants_toml, share_env_text, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
@@ -571,6 +575,7 @@ def enable_web_access_for_workspace(
     _enable_sharing_with_cli(
         host_id,
         agent_id,
+        build_agent_address(agent_id, backend_resolver),
         owner_grants,
         {},
         cli,
@@ -697,7 +702,9 @@ def get_sharing(
         return _unknown_grants_document(host_id, share, {})
     service_labels = resolve_share_target_labels(backend_resolver, agent_id)
     try:
-        grants_toml_text = read_share_grants_from_agent(agent_id, cli.mngr_caller)
+        grants_toml_text = read_share_grants_from_agent(
+            build_agent_address(agent_id, backend_resolver), cli.mngr_caller
+        )
     except ShareInjectionError as exc:
         logger.debug("Sharing grants read: {}", exc)
         return _unknown_grants_document(host_id, share, service_labels)
@@ -814,7 +821,7 @@ def disable_sharing(
         raise SharingError("imbue_cloud CLI is not configured.")
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
-    clear_share_materials_from_agent(agent_id, cli.mngr_caller)
+    clear_share_materials_from_agent(build_agent_address(agent_id, backend_resolver), cli.mngr_caller)
     if forward_identity is not None:
         forward_identity.mark_unshared(str(agent_id))
     try:

@@ -19,6 +19,7 @@ from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROBE_SCRIPT
@@ -149,7 +150,7 @@ class WorkspaceUpdateService(MutableModel):
         with self._callbacks_lock:
             self._on_run_finished_callbacks.append(callback)
 
-    # -- Dispatch ---------------------------------------------------------
+    # Dispatch
 
     def dispatch_update(self, agent_id: AgentId, *, target_override: str | None = None) -> UpdateDispatch:
         """Start an update run in ``agent_id``, returning what happened.
@@ -187,7 +188,8 @@ class WorkspaceUpdateService(MutableModel):
         # than gated on a possibly-stale discovery answer.
         if not self.start_workspace(agent_id):
             return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
-        probe = probe_skill(self.mngr_caller, agent_id, UPDATE_SKILL_NAME)
+        workspace_address = build_agent_address(agent_id, self.backend_resolver)
+        probe = probe_skill(self.mngr_caller, workspace_address, UPDATE_SKILL_NAME)
         match probe.support:
             case SkillSupport.UNSUPPORTED:
                 return UpdateDispatch(outcome=UpdateDispatchOutcome.UNSUPPORTED)
@@ -199,7 +201,7 @@ class WorkspaceUpdateService(MutableModel):
         # signed in refuses the create in its own words, which the spawn carries back.
         spawn = spawn_skill_chat(
             self.mngr_caller,
-            agent_id,
+            workspace_address,
             probe=probe,
             chat_name=chat_name,
             # Read here rather than carried from the press: a schedule armed days ago is not
@@ -222,7 +224,7 @@ class WorkspaceUpdateService(MutableModel):
             logger.info("Scheduled update for {} did not dispatch: {}", agent_id, dispatch.log_description)
         return dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
 
-    # -- Scheduling -------------------------------------------------------
+    # Scheduling
 
     def is_backup_configured(self, agent_id: AgentId) -> bool:
         """Whether this workspace has a canonical restic env, i.e. backups to fall back on.
@@ -263,7 +265,8 @@ class WorkspaceUpdateService(MutableModel):
         """
         command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", str(agent_id)))
         result = self.mngr_caller.call(
-            ["exec", "--agent", str(agent_id), command, "--no-start"], timeout=_GATE_PROBE_TIMEOUT_SECONDS
+            ["exec", "--agent", build_agent_address(agent_id, self.backend_resolver), command, "--no-start"],
+            timeout=_GATE_PROBE_TIMEOUT_SECONDS,
         )
         payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
         if payload is None:
@@ -276,7 +279,7 @@ class WorkspaceUpdateService(MutableModel):
         running_chats = payload.get("running_chats")
         return not (isinstance(running_chats, list) and running_chats)
 
-    # -- Closing a run out ------------------------------------------------
+    # Closing a run out
 
     def handle_verdict(self, agent_id: AgentId, verdict: UpdateVerdict, resulting_ref: str) -> None:
         """Everything the app owes a terminal verdict: re-detect, report, unschedule."""

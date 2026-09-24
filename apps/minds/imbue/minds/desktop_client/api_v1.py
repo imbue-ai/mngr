@@ -64,6 +64,7 @@ from imbue.minds.desktop_client import workspace_settings
 from imbue.minds.desktop_client import workspace_ssh
 from imbue.minds.desktop_client import workspace_ssh_tunnel
 from imbue.minds.desktop_client import workspace_version
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreateAttemptStatus
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES
@@ -217,7 +218,7 @@ _DESTROY_LOG_POLL_SECONDS: float = 1.0
 _CREATE_ATTEMPT_DISCARD_HOST_LIST_TIMEOUT_SECONDS: Final[float] = 120.0
 
 
-# -- Notification route --
+# Notification route
 
 
 @require_api_or_cookie_auth
@@ -250,7 +251,7 @@ _INSTANCE_TYPES_BY_LAUNCH_MODE = {
 }
 
 
-# -- App version route --
+# App version route
 #
 # Neither agent-scoped nor gated by a workspace verb: the latchkey baseline grants
 # ``minds-app-version-read`` to every agent, so a workspace can read its update
@@ -270,7 +271,7 @@ def _handle_app_version() -> AppVersionResponse:
     return AppVersionResponse(workspace_template_ref=default_workspace_template_ref())
 
 
-# -- Cross-workspace management routes --
+# Cross-workspace management routes
 #
 # These let an agent in one workspace act on *other* workspaces (and their
 # backups) through the hub. Every route is gated at the gateway by the
@@ -397,7 +398,7 @@ def _handle_workspace_version(agent_id: str) -> WorkspaceVersionResponse | Respo
     # warm-process MngrCaller (initialized at startup); any failure yields the
     # empty/None defaults rather than raising.
     git_version = workspace_version.read_workspace_git_version(
-        agent_id=parsed_id,
+        agent_address=build_agent_address(parsed_id, backend_resolver),
         mngr_caller=get_state().mngr_caller or get_default_mngr_caller(),
     )
     return WorkspaceVersionResponse(
@@ -930,7 +931,7 @@ def _handle_workspace_backup_export(agent_id: str, snapshot_id: str) -> Response
     )
 
 
-# -- Cross-workspace mutation routes (create / destroy / lifecycle) --
+# Cross-workspace mutation routes (create / destroy / lifecycle)
 
 
 @require_api_or_cookie_auth
@@ -1340,7 +1341,13 @@ def _apply_workspace_display_label(
     also renamed the host (a slug change), or None for a display-only rename.
     """
     returncode, _stdout, stderr = _run_mngr_blocking(
-        [get_state().mngr_binary, "label", str(agent_id), "--label", f"{WORKSPACE_DISPLAY_NAME_LABEL}={display_name}"],
+        [
+            get_state().mngr_binary,
+            "label",
+            build_agent_address(agent_id, get_state().backend_resolver),
+            "--label",
+            f"{WORKSPACE_DISPLAY_NAME_LABEL}={display_name}",
+        ],
         parent_cg,
     )
     if returncode != 0:
@@ -1406,7 +1413,7 @@ def _handle_workspace_rename(agent_id: str) -> Response:
     return _apply_workspace_display_label(parsed_id, raw_name, str(new_slug), parent_cg)
 
 
-# -- Workspace recovery routes --
+# Workspace recovery routes
 
 
 @require_api_or_cookie_auth
@@ -1585,7 +1592,7 @@ def _handle_restart_operation_status(operation_id: str) -> RestartOperationStatu
     )
 
 
-# -- Backup service verification + management routes --
+# Backup service verification + management routes
 
 
 # Plain-language names for the running operation in conflict (409) messages.
@@ -1878,6 +1885,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
             target=backup_update_module.run_backup_configure_sequence,
             kwargs={
                 "agent_id": parsed_id,
+                "agent_address": build_agent_address(parsed_id, state.backend_resolver),
                 "request": backup_request,
                 "imbue_cloud_cli": state.imbue_cloud_cli,
                 "paths": paths,
@@ -1928,6 +1936,7 @@ def _handle_backup_service_disable(agent_id: str) -> tuple[OperationHandleRespon
             target=backup_update_module.run_backup_disable_sequence,
             kwargs={
                 "agent_id": parsed_id,
+                "agent_address": build_agent_address(parsed_id, state.backend_resolver),
                 "paths": paths,
                 "parent_cg": parent_cg,
                 "registry": registry,
@@ -2156,7 +2165,7 @@ def _handle_restart_operation_logs(operation_id: str) -> Response:
     )
 
 
-# -- SSH access route --
+# SSH access route
 
 
 @require_api_or_cookie_auth
@@ -2240,10 +2249,11 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # line straight back into the target's authorized_keys -- and, because the
     # prune step only drops minds-owned grant lines, it would accumulate another
     # copy on every re-grant. The JSON envelope keeps the captured body clean.
+    target_address = build_agent_address(parsed_id, backend_resolver)
     read_argv = [
         mngr_binary,
         "exec",
-        str(parsed_id),
+        target_address,
         "cat ~/.ssh/authorized_keys 2>/dev/null || true",
         "--format",
         "json",
@@ -2285,7 +2295,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # shell. ``--format json`` here is for the failure path only (the write has no
     # output worth capturing): it puts the per-agent reason somewhere
     # ``_describe_mngr_exec_failure`` can find it, the same as the read.
-    write_argv = [mngr_binary, "exec", str(parsed_id), write_script, "--format", "json"]
+    write_argv = [mngr_binary, "exec", target_address, write_script, "--format", "json"]
     try:
         write_returncode, write_stdout, write_stderr = _run_mngr_blocking(write_argv, parent_cg)
     except (OSError, ConcurrencyGroupError) as e:
@@ -2340,7 +2350,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     )
 
 
-# -- Bug report route --
+# Bug report route
 
 
 @require_api_or_cookie_auth
@@ -2369,7 +2379,7 @@ def _handle_bug_report(agent_id: str) -> OkResponse | Response:
     return OkResponse(ok=True)
 
 
-# -- Workspace view refresh route --
+# Workspace view refresh route
 
 
 @require_api_or_cookie_auth
@@ -2400,7 +2410,7 @@ def _handle_workspace_refresh(agent_id: str) -> OkResponse:
     return OkResponse(ok=True)
 
 
-# -- Workspace metadata update route (color + account association) --
+# Workspace metadata update route (color + account association)
 
 
 @require_api_or_cookie_auth
@@ -2460,7 +2470,7 @@ def _handle_patch_workspace(agent_id: str) -> Response:
     return _json_response(applied)
 
 
-# -- Workspace operation dismissal --
+# Workspace operation dismissal
 
 
 @require_api_or_cookie_auth
@@ -2477,7 +2487,7 @@ def _handle_dismiss_destroy_operation(operation_id: str) -> EmptyResponse:
     return EmptyResponse()
 
 
-# -- CreateAttempt-row discard / dismiss routes --
+# CreateAttempt-row discard / dismiss routes
 #
 # These act on pending-create-attempt records (the interrupted / failed rows in the
 # workspace list), keyed by create attempt id. Discard is the interrupted row's
@@ -2679,7 +2689,7 @@ def _handle_dismiss_create_attempt(create_attempt_id: str) -> EmptyResponse | Re
     return EmptyResponse()
 
 
-# -- Machine sharing routes --
+# Machine sharing routes
 
 
 def _grants_document_from_request(body: MachineSharingRequest) -> SharingGrantsDocument:
@@ -2936,7 +2946,7 @@ def _handle_machine_sharing_readiness(host_id: str) -> SharingReadinessResponse:
     return _machine_sharing_readiness_core(host_id)
 
 
-# -- Desktop namespace routes (cookie-or-bearer; no agent verb) --
+# Desktop namespace routes (cookie-or-bearer; no agent verb)
 #
 # These manage install-scoped app state (provider config, host/state-container
 # lifecycle). They mint no ``minds-workspaces`` verb, so agents are blocked at
@@ -3217,7 +3227,7 @@ def _handle_stop_state_container() -> StopStateContainerResponse | Response:
     return StopStateContainerResponse(stopped=stopped)
 
 
-# -- Blueprint factory --
+# Blueprint factory
 
 
 def create_api_v1_blueprint() -> Blueprint:

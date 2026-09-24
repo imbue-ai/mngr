@@ -47,7 +47,7 @@ class _RecordingMessageSender(MngrMessageSender):
     concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
-    def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
+    def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
         self.sent_messages.append((str(chat_id), text))
 
 
@@ -111,7 +111,7 @@ def _build_authenticated_client(
     return client
 
 
-# -- handles_request_type / labels --
+# handles_request_type / labels
 
 
 def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
@@ -120,7 +120,7 @@ def test_handler_claims_workspace_request_type(tmp_path: Path) -> None:
     assert handler.kind_label() == "machine access"
 
 
-# -- apply_grant_request --
+# apply_grant_request
 
 
 def test_grant_selected_sends_override_with_target(tmp_path: Path) -> None:
@@ -255,7 +255,7 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
     assert sender.sent_messages == []
 
 
-# -- apply_deny_request --
+# apply_deny_request
 
 
 def test_deny_calls_gateway_delete_writes_response_notifies(tmp_path: Path) -> None:

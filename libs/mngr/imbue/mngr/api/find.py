@@ -16,6 +16,9 @@ from imbue.imbue_common.pure import pure
 from imbue.mngr.api.discover import DiscoveryOutcome
 from imbue.mngr.api.discover import discover_by_address
 from imbue.mngr.api.discover import discover_hosts_and_agents
+from imbue.mngr.api.discover import discover_pinned_hosts
+from imbue.mngr.api.discover import pinned_hosts_for_addresses
+from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.providers import get_local_host
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -496,6 +499,8 @@ class AgentMatch(FrozenModel):
 def _raise_for_unmatched_identifiers(
     unmatched_identifiers: Collection[AgentNameOrId],
     outcome: DiscoveryOutcome,
+    # The hosts the lookup was restricted to, when the addresses pinned them
+    pinned_hosts: Sequence[ResolvedAgentHost] | None,
 ) -> NoReturn:
     """Fail a lookup whose identifiers matched nothing, naming the reason we have.
 
@@ -548,11 +553,19 @@ def _raise_for_unmatched_identifiers(
             f"{reason} (so mngr cannot tell whether {unmatched_list} exists)",
             user_help_text=unreachable.user_help_text,
         )
+    # A pinned lookup never looked beyond the pinned hosts, so name them: the
+    # agent may exist elsewhere, and the caller's pin is what went stale.
+    pinned_suffix = (
+        ""
+        if pinned_hosts is None
+        else " on pinned host(s) "
+        + ", ".join(f"{pinned_host.host_id}.{pinned_host.provider_name}" for pinned_host in pinned_hosts)
+    )
     # Only an all-ids miss is a gone target; one user-typed name in the batch
     # makes a typo as good an explanation, so the whole failure stays ordinary.
     if all(isinstance(identifier, AgentId) for identifier in unmatched_identifiers):
-        raise AgentIdNotFoundError(f"No agent(s) found matching: {unmatched_list}")
-    raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}")
+        raise AgentIdNotFoundError(f"No agent(s) found matching: {unmatched_list}{pinned_suffix}")
+    raise AgentNotFoundError(f"No agent(s) found matching: {unmatched_list}{pinned_suffix}")
 
 
 def _find_agents_by_identifiers_or_state(
@@ -562,6 +575,7 @@ def _find_agents_by_identifiers_or_state(
     mngr_ctx: MngrContext,
     include_destroyed: bool = False,
     provider_names: tuple[str, ...] | None = None,
+    pinned_hosts: Sequence[ResolvedAgentHost] | None = None,
 ) -> list[AgentMatch]:
     """Find agents matching identifiers or a target lifecycle state.
 
@@ -569,19 +583,25 @@ def _find_agents_by_identifiers_or_state(
     (or all agents if target_state is None).
     When filter_all is False, returns agents matching the given identifiers.
 
-    When provider_names is set, only those providers are queried during discovery.
+    When pinned_hosts is set, only those hosts are read, and no provider runs
+    discovery. Otherwise, when provider_names is set, only those providers are
+    queried during discovery.
 
     Raises AgentNotFoundError if any identifier does not match an agent, or
     ProviderUnavailableError if a provider that could have hosted it was
     unreachable (see :func:`_raise_for_unmatched_identifiers`).
     """
-    outcome = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=provider_names,
-        agent_identifiers=tuple(str(i) for i in agent_identifiers) if not filter_all and agent_identifiers else None,
-        include_destroyed=include_destroyed,
-        reset_caches=False,
-    )
+    if pinned_hosts is not None:
+        outcome = discover_pinned_hosts(mngr_ctx, pinned_hosts, reset_caches=False)
+    else:
+        is_identifier_lookup = not filter_all and bool(agent_identifiers)
+        outcome = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=provider_names,
+            agent_identifiers=tuple(str(i) for i in agent_identifiers) if is_identifier_lookup else None,
+            include_destroyed=include_destroyed,
+            reset_caches=False,
+        )
     agents_by_host = outcome.agents_by_host
 
     candidates: list[AgentMatch] = []
@@ -620,7 +640,7 @@ def _find_agents_by_identifiers_or_state(
     if agent_identifiers:
         unmatched_identifiers = set(agent_identifiers) - matched_identifiers
         if unmatched_identifiers:
-            _raise_for_unmatched_identifiers(unmatched_identifiers, outcome)
+            _raise_for_unmatched_identifiers(unmatched_identifiers, outcome, pinned_hosts)
 
     if not filter_all or target_state is None:
         return candidates
@@ -662,7 +682,7 @@ def group_agents_by_host(agents: Sequence[AgentMatch]) -> dict[str, list[AgentMa
     return agents_by_host
 
 
-# === Address-driven find ===
+# Address-driven find
 
 
 @pure
@@ -702,14 +722,17 @@ def find_all_agents(
 ) -> list[AgentMatch]:
     """Find agents matching a sequence of :class:`AgentAddress` constraints.
 
-    When all addresses pin a provider, only those providers are queried during
-    discovery. Identifiers without host/provider components match by name/ID
-    alone; identifiers with host/provider components are post-filtered to
-    keep only matches on a satisfying host.
+    When every address pins a host id and a provider, only those hosts are
+    read and no discovery runs, so an agent that is not on its pinned host is
+    not found. Otherwise, when all addresses pin a provider, only those
+    providers are queried during discovery. Identifiers without host/provider
+    components match by name/ID alone; identifiers with host/provider
+    components are post-filtered to keep only matches on a satisfying host.
     """
     agent_identifiers = [addr.agent for addr in addresses]
     provider_filter = _collect_required_provider_names(addresses)
     provider_names = tuple(str(p) for p in provider_filter) if provider_filter is not None else None
+    pinned_hosts = None if filter_all or include_destroyed else pinned_hosts_for_addresses(addresses)
 
     matches = _find_agents_by_identifiers_or_state(
         agent_identifiers=agent_identifiers,
@@ -718,6 +741,7 @@ def find_all_agents(
         mngr_ctx=mngr_ctx,
         include_destroyed=include_destroyed,
         provider_names=provider_names,
+        pinned_hosts=pinned_hosts,
     )
 
     return _post_filter_matches_by_addresses(addresses, matches)
@@ -779,7 +803,8 @@ def find_one_agent_and_agents_by_host(
 ) -> tuple[DiscoveredHost, DiscoveredAgent, Mapping[DiscoveredHost, Sequence[DiscoveredAgent]]]:
     """Find an agent by :class:`AgentAddress` and return its refs plus the full discovery result.
 
-    Performs discovery (skipping irrelevant providers) and matches the
+    Performs discovery (skipping irrelevant providers, or every host but the
+    pinned one -- see :func:`discover_by_address`) and matches the
     address's agent identifier against the discovered agents (filtered by
     the address's host constraint if any). Returns the matching refs and
     the unfiltered ``agents_by_host`` mapping so callers that need the
@@ -797,22 +822,29 @@ def find_one_agent_and_agents_by_host(
     agent cannot be resolved (see :func:`filter_one_agent`), or
     :class:`ProviderUnavailableError` in place of either when a provider that
     could have held the agent was unreachable (see
-    :func:`_raise_for_unmatched_identifiers`).
+    :func:`_raise_for_unmatched_identifiers`). An address that pins a host id
+    and a provider, whose host exists but lacks the agent, instead fails the way
+    :func:`find_all_agents` does: :class:`AgentIdNotFoundError` for an id,
+    :class:`AgentNotFoundError` for a name, naming the pinned host.
     """
     outcome = discover_by_address(address, mngr_ctx, include_destroyed=False)
     agents_by_host = outcome.agents_by_host
+    pinned_hosts = pinned_hosts_for_addresses((address,))
+    is_unmatched = not _filter_all_agents(address.agent, agents_by_host)
     # An agent on a provider discovery could not reach is absent from the
     # snapshot in exactly the way a deleted one is, so neither "not found" nor
     # "no hosts matching" is honest until every provider has answered. Checked
     # on nothing-matched only: an ambiguous name is a complete answer, and a
     # backend that happens to be down does not make it less complete.
-    if outcome.unavailable_providers and not _filter_all_agents(address.agent, agents_by_host):
-        _raise_for_unmatched_identifiers((address.agent,), outcome)
+    if outcome.unavailable_providers and is_unmatched:
+        _raise_for_unmatched_identifiers((address.agent,), outcome, pinned_hosts)
     if not agents_by_host and address.host is not None:
         # The same id-vs-name split filter_one_agent makes, applied to the host.
         if isinstance(address.host.host, HostId):
             raise NoMatchingHostsError(f"No hosts found matching {address.host}")
         raise HostNameNotFoundError(f"No hosts found matching {address.host}")
+    if pinned_hosts is not None and is_unmatched:
+        _raise_for_unmatched_identifiers((address.agent,), outcome, pinned_hosts)
 
     host_ref, agent_ref = filter_one_agent(address.agent, resolved_host=None, agents_by_host=agents_by_host)
     return host_ref, agent_ref, agents_by_host

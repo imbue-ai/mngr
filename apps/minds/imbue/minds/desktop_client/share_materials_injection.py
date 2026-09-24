@@ -31,7 +31,6 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.utils.mngr_caller import MngrCaller
-from imbue.mngr.primitives import AgentId
 
 _SHARE_ENV_FILE: Final[str] = "data/.secrets/share.env"
 _SHARE_GRANTS_FILE: Final[str] = "data/.secrets/share_grants.toml"
@@ -161,7 +160,7 @@ def _locked_grants_write_clause(grants_toml_text: str) -> str:
 
 
 def provision_share_files_in_agent(
-    agent_id: AgentId,
+    agent_address: str,
     grants_toml_text: str,
     # None means "grants only" (the grants-only update path); the running
     # gateway re-reads grants per request, so share.env is untouched and the
@@ -180,11 +179,11 @@ def provision_share_files_in_agent(
     if share_env_text is not None:
         clauses.append(_atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
     result = mngr_caller.call(
-        ["exec", str(agent_id), " && ".join(clauses)],
+        ["exec", agent_address, " && ".join(clauses)],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        raise ShareInjectionError(f"Failed to write share files into agent {agent_id}: {result.stderr.strip()}")
+        raise ShareInjectionError(f"Failed to write share files into agent {agent_address}: {result.stderr.strip()}")
 
 
 _SHARE_GATEWAY_SERVICE_DIR: Final[str] = "system/services/share_gateway"
@@ -243,7 +242,7 @@ class ShareAgentProbe(FrozenModel):
     )
 
 
-def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> ShareAgentProbe:
+def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> ShareAgentProbe:
     """Read the workspace's share state (gateway, share.env, grants) in one exec.
 
     Conservative on exec failure: everything reports absent, so the caller
@@ -256,11 +255,11 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
     be mistaken for an absent one.
     """
     result = mngr_caller.call(
-        ["exec", str(agent_id), _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
+        ["exec", agent_address, _PROBE_SHARE_STATE_SCRIPT, "--no-start", "--format", "json"],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        logger.debug("Share state probe failed for agent {}: {}", agent_id, result.stderr.strip())
+        logger.debug("Share state probe failed for agent {}: {}", agent_address, result.stderr.strip())
         return ShareAgentProbe(has_gateway=False, has_share_env=False, grants_toml_text=None)
     stdout = extract_exec_stdout(result.stdout)
     if stdout is None:
@@ -272,7 +271,7 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
                 value_by_prefix[prefix] = line[len(prefix) :].strip()
     grants_value = value_by_prefix.get(_PROBE_GRANTS_B64_PREFIX, _PROBE_ABSENT_VALUE)
     if grants_value == _PROBE_UNREADABLE_VALUE:
-        raise ShareInjectionError(f"The share grants document in agent {agent_id} exists but could not be read")
+        raise ShareInjectionError(f"The share grants document in agent {agent_address} exists but could not be read")
     if grants_value == _PROBE_ABSENT_VALUE or not grants_value:
         # An empty value is an empty (whitespace-free) document: the checked
         # read means a failed one reports UNREADABLE above, and an empty file
@@ -282,7 +281,9 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
         try:
             grants_toml_text = base64.b64decode(grants_value).decode("utf-8")
         except (binascii.Error, UnicodeDecodeError) as exc:
-            raise ShareInjectionError(f"Could not decode the share grants read from agent {agent_id}: {exc}") from exc
+            raise ShareInjectionError(
+                f"Could not decode the share grants read from agent {agent_address}: {exc}"
+            ) from exc
     return ShareAgentProbe(
         has_gateway=value_by_prefix.get(_PROBE_GATEWAY_PREFIX) == "1",
         has_share_env=value_by_prefix.get(_PROBE_SHARE_ENV_PREFIX) == "1",
@@ -290,7 +291,7 @@ def probe_share_state_in_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> Sh
     )
 
 
-def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> None:
+def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller) -> None:
     """Remove share.env + the grants file; the share-gateway tears the stack down.
 
     Best-effort: a failure leaves stale materials (the connector-side relay
@@ -301,17 +302,17 @@ def clear_share_materials_from_agent(agent_id: AgentId, mngr_caller: MngrCaller)
     result = mngr_caller.call(
         [
             "exec",
-            str(agent_id),
+            agent_address,
             f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE}",
             "--no-start",
         ],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        logger.warning("Failed to clear share materials from agent {}: {}", agent_id, result.stderr.strip())
+        logger.warning("Failed to clear share materials from agent {}: {}", agent_address, result.stderr.strip())
 
 
-def read_share_grants_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> str | None:
+def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller) -> str | None:
     """Read the grants document back from the agent; None when absent.
 
     The exec rides ``--format json`` and the document is unwrapped from the
@@ -327,14 +328,14 @@ def read_share_grants_from_agent(agent_id: AgentId, mngr_caller: MngrCaller) -> 
     the absent-file case into rc 0 with empty stdout).
     """
     result = mngr_caller.call(
-        ["exec", str(agent_id), f"cat {_SHARE_GRANTS_FILE} 2>/dev/null || true", "--no-start", "--format", "json"],
+        ["exec", agent_address, f"cat {_SHARE_GRANTS_FILE} 2>/dev/null || true", "--no-start", "--format", "json"],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
         raise ShareInjectionError(
-            f"Could not read share grants from agent {agent_id}: {result.stderr.strip() or 'exec failed'}"
+            f"Could not read share grants from agent {agent_address}: {result.stderr.strip() or 'exec failed'}"
         )
     grants_text = extract_exec_stdout(result.stdout)
     if grants_text is None:
-        raise ShareInjectionError(f"Could not read share grants from agent {agent_id}: unrecognized exec output")
+        raise ShareInjectionError(f"Could not read share grants from agent {agent_address}: unrecognized exec output")
     return grants_text if grants_text.strip() else None

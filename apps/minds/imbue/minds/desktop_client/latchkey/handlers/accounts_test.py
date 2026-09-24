@@ -44,7 +44,7 @@ class _RecordingMessageSender(MngrMessageSender):
     concurrency_group: ConcurrencyGroup | None = None
     sent_messages: list[tuple[str, str]] = Field(default_factory=list)
 
-    def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
+    def send(self, chat_id: AgentId, text: str, exec_agent_address: str) -> None:
         self.sent_messages.append((str(chat_id), text))
 
 

@@ -32,6 +32,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -691,7 +692,8 @@ def _handle_help_assist() -> Response:
     # half-created chat behind. The probe is a quick filesystem check inside the
     # container; on an unsupported/unreachable workspace we return a clear error the
     # modal turns into a "report a bug instead" screen rather than a dead spinner.
-    probe = probe_skill(mngr_caller, workspace_agent_id, ASSIST_SKILL_NAME)
+    workspace_address = build_agent_address(workspace_agent_id, state.backend_resolver)
+    probe = probe_skill(mngr_caller, workspace_address, ASSIST_SKILL_NAME)
     if probe.support is SkillSupport.UNSUPPORTED:
         return make_response(
             status_code=409,
@@ -714,7 +716,7 @@ def _handle_help_assist() -> Response:
     # signed in refuses the create in its own words, which the spawn carries back.
     spawn = spawn_skill_chat(
         mngr_caller,
-        workspace_agent_id,
+        workspace_address,
         chat_name=generate_chat_name(ASSIST_SKILL_NAME),
         message=build_assist_chat_message(description),
         probe=probe,
@@ -2139,6 +2141,7 @@ def _build_workspace_update_machinery(
         tracker=system_interface_health_tracker,
         store=state_store,
         mngr_caller=mngr_caller,
+        backend_resolver=backend_resolver,
         concurrency_group=root_concurrency_group,
         dispatch_restart=dispatch_restart,
     )

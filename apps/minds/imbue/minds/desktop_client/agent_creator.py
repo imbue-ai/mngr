@@ -3022,6 +3022,8 @@ class AgentCreator(MutableModel):
                     _log_backup_attempt(agent_id, attempt.retry_state)
                     configure_backups_for_host(
                         agent_id=agent_id,
+                        # Discovery has not seen a workspace this new, so there is no host to pin yet.
+                        agent_address=str(agent_id),
                         request=backup_request,
                         imbue_cloud_cli=self.imbue_cloud_cli,
                         paths=self.paths,

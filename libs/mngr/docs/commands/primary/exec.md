@@ -19,6 +19,9 @@ code is 0 if all commands succeeded, 1 if any failed.
 
 Use '-' in place of agent names to read them from stdin, one per line.
 
+Addressing an agent as ID@HOST_ID.PROVIDER reads only that host instead of
+discovering every host, and fails if the agent is not there.
+
 Supports custom format templates via --format. Available fields: agent, stdout, stderr, success.
 
 Alias: x

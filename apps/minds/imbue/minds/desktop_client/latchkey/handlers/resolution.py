@@ -13,6 +13,7 @@ deny DELETEs it), so that stays with each handler.
 
 from pathlib import Path
 
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
@@ -58,7 +59,7 @@ def resolve_request(
     mngr_message_sender.send(
         agent_id,
         format_resolution_notice(message, request_event_id, status),
-        exec_agent_id=backend_resolver.resolve_agent_id(agent_id),
+        exec_agent_address=build_agent_address(backend_resolver.resolve_agent_id(agent_id), backend_resolver),
     )
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.notify_change()

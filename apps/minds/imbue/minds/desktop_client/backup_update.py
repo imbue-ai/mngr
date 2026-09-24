@@ -40,6 +40,7 @@ from imbue.minds.build_info import resolve_release_id
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client import backup_status
 from imbue.minds.desktop_client import restic_cli
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backup_env_store import has_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
@@ -194,6 +195,7 @@ def _run_update_phases(
     registry.append_log(agent_id, "Checking for running chats and in-progress backups...")
     if not _wait_for_quiet_workspace(
         agent_id=agent_id,
+        agent_address=build_agent_address(agent_id, resolver),
         registry=registry,
         parent_cg=parent_cg,
         is_stop_chats=is_stop_chats,
@@ -296,8 +298,9 @@ def _apply_update_and_verify(
         )
         + (("--stop-chats",) if is_stop_chats else ()),
     )
+    agent_address = build_agent_address(agent_id, resolver)
     apply_result = run_mngr_exec_on_agent(
-        agent_id,
+        agent_address,
         apply_command,
         parent_cg=parent_cg,
         timeout_seconds=_APPLY_EXEC_TIMEOUT_SECONDS,
@@ -327,7 +330,7 @@ def _apply_update_and_verify(
     # Re-inject the canonical env (rotates a drifted workspace copy).
     if has_canonical_env(paths, agent_id):
         registry.append_log(agent_id, "Re-injecting backup credentials...")
-        reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+        reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
 
     # Verify convergence with a fresh check.
     registry.append_log(agent_id, "Verifying the backup service...")
@@ -346,6 +349,7 @@ def _apply_update_and_verify(
 def _wait_for_quiet_workspace(
     *,
     agent_id: AgentId,
+    agent_address: str,
     registry: WorkspaceOperationRegistryInterface,
     parent_cg: ConcurrencyGroup | None,
     is_stop_chats: bool,
@@ -362,7 +366,7 @@ def _wait_for_quiet_workspace(
     is_gate_error_logged = False
     while not registry.is_cancel_requested(agent_id):
         probe_result = run_mngr_exec_on_agent(
-            agent_id, probe_command, parent_cg=parent_cg, timeout_seconds=_GATE_PROBE_TIMEOUT_SECONDS
+            agent_address, probe_command, parent_cg=parent_cg, timeout_seconds=_GATE_PROBE_TIMEOUT_SECONDS
         )
         payload = extract_marker_json(probe_result.stdout, GATE_RESULT_MARKER)
         if payload is None:
@@ -585,8 +589,9 @@ def _run_restore_phases(
     # workspace copy is archived aside, never destroyed. Also proves, before
     # anything mutates, that the snapshot the user picked lives in the same
     # repository the script will read: both came from the canonical env.
+    agent_address = build_agent_address(agent_id, resolver)
     registry.append_log(agent_id, "Making sure the machine has the right backup credentials...")
-    reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+    reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
 
     # Phase 1: gate + wait (cancellable; nothing has been mutated yet). Kept
     # even for a forced restore: the probe tolerates a broken `mngr list`
@@ -596,6 +601,7 @@ def _run_restore_phases(
     registry.append_log(agent_id, "Checking for running chats and in-progress backups...")
     if not _wait_for_quiet_workspace(
         agent_id=agent_id,
+        agent_address=agent_address,
         registry=registry,
         parent_cg=parent_cg,
         is_stop_chats=is_stop_chats,
@@ -640,7 +646,7 @@ def _run_restore_phases(
         + (("--skip-safety-snapshot",) if is_skip_safety_snapshot else ()),
     )
     restore_result = run_mngr_exec_on_agent(
-        agent_id,
+        agent_address,
         restore_command,
         parent_cg=parent_cg,
         timeout_seconds=_RESTORE_EXEC_TIMEOUT_SECONDS,
@@ -656,7 +662,7 @@ def _run_restore_phases(
         detail = (restore_result.stderr or restore_result.stdout).strip()[-800:]
         registry.append_log(agent_id, "The restore did not report a result; restarting the machine services...")
         resume_result = run_mngr_exec_on_agent(
-            agent_id,
+            agent_address,
             "supervisorctl restart all",
             parent_cg=parent_cg,
             timeout_seconds=_SERVICE_RESUME_TIMEOUT_SECONDS,
@@ -691,7 +697,7 @@ def _run_restore_phases(
     # env had drifted before the restore.
     if has_canonical_env(paths, agent_id):
         registry.append_log(agent_id, "Re-injecting backup credentials...")
-        reinject_canonical_env(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+        reinject_canonical_env(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
 
     # Phase 4 (default-on): converge the backup-service code afterwards. The
     # restored snapshot may carry arbitrarily old backup-service code; the
@@ -720,6 +726,8 @@ def _run_restore_phases(
 def run_backup_configure_sequence(
     *,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     request: BackupSetupRequest,
     imbue_cloud_cli: ImbueCloudCli | None,
     paths: InstallationPaths,
@@ -737,6 +745,7 @@ def run_backup_configure_sequence(
         if is_destination_change:
             change_backup_destination_for_host(
                 agent_id=agent_id,
+                agent_address=agent_address,
                 request=request,
                 imbue_cloud_cli=imbue_cloud_cli,
                 paths=paths,
@@ -746,6 +755,7 @@ def run_backup_configure_sequence(
         else:
             configure_backups_for_host(
                 agent_id=agent_id,
+                agent_address=agent_address,
                 request=request,
                 imbue_cloud_cli=imbue_cloud_cli,
                 paths=paths,
@@ -762,6 +772,8 @@ def run_backup_configure_sequence(
 def run_backup_disable_sequence(
     *,
     agent_id: AgentId,
+    # How ``mngr`` reaches the workspace (see ``build_agent_address``)
+    agent_address: str,
     paths: InstallationPaths,
     parent_cg: ConcurrencyGroup | None,
     registry: WorkspaceOperationRegistryInterface,
@@ -773,7 +785,7 @@ def run_backup_disable_sequence(
     operation; this ends it.
     """
     try:
-        disable_backups_for_host(agent_id=agent_id, paths=paths, parent_cg=parent_cg)
+        disable_backups_for_host(agent_id=agent_id, agent_address=agent_address, paths=paths, parent_cg=parent_cg)
     except BackupProvisioningError as exc:
         logger.warning("Backup disable for {} failed: {}", agent_id, exc)
         registry.fail(agent_id, str(exc))

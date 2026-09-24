@@ -27,6 +27,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.agent_address import build_agent_address
+from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
@@ -121,7 +123,7 @@ class UpdateRunProbe(FrozenModel):
         return self.is_apply_in_progress or self.agent_liveness is not UpdateAgentLiveness.GONE
 
 
-def build_update_run_probe_args(workspace_agent_id: AgentId) -> list[str]:
+def build_update_run_probe_args(workspace_address: str) -> list[str]:
     """Build the ``mngr`` CLI args for the combined run-status + agent probe.
 
     One exec for both facts because this runs on the stuck-edge callback thread. The
@@ -135,7 +137,7 @@ def build_update_run_probe_args(workspace_agent_id: AgentId) -> list[str]:
         f"{inner_list} 2>/dev/null || echo {AGENTS_FAILED_SENTINEL}; "
         f"echo {AGENTS_END_SENTINEL}"
     )
-    return ["exec", "--agent", str(workspace_agent_id), script, "--no-start"]
+    return ["exec", "--agent", workspace_address, script, "--no-start"]
 
 
 def _section(lines: list[str], begin: str, end: str) -> list[str] | None:
@@ -222,6 +224,7 @@ class UpdateApplyWindowManager(MutableModel):
     tracker: SystemInterfaceHealthTracker = Field(frozen=True, description="Whose probe grace the window arms.")
     store: WorkspaceUpdateStateStore = Field(frozen=True, description="Where the applying/stalled activity lands.")
     mngr_caller: MngrCaller = Field(frozen=True, description="Runs the run-status + agent probe.")
+    backend_resolver: BackendResolverInterface = Field(frozen=True, description="Places the probed machine's host.")
     concurrency_group: ConcurrencyGroup = Field(frozen=True, description="Parent group for the expiry pass.")
     dispatch_restart: Callable[[AgentId], None] = Field(
         frozen=True,
@@ -326,7 +329,10 @@ class UpdateApplyWindowManager(MutableModel):
     def probe_run(self, agent_id: AgentId) -> UpdateRunProbe:
         """Ask the workspace whether an update is still happening in it."""
         chat_agent_name = self.store.get(agent_id).chat_agent_name
-        result = self.mngr_caller.call(build_update_run_probe_args(agent_id), timeout=_RUN_PROBE_TIMEOUT_SECONDS)
+        result = self.mngr_caller.call(
+            build_update_run_probe_args(build_agent_address(agent_id, self.backend_resolver)),
+            timeout=_RUN_PROBE_TIMEOUT_SECONDS,
+        )
         probe = parse_update_run_probe(result.stdout, chat_agent_name)
         if not probe.is_probe_answered:
             logger.debug(

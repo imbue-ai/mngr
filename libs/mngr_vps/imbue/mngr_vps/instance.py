@@ -1727,6 +1727,23 @@ class VpsProvider(BaseProviderInstance):
 
         return result
 
+    def discover_host_and_agents(
+        self,
+        cg: ConcurrencyGroup,
+        host_id: HostId,
+    ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        """Pick one host out of a full ``discover_hosts_and_agents`` sweep.
+
+        ``discover_hosts`` applies none of the visibility and state rules above (and the
+        offline subclass adds stopped instances only here), so the base's single-host read
+        would disagree with discovery. Every VPS is still read, so a pinned address is no
+        faster on this provider.
+        """
+        for host_ref, agent_refs in self.discover_hosts_and_agents(cg=cg, include_destroyed=False).items():
+            if host_ref.host_id == host_id:
+                return host_ref, agent_refs
+        raise HostNotFoundError(self.name, host_id)
+
     def _get_effective_auto_shutdown_seconds(self) -> int | None:
         """Return the auto-shutdown TTL (in seconds) to inject into cloud-init.
 

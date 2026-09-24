@@ -178,7 +178,7 @@ def resolve_workspace_host_state(
 
 
 def build_diagnostics_argv(
-    workspace_agent_id: AgentId,
+    workspace_address: str,
     include_logs: bool,
     include_transcript: bool,
     timeout_seconds: float = WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS,
@@ -202,7 +202,7 @@ def build_diagnostics_argv(
     return [
         MNGR_BINARY,
         "exec",
-        str(workspace_agent_id),
+        workspace_address,
         command,
         "--format",
         "json",
@@ -214,7 +214,7 @@ def build_diagnostics_argv(
 
 
 def build_latchkey_logs_argv(
-    workspace_agent_id: AgentId,
+    workspace_address: str,
     timeout_seconds: float = WORKSPACE_DIAGNOSTICS_TIMEOUT_SECONDS,
 ) -> list[str]:
     """The ``mngr exec --outer`` argv that tails the workspace outer host's gateway logs.
@@ -240,7 +240,7 @@ def build_latchkey_logs_argv(
     return [
         MNGR_BINARY,
         "exec",
-        str(workspace_agent_id),
+        workspace_address,
         command,
         "--outer",
         "--missing-outer",
@@ -255,7 +255,7 @@ def build_latchkey_logs_argv(
 
 
 def refresh_remote_gateway_log_mirror(
-    workspace_agent_id: AgentId,
+    workspace_address: str,
     *,
     latchkey_plugin_data_dir: Path,
     concurrency_group: ConcurrencyGroup,
@@ -274,13 +274,13 @@ def refresh_remote_gateway_log_mirror(
     mirror is best-effort diagnostics.
     """
     mirror_path = latchkey_plugin_data_dir / REMOTE_GATEWAY_TAIL_MIRROR_FILENAME
-    argv = build_latchkey_logs_argv(workspace_agent_id, timeout_seconds)
+    argv = build_latchkey_logs_argv(workspace_address, timeout_seconds)
     try:
         stdout, _returncode, _stderr = run_mngr_capturing(
             concurrency_group, argv, env, timeout_seconds=timeout_seconds
         )
     except MngrCommandError as exc:
-        logger.info("The latchkey gateway tail for {} could not be refreshed: {}", workspace_agent_id, exc)
+        logger.info("The latchkey gateway tail for {} could not be refreshed: {}", workspace_address, exc)
         return
     # ``--missing-outer ignore`` leaves the envelope's outer_results empty when
     # the workspace has no reachable outer host: nothing was observed.
@@ -299,7 +299,7 @@ def refresh_remote_gateway_log_mirror(
 
 
 def collect_workspace_diagnostics(
-    workspace_agent_id: AgentId,
+    workspace_address: str,
     *,
     include_logs: bool,
     include_transcript: bool,
@@ -338,7 +338,7 @@ def collect_workspace_diagnostics(
     to the returned note.
     """
     if host_state is not None and host_state in _NOT_RUNNING_HOST_STATES:
-        logger.info("Skipping bug-report diagnostics for {}: its host is {}", workspace_agent_id, host_state.value)
+        logger.info("Skipping bug-report diagnostics for {}: its host is {}", workspace_address, host_state.value)
         return WorkspaceCollectionResult(
             note=f"the workspace host is {host_state.value.lower()}, so its logs and chats were not collected"
         )
@@ -346,23 +346,23 @@ def collect_workspace_diagnostics(
     env = dict(os.environ)
     if latchkey_plugin_data_dir is not None:
         refresh_remote_gateway_log_mirror(
-            workspace_agent_id,
+            workspace_address,
             latchkey_plugin_data_dir=latchkey_plugin_data_dir,
             concurrency_group=concurrency_group,
             env=env,
             timeout_seconds=timeout_seconds,
         )
 
-    argv = build_diagnostics_argv(workspace_agent_id, include_logs, include_transcript, timeout_seconds)
+    argv = build_diagnostics_argv(workspace_address, include_logs, include_transcript, timeout_seconds)
     try:
         stdout, _returncode, stderr = run_mngr_capturing(concurrency_group, argv, env, timeout_seconds=timeout_seconds)
     except MngrCommandTimeoutError:
         # Ordered before MngrCommandError, which it subclasses. A timeout
         # observed nothing, which is worth telling apart from a run that failed.
-        logger.warning("Bug-report diagnostics for {} timed out", workspace_agent_id)
+        logger.warning("Bug-report diagnostics for {} timed out", workspace_address)
         return WorkspaceCollectionResult(note=f"workspace collection timed out after {int(timeout_seconds)}s")
     except MngrCommandError as exc:
-        logger.warning("Bug-report diagnostics for {} could not run: {}", workspace_agent_id, exc)
+        logger.warning("Bug-report diagnostics for {} could not run: {}", workspace_address, exc)
         return WorkspaceCollectionResult(note=f"workspace collection could not run: {exc}")
 
     encoded = extract_exec_stdout(stdout)
@@ -373,7 +373,7 @@ def collect_workspace_diagnostics(
         # envelope itself -- the remote command's stderr, or the failed-agent
         # error of an exec that never landed -- with the process stderr tail as
         # the fallback for an envelope that could not even be parsed.
-        logger.warning("Bug-report diagnostics for {} failed inside the workspace", workspace_agent_id)
+        logger.warning("Bug-report diagnostics for {} failed inside the workspace", workspace_address)
         detail = (extract_exec_failure_detail(stdout) or stderr.strip())[-_NOTE_STDERR_MAX_CHARS:] or "no error output"
         return WorkspaceCollectionResult(note=f"workspace collection failed: {detail}")
     encoded = encoded.strip()
@@ -390,12 +390,12 @@ def collect_workspace_diagnostics(
         staging_dir.mkdir(parents=True, exist_ok=True)
         staged_path.write_bytes(zip_bytes)
     except ValueError:
-        logger.warning("The workspace {} sent an unreadable payload", workspace_agent_id)
+        logger.warning("The workspace {} sent an unreadable payload", workspace_address)
         return WorkspaceCollectionResult(
             note="the workspace sent an unreadable payload (its template may predate this app)"
         )
     except OSError as exc:
-        logger.warning("Could not stage the bug-report workspace zip for {}: {}", workspace_agent_id, exc)
+        logger.warning("Could not stage the bug-report workspace zip for {}: {}", workspace_address, exc)
         return WorkspaceCollectionResult(note="the workspace archive could not be written to disk")
-    logger.info("Bug-report diagnostics for {}: staged {}", workspace_agent_id, staged_path)
+    logger.info("Bug-report diagnostics for {}: staged {}", workspace_address, staged_path)
     return WorkspaceCollectionResult(staged_zip_path=staged_path)

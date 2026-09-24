@@ -1,8 +1,10 @@
 import concurrent.futures
 import time
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 from concurrent.futures import Future
+from contextlib import contextmanager
 from threading import Lock
 from typing import Final
 
@@ -15,9 +17,12 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
+from imbue.mngr.api.discovery_events import ResolvedAgentHost
 from imbue.mngr.api.discovery_events import resolve_provider_names_for_identifiers
+from imbue.mngr.api.providers import SkippedProviderConstruction
 from imbue.mngr.api.providers import get_all_provider_instances_and_skipped
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import ProviderDiscoveryError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.primitives import AgentAddress
@@ -120,6 +125,18 @@ def warn_on_duplicate_host_names(
             )
 
 
+@contextmanager
+def _attributing_failures_to_provider(provider_name: ProviderInstanceName) -> Iterator[None]:
+    """Wrap any failure inside one provider's discovery in ``ProviderDiscoveryError``, naming that provider."""
+    try:
+        yield
+    except ProviderUnavailableError:
+        # Re-raise as-is so the broad except below doesn't wrap it.
+        raise
+    except Exception as exc:
+        raise ProviderDiscoveryError(provider_name, exc) from exc
+
+
 def _discover_provider_hosts_and_agents(
     provider: BaseProviderInstance,
     agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]],
@@ -143,13 +160,8 @@ def _discover_provider_hosts_and_agents(
     # unusually-slow provider at WARNING by default).
     started_at = time.monotonic()
     with log_span("Discovering hosts and agents from provider {}", provider.name):
-        try:
+        with _attributing_failures_to_provider(provider.name):
             provider_results = provider.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        except ProviderUnavailableError:
-            # Re-raise as-is so the broad except below doesn't wrap it.
-            raise
-        except Exception as exc:
-            raise ProviderDiscoveryError(provider.name, exc) from exc
     elapsed_seconds = time.monotonic() - started_at
     if elapsed_seconds > _SLOW_PROVIDER_DISCOVERY_WARN_SECONDS:
         logger.warning("Provider {} discovery was slow: took {:.1f}s", provider.name, elapsed_seconds)
@@ -183,18 +195,11 @@ def _wait_for_provider_discovery(provider_name_by_future: Mapping["Future[None]"
             )
 
 
-def _run_discovery(
-    mngr_ctx: MngrContext,
-    provider_names: tuple[str, ...] | None,
-    include_destroyed: bool,
-    reset_caches: bool,
-) -> DiscoveryOutcome:
-    """Run the actual discovery against providers. Shared implementation for discover_hosts_and_agents."""
-    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
-    results_lock = Lock()
-
-    providers, skipped_providers = get_all_provider_instances_and_skipped(mngr_ctx, provider_names)
-    logger.trace("Found {} provider instances ({} skipped)", len(providers), len(skipped_providers))
+def _record_provider_results(
+    providers: Sequence[BaseProviderInstance],
+    skipped_providers: Sequence[SkippedProviderConstruction],
+) -> dict[ProviderInstanceName, BaseProviderInstance | Unreachable]:
+    """Map each loaded provider to its instance, and each unreachable one to why it could not be reached."""
     # One entry per provider: the instance that answered, or why it could not be
     # reached. An unreachable provider is queried by nobody, so it contributes no
     # hosts and no agents -- indistinguishable, from the hosts alone, from a
@@ -218,6 +223,22 @@ def _run_discovery(
             skipped.provider_name,
             skipped.error_message,
         )
+    return results_by_provider
+
+
+def _run_discovery(
+    mngr_ctx: MngrContext,
+    provider_names: tuple[str, ...] | None,
+    include_destroyed: bool,
+    reset_caches: bool,
+) -> DiscoveryOutcome:
+    """Run the actual discovery against providers. Shared implementation for discover_hosts_and_agents."""
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+    results_lock = Lock()
+
+    providers, skipped_providers = get_all_provider_instances_and_skipped(mngr_ctx, provider_names)
+    logger.trace("Found {} provider instances ({} skipped)", len(providers), len(skipped_providers))
+    results_by_provider = _record_provider_results(providers, skipped_providers)
 
     if reset_caches:
         logger.debug("Resetting provider caches before discovery")
@@ -322,6 +343,84 @@ def discover_hosts_and_agents(
         return _run_discovery(mngr_ctx, None, include_destroyed, reset_caches)
 
 
+@pure
+def pinned_hosts_for_addresses(addresses: Sequence[AgentAddress]) -> tuple[ResolvedAgentHost, ...] | None:
+    """The distinct hosts named by ``addresses``, when every one pins a host id and a provider; otherwise None.
+
+    A host *name* does not pin: only some providers keep names unique, so a name
+    still has to be matched against the whole provider's listing.
+    """
+    pinned_hosts: dict[tuple[HostId, ProviderInstanceName], ResolvedAgentHost] = {}
+    for address in addresses:
+        host_address = address.host
+        if host_address is None or host_address.provider is None or not isinstance(host_address.host, HostId):
+            return None
+        pinned_hosts[(host_address.host, host_address.provider)] = ResolvedAgentHost(
+            host_id=host_address.host, provider_name=host_address.provider
+        )
+    return tuple(pinned_hosts.values()) or None
+
+
+def _read_pinned_host(
+    provider: BaseProviderInstance,
+    host_id: HostId,
+    cg: ConcurrencyGroup,
+) -> tuple[DiscoveredHost, list[DiscoveredAgent]] | None:
+    """Read one pinned host and its agents, or None when the provider has no such host."""
+    with _attributing_failures_to_provider(provider.name):
+        try:
+            return provider.discover_host_and_agents(cg=cg, host_id=host_id)
+        except HostNotFoundError:
+            logger.debug("Pinned host {} does not exist on provider {}", host_id, provider.name)
+            return None
+
+
+def discover_pinned_hosts(
+    mngr_ctx: MngrContext,
+    pinned_hosts: Sequence[ResolvedAgentHost],
+    reset_caches: bool,
+) -> DiscoveryOutcome:
+    """Read only the pinned hosts, in parallel, without listing any provider's other hosts.
+
+    Providers are loaded exactly as discovery loads them, so a disabled provider
+    contributes nothing and an unreachable one is recorded as such. A pinned host
+    the provider does not have contributes nothing either, which leaves its
+    identifiers unmatched for the caller to report.
+    """
+    provider_names = tuple(sorted({str(pinned_host.provider_name) for pinned_host in pinned_hosts}))
+    providers, skipped_providers = get_all_provider_instances_and_skipped(
+        mngr_ctx, provider_names, reset_caches=reset_caches
+    )
+    results_by_provider = _record_provider_results(providers, skipped_providers)
+    provider_by_name = {provider.name: provider for provider in providers}
+    readable_hosts = [pinned_host for pinned_host in pinned_hosts if pinned_host.provider_name in provider_by_name]
+
+    agents_by_host: dict[DiscoveredHost, list[DiscoveredAgent]] = {}
+    with log_span(
+        "Reading {} pinned host(s) without discovery: {}",
+        len(readable_hosts),
+        ", ".join(f"{pinned_host.host_id}.{pinned_host.provider_name}" for pinned_host in readable_hosts),
+    ):
+        with mngr_executor(
+            parent_cg=mngr_ctx.concurrency_group, name="discover_pinned_hosts", max_workers=32
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _read_pinned_host,
+                    provider_by_name[pinned_host.provider_name],
+                    pinned_host.host_id,
+                    mngr_ctx.concurrency_group,
+                )
+                for pinned_host in readable_hosts
+            ]
+        for future in futures:
+            host_and_agents = future.result()
+            if host_and_agents is not None:
+                host_ref, agent_refs = host_and_agents
+                agents_by_host[host_ref] = agent_refs
+    return DiscoveryOutcome(agents_by_host=agents_by_host, results_by_provider=results_by_provider)
+
+
 def discover_by_address(
     address: AgentAddress,
     mngr_ctx: MngrContext,
@@ -330,22 +429,26 @@ def discover_by_address(
 ) -> DiscoveryOutcome:
     """Discover hosts and agents scoped by a single :class:`AgentAddress`.
 
-    The address's provider (if any) narrows discovery so we skip irrelevant
-    providers; the agent name/ID feeds the discovery event-stream
-    optimization. After discovery, results are filtered by the address's full
-    host/provider constraint.
+    An address that pins a host id and a provider reads only that host (see
+    :func:`discover_pinned_hosts`). Otherwise the address's provider (if any)
+    narrows discovery so we skip irrelevant providers, and the agent name/ID
+    feeds the discovery event-stream optimization. Either way, results are then
+    filtered by the address's full host/provider constraint.
     """
-    provider_names: tuple[str, ...] | None = None
-    if address.host is not None and address.host.provider is not None:
-        provider_names = (str(address.host.provider),)
-
-    outcome = discover_hosts_and_agents(
-        mngr_ctx,
-        provider_names=provider_names,
-        agent_identifiers=(str(address.agent),),
-        include_destroyed=include_destroyed,
-        reset_caches=reset_caches,
-    )
+    pinned_hosts = None if include_destroyed else pinned_hosts_for_addresses((address,))
+    if pinned_hosts is not None:
+        outcome = discover_pinned_hosts(mngr_ctx, pinned_hosts, reset_caches=reset_caches)
+    else:
+        provider_names: tuple[str, ...] | None = None
+        if address.host is not None and address.host.provider is not None:
+            provider_names = (str(address.host.provider),)
+        outcome = discover_hosts_and_agents(
+            mngr_ctx,
+            provider_names=provider_names,
+            agent_identifiers=(str(address.agent),),
+            include_destroyed=include_destroyed,
+            reset_caches=reset_caches,
+        )
 
     if address.host is None:
         return outcome

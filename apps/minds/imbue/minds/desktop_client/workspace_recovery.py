@@ -64,6 +64,7 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import WORKSPACE_READY_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
@@ -726,38 +727,6 @@ def read_environment_condition(
     if not is_network_dependent_workspace(backend_resolver, workspace_agent_id):
         return EnvironmentCondition.NONE
     return connectivity_detector.get_reading().environment_condition
-
-
-def _build_recovery_agent_address(agent_id: AgentId, workspace_display_info: AgentDisplayInfo | None) -> str:
-    """Render ``agent_id`` as ``AGENT@HOST.PROVIDER`` when discovery can supply both components.
-
-    A provider-qualified address is what restricts ``mngr``'s discovery to the
-    one provider that can host this agent (see ``find_all_agents``, which queries
-    every configured provider unless every address pins one). Unpinned, a recovery
-    pays for every provider the user has configured, and a provider that is
-    merely unreachable -- a stopped Docker daemon, an account this device cannot
-    currently reach -- is enough to fail it: when the agent goes unmatched,
-    ``mngr`` reports the first unavailable provider as the reason, whether or not
-    that provider could ever have hosted the agent.
-
-    ``workspace_display_info`` describes the *workspace* agent rather than the
-    system-services agent this address names. The two share a host by
-    construction (they run in the same container), and the workspace agent is the
-    one whose display info survives a lifecycle transition, so it is the more
-    reliable source of the same coordinate.
-
-    Falls back to the bare id when discovery supplies no ``host-`` coordinate or
-    no provider name. Unpinned is what shipped, so the fallback costs the
-    scoping and nothing else -- a recovery must not fail for want of a qualifier.
-    """
-    if workspace_display_info is None or workspace_display_info.provider_name is None:
-        return str(agent_id)
-    host_id = str(workspace_display_info.host_id)
-    # The resolver's placeholder host id ("localhost") is not a routable
-    # coordinate, and only the real host-<hex> shape parses as a HostId.
-    if not host_id.startswith("host-"):
-        return str(agent_id)
-    return f"{agent_id}@{host_id}.{workspace_display_info.provider_name}"
 
 
 def _build_mngr_stop_argv(mngr_binary: str, agent_address: str) -> list[str]:
@@ -1485,9 +1454,7 @@ def run_host_recovery_sequence(
     # Read before the stop step, so both commands address the same machine. The
     # post-recovery read further down is a separate question (where the machine
     # ended up) and deliberately takes its own, later snapshot.
-    services_agent_address = _build_recovery_agent_address(
-        services_agent_id, backend_resolver.get_agent_display_info(workspace_agent_id)
-    )
+    services_agent_address = build_agent_address(services_agent_id, backend_resolver)
 
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)

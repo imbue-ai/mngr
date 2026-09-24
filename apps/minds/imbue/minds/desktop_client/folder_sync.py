@@ -62,6 +62,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.config.data_types import MNGR_BINARY
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
@@ -340,7 +341,7 @@ def _build_pair_argv(mngr_binary: str, spec: FolderSyncSpec, workspace_target: "
     ]
 
 
-def _build_workspace_prepare_argv(mngr_binary: str, spec: FolderSyncSpec) -> list[str]:
+def _build_workspace_prepare_argv(mngr_binary: str, agent_address: str, spec: FolderSyncSpec) -> list[str]:
     """The ``mngr exec`` command that makes room for a sync and says where that is.
 
     Does two things in one round trip, because it needs two answers from the
@@ -350,7 +351,7 @@ def _build_workspace_prepare_argv(mngr_binary: str, spec: FolderSyncSpec) -> lis
     machine entirely -- and ``mngr exec`` runs where it can simply ask.
 
     """
-    return _exec_argv(mngr_binary, spec, _workspace_activate_script(spec))
+    return _exec_argv(mngr_binary, agent_address, _workspace_activate_script(spec))
 
 
 def _workspace_paths(spec: FolderSyncSpec) -> tuple[str, str]:
@@ -370,9 +371,9 @@ def _workspace_paths(spec: FolderSyncSpec) -> tuple[str, str]:
     return f'"$HOME"/{WORKSPACE_SYNC_DIRECTORY}/{leaf}', f'"$HOME"/{WORKSPACE_INACTIVE_SYNC_DIRECTORY}/{leaf}'
 
 
-def _exec_argv(mngr_binary: str, spec: FolderSyncSpec, script: str) -> list[str]:
+def _exec_argv(mngr_binary: str, agent_address: str, script: str) -> list[str]:
     """One ``mngr exec`` of ``script`` on the workspace, as JSON."""
-    return [mngr_binary, "exec", spec.agent_id, script, "--no-start", "--format", "json"]
+    return [mngr_binary, "exec", agent_address, script, "--no-start", "--format", "json"]
 
 
 def _workspace_activate_script(spec: FolderSyncSpec) -> str:
@@ -405,7 +406,7 @@ def _workspace_activate_script(spec: FolderSyncSpec) -> str:
     )
 
 
-def _build_workspace_deactivate_argv(mngr_binary: str, spec: FolderSyncSpec) -> list[str]:
+def _build_workspace_deactivate_argv(mngr_binary: str, agent_address: str, spec: FolderSyncSpec) -> list[str]:
     """The ``mngr exec`` that sets a sync's copy aside when its sync is turned off.
 
     A rename within the machine's home, so it costs no copying however large
@@ -429,10 +430,10 @@ def _build_workspace_deactivate_argv(mngr_binary: str, spec: FolderSyncSpec) -> 
             "fi",
         )
     )
-    return _exec_argv(mngr_binary, spec, script)
+    return _exec_argv(mngr_binary, agent_address, script)
 
 
-def _build_workspace_discard_argv(mngr_binary: str, spec: FolderSyncSpec) -> list[str]:
+def _build_workspace_discard_argv(mngr_binary: str, agent_address: str, spec: FolderSyncSpec) -> list[str]:
     """The ``mngr exec`` that deletes a set-aside copy for good.
 
     Only ever the set-aside directory: a sync that is still running keeps its
@@ -447,7 +448,7 @@ def _build_workspace_discard_argv(mngr_binary: str, spec: FolderSyncSpec) -> lis
             f'printf "%s" "{_WORKSPACE_OUTCOME_PREFIX}discarded"',
         )
     )
-    return _exec_argv(mngr_binary, spec, script)
+    return _exec_argv(mngr_binary, agent_address, script)
 
 
 def _expand_home(path: str, home_dir: Path) -> str:
@@ -1037,7 +1038,7 @@ class FolderSyncManager(MutableModel):
             raise FolderSyncError(f"{local_path} is still syncing; turn syncing off before deleting its copy.")
         self._set_desired(self._spec_for_record(record), FolderSyncActivity.DISCARDED)
 
-    # ---- desired state, and the loop that converges on it --------------------
+    # desired state, and the loop that converges on it
     #
     # Every click records where the folder should end up and returns. One worker
     # per folder then walks it there, re-reading the destination after each
@@ -1230,7 +1231,9 @@ class FolderSyncManager(MutableModel):
         try:
             with self._workspace_lock_for(_key_for(spec)):
                 self._run_workspace_script(
-                    _build_workspace_deactivate_argv(self.mngr_binary, spec), spec, "set aside the copy of"
+                    _build_workspace_deactivate_argv(self.mngr_binary, self._agent_address_for(spec), spec),
+                    spec,
+                    "set aside the copy of",
                 )
             self._note_applied(spec, FolderSyncActivity.INACTIVE)
         except FolderSyncError as e:
@@ -1252,7 +1255,9 @@ class FolderSyncManager(MutableModel):
         try:
             with self._workspace_lock_for(_key_for(spec)):
                 self._run_workspace_script(
-                    _build_workspace_discard_argv(self.mngr_binary, spec), spec, "delete the copy of"
+                    _build_workspace_discard_argv(self.mngr_binary, self._agent_address_for(spec), spec),
+                    spec,
+                    "delete the copy of",
                 )
         except FolderSyncError as e:
             logger.warning("Could not delete the set-aside copy of {}: {}", spec.local_path, e)
@@ -1494,6 +1499,10 @@ class FolderSyncManager(MutableModel):
         )
         return host_id is not None
 
+    def _agent_address_for(self, spec: FolderSyncSpec) -> str:
+        """How ``mngr`` reaches the workspace a sync is with (see ``build_agent_address``)."""
+        return build_agent_address(AgentId(spec.agent_id), self.backend_resolver)
+
     def _host_id_for(self, agent_id: str) -> str | None:
         """The machine ``agent_id`` runs on, or None while Minds cannot say.
 
@@ -1594,7 +1603,7 @@ class FolderSyncManager(MutableModel):
         runs first rather than leaving the user to go and make it. It comes back
         with the absolute path, which the caller hands to ``--source-path``.
         """
-        argv = _build_workspace_prepare_argv(self.mngr_binary, spec)
+        argv = _build_workspace_prepare_argv(self.mngr_binary, self._agent_address_for(spec), spec)
         try:
             with log_span("Preparing {} in the workspace", spec.workspace_path):
                 stdout = run_mngr_to_completion(

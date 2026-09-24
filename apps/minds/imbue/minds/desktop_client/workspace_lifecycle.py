@@ -20,6 +20,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_models import UiWorkspaceStoppedMessage
@@ -157,15 +158,16 @@ def perform_mind_host_action(
         )
     info = backend_resolver.get_agent_display_info(workspace_agent_id)
     host_id = HostId(info.host_id) if info is not None else None
+    services_agent_address = build_agent_address(services_agent_id, backend_resolver)
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
     match action:
         case MindHostAction.STOP:
-            argv = [mngr_binary, "stop", str(services_agent_id), "--quiet", "--stop-host"]
+            argv = [mngr_binary, "stop", services_agent_address, "--quiet", "--stop-host"]
             transitional_state = HostState.STOPPING
             timeout_seconds = HOST_STOP_TIMEOUT_SECONDS
         case MindHostAction.START:
-            argv = [mngr_binary, "start", str(services_agent_id), "--quiet"]
+            argv = [mngr_binary, "start", services_agent_address, "--quiet"]
             transitional_state = HostState.STARTING
             timeout_seconds = HOST_START_TIMEOUT_SECONDS
         case _ as unreachable:

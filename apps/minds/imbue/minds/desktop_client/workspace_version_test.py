@@ -92,14 +92,14 @@ def test_parse_update_self_ref_ignores_the_templates_own_update_self_commits() -
 def test_the_marker_and_the_tag_rank_by_release(marker_ref: str, tag: str, expected: str) -> None:
     caller = _GitAnsweringCaller(stdout=f"update-self: merge upstream template ({marker_ref})\n{tag}\n")
 
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == expected
+    assert read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller) == expected
 
 
 def test_the_marker_and_the_tag_are_read_in_one_exec() -> None:
     """Both git reads ride one ``mngr exec``."""
     caller = _GitAnsweringCaller(stdout="minds-v0.4.1\n")
 
-    read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert len(caller.git_commands) == 1
     (command,) = caller.git_commands
@@ -110,7 +110,7 @@ def test_the_marker_and_the_tag_are_read_in_one_exec() -> None:
 def test_a_workspace_with_no_marker_falls_back_to_the_tag() -> None:
     caller = _GitAnsweringCaller(stdout="minds-v0.4.1\n")
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version == "minds-v0.4.1"
 
@@ -119,18 +119,18 @@ def test_a_tagless_workspace_is_read_from_its_marker() -> None:
     """The create path checks the release out as a branch, so a fresh clone has no tags to describe."""
     caller = _GitAnsweringCaller(stdout="update-self: merge upstream template (minds-v0.4.1)\n")
 
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == "minds-v0.4.1"
+    assert read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller) == "minds-v0.4.1"
 
 
 def test_a_marker_the_strict_parse_rejects_does_not_shadow_the_tag() -> None:
     """The grep selects any subject that starts with the marker prefix; only an exact marker names a version."""
     caller = _GitAnsweringCaller(stdout="update-self: merge upstream template (minds-v0.4.1) [retry]\nminds-v0.3.17\n")
 
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == "minds-v0.3.17"
+    assert read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller) == "minds-v0.3.17"
 
 
 def test_a_workspace_with_neither_marker_nor_tag_has_no_version() -> None:
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=_GitAnsweringCaller()) is None
+    assert read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=_GitAnsweringCaller()) is None
 
 
 def test_parse_upgrade_merges_parses_tab_separated_lines() -> None:
@@ -197,7 +197,7 @@ def test_version_read_exec_never_starts_a_stopped_host() -> None:
     """
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1))
     agent_id = AgentId.generate()
-    read_workspace_git_version(agent_id=agent_id, mngr_caller=caller)
+    read_workspace_git_version(agent_address=agent_id, mngr_caller=caller)
     assert len(caller.calls) == 2
     for argv in caller.calls:
         assert argv[0] == "exec"
@@ -215,7 +215,7 @@ def test_version_read_parses_the_json_exec_envelope() -> None:
     """
     envelope = exec_json_envelope("minds-v1.2.3\n")
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=envelope))
-    version = read_workspace_git_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_git_version(agent_address=AgentId.generate(), mngr_caller=caller)
     assert version.current_minds_version == "minds-v1.2.3"
 
 
@@ -339,7 +339,7 @@ def test_a_published_template_clone_reads_its_base_tag(tmp_path: Path) -> None:
     workspace, official = _make_published_template_workspace(tmp_path)
     caller = _LocalGitCaller(repo=workspace, official_url=str(official))
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version == _BASE_TAG
     assert _local_minds_tags(workspace) == [_BASE_TAG]
@@ -351,7 +351,7 @@ def test_the_tag_fetch_repoints_an_official_remote_left_pointing_elsewhere(tmp_p
     run_git_for_backup_test(workspace, "remote", "add", "official", str(tmp_path / "somewhere-else"))
     caller = _LocalGitCaller(repo=workspace, official_url=str(official))
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version == _BASE_TAG
     assert run_git_for_backup_test(workspace, "remote", "get-url", "official").strip() == str(official)
@@ -366,12 +366,12 @@ def test_the_tag_fetch_stops_once_the_tag_is_local(tmp_path: Path) -> None:
     """
     workspace, official = _make_published_template_workspace(tmp_path)
     caller = _LocalGitCaller(repo=workspace, official_url=str(official))
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == _BASE_TAG
+    assert read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller) == _BASE_TAG
     fetch_head = workspace / ".git" / "FETCH_HEAD"
     assert fetch_head.exists()
     fetch_head.unlink()
 
-    assert read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller) == _BASE_TAG
+    assert read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller) == _BASE_TAG
 
     assert not fetch_head.exists()
 
@@ -384,7 +384,7 @@ def test_a_workspace_with_an_update_self_marker_never_fetches(tmp_path: Path) ->
     )
     caller = _LocalGitCaller(repo=workspace, official_url=str(official))
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version == "minds-v0.5.0"
     assert _local_minds_tags(workspace) == []
@@ -402,7 +402,7 @@ def test_a_workspace_that_cannot_reach_the_official_template_reads_nothing_and_s
     workspace, _official = _make_published_template_workspace(tmp_path)
     caller = _LocalGitCaller(repo=workspace, official_url=unreachable_url)
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version is None
     assert caller.shell_returncodes == [0]
@@ -448,7 +448,7 @@ def test_a_run_landed_with_an_ordinary_merge_reads_as_the_release_it_landed(tmp_
     _commit_on_day(workspace, 6, "merge", "-q", "--no-ff", "--no-edit", "mngr/update-self")
     caller = _LocalGitCaller(repo=workspace, official_url=str(tmp_path / "unused.git"))
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version == "minds-v0.7.0"
 
@@ -469,7 +469,7 @@ def test_a_workspace_that_is_not_template_derived_never_fetches(tmp_path: Path) 
     run_git_for_backup_test(workspace, "commit", "-q", "-m", "a repo of the user's own")
     caller = _LocalGitCaller(repo=workspace, official_url=str(official))
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version is None
     assert _local_minds_tags(workspace) == []
@@ -492,7 +492,7 @@ def test_a_shallow_workspace_never_fetches(tmp_path: Path) -> None:
     assert run_git_for_backup_test(shallow, "rev-parse", "--is-shallow-repository").strip() == "true"
     caller = _LocalGitCaller(repo=shallow, official_url=str(official))
 
-    version = read_workspace_current_version(agent_id=AgentId.generate(), mngr_caller=caller)
+    version = read_workspace_current_version(agent_address=AgentId.generate(), mngr_caller=caller)
 
     assert version is None
     assert _local_minds_tags(shallow) == []

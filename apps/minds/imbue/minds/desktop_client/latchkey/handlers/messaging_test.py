@@ -79,7 +79,7 @@ def test_send_does_not_raise_on_failure(root_concurrency_group: ConcurrencyGroup
 
     # Fire-and-forget: dispatching an eventually-failing send must not raise.
     chat_id = AgentId()
-    sender.send(chat_id, "hello", exec_agent_id=chat_id)
+    sender.send(chat_id, "hello", exec_agent_address=chat_id)
     # Let the background delivery run so the failure path is exercised.
     assert caller.called_event.wait(5.0)
 
@@ -90,7 +90,7 @@ def test_send_dispatches_on_concurrency_group_thread(root_concurrency_group: Con
     agent_id = AgentId()
 
     # Fire-and-forget: send returns without waiting for the delivery to run.
-    sender.send(agent_id, "hello", exec_agent_id=agent_id)
+    sender.send(agent_id, "hello", exec_agent_address=agent_id)
 
     assert caller.called_event.wait(5.0)
     # send goes to the chat's own chat app first, by chat id.

@@ -11,8 +11,11 @@ from pathlib import Path
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
+from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import make_update_state_store
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
@@ -30,6 +33,7 @@ from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateSta
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import HostId
 
 _CHAT = "update-abc123"
 
@@ -62,6 +66,7 @@ def _make_manager(
     *,
     probe_stdout: str = _NO_RUN_STDOUT,
     fallback_window_seconds: float = 300.0,
+    backend_resolver: MngrCliBackendResolver | None = None,
 ) -> tuple[UpdateApplyWindowManager, SystemInterfaceHealthTracker, WorkspaceUpdateStateStore, _RestartRecorder]:
     tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
     store = make_update_state_store(tmp_path)
@@ -70,6 +75,7 @@ def _make_manager(
         tracker=tracker,
         store=store,
         mngr_caller=RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout)),
+        backend_resolver=backend_resolver if backend_resolver is not None else MngrCliBackendResolver(),
         concurrency_group=root_concurrency_group,
         dispatch_restart=restarts,
         fallback_window_seconds=fallback_window_seconds,
@@ -90,7 +96,7 @@ def _is_failure_suppressed(tracker: SystemInterfaceHealthTracker, agent_id: Agen
     return tracker.get_health(agent_id) is AgentHealth.HEALTHY
 
 
-# -- The probe -------------------------------------------------------------
+# The probe
 
 
 @pytest.mark.witnesses("workspace-updates.unreachable-workspace-stays-updating")
@@ -248,7 +254,7 @@ def test_a_hold_in_the_record_parses_with_its_detail() -> None:
     assert probe.is_apply_in_progress is False
 
 
-# -- The window ------------------------------------------------------------
+# The window
 
 
 @pytest.mark.witnesses("workspace-updates.apply-outage-is-expected")
@@ -348,7 +354,7 @@ def test_arming_the_window_after_the_verdict_landed_keeps_the_verdict(
     assert store.get(agent_id).verdict is UpdateVerdict.UPDATED
 
 
-# -- The race guard --------------------------------------------------------
+# The race guard
 
 
 def test_a_stuck_edge_with_no_update_in_flight_dispatches_normally(
@@ -424,7 +430,7 @@ def test_starting_the_expiry_loop_twice_runs_one_strand(
         root_concurrency_group.shutdown()
 
 
-# -- Expiry ----------------------------------------------------------------
+# Expiry
 
 
 @pytest.mark.witnesses("workspace-updates.wedged-apply-recovered")
@@ -489,7 +495,7 @@ def test_an_expired_window_stops_suppressing_failure_accounting(
     assert tracker.get_health(agent_id) is AgentHealth.STUCK
 
 
-# -- Run liveness ----------------------------------------------------------
+# Run liveness
 
 
 @pytest.mark.witnesses("workspace-updates.run-liveness-is-observed", partial="the positively-gone reading only")
@@ -515,3 +521,23 @@ def test_the_probes_listing_survives_config_the_workspaces_mngr_cannot_parse() -
     script = build_update_run_probe_args(AgentId.generate())[3]
 
     assert "MNGR_ALLOW_UNKNOWN_CONFIG=1 mngr list " in script
+
+
+def test_the_run_probe_reaches_its_machine_by_the_host_discovery_placed_it_on(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    """The probe runs on the stuck-edge thread with a short budget that a provider-wide listing can outlast."""
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    manager, _tracker, store, _restarts = _make_manager(
+        root_concurrency_group,
+        tmp_path,
+        backend_resolver=build_resolver_with_system_services(agent_id, AgentId.generate(), host_id=host_id),
+    )
+    _begin_run(store, agent_id)
+
+    manager.probe_run(agent_id)
+
+    caller = manager.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    assert caller.calls[0][:3] == ["exec", "--agent", f"{agent_id}@{host_id}.{SYSTEM_SERVICES_PROVIDER_NAME}"]
