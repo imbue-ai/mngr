@@ -23,7 +23,7 @@ capability on a headless agent, or a CLI-specific capability on a bare command r
 | version_management | Y | Y | - | Y | - | - | n/a | n/a |
 | deploy_contributions | Y | - | - | - | - | - | - | - |
 | usage_tracking | Y | - | - | Y | Y | Y | n/a | n/a |
-| compaction | Y | n/a | - | Y | - | - | n/a | n/a |
+| compaction | Y | n/a | - | Y | - | Y | n/a | n/a |
 | headless_output | n/a | Y | n/a | n/a | n/a | n/a | n/a | Y |
 
 ## Capabilities

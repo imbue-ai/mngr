@@ -162,6 +162,18 @@ interface ExtensionContext {
   abort?: () => void;
   // Editor (composer) accessors; see ExtensionUi.
   ui?: ExtensionUi;
+  // Compaction entry point exposed by pi's extension context.
+  compact?: (options?: {
+    customInstructions?: string;
+    onComplete?: (result: unknown) => void;
+    onError?: (error: Error) => void;
+  }) => void;
+  // Context token usage accessor exposed by pi's extension context.
+  getContextUsage?: () => {
+    tokens: number | null;
+    contextWindow: number;
+    percent: number | null;
+  } | undefined;
 }
 
 // pi's ExtensionAPI -- `on`, `sendUserMessage` (input injection without tmux
@@ -217,6 +229,8 @@ const INTERRUPT_KEY = "minds_interrupt";
 //     Minds hands the queued messages back to the user's composer, so resubmitting them
 //     here would double-deliver.
 const RETRACT_KEY = "minds_interrupt_retract";
+//   * Compaction request sentinel: trigger manual session compaction with optional instructions.
+const COMPACTION_REQUEST_KEY = "mngr_compact";
 // Single-slot switch mailbox: the chat model bar's resolver atomically
 // OVERWRITES this file with one JSON intent ({model_id: "provider/model",
 // thinking_level: "high"|null}) -- a newer pick replaces an unconsumed older
@@ -276,8 +290,8 @@ function countLines(filePath: string): number {
   return parts.length;
 }
 
-function isoTimestamp(message: AgentMessage): string {
-  const ms = typeof message.timestamp === "number" ? message.timestamp : Date.now();
+function isoTimestamp(message: AgentMessage | { timestamp?: number }): string {
+  const ms = typeof message?.timestamp === "number" ? message.timestamp : Date.now();
   return new Date(ms).toISOString();
 }
 
@@ -514,11 +528,11 @@ export default function mngrPiLifecycle(pi: PiApi): void {
   // for the single moment each message is appended -- so a `--continue` restart,
   // which reuses the session id but only fires message_end for *new* messages,
   // cannot collide with the ids written before it.
-  const makeEventId = (prefix: string, message: AgentMessage): string => {
-    const rawContent = (message as { content?: unknown }).content ?? "";
+  const makeEventId = (prefix: string, item: AgentMessage | { timestamp?: number; content?: unknown; summary?: string }): string => {
+    const rawContent = (item as { content?: unknown; summary?: string }).content ?? (item as { summary?: string }).summary ?? "";
     const contentText = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent);
     const digest = createHash("sha256")
-      .update(`${isoTimestamp(message)}:${contentText.slice(0, 1024)}`)
+      .update(`${isoTimestamp(item as AgentMessage)}:${contentText.slice(0, 1024)}`)
       .digest("hex")
       .slice(0, 32);
     return `${prefix}-${digest}`;
@@ -760,6 +774,36 @@ export default function mngrPiLifecycle(pi: PiApi): void {
           // drain simply resumes on the next tick.
           return; // interrupted -> end this tick
         }
+        const isCompaction =
+          content !== null &&
+          typeof content === "object" &&
+          (content as Record<string, unknown>)[COMPACTION_REQUEST_KEY] === true;
+        if (isCompaction) {
+          if ((injectedStringThisTick || pendingInjections > 0) && sentinelDeferredTicks < SENTINEL_SETTLE_MAX_TICKS) {
+            sentinelDeferredTicks++;
+            return;
+          }
+          sentinelDeferredTicks = 0;
+          processedInbox++;
+          const rawInstructions = (content as Record<string, unknown>).instructions;
+          const customInstructions =
+            typeof rawInstructions === "string" && rawInstructions.trim().length > 0
+              ? rawInstructions.trim()
+              : undefined;
+          if (latestCtx && typeof latestCtx.compact === "function") {
+            try {
+              latestCtx.compact({
+                customInstructions,
+                onError: (err: Error) => {
+                  logDiagnostic("compaction", err);
+                },
+              });
+            } catch (err: unknown) {
+              logDiagnostic("compact call", err);
+            }
+          }
+          continue;
+        }
         // An unknown object line (a foreign/future sentinel) is inert under skew: skip it.
         processedInbox++;
       }
@@ -983,6 +1027,77 @@ export default function mngrPiLifecycle(pi: PiApi): void {
         appendLine(commonPath, JSON.stringify(record));
         commonLineCount += 1;
       }
+    });
+  });
+
+  pi.on("session_compact", (event: any, _ctx) => {
+    safe("session_compact", () => {
+      const entry = event?.compactionEntry;
+      if (!entry) {
+        return;
+      }
+      const timestampMs = typeof entry.timestamp === "number" ? entry.timestamp : Date.now();
+      const isoTs = new Date(timestampMs).toISOString();
+
+      if (emitRaw) {
+        appendLine(rawPath, JSON.stringify({ type: "compaction", timestamp: isoTs, entry }));
+      }
+
+      if (emitUsage && entry.usage) {
+        const sessionFile = (() => {
+          try {
+            return readFileSync(sessionFilePath, "utf8").trim();
+          } catch {
+            return "";
+          }
+        })();
+        const sessionId = sessionFile ? basename(sessionFile, ".jsonl") : "";
+        if (sessionId) {
+          const usage = entry.usage;
+          const cost = usage.cost?.total;
+          const hasCost = typeof cost === "number";
+          const hasTokens =
+            usage.input != null || usage.output != null || usage.cacheRead != null || usage.cacheWrite != null;
+          if (hasCost || hasTokens) {
+            const usageRecord = {
+              source: "pi-coding/usage",
+              type: "cost_snapshot",
+              event_id: makeEventId("evt-pi-usage-compaction", entry),
+              timestamp: isoTs,
+              session_id: sessionId,
+              cost: hasCost ? { total_cost_usd: cost } : null,
+              tokens: hasTokens
+                ? {
+                    input: usage.input ?? null,
+                    output: usage.output ?? null,
+                    cache_read: usage.cacheRead ?? null,
+                    cache_creation: usage.cacheWrite ?? null,
+                  }
+                : null,
+              model: null,
+              cost_mode: "API_KEY",
+            };
+            appendLine(usagePath, JSON.stringify(usageRecord));
+          }
+        }
+      }
+
+      if (!emitCommon) {
+        return;
+      }
+      const record = {
+        type: "step",
+        event_id: makeEventId("pi-cmp", entry),
+        emitter: commonEmitter,
+        timestamp: isoTs,
+        source: "system",
+        message: "",
+        observation: { results: [{ content: entry.summary ?? "" }] },
+        extra: { context_management: { type: "compaction", boundary: "replace" } },
+      };
+      ensureCommonHeader();
+      appendLine(commonPath, JSON.stringify(record));
+      commonLineCount += 1;
     });
   });
 }

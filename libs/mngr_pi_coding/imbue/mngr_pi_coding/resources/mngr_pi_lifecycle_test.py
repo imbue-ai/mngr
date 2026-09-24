@@ -920,6 +920,7 @@ const ctx = {
   isIdle: () => idle,
   abort: () => { aborted++; log.push("abort"); editorText += (scenario.parkedSteers || ""); },
   ui: { getEditorText: () => editorText, setEditorText: (t) => { editorText = t; } },
+  compact: (opts) => { log.push("compact:" + (opts?.customInstructions || "")); },
 };
 const pi = {
   on: (evt, h) => { (handlers[evt] ||= []).push(h); },
@@ -1384,3 +1385,64 @@ def test_guard_rewrites_with_git_identity_when_resolvable(tmp_path: Path) -> Non
     assert out["result"] is None
     assert "GIT_AUTHOR_NAME='test-agent'" in out["command"]
     assert "GIT_AUTHOR_EMAIL='agent-x@host-9'" in out["command"]
+
+
+def test_session_compact_writes_raw_common_and_usage_transcripts(tmp_path: Path) -> None:
+    compaction_entry = {
+        "id": "comp-1",
+        "timestamp": 1787832000000,
+        "summary": "Context was successfully compacted.",
+        "firstKeptEntryId": "entry-10",
+        "tokensBefore": 65000,
+        "usage": {
+            "input": 40000,
+            "output": 1200,
+            "cacheRead": 20000,
+            "cacheWrite": 0,
+        },
+    }
+    events = [
+        {"event": "session_start", "sessionId": "s1", "sessionFile": "/s/s1.jsonl"},
+        {"event": "session_compact", "payload": {"compactionEntry": compaction_entry}},
+    ]
+    state = _run_extension(tmp_path, events, emit_common=True, emit_usage=True)
+
+    # 1. Raw transcript
+    raw_lines = _read_jsonl(state / _RAW_TRANSCRIPT)
+    raw_comp = [r for r in raw_lines if r.get("type") == "compaction"]
+    assert len(raw_comp) == 1
+    assert raw_comp[0]["entry"]["id"] == "comp-1"
+    assert raw_comp[0]["entry"]["summary"] == "Context was successfully compacted."
+
+    # 2. Common transcript (ATIF v1.7)
+    common_lines = _read_jsonl(state / _COMMON_TRANSCRIPT)
+    comp_steps = [r for r in common_lines if r.get("event_id", "").startswith("pi-cmp-")]
+    assert len(comp_steps) == 1
+    step = comp_steps[0]
+    validate_common_transcript_record(step)
+    assert step["source"] == "system"
+    assert step["extra"]["context_management"] == {"type": "compaction", "boundary": "replace"}
+    assert step["observation"]["results"][0]["content"] == "Context was successfully compacted."
+
+    # 3. Usage transcript
+    usage_path = state / _USAGE_EVENTS
+    assert usage_path.exists()
+    usage_lines = _read_jsonl(usage_path)
+    comp_usages = [r for r in usage_lines if "compaction" in r.get("event_id", "")]
+    assert len(comp_usages) == 1
+    assert comp_usages[0]["tokens"]["input"] == 40000
+    assert comp_usages[0]["tokens"]["cache_read"] == 20000
+
+
+def test_inbox_watcher_triggers_compaction(tmp_path: Path) -> None:
+    scenario = {
+        "idle": True,
+        "actions": [
+            {"append": {"mngr_compact": True, "instructions": "focus on recent changes"}, "sleep": 200},
+            {"append": "follow-up message", "sleep": 200},
+        ],
+    }
+    state = _run_sentinel_scenario(tmp_path, scenario)
+    outcome = json.loads((state / "outcome.json").read_text())
+    assert "compact:focus on recent changes" in outcome["log"]
+    assert "inject:follow-up message" in outcome["log"]

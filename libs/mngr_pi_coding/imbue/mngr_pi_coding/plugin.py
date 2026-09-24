@@ -5,6 +5,7 @@ import shlex
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
 from imbue.mngr.interfaces.agent import HasUnattendedModeMixin
@@ -67,6 +69,11 @@ from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_pi_coding import resources as _pi_resources
+from imbue.mngr_pi_coding.compaction import get_agent_cache_ttl_minutes
+from imbue.mngr_pi_coding.compaction import get_agent_context_tokens
+from imbue.mngr_pi_coding.compaction import get_agent_idle_since
+from imbue.mngr_pi_coding.compaction import record_agent_compacted
+from imbue.mngr_pi_coding.pi_coding_config import COMPACTION_REQUEST_KEY
 
 _PI_HOME_DIR_NAME: str = ".pi"
 _PI_AGENT_SUBDIR: str = "agent"
@@ -233,7 +240,7 @@ def _serialize_pi_trust(trust: Mapping[str, bool]) -> str:
     return json.dumps({key: trust[key] for key in sorted(trust)}, indent=2) + "\n"
 
 
-def _inbox_append_command(inbox_path: Path, message: str) -> str:
+def _inbox_append_command(inbox_path: Path, message: str | Mapping[str, Any]) -> str:
     """Shell command that appends one JSON-encoded message line to the inbox.
 
     JSON encoding keeps the message on a single line (newlines escaped), so a
@@ -519,6 +526,7 @@ class PiCodingAgent(
     HasSessionPreservationMixin,
     HasUnattendedModeMixin,
     HasAutoInstallMixin,
+    HasCompactionMixin,
 ):
     """Agent implementation for the pi coding agent.
 
@@ -577,7 +585,7 @@ class PiCodingAgent(
             self._append_to_inbox(message)
             self._confirm_turn_started()
 
-    def _append_to_inbox(self, message: str) -> None:
+    def _append_to_inbox(self, message: str | Mapping[str, Any]) -> None:
         """Append one JSON-encoded message line to the agent's inbox on the host.
 
         The append is stateful (it must run exactly once, never be retried/deduped
@@ -606,6 +614,37 @@ class PiCodingAgent(
             f"pi did not start a turn within {timeout:.0f}s of inboxing the message "
             "(is the lifecycle extension running?)",
         )
+
+    # --- HasCompactionMixin capability implementation ---
+
+    def request_compaction(self, instructions: str | None = None) -> None:
+        """Perform context compaction on the Pi agent by inboxing a compaction sentinel."""
+        current_idle_since = self.get_idle_since()
+        try:
+            with self._message_lock(), log_span("Requesting context compaction for pi agent {}", self.name):
+                payload: dict[str, Any] = {COMPACTION_REQUEST_KEY: True}
+                if instructions and instructions.strip():
+                    payload["instructions"] = instructions.strip()
+                self._append_to_inbox(payload)
+        finally:
+            # Even if compaction fails, we still record it.
+            # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
+            # agent over and over as part of `mngr autocompact` when compaction isn't going through.
+            # We prefer in that case to just not compact, rather than continuously sending more compaction
+            # requests to the agent.
+            record_agent_compacted(self, idle_since=current_idle_since)
+
+    def get_cache_ttl_minutes(self) -> int | None:
+        """Return the prompt cache TTL in minutes for the agent's current model provider."""
+        return get_agent_cache_ttl_minutes(self)
+
+    def get_context_tokens(self) -> int | None:
+        """Return the total prompt context token count from the agent's most recent turn."""
+        return get_agent_context_tokens(self)
+
+    def get_idle_since(self) -> datetime | None:
+        """Return the datetime when the Pi agent entered idle state, or None."""
+        return get_agent_idle_since(self)
 
     def get_pi_config_dir(self) -> Path:
         """Return the per-agent pi config directory path.

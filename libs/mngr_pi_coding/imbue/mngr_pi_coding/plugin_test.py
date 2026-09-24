@@ -28,6 +28,7 @@ from imbue.mngr.errors import AgentInstallationError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
+from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.host import AgentEnvironmentOptions
@@ -1227,3 +1228,45 @@ def test_pi_waiting_reason_is_none_when_active(local_provider: LocalProviderInst
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text("1")
     assert _waiting_reason(agent, agent.host) is None
+
+
+def test_inbox_append_command_accepts_mapping() -> None:
+    cmd = _inbox_append_command(Path("/state/pi_inbox"), {"mngr_compact": True})
+    assert json.dumps({"mngr_compact": True}) in cmd
+
+
+def test_pi_agent_implements_has_compaction_mixin(pi_agent: PiCodingAgent) -> None:
+    assert isinstance(pi_agent, HasCompactionMixin)
+
+
+def test_pi_agent_request_compaction(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+    host = _stub_host(
+        tmp_path,
+        is_local=True,
+        command_results={"printf": CommandResult(stdout="", stderr="", success=True)},
+    )
+    object.__setattr__(pi_agent, "host", host)
+    agent_dir = pi_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    pi_agent.request_compaction(instructions="keep it brief")
+
+    last_compacted_file = agent_dir / "last_compacted_idle_since"
+    assert last_compacted_file.exists()
+
+
+def test_pi_agent_request_compaction_records_on_failure(tmp_path: Path, pi_agent: PiCodingAgent) -> None:
+    host = _stub_host(
+        tmp_path,
+        is_local=True,
+        command_results={"printf": CommandResult(stdout="", stderr="disk full", success=False)},
+    )
+    object.__setattr__(pi_agent, "host", host)
+    agent_dir = pi_agent._get_agent_dir()
+    agent_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(SendMessageError):
+        pi_agent.request_compaction(instructions="keep it brief")
+
+    last_compacted_file = agent_dir / "last_compacted_idle_since"
+    assert last_compacted_file.exists()
