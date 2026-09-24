@@ -1310,7 +1310,7 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
 
     workspace_id = AgentId.generate()
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
-        status = probe_workspace_through_plugin(
+        outcome = probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
             workspace_id=str(workspace_id),
@@ -1318,7 +1318,8 @@ def test_probe_workspace_through_plugin_targets_root_path() -> None:
             client=client,
         )
 
-    assert status == 200
+    assert outcome.is_ready
+    assert outcome.summary == "HTTP 200"
     assert len(captured) == 1
     assert captured[0].url.path == "/"
     # The workspace vhost rides the Host header, not the URL host, so the
@@ -1342,7 +1343,7 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
         return httpx.Response(503, text="Service Unavailable")
 
     with httpx.Client(transport=httpx.MockTransport(_capture)) as client:
-        status = probe_workspace_through_plugin(
+        outcome = probe_workspace_through_plugin(
             mngr_forward_port=18999,
             preauth_cookie="any-preauth",
             workspace_id=str(AgentId.generate()),
@@ -1350,7 +1351,45 @@ def test_probe_workspace_through_plugin_surfaces_non_200_status() -> None:
             client=client,
         )
 
-    assert status == 503
+    assert not outcome.is_ready
+    assert outcome.status_code == 503
+    assert outcome.summary == "HTTP 503"
+
+
+@pytest.mark.parametrize(
+    "raised, expected_summary",
+    [
+        (httpx.ConnectError("[Errno 61] Connection refused"), "ConnectError: [Errno 61] Connection refused"),
+        # httpx raises its timeouts and read errors with an empty message, so
+        # the class name is the whole of what there is to report.
+        (httpx.ReadTimeout(""), "ReadTimeout"),
+    ],
+    ids=("refused", "timed-out"),
+)
+def test_probe_workspace_through_plugin_names_the_transport_failure(raised: Exception, expected_summary: str) -> None:
+    """A probe that never got a response reports which failure it was, not a bare None.
+
+    The readiness wait and the probe loop both discard everything but "was it a
+    200", so this summary is the only place the reason a probe keeps failing
+    can be read from -- a refused connection, a timeout and a 503 each point at
+    a different component.
+    """
+
+    def _fail(request: httpx.Request) -> httpx.Response:
+        raise raised
+
+    with httpx.Client(transport=httpx.MockTransport(_fail)) as client:
+        outcome = probe_workspace_through_plugin(
+            mngr_forward_port=18999,
+            preauth_cookie="any-preauth",
+            workspace_id=str(AgentId.generate()),
+            probe_timeout_seconds=0.5,
+            client=client,
+        )
+
+    assert not outcome.is_ready
+    assert outcome.status_code is None
+    assert outcome.summary == expected_summary
 
 
 def test_probe_workspace_uses_https_scheme() -> None:

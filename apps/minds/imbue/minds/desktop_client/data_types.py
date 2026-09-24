@@ -72,3 +72,29 @@ class RemoteWorkspaceTile(FrozenModel):
     )
     state_detail: str | None = Field(default=None, description="Failure detail for the 'error' state (chip tooltip)")
     backup_access: BackupAccessState = Field(description="Whether this device can read the workspace's backups now")
+
+
+class WorkspaceProbeOutcome(FrozenModel):
+    """What one readiness probe of a workspace's system interface, through the plugin, came back with."""
+
+    status_code: int | None = Field(
+        description="The HTTP status the plugin answered with; None when the probe failed before any response"
+    )
+    failure: str | None = Field(
+        default=None,
+        description=(
+            "The transport failure that produced no response, as the exception's class and message; "
+            "None whenever a status arrived"
+        ),
+    )
+
+    @property
+    def is_ready(self) -> bool:
+        return self.status_code == 200
+
+    @property
+    def summary(self) -> str:
+        """The one phrase a log line or a failure message names this outcome by."""
+        if self.status_code is not None:
+            return f"HTTP {self.status_code}"
+        return self.failure or "no response"

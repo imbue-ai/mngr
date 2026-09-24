@@ -97,9 +97,6 @@ class ProxyTarget(FrozenModel):
     )
 
 
-# -- Envelope payload schemas -----------------------------------------------
-
-
 class LoginUrlPayload(FrozenModel):
     """Emitted once at startup with the freshly-minted login URL."""
 
@@ -157,8 +154,31 @@ class SystemInterfaceBackendFailurePayload(FrozenModel):
     )
 
 
+class SystemInterfaceBackendAnsweredPayload(FrozenModel):
+    """Emitted when the plugin observes a per-agent shell backend answer a forwarded request.
+
+    The counterpart of :class:`SystemInterfaceBackendFailurePayload`, and the
+    same kind of thing: an observation, for a downstream consumer to apply its
+    own policy to (a health tracker clearing a verdict its own probes cannot).
+    Only the agent's shell target is reported -- the service a readiness
+    probe of the bare origin would reach -- and at most once per agent per
+    short interval, so a healthy agent under steady traffic produces a
+    trickle rather than one line per request, and an idle one produces nothing.
+    """
+
+    type: Literal["system_interface_backend_answered"] = "system_interface_backend_answered"
+    agent_id: AgentId = Field(description="Agent whose shell backend answered")
+    status_code: int | None = Field(
+        description="The 2xx status the backend answered with; None for a websocket the backend accepted"
+    )
+
+
 ForwardPayload = (
-    LoginUrlPayload | ListeningPayload | ReverseTunnelEstablishedPayload | SystemInterfaceBackendFailurePayload
+    LoginUrlPayload
+    | ListeningPayload
+    | ReverseTunnelEstablishedPayload
+    | SystemInterfaceBackendFailurePayload
+    | SystemInterfaceBackendAnsweredPayload
 )
 
 
@@ -183,9 +203,6 @@ class ForwardEnvelope(FrozenModel):
     payload: dict[str, Any] = Field(description="Raw decoded JSON payload")
 
 
-# -- Forwarding strategy ----------------------------------------------------
-
-
 class ForwardServiceStrategy(FrozenModel):
     """Resolve backend URLs by looking up a named service per agent."""
 
@@ -204,9 +221,6 @@ class ForwardPortStrategy(FrozenModel):
 
 
 ForwardStrategy = ForwardServiceStrategy | ForwardPortStrategy
-
-
-# -- Per-snapshot result ----------------------------------------------------
 
 
 class ForwardAgentSnapshot(FrozenModel):

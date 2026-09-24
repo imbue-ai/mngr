@@ -678,7 +678,10 @@ def test_a_probe_cut_short_mid_round_does_not_record_the_half_it_never_measured(
     reading = detector.probe_now()
 
     ssh_questions = [endpoint for endpoint in prober.probed_endpoints if endpoint.startswith("ssh://")]
-    assert len(ssh_questions) == 1, "the shutdown must land inside the SSH facet, not before it"
+    # Not a count: the quorum's endpoints are asked at once and each re-checks
+    # the shutdown before dialling, so how many get their question in before the
+    # first one's answer sets the event is up to the scheduler.
+    assert ssh_questions, "the shutdown must land inside the SSH facet, not before it"
     assert reading.internet is ConnectivityFacet.UNKNOWN, "the round measured nothing that may be kept"
     assert detector.get_reading().environment_block is EnvironmentBlock.NONE
     assert changes == [], "and nothing may be announced for a condition that was never measured"
@@ -955,7 +958,7 @@ def test_a_failing_recovery_callback_takes_neither_the_others_nor_the_watcher_wi
     assert survivors == [1]
 
 
-# -- SocketNetworkProber, against real loopback listeners --
+# SocketNetworkProber, against real loopback listeners
 #
 # The one part of this module that speaks to a socket, and the part every
 # reading a user is ever shown comes out of. Driven against in-process

@@ -11,6 +11,7 @@ and lifecycle gating.
 import json
 import subprocess
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
@@ -27,6 +28,7 @@ from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.forward_cli import EnvelopeStreamConsumer
 from imbue.minds.desktop_client.forward_cli import ForwardSubprocessConfig
+from imbue.minds.desktop_client.forward_cli import _ForwardStderrCollapser
 from imbue.minds.desktop_client.forward_cli import _build_forward_command
 from imbue.minds.desktop_client.forward_cli import _redact_secrets
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
@@ -277,9 +279,6 @@ def consumer() -> EnvelopeStreamConsumer:
     return EnvelopeStreamConsumer(resolver=resolver, started_at=_CONSUMER_STARTED_AT)
 
 
-# envelope dispatch
-
-
 def test_invalid_json_envelope_is_skipped(consumer: EnvelopeStreamConsumer) -> None:
     # Should not raise; a warning is logged.
     _dispatch(consumer, "not json at all")
@@ -295,9 +294,6 @@ def test_unknown_stream_value_is_ignored(consumer: EnvelopeStreamConsumer) -> No
 def test_envelope_with_non_dict_payload_is_ignored(consumer: EnvelopeStreamConsumer) -> None:
     _dispatch(consumer, json.dumps({"stream": "observe", "payload": "not-a-dict"}))
     assert consumer.resolver.list_known_agent_ids() == ()
-
-
-# observe stream: per-provider snapshot
 
 
 def test_provider_snapshot_populates_resolver_and_fires_discovered_callbacks(
@@ -724,9 +720,6 @@ def test_shutdown_reports_a_replay_that_never_ended() -> None:
     assert "6x Docker state container is stopped" in lines[0]
 
 
-# observe stream: host ssh info
-
-
 def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamConsumer) -> None:
     counter = [0]
     discovered: list[tuple[AgentId, RemoteSSHInfo | None, str]] = []
@@ -759,9 +752,6 @@ def test_host_ssh_info_refires_discovery_with_ssh_info(consumer: EnvelopeStreamC
     assert second.user == "root"
     assert second.host == "1.2.3.4"
     assert second.known_hosts_path == Path("/tmp/pins/known_hosts")
-
-
-# observe stream: agent / host destroyed
 
 
 def test_agent_destroyed_clears_resolver_services_and_fires_callback(
@@ -813,9 +803,6 @@ def test_host_destroyed_destroys_all_agents_on_host(consumer: EnvelopeStreamCons
 
     assert set(destroyed) == {_AGENT_ID_1, _AGENT_ID_2}
     assert consumer.resolver.list_known_agent_ids() == ()
-
-
-# observe stream: host state threading
 
 
 def test_provider_snapshot_threads_host_state_into_resolver(consumer: EnvelopeStreamConsumer) -> None:
@@ -888,9 +875,6 @@ def test_provider_snapshot_carries_destroyed_host_state(consumer: EnvelopeStream
     _dispatch(consumer, _observe_envelope(snapshot))
 
     assert consumer.resolver.get_host_state(_HOST_ID_1) is HostState.DESTROYED
-
-
-# event stream: services / requests
 
 
 def test_event_services_envelope_updates_resolver_services(consumer: EnvelopeStreamConsumer) -> None:
@@ -975,9 +959,6 @@ def test_reverse_tunnel_established_is_silently_ignored(
     _dispatch(consumer, _forward_envelope(payload, agent_id=_AGENT_ID_1))
 
 
-# forward stream: system_interface_backend_failure
-
-
 def _record_backend_failures(
     consumer: EnvelopeStreamConsumer,
 ) -> list[tuple[AgentId, SystemInterfaceBackendFailureReason, int | None, str | None]]:
@@ -1048,6 +1029,50 @@ def test_an_unknown_reason_still_reports_a_connection_failure(consumer: Envelope
     assert _AGENT_ID_1 in tracker.snapshot_probe_targets()
 
 
+def test_backend_answered_envelope_reaches_its_callback_with_the_status(consumer: EnvelopeStreamConsumer) -> None:
+    """The plugin's report that a shell answered is what lets a live renderer clear a stale verdict.
+
+    A status that will not parse is read as the absent one and said so, rather
+    than dropping the observation: the answer is the evidence minds acts on, and
+    an accepted websocket reports no status at all, so there is nothing a
+    garbled value could mean that "no status" does not already cover.
+    """
+    observed: list[tuple[AgentId, int | None]] = []
+    consumer.add_on_system_interface_backend_answered_callback(
+        lambda agent_id, status_code: observed.append((agent_id, status_code))
+    )
+
+    with capture_loguru(level="WARNING") as log_output:
+        for raw_status_code in (200, None, "not-a-status"):
+            _dispatch(
+                consumer,
+                _forward_envelope(
+                    {
+                        "type": "system_interface_backend_answered",
+                        "agent_id": str(_AGENT_ID_1),
+                        "status_code": raw_status_code,
+                    },
+                    agent_id=_AGENT_ID_1,
+                ),
+            )
+
+    assert observed == [(_AGENT_ID_1, 200), (_AGENT_ID_1, None), (_AGENT_ID_1, None)]
+    assert "Unparseable status_code 'not-a-status'" in log_output.getvalue()
+
+
+def test_a_backend_answer_without_an_agent_id_is_dropped(consumer: EnvelopeStreamConsumer) -> None:
+    observed: list[tuple[AgentId, int | None]] = []
+    consumer.add_on_system_interface_backend_answered_callback(
+        lambda agent_id, status_code: observed.append((agent_id, status_code))
+    )
+
+    with capture_loguru(level="WARNING") as log_output:
+        _dispatch(consumer, _forward_envelope({"type": "system_interface_backend_answered", "status_code": 200}))
+
+    assert "Could not parse" in log_output.getvalue()
+    assert observed == []
+
+
 def test_a_backend_failure_without_an_agent_id_is_dropped(consumer: EnvelopeStreamConsumer) -> None:
     """An observation with nothing to attribute it to cannot drive anything."""
     observed = _record_backend_failures(consumer)
@@ -1059,7 +1084,165 @@ def test_a_backend_failure_without_an_agent_id_is_dropped(consumer: EnvelopeStre
     assert observed == []
 
 
-# forward stream: listening
+_UNRETRIEVED_TASK_REPORT = (
+    "Task exception was never retrieved",
+    "future: <Task finished name='Task-66503' coro=<_send_and_read_backend_response() done> exception=PoolTimeout()>",
+    "Traceback (most recent call last):",
+    '  File "/venv/site-packages/imbue/mngr_forward/server.py", line 649, in _send_and_read_backend_response',
+    "    response = http_client.send(backend_request, stream=True)",
+    "                                                 ^^^^^^^^^^^^",
+    '  File "/venv/site-packages/httpx/_client.py", line 1629, in send',
+    "    response = self._send_handling_auth(",
+    "httpx.PoolTimeout",
+)
+
+# The shape the pool-timeout storm actually had: the httpcore timeout chained
+# into the httpx one under asyncio's headline.
+_CHAINED_UNRETRIEVED_TASK_REPORT = (
+    *_UNRETRIEVED_TASK_REPORT[:-1],
+    "httpcore.PoolTimeout",
+    "The above exception was the direct cause of the following exception:",
+    "Traceback (most recent call last):",
+    '  File "/venv/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions',
+    "    raise mapped_exc(message) from exc",
+    "httpx.PoolTimeout",
+)
+
+# An exception whose message runs past its first line, ending indented: the
+# shape in which the next report's headline follows an indented line rather
+# than an exception line.
+_MULTI_LINE_MESSAGE_REPORT = (
+    "Task exception was never retrieved",
+    "Traceback (most recent call last):",
+    '  File "/venv/site-packages/imbue/mngr_forward/server.py", line 649, in _send_and_read_backend_response',
+    "pydantic_core.ValidationError: 1 validation error for ForwardEnvelope",
+    "  payload.agent_id",
+    "    Field required [type=missing]",
+)
+
+_BARE_TRACEBACK_REPORT = (
+    "Traceback (most recent call last):",
+    '  File "/venv/site-packages/imbue/mngr_forward/cli.py", line 12, in <module>',
+    "    main()",
+    "ValueError: boom",
+)
+
+_HANDLER_CRASH_REPORT = (
+    "Unhandled exception in client_connected_cb",
+    "transport: <asyncio.sslproto._SSLProtocolTransport object at 0x11cbebc50>",
+    "+ Exception Group Traceback (most recent call last):",
+    '  |   File "/venv/site-packages/hypercorn/asyncio/run.py", line 109, in _server_callback',
+    "  |     TCPServer(app, loop, config, context, lifespan_state, reader, writer)",
+    "  | ExceptionGroup: unhandled errors in a TaskGroup (1 sub-exception)",
+    "  +-+---------------- 1 ----------------",
+    '    |   File "/venv/site-packages/hypercorn/protocol/h2.py", line 259, in _handle_events',
+    "    |     self.streams[event.stream_id].handle(",
+    "    | KeyError: 9",
+    "    +------------------------------------",
+)
+
+
+def _relayed_stderr_lines(fed_lines: Sequence[str]) -> list[str]:
+    """Feed lines through the collapser (flushing at the end, as the reader does at EOF) and return what it logged."""
+    collapser = _ForwardStderrCollapser()
+    with capture_loguru(level="DEBUG") as log_output:
+        for line in fed_lines:
+            collapser.feed(line)
+        collapser.flush()
+    return [
+        line.split("mngr forward stderr: ", 1)[1]
+        for line in log_output.getvalue().splitlines()
+        if "mngr forward stderr: " in line
+    ]
+
+
+def test_stderr_relay_folds_a_traceback_into_one_line_and_counts_its_repeats() -> None:
+    """A burst of identical runtime reports costs a couple of log lines, not thousands.
+
+    The pool-timeout storm that followed a network outage wrote 1640 of these
+    reports in ninety seconds; relayed line by line they were 94% of a log
+    rotation and pushed the day's earlier logs out of the bug report. Each
+    report folds to its first and last lines, and identical consecutive reports
+    fold to a count.
+    """
+    relayed = _relayed_stderr_lines(
+        [
+            *_UNRETRIEVED_TASK_REPORT,
+            *_UNRETRIEVED_TASK_REPORT,
+            *_UNRETRIEVED_TASK_REPORT,
+            "WARNING: SSH tunnel setup failed",
+        ]
+    )
+
+    assert relayed == [
+        "Task exception was never retrieved [8 lines folded, ending: httpx.PoolTimeout]",
+        "the previous report repeated 2 more time(s)",
+        "WARNING: SSH tunnel setup failed",
+    ]
+
+
+def test_stderr_relay_folds_a_chained_traceback_under_its_headline_into_one_report() -> None:
+    """The storm's reports were two tracebacks joined by a chain separator; each folds to one line, repeats to a count."""
+    relayed = _relayed_stderr_lines(
+        [*_CHAINED_UNRETRIEVED_TASK_REPORT, *_CHAINED_UNRETRIEVED_TASK_REPORT, "WARNING: SSH tunnel setup failed"]
+    )
+
+    assert relayed == [
+        "Task exception was never retrieved [13 lines folded, ending: httpx.PoolTimeout]",
+        "the previous report repeated 1 more time(s)",
+        "WARNING: SSH tunnel setup failed",
+    ]
+
+
+def test_stderr_relay_starts_a_new_report_at_a_headline_whatever_the_open_one_ended_on() -> None:
+    """A headline is the next report, not the previous one's exception line -- so a storm keeps its per-report count."""
+    relayed = _relayed_stderr_lines([*_MULTI_LINE_MESSAGE_REPORT, *_UNRETRIEVED_TASK_REPORT])
+
+    assert relayed == [
+        "Task exception was never retrieved [5 lines folded, ending: Field required [type=missing]]",
+        "Task exception was never retrieved [8 lines folded, ending: httpx.PoolTimeout]",
+    ]
+
+
+def test_stderr_relay_keeps_single_line_messages_verbatim_and_in_order() -> None:
+    """The forward's ordinary loguru lines are untouched: one in, one out, as they arrive."""
+    relayed = _relayed_stderr_lines(
+        [
+            "WARNING: Backend SSE stream failed for /api/agents/x/stream: peer closed connection",
+            "WS forward ended for agent-1 path=/api/ws (backend leg ended first)",
+            "   ",
+            "WARNING: SSH tunnel setup failed for agent-1: timed out",
+        ]
+    )
+
+    assert relayed == [
+        "WARNING: Backend SSE stream failed for /api/agents/x/stream: peer closed connection",
+        "WS forward ended for agent-1 path=/api/ws (backend leg ended first)",
+        "WARNING: SSH tunnel setup failed for agent-1: timed out",
+    ]
+
+
+def test_stderr_relay_folds_an_exception_group_report_and_ends_it_at_the_next_message() -> None:
+    """hypercorn's handler crash is one report, however deep its tree draws, and a plain line after it starts anew."""
+    relayed = _relayed_stderr_lines(
+        [*_HANDLER_CRASH_REPORT, "WARNING: Failed to open an SSH channel", *_HANDLER_CRASH_REPORT]
+    )
+
+    assert relayed == [
+        "Unhandled exception in client_connected_cb [10 lines folded, ending: +------------------------------------]",
+        "WARNING: Failed to open an SSH channel",
+        "Unhandled exception in client_connected_cb [10 lines folded, ending: +------------------------------------]",
+    ]
+
+
+def test_stderr_relay_relays_a_bare_traceback_without_waiting_for_more_output() -> None:
+    """A crash followed by silence is relayed at its exception line, not held until stderr speaks again."""
+    collapser = _ForwardStderrCollapser()
+    with capture_loguru(level="DEBUG") as log_output:
+        for line in _BARE_TRACEBACK_REPORT:
+            collapser.feed(line)
+
+    assert "Traceback (most recent call last): [3 lines folded, ending: ValueError: boom]" in log_output.getvalue()
 
 
 def test_listening_envelope_unblocks_wait_for_listening_with_port(
@@ -1087,9 +1270,6 @@ def test_malformed_listening_port_is_dropped_and_waiter_keeps_waiting(
     assert consumer.wait_for_listening(timeout=0.05) is None
 
 
-# terminate
-
-
 def test_terminate_calls_terminate_then_returns(consumer: EnvelopeStreamConsumer) -> None:
     fake = _FakeProcess(pid=4242)
     fake.returncode = 0
@@ -1101,9 +1281,6 @@ def test_terminate_calls_terminate_then_returns(consumer: EnvelopeStreamConsumer
 def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamConsumer) -> None:
     # Must not raise even with no attached process.
     consumer.terminate()
-
-
-# intentional vs unintentional exit reporting
 
 
 def test_intentional_terminate_does_not_report_exit() -> None:
@@ -1162,9 +1339,6 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
         consumer.start(cg)
 
 
-# _build_forward_command
-
-
 def test_build_forward_command_includes_use_http2_flag() -> None:
     """The spawned argv always carries --use-http2 so the proxy serves TLS.
 
@@ -1209,9 +1383,6 @@ def test_build_forward_command_passes_the_request_headers_file_only_when_configu
 
     without_file = _build_forward_command(ForwardSubprocessConfig(), preauth_cookie="s", browser_bridge_token="b")
     assert "--request-headers-file" not in without_file
-
-
-# _redact_secrets
 
 
 def test_redact_secrets_masks_preauth_cookie_value() -> None:

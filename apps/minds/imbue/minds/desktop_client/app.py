@@ -115,6 +115,7 @@ from imbue.minds.desktop_client.supertokens_routes import create_supertokens_blu
 from imbue.minds.desktop_client.supertokens_routes import signout_user_via_plugin
 from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -2835,6 +2836,7 @@ def _run_system_interface_health_probe_loop(
             type(backend_resolver).__name__,
         )
         return
+    probe_log_gate = AgentFailureLogGate()
     with make_workspace_probe_client(
         preauth_cookie=mngr_forward_preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
@@ -2863,16 +2865,24 @@ def _run_system_interface_health_probe_loop(
                 # an agent the plugin cannot resolve (discovery still warming
                 # up, or the agent gone) answers with its 503 loader, which
                 # records as a failure below.
-                probe_status = probe_workspace_through_plugin(
+                outcome = probe_workspace_through_plugin(
                     mngr_forward_port=mngr_forward_port,
                     preauth_cookie=mngr_forward_preauth_cookie,
                     workspace_id=str(aid),
                     probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
                     client=probe_client,
                 )
-                if probe_status == 200:
+                if outcome.is_ready:
+                    probe_log_gate.forget(aid)
                     tracker.record_probe_success(aid)
                 else:
+                    if probe_log_gate.should_log_failure(aid, outcome.summary):
+                        logger.info(
+                            "Probed the system interface of {} without a 200: {} (its health reads {})",
+                            aid,
+                            outcome.summary,
+                            tracker.get_health(aid).value,
+                        )
                     tracker.record_probe_failure(aid)
             # Sleep on the group's shutdown event (not a throwaway Event) so
             # the loop wakes immediately when shutdown is triggered instead of

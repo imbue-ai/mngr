@@ -28,7 +28,6 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
-from imbue.minds.desktop_client.environment_signals import ConnectivityFacet
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import SshEndpoint
 from imbue.minds.desktop_client.mngr_command import OUTPUT_TAIL_MAX_CHARS
@@ -61,8 +60,10 @@ from imbue.minds.desktop_client.workspace_recovery import HOST_ACCESS_REJECTED_R
 from imbue.minds.desktop_client.workspace_recovery import ProviderErrorConnectivityTrigger
 from imbue.minds.desktop_client.workspace_recovery import RecoveryDispatchOutcome
 from imbue.minds.desktop_client.workspace_recovery import RecoveryReadinessOutcome
+from imbue.minds.desktop_client.workspace_recovery import RecoveryReadinessResult
 from imbue.minds.desktop_client.workspace_recovery import UnattendedRecoveryDispatcher
 from imbue.minds.desktop_client.workspace_recovery import WorkspaceSshEndpointSource
+from imbue.minds.desktop_client.workspace_recovery import _GATE_VOIDED_READING_ATTEMPT_LIMIT
 from imbue.minds.desktop_client.workspace_recovery import _HOST_RECOVERY_STARTUP_WAIT_SECONDS
 from imbue.minds.desktop_client.workspace_recovery import _await_system_interface_ready
 from imbue.minds.desktop_client.workspace_recovery import _build_mngr_start_argv
@@ -179,7 +180,7 @@ def _started_registry(workspace_agent: AgentId) -> InMemoryWorkspaceOperationReg
     return registry
 
 
-# -- argv builders --
+# argv builders
 
 
 def test_build_mngr_stop_argv_always_stops_the_host() -> None:
@@ -305,7 +306,7 @@ def test_run_host_recovery_sequence_pins_the_provider_on_both_steps(tmp_path: Pa
     assert [line.split()[1] for line in invocations] == [expected, expected]
 
 
-# -- timed-out subprocess output capture --
+# timed-out subprocess output capture
 
 
 def test_run_mngr_capturing_timeout_carries_the_output_tail(tmp_path: Path) -> None:
@@ -454,7 +455,7 @@ def test_run_mngr_falls_back_to_the_stderr_tail_when_mngr_printed_no_verdict(tmp
     assert "RecursionError" in str(caught)
 
 
-# -- provider-error attribution --
+# provider-error attribution
 
 
 def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
@@ -523,7 +524,7 @@ def test_provider_error_message_for_workspace_reduces_the_generic_shape_to_its_r
     assert _provider_error_message_for_workspace(errors, "docker", True) == reason
 
 
-# -- recovery worker --
+# recovery worker
 
 
 def test_run_host_recovery_sequence_fails_when_system_services_agent_is_unresolved(tmp_path: Path) -> None:
@@ -621,7 +622,11 @@ def test_run_host_recovery_sequence_fails_and_reports_when_interface_never_answe
     tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
     resolver = build_resolver_with_system_services(workspace_agent, services_agent)
 
-    with ConcurrencyGroup(name="test-restart") as cg, capture_error_logs() as error_records:
+    with (
+        ConcurrencyGroup(name="test-restart") as cg,
+        capture_error_logs() as error_records,
+        capture_loguru(level="INFO") as log_output,
+    ):
         run_host_recovery_sequence(
             workspace_agent_id=workspace_agent,
             tracker=tracker,
@@ -638,7 +643,101 @@ def test_run_host_recovery_sequence_fails_and_reports_when_interface_never_answe
         )
 
     assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
-    assert "did not respond" in (tracker.get_last_recovery_error(workspace_agent) or "")
+    recovery_error = tracker.get_last_recovery_error(workspace_agent) or ""
+    assert "did not respond" in recovery_error
+    # The verdict names what the probes actually got back, and so does the log:
+    # a refused connection here, which is what tells this apart from a timeout
+    # or a non-200 the plugin answered with.
+    assert "last probe: ConnectError" in recovery_error, recovery_error
+    assert f"Probed the system interface of {workspace_agent} during its recovery without a 200: ConnectError" in (
+        log_output.getvalue()
+    )
+    assert len(error_records) == 1, error_records
+
+
+def test_run_host_recovery_sequence_completes_when_the_shell_is_seen_answering_the_plugin(tmp_path: Path) -> None:
+    """A restart whose readiness probes never land still ends well once the plugin sees the shell answer.
+
+    This is the false "did not respond within 300s" verdict: the container was
+    up and serving the renderer through the plugin the whole time, and only the
+    probe path was broken. The forwarded answer completes the recovery instead.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    registry = _started_registry(workspace_agent)
+
+    def _has_reached_the_readiness_wait() -> bool:
+        chunk = registry.read_log_chunk(workspace_agent, 0, timeout_seconds=0.05)
+        return chunk is not None and any("Waiting for the system interface" in line for line in chunk.lines)
+
+    def _answer_once_the_wait_begins() -> None:
+        assert poll_until(_has_reached_the_readiness_wait, timeout=5.0, poll_interval=0.02), (
+            "the recovery never reached its readiness wait"
+        )
+        tracker.record_forwarded_answer(workspace_agent)
+
+    with ConcurrencyGroup(name="test-restart-answered") as cg, capture_error_logs() as error_records:
+        cg.start_new_thread(target=_answer_once_the_wait_begins, name="test-forwarded-answer")
+        started = time.monotonic()
+        run_host_recovery_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            # Port 1 refuses connections, so the wait's own probes never land.
+            mngr_forward_port=1,
+            mngr_forward_preauth_cookie="cookie",
+            registry=registry,
+            startup_wait_seconds=30.0,
+            kind=HostRecoveryKind.RESTART,
+        )
+        elapsed = time.monotonic() - started
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.HEALTHY
+    record = registry.get(workspace_agent)
+    assert record is not None and record.status == WorkspaceOperationStatus.DONE, record
+    assert error_records == []
+    assert elapsed < 10.0, f"the recovery took {elapsed:.1f}s to notice the machine answering"
+
+
+def test_run_host_recovery_sequence_ignores_an_answer_from_before_its_commands_ran(tmp_path: Path) -> None:
+    """A shell answer that lands during the stop phase must not pass for the machine coming back.
+
+    The shell keeps serving the renderer for the first seconds of the stop, so
+    the plugin reports it answering while the worker is still bouncing the
+    machine. Only the readiness wait's own evidence -- or an answer after the
+    commands ran -- may end the recovery; here neither comes, so it fails.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    tracker.mark_recovering(workspace_agent, HostRecoveryKind.RESTART)
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent)
+    # The renderer's traffic during the stop, reported by the plugin before the worker runs.
+    tracker.record_forwarded_answer(workspace_agent)
+
+    with ConcurrencyGroup(name="test-restart-early-answer") as cg, capture_error_logs() as error_records:
+        run_host_recovery_sequence(
+            workspace_agent_id=workspace_agent,
+            tracker=tracker,
+            backend_resolver=resolver,
+            mngr_binary=_write_fake_mngr(tmp_path),
+            mngr_host_dir=tmp_path,
+            concurrency_group=cg,
+            # Port 1 refuses connections, so the wait's own probes never land.
+            mngr_forward_port=1,
+            mngr_forward_preauth_cookie="cookie",
+            registry=_started_registry(workspace_agent),
+            startup_wait_seconds=0.1,
+            kind=HostRecoveryKind.RESTART,
+        )
+
+    assert tracker.get_health(workspace_agent) == AgentHealth.RECOVERY_FAILED
     assert len(error_records) == 1, error_records
 
 
@@ -863,7 +962,7 @@ def test_run_host_recovery_sequence_stops_before_start_for_a_restart(tmp_path: P
     assert stop_index < start_index
 
 
-# -- recovery classification trustworthiness (freshness gate on the verdict path) --
+# recovery classification trustworthiness (freshness gate on the verdict path)
 
 
 def _drive_to_stuck_with_onset(tracker: SystemInterfaceHealthTracker, agent_id: AgentId) -> datetime:
@@ -1002,7 +1101,7 @@ def test_classification_trustworthiness_without_onset_falls_back_to_age() -> Non
     assert is_recovery_classification_trustworthy(resolver, None, agent_id) is False
 
 
-# -- unattended recovery + the shared dispatch --
+# unattended recovery + the shared dispatch
 
 
 def _dispatcher(
@@ -1441,7 +1540,7 @@ def test_a_machine_that_answers_is_never_started(tmp_path: Path) -> None:
     assert _read_fake_mngr_invocations(mngr_binary) == []
 
 
-# -- backend-unreachable verdict (the poll-cheap read) --
+# backend-unreachable verdict (the poll-cheap read)
 
 
 def _write_fake_mngr_with_provider_outage(
@@ -1739,7 +1838,7 @@ def test_a_rejected_starts_verdict_lasts_until_the_backend_is_next_polled(tmp_pa
     assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
 
 
-# -- the this-device-cannot-connect verdict --
+# the this-device-cannot-connect verdict
 
 
 @pytest.mark.parametrize(
@@ -1835,7 +1934,7 @@ def test_device_verdict_is_none_without_a_tracker() -> None:
     assert read_device_cannot_connect_verdict(AgentId.generate(), tracker=None) is None
 
 
-# -- a start that booted nothing --
+# a start that booted nothing
 
 
 def test_a_start_that_booted_nothing_is_recorded_against_the_episode(tmp_path: Path) -> None:
@@ -1922,7 +2021,8 @@ def test_a_failure_the_probe_outranked_ends_the_operation_as_a_caveat(tmp_path: 
             workspace_agent_id=workspace_agent,
             tracker=tracker,
             backend_resolver=resolver,
-            mngr_binary=_write_fake_mngr(tmp_path, was_host_started=True),
+            # The start errors out after the probe already found the machine up.
+            mngr_binary=_write_fake_mngr(tmp_path, start_exit=1),
             mngr_host_dir=tmp_path,
             concurrency_group=cg,
             mngr_forward_port=1,
@@ -1941,7 +2041,7 @@ def test_a_failure_the_probe_outranked_ends_the_operation_as_a_caveat(tmp_path: 
     assert record.warning is not None
 
 
-# -- post-recovery readiness wait --
+# post-recovery readiness wait
 
 
 def test_recovery_readiness_budget_covers_a_cold_boot() -> None:
@@ -1999,18 +2099,23 @@ def test_await_system_interface_ready_reports_a_slow_boot_that_answers() -> None
     """The wait polls past not-ready responses and reports READY on the first 200."""
     with scripted_workspace_probe_server(not_ready_count=2) as port:
         with ConcurrencyGroup(name="test-wait") as cg:
-            outcome = _await_system_interface_ready(
-                str(AgentId.generate()), port, "cookie", 30.0, concurrency_group=cg
+            readiness = _await_system_interface_ready(
+                AgentId.generate(), SystemInterfaceHealthTracker(), port, "cookie", 30.0, concurrency_group=cg
             )
-    assert outcome is RecoveryReadinessOutcome.READY
+    assert readiness.outcome is RecoveryReadinessOutcome.READY
+    assert readiness.last_probe_summary == "HTTP 200"
 
 
 def test_await_system_interface_ready_times_out_when_nothing_ever_answers() -> None:
     """A budget that elapses with no answer is a TIMED_OUT verdict (the real failure)."""
     with ConcurrencyGroup(name="test-wait") as cg:
         # Port 1 refuses connections, so every poll fails fast.
-        outcome = _await_system_interface_ready(str(AgentId.generate()), 1, "cookie", 0.1, concurrency_group=cg)
-    assert outcome is RecoveryReadinessOutcome.TIMED_OUT
+        readiness = _await_system_interface_ready(
+            AgentId.generate(), SystemInterfaceHealthTracker(), 1, "cookie", 0.1, concurrency_group=cg
+        )
+    assert readiness.outcome is RecoveryReadinessOutcome.TIMED_OUT
+    # The refused connection is the whole diagnosis, and rides on the verdict.
+    assert readiness.last_probe_summary.startswith("ConnectError"), readiness.last_probe_summary
 
 
 def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
@@ -2025,13 +2130,53 @@ def test_await_system_interface_ready_gives_up_promptly_on_shutdown() -> None:
         cg.shutdown()
         started = time.monotonic()
         # Port 1 refuses connections, so only the shutdown check can end this.
-        outcome = _await_system_interface_ready(
-            str(AgentId.generate()), 1, "cookie", _HOST_RECOVERY_STARTUP_WAIT_SECONDS, concurrency_group=cg
+        readiness = _await_system_interface_ready(
+            AgentId.generate(),
+            SystemInterfaceHealthTracker(),
+            1,
+            "cookie",
+            _HOST_RECOVERY_STARTUP_WAIT_SECONDS,
+            concurrency_group=cg,
         )
         elapsed = time.monotonic() - started
 
-    assert outcome is RecoveryReadinessOutcome.ABANDONED
+    assert readiness.outcome is RecoveryReadinessOutcome.ABANDONED
     assert elapsed < 5.0, f"the wait ran {elapsed:.1f}s past a shutdown"
+
+
+def test_await_system_interface_ready_ends_when_the_machine_is_seen_answering_elsewhere() -> None:
+    """A shell answer the plugin reported ends the wait at once, whatever its own probes are getting back.
+
+    The wait's probes and the renderer's traffic go through the same plugin,
+    and the day this exists for is the one where only the probes fail: the
+    machine must stop being described as failing when it is seen answering,
+    not 300 seconds later.
+    """
+    tracker = SystemInterfaceHealthTracker()
+    agent_id = AgentId.generate()
+    tracker.mark_recovering(agent_id, HostRecoveryKind.RESTART)
+    tracker.mark_awaiting_readiness(agent_id)
+    results: list[RecoveryReadinessResult] = []
+
+    with capture_loguru(level="INFO") as log_output, ConcurrencyGroup(name="test-wait-answered") as cg:
+        cg.start_new_thread(
+            # Port 1 refuses connections, so only the tracker can end this inside the budget.
+            target=lambda: results.append(
+                _await_system_interface_ready(agent_id, tracker, 1, "cookie", 30.0, concurrency_group=cg)
+            ),
+            name="test-readiness-wait",
+        )
+        started = time.monotonic()
+        assert poll_until(
+            lambda: "during its recovery without a 200" in log_output.getvalue(), timeout=5.0, poll_interval=0.02
+        ), "the wait never probed"
+        tracker.record_forwarded_answer(agent_id)
+        assert poll_until(lambda: results != [], timeout=5.0, poll_interval=0.02), "the wait never returned"
+        elapsed = time.monotonic() - started
+
+    assert results[0].outcome is RecoveryReadinessOutcome.READY
+    assert results[0].last_probe_summary.startswith("ConnectError"), "its own probes were still failing"
+    assert elapsed < 5.0, f"the wait ran {elapsed:.1f}s after the machine was seen answering"
 
 
 def test_run_host_recovery_sequence_does_not_report_a_failure_when_shutdown_cuts_it_short(tmp_path: Path) -> None:
@@ -2464,47 +2609,6 @@ def test_a_recovery_that_lands_while_the_start_is_being_owed_still_runs_it(
         assert _wait_for_mngr_invocation(mngr_binary, "start "), "the owed start must not be stranded by the drain"
 
     assert dispatcher._owed_agent_ids == set(), "the start that ran is no longer owed"
-
-
-def test_an_unknown_reading_dispatches_exactly_as_before(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
-) -> None:
-    """A reading a wake disqualified knows nothing, and nothing here may suppress on that.
-
-    The one path that hands the gate an UNKNOWN in production, since its own
-    ``probe_now`` measures whenever there is no fresh reading to reuse: the
-    laptop wakes while that probe is in flight, and the detector answers with
-    the blanked reading instead of a description of the network it went to sleep
-    on. The network under the wake is dead, so a measurement that was wrongly
-    kept would read OFFLINE and withhold the start -- which is what makes this
-    the UNKNOWN case rather than another clear-network one.
-    """
-    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
-    workspace_agent = AgentId.generate()
-    services_agent = AgentId.generate()
-    resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
-    mngr_binary = _write_fake_mngr(tmp_path)
-    registry = InMemoryWorkspaceOperationRegistry()
-
-    def _wake_the_detector() -> None:
-        detector.invalidate_after_wake(datetime.now(timezone.utc))
-
-    prober = SideEffectingStubNetworkProber(
-        reachable_hosts=set(), ssh_endpoints=set(), on_first_question=_wake_the_detector
-    )
-    detector = build_connectivity_detector_over(prober, root_concurrency_group)
-
-    with ConcurrencyGroup(name="test-unattended-unknown") as cg:
-        dispatcher = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path, detector)
-        tracker.add_on_stuck_edge_callback(dispatcher)
-        tracker.record_failure(workspace_agent)
-        tracker.record_probe_failure(workspace_agent)
-        is_started = _wait_for_mngr_invocation(mngr_binary, "start ")
-
-    assert is_started, "an unmeasured network must never withhold a restart"
-    reading = detector.get_reading()
-    assert reading.observed_at is None, "the wake must have left the gate with a reading nobody took"
-    assert reading.internet is ConnectivityFacet.UNKNOWN
 
 
 def test_a_start_that_fails_while_offline_is_still_recovery_failed_but_not_error_logged(
@@ -3022,6 +3126,95 @@ def test_a_machine_stopped_while_the_gate_probes_is_not_started_anyway(
         )
 
     assert _read_fake_mngr_invocations(mngr_binary) == [], "a machine stopped from inside the app is not started"
+
+
+def _internet_round_count(prober: StubNetworkProber) -> int:
+    """How many internet rounds the detector ran, each asking every quorum host once."""
+    return len([endpoint for endpoint in prober.probed_endpoints if not endpoint.startswith("ssh://")]) // len(
+        STUB_CONNECTIVITY_HOSTS
+    )
+
+
+@pytest.mark.witnesses(
+    "no-blame-past-an-unmeasured-device",
+    partial="witnesses only the gate re-measuring a reading a wake voided, not what it then decides to blame",
+)
+def test_a_gate_whose_reading_was_voided_by_a_wake_probes_again_before_deciding(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A sleep landing mid-probe voids the reading, and the gate must measure again rather than dispatch on the blank.
+
+    The network a laptop wakes onto is the one most likely to be dead, and it
+    is exactly the one a voided reading says nothing about. Dispatching on the
+    blank started a machine over a dead network in the field; the probe after
+    the wake is the one that describes that network, so the gate takes it and
+    owes the start.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+    # Nothing is reachable, so the round the wake voids would have read OFFLINE.
+    prober = SideEffectingStubNetworkProber(reachable_hosts=set(), ssh_endpoints=set(), on_first_question=lambda: None)
+    detector = build_connectivity_detector_over(prober, root_concurrency_group)
+    prober.on_first_question = lambda: detector.invalidate_after_wake(datetime.now(timezone.utc))
+
+    with ConcurrencyGroup(name="test-unattended-gate-voided-once") as cg:
+        dispatcher = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path, detector)
+        tracker.add_on_stuck_edge_callback(dispatcher)
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+        assert poll_until(
+            lambda: str(workspace_agent) in dispatcher._owed_agent_ids,
+            timeout=_DISPATCH_WAIT_SECONDS,
+            poll_interval=0.02,
+        ), "the dead network the second probe found must withhold the start"
+
+    assert _internet_round_count(prober) == 2, "the voided reading must be followed by a second measurement"
+    assert _read_fake_mngr_invocations(mngr_binary) == [], "a start withheld for a dead network never ran"
+
+
+@pytest.mark.witnesses(
+    "no-blame-past-an-unmeasured-device",
+    partial="witnesses only the action a device that stays unmeasurable is still owed, not any verdict",
+)
+def test_a_gate_whose_every_reading_is_voided_still_starts_the_machine(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A laptop that sleeps through every measurement gets the no-evidence dispatch, not a stranded machine.
+
+    The same answer a probe that raised gets: nothing measured the network, so
+    nothing may withhold the start, and the owed set would never be drained for
+    a machine no reading ever convicted.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = _resolver_for_a_remote_machine(workspace_agent, services_agent)
+    mngr_binary = _write_fake_mngr(tmp_path)
+    registry = InMemoryWorkspaceOperationRegistry()
+    prober = SideEffectingStubNetworkProber(reachable_hosts=set(), ssh_endpoints=set(), on_first_question=lambda: None)
+    detector = build_connectivity_detector_over(prober, root_concurrency_group)
+
+    def _wake_and_stay_armed() -> None:
+        detector.invalidate_after_wake(datetime.now(timezone.utc))
+        prober.is_armed = True
+
+    prober.on_first_question = _wake_and_stay_armed
+
+    with capture_loguru(level="WARNING") as log_output, ConcurrencyGroup(name="test-unattended-gate-voided") as cg:
+        dispatcher = _dispatcher(tracker, resolver, registry, cg, mngr_binary, tmp_path, detector)
+        tracker.add_on_stuck_edge_callback(dispatcher)
+        tracker.record_failure(workspace_agent)
+        tracker.record_probe_failure(workspace_agent)
+        is_started = _wait_for_mngr_invocation(mngr_binary, "start ")
+
+    assert is_started, "a machine no reading could describe is started, not stranded"
+    assert _internet_round_count(prober) == _GATE_VOIDED_READING_ATTEMPT_LIMIT
+    assert dispatcher._owed_agent_ids == set()
+    assert "every reading was voided by a wake" in log_output.getvalue()
 
 
 def test_a_recovery_that_wins_the_machine_mid_probe_is_not_overwritten(

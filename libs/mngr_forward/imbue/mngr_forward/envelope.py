@@ -24,6 +24,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import ListeningPayload
 from imbue.mngr_forward.data_types import LoginUrlPayload
 from imbue.mngr_forward.data_types import ReverseTunnelEstablishedPayload
+from imbue.mngr_forward.data_types import SystemInterfaceBackendAnsweredPayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.primitives import ForwardPort
 
@@ -99,12 +100,29 @@ class EnvelopeWriter(MutableModel):
 
         Surfaces a per-agent observation from the forwarding path so a
         downstream consumer can apply its own restart-recovery policy. The
-        plugin remains a dumb reverse proxy -- this is the only per-agent
-        backend signal it exposes outside its own logs.
+        plugin remains a dumb reverse proxy: it reports what it observed and
+        leaves what that means to the consumer, here and in its success-side
+        counterpart, :meth:`emit_system_interface_backend_answered`.
 
         ``payload.reason`` says what was observed, and not every reason
         reports a failed request: ``STALLED`` reports one still in flight
         that may yet succeed. See ``SystemInterfaceBackendFailureReason``.
+        """
+        self._write_envelope(
+            {
+                "stream": "forward",
+                "agent_id": str(payload.agent_id),
+                "payload": payload.model_dump(mode="json"),
+            }
+        )
+
+    def emit_system_interface_backend_answered(self, payload: SystemInterfaceBackendAnsweredPayload) -> None:
+        """Emit a ``system_interface_backend_answered`` plugin event.
+
+        The success-side counterpart of
+        :meth:`emit_system_interface_backend_failure`: the shell backend of one
+        agent answered a request the plugin forwarded. Rate-limited by the
+        caller, not here.
         """
         self._write_envelope(
             {

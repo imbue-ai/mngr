@@ -8,8 +8,8 @@ spare Mac:
 
 - `sleep_wake_drill.py` stages the incident against running Minds apps and
   reports what each app did. This is the one to run after changing the
-  forward's tunnels, the health tracker's thresholds, the recovery dispatch, or
-  the sleep tracker.
+  forward's tunnels, the health tracker's thresholds, the recovery dispatch,
+  the connectivity gate, or the sleep tracker.
 - `sleep_wake_probe.py` measures the platform facts that work relies on
   (which clocks stop, what releases a blocked SSH read, how long a half-open
   tunnel stalls). Run it when a drill result does not make sense.
@@ -29,7 +29,11 @@ the laptop you are working from.
   on a workspace for the whole run. The health probe loop only polls a
   workspace that a failed request has enrolled, and those requests come from an
   open window. A workspace nobody is looking at is never probed, never
-  convicted, and measures nothing.
+  convicted, and measures nothing. In the scenarios that cut the network
+  before the sleep, the drill checks for this: it names any app that has not
+  hit the cut network after 45 seconds, so its window can be brought to the
+  front, and stops the run if one still has not by `--wait-for-enrolled` (two
+  minutes by default).
 - To compare a change against main, run two apps side by side: the build under
   test on one data directory and a main build on another (for example `~/.minds`
   and `~/.minds-staging`). The drill finds every running app in the process
@@ -83,13 +87,75 @@ and waits.
 does not doze off again once the display goes dark. The forced sleep still
 goes ahead.
 
-### The other scenario
+### The other scenarios
 
 `--scenario recovery-across-sleep` stages the opposite case: the machines are
 taken off the network first, the apps are left to convict them and dispatch
 restarts, and the laptop sleeps across those restarts. There the conviction is
 right, and what is under test is what the sleep does to a `mngr start` whose
-deadlines are measured on a clock the sleep stops.
+deadlines are measured on a clock the sleep stops. As in the gate scenario
+below, a sleep too short for the apps to see ends the run early.
+
+`--scenario gate-across-sleep` stages the morning of a later incident, in which
+the laptop woke onto no network at all. Every packet off the laptop is dropped
+(loopback excepted), so the machine is unreachable and so is the public quorum
+the unattended dispatcher measures the device by before it starts anything.
+The apps convict the machine, and at the conviction the drill sleeps the
+laptop: the dispatcher is measuring the dead network at that moment, and a
+sleep landing inside the measurement voids its reading. A gate that acted on
+the voided reading dispatched a start over a network nothing had looked at;
+that start failed, and its failure held a running machine on "This machine
+stopped responding" for the rest of the day. The network stays dead for
+`--offline-after-wake` (two minutes by default) past the wake, long enough for
+such a start to fail, and is then put back for `--post-wake-wait`.
+
+Run it with `--auto-sleep`. The measurement the sleep has to land in lasts only
+as long as the resolver takes to give up on the quorum's names, about 30
+seconds, and a lid closed by hand at the right moment is luck; the drill sleeps
+the laptop the moment the last app convicts. For an imbue_cloud workspace the
+gate first asks the connector for the machine's status, and on a dead network
+that read runs to its one-minute timeout before the gate measures anything, so
+there the drill waits for each app's read to give up and sleeps then. The report says whether the sleep landed (step
+3). A run where it did not measured the gate on a reading it took before the
+sleep, which is a different and easier case; re-run it.
+
+The sleep also has to last. The apps only count a gap of 30 seconds or more as
+a sleep, and with the whole network cut, macOS's TCP keepalive gets no answer
+and can wake the laptop within seconds. So for this scenario the drill turns
+`tcpkeepalive` off while the network is cut, and puts each power source's
+setting back when the network returns, or if the run dies. Until then Find My
+cannot reach the laptop while it sleeps. If the laptop still wakes before 30
+seconds, the drill puts the network back and reports at once: the steps that
+depend on the sleep read UNMEASURED, and the report shows pmset's reason for
+the wake. Re-run it.
+
+Each app's report for this scenario has these steps:
+
+1. **The outage convicted the machine.** As in the recovery scenario.
+2. **The failing probes were logged with what they got back.** A build from
+   before the fix logs nothing for a probe failing against a machine already
+   convicted, which is what left the incident's day undiagnosable.
+3. **The sleep landed inside a connectivity probe.** Read off the app's own
+   `Dropping a connectivity reading ... taken across a wake` line, counted
+   only once that app has convicted, since the gate opens at the conviction.
+   A gate that had already read the device offline before the laptop went to
+   sleep was never handed a voided reading, nor was one in an app that only
+   convicted after the wake, and the report says so rather than counting its
+   decision.
+4. **The start was withheld while the device was offline.** A dispatch before
+   the network came back is the defect. The fixed build measures the device
+   again after the wake voided its reading (`Probing the device again ...`).
+5. **The network came back and the machine was seen answering.** The owed
+   start runs and boots nothing, or is dropped because a probe had already
+   found the machine answering; either way the verdict clears.
+6. **No recovery-failed card was raised.**
+
+Its side-by-side table lists STUCK, the voided reading, the withheld start, any
+dispatch, probe back, and the card, timed from the wake, with the time the
+network came back above the rows. A pass for the build under test is a
+withheld start, no dispatch before the network came back, and no card. Main,
+as the control, should show a dispatch a few seconds after the wake and a
+RECOVERY_FAILED card.
 
 ## Reading the report
 

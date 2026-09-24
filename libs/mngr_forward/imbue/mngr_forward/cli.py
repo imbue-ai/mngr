@@ -9,6 +9,7 @@ import ssl
 import subprocess
 import threading
 import time
+import traceback
 import webbrowser
 from collections.abc import Awaitable
 from collections.abc import Callable
@@ -20,8 +21,10 @@ import click
 from hypercorn.asyncio import serve as hypercorn_serve
 from hypercorn.config import Config
 from loguru import logger
+from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.primitives import NonNegativeInt
 from imbue.imbue_common.primitives import PositiveInt
 from imbue.imbue_common.pure import pure
@@ -54,6 +57,7 @@ from imbue.mngr_forward.primitives import ReverseTunnelSpec
 from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
 from imbue.mngr_forward.reverse_handler import ReverseTunnelHandler
+from imbue.mngr_forward.server import ForwardRepeatRateLimiter
 from imbue.mngr_forward.server import create_forward_app
 from imbue.mngr_forward.service_map_cache import ServiceMapCache
 from imbue.mngr_forward.snapshot import mngr_list_snapshot
@@ -546,13 +550,120 @@ def _is_benign_tls_teardown_error(exception: BaseException | None) -> bool:
     return is_handshake_failure or is_abandoned_shutdown
 
 
-def _handle_serve_loop_exception(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
-    """Loop exception handler: drop benign TLS teardown noise, defer the rest."""
+# The headline asyncio puts on a context that carries none of its own.
+_DEFAULT_LOOP_EXCEPTION_HEADLINE: Final[str] = "Unhandled exception in event loop"
+# Context keys holding a list of frames rather than an object: their repr says
+# nothing, so they are rendered as the frames they are.
+_LOOP_EXCEPTION_FRAME_LIST_KEYS: Final[tuple[str, ...]] = ("source_traceback", "handle_traceback")
+# Rendered on the summary line rather than in the context block, so they are
+# not also repeated under it.
+_LOOP_EXCEPTION_SUMMARY_KEYS: Final[tuple[str, ...]] = ("message", "exception")
+
+
+@pure
+def _format_raising_frame(exception: BaseException) -> str:
+    """Name where ``exception`` was raised, as the one frame worth carrying on a single-line summary.
+
+    The whole traceback follows at debug, but that is below the console level a
+    forward runs at by default, so this line is all a consumer reading the
+    plugin's stderr gets to place the failure with.
+    """
+    frames = traceback.extract_tb(exception.__traceback__)
+    if not frames:
+        return ""
+    raising_frame = frames[-1]
+    return f" at {raising_frame.filename}:{raising_frame.lineno} in {raising_frame.name}"
+
+
+@pure
+def _format_loop_exception_summary(context: dict[str, Any]) -> str:
+    """Render a loop-exception context as the one line that says which failure this was."""
+    headline = str(context.get("message") or _DEFAULT_LOOP_EXCEPTION_HEADLINE)
     exception = context.get("exception")
-    if _is_benign_tls_teardown_error(exception):
-        logger.debug("Dropped benign TLS teardown error from an abandoned connection: {!r}", exception)
-        return
-    loop.default_exception_handler(context)
+    if not isinstance(exception, BaseException):
+        return headline
+    # A repr escapes the newlines of a multi-line exception message; str would
+    # not, and this line's whole point is to be one line.
+    return f"{headline}: {exception!r}{_format_raising_frame(exception)}"
+
+
+@pure
+def _format_loop_exception_context(context: dict[str, Any]) -> str:
+    """Render the objects asyncio prints under the headline (the transport, the future, ...) for the debug detail."""
+    lines: list[str] = []
+    for key in sorted(context):
+        if key in _LOOP_EXCEPTION_SUMMARY_KEYS:
+            continue
+        value = context[key]
+        if key in _LOOP_EXCEPTION_FRAME_LIST_KEYS:
+            lines.append(f"{key}:\n{''.join(traceback.format_list(value)).rstrip()}")
+        else:
+            lines.append(f"{key}: {value!r}")
+    return "\n".join(lines)
+
+
+@pure
+def _loop_exception_rate_limit_key(context: dict[str, Any]) -> str:
+    """Key one loop exception by the failure it is, so a storm of the same failure rations as one report.
+
+    Where it was raised is part of which failure it is: almost everything the
+    loop is handed arrives under one of a handful of fixed headlines, so two
+    unrelated bugs of the same exception class would otherwise share a key --
+    and a report that shares a key is written nowhere at all, then counted as a
+    repeat of the other. A storm still collapses, since it raises from one site.
+    The exception's message stays out: it interpolates per-task data, which
+    would give every task in a storm a line of its own.
+    """
+    headline = str(context.get("message") or _DEFAULT_LOOP_EXCEPTION_HEADLINE)
+    exception = context.get("exception")
+    if not isinstance(exception, BaseException):
+        return f"{headline}|no-exception"
+    return f"{headline}|{type(exception).__name__}{_format_raising_frame(exception)}"
+
+
+class ServeLoopExceptionReporter(MutableModel):
+    """Reports what asyncio hands the serve loop as one log line per failure, rationed per repeat.
+
+    asyncio's own handler writes the headline, every context object's repr and
+    the traceback to the ``asyncio`` stdlib logger, which nothing here
+    configures: the report goes to stderr through logging's last-resort
+    handler, so it never reaches loguru, is absent from the process's
+    structured log, and costs dozens of lines apiece -- a proxy pool timing out
+    on a backlog after a network outage wrote 1640 unretrieved-task reports in
+    ninety seconds, which was 94% of a log rotation for the consumer relaying
+    that stderr.
+
+    Each report instead becomes one error line naming the failure and where it
+    was raised, at most one per failure per interval with the suppressed count
+    carried on the one that is due, and the context objects and full traceback
+    follow at debug -- kept by the structured log, and below the console level a
+    forward runs at by default, so the stderr a consumer reads stays one line
+    per failure. Benign TLS teardown noise is dropped outright, as hypercorn's
+    own runner drops it.
+    """
+
+    limiter: ForwardRepeatRateLimiter = Field(
+        default_factory=ForwardRepeatRateLimiter,
+        description="Rations repeats of one failure, so a storm costs a line an interval rather than a line per task",
+    )
+
+    def handle(self, loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        """Take one loop exception, in the shape ``loop.set_exception_handler`` calls a handler with."""
+        exception = context.get("exception")
+        if _is_benign_tls_teardown_error(exception):
+            logger.debug("Dropped benign TLS teardown error from an abandoned connection: {!r}", exception)
+            return
+        suppressed_count = self.limiter.suppressed_repeats_if_due(_loop_exception_rate_limit_key(context))
+        if suppressed_count is None:
+            return
+        summary = _format_loop_exception_summary(context)
+        if suppressed_count > 0:
+            logger.error("{} ({} identical report(s) suppressed since the last one)", summary, suppressed_count)
+        else:
+            logger.error("{}", summary)
+        logger.opt(exception=exception if isinstance(exception, BaseException) else None).debug(
+            "Serve loop exception detail: {}\n{}", summary, _format_loop_exception_context(context)
+        )
 
 
 def _run_serve_loop(
@@ -561,14 +672,14 @@ def _run_serve_loop(
     loop_factory: Callable[[], asyncio.AbstractEventLoop],
     shutdown_trigger: Callable[..., Awaitable[Any]] | None,
 ) -> None:
-    """Run hypercorn on a loop from ``loop_factory``, dropping benign TLS teardown noise.
+    """Run hypercorn on a loop from ``loop_factory``, reporting what the loop raises one line at a time.
 
     ``shutdown_trigger=None`` makes hypercorn install its own SIGINT/SIGTERM
     handlers (which requires running on the main thread); tests pass an
     explicit trigger instead so they can stop the server from another thread.
     """
     with asyncio.Runner(loop_factory=loop_factory) as runner:
-        runner.get_loop().set_exception_handler(_handle_serve_loop_exception)
+        runner.get_loop().set_exception_handler(ServeLoopExceptionReporter().handle)
         runner.run(hypercorn_serve(app, config, shutdown_trigger=shutdown_trigger))
 
 

@@ -65,8 +65,8 @@ from imbue.mngr_forward.primitives import OneTimeCode
 from imbue.mngr_forward.request_headers import NO_REQUEST_HEADERS
 from imbue.mngr_forward.request_headers import RequestHeadersFileReader
 from imbue.mngr_forward.resolver import ForwardResolver
-from imbue.mngr_forward.server import ForwardWarningRateLimiter
-from imbue.mngr_forward.server import _MAX_TRACKED_WARNING_KEYS
+from imbue.mngr_forward.server import ForwardRepeatRateLimiter
+from imbue.mngr_forward.server import _MAX_TRACKED_RATE_LIMIT_KEYS
 from imbue.mngr_forward.server import _PROXY_BACKSTOP_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_CONNECT_TIMEOUT_SECONDS
 from imbue.mngr_forward.server import _PROXY_POOL_LIMITS
@@ -1787,7 +1787,7 @@ def test_loading_page_self_heals_once_the_backend_answers(tmp_path: Path) -> Non
         assert "workspace is up" in healed.text
 
 
-# -- system_interface_backend_failure envelope + recovery redirect tests --
+# system_interface_backend_failure envelope + recovery redirect tests
 
 
 def _make_forward_app_with_capture(
@@ -1884,8 +1884,15 @@ def test_subdomain_forward_emits_error_response_for_any_non_2xx(
     assert payload["status_code"] == backend_status
 
 
-def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
-    """A successful backend response must not produce a failure envelope."""
+def test_subdomain_forward_reports_a_shell_2xx_as_answered_once_per_interval(tmp_path: Path) -> None:
+    """A shell backend that answers is reported as such -- once, however many requests it answers in the interval.
+
+    A consumer whose own probes cannot reach the shell has no other way to learn
+    that the machine is answering the renderer through this same proxy. The
+    report is rate-limited here because the shell answers several requests a
+    second under a live page, and one observation per interval says all there
+    is to say. It is never a failure envelope.
+    """
     instance_key = _make_test_instance_key()
     preauth = "preauth-cookie-ok"
     app, _captured, env_out, mock_client = _make_forward_app_with_capture(
@@ -1897,16 +1904,74 @@ def test_subdomain_forward_does_not_emit_failure_on_2xx(tmp_path: Path) -> None:
 
     with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
         app.state.http_client = mock_client
+        headers = {"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "application/json"}
+        first_response = client.get("/api/state", headers=headers)
+        second_response = client.get("/api/state", headers=headers)
+
+    assert (first_response.status_code, second_response.status_code) == (200, 200)
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1, lines
+    envelope = json.loads(lines[0])
+    assert envelope["stream"] == "forward"
+    assert envelope["agent_id"] == str(instance_key.agent_id)
+    assert envelope["payload"]["type"] == "system_interface_backend_answered"
+    assert envelope["payload"]["status_code"] == 200
+
+
+def test_subdomain_forward_does_not_report_an_answer_from_a_non_shell_service(tmp_path: Path) -> None:
+    """Only the shell's answers are evidence a readiness probe would have produced; another service's are not."""
+    instance_key = _make_test_instance_key()
+    preauth = "preauth-cookie-chat"
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        instance_key,
+        preauth,
+        backend_status=200,
+    )
+    app.state.resolver.update_services(
+        instance_key,
+        {"system_interface": "http://stub-backend", "chat": "http://stub-backend"},
+        {"chat-abc123": "chat"},
+    )
+
+    with TestClient(app, base_url=_agent_origin("chat-abc123"), follow_redirects=False) as client:
+        app.state.http_client = mock_client
         response = client.get(
             "/api/state",
-            headers={
-                "cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}",
-                "accept": "application/json",
-            },
+            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "application/json"},
         )
 
     assert response.status_code == 200
     assert _envelope_lines(env_out) == []
+
+
+def test_subdomain_forward_reports_a_shell_event_stream_that_opened_as_answered(tmp_path: Path) -> None:
+    """The streaming path reports the shell answering too: an SSE stream the backend opened is a 2xx it served."""
+    instance_key = _make_test_instance_key()
+    preauth = "preauth-cookie-sse-ok"
+    app, _captured, env_out, mock_client = _make_forward_app_with_capture(
+        tmp_path,
+        instance_key,
+        preauth,
+        backend_status=200,
+    )
+
+    with TestClient(app, base_url=_agent_origin(), follow_redirects=False) as client:
+        app.state.http_client = mock_client
+        with client.stream(
+            "GET",
+            "/api/events",
+            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "text/event-stream"},
+        ) as response:
+            body = response.read()
+
+    assert response.status_code == 200
+    assert body == b"hi"
+    lines = _envelope_lines(env_out)
+    assert len(lines) == 1, lines
+    payload = json.loads(lines[0])["payload"]
+    assert payload["type"] == "system_interface_backend_answered"
+    assert payload["status_code"] == 200
 
 
 def test_subdomain_forward_emits_system_interface_backend_failure_on_sse_startup_disconnect(tmp_path: Path) -> None:
@@ -2115,12 +2180,15 @@ def test_subdomain_forward_reports_a_stalled_backend_without_abandoning_the_requ
 
     assert response.status_code == 200
     assert response.content == b"hi"
-    lines = _envelope_lines(env_out)
-    assert len(lines) == 1
-    payload = json.loads(lines[0])["payload"]
-    assert payload["type"] == "system_interface_backend_failure"
-    assert payload["reason"] == "STALLED"
-    assert payload["status_code"] is None
+    payloads = [json.loads(line)["payload"] for line in _envelope_lines(env_out)]
+    failures = [payload for payload in payloads if payload["type"] == "system_interface_backend_failure"]
+    assert len(failures) == 1
+    assert failures[0]["reason"] == "STALLED"
+    assert failures[0]["status_code"] is None
+    # A stall is not a failure: the answer that eventually came is reported as one.
+    assert [payload["type"] for payload in payloads if payload not in failures] == [
+        "system_interface_backend_answered"
+    ]
 
 
 # Longer than any virtual clock in this file is advanced to, so a client
@@ -2187,7 +2255,9 @@ def test_subdomain_forward_emits_no_stall_envelope_when_the_backend_answers_in_t
         loop.close()
 
     assert sent_status == 200
-    assert _envelope_lines(env_out) == [], "the stall timer outlived the request it was armed for"
+    assert [json.loads(line)["payload"]["type"] for line in _envelope_lines(env_out)] == [
+        "system_interface_backend_answered"
+    ], "the stall timer outlived the request it was armed for"
 
 
 def _make_forward_request_scope(path: str, preauth: str, accept_header: bytes = b"application/json") -> dict[str, Any]:
@@ -3363,6 +3433,60 @@ def test_ws_relay_forwards_path_query_subprotocol_and_messages_both_ways(tmp_pat
         backend_server.shutdown()
 
 
+def test_ws_forward_reports_only_a_shell_socket_the_backend_accepted_as_answered(tmp_path: Path) -> None:
+    """A shell websocket the backend accepted is reported as answered; another service's socket is not.
+
+    The websocket half of ``system_interface_backend_answered``. A renderer
+    holding a shell socket open is often all the evidence there is that a
+    machine is answering, since it makes no further HTTP request while it
+    streams -- and it is exactly the case a consumer whose own probes cannot
+    reach the shell has to learn from. There is no status to report for an
+    accepted socket, so the payload carries ``null``.
+    """
+
+    def backend_handler(connection: ServerConnection) -> None:
+        connection.send("hello")
+
+    backend_server = ws_serve(backend_handler, "127.0.0.1", 0)
+    backend_port = backend_server.socket.getsockname()[1]
+    threading.Thread(target=backend_server.serve_forever, daemon=True).start()
+    try:
+        preauth = "preauth-cookie-ws-answered"
+        envelope_output = io.StringIO()
+        app, _auth_store, resolver = _make_forward_app(
+            tmp_path, preauth_cookie_value=preauth, allow_host_loopback=True, envelope_output=envelope_output
+        )
+        backend_url = f"http://127.0.0.1:{backend_port}"
+        instance_key = _register_default_service(resolver, backend_url)
+        resolver.update_services(
+            instance_key, {"system_interface": backend_url, "chat": backend_url}, {"chat-abc123": "chat"}
+        )
+        headers = {"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}"}
+
+        # The non-shell socket goes first: the answered envelope is rate-limited
+        # per agent, so a leg after the shell's would be suppressed whether the
+        # service guard held or not.
+        with TestClient(app, base_url=_agent_origin("chat-abc123")) as client:
+            with client.websocket_connect(
+                f"ws://chat-abc123.{_TEST_AGENT_ID}.localhost:18421/api/ws", headers=headers
+            ) as session:
+                assert session.receive_text() == "hello"
+        assert _envelope_lines(envelope_output) == []
+
+        with TestClient(app, base_url=_agent_origin()) as client:
+            with client.websocket_connect(f"ws://{_TEST_AGENT_ID}.localhost:18421/api/ws", headers=headers) as session:
+                assert session.receive_text() == "hello"
+    finally:
+        backend_server.shutdown()
+
+    lines = _envelope_lines(envelope_output)
+    assert len(lines) == 1, lines
+    envelope = json.loads(lines[0])
+    assert envelope["agent_id"] == str(instance_key.agent_id)
+    assert envelope["payload"]["type"] == "system_interface_backend_answered"
+    assert envelope["payload"]["status_code"] is None
+
+
 @pytest.mark.witnesses("forwarding.ws-unknown-host")
 @pytest.mark.witnesses(
     "forwarding.ws-refused-at-handshake",
@@ -3424,9 +3548,6 @@ def test_ws_without_session_is_refused_before_backend_contact(tmp_path: Path) ->
         assert not backend_contacted.wait(timeout=1.0)
     finally:
         backend_server.shutdown()
-
-
-# Embedding substrate: cookie attributes, /_bridge, frame-ancestors
 
 
 def test_http2_authenticate_cookie_is_none_and_partitioned(
@@ -3586,54 +3707,51 @@ def test_bare_origin_responses_carry_no_frame_ancestors(
     assert "content-security-policy" not in response.headers
 
 
-# ForwardWarningRateLimiter
-
-
-def test_forward_warning_rate_limiter_logs_the_first_warning_per_key() -> None:
+def test_forward_repeat_rate_limiter_reports_the_first_event_per_key() -> None:
     clock = [100.0]
-    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
-    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
-    assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
+    assert limiter.suppressed_repeats_if_due("agent-a") == 0
+    assert limiter.suppressed_repeats_if_due("agent-b") == 0
 
 
-def test_forward_warning_rate_limiter_suppresses_repeats_inside_the_interval() -> None:
+def test_forward_repeat_rate_limiter_suppresses_repeats_inside_the_interval() -> None:
     clock = [100.0]
-    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
-    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    assert limiter.suppressed_repeats_if_due("agent-a") == 0
     clock[0] = 130.0
-    assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+    assert limiter.suppressed_repeats_if_due("agent-a") is None
     clock[0] = 159.9
-    assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+    assert limiter.suppressed_repeats_if_due("agent-a") is None
 
 
-def test_forward_warning_rate_limiter_reports_the_suppressed_count_after_the_interval() -> None:
+def test_forward_repeat_rate_limiter_reports_the_suppressed_count_after_the_interval() -> None:
     clock = [100.0]
-    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
-    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    assert limiter.suppressed_repeats_if_due("agent-a") == 0
     for tick in (110.0, 120.0, 130.0):
         clock[0] = tick
-        assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+        assert limiter.suppressed_repeats_if_due("agent-a") is None
     clock[0] = 161.0
-    assert limiter.suppressed_repeats_if_should_log("agent-a") == 3
+    assert limiter.suppressed_repeats_if_due("agent-a") == 3
     # The count resets once reported.
     clock[0] = 222.0
-    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    assert limiter.suppressed_repeats_if_due("agent-a") == 0
 
 
-def test_forward_warning_rate_limiter_tracks_keys_independently() -> None:
+def test_forward_repeat_rate_limiter_tracks_keys_independently() -> None:
     clock = [100.0]
-    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
-    assert limiter.suppressed_repeats_if_should_log("agent-a") == 0
+    assert limiter.suppressed_repeats_if_due("agent-a") == 0
     clock[0] = 110.0
-    assert limiter.suppressed_repeats_if_should_log("agent-b") == 0
-    assert limiter.suppressed_repeats_if_should_log("agent-a") is None
+    assert limiter.suppressed_repeats_if_due("agent-b") == 0
+    assert limiter.suppressed_repeats_if_due("agent-a") is None
 
 
-def test_forward_warning_rate_limiter_forgets_lapsed_keys_instead_of_growing_forever() -> None:
+def test_forward_repeat_rate_limiter_forgets_lapsed_keys_instead_of_growing_forever() -> None:
     """The unresolved-origin key carries the request's own Host label, so the key space must stay bounded.
 
     Nothing validates that label against a known service, and the forward runs
@@ -3643,17 +3761,17 @@ def test_forward_warning_rate_limiter_forgets_lapsed_keys_instead_of_growing_for
     the limiter into silence.
     """
     clock = [100.0]
-    limiter = ForwardWarningRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    limiter = ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
 
-    for tick in range(4 * _MAX_TRACKED_WARNING_KEYS):
+    for tick in range(4 * _MAX_TRACKED_RATE_LIMIT_KEYS):
         clock[0] = 100.0 + tick
-        assert limiter.suppressed_repeats_if_should_log(f"agent-a|label-{tick}") == 0
+        assert limiter.suppressed_repeats_if_due(f"agent-a|label-{tick}") == 0
         # Warns on every tick, so this key is never a whole interval stale.
-        limiter.suppressed_repeats_if_should_log("agent-hot|shell")
+        limiter.suppressed_repeats_if_due("agent-hot|shell")
 
-    assert len(limiter.last_logged_at_by_key) <= _MAX_TRACKED_WARNING_KEYS
-    assert len(limiter.suppressed_count_by_key) <= _MAX_TRACKED_WARNING_KEYS
-    assert limiter.suppressed_repeats_if_should_log("agent-hot|shell") is None
+    assert len(limiter.last_logged_at_by_key) <= _MAX_TRACKED_RATE_LIMIT_KEYS
+    assert len(limiter.suppressed_count_by_key) <= _MAX_TRACKED_RATE_LIMIT_KEYS
+    assert limiter.suppressed_repeats_if_due("agent-hot|shell") is None
 
 
 # Streaming stall/close regression tests
@@ -3890,6 +4008,8 @@ async def _run_sse_write_failure_through_the_forward_handler(
                 envelope_writer=EnvelopeWriter(output=envelope_output),
                 stall_notice_seconds=_STALL_NOTICE_SECONDS,
                 was_backend_refused=_never_refused,
+                is_shell_target=False,
+                answered_envelope_limiter=ForwardRepeatRateLimiter(),
                 request_headers=NO_REQUEST_HEADERS,
             )
             with pytest.raises(MngrForwardError):
@@ -3973,6 +4093,8 @@ async def _collect_incremental_sse_deliveries() -> list[dict[str, Any]]:
                 envelope_writer=EnvelopeWriter(output=io.StringIO()),
                 stall_notice_seconds=_STALL_NOTICE_SECONDS,
                 was_backend_refused=_never_refused,
+                is_shell_target=False,
+                answered_envelope_limiter=ForwardRepeatRateLimiter(),
                 request_headers=NO_REQUEST_HEADERS,
             )
             with pytest.raises(MngrForwardError):
@@ -4187,6 +4309,8 @@ async def _run_simultaneous_disconnect_and_handoff(
             envelope_writer=EnvelopeWriter(output=envelope_output),
             stall_notice_seconds=_STALL_NOTICE_SECONDS,
             was_backend_refused=_never_refused,
+            is_shell_target=False,
+            answered_envelope_limiter=ForwardRepeatRateLimiter(),
             request_headers=NO_REQUEST_HEADERS,
         )
     finally:

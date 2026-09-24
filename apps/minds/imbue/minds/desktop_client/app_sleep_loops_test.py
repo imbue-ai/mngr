@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHe
 from imbue.minds.desktop_client.testing import make_sleep_tracker
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.testing import capture_loguru
 
 # Short enough that a probe-failure run reaches it inside a test.
 _FAST_THRESHOLD: float = 0.05
@@ -126,3 +127,39 @@ def test_the_probe_loop_establishes_the_wake_before_it_convicts_anything() -> No
         "the run that spans the sleep must be restarted at the wake, not convicted on it"
     )
     assert sleep_tracker.get_last_wake_at() is not None
+
+
+def test_the_probe_loop_logs_why_a_probe_failed_once_per_outcome() -> None:
+    """A failing probe target gets its failure named in the log, but not on every 2s pass.
+
+    ``record_probe_failure`` is silent for a machine that is already convicted,
+    so this line is the only record of what the probes were getting back. It is
+    logged when the failure first appears and not again while it stays the
+    same, however many passes the loop makes in the meantime.
+    """
+    sleep_tracker, _clock = make_sleep_tracker()
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD, sleep_tracker=sleep_tracker)
+    agent_id = AgentId.generate()
+    resolver = MngrCliBackendResolver()
+    tracker.record_failure(agent_id)
+
+    with capture_loguru(level="INFO") as log_output, ConcurrencyGroup(name="test-health-probe-log") as cg:
+        cg.start_new_thread(
+            target=_run_system_interface_health_probe_loop,
+            # Port 1 refuses connections, so every probe fails the same way.
+            args=(tracker, resolver, 1, "test-cookie", cg, sleep_tracker),
+            name="test-system-interface-health-probe-log",
+        )
+        # STUCK takes a run of failures longer than the threshold, so by the
+        # time it lands the loop has probed more than once.
+        assert poll_until(
+            lambda: tracker.get_health(agent_id) is AgentHealth.STUCK, timeout=5.0, poll_interval=0.02
+        ), "the probe loop never convicted the enrolled agent"
+        cg.shutdown()
+
+    failure_lines = [
+        line
+        for line in log_output.getvalue().splitlines()
+        if f"Probed the system interface of {agent_id} without a 200: ConnectError" in line
+    ]
+    assert len(failure_lines) == 1, log_output.getvalue()

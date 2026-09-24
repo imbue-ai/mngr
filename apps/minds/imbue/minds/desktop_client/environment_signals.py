@@ -167,8 +167,6 @@ class SleepTracker(MutableModel):
     _last_heartbeat_monotonic_at: float | None = PrivateAttr(default=None)
     _on_wake_callbacks: list[OnWakeCallback] = PrivateAttr(default_factory=list)
 
-    # -- Public callback registration -------------------------------------
-
     def add_on_wake_callback(self, callback: OnWakeCallback) -> None:
         """Register a callback fired once per recorded sleep interval, with its end.
 
@@ -184,8 +182,6 @@ class SleepTracker(MutableModel):
         """
         with self._lock:
             self._on_wake_callbacks.append(callback)
-
-    # -- Input ------------------------------------------------------------
 
     def record_heartbeat(self) -> None:
         """Record that the process is running now, opening an interval if it was not.
@@ -253,8 +249,6 @@ class SleepTracker(MutableModel):
                 callback(interval.ended_at)
             except (OSError, RuntimeError, ValueError, MindError, MngrError) as e:
                 logger.opt(exception=e).warning("SleepTracker on-wake callback failed: {}", e)
-
-    # -- Readings ---------------------------------------------------------
 
     def was_asleep_since(self, start: datetime) -> bool:
         """Whether this process stopped running at any point between ``start`` and now.
@@ -738,8 +732,6 @@ class ConnectivityDetector(MutableModel):
     _on_recovery_callbacks: list[OnConnectivityRecoveryCallback] = PrivateAttr(default_factory=list)
     _on_change_callbacks: list[OnConnectivityChangeCallback] = PrivateAttr(default_factory=list)
 
-    # -- Public callback registration -------------------------------------
-
     def add_on_recovery_callback(self, callback: OnConnectivityRecoveryCallback) -> None:
         """Register a no-arg callback fired when a probe finds the device reachable again.
 
@@ -763,8 +755,6 @@ class ConnectivityDetector(MutableModel):
         """
         with self._lock:
             self._on_change_callbacks.append(callback)
-
-    # -- Readings ---------------------------------------------------------
 
     def get_reading(self) -> ConnectivityReading:
         """The last reading taken, without touching the network.
@@ -834,10 +824,10 @@ class ConnectivityDetector(MutableModel):
             # :meth:`_read_ssh_facet` checks before each of its own: the round
             # starts threads on the parent group, which refuses outright once
             # that group is shutting down rather than answering short.
-            if self._is_shutting_down():
+            if self.is_shutting_down():
                 return self._abandon_probe()
             is_internet_up = self._does_any_probe_host_answer(_HTTPS_PORT)
-            if self._is_shutting_down():
+            if self.is_shutting_down():
                 return self._abandon_probe()
             if not is_internet_up:
                 # With nothing reachable at all, port 22 has not been tested --
@@ -849,7 +839,7 @@ class ConnectivityDetector(MutableModel):
                 )
             else:
                 ssh_facet = self._read_ssh_facet()
-                if self._is_shutting_down():
+                if self.is_shutting_down():
                     return self._abandon_probe()
                 reading = ConnectivityReading(
                     internet=ConnectivityFacet.ONLINE,
@@ -865,7 +855,7 @@ class ConnectivityDetector(MutableModel):
         _fire_connectivity_callbacks(owed_callbacks)
         return reading
 
-    def _is_shutting_down(self) -> bool:
+    def is_shutting_down(self) -> bool:
         """Whether the app is going down, and this probe should stop opening connections."""
         return self.shutdown_event is not None and self.shutdown_event.is_set()
 
@@ -882,7 +872,7 @@ class ConnectivityDetector(MutableModel):
 
     def _ask_probe_host(self, host: str, port: int) -> bool:
         """Whether one quorum host answers on ``port``, opening no connection once shut down."""
-        if self._is_shutting_down():
+        if self.is_shutting_down():
             return False
         return self.prober.is_reachable(host, port)
 
@@ -902,7 +892,7 @@ class ConnectivityDetector(MutableModel):
         nothing is waiting on it: three rather than one, per probe.
 
         A short round on shutdown reads as "nothing answered", which is why
-        every caller re-checks :meth:`_is_shutting_down` before believing it.
+        every caller re-checks :meth:`is_shutting_down` before believing it.
         """
         if not self.probe_hosts:
             return False
@@ -922,7 +912,7 @@ class ConnectivityDetector(MutableModel):
         runs once per endpoint, concurrently, so it is the last point at which a
         quit can still stop a connection from being opened.
         """
-        if self._is_shutting_down():
+        if self.is_shutting_down():
             return False
         return self.prober.is_ssh_server(endpoint.host, endpoint.port)
 
@@ -947,7 +937,7 @@ class ConnectivityDetector(MutableModel):
         :meth:`_ask_ssh_endpoint`), so a quit landing mid-round still opens no
         connection it has not already opened. A round abandoned that way reads as
         "nothing answered", which is why every caller re-checks
-        :meth:`_is_shutting_down` before believing it.
+        :meth:`is_shutting_down` before believing it.
         """
         if not endpoints:
             return False
@@ -993,11 +983,11 @@ class ConnectivityDetector(MutableModel):
         against dispatching over a network that cannot carry it.
         """
         endpoints = tuple(dict.fromkeys(self.workspace_ssh_endpoints_fn()))[:_MAX_SAMPLED_WORKSPACE_SSH_ENDPOINTS]
-        if self._is_shutting_down():
+        if self.is_shutting_down():
             return ConnectivityFacet.OFFLINE
         if self._does_any_ssh_endpoint_answer(endpoints):
             return ConnectivityFacet.ONLINE
-        if self._is_shutting_down():
+        if self.is_shutting_down():
             return ConnectivityFacet.OFFLINE
         is_public_ssh_up = self._does_any_ssh_endpoint_answer(
             tuple(SshEndpoint(host=host, port=_PUBLIC_SSH_PORT) for host in self.probe_hosts)
@@ -1039,8 +1029,6 @@ class ConnectivityDetector(MutableModel):
             logger.info("Connectivity reading invalidated by the wake at {}", wake_at.isoformat())
         _fire_connectivity_callbacks(callbacks)
 
-    # -- Background loop --------------------------------------------------
-
     def run_background_loop(self, concurrency_group: ConcurrencyGroup) -> None:
         """Re-probe while a bad reading is outstanding; otherwise do nothing at all.
 
@@ -1080,8 +1068,6 @@ class ConnectivityDetector(MutableModel):
             # loop wakes immediately when shutdown is triggered instead of
             # holding the concurrency-group exit for up to a full interval.
             concurrency_group.shutdown_event.wait(timeout=self.poll_interval_seconds)
-
-    # -- Internals --------------------------------------------------------
 
     def _store_reading(
         self, reading: ConnectivityReading, generation: int

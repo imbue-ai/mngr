@@ -625,6 +625,9 @@ def run(
     consumer.add_on_system_interface_backend_failure_callback(
         BackendFailureRecorder(tracker=system_interface_health_tracker)
     )
+    consumer.add_on_system_interface_backend_answered_callback(
+        lambda agent_id, _status_code: system_interface_health_tracker.record_forwarded_answer(agent_id)
+    )
 
     # All callbacks registered -- now safe to start the envelope reader
     # threads. Doing this earlier (e.g. inside ``start_mngr_forward``)

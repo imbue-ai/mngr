@@ -77,6 +77,7 @@ OnAgentDestroyedCallback = Callable[[AgentId], None]
 OnSystemInterfaceBackendFailureCallback = Callable[
     [AgentId, SystemInterfaceBackendFailureReason, int | None, str | None], None
 ]
+OnSystemInterfaceBackendAnsweredCallback = Callable[[AgentId, int | None], None]
 OnUnexpectedExitCallback = Callable[[int], None]
 
 
@@ -97,6 +98,24 @@ def _parse_backend_failure_reason(raw_reason: str) -> SystemInterfaceBackendFail
             "Unknown system_interface_backend_failure reason {!r}; treating it as a connection failure", raw_reason
         )
         return SystemInterfaceBackendFailureReason.CONNECT_ERROR
+
+
+def _parse_status_code(payload: dict[str, Any]) -> int | None:
+    """Read an envelope payload's optional ``status_code``, reading anything unparseable as absent.
+
+    Both payloads that carry one send it as null for the case that has no
+    status (a websocket the backend accepted; a failure that never got a
+    response), so there is nothing a garbled value could be reported as that
+    "no status" does not already cover.
+    """
+    raw_status_code = payload.get("status_code")
+    if raw_status_code is None:
+        return None
+    try:
+        return int(raw_status_code)
+    except (ValueError, TypeError):
+        logger.warning("Unparseable status_code {!r} on a forward envelope; reading it as no status", raw_status_code)
+        return None
 
 
 class ForwardSubprocessConfig(FrozenModel):
@@ -219,6 +238,145 @@ class _PreStartErrorDropLogger(MutableModel):
             self.flush_provider(provider_name)
 
 
+# The line above a traceback's frames: on its own it is the whole headline of a
+# bare traceback, and it also opens each traceback chained under a runtime one.
+_STDERR_BARE_TRACEBACK_HEADER: Final[str] = "Traceback (most recent call last):"
+# The first lines of a multi-line report on the plugin's stderr. The plugin
+# folds the ones its serve loop is handed into a line apiece before they ever
+# reach here, so what these catch is what its own logging never sees: a crash
+# outside it, the interpreter's own output, a plugin build older than that fold.
+_STDERR_TRACEBACK_OPENERS: Final[tuple[str, ...]] = (
+    _STDERR_BARE_TRACEBACK_HEADER,
+    "Task exception was never retrieved",
+    "Exception in callback",
+    "Unhandled exception in client_connected_cb",
+    "+ Exception Group Traceback",
+)
+# Top-level lines that belong to the report they follow rather than starting
+# a message of their own: the object lines asyncio and hypercorn print under
+# their headline, the chained-exception separators, and the exception-group
+# tree drawing.
+_STDERR_TRACEBACK_CONTINUATION_PREFIXES: Final[tuple[str, ...]] = (
+    _STDERR_BARE_TRACEBACK_HEADER,
+    "future:",
+    "handle:",
+    "transport:",
+    "The above exception was the direct cause",
+    "During handling of the above exception",
+    "+",
+    "|",
+)
+
+
+class _ForwardStderrCollapser(MutableModel):
+    """Relays the forward's stderr one message per log line, folding tracebacks and counting repeats.
+
+    A traceback the forward's runtime prints is dozens of lines, and a burst of
+    identical ones -- 1640 unretrieved-task reports in ninety seconds, when a
+    proxy pool timed out on a backlog after a network outage -- relayed line by
+    line is what rotated a whole day of the app's log away. The plugin now folds
+    and rations what its serve loop is handed, so that storm arrives a line
+    apiece; this is the backstop for the reports its own logging never sees. A
+    report is folded into one line naming its first and last lines and how many
+    were folded, and a report identical to the one just relayed is counted
+    rather than relayed, with the count reported when a different message
+    arrives or the stream ends. Ordinary single-line messages are relayed as
+    they arrive.
+
+    A report under a runtime headline (asyncio's, hypercorn's) runs until the
+    next ordinary message, so the chained tracebacks those print -- the pool
+    timeout storm was two per report, joined by "The above exception was the
+    direct cause" -- fold into the one line. A bare traceback has no headline
+    to wait behind and is relayed at its own exception line, so a non-fatal one
+    from a plugin that then goes quiet does not wait on a message that may
+    never come.
+    """
+
+    _open_report: list[str] = PrivateAttr(default_factory=list)
+    _is_open_report_traceback_terminated: bool = PrivateAttr(default=False)
+    _is_previous_report_line_indented: bool = PrivateAttr(default=False)
+    _last_relayed_report_key: tuple[str, str] | None = PrivateAttr(default=None)
+    _suppressed_repeat_count: int = PrivateAttr(default=0)
+
+    def feed(self, raw_line: str) -> None:
+        """Take one stderr line, relaying or folding it."""
+        stripped = raw_line.strip()
+        if not stripped:
+            return
+        if self._open_report:
+            if self._does_line_continue_the_open_report(raw_line):
+                self._open_report.append(stripped)
+                self._is_previous_report_line_indented = raw_line[:1].isspace()
+                if self._is_open_report_traceback_terminated:
+                    self._close_open_report()
+                return
+            self._close_open_report()
+        if stripped.startswith(_STDERR_TRACEBACK_OPENERS):
+            self._open_report = [stripped]
+            self._is_open_report_traceback_terminated = False
+            self._is_previous_report_line_indented = False
+            return
+        self._relay_suppressed_repeat_count()
+        # Only consecutive identical reports are counted: a report that recurs
+        # after something else was said is news again.
+        self._last_relayed_report_key = None
+        logger.debug("mngr forward stderr: {}", stripped)
+
+    def flush(self) -> None:
+        """Relay whatever is still folded: the stream ended (or the caller is done) and nothing more will close it."""
+        if self._open_report:
+            self._close_open_report()
+        self._relay_suppressed_repeat_count()
+
+    def _does_line_continue_the_open_report(self, raw_line: str) -> bool:
+        if raw_line[:1].isspace():
+            return True
+        stripped = raw_line.strip()
+        if stripped.startswith(_STDERR_TRACEBACK_CONTINUATION_PREFIXES):
+            return True
+        # A headline starts a report of its own however the open one was left:
+        # an exception whose message ends on an indented line would otherwise
+        # make the rule below read the next report's headline as this report's
+        # exception line and swallow it.
+        if stripped.startswith(_STDERR_TRACEBACK_OPENERS):
+            return False
+        # The exception line that ends a traceback is the first un-indented
+        # line after its indented frames. It is folded in; a bare traceback is
+        # complete at it, while a headlined report stays open for the chained
+        # traceback that may follow and closes at the next ordinary message.
+        has_seen_traceback_header = any(line.startswith(_STDERR_BARE_TRACEBACK_HEADER) for line in self._open_report)
+        if has_seen_traceback_header and self._is_previous_report_line_indented:
+            self._is_open_report_traceback_terminated = self._open_report[0].startswith(_STDERR_BARE_TRACEBACK_HEADER)
+            return True
+        return False
+
+    def _close_open_report(self) -> None:
+        report = self._open_report
+        self._open_report = []
+        self._is_open_report_traceback_terminated = False
+        key = (report[0], report[-1])
+        if key == self._last_relayed_report_key:
+            self._suppressed_repeat_count += 1
+            return
+        self._relay_suppressed_repeat_count()
+        self._last_relayed_report_key = key
+        if len(report) == 1:
+            logger.debug("mngr forward stderr: {}", report[0])
+        else:
+            logger.debug(
+                "mngr forward stderr: {} [{} lines folded, ending: {}]", report[0], len(report) - 1, report[-1]
+            )
+
+    def _relay_suppressed_repeat_count(self) -> None:
+        if self._suppressed_repeat_count == 0:
+            return
+        logger.debug(
+            "mngr forward stderr: the previous report repeated {} more time(s)", self._suppressed_repeat_count
+        )
+        self._suppressed_repeat_count = 0
+        self._last_relayed_report_key = None
+
+
 class EnvelopeStreamConsumer(MutableModel):
     """Owns the ``mngr forward`` subprocess and dispatches its envelope JSONL stream.
 
@@ -284,6 +442,9 @@ class EnvelopeStreamConsumer(MutableModel):
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
         default_factory=list
     )
+    _on_system_interface_backend_answered_callbacks: list[OnSystemInterfaceBackendAnsweredCallback] = PrivateAttr(
+        default_factory=list
+    )
     _on_unexpected_exit_callbacks: list[OnUnexpectedExitCallback] = PrivateAttr(default_factory=list)
     _process: subprocess.Popen[bytes] | None = PrivateAttr(default=None)
     _has_reported_exit: bool = PrivateAttr(default=False)
@@ -293,8 +454,6 @@ class EnvelopeStreamConsumer(MutableModel):
     # blocks on the event so `minds run` can learn the port at startup.
     _listening_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _listening_port: int | None = PrivateAttr(default=None)
-
-    # Public callback registration
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every observe-stream agent discovery."""
@@ -323,6 +482,20 @@ class EnvelopeStreamConsumer(MutableModel):
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
 
+    def add_on_system_interface_backend_answered_callback(
+        self, callback: OnSystemInterfaceBackendAnsweredCallback
+    ) -> None:
+        """Register a callback fired for each ``system_interface_backend_answered`` forward-stream envelope.
+
+        The callback receives ``(agent_id, status_code)``: the workspace whose
+        shell backend answered a forwarded request, and the 2xx it answered
+        with (``None`` for an accepted websocket). The plugin sends at most one
+        per agent per few seconds. Used by minds to let a live renderer clear a
+        health verdict the tracker's own probes cannot.
+        """
+        with self._lock:
+            self._on_system_interface_backend_answered_callbacks.append(callback)
+
     def add_on_unexpected_exit_callback(self, callback: OnUnexpectedExitCallback) -> None:
         """Register a callback fired once when the plugin subprocess exits unexpectedly.
 
@@ -333,8 +506,6 @@ class EnvelopeStreamConsumer(MutableModel):
         """
         with self._lock:
             self._on_unexpected_exit_callbacks.append(callback)
-
-    # Subprocess lifecycle
 
     def attach(self, process: subprocess.Popen[bytes]) -> None:
         """Store a freshly-spawned plugin subprocess.
@@ -417,8 +588,6 @@ class EnvelopeStreamConsumer(MutableModel):
         except OSError as e:
             logger.trace("Error terminating plugin subprocess: {}", e)
 
-    # Reader threads
-
     def _read_stdout_loop(self) -> None:
         process = self._process
         if process is None or process.stdout is None:
@@ -431,11 +600,10 @@ class EnvelopeStreamConsumer(MutableModel):
         process = self._process
         if process is None or process.stderr is None:
             return
+        collapser = _ForwardStderrCollapser()
         for raw in process.stderr:
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            stripped = line.strip()
-            if stripped:
-                logger.debug("mngr forward stderr: {}", stripped)
+            collapser.feed(raw.decode("utf-8", errors="replace").rstrip("\n"))
+        collapser.flush()
 
     def _wait_and_report_exit(self) -> None:
         process = self._process
@@ -461,8 +629,6 @@ class EnvelopeStreamConsumer(MutableModel):
                 callback(exit_code)
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_unexpected_exit callback failed: {}", e)
-
-    # Envelope parsing + dispatch
 
     def _handle_envelope_line(self, line: str) -> None:
         stripped = line.strip()
@@ -728,8 +894,6 @@ class EnvelopeStreamConsumer(MutableModel):
             except (OSError, RuntimeError, ValueError) as e:
                 logger.warning("on_agent_destroyed callback failed for {}: {}", agent_id, e)
 
-    # Per-agent event lines (services / requests)
-
     def _handle_event_payload(self, agent_id: AgentId, payload: dict[str, Any]) -> None:
         source = payload.get("source", "")
         aid_str = str(agent_id)
@@ -763,8 +927,6 @@ class EnvelopeStreamConsumer(MutableModel):
             icons_snapshot = dict(icons)
         self.resolver.update_services(agent_id, services_snapshot, labels_snapshot, icons_snapshot)
 
-    # Forward-stream payloads
-
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")
         if payload_type == "reverse_tunnel_established":
@@ -777,11 +939,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 logger.warning("Could not parse system_interface_backend_failure payload: {}", e)
                 return
             reason = _parse_backend_failure_reason(raw_reason)
-            raw_status_code = payload.get("status_code")
-            try:
-                status_code: int | None = int(raw_status_code) if raw_status_code is not None else None
-            except (ValueError, TypeError):
-                status_code = None
+            status_code = _parse_status_code(payload)
             raw_detail = payload.get("detail")
             detail = str(raw_detail) if raw_detail is not None else None
             with self._lock:
@@ -791,6 +949,20 @@ class EnvelopeStreamConsumer(MutableModel):
                     callback(agent_id, reason, status_code, detail)
                 except (OSError, RuntimeError, ValueError) as e:
                     logger.warning("system_interface_backend_failure callback failed for {}: {}", agent_id, e)
+        elif payload_type == "system_interface_backend_answered":
+            try:
+                agent_id = AgentId(str(payload["agent_id"]))
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning("Could not parse system_interface_backend_answered payload: {}", e)
+                return
+            status_code = _parse_status_code(payload)
+            with self._lock:
+                callbacks = list(self._on_system_interface_backend_answered_callbacks)
+            for callback in callbacks:
+                try:
+                    callback(agent_id, status_code)
+                except (OSError, RuntimeError, ValueError) as e:
+                    logger.warning("system_interface_backend_answered callback failed for {}: {}", agent_id, e)
         elif payload_type == "listening":
             self._handle_listening(payload)
         elif payload_type == "login_url":
@@ -818,9 +990,6 @@ class EnvelopeStreamConsumer(MutableModel):
             self._listening_port = port
         self._listening_event.set()
         logger.info("`mngr forward` is listening on port {}", port)
-
-
-# start_mngr_forward
 
 
 def start_mngr_forward(

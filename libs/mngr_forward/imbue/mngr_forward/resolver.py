@@ -194,9 +194,11 @@ class ForwardResolver(MutableModel):
     def is_shell_target(self, instance_key: AgentInstanceKey, origin_label: str | None) -> bool:
         """Whether a request with this origin label (None = bare origin) routes to the shell service.
 
-        Used by the legacy ``/service/<name>/`` redirect to fire only on requests
-        the shell itself would serve: the bare workspace origin, or a label that
-        maps (directly or via the identity fallback) to the shell service name.
+        True for the bare agent origin, and for a label that maps (directly
+        or via the identity fallback) to the shell service name. This is the
+        predicate for "the shell itself would serve this request", which is what
+        both the legacy ``/service/<name>/`` redirect and the
+        ``system_interface_backend_answered`` envelope turn on.
         Port-forward mode has no shell, so nothing is a shell target there.
         """
         match self.strategy:

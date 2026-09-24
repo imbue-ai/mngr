@@ -7,6 +7,10 @@ backend has not answered yet, which may still succeed. The plugin does not
 decide which of those matter -- that policy lives here:
 ``should_enroll_suspect_for_backend_failure`` selects the ones that suggest the
 backend is unreachable, and minds routes only those into ``record_failure``.
+The plugin emits the success-side observation too --
+``system_interface_backend_answered``, for a workspace's shell answering a
+forwarded request -- and the policy for that lives here as well, in
+``record_forwarded_answer``.
 
 A failure envelope is only a *hint*. A single transient blip -- most commonly a
 mid-SSE EOF when an SSE stream is recycled -- is not evidence that the workspace
@@ -14,10 +18,13 @@ is stuck, so ``record_failure`` never changes health on its own. It merely
 enrolls the agent as a *suspect*: an agent the background probe loop should
 start actively polling.
 
-The background probe loop is the single authority on whether a workspace is
-reachable. Each iteration it probes every suspect / non-HEALTHY agent and
-reports the result back through ``record_probe_success`` / ``record_probe_failure``.
-The state machine:
+The background probe loop is the only thing that can convict a workspace. Each
+iteration it probes every suspect / non-HEALTHY agent and reports the result
+back through ``record_probe_success`` / ``record_probe_failure``. Clearing one
+has a second route, because a broken probe path is itself a way for a machine
+to read as failing while it serves the renderer: a forwarded answer the plugin
+observed clears a verdict exactly as a probe success does
+(``record_forwarded_answer``). The state machine:
 
 - HEALTHY -> STUCK: the probe loop observes an unbroken run of probe failures
   lasting at least ``stuck_threshold_seconds``. Every second of that run is
@@ -37,7 +44,12 @@ The state machine:
   (the connector refused the start because an operator holds the machine's
   stop). The agent goes back to the probe loop, which is what will notice the
   operator's start bringing it back.
-- {STUCK, RECOVERING, RECOVERY_FAILED} -> HEALTHY: a successful probe.
+- {STUCK, RECOVERING, RECOVERY_FAILED} -> HEALTHY: a successful probe, or a
+  forwarded answer the plugin observed. A RECOVERING machine takes the second
+  only once its recovery worker has run its commands and said so
+  (``mark_awaiting_readiness``): before that, the shell is still serving the
+  first seconds of the stop, and its answer describes the machine before the
+  bounce.
 
 Which of the two recoveries ran is :class:`HostRecoveryKind`, and the surfaces
 turn on it: only the user's own click stops the machine, so only that one may be
@@ -415,6 +427,66 @@ class _AgentRecord(MutableModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
+# How long one machine's unchanged failure waits before it is logged again.
+# What this rations arrives about once a second or two per machine and says the
+# same thing every time for as long as the machine is down, so a failure earns a
+# line when it first appears, whenever what was observed changes, and otherwise
+# once per interval.
+_DEFAULT_FAILURE_LOG_INTERVAL_SECONDS: Final[float] = 60.0
+
+
+class AgentFailureLogGate(MutableModel):
+    """Rations the log lines for a repeating failure: the first per machine, each change, and a periodic reminder.
+
+    The tracker is quiet about a failure that changes nothing -- ``record_probe_failure``
+    logs only the STUCK edge, and says nothing at all for a machine that is
+    already STUCK or RECOVERY_FAILED -- so without a line of its own the reason
+    a failure keeps recurring, a refused connection or a timeout or a 503, never
+    reaches the log. Logging every occurrence would bury it instead. Thread-safe;
+    one instance per stream being rationed, since the interval is per machine
+    within one.
+    """
+
+    interval_seconds: float = Field(
+        frozen=True,
+        default=_DEFAULT_FAILURE_LOG_INTERVAL_SECONDS,
+        description="Minimum seconds between two log lines for one machine's unchanged failure",
+    )
+    now_fn: Callable[[], float] = Field(
+        frozen=True,
+        default=time.time,
+        description=(
+            "Clock the interval is measured on. The wall one, because a suspend does not advance the "
+            "monotonic clock: the first failure after a wake, the one most worth reading, would then "
+            "wait out the rest of an interval the sleep left unspent. A wall clock stepping backwards "
+            "costs the reminders due while it catches back up, since a suppressed call leaves the "
+            "timestamp it was measured against where it is"
+        ),
+    )
+    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    _last_logged_by_agent_id: dict[str, tuple[str, float]] = PrivateAttr(default_factory=dict)
+
+    def should_log_failure(self, agent_id: AgentId, summary: str) -> bool:
+        """Whether this failure earns a line, recording it as logged when it does.
+
+        ``summary`` is what was observed, in whatever form the caller's line
+        names it: a different one is logged at once, because that transition is
+        the thing worth seeing.
+        """
+        now = self.now_fn()
+        with self._lock:
+            last_logged = self._last_logged_by_agent_id.get(str(agent_id))
+            if last_logged is not None and last_logged[0] == summary and now - last_logged[1] < self.interval_seconds:
+                return False
+            self._last_logged_by_agent_id[str(agent_id)] = (summary, now)
+            return True
+
+    def forget(self, agent_id: AgentId) -> None:
+        """Drop the machine's record on a success, so its next failure logs at once."""
+        with self._lock:
+            self._last_logged_by_agent_id.pop(str(agent_id), None)
+
+
 class SystemInterfaceHealthTracker(MutableModel):
     """Per-agent health state machine driven by failure envelopes + probe results.
 
@@ -484,21 +556,30 @@ class SystemInterfaceHealthTracker(MutableModel):
     # is still answering, so a probe success is the stop in progress rather than
     # the machine back, and must not drop the mark above.
     _in_flight_intentional_stop_agents: set[str] = PrivateAttr(default_factory=set)
-    # Agents a probe found answering while their recovery was still in flight, so
-    # the recovery's later failure is declined (see mark_recovery_failed). Outside
-    # ``_records`` because the probe success that adds an agent drops its record.
-    _probe_recovered_during_recovery_agents: set[str] = PrivateAttr(default_factory=set)
-    # agent_id_str -> the connection-failure cause last logged for it, and when.
+    # Agents found answering while their recovery was still in flight -- by a
+    # probe, or by the plugin reporting their shell answering -- so the recovery's
+    # later failure is declined (see mark_recovery_failed). Outside ``_records``
+    # because the success that adds an agent drops its record.
+    _seen_answering_during_recovery_agents: set[str] = PrivateAttr(default_factory=set)
+    # Recoveries whose worker has run its commands and is now waiting for the
+    # interface. A forwarded answer counts only from then on: before it, the
+    # shell is still serving the first seconds of the stop, and an answer there
+    # describes the machine before the bounce, not after it.
+    _recoveries_awaiting_readiness: set[str] = PrivateAttr(default_factory=set)
+    # Rations the line naming an episode's connection-failure cause.
     # Deliberately outside ``_records``: it has to survive the probe success that
     # drops the episode, which is the only thing standing between a repeating
     # failure and one log line per envelope (see record_connection_failure).
-    _last_logged_connection_failure: dict[str, tuple[SystemInterfaceBackendFailureReason, datetime]] = PrivateAttr(
-        default_factory=dict
-    )
+    # Built in ``model_post_init``, which is where the configured interval is
+    # first readable.
+    _connection_failure_log_gate: AgentFailureLogGate = PrivateAttr()
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    # -- Public callback registration -------------------------------------
+    def model_post_init(self, __context: object) -> None:
+        self._connection_failure_log_gate = AgentFailureLogGate(
+            interval_seconds=self.connection_failure_log_interval_seconds
+        )
 
     def add_on_change_callback(self, callback: OnChangeCallback) -> None:
         """Register a callback fired whenever any agent's health changes.
@@ -547,8 +628,6 @@ class SystemInterfaceHealthTracker(MutableModel):
                 self._on_change_callbacks.remove(callback)
             except ValueError:
                 pass
-
-    # -- Probe grace ------------------------------------------------------
 
     def begin_probe_grace(self, agent_id: AgentId, purpose: ProbeGracePurpose, deadline_monotonic: float) -> None:
         """Ignore ``agent_id``'s probe failures for ``purpose`` until ``deadline_monotonic``.
@@ -632,8 +711,6 @@ class SystemInterfaceHealthTracker(MutableModel):
             return None
         return onset_delay_seconds
 
-    # -- Intentional stops ------------------------------------------------
-
     def suppress_unattended_recovery(self, agent_id: AgentId, *, is_stop_in_flight: bool = False) -> None:
         """Mark ``agent_id`` as deliberately stopped, so nothing auto-starts it.
 
@@ -655,25 +732,28 @@ class SystemInterfaceHealthTracker(MutableModel):
         The connector sets it too, through the unattended dispatch: a live read
         that finds a cloud machine stopping, stopped or starting (someone asked
         for that stop), and a start the connector refused as an operator hold.
-        Cleared by the in-app start, or by any probe that finds the machine
-        answering again. That probe clear is what makes the mark self-limiting:
-        a stopped machine can also be started by a route that never touches the
-        start endpoint (the machines-list click-through dispatches a start), and
-        those machines would otherwise stay suppressed for the life of the
-        process.
+        Cleared by the in-app start, or by the machine being found answering
+        again -- by a probe, or by the plugin reporting its shell answering a
+        forwarded request (:meth:`record_forwarded_answer`, which clears
+        through the same body a probe success does). That clear is what makes
+        the mark self-limiting: a stopped machine can also be started by a route
+        that never touches the start endpoint (the machines-list click-through
+        dispatches a start), and those machines would otherwise stay suppressed
+        for the life of the process.
 
-        ``is_stop_in_flight`` covers the one window in which that probe clear
-        would be wrong: a stop's own command, which blocks for tens of seconds
-        (a cloud host, minutes) while the interface goes on answering for the
-        first of them. A machine being stopped is often a probe target already
+        ``is_stop_in_flight`` covers the one window in which that clear would be
+        wrong: a stop's own command, which blocks for tens of seconds (a cloud
+        host, minutes) while the interface goes on answering for the first of
+        them. A machine being stopped is often a probe target already
         (suspect-enrolled, STUCK, or RECOVERY_FAILED), so that 200 gets taken,
         and dropping the mark on it would hand the machine to the dispatch
-        mid-stop. While a stop is in flight a probe success leaves the mark
-        alone; the stop closes the window when its command returns, either by
-        marking again with the default (keeping the mark, dropping the flag) or
-        by calling :meth:`allow_unattended_recovery` if it failed. A destroy
-        marks in flight and never reconciles: it is answered while the teardown
-        is still running, and a machine that is gone has no 200 left to give.
+        mid-stop. While a stop is in flight the machine answering leaves the
+        mark alone, whichever route saw it; the stop closes the window when its
+        command returns, either by marking again with the default (keeping the
+        mark, dropping the flag) or by calling
+        :meth:`allow_unattended_recovery` if it failed. A destroy marks in
+        flight and never reconciles: it is answered while the teardown is still
+        running, and a machine that is gone has no 200 left to give.
 
         Scoped to this process, and to teardowns that went through those paths.
         A machine stopped from the CLI, or left stopped across an app restart,
@@ -704,8 +784,6 @@ class SystemInterfaceHealthTracker(MutableModel):
         """Whether ``agent_id`` was stopped on purpose (from inside the app, or per the connector) and left stopped."""
         with self._lock:
             return str(agent_id) in self._unattended_recovery_suppressed_agents
-
-    # -- State updates ----------------------------------------------------
 
     def record_failure(self, agent_id: AgentId) -> None:
         """Enroll ``agent_id`` as a suspect probe target. Does NOT change health.
@@ -805,14 +883,7 @@ class SystemInterfaceHealthTracker(MutableModel):
             record.connection_failure = ConnectionFailureObservation(
                 reason=reason, detail=detail, last_observed_at=now
             )
-            last_logged = self._last_logged_connection_failure.get(aid_str)
-            is_worth_logging = (
-                last_logged is None
-                or last_logged[0] != reason
-                or (now - last_logged[1]).total_seconds() >= self.connection_failure_log_interval_seconds
-            )
-            if is_worth_logging:
-                self._last_logged_connection_failure[aid_str] = (reason, now)
+            is_worth_logging = self._connection_failure_log_gate.should_log_failure(agent_id, reason.value)
         if is_worth_logging:
             logger.info(
                 "System-interface connection failure for {} classified as {}{}",
@@ -955,34 +1026,93 @@ class SystemInterfaceHealthTracker(MutableModel):
         authoritative.
         """
         aid_str = str(agent_id)
-        fire_health: AgentHealth | None = None
-        prior_health: AgentHealth | None = None
         with self._lock:
-            # A reachable workspace no longer needs any of its graces.
-            self._probe_grace_deadlines_by_agent.pop(aid_str, None)
-            # Nor is it still the stopped machine the marker was set for, no
-            # matter which route started it back up. A machine whose stop
-            # command has not returned yet is the exception: its interface
-            # answers for the first seconds of the stop, so this 200 is the stop
-            # in progress rather than the machine back.
-            if aid_str not in self._in_flight_intentional_stop_agents:
-                self._unattended_recovery_suppressed_agents.discard(aid_str)
-            record = self._records.pop(aid_str, None)
+            prior_health = self._record_probe_success_locked(aid_str)
+        self._report_probe_success(agent_id, prior_health, "probe succeeded")
+
+    def _record_probe_success_locked(self, aid_str: str) -> AgentHealth | None:
+        """Apply a probe success under the lock; return the health it ended, or None for a machine that was already clean."""
+        # A reachable workspace no longer needs any of its graces.
+        self._probe_grace_deadlines_by_agent.pop(aid_str, None)
+        # Nor is it still the stopped machine the marker was set for, no
+        # matter which route started it back up. A machine whose stop
+        # command has not returned yet is the exception: its interface
+        # answers for the first seconds of the stop, so this 200 is the stop
+        # in progress rather than the machine back.
+        if aid_str not in self._in_flight_intentional_stop_agents:
+            self._unattended_recovery_suppressed_agents.discard(aid_str)
+        self._recoveries_awaiting_readiness.discard(aid_str)
+        record = self._records.pop(aid_str, None)
+        if record is None or record.health == AgentHealth.HEALTHY:
+            return None
+        if record.health == AgentHealth.RECOVERING:
+            self._seen_answering_during_recovery_agents.add(aid_str)
+        return record.health
+
+    def _report_probe_success(self, agent_id: AgentId, prior_health: AgentHealth | None, reason: str) -> None:
+        """Log and fire the HEALTHY edge a probe success produced, if it produced one.
+
+        ``reason`` names the evidence, because the two routes here are not
+        interchangeable to whoever reads this line afterwards: the forwarded
+        answer is the one that lands while the probe path is itself broken, and
+        a line crediting a probe for it would describe that path as recovered.
+        """
+        if prior_health is None:
+            return
+        logger.info("System-interface health for {}: {} -> HEALTHY ({})", agent_id, prior_health.value, reason)
+        self._fire_on_change(agent_id, AgentHealth.HEALTHY)
+        self._fire_on_recovery(agent_id)
+
+    def mark_awaiting_readiness(self, agent_id: AgentId) -> None:
+        """Note that ``agent_id``'s recovery has run its commands and is now waiting for the interface.
+
+        From here a forwarded answer describes the machine after the bounce and
+        counts as a probe success; see :meth:`record_forwarded_answer`.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            record = self._records.get(aid_str)
+            if record is not None and record.health == AgentHealth.RECOVERING:
+                self._recoveries_awaiting_readiness.add(aid_str)
+
+    def record_forwarded_answer(self, agent_id: AgentId) -> None:
+        """Take the plugin's report that ``agent_id``'s shell answered a forwarded request as a probe success.
+
+        The plugin only reports the shell target, which is the service a
+        readiness probe of the bare origin reaches, so the answer is the same
+        evidence such a probe would have produced -- and it is the evidence
+        that ends a false verdict when the probe path itself is what is broken:
+        a machine held STUCK or RECOVERY_FAILED while the renderer talks to it
+        through the same plugin.
+
+        Two reports change nothing. A machine this tracker holds no record for:
+        the answer must not end a probe grace or lift a stopped-on-purpose mark
+        the way a probe success of a watched machine does. And a machine whose
+        recovery is still running its commands (see
+        :meth:`mark_awaiting_readiness`): the shell keeps answering the renderer
+        for the first seconds of a stop, and taking that as the machine back
+        would end the readiness wait before the container has even gone down.
+
+        A recovery whose progress no longer stands is the exception, on the
+        grounds :meth:`snapshot_probe_targets` gives for probing one: it is a
+        START, so there is no stop for a doomed answer to come from, and the
+        worker's own probe runs only after a ``mngr start`` a sleep may have
+        left blocked indefinitely. That is the state in which this route is the
+        only one left, so it is the last one it may be refused in.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            record = self._records.get(aid_str)
             if record is None:
                 return
-            if record.health != AgentHealth.HEALTHY:
-                prior_health = record.health
-                fire_health = AgentHealth.HEALTHY
-            if prior_health == AgentHealth.RECOVERING:
-                self._probe_recovered_during_recovery_agents.add(aid_str)
-        if fire_health is not None:
-            logger.info(
-                "System-interface health for {}: {} -> HEALTHY (probe succeeded)",
-                agent_id,
-                prior_health.value if prior_health is not None else "?",
-            )
-            self._fire_on_change(agent_id, fire_health)
-            self._fire_on_recovery(agent_id)
+            if (
+                record.health == AgentHealth.RECOVERING
+                and aid_str not in self._recoveries_awaiting_readiness
+                and not record.is_recovery_progress_unverified
+            ):
+                return
+            prior_health = self._record_probe_success_locked(aid_str)
+        self._report_probe_success(agent_id, prior_health, "the plugin saw its shell answer")
 
     def mark_stuck(self, agent_id: AgentId) -> None:
         """Force-transition ``agent_id`` to STUCK, firing on-change.
@@ -1033,7 +1163,8 @@ class SystemInterfaceHealthTracker(MutableModel):
             record.last_recovery_error = None
             record.is_recovery_a_no_op = False
             record.is_recovery_progress_unverified = False
-            self._probe_recovered_during_recovery_agents.discard(aid_str)
+            self._seen_answering_during_recovery_agents.discard(aid_str)
+            self._recoveries_awaiting_readiness.discard(aid_str)
             if record.health != AgentHealth.RECOVERING:
                 record.health = AgentHealth.RECOVERING
                 record.recovery_kind = kind
@@ -1050,16 +1181,17 @@ class SystemInterfaceHealthTracker(MutableModel):
         the recovery page so it can render an escalate / try-again affordance
         instead of an indefinite wait.
 
-        Declined (returning False) for an agent a probe found answering while
-        this recovery was still running: a ``mngr start`` blocked across a sleep
-        can return its error long after the machine came back (see
-        :meth:`invalidate_recovery_progress_after_wake`), and the probe's 200 is
-        the newer and more direct claim about the machine.
+        Declined (returning False) for an agent found answering while this
+        recovery was still running, by either route into that -- a probe, or the
+        plugin reporting its shell answering: a ``mngr start`` blocked across a
+        sleep can return its error long after the machine came back (see
+        :meth:`invalidate_recovery_progress_after_wake`), and the machine
+        answering is the newer and more direct claim about it.
         """
         aid_str = str(agent_id)
         with self._lock:
-            is_outranked_by_a_probe = aid_str in self._probe_recovered_during_recovery_agents
-            if not is_outranked_by_a_probe:
+            is_outranked_by_the_machine_answering = aid_str in self._seen_answering_during_recovery_agents
+            if not is_outranked_by_the_machine_answering:
                 record = self._records.setdefault(aid_str, _AgentRecord())
                 record.failure_run_started_at = None
                 record.failure_run_started_wall_at = None
@@ -1067,15 +1199,33 @@ class SystemInterfaceHealthTracker(MutableModel):
                 # Always re-fire: a second failure with a new reason must reach
                 # the recovery page even if the state is already RECOVERY_FAILED.
                 record.health = AgentHealth.RECOVERY_FAILED
-        if is_outranked_by_a_probe:
+        if is_outranked_by_the_machine_answering:
             logger.info(
-                "Recovery failure for {} not shown ({}): a probe found the machine answering while it was still running",
+                "Recovery failure for {} not shown ({}): the machine was found answering while it was still running",
                 agent_id,
                 error,
             )
             return False
         self._fire_on_change(agent_id, AgentHealth.RECOVERY_FAILED)
         return True
+
+    def was_seen_answering_during_recovery(self, agent_id: AgentId) -> bool:
+        """Whether ``agent_id`` was found answering while its current recovery was still running.
+
+        Set on the RECOVERING -> HEALTHY edge by either route into it, the
+        recovery worker's own :meth:`record_probe_success` and the plugin's
+        :meth:`record_forwarded_answer`, and cleared by the next
+        :meth:`mark_recovering`, so it describes the recovery in flight and
+        nothing before it. The second route is the one that matters here: the
+        wait's probes and the renderer's traffic take the same path, and the
+        case this is for is the one where only the probes fail. The recovery's
+        readiness wait reads it to end early: the machine has been seen
+        answering, which is all the wait is for -- and
+        :meth:`mark_recovery_failed` reads it to decline a late failure for the
+        same reason.
+        """
+        with self._lock:
+            return str(agent_id) in self._seen_answering_during_recovery_agents
 
     def get_health(self, agent_id: AgentId) -> AgentHealth:
         """Return the current health for ``agent_id`` (HEALTHY by default)."""
@@ -1268,8 +1418,6 @@ class SystemInterfaceHealthTracker(MutableModel):
                 "Recovery of {} was in flight across a sleep; probing it again rather than waiting on it",
                 aid_str,
             )
-
-    # -- Internals --------------------------------------------------------
 
     def _fire_on_change(self, agent_id: AgentId, new_health: AgentHealth) -> None:
         with self._lock:

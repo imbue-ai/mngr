@@ -14,6 +14,7 @@ import os
 import socket
 import ssl
 import threading
+from typing import Any
 
 import click
 import pytest
@@ -28,6 +29,7 @@ from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_forward.cli import ForwardCliOptions
+from imbue.mngr_forward.cli import ServeLoopExceptionReporter
 from imbue.mngr_forward.cli import _BoundedSSLShutdownEventLoop
 from imbue.mngr_forward.cli import _DEFAULT_PORT
 from imbue.mngr_forward.cli import _SSL_SHUTDOWN_TIMED_OUT_MESSAGE
@@ -35,7 +37,6 @@ from imbue.mngr_forward.cli import _bind_listen_socket
 from imbue.mngr_forward.cli import _build_hypercorn_config
 from imbue.mngr_forward.cli import _build_strategy
 from imbue.mngr_forward.cli import _filter_snapshot
-from imbue.mngr_forward.cli import _handle_serve_loop_exception
 from imbue.mngr_forward.cli import _parse_reverse_specs
 from imbue.mngr_forward.cli import _run_serve_loop
 from imbue.mngr_forward.cli import _validate_options
@@ -44,6 +45,7 @@ from imbue.mngr_forward.data_types import ForwardListSnapshot
 from imbue.mngr_forward.data_types import ForwardPortStrategy
 from imbue.mngr_forward.data_types import ForwardServiceStrategy
 from imbue.mngr_forward.primitives import ReverseTunnelSpec
+from imbue.mngr_forward.server import ForwardRepeatRateLimiter
 from imbue.mngr_forward.testing import TEST_AGENT_ID_1
 from imbue.mngr_forward.testing import TEST_AGENT_ID_2
 from imbue.mngr_forward.testing import make_in_memory_test_ca
@@ -262,45 +264,224 @@ def _asyncio_error_records(caplog: pytest.LogCaptureFixture) -> list[str]:
     return [record.getMessage() for record in caplog.records if record.name == "asyncio"]
 
 
-def _serve_loop_asyncio_error_records(
-    caplog: pytest.LogCaptureFixture, message: str, exception: BaseException
-) -> list[str]:
-    """Run the serve-loop exception handler on a fresh loop; return asyncio ERROR records."""
+def _raised_runtime_error(message: str) -> RuntimeError:
+    """Return a RuntimeError carrying a real traceback, as one that escaped a task does."""
+    try:
+        raise RuntimeError(message)
+    except RuntimeError as raised:
+        return raised
+
+
+def _reported_serve_loop_lines(
+    caplog: pytest.LogCaptureFixture,
+    context: dict[str, Any],
+    reporter: ServeLoopExceptionReporter | None = None,
+    times: int = 1,
+) -> tuple[list[str], list[str]]:
+    """Run a loop-exception context through the reporter ``times`` over on one loop; return its error and debug lines.
+
+    The loop is only what ``set_exception_handler`` hands a handler, and the
+    reporter never touches it, so a burst shares one rather than paying for a
+    loop and a sink per report.
+    """
+    messages: list[Any] = []
+    sink_id = logger.add(messages.append, level="DEBUG", format="{message}")
     loop = asyncio.new_event_loop()
     try:
         with caplog.at_level("ERROR", logger="asyncio"):
-            _handle_serve_loop_exception(loop, {"message": message, "exception": exception})
+            handler = (reporter if reporter is not None else ServeLoopExceptionReporter()).handle
+            for _ in range(times):
+                handler(loop, context)
     finally:
         loop.close()
-    return _asyncio_error_records(caplog)
+        logger.remove(sink_id)
+    error_lines = [str(message).rstrip("\n") for message in messages if message.record["level"].name == "ERROR"]
+    debug_lines = [str(message).rstrip("\n") for message in messages if message.record["level"].name == "DEBUG"]
+    return error_lines, debug_lines
 
 
-def test_serve_loop_exception_handler_drops_ssl_shutdown_timeout(caplog: pytest.LogCaptureFixture) -> None:
-    """The TimeoutError of an abandoned TLS teardown must not reach asyncio's default handler."""
-    records = _serve_loop_asyncio_error_records(
-        caplog, "Unhandled exception in client_connected_cb", TimeoutError("SSL shutdown timed out")
+def test_serve_loop_exception_reporter_drops_ssl_shutdown_timeout(caplog: pytest.LogCaptureFixture) -> None:
+    """The TimeoutError of an abandoned TLS teardown must not be reported at all."""
+    error_lines, _ = _reported_serve_loop_lines(
+        caplog,
+        {
+            "message": "Unhandled exception in client_connected_cb",
+            "exception": TimeoutError("SSL shutdown timed out"),
+        },
     )
-    assert records == []
+    assert error_lines == []
+    assert _asyncio_error_records(caplog) == []
 
 
-def test_serve_loop_exception_handler_drops_ssl_errors(caplog: pytest.LogCaptureFixture) -> None:
+def test_serve_loop_exception_reporter_drops_ssl_errors(caplog: pytest.LogCaptureFixture) -> None:
     """TLS handshake failures are dropped, matching hypercorn's own runner behavior."""
-    records = _serve_loop_asyncio_error_records(
-        caplog, "SSL handshake failed", ssl.SSLError(1, "TLSV1_ALERT_UNKNOWN_CA")
+    error_lines, _ = _reported_serve_loop_lines(
+        caplog, {"message": "SSL handshake failed", "exception": ssl.SSLError(1, "TLSV1_ALERT_UNKNOWN_CA")}
     )
-    assert records == []
+    assert error_lines == []
+    assert _asyncio_error_records(caplog) == []
 
 
-def test_serve_loop_exception_handler_delegates_unrelated_errors(caplog: pytest.LogCaptureFixture) -> None:
-    """Anything that is not benign TLS teardown noise still reaches the default handler."""
-    records = _serve_loop_asyncio_error_records(caplog, "something exploded in a task", RuntimeError("kaboom-7c1f"))
-    assert any("something exploded in a task" in message for message in records)
+def test_serve_loop_exception_reporter_reports_an_unrelated_failure_as_one_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A real failure costs the consumer reading our stderr one line that names it and where it was raised.
+
+    Deferring to asyncio's own handler instead wrote the headline, every
+    context object and the whole traceback to the `asyncio` stdlib logger,
+    which nothing configures: dozens of stderr lines per report, through
+    logging's last-resort handler rather than loguru.
+    """
+    error_lines, _ = _reported_serve_loop_lines(
+        caplog,
+        {
+            "message": "Task exception was never retrieved",
+            "exception": _raised_runtime_error("kaboom-7c1f"),
+            "future": "<Task finished name='Task-1'>",
+        },
+    )
+
+    assert len(error_lines) == 1
+    assert len(error_lines[0].splitlines()) == 1
+    assert "Task exception was never retrieved" in error_lines[0]
+    assert "RuntimeError('kaboom-7c1f')" in error_lines[0]
+    assert "cli_test.py" in error_lines[0] and "_raised_runtime_error" in error_lines[0]
+    assert _asyncio_error_records(caplog) == []
 
 
-def test_serve_loop_exception_handler_delegates_other_timeouts(caplog: pytest.LogCaptureFixture) -> None:
+def test_serve_loop_exception_reporter_keeps_the_context_and_traceback_at_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing asyncio's own handler would have said is lost: it follows the summary at debug."""
+    _, debug_lines = _reported_serve_loop_lines(
+        caplog,
+        {
+            "message": "Task exception was never retrieved",
+            "exception": _raised_runtime_error("kaboom-7c1f"),
+            "transport": "<_SSLProtocolTransport object>",
+        },
+    )
+
+    assert len(debug_lines) == 1
+    assert "transport: '<_SSLProtocolTransport object>'" in debug_lines[0]
+    assert "Traceback (most recent call last):" in debug_lines[0]
+    assert "RuntimeError: kaboom-7c1f" in debug_lines[0]
+
+
+def test_serve_loop_exception_reporter_rations_a_storm_of_one_failure(caplog: pytest.LogCaptureFixture) -> None:
+    """A storm of one failure costs a line an interval, carrying the count of what it stood in for.
+
+    The pool-timeout storm that followed a network outage was 1640
+    unretrieved-task reports in ninety seconds; relayed as asyncio wrote them
+    they were 94% of a log rotation and pushed the day's earlier logs out of
+    the bug report.
+    """
+    clock = [0.0]
+    reporter = ServeLoopExceptionReporter(
+        limiter=ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    )
+    storm_context = {
+        "message": "Task exception was never retrieved",
+        "exception": _raised_runtime_error("pool timeout"),
+    }
+
+    relayed, _ = _reported_serve_loop_lines(caplog, storm_context, reporter=reporter, times=1640)
+    assert len(relayed) == 1
+
+    clock[0] = 61.0
+    due_lines, _ = _reported_serve_loop_lines(caplog, storm_context, reporter=reporter)
+    assert len(due_lines) == 1
+    assert "1639 identical report(s) suppressed since the last one" in due_lines[0]
+
+
+def test_serve_loop_exception_reporter_reports_a_different_failure_inside_the_interval(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Rationing is per failure: a storm of one must not silence a different one that starts during it."""
+    clock = [0.0]
+    reporter = ServeLoopExceptionReporter(
+        limiter=ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    )
+    _reported_serve_loop_lines(
+        caplog,
+        {"message": "Task exception was never retrieved", "exception": _raised_runtime_error("pool timeout")},
+        reporter=reporter,
+    )
+
+    other_lines, _ = _reported_serve_loop_lines(
+        caplog,
+        {"message": "Task exception was never retrieved", "exception": ValueError("something else entirely")},
+        reporter=reporter,
+    )
+    assert len(other_lines) == 1
+    assert "ValueError('something else entirely')" in other_lines[0]
+
+
+def _raised_runtime_error_elsewhere(message: str) -> RuntimeError:
+    """A RuntimeError from a second call site, so its traceback names a different frame."""
+    try:
+        raise RuntimeError(message)
+    except RuntimeError as raised:
+        return raised
+
+
+def test_serve_loop_exception_reporter_reports_one_class_raised_at_two_sites_separately(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two unrelated bugs of the same class under one headline are two failures, and each owes a report.
+
+    A report the limiter suppresses is written nowhere -- not at debug either --
+    and is then counted as a repeat of whatever holds the key. Nearly everything
+    the loop is handed arrives under one of a handful of fixed headlines, so
+    keying on the headline and the class alone hides the second bug for a whole
+    interval and misdescribes it when the count finally lands.
+    """
+    clock = [0.0]
+    reporter = ServeLoopExceptionReporter(
+        limiter=ForwardRepeatRateLimiter(interval_seconds=60.0, now_fn=lambda: clock[0])
+    )
+    headline = "Task exception was never retrieved"
+
+    first_lines, _ = _reported_serve_loop_lines(
+        caplog, {"message": headline, "exception": _raised_runtime_error("pool timeout")}, reporter=reporter
+    )
+    second_lines, _ = _reported_serve_loop_lines(
+        caplog,
+        {"message": headline, "exception": _raised_runtime_error_elsewhere("a wholly different wedge")},
+        reporter=reporter,
+    )
+
+    assert len(first_lines) == 1
+    assert "_raised_runtime_error" in first_lines[0]
+    assert len(second_lines) == 1, "the second site's failure was swallowed as a repeat of the first's"
+    assert "RuntimeError('a wholly different wedge')" in second_lines[0]
+    assert "_raised_runtime_error_elsewhere" in second_lines[0]
+
+    # The same site inside the interval is still a repeat, so a storm costs one line.
+    repeat_lines, _ = _reported_serve_loop_lines(
+        caplog, {"message": headline, "exception": _raised_runtime_error("pool timeout")}, reporter=reporter
+    )
+    assert repeat_lines == []
+
+
+def test_serve_loop_exception_reporter_reports_a_context_carrying_no_exception(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """asyncio may hand the loop a context with no exception on it; that report still gets its line."""
+    error_lines, debug_lines = _reported_serve_loop_lines(
+        caplog, {"message": "Executing <Handle foo> took 0.5 seconds", "handle": "<Handle foo>"}
+    )
+    assert error_lines == ["Executing <Handle foo> took 0.5 seconds"]
+    assert "handle: '<Handle foo>'" in debug_lines[0]
+
+
+def test_serve_loop_exception_reporter_reports_other_timeouts(caplog: pytest.LogCaptureFixture) -> None:
     """Only the SSL-shutdown TimeoutError is suppressed; other timeouts must stay visible."""
-    records = _serve_loop_asyncio_error_records(caplog, "some other timeout", TimeoutError("read timed out"))
-    assert any("some other timeout" in message for message in records)
+    error_lines, _ = _reported_serve_loop_lines(
+        caplog, {"message": "some other timeout", "exception": TimeoutError("read timed out")}
+    )
+    assert len(error_lines) == 1
+    assert "some other timeout" in error_lines[0]
 
 
 class _FastSSLShutdownEventLoop(_BoundedSSLShutdownEventLoop):

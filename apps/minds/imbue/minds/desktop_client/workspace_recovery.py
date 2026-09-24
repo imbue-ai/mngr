@@ -70,6 +70,7 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
+from imbue.minds.desktop_client.data_types import WorkspaceProbeOutcome
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
 from imbue.minds.desktop_client.environment_signals import EnvironmentCondition
@@ -77,6 +78,7 @@ from imbue.minds.desktop_client.environment_signals import SshEndpoint
 from imbue.minds.desktop_client.machine_stop_kinds import CONNECTOR_OWNED_WORKSPACE_STATUSES
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.provider_display import friendly_provider_label
+from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -145,6 +147,12 @@ _DISCOVERY_FRESHNESS_MISSED_SNAPSHOT_COUNT: Final[int] = 3
 # between the first machine's verdict and the last's. Short enough that the
 # reading still describes the network the decision is being made on.
 _GATE_READING_REUSE_SECONDS: Final[float] = 2.0
+# How many readings a gate takes before it gives up on measuring the network. A
+# reading is voided when the laptop sleeps while it is being taken, and the
+# probe that follows the wake is exactly the one that describes the network
+# the decision is being made on; a machine that sleeps through this many
+# consecutive probes is not one a further probe would settle.
+_GATE_VOIDED_READING_ATTEMPT_LIMIT: Final[int] = 3
 # Provider backends whose machines *can* live on this device. Their workspaces
 # are then reachable with the network unplugged, so no connectivity reading ever
 # gates or explains anything about them. Only "can": a docker provider is
@@ -824,13 +832,27 @@ class RecoveryReadinessOutcome(UpperCaseStrEnum):
     ABANDONED = auto()
 
 
+class RecoveryReadinessResult(FrozenModel):
+    """How the post-recovery wait ended, with the last thing its probe saw."""
+
+    outcome: RecoveryReadinessOutcome = Field(description="How the wait ended")
+    last_probe: WorkspaceProbeOutcome | None = Field(
+        description="What the final probe came back with; None when the wait ended before it probed at all"
+    )
+
+    @property
+    def last_probe_summary(self) -> str:
+        return self.last_probe.summary if self.last_probe is not None else "never probed"
+
+
 def _await_system_interface_ready(
-    workspace_id: str,
+    workspace_agent_id: AgentId,
+    tracker: SystemInterfaceHealthTracker,
     mngr_forward_port: int,
     preauth_cookie: str,
     wait_seconds: float,
     concurrency_group: ConcurrencyGroup,
-) -> RecoveryReadinessOutcome:
+) -> RecoveryReadinessResult:
     """Poll the system interface through the plugin until it answers 200, the budget elapses, or shutdown.
 
     The wait spans a full cold boot, which is far longer than the group's ~10s
@@ -839,27 +861,56 @@ def _await_system_interface_ready(
     uninterruptible sleep that outlives the join and fails the group's exit.
     Shutdown is reported as its own outcome (never as a timeout), because a
     truncated wait is not evidence that the recovery failed.
+
+    The tracker is asked before every probe whether a probe success has
+    already landed during this recovery, and a machine one has is READY
+    without another: the plugin's report of the shell answering the renderer
+    lands there, and it is the same evidence this probe is after -- so when
+    this probe's own path is what is broken, the machine still stops being
+    described as failing the moment it is seen answering, instead of after the
+    whole budget.
+
+    What each failed probe got back is logged as it changes (and once a minute
+    while it does not), and the last of them rides on the result: a wait that
+    times out while the renderer is connected through the same plugin is
+    undiagnosable without knowing whether its probes were refused, timed out,
+    or answered with something other than a 200.
     """
     deadline = time.monotonic() + wait_seconds
+    probe_log_gate = AgentFailureLogGate()
+    last_outcome: WorkspaceProbeOutcome | None = None
     with make_workspace_probe_client(
         preauth_cookie=preauth_cookie,
         probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
     ) as probe_client:
         while time.monotonic() < deadline:
             if concurrency_group.is_shutting_down():
-                return RecoveryReadinessOutcome.ABANDONED
-            status = probe_workspace_through_plugin(
+                return RecoveryReadinessResult(outcome=RecoveryReadinessOutcome.ABANDONED, last_probe=last_outcome)
+            if tracker.was_seen_answering_during_recovery(workspace_agent_id):
+                logger.info(
+                    "Ending the readiness wait for {}: the machine was seen answering before this probe reached it",
+                    workspace_agent_id,
+                )
+                return RecoveryReadinessResult(outcome=RecoveryReadinessOutcome.READY, last_probe=last_outcome)
+            outcome = probe_workspace_through_plugin(
                 mngr_forward_port=mngr_forward_port,
                 preauth_cookie=preauth_cookie,
-                workspace_id=workspace_id,
+                workspace_id=str(workspace_agent_id),
                 probe_timeout_seconds=_WORKSPACE_PROBE_TIMEOUT_SECONDS,
                 client=probe_client,
             )
-            if status == 200:
-                return RecoveryReadinessOutcome.READY
+            last_outcome = outcome
+            if outcome.is_ready:
+                return RecoveryReadinessResult(outcome=RecoveryReadinessOutcome.READY, last_probe=outcome)
+            if probe_log_gate.should_log_failure(workspace_agent_id, outcome.summary):
+                logger.info(
+                    "Probed the system interface of {} during its recovery without a 200: {}",
+                    workspace_agent_id,
+                    outcome.summary,
+                )
             if concurrency_group.shutdown_event.wait(timeout=_RECOVERY_PROBE_INTERVAL_SECONDS):
-                return RecoveryReadinessOutcome.ABANDONED
-    return RecoveryReadinessOutcome.TIMED_OUT
+                return RecoveryReadinessResult(outcome=RecoveryReadinessOutcome.ABANDONED, last_probe=last_outcome)
+    return RecoveryReadinessResult(outcome=RecoveryReadinessOutcome.TIMED_OUT, last_probe=last_outcome)
 
 
 class RecoveryWorkerFailureHandler(MutableModel):
@@ -1216,6 +1267,40 @@ class UnattendedRecoveryDispatcher(MutableModel):
         self.tracker.suppress_unattended_recovery(agent_id)
         return True
 
+    def _read_device_block_for_gate(self, agent_id: AgentId, detector: ConnectivityDetector) -> EnvironmentBlock:
+        """Measure the device for the gate, probing again when a sleep voided the measurement.
+
+        A wake landing mid-probe hands back the blanked UNKNOWN reading rather
+        than the network the laptop went to sleep on, and UNKNOWN blocks
+        nothing. Acting on it would start the machine over whatever network the
+        laptop woke onto without anyone having looked at it -- which, right
+        after a wake, is the network most likely to be dead. The probe after the
+        wake is the one that describes it, so take it. Only when every attempt
+        is voided does the gate fall back to dispatching on no evidence, for the
+        reason :meth:`_dispatch_once_connectivity_is_known` gives for a probe
+        that raised.
+        """
+        for attempt in range(1, _GATE_VOIDED_READING_ATTEMPT_LIMIT + 1):
+            reading = detector.probe_now(max_reuse_age_seconds=_GATE_READING_REUSE_SECONDS)
+            if reading.observed_at is not None:
+                return reading.environment_block
+            # A probe the shutdown cut short hands back the same blank, and there
+            # is no network left to measure on the way out.
+            if detector.is_shutting_down():
+                return EnvironmentBlock.NONE
+            if attempt < _GATE_VOIDED_READING_ATTEMPT_LIMIT:
+                logger.info(
+                    "Probing the device again for the gated start of {}: a wake voided the reading (attempt {} of {})",
+                    agent_id,
+                    attempt,
+                    _GATE_VOIDED_READING_ATTEMPT_LIMIT,
+                )
+        logger.warning(
+            "Dispatching the gated start of {} as though the device were fine: every reading was voided by a wake",
+            agent_id,
+        )
+        return EnvironmentBlock.NONE
+
     def _dispatch_once_connectivity_is_known(self, agent_id: AgentId, detector: ConnectivityDetector) -> None:
         """Worker body: probe the device, then either dispatch or record the start as owed.
 
@@ -1230,7 +1315,7 @@ class UnattendedRecoveryDispatcher(MutableModel):
         start (:meth:`_is_start_still_due`).
         """
         try:
-            block = detector.probe_now(max_reuse_age_seconds=_GATE_READING_REUSE_SECONDS).environment_block
+            block = self._read_device_block_for_gate(agent_id, detector)
         # The group refusing one of the probe's rounds is the spawn failure one
         # frame later, and gets the same answer for the same reason: it only
         # refuses once the app is going down, so there is nothing left to
@@ -1241,10 +1326,9 @@ class UnattendedRecoveryDispatcher(MutableModel):
             return
         # Everything else the probe reaches is the walk behind its endpoints, on
         # an app that is otherwise fine. A reading that could not be taken is no
-        # evidence, and no evidence suppresses nothing here -- the same answer a
-        # wake-disqualified probe hands back. Withholding instead would strand
-        # the machine: the owed set is drained by a connectivity recovery, and a
-        # probe that never landed can produce no such edge.
+        # evidence, and no evidence suppresses nothing here. Withholding instead
+        # would strand the machine: the owed set is drained by a connectivity
+        # recovery, and a probe that never landed can produce no such edge.
         except (MindError, MngrError, OSError, RuntimeError, ValueError) as exc:
             logger.opt(exception=exc).warning(
                 "The connectivity gate's probe for {} failed; dispatching as though the device were fine: {}",
@@ -1522,14 +1606,17 @@ def run_host_recovery_sequence(
         _record_recovery_failure(tracker, registry, workspace_agent_id, message)
         return
 
+    tracker.mark_awaiting_readiness(workspace_agent_id)
     registry.append_log(workspace_agent_id, "Waiting for the system interface to respond.")
-    outcome = _await_system_interface_ready(
-        str(workspace_agent_id),
+    readiness = _await_system_interface_ready(
+        workspace_agent_id,
+        tracker,
         mngr_forward_port,
         mngr_forward_preauth_cookie,
         startup_wait_seconds,
         concurrency_group,
     )
+    outcome = readiness.outcome
     if outcome is RecoveryReadinessOutcome.READY:
         tracker.record_probe_success(workspace_agent_id)
         registry.append_log(workspace_agent_id, "The system interface is responding again.")
@@ -1542,7 +1629,10 @@ def run_host_recovery_sequence(
         # info line -- there is no persistent condition for it to hide.
         logger.info("Host recovery of {} was cut short by shutdown before the interface answered", workspace_agent_id)
     else:
-        message = f"The system interface did not respond within {int(startup_wait_seconds)}s of the host recovery."
+        message = (
+            f"The system interface did not respond within {int(startup_wait_seconds)}s of the host recovery "
+            f"(last probe: {readiness.last_probe_summary})."
+        )
         # Warning while this device is confirmed offline or on a network that
         # blocks SSH, for the reason :func:`_report_recovery_step_failure` gives
         # for the steps: every poll of the wait was routed over the same network

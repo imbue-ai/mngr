@@ -70,6 +70,7 @@ from imbue.mngr_forward.cookie import create_session_cookie
 from imbue.mngr_forward.cookie import create_subdomain_auth_token
 from imbue.mngr_forward.cookie import verify_session_cookie
 from imbue.mngr_forward.cookie import verify_subdomain_auth_token
+from imbue.mngr_forward.data_types import SystemInterfaceBackendAnsweredPayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailurePayload
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
 from imbue.mngr_forward.embedding import EmbedderOrigin
@@ -100,6 +101,11 @@ from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
 # would additionally cap every proxied request at this value, which silently
 # breaks any user app endpoint that legitimately takes longer.
 _STALL_NOTICE_SECONDS: Final[float] = 30.0
+# Minimum seconds between two ``system_interface_backend_answered`` envelopes
+# for one agent. A shell under a live renderer answers several requests a
+# second, and one observation per interval is all a consumer clearing a stale
+# verdict needs.
+_BACKEND_ANSWERED_ENVELOPE_INTERVAL_SECONDS: Final[float] = 5.0
 
 # Backstop for a backend that goes silent. httpx applies this per read, not to
 # the request as a whole, so it bounds the gap between bytes: a backend that
@@ -277,9 +283,6 @@ def _render_index_page(
     return env.get_template("index.html").render(agents=agents, port=port)
 
 
-# Auth helpers
-
-
 def _append_partitioned_to_last_set_cookie(response: Response) -> None:
     """Append ``; Partitioned`` to the most recently written ``Set-Cookie`` header.
 
@@ -389,9 +392,6 @@ def _unauthenticated_subdomain_response(
     return Response(status_code=302, headers={"Location": location})
 
 
-# WebSocket forwarding helpers
-
-
 def _connect_backend_websocket(
     ws_url: str,
     subprotocols: list[str],
@@ -474,9 +474,6 @@ async def _forward_backend_to_client(
         logger.debug("Backend WebSocket closed for {}", agent_id)
     except RuntimeError as e:
         logger.trace("Client WebSocket send error (likely post-disconnect): {}", e)
-
-
-# HTTP/WS tunnel helpers
 
 
 def _get_tunnel_socket_path(
@@ -608,9 +605,6 @@ def _connect_failure_reason(was_backend_refused: Callable[[], bool]) -> SystemIn
     if was_backend_refused():
         return SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING
     return SystemInterfaceBackendFailureReason.CONNECT_ERROR
-
-
-# HTTP forwarding
 
 
 class _BackendBodyError(MngrForwardError):
@@ -771,6 +765,63 @@ class _StallGuardedStreamingResponse(StreamingResponse):
             await self._close_backend()
 
 
+# Above this many tracked keys, the limiter forgets the ones whose interval has
+# already lapsed. The unresolved-origin key carries the request's own Host
+# label, which nothing validates against a known service, so without this the
+# key space a long-lived forward accumulates is whatever clients ask for.
+_MAX_TRACKED_RATE_LIMIT_KEYS: Final[int] = 512
+
+
+class ForwardRepeatRateLimiter(MutableModel):
+    """Interval rate limit for a report the forward repeats under one key.
+
+    For a report whose repeats say nothing its first did: a proxied view open on
+    an unhealthy agent re-dials the tunnel and polls its dead origin about once
+    a second, and a pool timing out on a backlog wrote 1640 identical reports in
+    ninety seconds. One per interval per key says everything the whole run of
+    them would. The suppressed count comes back with the report that is due, for
+    a caller whose report has somewhere to put it.
+    """
+
+    interval_seconds: float = Field(
+        frozen=True, default=60.0, description="Minimum seconds between two reports for one key"
+    )
+    now_fn: Callable[[], float] = Field(
+        frozen=True, default=time.monotonic, description="Monotonic clock, injectable for tests"
+    )
+    last_logged_at_by_key: dict[str, float] = Field(
+        default_factory=dict, description="Monotonic time of the last reported event per key"
+    )
+    suppressed_count_by_key: dict[str, int] = Field(
+        default_factory=dict, description="Events suppressed since the last reported one per key"
+    )
+
+    def suppressed_repeats_if_due(self, key: str) -> int | None:
+        """Return the count suppressed since the last report when this key is due for one now, or None to suppress."""
+        now = self.now_fn()
+        last_logged_at = self.last_logged_at_by_key.get(key)
+        if last_logged_at is None or now - last_logged_at >= self.interval_seconds:
+            suppressed_count = self.suppressed_count_by_key.pop(key, 0)
+            self.last_logged_at_by_key[key] = now
+            self._forget_lapsed_keys_over_capacity(now)
+            return suppressed_count
+        self.suppressed_count_by_key[key] = self.suppressed_count_by_key.get(key, 0) + 1
+        return None
+
+    def _forget_lapsed_keys_over_capacity(self, now: float) -> None:
+        """Drop keys whose interval has lapsed, once more than ``_MAX_TRACKED_RATE_LIMIT_KEYS`` are tracked.
+
+        Only lapsed keys may ever be dropped: evicting one still inside its
+        interval would let the flood this limiter exists to damp silence it.
+        """
+        if len(self.last_logged_at_by_key) <= _MAX_TRACKED_RATE_LIMIT_KEYS:
+            return
+        for key, last_logged_at in tuple(self.last_logged_at_by_key.items()):
+            if now - last_logged_at >= self.interval_seconds:
+                del self.last_logged_at_by_key[key]
+                self.suppressed_count_by_key.pop(key, None)
+
+
 def _request_headers_for(reader: RequestHeadersFileReader | None, agent_id: AgentId) -> AgentRequestHeaders:
     """The header edits for a request to one of ``agent_id``'s origins: nothing without a request-headers file."""
     return NO_REQUEST_HEADERS if reader is None else reader.headers_for_agent(str(agent_id))
@@ -784,9 +835,17 @@ async def _forward_workspace_http(
     envelope_writer: EnvelopeWriter,
     stall_notice_seconds: float,
     was_backend_refused: Callable[[], bool],
+    is_shell_target: bool,
+    answered_envelope_limiter: ForwardRepeatRateLimiter,
     request_headers: AgentRequestHeaders,
 ) -> Response:
     """Byte-forward one request to ``backend_url`` and report what happened.
+
+    ``is_shell_target`` is whether the origin routes to the agent's shell
+    service, which is the one backend whose answers are reported as
+    ``system_interface_backend_answered`` envelopes: a readiness probe of the
+    bare origin reaches the same service, so an answer here is the same
+    evidence such a probe would have produced.
 
     ``was_backend_refused`` must have been armed by
     :func:`_snapshot_backend_refusals` before this is called: it is what tells a
@@ -913,6 +972,9 @@ async def _forward_workspace_http(
             logger.debug("Client disconnected as the backend stream for {} opened", agent_id)
             return Response(status_code=499, content="Client disconnected")
 
+        if is_shell_target and 200 <= backend_response.status_code < 300:
+            _emit_backend_answered(envelope_writer, answered_envelope_limiter, agent_id, backend_response.status_code)
+
         # Closing the backend is the response's job, not this generator's: see
         # ``_StallGuardedStreamingResponse.stream_response``.
         async def _stream() -> AsyncGenerator[bytes, None]:
@@ -1023,7 +1085,8 @@ async def _forward_workspace_http(
         backend_task.cancel()
         disconnect_task.cancel()
 
-    if not 200 <= backend_response.status_code < 300:
+    is_answered = 200 <= backend_response.status_code < 300
+    if not is_answered:
         # Any non-2xx response is surfaced as a single ``ERROR_RESPONSE`` signal
         # carrying the status code. The plugin forwards the response unchanged
         # and does not interpret which codes matter -- the consumer decides
@@ -1034,6 +1097,8 @@ async def _forward_workspace_http(
             SystemInterfaceBackendFailureReason.ERROR_RESPONSE,
             backend_response.status_code,
         )
+    if is_answered and is_shell_target:
+        _emit_backend_answered(envelope_writer, answered_envelope_limiter, agent_id, backend_response.status_code)
 
     response = Response(content=backend_response.content, status_code=backend_response.status_code)
     for header_key, header_value in backend_response.headers.multi_items():
@@ -1101,6 +1166,27 @@ def _emit_backend_failure(
         logger.trace("Could not emit system_interface_backend_failure envelope for {}: {}", agent_id, e)
 
 
+def _emit_backend_answered(
+    envelope_writer: EnvelopeWriter,
+    answered_envelope_limiter: ForwardRepeatRateLimiter,
+    agent_id: AgentId,
+    status_code: int | None,
+) -> None:
+    """Emit a ``system_interface_backend_answered`` envelope, at most once per agent per interval, best-effort.
+
+    Rate-limited for the reason the limiter exists: the event recurs many
+    times a second per agent while a page is open, and one per interval
+    carries all the information there is.
+    """
+    if answered_envelope_limiter.suppressed_repeats_if_due(str(agent_id)) is None:
+        return
+    try:
+        payload = SystemInterfaceBackendAnsweredPayload(agent_id=agent_id, status_code=status_code)
+        envelope_writer.emit_system_interface_backend_answered(payload)
+    except (OSError, ValueError) as e:
+        logger.trace("Could not emit system_interface_backend_answered envelope for {}: {}", agent_id, e)
+
+
 # The proxy loader: the canonical "Loading workspace" page that re-attempts the
 # workspace until the backend answers. A downstream consumer can reuse
 # ``render_loading_page`` so its own loading page renders identically.
@@ -1158,9 +1244,6 @@ def _service_unavailable_response(request: Request) -> Response:
     return Response(status_code=503, content="Backend not yet available")
 
 
-# Subdomain handlers
-
-
 def _sanitize_next_url(value: str) -> str:
     """Return ``value`` if it is a same-origin path; otherwise ``"/"``.
 
@@ -1208,66 +1291,8 @@ def _handle_subdomain_auth_bridge(
     return response
 
 
-# Above this many tracked keys, the limiter forgets the ones whose interval has
-# already lapsed. The unresolved-origin key carries the request's own Host
-# label, which nothing validates against a known service, so without this the
-# key space a long-lived forward accumulates is whatever clients ask for.
-_MAX_TRACKED_WARNING_KEYS: Final[int] = 512
-
-
-class ForwardWarningRateLimiter(MutableModel):
-    """Interval rate limit for a per-key repeated warning.
-
-    Both warnings this guards (tunnel setup failed; origin unresolved) recur
-    about once a second while a proxied view is open -- the tunnel is
-    re-dialed per request, and the 503 loading page polls its dead origin --
-    so an unhealthy agent floods the log with (usually identical)
-    warnings. One line per interval per key (carrying the count of suppressed
-    earlier warnings, whatever their message) keeps the signal without the
-    noise.
-    """
-
-    interval_seconds: float = Field(
-        frozen=True, default=60.0, description="Minimum seconds between logged warnings per key"
-    )
-    now_fn: Callable[[], float] = Field(
-        frozen=True, default=time.monotonic, description="Monotonic clock, injectable for tests"
-    )
-    last_logged_at_by_key: dict[str, float] = Field(
-        default_factory=dict, description="Monotonic time of the last logged warning per key"
-    )
-    suppressed_count_by_key: dict[str, int] = Field(
-        default_factory=dict, description="Warnings suppressed since the last logged one per key"
-    )
-
-    def suppressed_repeats_if_should_log(self, key: str) -> int | None:
-        """Return the count of warnings suppressed since the last logged one when a warning should log now, or None to suppress."""
-        now = self.now_fn()
-        last_logged_at = self.last_logged_at_by_key.get(key)
-        if last_logged_at is None or now - last_logged_at >= self.interval_seconds:
-            suppressed_count = self.suppressed_count_by_key.pop(key, 0)
-            self.last_logged_at_by_key[key] = now
-            self._forget_lapsed_keys_over_capacity(now)
-            return suppressed_count
-        self.suppressed_count_by_key[key] = self.suppressed_count_by_key.get(key, 0) + 1
-        return None
-
-    def _forget_lapsed_keys_over_capacity(self, now: float) -> None:
-        """Drop keys whose interval has lapsed, once more than ``_MAX_TRACKED_WARNING_KEYS`` are tracked.
-
-        Only lapsed keys may ever be dropped: evicting one still inside its
-        interval would let the flood this limiter exists to damp silence it.
-        """
-        if len(self.last_logged_at_by_key) <= _MAX_TRACKED_WARNING_KEYS:
-            return
-        for key, last_logged_at in tuple(self.last_logged_at_by_key.items()):
-            if now - last_logged_at >= self.interval_seconds:
-                del self.last_logged_at_by_key[key]
-                self.suppressed_count_by_key.pop(key, None)
-
-
 def _log_unresolved_origin_rate_limited(
-    limiter: ForwardWarningRateLimiter,
+    limiter: ForwardRepeatRateLimiter,
     instance_key: AgentInstanceKey,
     origin_label: str | None,
 ) -> None:
@@ -1280,7 +1305,7 @@ def _log_unresolved_origin_rate_limited(
     maps). Without this line, a wedged label map is invisible in every log.
     """
     origin_description = "the bare host origin" if origin_label is None else f"origin label {origin_label!r}"
-    suppressed_repeats = limiter.suppressed_repeats_if_should_log(f"{instance_key}|{origin_label}")
+    suppressed_repeats = limiter.suppressed_repeats_if_due(f"{instance_key}|{origin_label}")
     if suppressed_repeats is not None:
         repeat_suffix = f" ({suppressed_repeats} earlier occurrences suppressed)" if suppressed_repeats > 0 else ""
         logger.warning(
@@ -1307,8 +1332,9 @@ async def _handle_workspace_forward_http(
     envelope_writer: EnvelopeWriter,
     use_http2: bool,
     stall_notice_seconds: float,
-    tunnel_warning_limiter: ForwardWarningRateLimiter,
-    unresolved_warning_limiter: ForwardWarningRateLimiter,
+    tunnel_warning_limiter: ForwardRepeatRateLimiter,
+    unresolved_warning_limiter: ForwardRepeatRateLimiter,
+    answered_envelope_limiter: ForwardRepeatRateLimiter,
     request_headers_reader: RequestHeadersFileReader | None,
 ) -> Response:
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
@@ -1420,7 +1446,7 @@ async def _handle_workspace_forward_http(
         # Emit a backend-failure envelope so a consumer can react (e.g. drive
         # its own recovery UI), and serve the same styled loader as the
         # UNRESOLVED path instead of raw error text.
-        suppressed_repeats = tunnel_warning_limiter.suppressed_repeats_if_should_log(str(agent_id))
+        suppressed_repeats = tunnel_warning_limiter.suppressed_repeats_if_due(str(agent_id))
         if suppressed_repeats is not None:
             repeat_suffix = f" ({suppressed_repeats} earlier failures suppressed)" if suppressed_repeats > 0 else ""
             logger.warning("SSH tunnel setup failed for {}: {}{}", agent_id, e, repeat_suffix)
@@ -1455,6 +1481,8 @@ async def _handle_workspace_forward_http(
         # Armed here rather than inside the forward, so the count it compares
         # against is read before the request is dialed.
         was_backend_refused=_snapshot_backend_refusals(tunnel_manager, backend_url, target.ssh_info),
+        is_shell_target=resolver.is_shell_target(instance_key, host_info.service_name),
+        answered_envelope_limiter=answered_envelope_limiter,
         request_headers=_request_headers_for(request_headers_reader, agent_id),
     )
 
@@ -1468,7 +1496,8 @@ async def _handle_workspace_forward_websocket(
     preauth_cookie_value: str | None,
     allow_host_loopback: bool,
     envelope_writer: EnvelopeWriter,
-    unresolved_warning_limiter: ForwardWarningRateLimiter,
+    unresolved_warning_limiter: ForwardRepeatRateLimiter,
+    answered_envelope_limiter: ForwardRepeatRateLimiter,
     request_headers_reader: RequestHeadersFileReader | None,
 ) -> None:
     if not _is_authenticated(
@@ -1571,6 +1600,8 @@ async def _handle_workspace_forward_websocket(
             is_backend_connected = True
             await websocket.accept(subprotocol=backend_ws.subprotocol)
             logger.info("WS forward established for {} path={}", agent_id, websocket.url.path)
+            if resolver.is_shell_target(instance_key, host_info.service_name):
+                _emit_backend_answered(envelope_writer, answered_envelope_limiter, agent_id, None)
             client_to_backend = asyncio.create_task(
                 _forward_client_to_backend(client_websocket=websocket, backend_ws=backend_ws)
             )
@@ -1650,9 +1681,6 @@ async def _handle_workspace_forward_websocket(
             await websocket.close(code=1011, reason="Backend connection failed")
         except RuntimeError:
             pass
-
-
-# Bare-origin handlers
 
 
 def _handle_login(
@@ -1821,9 +1849,6 @@ def _handle_goto_workspace(
     return Response(status_code=302, headers={"Location": location})
 
 
-# App factory + lifespan
-
-
 @asynccontextmanager
 async def _managed_lifespan(
     inner_app: FastAPI,
@@ -1915,8 +1940,9 @@ def create_forward_app(
     reader, requests are forwarded with their headers untouched.
     """
     env = _build_jinja_env()
-    tunnel_warning_limiter = ForwardWarningRateLimiter()
-    unresolved_warning_limiter = ForwardWarningRateLimiter()
+    tunnel_warning_limiter = ForwardRepeatRateLimiter()
+    unresolved_warning_limiter = ForwardRepeatRateLimiter()
+    answered_envelope_limiter = ForwardRepeatRateLimiter(interval_seconds=_BACKEND_ANSWERED_ENVELOPE_INTERVAL_SECONDS)
 
     app = FastAPI(
         title="mngr forward",
@@ -1955,6 +1981,7 @@ def create_forward_app(
             stall_notice_seconds=stall_notice_seconds,
             tunnel_warning_limiter=tunnel_warning_limiter,
             unresolved_warning_limiter=unresolved_warning_limiter,
+            answered_envelope_limiter=answered_envelope_limiter,
             request_headers_reader=request_headers_reader,
         )
         # The proxy owns embedding policy for every workspace origin: APPEND a
@@ -2042,6 +2069,7 @@ def create_forward_app(
             allow_host_loopback=allow_host_loopback,
             envelope_writer=envelope_writer,
             unresolved_warning_limiter=unresolved_warning_limiter,
+            answered_envelope_limiter=answered_envelope_limiter,
             request_headers_reader=request_headers_reader,
         )
 

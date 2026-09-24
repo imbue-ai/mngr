@@ -8,6 +8,7 @@ from datetime import timezone
 import pytest
 
 from imbue.minds.desktop_client.environment_signals import SleepTracker
+from imbue.minds.desktop_client.system_interface_health import AgentFailureLogGate
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import BackendFailureRecorder
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
@@ -285,6 +286,131 @@ def test_probe_success_after_stuck_transitions_back_to_healthy() -> None:
     tracker.record_probe_success(aid)
     assert tracker.get_health(aid) == AgentHealth.HEALTHY
     assert seen == [AgentHealth.STUCK, AgentHealth.HEALTHY]
+
+
+def test_a_forwarded_answer_clears_a_convicted_machine_like_a_probe_success() -> None:
+    """The plugin seeing the shell answer the renderer is the evidence a broken probe path cannot produce.
+
+    A machine held STUCK, or RECOVERY_FAILED after a restart whose readiness
+    probes never landed, stays there for as long as the probe path is what is
+    broken -- while the user is working in it through the same proxy. The
+    forwarded answer ends that the way a probe 200 would.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    stuck_aid = AgentId.generate()
+    failed_aid = AgentId.generate()
+    seen: list[tuple[AgentId, AgentHealth]] = []
+    tracker.add_on_change_callback(lambda a, h: seen.append((a, h)))
+    _drive_to_stuck(tracker, stuck_aid)
+    tracker.mark_recovering(failed_aid, HostRecoveryKind.RESTART)
+    tracker.mark_recovery_failed(failed_aid, "the readiness wait timed out")
+
+    tracker.record_forwarded_answer(stuck_aid)
+    tracker.record_forwarded_answer(failed_aid)
+
+    assert tracker.get_health(stuck_aid) is AgentHealth.HEALTHY
+    assert tracker.get_health(failed_aid) is AgentHealth.HEALTHY
+    assert tracker.snapshot_probe_targets() == frozenset()
+    assert seen[-2:] == [(stuck_aid, AgentHealth.HEALTHY), (failed_aid, AgentHealth.HEALTHY)]
+
+
+def test_the_healthy_edge_names_which_evidence_cleared_the_verdict() -> None:
+    """A forwarded answer is not a probe, and the line an investigator reads afterwards must not say it was.
+
+    The whole case for the forwarded route is the day the probe path is what
+    is broken. A line crediting a probe for that edge describes the one thing
+    that did not happen as having happened.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    answered_aid = AgentId.generate()
+    probed_aid = AgentId.generate()
+    _drive_to_stuck(tracker, answered_aid)
+    _drive_to_stuck(tracker, probed_aid)
+
+    with capture_loguru(level="INFO") as log_output:
+        tracker.record_forwarded_answer(answered_aid)
+        tracker.record_probe_success(probed_aid)
+
+    logged = log_output.getvalue()
+    assert f"System-interface health for {answered_aid}: stuck -> HEALTHY (the plugin saw its shell answer)" in logged
+    assert f"System-interface health for {probed_aid}: stuck -> HEALTHY (probe succeeded)" in logged
+
+
+def test_a_forwarded_answer_counts_for_a_recovery_only_once_it_is_waiting_for_the_interface() -> None:
+    """An answer while the restart is still stopping or starting the machine describes the machine before the bounce.
+
+    The shell serves the renderer for the first seconds of a stop, and the
+    plugin reports those answers like any other. Taking one as the machine back
+    would end the readiness wait before the container had gone down. Once the
+    worker has run its commands and says so, the next answer is the machine back.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+
+    tracker.record_forwarded_answer(aid)
+    assert tracker.get_health(aid) is AgentHealth.RECOVERING
+    assert not tracker.was_seen_answering_during_recovery(aid)
+
+    tracker.mark_awaiting_readiness(aid)
+    tracker.record_forwarded_answer(aid)
+    assert tracker.get_health(aid) is AgentHealth.HEALTHY
+    assert tracker.was_seen_answering_during_recovery(aid)
+
+    # The next recovery starts from scratch: its own stop phase ignores answers again.
+    tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+    tracker.record_forwarded_answer(aid)
+    assert tracker.get_health(aid) is AgentHealth.RECOVERING
+
+
+def test_a_forwarded_answer_counts_for_a_start_whose_progress_a_sleep_invalidated() -> None:
+    """A start left blocked across a sleep is the one recovery an answer may not be refused for.
+
+    The tracker already hands such a recovery back to the probe loop
+    (``snapshot_probe_targets``), for reasons that are about the evidence and
+    not the route: a START has no stop for a doomed answer to come from, and
+    the worker's own probe runs only once a ``mngr start`` the sleep may have
+    blocked indefinitely returns. Refusing the plugin's report here leaves
+    nothing at all to outrank the failure that start eventually reports, which
+    is the false card on a machine the renderer is working in.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    _drive_to_stuck(tracker, aid)
+    tracker.mark_recovering(aid, HostRecoveryKind.START)
+
+    # The control: before the sleep, the start's own progress still stands.
+    tracker.record_forwarded_answer(aid)
+    assert tracker.get_health(aid) is AgentHealth.RECOVERING
+
+    tracker.invalidate_recovery_progress_after_wake(datetime.now(timezone.utc))
+    assert aid in tracker.snapshot_probe_targets(), "the loop is already allowed to probe it"
+    tracker.record_forwarded_answer(aid)
+
+    assert tracker.get_health(aid) is AgentHealth.HEALTHY
+    assert tracker.was_seen_answering_during_recovery(aid)
+    assert not tracker.mark_recovery_failed(aid, "the start never returned"), "the answer must outrank the failure"
+
+
+def test_a_forwarded_answer_for_an_untracked_machine_changes_nothing() -> None:
+    """A machine the tracker holds no record for is left exactly as it was, graces included.
+
+    A probe success of a watched machine ends its probe graces and lifts a
+    stopped-on-purpose mark; the plugin reports every shell answer for every
+    machine, so an answer must not do that to a machine nothing has enrolled --
+    a freshly created one is still inside the grace its creation opened.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    aid = AgentId.generate()
+    tracker.begin_probe_grace(aid, ProbeGracePurpose.CREATE_ATTEMPT, time.monotonic() + 60.0)
+
+    tracker.record_forwarded_answer(aid)
+
+    # The grace still stands: a failure recorded under it opens no run at all.
+    tracker.record_failure(aid)
+    tracker.record_probe_failure(aid)
+    assert tracker.get_failure_run_started_wall_at(aid) is None
+    assert tracker.get_health(aid) is AgentHealth.HEALTHY
 
 
 def test_repeated_failure_envelopes_enroll_once() -> None:
@@ -670,9 +796,7 @@ def test_callback_exception_does_not_break_subsequent_callbacks() -> None:
     assert seen == [AgentHealth.RECOVERING]
 
 
-# ---------------------------------------------------------------------------
 # Probe grace (bounded suppression of expected outages)
-# ---------------------------------------------------------------------------
 
 
 def test_probe_grace_suppresses_probe_failures_entirely() -> None:
@@ -719,7 +843,7 @@ def test_end_probe_grace_restores_normal_probe_accounting() -> None:
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
 
 
-# -- intentional-stop suppression --
+# intentional-stop suppression
 
 
 def test_a_machine_that_answers_again_is_no_longer_a_deliberate_stop() -> None:
@@ -1059,6 +1183,38 @@ def test_a_probe_that_recovered_a_machine_mid_recovery_outranks_the_recovery_fai
     assert seen == []
 
 
+@pytest.mark.witnesses(
+    "no-blame-past-an-unmeasured-device",
+    partial="witnesses only the plugin's report of an answer outranking a recovery's failure",
+)
+def test_a_forwarded_answer_mid_recovery_outranks_the_recovery_failure() -> None:
+    """A recovery that errors out after the plugin saw the shell answer must not re-condemn the machine.
+
+    The route the incident needed. A recovery whose own readiness probes never
+    land still reports a failure at the end of its budget, and the forwarded
+    answer is the only thing that can outrank it -- there was no probe success
+    to do the job.
+    """
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=_FAST_THRESHOLD)
+    answered_aid = AgentId.generate()
+    unanswered_aid = AgentId.generate()
+    for aid in (answered_aid, unanswered_aid):
+        _drive_to_stuck(tracker, aid)
+        tracker.mark_recovering(aid, HostRecoveryKind.RESTART)
+        tracker.mark_awaiting_readiness(aid)
+    tracker.record_forwarded_answer(answered_aid)
+
+    with capture_loguru(level="INFO") as log_output:
+        assert not tracker.mark_recovery_failed(answered_aid, "the readiness wait timed out")
+        # The control: the same failure, on the machine nothing reported answering.
+        assert tracker.mark_recovery_failed(unanswered_aid, "the readiness wait timed out")
+
+    assert tracker.get_health(answered_aid) is AgentHealth.HEALTHY
+    assert tracker.get_last_recovery_error(answered_aid) is None
+    assert tracker.get_health(unanswered_aid) is AgentHealth.RECOVERY_FAILED
+    assert f"Recovery failure for {answered_aid} not shown" in log_output.getvalue()
+
+
 def test_the_next_recovery_attempt_can_fail_normally_again() -> None:
     """The probe's word covers the attempt it overtook, not every later one."""
     sleep_tracker, clock = make_sleep_tracker()
@@ -1098,7 +1254,7 @@ def test_a_sleep_never_reopens_a_forced_stuck() -> None:
     assert tracker.get_health(aid) == AgentHealth.STUCK
 
 
-# -- the classified cause of an episode's connection failures --
+# the classified cause of an episode's connection failures
 
 
 def test_repeated_envelopes_record_one_cause_per_episode() -> None:
@@ -1289,7 +1445,7 @@ def test_a_no_op_start_is_recorded_and_superseded_by_the_next_attempt() -> None:
     assert tracker.is_recovery_a_no_op(aid) is False
 
 
-# -- the envelope-to-tracker policy --
+# the envelope-to-tracker policy
 
 
 @pytest.mark.parametrize(
@@ -1358,3 +1514,33 @@ def test_an_envelope_minds_ignores_never_touches_the_tracker() -> None:
 
     assert tracker.snapshot_probe_targets() == frozenset()
     assert tracker.get_connection_failure(aid) is None
+
+
+def test_the_failure_log_gate_logs_the_first_failure_each_change_and_a_periodic_reminder() -> None:
+    """The gate rations a 2s loop's identical failures down to what a reader can use.
+
+    A machine that is down fails the same way every two seconds for as long as
+    it is down; logging each would bury the log, and logging none is how the
+    reason a probe kept failing went unrecorded for a whole day. What is worth
+    a line: the first failure, any change in what came back, and one reminder
+    per interval while nothing changes.
+    """
+    clock = {"now": 1000.0}
+    gate = AgentFailureLogGate(interval_seconds=60.0, now_fn=lambda: clock["now"])
+    aid = AgentId.generate()
+    other_aid = AgentId.generate()
+
+    assert gate.should_log_failure(aid, "ConnectError: refused")
+    assert not gate.should_log_failure(aid, "ConnectError: refused")
+    clock["now"] += 30.0
+    assert not gate.should_log_failure(aid, "ConnectError: refused")
+    # A different outcome is the transition worth seeing, at once.
+    assert gate.should_log_failure(aid, "HTTP 503")
+    assert not gate.should_log_failure(aid, "HTTP 503")
+    # Machines are rationed independently of each other.
+    assert gate.should_log_failure(other_aid, "HTTP 503")
+    clock["now"] += 60.0
+    assert gate.should_log_failure(aid, "HTTP 503")
+    # A success clears the slate, so the next failure after it logs immediately.
+    gate.forget(aid)
+    assert gate.should_log_failure(aid, "HTTP 503")
