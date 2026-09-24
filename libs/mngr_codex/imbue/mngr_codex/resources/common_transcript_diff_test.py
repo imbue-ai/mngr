@@ -33,11 +33,16 @@ _EXCLUDED_LINE_TYPES = {
     # Session header: ids, cwd, base instructions.
     "session_meta",
     # Display-stream duplicates of response_items (user_message/agent_message)
-    # plus progress markers (task_started, token_count, task_complete).
+    # plus progress markers (task_started, token_count, task_complete). token_count
+    # is read for the usage it reports, and a CommandExecution's item_completed for
+    # the command a call ran, but each decorates an existing step or call rather than
+    # contributing a turn.
     "event_msg",
     # Environment/tooling snapshot bookkeeping.
     "world_state",
-    # Per-turn model/config bookkeeping.
+    # Per-turn model/config bookkeeping; read for the model and reasoning effort it
+    # stamps on the turn's agent steps and for the turn a call was made in, never a
+    # turn of its own.
     "turn_context",
 }
 

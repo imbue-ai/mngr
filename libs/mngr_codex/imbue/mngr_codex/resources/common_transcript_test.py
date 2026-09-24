@@ -26,6 +26,7 @@ from __future__ import annotations
 import importlib.resources
 import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -35,15 +36,24 @@ import pytest
 
 from imbue.mngr import resources as mngr_resources
 from imbue.mngr.agents.common_transcript_records import validate_common_transcript_record
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_codex.resources.testing import rollout_assistant_message as _assistant
 from imbue.mngr_codex.resources.testing import rollout_event_msg_user as _event_msg_user
 from imbue.mngr_codex.resources.testing import rollout_function_call as _function_call
 from imbue.mngr_codex.resources.testing import rollout_function_call_output as _function_call_output
 from imbue.mngr_codex.resources.testing import rollout_line as _line
 from imbue.mngr_codex.resources.testing import rollout_reasoning as _reasoning
+from imbue.mngr_codex.resources.testing import rollout_token_count as _token_count
 from imbue.mngr_codex.resources.testing import rollout_user_message as _user
 
 _SCRIPT_PATH = Path(__file__).parent / "common_transcript.sh"
+
+# The daemon spends nearly all its time in `sleep`, which defers a signal until the
+# current one returns, so give it more than one poll interval to die.
+_WATCHER_EXIT_TIMEOUT = 15
+# The daemon needs one poll cycle with no growth before it declares the input
+# complete; a few cycles of headroom keeps a loaded CI box from failing the wait.
+_COMPLETING_PASS_TIMEOUT = 30
 
 
 @pytest.fixture
@@ -77,6 +87,39 @@ def _run_converter(state_dir: Path) -> str:
     )
     assert "Traceback" not in result.stderr, result.stderr
     return result.stderr
+
+
+def _start_watcher(state_dir: Path) -> subprocess.Popen[bytes]:
+    """Start the real poll daemon (no --single-pass); its loop never exits.
+
+    Given its own process group so _stop_watcher can take an in-flight converter
+    child down with the bash parent. The caller owns the handle and must stop it
+    by that exact handle, never by pattern.
+    """
+    return subprocess.Popen(
+        ["bash", str(_SCRIPT_PATH)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "MNGR_AGENT_STATE_DIR": str(state_dir)},
+        start_new_session=True,
+    )
+
+
+def _stop_watcher(watcher: subprocess.Popen[bytes]) -> None:
+    """Stop a daemon started by _start_watcher (SIGTERM to its group, then SIGKILL).
+
+    The group, not the bash parent alone: a SIGTERM that lands while the parent's
+    converter child holds the convert lock kills bash without releasing it.
+    """
+    try:
+        os.killpg(watcher.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        os.killpg(watcher.pid, signal.SIGKILL)
+        watcher.wait(timeout=_WATCHER_EXIT_TIMEOUT)
 
 
 def _run_single_pass(state_dir: Path) -> subprocess.CompletedProcess[str]:
@@ -211,7 +254,12 @@ def test_event_msg_duplicates_are_ignored(state_dir: Path) -> None:
 
 
 def test_bookkeeping_records_are_dropped(state_dir: Path) -> None:
-    """session_meta / turn_context / token_count are not conversation content."""
+    """session_meta / turn_context / token_count are never turns of their own.
+
+    turn_context and token_count do reach the converter -- they carry the model and
+    the token usage it stamps on the agent steps around them -- but neither becomes
+    a step.
+    """
     _write_raw_stream(
         state_dir,
         [
@@ -219,12 +267,69 @@ def test_bookkeeping_records_are_dropped(state_dir: Path) -> None:
             _user("hi"),
             _line("turn_context", {"cwd": "/tmp/ws", "model": "gpt-5.1"}),
             _assistant("hello"),
+            _token_count(input_tokens=120, output_tokens=8),
         ],
     )
 
     _run_converter(state_dir)
 
-    assert [s["source"] for s in _steps(state_dir)] == ["user", "agent"]
+    steps = _steps(state_dir)
+    assert [s["source"] for s in steps] == ["user", "agent"]
+    assert steps[1]["model_name"] == "gpt-5.1"
+    assert steps[1]["metrics"]["prompt_tokens"] == 120
+
+
+def test_completing_pass_emits_an_agent_step_its_usage_never_reached(state_dir: Path) -> None:
+    """A pass over a complete input must tell the converter so.
+
+    Without that signal the converter would hold an unmeasured trailing step back
+    waiting for a token_count that is never coming, and the turn's final message
+    would never reach a consumer reading on the WAITING transition.
+    """
+    _write_raw_stream(
+        state_dir,
+        [
+            _user("hi"),
+            _assistant("measured"),
+            _token_count(input_tokens=120, output_tokens=8),
+            _assistant("interrupted before its usage landed"),
+        ],
+    )
+
+    _run_converter(state_dir)
+
+    assert [s["message"] for s in _steps(state_dir)][-1] == "interrupted before its usage landed"
+
+
+@pytest.mark.timeout(60)
+def test_poll_daemon_releases_a_step_no_token_count_ever_closes(state_dir: Path) -> None:
+    """codex installs no turn-end hook, so the poll daemon has to complete itself.
+
+    A rollout that ends in an agent step no token_count measures (an aborted
+    response) stops growing. The daemon holds that step back on the pass that
+    first sees it, then releases it on the next cycle, having observed that the
+    input is not growing any more -- rather than waiting forever for usage.
+    """
+    trailing_message = "aborted before its usage landed"
+    _write_raw_stream(
+        state_dir,
+        [_assistant("measured"), _token_count(input_tokens=120, output_tokens=8), _assistant(trailing_message)],
+    )
+    output_path = state_dir / "events" / "codex" / "common_transcript" / "events.jsonl"
+
+    watcher = _start_watcher(state_dir)
+    try:
+        # Wait on the raw text: the trailing step is the last record the releasing
+        # pass writes, so seeing it means that write finished and _steps can parse.
+        released = poll_until(
+            condition=lambda: output_path.exists() and trailing_message in output_path.read_text(),
+            timeout=_COMPLETING_PASS_TIMEOUT,
+            poll_interval=0.2,
+        )
+        assert released, "the daemon never released the step no token_count closed"
+        assert [s["message"] for s in _steps(state_dir)] == ["measured", trailing_message]
+    finally:
+        _stop_watcher(watcher)
 
 
 def test_emitted_common_records_conform_to_canonical_schema(state_dir: Path) -> None:

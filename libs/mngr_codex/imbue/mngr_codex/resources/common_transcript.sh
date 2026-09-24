@@ -39,6 +39,17 @@ POLL_INTERVAL=5
 # always runs and reconciles against the output exactly as before.
 _LAST_CONVERTED_INPUT_SIGNATURE=""
 
+# Signature of the input as of the last pass that told the converter its input was
+# complete. The converter holds a trailing agent step back until the token usage
+# that measures it lands, and codex installs no turn-end hook that could release a
+# step whose usage never arrives (an interrupted response) -- so the poll loop has
+# to recognize completion itself. An input that has not grown for a whole poll
+# cycle is not waiting on a line that is still coming, except while a tool call is
+# still running -- the converter itself keeps such a step held. Keying the
+# completing pass on the signature runs it once per quiescent period rather than
+# once per cycle.
+_LAST_COMPLETED_INPUT_SIGNATURE=""
+
 _MNGR_LOG_TYPE="common_transcript"
 _MNGR_LOG_SOURCE="logs/common_transcript"
 _MNGR_LOG_FILE="$AGENT_DATA_DIR/events/logs/common_transcript/events.jsonl"
@@ -59,7 +70,13 @@ _input_signature() {
     stat -c '%s %Y' "$INPUT_FILE" 2>/dev/null || stat -f '%z %m' "$INPUT_FILE" 2>/dev/null || true
 }
 
+# Convert new codex rollout lines to the common format.
+#
+# $1: "true" when this pass reads an input that has stopped growing, which lets
+#     the converter emit an agent step whose token usage never arrived. See the
+#     comment on _MNGR_EMIT_TRAILING_AGENT_STEP below.
 convert_new_events() {
+    local is_input_complete="$1"
     if [ ! -f "$INPUT_FILE" ]; then
         log_debug "Input file not found: $INPUT_FILE"
         return
@@ -74,11 +91,22 @@ convert_new_events() {
 
     local convert_stderr
     convert_stderr=$(mktemp)
+    # codex writes an inference's token usage (an event_msg/token_count line) after
+    # the response items it measures and the outputs of the calls they made, and the
+    # converter dedups by event_id -- so a step emitted before that line landed would
+    # stay unmeasured forever. The converter therefore holds the trailing unmeasured
+    # step back unless this variable says the input is complete. A pass over an input
+    # that just grew must never say so -- the usage line is very likely still in flight.
+    local emit_trailing_step=""
+    if [ "$is_input_complete" = true ]; then
+        emit_trailing_step=1
+    fi
     # The converter prints the count of appended events to stdout; capture it
     # here so it never reaches this watcher's stdout (which would surface in the
     # agent's pane). Genuine errors go to stderr.
     local result
     result=$(_INPUT_FILE="$INPUT_FILE" _OUTPUT_FILE="$OUTPUT_FILE" \
+        _MNGR_EMIT_TRAILING_AGENT_STEP="$emit_trailing_step" \
         python3 "$SCRIPT_DIR/common_transcript_convert.py" 2>"$convert_stderr" || true)
 
     # The read-modify-write is done; drop the lock before the (lock-free)
@@ -116,7 +144,7 @@ main() {
     if [ "$is_single_pass" = true ]; then
         # A pass skipped for a held lock is not a script failure -- the caller
         # only needs to know the flush was attempted.
-        convert_new_events || true
+        convert_new_events true || true
         return
     fi
 
@@ -127,8 +155,16 @@ main() {
         local current_signature
         current_signature=$(_input_signature)
         if [ "$current_signature" != "$_LAST_CONVERTED_INPUT_SIGNATURE" ]; then
-            if convert_new_events; then
+            if convert_new_events false; then
                 _LAST_CONVERTED_INPUT_SIGNATURE="$current_signature"
+            fi
+        elif [ "$current_signature" != "$_LAST_COMPLETED_INPUT_SIGNATURE" ]; then
+            # The input has not grown since the previous pass, so whatever that
+            # pass held back is not waiting on a line that is still coming. One
+            # completing pass releases it; the signature guard stops this from
+            # repeating every cycle on an idle agent.
+            if convert_new_events true; then
+                _LAST_COMPLETED_INPUT_SIGNATURE="$current_signature"
             fi
         fi
         sleep "$POLL_INTERVAL"
