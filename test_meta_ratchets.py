@@ -246,7 +246,7 @@ def test_no_type_errors() -> None:
     Timeout is 60s rather than the default 10s because the ``uv run ty check``
     subprocess can be slow on offload under load; the check is deterministic, so it
     is not marked flaky. If a failure looks spurious, run ``uv sync --all-packages``
-    and re-run before treating it as real (see CLAUDE.md).
+    and re-run before treating it as real (see AGENTS.md).
     """
     check_no_type_errors(_REPO_ROOT)
 
@@ -408,6 +408,10 @@ _PREVENT_OLD_MNG_NAME = RegexRatchetRule(
 )
 
 
+# Reads every file in the checkout and has run well past the 10s default; see
+# test_no_import_layer_violations for the flaky/timeout rationale.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_prevent_old_mng_name_in_file_contents() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file contents."""
     exclusions = _SELF_EXCLUSION + _DATA_FILE_EXCLUSION + _MIGRATION_SCRIPT_EXCLUSION
@@ -415,6 +419,11 @@ def test_prevent_old_mng_name_in_file_contents() -> None:
     assert len(chunks) <= snapshot(0), _PREVENT_OLD_MNG_NAME.format_failure(chunks)
 
 
+# Walks the same whole-checkout file list as the contents ratchet above (one shared cache
+# entry, but whichever runs first pays the walk); see test_no_import_layer_violations for
+# the flaky/timeout rationale.
+@pytest.mark.flaky
+@pytest.mark.timeout(60)
 def test_prevent_old_mng_name_in_file_paths() -> None:
     """Ensure the old 'mng' name (not followed by 'r') is not reintroduced in file paths."""
     mng_not_mngr = re.compile(r"mng(?!r)")

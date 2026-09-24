@@ -15,7 +15,7 @@ Tests that verify a behavior unit declare it with the
 behavior corpus under `apps/minds/behaviors/`, and `partial=` notes what the test does
 not cover. The marker is registered in the shared pytest settings, so any
 project in the monorepo can use it; the behaviors skill
-(`.claude/skills/behaviors/SKILL.md`) defines the convention,
+(`.agents/skills/behaviors/SKILL.md`) defines the convention,
 `behaviors.md` (in this folder) covers the CLI, and
 `uv run mngr behaviors matrix --root apps/minds/behaviors` reports per-unit coverage
 from the markers.

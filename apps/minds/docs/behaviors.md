@@ -2,7 +2,7 @@
 
 The behavior corpus at `apps/minds/behaviors/` describes the externally observable behavior of minds surfaces as Gherkin `.feature` files: scenarios for the flows a user or client can take, and rules for the invariants that hold across all flows and states.
 Each scenario and rule carries a stable coordinate that everything outside the corpus uses to refer to it.
-The corpus language -- folders, tags, coordinates, invariant scoping, prose sidecars -- is defined by the behaviors skill (`.claude/skills/behaviors/SKILL.md`); this page covers only the CLI as used for the minds corpus.
+The corpus language -- folders, tags, coordinates, invariant scoping, prose sidecars -- is defined by the behaviors skill (`.agents/skills/behaviors/SKILL.md`); this page covers only the CLI as used for the minds corpus.
 
 ## The `mngr behaviors` CLI
 

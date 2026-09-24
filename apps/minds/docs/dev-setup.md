@@ -121,7 +121,7 @@ which lives outside the public mirror:
       detail: [environments.md](./deploy/reference/environments.md).
 
 With those in place, follow the **minds-dev-workflow** skill
-(`.claude/skills/minds-dev-workflow/SKILL.md`; ask your agent to run it, or
+(`.agents/skills/minds-dev-workflow/SKILL.md`; ask your agent to run it, or
 read it directly) for the actual commands. It covers the whole loop:
 
 - **First time** -- stand up a default-workspace-template worktree, then
