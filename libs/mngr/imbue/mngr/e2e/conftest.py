@@ -667,6 +667,9 @@ def e2e(
     # are already set by the parent autouse fixture and inherited via
     # os.environ.copy().
     env = os.environ.copy()
+    # Terminal programs the tutorial runs refuse to start without a terminal
+    # type, and a CI runner leaves TERM unset.
+    env["TERM"] = "xterm-256color"
 
     # Load Modal credentials from ~/.modal.toml if present and not already in
     # env vars. The Modal conftest does this via monkeypatch for in-process
