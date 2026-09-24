@@ -110,6 +110,11 @@ TICK_COMPLETION_TYPES = (
 # timeout so a structured "timed out waiting" payload beats the exec being
 # killed.
 TICK_WAIT_TIMEOUT_SECONDS = 900.0
+# How much of the end of the backup events log the in-flight check reads. Events
+# embed restic's full output, so the log reaches gigabytes on an old workspace;
+# the events a tick writes before it completes are small, so an in-flight tick
+# always falls inside this window.
+EVENTS_TAIL_MAX_BYTES = 8 * 1024 * 1024
 TICK_POLL_SECONDS = 5.0
 SERVICE_VERIFY_TIMEOUT_SECONDS = 60.0
 
@@ -405,10 +410,15 @@ def _is_backup_tick_in_flight(agent_id):
     if not events_path or not _os.path.isfile(events_path):
         return False
     try:
-        with open(events_path, "r", errors="replace") as fh:
-            lines = fh.readlines()
+        with open(events_path, "rb") as fh:
+            size = fh.seek(0, _os.SEEK_END)
+            fh.seek(max(0, size - EVENTS_TAIL_MAX_BYTES))
+            lines = fh.read().decode(errors="replace").splitlines()
     except OSError:
         return False
+    # A window that starts mid-file almost certainly cut its first line in half.
+    if size > EVENTS_TAIL_MAX_BYTES and lines:
+        lines = lines[1:]
     # Ticks run serially in one loop, so only the most recently started tick
     # can be in flight. A tick killed mid-flight (e.g. by a service restart, or
     # by the stop a restore does) never writes its completion event; treating

@@ -22,8 +22,8 @@ const EMPTY_LAUNCH: HelpLaunchContext = {
   workspaceName: "",
 };
 
-// Staged by the open_help handler (and, once wired, the titlebar's help
-// button) just before routing to /help; consumed exactly once on page init.
+// Staged by the open_help handler just before routing to /help; consumed
+// exactly once, by the page that opens (or is already open) for its machine.
 let pendingLaunch: HelpLaunchContext | null = null;
 
 export function setPendingHelpLaunch(launch: Partial<HelpLaunchContext>): void {
@@ -34,6 +34,86 @@ export function takePendingHelpLaunch(): HelpLaunchContext | null {
   const taken = pendingLaunch;
   pendingLaunch = null;
   return taken;
+}
+
+/** The machine a staged launch is for ("" for none), or null when nothing is
+ * staged. Does not consume it. */
+export function stagedHelpLaunchWorkspace(): string | null {
+  return pendingLaunch?.workspaceAgentId ?? null;
+}
+
+/** Whether a launch is staged for the /help route naming `routeWorkspace`
+ * (undefined for a route that names no machine). Does not consume it. */
+export function isHelpLaunchStagedFor(
+  routeWorkspace: string | undefined,
+): boolean {
+  return (
+    pendingLaunch !== null && isLaunchForRoute(pendingLaunch, routeWorkspace)
+  );
+}
+
+function isLaunchForRoute(
+  launch: HelpLaunchContext,
+  routeWorkspace: string | undefined,
+): boolean {
+  return launch.workspaceAgentId === (routeWorkspace ?? "");
+}
+
+/** The /help route's own query params, as read off the route (absent = undefined). */
+export interface HelpRouteParams {
+  workspace?: string;
+  assist?: string;
+  description?: string;
+  agent_report?: string;
+  workspace_name?: string;
+}
+
+/**
+ * Settle what the arriving /help page launches with: the route's params over
+ * the launch staged for it, field by field. A route that names no machine and
+ * carries no report of its own, with nothing staged, leaves the page on its
+ * defaults.
+ *
+ * Field by field rather than whole: the agent-report flow supplies both
+ * halves. `?workspace=` has to be in the route because it is the only thing
+ * that keeps that machine mounted behind the modal, while the diagnosis is far
+ * too large for a URL and rides the staged launch -- so a route that names the
+ * machine must not blank the description staged alongside it.
+ *
+ * Only the launch staged for THIS machine, though: a launch naming another one
+ * is not this route's, and merging it would address the form (and the logs and
+ * transcript the report collects) to the machine the route names while filling
+ * it with what the other machine said. A route naming no machine takes only a
+ * launch that names none either.
+ */
+export function stageHelpLaunchFromRoute(params: HelpRouteParams): void {
+  const stagedForAnyMachine = takePendingHelpLaunch();
+  const staged =
+    stagedForAnyMachine !== null &&
+    isLaunchForRoute(stagedForAnyMachine, params.workspace)
+      ? stagedForAnyMachine
+      : null;
+  if (
+    staged === null &&
+    !params.workspace &&
+    !params.description &&
+    !params.agent_report
+  )
+    return;
+  const base = staged ?? EMPTY_LAUNCH;
+  setPendingHelpLaunch({
+    workspaceAgentId: params.workspace ?? base.workspaceAgentId,
+    isAssistAvailable:
+      params.assist === undefined
+        ? base.isAssistAvailable
+        : params.assist === "1",
+    description: params.description ?? base.description,
+    isAgentReport:
+      params.agent_report === undefined
+        ? base.isAgentReport
+        : params.agent_report === "1",
+    workspaceName: params.workspace_name ?? base.workspaceName,
+  });
 }
 
 const STICKY_REMOTE_ACCESS_KEY = "minds.help.help-remote-access";
@@ -77,10 +157,8 @@ export class HelpModel {
   isReportIdCopied = false;
   private copyFlashTimer: ReturnType<typeof setTimeout> | null = null;
   isSubmitBusy = false;
-  /** True only while a report POST is in flight. Narrower than isSubmitBusy
-   * (which also covers the assist spawn, whose success closes the surface
-   * itself): only a report in flight pins the surface open. */
   private isReportInFlight = false;
+  private isSendFailed = false;
 
   private readonly options: HelpModelOptions;
 
@@ -120,6 +198,18 @@ export class HelpModel {
 
   private redraw(): void {
     this.options.redraw?.();
+  }
+
+  /** On the form with nothing being sent, no failed send on screen, and
+   * nothing written over what the launch filled in: the one state the page
+   * may swap for a newly arrived report without losing what the user acted on. */
+  get isAwaitingInput(): boolean {
+    return (
+      this.phase === "form" &&
+      !this.isReportInFlight &&
+      !this.isSendFailed &&
+      this.description === this.launch.description
+    );
   }
 
   close(): void {
@@ -232,6 +322,7 @@ export class HelpModel {
   private async submitReport(description: string): Promise<void> {
     this.isSubmitBusy = true;
     this.isReportInFlight = true;
+    this.isSendFailed = false;
     this.statusMessage = "Sending...";
     this.isStatusError = false;
     this.redraw();
@@ -258,13 +349,13 @@ export class HelpModel {
       } else {
         this.statusMessage = data.error ?? "Could not send the report.";
         this.isStatusError = true;
+        this.isSendFailed = true;
       }
     } catch {
       this.statusMessage = "Network error sending the report.";
       this.isStatusError = true;
+      this.isSendFailed = true;
     } finally {
-      // Either the sent phase (with the report id) or the error is now shown,
-      // so the surface unpins and the Done / close paths work again.
       this.isSubmitBusy = false;
       this.isReportInFlight = false;
       this.redraw();

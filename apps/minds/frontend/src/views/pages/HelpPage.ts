@@ -5,7 +5,12 @@
 // via route params or a staged pending-launch from the open_help flow.
 
 import m from "mithril";
-import { HelpModel, setPendingHelpLaunch } from "../../models/help";
+import {
+  HelpModel,
+  isHelpLaunchStagedFor,
+  stageHelpLaunchFromRoute,
+  stagedHelpLaunchWorkspace,
+} from "../../models/help";
 import { Button } from "../components/Button";
 import { Icon16 } from "../components/Icon";
 import { machineVerdict } from "../components/MachineVerdict";
@@ -349,7 +354,7 @@ export function sentPhase(model: HelpModel): m.Children {
       : null,
     m(
       Button,
-      { variant: "primary", block: true, onclick: () => closeHelpSurface() },
+      { variant: "primary", block: true, onclick: () => model.close() },
       "Done",
     ),
   ]);
@@ -358,31 +363,50 @@ export function sentPhase(model: HelpModel): m.Children {
 function HelpPageComponent(): m.Component {
   let model: HelpModel | null = null;
 
+  const openFromRoute = (): void => {
+    stageHelpLaunchFromRoute({
+      workspace: m.route.param("workspace"),
+      assist: m.route.param("assist"),
+      description: m.route.param("description"),
+      agent_report: m.route.param("agent_report"),
+      workspace_name: m.route.param("workspace_name"),
+    });
+    model = new HelpModel({
+      onClose: () => {
+        if (!openArrivedReport()) closeHelpSurface();
+      },
+      redraw: () => m.redraw(),
+    });
+  };
+
+  // A report that arrives while this page is up is staged and routed like the
+  // first one, but Mithril keeps this instance across a /help param change, so
+  // oninit never sees it. Matched against the route's machine rather than taken
+  // on sight: m.route.param still names the previous machine until the new
+  // route resolves, and a redraw lands in between.
+  const openArrivedReport = (): boolean => {
+    if (!isHelpLaunchStagedFor(m.route.param("workspace"))) return false;
+    openFromRoute();
+    return true;
+  };
+
   return {
-    oninit() {
-      // Route params take precedence (titlebar / deep link); a staged
-      // pending-launch (open_help flow) fills anything the params omit.
-      const workspaceParam = m.route.param("workspace");
-      if (
-        workspaceParam ||
-        m.route.param("description") ||
-        m.route.param("agent_report")
-      ) {
-        setPendingHelpLaunch({
-          workspaceAgentId: workspaceParam ?? "",
-          isAssistAvailable: m.route.param("assist") === "1",
-          description: m.route.param("description") ?? "",
-          isAgentReport: m.route.param("agent_report") === "1",
-          workspaceName: m.route.param("workspace_name") ?? "",
-        });
-      }
-      model = new HelpModel({
-        onClose: closeHelpSurface,
-        redraw: () => m.redraw(),
-      });
+    oninit: openFromRoute,
+    onbeforeupdate() {
+      // Anything but an idle form keeps the arrival waiting: for the form to
+      // come back, or for the surface to be closed, which shows it instead.
+      if (model?.isAwaitingInput) openArrivedReport();
     },
     onremove() {
       model = null;
+      // Left with a report still waiting (navigated away from its Thanks
+      // screen, say): open Help again for it rather than leave it staged.
+      const waitingFor = stagedHelpLaunchWorkspace();
+      if (waitingFor !== null)
+        m.route.set(
+          "/help",
+          waitingFor ? { workspace: waitingFor } : undefined,
+        );
     },
     view() {
       const activeModel = model;

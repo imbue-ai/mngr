@@ -7,7 +7,6 @@ import { registerAppContext } from "./app-context";
 import { UiChannelClient } from "./channel/client";
 import { electronBridge } from "./electron-bridge";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
-import { setPendingHelpLaunch } from "./models/help";
 import { onboardingProgress } from "./models/onboarding";
 import {
   NotificationGestures,
@@ -18,24 +17,6 @@ import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
 import { installTooltips } from "./views/shell/tooltips";
 import { setRelayedWindowFocus } from "./window-focus";
-
-// Stage the pre-filled agent-report launch, then route to the help page
-// (which consumes it). Shared by the plain-browser open_help path and the
-// Electron 'open-overlay' ask from the main process.
-function openHelpFromShellAsk(
-  shell: ShellState,
-  workspaceAgentId: string,
-  description: string,
-): void {
-  setPendingHelpLaunch({
-    workspaceAgentId,
-    description,
-    isAgentReport: true,
-    workspaceName:
-      shell.stores.workspaces.accentEntry(workspaceAgentId)?.name ?? "",
-  });
-  m.route.set("/help");
-}
 
 function main(): void {
   const bootstrap = window.__MINDS_BOOTSTRAP__;
@@ -153,8 +134,7 @@ function main(): void {
       // would open help in every window. In plain-browser mode there is no
       // main process, so each tab handles it locally.
       if (electronBridge.isDesktop) return;
-      openHelpFromShellAsk(
-        shell,
+      shell.openHelpForAgentAsk(
         message.workspace_agent_id,
         message.description,
       );
@@ -211,8 +191,7 @@ function main(): void {
     if (typeof cmd !== "object" || cmd === null) return;
     const record = cmd as Record<string, unknown>;
     if (record.kind !== "help") return;
-    openHelpFromShellAsk(
-      shell,
+    shell.openHelpForAgentAsk(
       typeof record.workspace === "string" ? record.workspace : "",
       typeof record.description === "string" ? record.description : "",
     );

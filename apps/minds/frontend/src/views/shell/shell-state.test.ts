@@ -1,6 +1,7 @@
 import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
+import { takePendingHelpLaunch } from "../../models/help";
 import { workspacesMessage } from "../../testing";
 import type { WaitingRequestList } from "./shell-state";
 import { ShellState } from "./shell-state";
@@ -770,6 +771,62 @@ describe("ShellState.openHelp", () => {
     // strip or an Electron open-overlay ask alike.
     land(shell, `/help?workspace=${WORKSPACE_ID}&assist=1`);
     expect(shell.panelRouteBehindOverlay).toBeNull();
+  });
+});
+
+describe("ShellState.openHelpForAgentAsk", () => {
+  it("floats the pre-filled report over the machine that asked, which stays mounted", () => {
+    // Without ?workspace= the Shell has no machine to keep behind the
+    // backdrop, and a report ABOUT a machine floats over Home instead, with
+    // that machine's frame torn down behind it.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForAgentAsk(WORKSPACE_ID, "the diagnosis");
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { workspace: WORKSPACE_ID },
+      undefined,
+    );
+    // The route names the machine, so the Shell reads it as displayed.
+    land(shell, `/help?workspace=${WORKSPACE_ID}`);
+    expect(shell.displayedWorkspaceAnyId).toBe(WORKSPACE_ID);
+  });
+
+  it("hands the page the diagnosis the route cannot carry", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.openHelpForAgentAsk(WORKSPACE_ID, "the diagnosis");
+
+    expect(takePendingHelpLaunch()).toMatchObject({
+      workspaceAgentId: WORKSPACE_ID,
+      description: "the diagnosis",
+      isAgentReport: true,
+    });
+  });
+
+  it("replaces a titlebar popup's entry rather than stacking on it", () => {
+    // Same reasoning as openHelp: pushed, the options panel would be left one
+    // Back away under the report form it was covered by.
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}/options?tab=share`);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
+
+    shell.openHelpForAgentAsk(WORKSPACE_ID, "the diagnosis");
+
+    expect(routeSet).toHaveBeenCalledWith(
+      "/help",
+      { workspace: WORKSPACE_ID },
+      { replace: true },
+    );
   });
 });
 

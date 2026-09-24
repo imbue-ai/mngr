@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { jsonResponse, memoryStorage } from "../testing";
-import { HelpModel, setPendingHelpLaunch, takePendingHelpLaunch } from "./help";
+import {
+  HelpModel,
+  setPendingHelpLaunch,
+  stageHelpLaunchFromRoute,
+  takePendingHelpLaunch,
+} from "./help";
 
 describe("HelpModel", () => {
   it("consumes the staged launch exactly once and defaults the mode from it", () => {
@@ -33,6 +38,25 @@ describe("HelpModel", () => {
     await model.submit();
     expect(model.statusMessage).toBe("Please describe the problem first.");
     expect(model.isStatusError).toBe(true);
+  });
+
+  it("stays open to an arriving report after an empty Send, but not after a failed one", async () => {
+    const model = new HelpModel({
+      storage: memoryStorage(),
+      fetcher: () =>
+        Promise.resolve(jsonResponse({ error: "upstream down" }, 502)),
+    });
+
+    await model.submit();
+    expect(model.isStatusError).toBe(true);
+    expect(model.isAwaitingInput).toBe(true);
+
+    model.description = "it broke";
+    await model.submit();
+    model.description = "";
+    await model.submit();
+    expect(model.statusMessage).toBe("Please describe the problem first.");
+    expect(model.isAwaitingInput).toBe(false);
   });
 
   it("submits a report and surfaces the Sentry event id", async () => {
@@ -247,5 +271,105 @@ describe("HelpModel report-ID copy", () => {
     await model.copyReportId();
 
     expect(model.isReportIdCopied).toBe(false);
+  });
+});
+
+describe("stageHelpLaunchFromRoute", () => {
+  it("keeps the agent's staged diagnosis when the route also names the machine", () => {
+    // A route param must not blank the fields it does not carry: the
+    // agent-report launch rides both carriers at once (see
+    // stageHelpLaunchFromRoute).
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      description: "the diagnosis",
+      isAgentReport: true,
+      workspaceName: "octopus",
+    });
+
+    stageHelpLaunchFromRoute({ workspace: "agent-1" });
+
+    const launch = takePendingHelpLaunch();
+    expect(launch).toEqual({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: false,
+      description: "the diagnosis",
+      isAgentReport: true,
+      workspaceName: "octopus",
+    });
+  });
+
+  it("lets the route's params win over the staged launch, field by field", () => {
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      description: "staged",
+      workspaceName: "octopus",
+    });
+
+    stageHelpLaunchFromRoute({
+      workspace: "agent-1",
+      assist: "1",
+      description: "from the link",
+    });
+
+    expect(takePendingHelpLaunch()).toEqual({
+      workspaceAgentId: "agent-1",
+      isAssistAvailable: true,
+      description: "from the link",
+      isAgentReport: false,
+      workspaceName: "octopus",
+    });
+  });
+
+  it("drops a launch staged for a machine other than the one the route names", () => {
+    // A launch left staged by an ask nothing consumed is not this route's:
+    // merged, the form would be addressed to the machine the route names --
+    // and so would the logs and transcript the report collects -- while
+    // holding what the other machine said.
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      description: "the diagnosis",
+      isAgentReport: true,
+      workspaceName: "octopus",
+    });
+
+    stageHelpLaunchFromRoute({ workspace: "agent-2" });
+
+    expect(takePendingHelpLaunch()).toEqual({
+      workspaceAgentId: "agent-2",
+      isAssistAvailable: false,
+      description: "",
+      isAgentReport: false,
+      workspaceName: "",
+    });
+  });
+
+  it("keeps a machine's report off a Help opened over no machine", () => {
+    // The titlebar bug button on Home routes to plain /help; a report staged
+    // for a machine and never shown must not surface there as if it were this
+    // open's own.
+    setPendingHelpLaunch({
+      workspaceAgentId: "agent-1",
+      description: "the diagnosis",
+      isAgentReport: true,
+    });
+
+    stageHelpLaunchFromRoute({});
+
+    expect(takePendingHelpLaunch()).toBeNull();
+
+    setPendingHelpLaunch({ description: "no machine", isAgentReport: true });
+
+    stageHelpLaunchFromRoute({});
+
+    expect(takePendingHelpLaunch()).toMatchObject({
+      workspaceAgentId: "",
+      description: "no machine",
+    });
+  });
+
+  it("stages nothing when neither the route nor the opener carried a launch", () => {
+    stageHelpLaunchFromRoute({});
+
+    expect(takePendingHelpLaunch()).toBeNull();
   });
 });

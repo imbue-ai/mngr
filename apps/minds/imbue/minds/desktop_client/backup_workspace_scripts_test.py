@@ -11,7 +11,9 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -60,7 +62,9 @@ def _run_script(
     *,
     extra_path: Path | None = None,
     env_overrides: dict[str, str] | None = None,
+    launcher: tuple[str, ...] = ("bash", "-c"),
 ) -> dict:
+    """Run ``script`` as a workspace would. ``launcher`` is the argv the shell command is appended to."""
     command = build_workspace_script_command(script, args)
     env = dict(os.environ)
     if extra_path is not None:
@@ -72,9 +76,21 @@ def _run_script(
     if env_overrides:
         env.update(env_overrides)
     result = subprocess.run(
-        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=300, env=env
+        [*launcher, command], cwd=repo, capture_output=True, text=True, check=False, timeout=300, env=env
     )
     return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
+
+
+def _backup_events_log(host_dir: Path) -> Path:
+    """Where the gate probe reads agent-x's backup events under ``host_dir``, its directory created."""
+    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
+    events_path.parent.mkdir(parents=True)
+    return events_path
+
+
+def _backup_event_lines(*events: tuple[str, str]) -> str:
+    """JSONL for ``(type, tick_id)`` backup events, one per line."""
+    return "".join(json.dumps({"type": event_type, "tick_id": tick_id}) + "\n" for event_type, tick_id in events)
 
 
 def _make_stub_bin(
@@ -438,27 +454,21 @@ def test_gate_probe_answers_in_a_machine_whose_own_mngr_config_it_cannot_parse(t
 def test_gate_probe_detects_in_flight_backup_tick(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     host_dir = tmp_path / "host"
-    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
-    events_path.parent.mkdir(parents=True)
-    events_path.write_text(
-        json.dumps({"type": "BACKUP_STARTED", "tick_id": "t1"})
-        + "\n"
-        + json.dumps({"type": "RESTIC_BACKUP_SUCCEEDED", "tick_id": "t1"})
-        + "\n"
-        + json.dumps({"type": "BACKUP_STARTED", "tick_id": "t2"})
-        + "\n"
+    _backup_events_log(host_dir).write_text(
+        _backup_event_lines(("BACKUP_STARTED", "t1"), ("RESTIC_BACKUP_SUCCEEDED", "t1"), ("BACKUP_STARTED", "t2"))
     )
     stub_bin = _make_stub_bin(tmp_path)
-    command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"))
-    env = dict(os.environ)
-    env["PATH"] = f"{stub_bin}:{env['PATH']}"
-    env["MNGR_HOST_DIR"] = str(host_dir)
-    env.pop("MNGR_AGENT_STATE_DIR", None)
-    result = subprocess.run(
-        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=120, env=env
+
+    run = _run_script(
+        repo,
+        BACKUP_GATE_PROBE_SCRIPT,
+        ("--agent-id", "agent-x"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host_dir)},
     )
-    payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
-    assert payload is not None, result.stdout + result.stderr
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
     assert payload["backup_tick_in_flight"] is True
 
 
@@ -469,28 +479,75 @@ def test_gate_probe_ignores_a_stale_dead_tick_once_a_newer_tick_finished(tmp_pat
     # recently started tick can be.
     repo = _make_workspace_repo(tmp_path)
     host_dir = tmp_path / "host"
-    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
-    events_path.parent.mkdir(parents=True)
-    events_path.write_text(
-        json.dumps({"type": "BACKUP_STARTED", "tick_id": "dead-tick"})
-        + "\n"
-        + json.dumps({"type": "BACKUP_STARTED", "tick_id": "t2"})
-        + "\n"
-        + json.dumps({"type": "RESTIC_BACKUP_SUCCEEDED", "tick_id": "t2"})
-        + "\n"
+    _backup_events_log(host_dir).write_text(
+        _backup_event_lines(
+            ("BACKUP_STARTED", "dead-tick"), ("BACKUP_STARTED", "t2"), ("RESTIC_BACKUP_SUCCEEDED", "t2")
+        )
     )
     stub_bin = _make_stub_bin(tmp_path)
-    command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"))
-    env = dict(os.environ)
-    env["PATH"] = f"{stub_bin}:{env['PATH']}"
-    env["MNGR_HOST_DIR"] = str(host_dir)
-    env.pop("MNGR_AGENT_STATE_DIR", None)
-    result = subprocess.run(
-        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=120, env=env
+
+    run = _run_script(
+        repo,
+        BACKUP_GATE_PROBE_SCRIPT,
+        ("--agent-id", "agent-x"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host_dir)},
     )
-    payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
-    assert payload is not None, result.stdout + result.stderr
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
     assert payload["backup_tick_in_flight"] is False
+
+
+_PEAK_RSS_MARKER: Final[str] = "PEAK_DESCENDANT_RSS_JSON:"
+_PEAK_DESCENDANT_RSS_WRAPPER: Final[str] = (
+    "import json, resource, subprocess, sys\n"
+    "subprocess.run(['bash', '-c', sys.argv[1]], check=False)\n"
+    "peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss\n"
+    # ru_maxrss is in bytes on macOS and in kilobytes on Linux.
+    "peak_bytes = peak if sys.platform == 'darwin' else peak * 1024\n"
+    f"print({_PEAK_RSS_MARKER!r} + json.dumps({{'bytes': peak_bytes}}), flush=True)\n"
+)
+
+
+def test_gate_probe_reads_only_the_tail_of_a_huge_backup_events_log(tmp_path: Path) -> None:
+    # Backup events embed restic's whole output, so the log reaches gigabytes on
+    # an old workspace. A sparse gap stands in for that history; the probe must
+    # answer from the events at the end without holding the file in memory.
+    repo = _make_workspace_repo(tmp_path)
+    host_dir = tmp_path / "host"
+    history_bytes = 256 * 1024 * 1024
+    with _backup_events_log(host_dir).open("wb") as fh:
+        fh.seek(history_bytes)
+        fh.write(
+            (
+                "\n"
+                + _backup_event_lines(
+                    ("BACKUP_STARTED", "t1"), ("RESTIC_BACKUP_SUCCEEDED", "t1"), ("BACKUP_STARTED", "t2")
+                )
+            ).encode()
+        )
+    stub_bin = _make_stub_bin(tmp_path)
+
+    # A wrapper process owns the script's process tree, so its RUSAGE_CHILDREN
+    # peak is the script's alone rather than any earlier child of this worker.
+    run = _run_script(
+        repo,
+        BACKUP_GATE_PROBE_SCRIPT,
+        ("--agent-id", "agent-x"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host_dir)},
+        launcher=(sys.executable, "-c", _PEAK_DESCENDANT_RSS_WRAPPER),
+    )
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["backup_tick_in_flight"] is True
+    peak_rss = extract_marker_json(run["stdout"], _PEAK_RSS_MARKER)
+    assert peak_rss is not None, run
+    peak_rss_bytes = peak_rss["bytes"]
+    assert isinstance(peak_rss_bytes, int)
+    assert peak_rss_bytes < history_bytes // 4, peak_rss_bytes
 
 
 def test_gate_probe_treats_a_tick_as_dead_when_the_backup_service_is_not_running(tmp_path: Path) -> None:
@@ -501,21 +558,20 @@ def test_gate_probe_treats_a_tick_as_dead_when_the_backup_service_is_not_running
     # tick that will never finish.
     repo = _make_workspace_repo(tmp_path)
     host_dir = tmp_path / "host"
-    events_path = host_dir / "agents" / "agent-x" / "events" / "backup" / "events.jsonl"
-    events_path.parent.mkdir(parents=True)
-    events_path.write_text(json.dumps({"type": "BACKUP_STARTED", "tick_id": "orphan"}) + "\n")
+    _backup_events_log(host_dir).write_text(_backup_event_lines(("BACKUP_STARTED", "orphan")))
     # The is_restart_ok=False supervisorctl stub reports the service STOPPED.
     stub_bin = _make_stub_bin(tmp_path, restart_ok=False)
-    command = build_workspace_script_command(BACKUP_GATE_PROBE_SCRIPT, ("--agent-id", "agent-x"))
-    env = dict(os.environ)
-    env["PATH"] = f"{stub_bin}:{env['PATH']}"
-    env["MNGR_HOST_DIR"] = str(host_dir)
-    env.pop("MNGR_AGENT_STATE_DIR", None)
-    result = subprocess.run(
-        ["bash", "-c", command], cwd=repo, capture_output=True, text=True, check=False, timeout=120, env=env
+
+    run = _run_script(
+        repo,
+        BACKUP_GATE_PROBE_SCRIPT,
+        ("--agent-id", "agent-x"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host_dir)},
     )
-    payload = extract_marker_json(result.stdout, GATE_RESULT_MARKER)
-    assert payload is not None, result.stdout + result.stderr
+
+    payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
+    assert payload is not None, run
     assert payload["backup_tick_in_flight"] is False
 
 

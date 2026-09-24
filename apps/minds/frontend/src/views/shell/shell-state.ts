@@ -20,6 +20,7 @@ import {
   workspaceSurfaceIdFromPath,
 } from "./classify";
 import { recoveryRoute } from "../../models/create";
+import { setPendingHelpLaunch } from "../../models/help";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { rowClickActionFor } from "../pages/landing-controls";
 
@@ -1056,6 +1057,38 @@ export class ShellState {
       "/help",
       { workspace: agentScoped, assist: isHealthy ? "1" : "0" },
       routeOptions,
+    );
+  }
+
+  /**
+   * Open the report form pre-filled with an in-workspace agent's diagnosis,
+   * floating over the machine that asked.
+   *
+   * The diagnosis is staged rather than routed (a report body is far too large
+   * for a URL), but the machine is NAMED in the route exactly as `openHelp`
+   * names it: `?workspace=` is the only thing that keeps that machine's surface
+   * mounted behind the modal. Routed without it, a report ABOUT a machine opens
+   * over Home with that machine's frame torn down behind it.
+   *
+   * Assist is not offered: the description is already written, so the form is
+   * the only mode this launch can land in.
+   */
+  openHelpForAgentAsk(workspaceAgentId: string, description: string): void {
+    setPendingHelpLaunch({
+      workspaceAgentId,
+      description,
+      isAgentReport: true,
+      workspaceName:
+        this.stores.workspaces.accentEntry(workspaceAgentId)?.name ?? "",
+    });
+    // Same switch-not-stack rule as `openHelp`: raised over the options panel
+    // or the request popup, this takes that surface's entry rather than
+    // leaving it one Back away underneath.
+    const isSwitching = isTitlebarPopupRoutePath(this.currentRoutePath());
+    m.route.set(
+      "/help",
+      workspaceAgentId ? { workspace: workspaceAgentId } : undefined,
+      isSwitching ? { replace: true } : undefined,
     );
   }
 }
