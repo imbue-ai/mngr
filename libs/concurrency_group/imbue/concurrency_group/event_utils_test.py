@@ -1,7 +1,7 @@
-from threading import Event
+import gc
+import weakref
 from threading import Thread
 
-from imbue.concurrency_group.event_utils import CompoundEvent
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.thread_utils import ObservableThread
 
@@ -26,23 +26,6 @@ def test_shutdown_event_wait_returns_false_on_timeout() -> None:
     assert result is False
 
 
-def test_shutdown_event_wait_returns_true_when_external_event_is_set() -> None:
-    """Test that wait() returns True when the external event is set."""
-    parent = ShutdownEvent.build_root()
-    external = Event()
-    child = ShutdownEvent.from_parent(parent, external=external)
-
-    # Set the external event in another thread after a short delay
-    def set_external() -> None:
-        external.set()
-
-    thread = Thread(target=set_external)
-    thread.start()
-    result = child.wait(timeout=1.0)
-    thread.join()
-    assert result is True
-
-
 def test_shutdown_event_wait_returns_true_when_parent_event_is_set() -> None:
     """Test that wait() returns True when the parent event is set."""
     parent = ShutdownEvent.build_root()
@@ -57,17 +40,6 @@ def test_shutdown_event_wait_returns_true_when_parent_event_is_set() -> None:
     result = child.wait(timeout=1.0)
     thread.join()
     assert result is True
-
-
-def test_shutdown_event_is_set_via_external_event() -> None:
-    """Test that is_set() returns True when the external event is set."""
-    parent = ShutdownEvent.build_root()
-    external = Event()
-    child = ShutdownEvent.from_parent(parent, external=external)
-
-    assert child.is_set() is False
-    external.set()
-    assert child.is_set() is True
 
 
 def test_shutdown_event_is_set_via_parent_event() -> None:
@@ -89,50 +61,81 @@ def test_shutdown_event_is_set_via_own_event() -> None:
     assert shutdown_event.is_set() is True
 
 
-def test_compound_event_is_set_returns_true_when_any_child_is_set() -> None:
-    """Test that CompoundEvent.is_set() returns True if any child event is set."""
-    event1 = Event()
-    event2 = Event()
-    event3 = Event()
+def test_shutdown_event_created_from_an_already_set_parent_starts_set() -> None:
+    parent = ShutdownEvent.build_root()
+    parent.set()
 
-    compound = CompoundEvent([event1, event2, event3])
-    assert compound.is_set() is False
+    child = ShutdownEvent.from_parent(parent)
 
-    event2.set()
-    assert compound.is_set() is True
+    assert child.is_set() is True
+    assert child.wait(timeout=0) is True
 
 
-def test_compound_event_is_set_returns_false_when_no_child_is_set() -> None:
-    """Test that CompoundEvent.is_set() returns False if no child event is set."""
-    event1 = Event()
-    event2 = Event()
+def test_setting_a_shutdown_event_sets_its_descendants_but_not_its_parent() -> None:
+    root = ShutdownEvent.build_root()
+    middle = ShutdownEvent.from_parent(root)
+    leaf = ShutdownEvent.from_parent(middle)
 
-    compound = CompoundEvent([event1, event2])
-    assert compound.is_set() is False
+    middle.set()
 
-
-def test_compound_event_wait_returns_true_when_child_is_set() -> None:
-    """Test that CompoundEvent.wait() returns True when a child event is set."""
-    event1 = Event()
-    event2 = Event()
-    compound = CompoundEvent([event1, event2])
-
-    # Set one of the events in another thread
-    def set_event() -> None:
-        event1.set()
-
-    thread = Thread(target=set_event)
-    thread.start()
-    result = compound.wait(timeout=1.0)
-    thread.join()
-    assert result is True
+    assert leaf.is_set() is True
+    assert middle.is_set() is True
+    assert root.is_set() is False
 
 
-def test_compound_event_wait_returns_false_on_timeout() -> None:
-    """Test that CompoundEvent.wait() returns False when timeout expires without any event set."""
-    event1 = Event()
-    event2 = Event()
-    compound = CompoundEvent([event1, event2])
+def test_call_on_set_runs_the_callback_once_when_an_ancestor_is_set() -> None:
+    root = ShutdownEvent.build_root()
+    child = ShutdownEvent.from_parent(root)
+    calls: list[str] = []
 
-    result = compound.wait(timeout=0.02)
-    assert result is False
+    with child.call_on_set(lambda: calls.append("called")):
+        assert calls == []
+        root.set()
+        root.set()
+        child.set()
+
+    assert calls == ["called"]
+
+
+def test_call_on_set_runs_the_callback_immediately_when_already_set() -> None:
+    shutdown_event = ShutdownEvent.build_root()
+    shutdown_event.set()
+    calls: list[str] = []
+
+    with shutdown_event.call_on_set(lambda: calls.append("called")):
+        assert calls == ["called"]
+
+
+def test_call_on_set_does_not_run_the_callback_after_its_block_exits() -> None:
+    root = ShutdownEvent.build_root()
+    child = ShutdownEvent.from_parent(root)
+    calls: list[str] = []
+
+    with child.call_on_set(lambda: calls.append("called")):
+        pass
+    root.set()
+
+    assert calls == []
+
+
+def test_shutdown_event_does_not_keep_discarded_children_alive() -> None:
+    # A long-lived group's event gains a child per process it ever runs, so
+    # holding them strongly would grow without bound.
+    root = ShutdownEvent.build_root()
+    child_reference = weakref.ref(ShutdownEvent.from_parent(root))
+
+    gc.collect()
+
+    assert child_reference() is None
+    root.set()
+    assert root.is_set() is True
+
+
+def test_shutdown_event_reaches_a_descendant_whose_intermediate_ancestor_was_discarded() -> None:
+    root = ShutdownEvent.build_root()
+    leaf = ShutdownEvent.from_parent(ShutdownEvent.from_parent(root))
+
+    gc.collect()
+    root.set()
+
+    assert leaf.is_set() is True

@@ -13,8 +13,7 @@ import pytest
 from imbue.concurrency_group.errors import OutputNotAccumulatedError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.concurrency_group.event_utils import CompoundEvent
-from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import run_background
 from imbue.concurrency_group.subprocess_utils import OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
@@ -369,7 +368,7 @@ def test_run_background_command_not_found() -> None:
 
 def test_run_background_shutdown_event() -> None:
     """Test using shutdown event to interrupt background process."""
-    shutdown_event = Event()
+    shutdown_event = ShutdownEvent.build_root()
 
     process = run_background(["sleep", LONG_SLEEP_SECONDS], shutdown_event=shutdown_event, shutdown_timeout_sec=0.2)
 
@@ -378,33 +377,6 @@ def test_run_background_shutdown_event() -> None:
 
     # Trigger shutdown
     shutdown_event.set()
-
-    # Wait for the process to actually complete
-    process.wait(timeout=5.0)
-
-    # Process should be terminated
-    assert process.is_finished()
-    assert process.returncode != 0
-
-
-def test_run_background_compound_shutdown_event() -> None:
-    """Test using CompoundEvent for shutdown."""
-    event1 = Event()
-    event2 = Event()
-    compound_event = CompoundEvent([event1, event2])
-
-    # RemoteRunningProcess lets shutdown_event be a ReadOnlyEvent, including CompoundEvent, but RunningProcess only allows MutableEvent
-    process: RunningProcess = run_background(
-        ["sleep", LONG_SLEEP_SECONDS],
-        shutdown_event=compound_event,  # ty: ignore[invalid-argument-type]
-        shutdown_timeout_sec=0.2,
-    )
-
-    # Wait until the process is running
-    assert poll_until(lambda: not process.is_finished(), timeout=5.0)
-
-    # Trigger one of the compound events
-    event2.set()
 
     # Wait for the process to actually complete
     process.wait(timeout=5.0)
@@ -630,7 +602,7 @@ def test_run_background_thread_safety(tmp_path: Path) -> None:
 
 
 def test_run_background_shutdown_event_already_set() -> None:
-    shutdown_event = Event()
+    shutdown_event = ShutdownEvent.build_root()
     shutdown_event.set()
     process = run_background(["sleep", LONG_SLEEP_SECONDS], shutdown_event=shutdown_event)
     process.wait(timeout=2.0)

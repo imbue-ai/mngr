@@ -1,6 +1,9 @@
+from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Event
 from threading import Lock
-from time import monotonic
+from weakref import WeakValueDictionary
 
 from pydantic import PrivateAttr
 
@@ -19,82 +22,74 @@ class ShutdownEvent(MutableModel):
 
     This is effectively a tree of shutdown events where each node can be triggered by its parent or by itself.
     (This concept is closely related to ConcurrencyGroups which span the whole codebase in a tree structure.)
+    Setting a node sets its whole subtree immediately, so waiting on any node is a single blocking wait.
     """
 
-    _parent: "ShutdownEvent | None" = PrivateAttr()
-    # This would typically be a threading.Event, but we allow ShutdownEvent as well for consistency in some interfaces.
-    _own: "Event | ShutdownEvent" = PrivateAttr(default_factory=Event)
-    # Optionally, the shutdown event can also be set through an external event.
-    _external: "ReadOnlyEvent | None" = PrivateAttr(default=None)
-    # Used to prevent multiple busy-wait loops from being unnecessarily active at the same time.
-    _wait_lock: Lock = PrivateAttr(default_factory=Lock)
+    _set_event: Event = PrivateAttr(default_factory=Event)
+    # Guards the set transition against concurrent child and callback registration.
+    _lock: Lock = PrivateAttr(default_factory=Lock)
+    # Weak so that a long-lived event does not keep every child it ever had alive; keyed by
+    # identity because the model itself is unhashable.
+    _child_by_id: WeakValueDictionary[int, "ShutdownEvent"] = PrivateAttr(default_factory=WeakValueDictionary)
+    _callbacks: list[Callable[[], None]] = PrivateAttr(default_factory=list)
+    # Strong, so a live descendant keeps its whole ancestor chain alive and so stays
+    # reachable from any ancestor's set().
+    _parent: "ShutdownEvent | None" = PrivateAttr(default=None)
 
     def is_set(self) -> bool:
-        return (
-            self._own.is_set()
-            or (self._external is not None and self._external.is_set())
-            or (self._parent is not None and self._parent.is_set())
-        )
+        return self._set_event.is_set()
 
     def set(self) -> None:
-        self._own.set()
+        # Descendants are re-set even when this event already was, so a set that was
+        # interrupted partway through its subtree is finished by the next one.
+        with self._lock:
+            self._set_event.set()
+            children = tuple(self._child_by_id.values())
+            callbacks = tuple(self._callbacks)
+            self._callbacks.clear()
+        for child in children:
+            child.set()
+        for callback in callbacks:
+            callback()
 
     def wait(self, timeout: float | None = None) -> bool:
-        start = monotonic()
-        poll_interval = 0.01
-        # Don't busy-wait if another thread is already doing so for us.
-        acquired = self._wait_lock.acquire(timeout=timeout if timeout is not None else -1)
-        if not acquired:
-            return False
+        return self._set_event.wait(timeout)
+
+    @contextmanager
+    def call_on_set(self, callback: Callable[[], None]) -> Iterator[None]:
+        """Run a non-blocking callback when this event is set (at once if it already is) while the block is active.
+
+        The callback runs on whichever thread sets the event, and may still run
+        shortly after the block exits if a set was already underway.
+        """
+        with self._lock:
+            is_already_set = self._set_event.is_set()
+            if not is_already_set:
+                self._callbacks.append(callback)
+        if is_already_set:
+            callback()
         try:
-            # Use a dummy event for polling instead of time.sleep
-            poll_event = Event()
-            while timeout is None or monotonic() - start < timeout:
-                if self.is_set():
-                    return True
-                poll_event.wait(timeout=poll_interval)
-            return False
+            yield
         finally:
-            self._wait_lock.release()
+            with self._lock:
+                if callback in self._callbacks:
+                    self._callbacks.remove(callback)
 
     @classmethod
-    def from_parent(cls, parent: "ShutdownEvent", external: "ReadOnlyEvent | None" = None) -> "ShutdownEvent":
-        """Inject your own Event if you need to integrate with existing code that already has an Event."""
+    def from_parent(cls, parent: "ShutdownEvent") -> "ShutdownEvent":
         shutdown_event = cls()
         shutdown_event._parent = parent
-        if external is not None:
-            shutdown_event._external = external
+        with parent._lock:
+            if parent._set_event.is_set():
+                shutdown_event._set_event.set()
+            else:
+                parent._child_by_id[id(shutdown_event)] = shutdown_event
         return shutdown_event
 
     @classmethod
     def build_root(cls) -> "ShutdownEvent":
-        shutdown_event = cls()
-        shutdown_event._parent = None
-        return shutdown_event
-
-
-class CompoundEvent:
-    """Has the read-only interface of an Event, but is set if any child event is set."""
-
-    def __init__(self, events: list["ReadOnlyEvent"]) -> None:
-        assert len(events) >= 1
-        self.events = events
-
-    def is_set(self) -> bool:
-        return any([event.is_set() for event in self.events])
-
-    def wait(self, timeout: float | None = None) -> bool:
-        start = monotonic()
-        poll_interval = 0.01
-        # Use a dummy event for polling instead of time.sleep
-        poll_event = Event()
-        while timeout is None or monotonic() - start < timeout:
-            if self.is_set():
-                return True
-            poll_event.wait(timeout=poll_interval)
-        return False
+        return cls()
 
 
 # Define some convenience type aliases.
-MutableEvent = Event | ShutdownEvent
-ReadOnlyEvent = Event | ShutdownEvent | CompoundEvent
+ReadOnlyEvent = Event | ShutdownEvent

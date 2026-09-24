@@ -237,7 +237,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    rc.check_direct_subprocess(_DIR, snapshot(3))
+    rc.check_direct_subprocess(_DIR, snapshot(1))
 
 
 def test_prevent_bare_tmux_targets() -> None:
@@ -264,7 +264,7 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(8))
+    rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(7))
 
 
 def test_prevent_cast_usage() -> None:

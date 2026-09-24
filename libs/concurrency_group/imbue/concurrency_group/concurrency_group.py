@@ -24,7 +24,6 @@ from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.errors import SingleExceptionExpectedError
-from imbue.concurrency_group.event_utils import ReadOnlyEvent
 from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.local_process import run_background
@@ -379,11 +378,6 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             current = current.parent
         return None
 
-    def _maybe_wrap_external_shutdown_event(self, external_shutdown_event: ReadOnlyEvent | None) -> ShutdownEvent:
-        if external_shutdown_event is None:
-            return ShutdownEvent.from_parent(self.shutdown_event)
-        return ShutdownEvent.from_parent(self.shutdown_event, external=external_shutdown_event)
-
     @_trigger_cleanup
     @_raise_if_any_strands_or_ancestors_failed_or_is_shutting_down
     def start_thread(self, thread: ObservableThread, is_checked: bool = True) -> None:
@@ -437,7 +431,6 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         on_output: Callable[[str, bool], None] | None = None,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
-        shutdown_event: ReadOnlyEvent | None = None,
         # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
         pass_fds: Sequence[int] = (),
         # Optional log-safe label for the process. When the command carries secret
@@ -480,7 +473,7 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
                 env=env,
                 is_checked=is_checked_by_group,
                 timeout=timeout,
-                shutdown_event=self._maybe_wrap_external_shutdown_event(shutdown_event),
+                shutdown_event=ShutdownEvent.from_parent(self.shutdown_event),
                 pass_fds=pass_fds,
                 process_class=RunningProcessWithOnLineCallback,
                 process_class_kwargs={"on_line_callback": on_output},
@@ -500,7 +493,6 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
         on_output: Callable[[str, bool], None] | None = None,
         cwd: Path | None = None,
         env: Mapping[str, str] | None = None,
-        shutdown_event: ReadOnlyEvent | None = None,
         # Optional log-safe label for the process (see ``run_process_in_background``).
         name: str | None = None,
         # Bytes handed to the child on stdin (see ``run_process_in_background``).
@@ -517,7 +509,6 @@ class ConcurrencyGroup(MutableModel, AbstractContextManager):
             timeout=timeout,
             cwd=cwd,
             env=env,
-            shutdown_event=shutdown_event,
             on_output=on_output,
             is_checked_by_group=False,
             name=name,

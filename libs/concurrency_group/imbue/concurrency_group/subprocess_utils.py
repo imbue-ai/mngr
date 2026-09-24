@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import os
+import selectors
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from threading import Event
+from threading import Lock
 from typing import Callable
 from typing import Final
 from typing import IO
@@ -14,13 +18,17 @@ from typing import Self
 from typing import Sequence
 
 from loguru import logger
+from pydantic import Field
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.errors import ProcessTimeoutError
-from imbue.concurrency_group.event_utils import MutableEvent
 from imbue.concurrency_group.event_utils import ReadOnlyEvent
+from imbue.concurrency_group.event_utils import ShutdownEvent
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.mutable_model import MutableModel
 
 # Received a shutdown signal
 SUBPROCESS_STOPPED_BY_REQUEST_EXIT_CODE: Final[int] = -9999
@@ -35,6 +43,12 @@ _READ_SIZE: Final[int] = 2**20
 # data the drain is actually after is already sitting in the pipe buffers, so it
 # never needs more than a moment.
 _POST_KILL_DRAIN_TIMEOUT_SECONDS: Final[float] = 2.0
+
+# How long a child gets to be reaped after SIGKILL before it is reported unkillable.
+_POST_SIGKILL_WAIT_SECONDS: Final[float] = 2.0
+
+# Only a handful of wakeup bytes are ever pending, and any left over just wake the loop once more.
+_WAKEUP_PIPE_DRAIN_SIZE: Final[int] = 4096
 
 # Stands in for stdout/stderr on a FinishedProcess produced with
 # ``is_output_accumulated=False``. Never an empty string: "we did not keep this"
@@ -133,6 +147,8 @@ class OutputGatherer:
         self.stdout_container = stdout_container
         self.stderr_container = stderr_container
         self.shutdown_event = shutdown_event
+        self.is_stdout_at_end_of_file = False
+        self.is_stderr_at_end_of_file = False
 
     @classmethod
     def build_from_popen(
@@ -166,7 +182,7 @@ class OutputGatherer:
         """Read whatever the pipes currently hold into the output containers.
 
         A gather normally stops early once the shutdown event is set, so the
-        poll loop notices a shutdown request promptly instead of looping while
+        read loop notices a shutdown request promptly instead of looping while
         a live child keeps producing output. ``is_draining_after_exit`` skips
         that short-circuit for the final drain of an already-dead process --
         the event is set in exactly the shutdown case that drain exists for --
@@ -185,12 +201,14 @@ class OutputGatherer:
             if partial_stdout is not None:
                 self.stdout_container.write(partial_stdout)
                 is_more_from_stdout = len(partial_stdout) == _READ_SIZE
+                self.is_stdout_at_end_of_file = len(partial_stdout) == 0
             else:
                 is_more_from_stdout = False
             partial_stderr = self.stderr.read(_READ_SIZE)
             if partial_stderr is not None:
                 self.stderr_container.write(partial_stderr)
                 is_more_from_stderr = len(partial_stderr) == _READ_SIZE
+                self.is_stderr_at_end_of_file = len(partial_stderr) == 0
             else:
                 is_more_from_stderr = False
 
@@ -203,19 +221,24 @@ class OutputGatherer:
         ), self.stderr_container.in_progress_line.decode("utf-8", errors="replace")
 
 
-def _shutdown_popen(process: subprocess.Popen[bytes], shutdown_timeout_sec: float, reason: str) -> int | None:
+def _shutdown_popen(
+    process: subprocess.Popen[bytes],
+    # Set by the thread started with ``_start_exit_waiter`` once it has reaped the child.
+    exited_event: Event,
+    shutdown_timeout_sec: float,
+    reason: str,
+) -> int | None:
     # A shutdown request routinely races with the process's own exit (e.g. a
     # single-use worker whose parent reaps it right after reading its result),
     # so an already-exited process is reaped quietly -- logging a SIGTERM there
     # would misread routine cleanup as a forced kill.
-    already_exited_code = process.poll()
-    if already_exited_code is not None:
+    if exited_event.is_set():
         logger.debug(
             "Reaped subprocess (pid {}) which had already exited with code {}",
             process.pid,
-            already_exited_code,
+            process.returncode,
         )
-        return already_exited_code
+        return process.returncode
     # ``reason`` distinguishes the two ways this is reached -- a per-command
     # timeout vs. an externally requested shutdown -- because the two look
     # identical from here otherwise and the old "due to signal" wording led
@@ -229,18 +252,104 @@ def _shutdown_popen(process: subprocess.Popen[bytes], shutdown_timeout_sec: floa
         reason,
     ):
         process.terminate()
-        try:
-            process.wait(timeout=shutdown_timeout_sec)
+        if exited_event.wait(timeout=shutdown_timeout_sec):
             return process.returncode
-        except subprocess.TimeoutExpired:
-            logger.warning("Process didn't die within {} seconds of SIGTERM", shutdown_timeout_sec)
-            process.kill()
+        logger.warning("Process didn't die within {} seconds of SIGTERM", shutdown_timeout_sec)
+        process.kill()
+        if exited_event.wait(timeout=_POST_SIGKILL_WAIT_SECONDS):
+            return process.returncode
+        logger.error("Process didn't die after kill()")
+        return None
+
+
+def _start_exit_waiter(process: subprocess.Popen[bytes], on_exit: Callable[[], None]) -> Event:
+    """Reap the child on a thread blocked in ``waitpid``, then set the returned event and call ``on_exit``.
+
+    While that thread waits it holds the ``Popen``'s internal wait lock, so
+    ``poll()`` reports the child as running until it has been reaped: read the
+    exit from the returned event instead.
+    """
+    exited_event = Event()
+    ObservableThread(
+        target=_wait_for_exit,
+        args=(process, exited_event, on_exit),
+        name=f"exit-waiter-{process.pid}",
+    ).start()
+    return exited_event
+
+
+def _wait_for_exit(process: subprocess.Popen[bytes], exited_event: Event, on_exit: Callable[[], None]) -> None:
+    # Signalled even if the wait fails, so the read loop can never block on an exit it will not hear about.
+    try:
+        process.wait()
+    finally:
+        exited_event.set()
+        on_exit()
+
+
+class _WakeupPipe(MutableModel):
+    """A self-pipe other threads write to in order to wake a thread blocked on a selector."""
+
+    read_fd: int = Field(frozen=True, description="Non-blocking read end, registered with the selector")
+    write_fd: int = Field(frozen=True, description="Non-blocking write end, written to by wake()")
+    _lock: Lock = PrivateAttr(default_factory=Lock)
+    _is_closed: bool = PrivateAttr(default=False)
+
+    def wake(self) -> None:
+        # A wake can arrive after the pipe is closed (a set already underway, or
+        # an unkillable child exiting late), and its fd numbers may by then
+        # belong to something else.
+        with self._lock:
+            if self._is_closed:
+                return
             try:
-                process.wait(timeout=2)
-                return process.returncode
-            except subprocess.TimeoutExpired:
-                logger.error("Process didn't die after kill()")
-                return None
+                os.write(self.write_fd, b"\0")
+            except BlockingIOError:
+                logger.trace("Skipped a wakeup write: the pipe is full, so a wakeup is already pending")
+
+    def drain(self) -> None:
+        try:
+            os.read(self.read_fd, _WAKEUP_PIPE_DRAIN_SIZE)
+        except BlockingIOError:
+            logger.trace("Found the wakeup pipe already drained")
+
+    def close(self) -> None:
+        with self._lock:
+            self._is_closed = True
+            os.close(self.read_fd)
+            os.close(self.write_fd)
+
+
+@contextmanager
+def _open_wakeup_pipe() -> Iterator[_WakeupPipe]:
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    os.set_blocking(write_fd, False)
+    wakeup_pipe = _WakeupPipe(read_fd=read_fd, write_fd=write_fd)
+    try:
+        yield wakeup_pipe
+    finally:
+        wakeup_pipe.close()
+
+
+def _wait_for_output_or_wakeup(
+    selector: selectors.BaseSelector,
+    wakeup_pipe: _WakeupPipe,
+    timeout_time: float | None,
+) -> None:
+    remaining_seconds = None if timeout_time is None else max(0.0, timeout_time - time.monotonic())
+    for key, _ in selector.select(timeout=remaining_seconds):
+        if key.fd == wakeup_pipe.read_fd:
+            wakeup_pipe.drain()
+
+
+def _unregister_streams_at_end_of_file(selector: selectors.BaseSelector, gatherer: OutputGatherer) -> None:
+    # A stream at end-of-file stays readable forever, so leaving it registered would spin the loop.
+    registered_streams = selector.get_map()
+    if gatherer.is_stdout_at_end_of_file and gatherer.stdout in registered_streams:
+        selector.unregister(gatherer.stdout)
+    if gatherer.is_stderr_at_end_of_file and gatherer.stderr in registered_streams:
+        selector.unregister(gatherer.stderr)
 
 
 def _is_timeout(timeout_time: float | None = None) -> bool:
@@ -268,9 +377,8 @@ def run_local_command_modern_version(
     trace_output: bool = False,
     cwd: Path | None = None,
     trace_on_line_callback: Callable[[str, bool], None] | None = None,
-    shutdown_event: MutableEvent | None = None,
+    shutdown_event: ShutdownEvent | None = None,
     shutdown_timeout_sec: float = 30.0,
-    poll_time: float = 0.01,
     env: Mapping[str, str] | None = None,
     # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
     pass_fds: Sequence[int] = (),
@@ -282,7 +390,8 @@ def run_local_command_modern_version(
     """
     Run a subprocess command and return the result.
 
-    This function handles reading stdout/stderr in real-time while monitoring for shutdown events.
+    This function handles reading stdout/stderr in real-time while monitoring for shutdown events. It blocks
+    until the child writes output, exits, is asked to shut down, or times out.
 
     ``stdin_bytes`` is handed to the child on its standard input, which is then closed -- the way
     to pass a value a command must not receive in ``argv`` (where it would show up in a process
@@ -303,7 +412,7 @@ def run_local_command_modern_version(
     output, including in any ``ProcessError`` that ``is_checked`` raises.
     """
     try:
-        shutdown_event = shutdown_event or Event()
+        shutdown_event = shutdown_event if shutdown_event is not None else ShutdownEvent.build_root()
 
         try:
             process = subprocess.Popen(
@@ -359,26 +468,38 @@ def run_local_command_modern_version(
 
         timeout_time = time.monotonic() + timeout if timeout is not None else None
 
-        while not shutdown_event.wait(poll_time) and not _is_timeout(timeout_time):
-            maybe_exit_code = process.poll()
-            gatherer.gather_output()
-            if maybe_exit_code is not None:
-                exit_code = maybe_exit_code
-                break
-        else:
-            if _is_timeout(timeout_time):
-                shutdown_reason = f"it exceeded its {timeout:.0f}s timeout"
+        with (
+            _open_wakeup_pipe() as wakeup_pipe,
+            selectors.DefaultSelector() as selector,
+            shutdown_event.call_on_set(wakeup_pipe.wake),
+        ):
+            exited_event = _start_exit_waiter(process, on_exit=wakeup_pipe.wake)
+            selector.register(wakeup_pipe.read_fd, selectors.EVENT_READ)
+            selector.register(gatherer.stdout, selectors.EVENT_READ)
+            selector.register(gatherer.stderr, selectors.EVENT_READ)
+
+            while not shutdown_event.is_set() and not _is_timeout(timeout_time):
+                if exited_event.is_set():
+                    gatherer.gather_output()
+                    exit_code = process.returncode
+                    break
+                _wait_for_output_or_wakeup(selector, wakeup_pipe, timeout_time)
+                gatherer.gather_output()
+                _unregister_streams_at_end_of_file(selector, gatherer)
             else:
-                shutdown_reason = "the parent requested cleanup (shutdown_event was set)"
-            exit_code = _shutdown_popen(process, shutdown_timeout_sec, shutdown_reason)
-            # Drain what the child wrote between the last poll and its death --
-            # including anything it printed while handling the shutdown signal.
-            # For a timeout kill this is the tail that diagnoses where the
-            # command was stuck, and get_output only returns what was gathered.
-            # The drain must ignore the shutdown event: it is set in exactly
-            # the shutdown-kill case this drain covers. It is deadline-bounded
-            # instead (see _POST_KILL_DRAIN_TIMEOUT_SECONDS).
-            gatherer.gather_output(is_draining_after_exit=True)
+                if _is_timeout(timeout_time):
+                    shutdown_reason = f"it exceeded its {timeout:.0f}s timeout"
+                else:
+                    shutdown_reason = "the parent requested cleanup (shutdown_event was set)"
+                exit_code = _shutdown_popen(process, exited_event, shutdown_timeout_sec, shutdown_reason)
+                # Drain what the child wrote between the last gather and its death --
+                # including anything it printed while handling the shutdown signal.
+                # For a timeout kill this is the tail that diagnoses where the
+                # command was stuck, and get_output only returns what was gathered.
+                # The drain must ignore the shutdown event: it is set in exactly
+                # the shutdown-kill case this drain covers. It is deadline-bounded
+                # instead (see _POST_KILL_DRAIN_TIMEOUT_SECONDS).
+                gatherer.gather_output(is_draining_after_exit=True)
 
         stdout, stderr = gatherer.get_output()
 

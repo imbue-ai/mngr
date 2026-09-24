@@ -305,7 +305,7 @@ def test_prevent_bare_tmux_targets() -> None:
 def test_prevent_direct_subprocess() -> None:
     # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
-    rc.check_direct_subprocess(_DIR, snapshot(15), excluded_patterns=excluded)
+    rc.check_direct_subprocess(_DIR, snapshot(13), excluded_patterns=excluded)
 
 
 def test_prevent_raw_concurrency_group_executor() -> None:

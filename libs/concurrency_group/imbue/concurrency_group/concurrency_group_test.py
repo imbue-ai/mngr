@@ -1,5 +1,6 @@
 import contextlib
 import signal
+import sys
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -17,6 +18,7 @@ from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupSta
 from imbue.concurrency_group.concurrency_group import StrandTimedOutError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.test_utils import IdleChildrenCpuMeasurement
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 from imbue.concurrency_group.test_utils import poll_until
 from imbue.concurrency_group.thread_utils import ObservableThread
@@ -658,3 +660,40 @@ def test_new_resources_cannot_be_created_when_ancestor_has_failed_strands() -> N
                     with pytest.raises(ConcurrencyExceptionGroup) as exception_info_thread:
                         cg_inner.start_new_thread(target=lambda: 1)
     assert exception_info_thread.value.only_exception_is_instance_of(AncestorConcurrentFailure)
+
+
+# Long enough that an idle wait dominates the measurement, and unusual enough
+# not to collide with other tests' sleeps.
+_IDLE_CHILD_SLEEP_SECONDS: Final[str] = "2.37"
+_IDLE_CHILD_COUNT: Final[int] = 8
+_MAX_CPU_FRACTION_WHILE_WAITING_ON_IDLE_CHILDREN: Final[float] = 0.02
+_IDLE_CHILDREN_CPU_PROBE_PROGRAM: Final[str] = (
+    "import sys\n"
+    "from imbue.concurrency_group.test_utils import measure_cpu_waiting_on_idle_children\n"
+    "print(measure_cpu_waiting_on_idle_children(sys.argv[1], int(sys.argv[2])).model_dump_json())\n"
+)
+
+
+@pytest.mark.parametrize(
+    "child_script",
+    [
+        pytest.param(f"exec sleep {_IDLE_CHILD_SLEEP_SECONDS}", id="child_keeps_its_pipes_open"),
+        pytest.param(f"exec >&- 2>&-; exec sleep {_IDLE_CHILD_SLEEP_SECONDS}", id="child_closed_its_pipes"),
+    ],
+)
+@pytest.mark.flaky
+def test_waiting_on_idle_background_processes_uses_almost_no_cpu(child_script: str) -> None:
+    # Long-lived streams spend nearly all of their life idle, so waiting on
+    # them must not cost CPU on a timer. The measurement runs in a fresh
+    # interpreter because process CPU time also counts whatever threads
+    # earlier tests left running in this one.
+    with ConcurrencyGroup(name="idle_children_cpu_probe") as cg:
+        finished = cg.run_process_to_completion(
+            [sys.executable, "-c", _IDLE_CHILDREN_CPU_PROBE_PROGRAM, child_script, str(_IDLE_CHILD_COUNT)],
+            timeout=60.0,
+        )
+    measurement = IdleChildrenCpuMeasurement.model_validate_json(finished.stdout.strip().splitlines()[-1])
+
+    assert measurement.cpu_seconds < _MAX_CPU_FRACTION_WHILE_WAITING_ON_IDLE_CHILDREN * measurement.wall_seconds, (
+        f"used {measurement.cpu_seconds:.3f}s of CPU over {measurement.wall_seconds:.3f}s waiting on idle children"
+    )

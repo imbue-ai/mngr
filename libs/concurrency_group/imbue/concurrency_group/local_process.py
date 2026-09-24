@@ -4,7 +4,6 @@ import contextvars
 from pathlib import Path
 from queue import Queue
 from subprocess import TimeoutExpired
-from threading import Event
 from typing import Mapping
 from typing import Sequence
 from typing import TypeVar
@@ -13,7 +12,7 @@ from imbue.concurrency_group.errors import EnvironmentStoppedError
 from imbue.concurrency_group.errors import OutputNotAccumulatedError
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessSetupError
-from imbue.concurrency_group.event_utils import MutableEvent
+from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.subprocess_utils import OUTPUT_NOT_ACCUMULATED_PLACEHOLDER
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
@@ -27,7 +26,7 @@ class RunningProcess:
         self,
         command: Sequence[str],
         output_queue: Queue[tuple[str, bool]] | None,
-        shutdown_event: MutableEvent,
+        shutdown_event: ShutdownEvent,
         is_checked: bool = False,
         name: str | None = None,
         is_output_accumulated: bool = True,
@@ -225,7 +224,7 @@ def run_background(
     timeout: float | None = None,
     is_checked: bool = False,
     cwd: Path | None = None,
-    shutdown_event: MutableEvent | None = None,
+    shutdown_event: ShutdownEvent | None = None,
     shutdown_timeout_sec: float = 30.0,
     env: Mapping[str, str] | None = None,
     # Open file descriptors to keep open in (and inherit into) the spawned child, by their fd numbers.
@@ -259,7 +258,7 @@ def run_background(
     ``stdin_bytes`` is written to the child's standard input, which is then closed; see
     ``run_local_command_modern_version`` for the size limit that applies to it.
     """
-    true_shutdown_event = shutdown_event if shutdown_event is not None else Event()
+    true_shutdown_event = shutdown_event if shutdown_event is not None else ShutdownEvent.build_root()
     process = process_class(
         output_queue=output_queue,
         shutdown_event=true_shutdown_event,

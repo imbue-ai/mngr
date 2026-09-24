@@ -481,7 +481,8 @@ PREVENT_DIRECT_SUBPROCESS = RegexRatchetRule(
     ),
     pattern_string=(
         r"\bfrom\s+subprocess\s+import\b(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)"
-        r"|\bsubprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\b"
+        # A subscripted name like ``subprocess.Popen[bytes]`` is a type annotation, not a spawn.
+        r"|\bsubprocess\.(Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\b(?!\[)"
         r"|\bos\.(exec\w+|spawn\w+|system|popen)\b"
         r"|\bfrom\s+os\s+import\b.*\b(exec\w+|spawn\w+|system|popen)\b"
     ),

@@ -6,6 +6,7 @@ from queue import Queue
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.mngr.api.observe import get_agent_states_events_path
 from imbue.mngr.api.observe import get_default_events_base_dir
@@ -23,7 +24,7 @@ class _FakeDeadProcess(RunningProcess):
     """Simulates a RunningProcess that has already exited."""
 
     def __init__(self, exit_code: int, stderr: str = "") -> None:
-        super().__init__(command=["fake"], output_queue=Queue(), shutdown_event=threading.Event())
+        super().__init__(command=["fake"], output_queue=Queue(), shutdown_event=ShutdownEvent.build_root())
         self._exit_code = exit_code
         self._fake_stderr = stderr
 
@@ -275,9 +276,6 @@ def test_process_events_was_running_bit_is_not_shared_across_hosts_for_same_agen
 
     assert len(notifier.calls) == 1
     assert "xxx" in notifier.calls[0][1]
-
-
-# --- watch_for_waiting_agents ---
 
 
 def test_watch_exits_when_observe_process_dies(temp_mngr_ctx: MngrContext) -> None:

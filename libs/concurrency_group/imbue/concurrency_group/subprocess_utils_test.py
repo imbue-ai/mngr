@@ -1,4 +1,5 @@
 import gc
+import os
 import signal
 import subprocess
 import time
@@ -12,12 +13,14 @@ import pytest
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
+from imbue.concurrency_group.event_utils import ShutdownEvent
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.concurrency_group.subprocess_utils import OutputGatherer
 from imbue.concurrency_group.subprocess_utils import PartialOutputContainer
 from imbue.concurrency_group.subprocess_utils import _POST_KILL_DRAIN_TIMEOUT_SECONDS
 from imbue.concurrency_group.subprocess_utils import _is_timeout
 from imbue.concurrency_group.subprocess_utils import _shutdown_popen
+from imbue.concurrency_group.subprocess_utils import _start_exit_waiter
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
 
@@ -258,6 +261,10 @@ def test_is_timeout_reads_the_clock_a_suspended_machine_does_not_advance() -> No
     assert _is_timeout(time.monotonic() + 100.0) is False
 
 
+def _do_nothing() -> None:
+    pass
+
+
 def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() -> None:
     # A process that dies cleanly on SIGTERM must be reaped within the shutdown timeout, and
     # _shutdown_popen must return its signal-based returncode (negative SIGTERM on POSIX) rather than
@@ -270,7 +277,9 @@ def test_shutdown_popen_terminates_with_sigterm_and_returns_signal_returncode() 
         stderr=subprocess.PIPE,
     )
 
-    returncode = _shutdown_popen(process, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+
+    returncode = _shutdown_popen(process, exited_event, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
 
     assert returncode == -signal.SIGTERM
     assert process.poll() == -signal.SIGTERM
@@ -285,9 +294,10 @@ def test_shutdown_popen_reaps_already_exited_process_with_its_own_exit_code() ->
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    process.wait(timeout=5)
+    exited_event = _start_exit_waiter(process, on_exit=_do_nothing)
+    assert exited_event.wait(timeout=5.0)
 
-    returncode = _shutdown_popen(process, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
+    returncode = _shutdown_popen(process, exited_event, shutdown_timeout_sec=5.0, reason="the test requested shutdown")
 
     assert returncode == 0
 
@@ -296,7 +306,7 @@ def test_timed_out_process_dying_words_are_captured() -> None:
     """Output written while the child handles its shutdown signal reaches the result.
 
     A timeout kill's final output is the tail that diagnoses where the command
-    was stuck, and it is written after the poll loop has stopped gathering --
+    was stuck, and it is written after the read loop has stopped gathering --
     only the post-kill drain picks it up.
     """
     # The sleep runs in the background with an interruptible ``wait``: a
@@ -321,10 +331,14 @@ def test_shutdown_killed_process_dying_words_are_captured() -> None:
     this case, and the mid-loop gathers stop once it is set, so only the drain
     can pick up what the child printed while dying. The shutdown is requested
     from the output callback on the child's own trap-armed line, so the TERM
-    always reaches an armed handler without any sleep-and-poll.
+    always reaches an armed handler.
     """
-    script = "trap 'kill $child 2>/dev/null; echo dying-words; exit 1' TERM; echo trap-armed; sleep 30 & child=$!; wait $child"
-    shutdown_event = Event()
+    # The TERM lands right after trap-armed is read. bash defers a trap that
+    # arrives just before it blocks in ``wait`` until the waited child exits,
+    # so the child waits in short foreground sleeps instead, after each of
+    # which bash runs a pending trap.
+    script = "trap 'echo dying-words; exit 1' TERM; echo trap-armed; while :; do sleep 0.05; done"
+    shutdown_event = ShutdownEvent.build_root()
 
     def request_shutdown_once_trap_is_armed(line: str, is_stdout: bool) -> None:
         if "trap-armed" in line:
@@ -499,3 +513,28 @@ def test_run_local_command_closes_subprocess_pipes() -> None:
         f"Subprocess pipes not closed explicitly; got {len(resource_warnings)} ResourceWarning(s): "
         + ", ".join(str(w.message) for w in resource_warnings)
     )
+
+
+def test_run_local_command_returns_when_the_child_exits_while_a_grandchild_holds_its_pipes() -> None:
+    # The grandchild inherits the output pipes, so they never reach end-of-file
+    # while it lives: only the child's own exit can end the command.
+    finished = run_local_command_modern_version(
+        ["sh", "-c", f"sleep {LONG_SLEEP_SECONDS} & echo $!"],
+        is_checked=False,
+        timeout=30.0,
+    )
+    os.kill(int(finished.stdout.strip()), signal.SIGKILL)
+
+    assert finished.is_timed_out is False
+    assert finished.returncode == 0
+
+
+def test_run_local_command_returns_the_exit_code_of_a_child_that_closed_its_pipes() -> None:
+    finished = run_local_command_modern_version(
+        ["sh", "-c", "exec >&- 2>&-; sleep 0.3; exit 7"],
+        is_checked=False,
+        timeout=30.0,
+    )
+
+    assert finished.is_timed_out is False
+    assert finished.returncode == 7
