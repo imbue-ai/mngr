@@ -71,6 +71,7 @@ import os
 import shlex
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
 from enum import auto
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import CliBackedAgentMixin
 from imbue.mngr.interfaces.agent import HasAutoInstallMixin
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
+from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import HasPermissionPolicyMixin
 from imbue.mngr.interfaces.agent import HasSessionAdoptionMixin
 from imbue.mngr.interfaces.agent import HasSessionPreservationMixin
@@ -181,6 +183,10 @@ from imbue.mngr_codex.codex_config import read_codex_config
 from imbue.mngr_codex.codex_config import rewrite_rollout_record_cwd
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
+from imbue.mngr_codex.compaction import CODEX_DEFAULT_CACHE_TTL_MINUTES
+from imbue.mngr_codex.compaction import get_agent_context_tokens
+from imbue.mngr_codex.compaction import get_agent_idle_since
+from imbue.mngr_codex.compaction import record_agent_compacted
 
 # codex approval policy that suppresses every interactive approval dialog while
 # keeping the sandbox on (the right unattended default). Applied only when
@@ -484,6 +490,7 @@ class CodexAgent(
     HasPermissionPolicyMixin,
     HasVersionManagementMixin,
     HasAutoInstallMixin,
+    HasCompactionMixin,
 ):
     """Agent implementation for the OpenAI Codex CLI (``codex``), driven over the app-server.
 
@@ -1116,6 +1123,45 @@ class CodexAgent(
         if "approval_policy" in self.agent_config.config_overrides:
             policy["approval_policy"] = self.agent_config.config_overrides["approval_policy"]
         return policy
+
+    # --- HasCompactionMixin capability implementation ---
+
+    def request_compaction(self, instructions: str | None = None) -> None:
+        """Perform context compaction on the Codex agent.
+
+        Codex CLI does not accept additional instructions for compaction, so
+        ``instructions`` is ignored.
+        """
+        current_idle_since = self.get_idle_since()
+        with self._message_lock(), log_span("Requesting context compaction for codex agent {}", self.name):
+            try:
+                client = self._open_app_server_client()
+                try:
+                    self._bind_thread_for_send(client)
+                    client.thread_compact_start()
+                except CodexAppServerError as exc:
+                    raise SendMessageError(str(self.name), f"failed to request context compaction: {exc}") from exc
+                finally:
+                    client.close()
+            finally:
+                # Even if compaction fails, we still record it.
+                # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
+                # agent over and over as part of `mngr autocompact` when compaction isn't going through.
+                # We prefer in that case to just not compact, rather than continuously sending more compaction
+                # requests to the agent.
+                record_agent_compacted(self, idle_since=current_idle_since)
+
+    def get_cache_ttl_minutes(self) -> int | None:
+        """Return the Codex / OpenAI prompt cache TTL (30 minutes)."""
+        return CODEX_DEFAULT_CACHE_TTL_MINUTES
+
+    def get_context_tokens(self) -> int | None:
+        """Return the total prompt context token count from the agent's most recent turn."""
+        return get_agent_context_tokens(self)
+
+    def get_idle_since(self) -> datetime | None:
+        """Return the datetime when the agent became idle in the current turn, or None if active or compacted."""
+        return get_agent_idle_since(self)
 
     def reconcile_installed_version(self, host: OnlineHostInterface, mngr_ctx: MngrContext) -> None:
         # With a pinned version, verify the installed codex matches and error on a mismatch --

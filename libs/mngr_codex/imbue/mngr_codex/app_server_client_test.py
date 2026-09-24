@@ -193,6 +193,46 @@ def test_thread_resume_raises_on_missing_rollout() -> None:
     assert exc_info.value.code == -32600
 
 
+def test_thread_compact_start_sends_bound_thread_id() -> None:
+    transport = ScriptedTransport()
+    client = _handshaken_client(transport)
+    transport.respond_result("thread/compact/start", {})
+    result = client.thread_compact_start()
+    assert result == {}
+    compact_frames = transport.sent_of("thread/compact/start")
+    assert len(compact_frames) == 1
+    assert compact_frames[0]["params"] == {"threadId": "thread-1"}
+
+
+def test_thread_compact_start_accepts_explicit_thread_id() -> None:
+    transport = ScriptedTransport()
+    client = _handshaken_client(transport)
+    transport.respond_result("thread/compact/start", {})
+    result = client.thread_compact_start(thread_id="thread-explicit")
+    assert result == {}
+    compact_frames = transport.sent_of("thread/compact/start")
+    assert len(compact_frames) == 1
+    assert compact_frames[0]["params"] == {"threadId": "thread-explicit"}
+
+
+def test_thread_compact_start_raises_without_a_bound_thread() -> None:
+    transport = ScriptedTransport()
+    transport.respond_result("initialize", _initialize_result())
+    client = CodexAppServerClient(transport=transport)
+    client.initialize("mngr", "0.1")
+    with pytest.raises(CodexAppServerError):
+        client.thread_compact_start()
+
+
+def test_thread_compact_start_propagates_error() -> None:
+    transport = ScriptedTransport()
+    client = _handshaken_client(transport)
+    transport.respond_error("thread/compact/start", -32600, "thread cannot be compacted")
+    with pytest.raises(CodexAppServerError) as exc_info:
+        client.thread_compact_start()
+    assert exc_info.value.code == -32600
+
+
 # =============================================================================
 # submit: idle -> started, busy -> steered
 # =============================================================================

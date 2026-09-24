@@ -52,6 +52,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import Final
 
 import tomlkit
 
@@ -213,6 +214,12 @@ COMMON_TRANSCRIPT_CONVERT_SCRIPT_NAME: str = "common_transcript_convert.py"
 # ``events/``.
 RAW_TRANSCRIPT_OUTPUT_RELATIVE: str = "logs/codex_transcript/events.jsonl"
 COMMON_TRANSCRIPT_OUTPUT_RELATIVE: str = "events/codex/common_transcript/events.jsonl"
+
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) storing the ISO timestamp when the agent became idle.
+IDLE_SINCE_FILENAME: Final[str] = "idle_since"
+
+# Marker file (in ``$MNGR_AGENT_STATE_DIR``) storing the idle_since ISO timestamp for which compaction was executed.
+LAST_COMPACTED_IDLE_SINCE_FILENAME: Final[str] = "last_compacted_idle_since"
 
 
 # ---------------------------------------------------------------------------

@@ -527,6 +527,11 @@ class CodexAppServerClient(MutableModel):
         thread_id = self._require_thread_id()
         return self._request("thread/read", {"threadId": thread_id, "includeTurns": include_turns})
 
+    def thread_compact_start(self, thread_id: str | None = None) -> Mapping[str, Any]:
+        """Start context compaction on the bound thread (or explicit ``thread_id``)."""
+        tid = self._require_thread_id() if thread_id is None else thread_id
+        return self._request("thread/compact/start", {"threadId": tid})
+
     def thread_loaded_list(self) -> tuple[str, ...]:
         """Return the ids of the threads the daemon currently holds loaded in memory.
 

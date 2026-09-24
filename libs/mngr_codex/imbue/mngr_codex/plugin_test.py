@@ -35,6 +35,7 @@ from imbue.mngr.errors import MessageDeliveredButBlockedError
 from imbue.mngr.errors import PluginMngrError
 from imbue.mngr.errors import SendMessageError
 from imbue.mngr.errors import UserInputError
+from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.agent import InteractiveAgentMixin
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileType
@@ -124,6 +125,7 @@ def test_codex_agent_subclasses_base_agent_not_send_keys_or_interactive_tui() ->
     # `mngr message` on. `SendKeysAgent` provided it implicitly; on BaseAgent it must be explicit
     # (as pi/opencode do), or `mngr message` fails "does not accept interactive messages".
     assert issubclass(CodexAgent, InteractiveAgentMixin)
+    assert issubclass(CodexAgent, HasCompactionMixin)
 
 
 def test_register_agent_type_returns_codex_class_and_config() -> None:
