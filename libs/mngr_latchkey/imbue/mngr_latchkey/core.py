@@ -636,6 +636,11 @@ def _build_gateway_env(
     env["LATCHKEY_PERMISSIONS_CONFIG"] = str(permissions_config_path)
     env["LATCHKEY_GATEWAY_LISTEN_PASSWORD"] = listen_password
     env[_ENV_EXTENSION_PERMISSIONS_ROOT] = str(extension_permissions_root)
+    # A remote machine's gateway sends the requests it routes through this
+    # computer with its own credentials already injected, and asks this gateway
+    # to add none. Latchkey refuses that unless uninjected forwarding is on.
+    # The permission check still runs, and denies whatever no rule allows.
+    env["LATCHKEY_PASSTHROUGH_UNKNOWN"] = "1"
     inject_encryption_key_into_env(env, encryption_key)
     return env
 

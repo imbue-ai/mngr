@@ -5,6 +5,7 @@ import {
   BROWSER_SIGN_IN,
   awsAvailable,
   credentialsSignIn,
+  desktopEgress,
   pathSync,
   permissionsView,
   sharedPath,
@@ -356,6 +357,67 @@ describe("PermissionsTab connection panel", () => {
       url: `/ui/api/workspaces/${AGENT_ID}/permissions/connector-toggle`,
       body: { scope: "slack-api", account: "work@example.com", permission: "slack-chat-read", enabled: true },
     });
+  });
+
+  it("draws no desktop egress row when the server says it is not supported", async () => {
+    const { root } = await render(permissionsView());
+    expect(withAttr(root, "data-perm-desktop-egress")).toHaveLength(0);
+    expect(allText(root)).not.toContain("Proxy through this desktop");
+    expect(switches(root)).toHaveLength(2);
+  });
+
+  it("draws the desktop egress row above the permission toggles when it is supported", async () => {
+    const { root } = await render(
+      permissionsView({
+        connections: [slackConnection({ desktop_egress: desktopEgress({ is_enabled: true }) })],
+      }),
+    );
+    const rows = withAttr(root, "data-perm-desktop-egress");
+    expect(rows).toHaveLength(1);
+    expect(allText(rows[0])).toContain("Proxy through this desktop");
+    expect(allText(rows[0])).toContain(
+      "Requests this workspace makes to Slack leave from this computer instead of from the workspace's " +
+        "machine. This computer has to be running and connected for them to succeed.",
+    );
+    const controls = switches(root);
+    expect(controls.map((node) => attrsOf(node)["data-perm-permission"])).toEqual([
+      "desktop-egress",
+      "slack-chat-read",
+      "slack-chat-write",
+    ]);
+    expect(attrsOf(controls[0])["aria-checked"]).toBe("true");
+    expect(attrsOf(controls[0])["aria-label"]).toBe("Proxy through this desktop");
+  });
+
+  it("flips desktop egress through the model with the service name", async () => {
+    const { root, requests } = await render(
+      permissionsView({
+        connections: [slackConnection({ account: "work@example.com", desktop_egress: desktopEgress() })],
+      }),
+      { requestedSection: "conn:slack:work@example.com" },
+    );
+    (attrsOf(switches(withAttr(root, "data-perm-desktop-egress")[0])[0]).onclick as () => void)();
+    await settle();
+    expect(requests[1]).toEqual({
+      url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-toggle`,
+      body: { service_name: "slack", enabled: true },
+    });
+  });
+
+  it("spins the desktop egress row while its write is in flight and locks the other toggles", async () => {
+    const { root, rerender } = await render(
+      permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] }),
+      { respond: (url) => (url.endsWith("/desktop-egress-toggle") ? new Promise(() => undefined) : null) },
+    );
+
+    (attrsOf(switches(root)[0]).onclick as () => void)();
+    await settle();
+    const after = rerender();
+
+    expect(classesOf(switches(after)[0])).toContain("is-busy");
+    expect(spinners(after)).toHaveLength(1);
+    expect(attrsOf(switches(after)[1]).disabled).toBe(true);
+    expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this machine.");
   });
 
   it("warns and blocks new grants when a connection is not connected", async () => {

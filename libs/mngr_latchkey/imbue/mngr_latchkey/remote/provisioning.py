@@ -117,6 +117,7 @@ from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
@@ -839,6 +840,7 @@ def _build_gateway_run_script(
     desktop_password_file_path: Path,
     desktop_permissions_override_file_path: Path,
     desktop_gateway_url: str,
+    desktop_egress_rules_file_path: Path,
 ) -> str:
     """Build the wrapper script supervisord runs to launch ``latchkey gateway``.
 
@@ -876,9 +878,15 @@ def _build_gateway_run_script(
     machine that renews its own tokens keeps working while the user's computer
     is off. ``--max-body-size`` matches the limit the desktop-side gateway uses
     (:data:`GATEWAY_MAX_BODY_SIZE_BYTES`).
+
+    The curl router fails every request when ``LATCHKEY_DESKTOP_PROXY_CONFIG``
+    names a file that is not there, so the script that exports the variable is
+    also what creates the file, with no rules in it. A machine's existing rules
+    are left alone.
     """
     key_q = shlex.quote(str(key_file_path))
     password_q = shlex.quote(str(password_file_path))
+    egress_rules_q = shlex.quote(str(desktop_egress_rules_file_path))
     return "\n".join(
         (
             "#!/bin/sh",
@@ -913,6 +921,14 @@ def _build_gateway_run_script(
             # X-Imbue-Impersonate marker header get Chrome TLS impersonation
             # via the sibling impersonator, everything else uses system curl.
             f"export LATCHKEY_CURL={_CURL_ROUTER_PATH}",
+            f"if [ ! -f {egress_rules_q} ]; then",
+            f"  (umask 077 && printf '{{}}\\n' > {egress_rules_q})",
+            "fi",
+            f"export LATCHKEY_DESKTOP_PROXY_CONFIG={egress_rules_q}",
+            # The router routes on the service latchkey reports for a request
+            # (the ``X-Latchkey-Matched-Service`` header), and latchkey reports
+            # it only with its diagnostic headers on.
+            "export LATCHKEY_DIAGNOSTIC_HEADERS=1",
             f"exec latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES}",
             "",
         )
@@ -1002,6 +1018,7 @@ def _ensure_latchkey_gateway_running(
         desktop_password_file_path,
         desktop_permissions_override_file_path,
         desktop_gateway_url,
+        remote_dir / DESKTOP_EGRESS_RULES_FILENAME,
     )
     host.write_file(run_script_path, run_script.encode("utf-8"), mode="0700")
 

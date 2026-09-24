@@ -2478,6 +2478,7 @@ def create_desktop_client(
         minds_api_key=minds_api_key,
         latchkey_forward_supervisor=latchkey_forward_supervisor,
         machine_operator=machine_operator,
+        device_id=device_id,
         discovery_health_watchdog=discovery_health_watchdog,
         connectivity_detector=connectivity_detector,
         # The real machine's probe needs a group to run commands under; an app

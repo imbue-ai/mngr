@@ -627,6 +627,13 @@ class UiServiceSignIn(FrozenModel):
     )
 
 
+class UiDesktopEgressToggle(FrozenModel):
+    """Whether one service's requests from this workspace are sent out through this computer."""
+
+    is_supported: bool = Field(description="Whether the toggle is offered for this workspace and service")
+    is_enabled: bool = Field(description="Whether this computer forwards the service's requests")
+
+
 class UiPermissionConnection(FrozenModel):
     """One connection entry: a (service, account) pair with its toggle panels."""
 
@@ -639,6 +646,9 @@ class UiPermissionConnection(FrozenModel):
     granted_count: int = Field(description="Total permissions currently granted across the service's scopes")
     scopes: tuple[UiPermissionScopePanel, ...] = Field(description="One toggle panel per scope the service exposes")
     sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
+    desktop_egress: UiDesktopEgressToggle = Field(
+        description="The service's desktop egress toggle; identical across its accounts"
+    )
 
 
 class UiAvailableConnection(FrozenModel):
@@ -827,6 +837,13 @@ class UiSelfToggleRequest(FrozenModel):
     enabled: bool = Field(description="The permission's new state")
 
 
+class UiDesktopEgressToggleRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/desktop-egress-toggle."""
+
+    service_name: str = Field(description="Catalog service whose requests are sent through this computer")
+    enabled: bool = Field(description="The toggle's new state")
+
+
 class UiConnectorRevokeAllRequest(FrozenModel):
     """Body of POST /ui/api/workspaces/<agent_id>/permissions/connector-revoke-all."""
 
@@ -922,6 +939,7 @@ class UiWireSchema(FrozenModel):
     workspace_permissions: UiWorkspacePermissions = Field(description="workspace permissions payload")
     connector_toggle: UiConnectorToggleRequest = Field(description="connector-toggle request body")
     self_toggle: UiSelfToggleRequest = Field(description="self-toggle request body")
+    desktop_egress_toggle: UiDesktopEgressToggleRequest = Field(description="desktop-egress-toggle request body")
     connector_revoke_all: UiConnectorRevokeAllRequest = Field(description="connector-revoke-all request body")
     connector_disconnect: UiConnectorDisconnectRequest = Field(description="connector-disconnect request body")
     connect_credentials: UiConnectCredentialsRequest = Field(description="connect-credentials request body")

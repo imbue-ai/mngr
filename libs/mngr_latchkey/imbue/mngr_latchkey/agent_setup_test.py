@@ -8,7 +8,6 @@ deterministically.
 """
 
 import json
-import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final
@@ -27,10 +26,8 @@ from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_DISABLE_COUNTING
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PASSWORD
 from imbue.mngr_latchkey.agent_setup import ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE
-from imbue.mngr_latchkey.agent_setup import ENV_MINDS_VIA_DESKTOP_URL_PREFIX
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import SECRET_LATCHKEY_ENV_VAR_NAMES
-from imbue.mngr_latchkey.agent_setup import VIA_DESKTOP_URL_PREFIX
 from imbue.mngr_latchkey.agent_setup import _build_allowed_agent_anyof_entry
 from imbue.mngr_latchkey.agent_setup import _does_hosts_file_name_outer_host
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
@@ -42,7 +39,6 @@ from imbue.mngr_latchkey.agent_setup import reconcile_baseline_permissions
 from imbue.mngr_latchkey.agent_setup import register_agent_for_host
 from imbue.mngr_latchkey.baseline_permissions import ADDITIONAL_SERVICE_SCHEMAS
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
-from imbue.mngr_latchkey.baseline_permissions import VIA_DESKTOP_PATH_PATTERN
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
@@ -85,7 +81,7 @@ def test_prepare_no_latchkey_tunneled_returns_constant_url(tmp_path: Path) -> No
     """
     setup = prepare_agent_latchkey(None, is_tunneled=True)
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
-    assert set(setup.env) == {ENV_LATCHKEY_GATEWAY, ENV_LATCHKEY_DISABLE_COUNTING, ENV_MINDS_VIA_DESKTOP_URL_PREFIX}
+    assert set(setup.env) == {ENV_LATCHKEY_GATEWAY, ENV_LATCHKEY_DISABLE_COUNTING}
     assert setup.env[ENV_LATCHKEY_DISABLE_COUNTING] == "1"
     assert ENV_LATCHKEY_GATEWAY_PASSWORD not in setup.env
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
@@ -143,7 +139,6 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "minds-api-schema-read",
                 "minds-app-version-read",
                 "minds-api-timezone-read",
-                "via-desktop-egress",
             ],
         },
     ]
@@ -223,33 +218,6 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
         "method": {"const": "GET"},
         "path": {"const": "/minds-api-proxy/api/v1/timezone"},
     }
-    # Desktop egress is a pre-approved *route*, not a grant: the path must carry
-    # an absolute http(s) target, which the desktop then checks against the
-    # ordinary per-service rules in this same file. Any method, because the
-    # wrapped request keeps the caller's verb.
-    via_desktop = schemas["via-desktop-egress"]["properties"]
-    assert via_desktop == {"path": {"type": "string", "pattern": VIA_DESKTOP_PATH_PATTERN}}
-
-
-def test_via_desktop_baseline_permission_cannot_reach_other_gateway_self_endpoints() -> None:
-    """The pattern is anchored and demands an absolute target right after the prefix.
-
-    Without both, the route grant would double as a way to reach any other
-    gateway-self endpoint by hiding it behind the prefix. The on-disk baseline is
-    asserted to use this exact pattern above, so checking the constant's behavior
-    here checks what a real host file enforces.
-    """
-    pattern = re.compile(VIA_DESKTOP_PATH_PATTERN)
-    assert pattern.search("/via-desktop/https://a.example.com/x") is not None
-    assert pattern.search("/via-desktop/http://a.example.com/x") is not None
-    for rejected in (
-        "/permissions/self",
-        "/via-desktop/permissions/self",
-        "/via-desktop//permissions",
-        "/via-desktop/ftp://a.example.com",
-        "/minds-api-proxy/via-desktop/https://a.example.com",
-    ):
-        assert pattern.search(rejected) is None, rejected
 
 
 def test_prepare_vps_gateway_omits_workspace_permissions_override(tmp_path: Path) -> None:
@@ -269,30 +237,6 @@ def test_prepare_vps_gateway_omits_workspace_permissions_override(tmp_path: Path
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
     assert setup.opaque_permissions_path is not None
     assert setup.opaque_permissions_path.exists()
-
-
-def test_via_desktop_prefix_is_set_only_where_the_gateway_is_not_already_on_the_desktop(
-    tmp_path: Path,
-) -> None:
-    """The prefix is a real value for VPS workspaces and empty for desktop ones.
-
-    In-workspace tooling concatenates whatever it holds without branching on
-    topology: a desktop-gateway workspace already egresses from the user's
-    machine, so prepending anything there would only add a hop. It is always
-    present so tooling can tell "no prefix configured" apart from "this
-    workspace predates the feature".
-    """
-    fake = _full_fake(tmp_path)
-    vps = prepare_agent_latchkey(fake, is_tunneled=True, gateway_location=LatchkeyGatewayLocation.VPS)
-    assert vps.env[ENV_MINDS_VIA_DESKTOP_URL_PREFIX] == "https://latchkey-self.invalid/via-desktop"
-
-    desktop = prepare_agent_latchkey(fake, is_tunneled=True, gateway_location=LatchkeyGatewayLocation.DESKTOP)
-    assert desktop.env[ENV_MINDS_VIA_DESKTOP_URL_PREFIX] == ""
-
-
-def test_via_desktop_prefix_is_not_treated_as_a_secret() -> None:
-    """It carries no credential, so callers rendering ``--host-env`` need not mask it."""
-    assert ENV_MINDS_VIA_DESKTOP_URL_PREFIX not in SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
 def test_prepare_vps_gateway_rejects_on_host_mode(tmp_path: Path) -> None:
@@ -870,7 +814,6 @@ def test_fall_back_to_reverse_tunneled_gateway_url_rewrites_outer_host_url_when_
     assert did_fall_back is True
     assert local_host.get_env_var(ENV_LATCHKEY_GATEWAY) == f"http://127.0.0.1:{AGENT_SIDE_LATCHKEY_PORT}"
     # Only the URL changes: the rest of the wiring is what a VPS-gateway agent needs either way.
-    assert local_host.get_env_var(ENV_MINDS_VIA_DESKTOP_URL_PREFIX) == VIA_DESKTOP_URL_PREFIX
     assert local_host.get_env_var(ENV_LATCHKEY_DISABLE_COUNTING) == "1"
 
 

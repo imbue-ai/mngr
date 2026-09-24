@@ -42,9 +42,11 @@ from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote._transfer import _MachineScriptOutcome
 from imbue.mngr_latchkey.remote._transfer import _READ_CREDENTIALS_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _READ_DATA_FORMAT_VERSION_PREFIX
+from imbue.mngr_latchkey.remote._transfer import _READ_DESKTOP_EGRESS_RULES_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _READ_PERMISSIONS_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _SCRIPT_OUTCOME_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _outcome_marker
+from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
@@ -122,6 +124,9 @@ class StubOuter(MutableModel):
     )
     machine_permissions: str | None = Field(
         default=None, description="The permissions policy this machine is enforcing, or None when it has none."
+    )
+    machine_desktop_egress_rules: str | None = Field(
+        default=None, description="The desktop egress rules file this machine holds, or None when it has none."
     )
     remote_files: dict[str, bytes] = Field(
         default_factory=dict, description="Files written to the machine, by absolute path."
@@ -265,7 +270,8 @@ class StubOuter(MutableModel):
         missing tmpfs key (a script that touches the credential store needs
         one), refuse a key that is not the one the script expects (only a
         script that *brings* credential material names one), then apply
-        whichever halves it carries, credential first and policy second.
+        whichever parts it carries: credential first, then the desktop egress
+        rules, and the policy last.
         """
         self.latchkey_commands.append(script)
         variable_by_name = _parse_script_variables(script)
@@ -301,6 +307,12 @@ class StubOuter(MutableModel):
             )
         if "latchkey auth clear" in script:
             self._clear_account(variable_by_name["_lk_service"], variable_by_name["_lk_account"])
+        desktop_egress_rules_b64 = variable_by_name.get("_lk_desktop_egress_rules_b64")
+        if desktop_egress_rules_b64 is not None:
+            desktop_egress_rules = base64.b64decode(desktop_egress_rules_b64)
+            remote_dir = variable_by_name["_lk_remote_dir"].replace("$HOME", self.home)
+            self.remote_files[f"{remote_dir}/{DESKTOP_EGRESS_RULES_FILENAME}"] = desktop_egress_rules
+            self.machine_desktop_egress_rules = desktop_egress_rules.decode("utf-8")
         permissions_b64 = variable_by_name.get("_lk_permissions_b64")
         if permissions_b64 is not None:
             permissions = base64.b64decode(permissions_b64)
@@ -312,14 +324,16 @@ class StubOuter(MutableModel):
     def _answer_machine_read(self, variable_by_name: Mapping[str, str]) -> CommandResult:
         """Act out the single-round-trip read of everything this machine holds.
 
-        The policy is answered whatever key the machine is running under -- it
-        is not encrypted -- while the credential store needs the tmpfs key, so a
+        The policy and the desktop egress rules are answered whatever key the
+        machine is running under -- neither is encrypted -- while the credential store needs the tmpfs key, so a
         machine that has one but lost the key reports that instead, exactly as
         the script does.
         """
         lines: list[str] = []
         if self.machine_permissions is not None:
             lines.append(_READ_PERMISSIONS_PREFIX + _b64(self.machine_permissions.encode("utf-8")))
+        if self.machine_desktop_egress_rules is not None:
+            lines.append(_READ_DESKTOP_EGRESS_RULES_PREFIX + _b64(self.machine_desktop_egress_rules.encode("utf-8")))
         if self.machine_accounts:
             key_content = self.remote_files.get(variable_by_name["_lk_key_file"])
             if key_content is None or not key_content.strip():

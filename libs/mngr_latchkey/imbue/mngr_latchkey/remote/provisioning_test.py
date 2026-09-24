@@ -420,6 +420,19 @@ def test_ensure_latchkey_gateway_running_registers_supervisord_program_on_the_do
     # guarantees they are there. The router finds the impersonator as a
     # sibling, so no second env var is exported.
     assert f"export LATCHKEY_CURL={_CURL_ROUTER_PATH}" in run_script
+    # The router fails every request when the rules file it is pointed at is
+    # missing, so the wrapper creates an empty one before exporting the path,
+    # and never overwrites rules a machine already has.
+    rules_path = "/root/.latchkey/proxyRules.json"
+    assert f"if [ ! -f {rules_path} ]; then\n  (umask 077 && printf '{{}}\\n' > {rules_path})\nfi" in run_script
+    assert (
+        run_script.index(f"> {rules_path}")
+        < run_script.index(f"export LATCHKEY_DESKTOP_PROXY_CONFIG={rules_path}")
+        < run_script.index("exec latchkey gateway")
+    )
+    # The router looks the rules up by the service latchkey names in this
+    # header, and latchkey sends the header only when this variable asks for it.
+    assert "export LATCHKEY_DIAGNOSTIC_HEADERS=1\n" in run_script
     assert "FRANKWEILER_IMPERSONATE_CURL" not in run_script
     # The wrapper refuses to launch a keyless gateway when the machine's own
     # tmpfs secrets are gone (e.g. wiped by a reboot). The desktop-owned pair is

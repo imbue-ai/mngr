@@ -7,8 +7,9 @@ machine, and a bundle heading to the machine is re-encrypted with the machine's
 key here. Neither side's key is ever handed to the other.
 
 Everything this computer *pushes* to a machine -- a connect, a disconnect, a
-permissions snapshot, or a permission grant (a connect and a snapshot together)
--- travels as one POSIX ``sh`` script the machine runs in a single remote
+permissions snapshot (alone, or with a desktop egress rules snapshot), or a
+permission grant (a connect and a snapshot together) -- travels as one POSIX
+``sh`` script the machine runs in a single remote
 command (:func:`build_machine_script`): the payloads ride inside it
 base64-encoded, it expands ``$HOME`` itself rather than making this computer
 probe for it, and it reports on its last line of output what it did. So a push
@@ -26,7 +27,8 @@ its gateway could not read.
 
 Reading a machine back (:func:`fetch_machine_state`) is one script too: it has
 the machine re-encrypt its store for the desktop and prints that, its format
-stamp, and the policy it enforces as base64 lines of the same command's output,
+stamp, the policy it enforces, and its desktop egress rules as base64 lines of
+the same command's output,
 so opening a workspace's Permissions tab costs one round trip rather than one
 per file.
 """
@@ -59,6 +61,8 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
+from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_KEY_MESSAGE
@@ -72,7 +76,9 @@ from imbue.mngr_latchkey.remote._mirror import clear_machine_credentials
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
+from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import load_permissions_from_text
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
@@ -107,6 +113,7 @@ _SCRIPT_OUTCOME_PREFIX: Final[str] = "MNGR_LATCHKEY_OUTCOME="
 # invocation in the middle of the script writes to the same stdout, so an
 # answer has to be recognizable among whatever the CLI chose to say.
 _READ_PERMISSIONS_PREFIX: Final[str] = "MNGR_LATCHKEY_PERMISSIONS="
+_READ_DESKTOP_EGRESS_RULES_PREFIX: Final[str] = "MNGR_LATCHKEY_DESKTOP_EGRESS_RULES="
 _READ_CREDENTIALS_PREFIX: Final[str] = "MNGR_LATCHKEY_CREDENTIALS="
 _READ_DATA_FORMAT_VERSION_PREFIX: Final[str] = "MNGR_LATCHKEY_DATA_FORMAT_VERSION="
 
@@ -176,8 +183,8 @@ class _MachineScriptInputs(FrozenModel):
     order: the config first, because a gateway with no entry for a service
     cannot route a request to it, so nothing that refers to the service means
     anything until the machine's config names it; then the credential; then the
-    policy, because a rule the machine cannot yet exercise would send the agent
-    back to a request it had already answered.
+    desktop egress rules; then the policy, because a rule the machine cannot yet
+    exercise would send the agent back to a request it had already answered.
     """
 
     config_json: str | None = Field(
@@ -189,6 +196,12 @@ class _MachineScriptInputs(FrozenModel):
     )
     credential_change: _CredentialMerge | _CredentialClear | None = Field(
         description="What to do to the machine's credential store, or ``None`` for a script that only sets a policy."
+    )
+    desktop_egress_rules_json: str | None = Field(
+        description=(
+            "The full desktop egress rules file the machine's router should read afterwards, or ``None`` to "
+            "leave its rules alone."
+        )
     )
     permissions_json: str | None = Field(
         description="The full policy the machine should enforce afterwards, or ``None`` to leave its policy alone."
@@ -206,6 +219,9 @@ class FetchedMachineState(FrozenModel):
     )
     permissions_json: str | None = Field(
         description="The policy the machine's gateway enforces, or ``None`` when it has none yet."
+    )
+    desktop_egress_rules_json: str | None = Field(
+        description="The desktop egress rules the machine's router reads, or ``None`` when it has no rules file."
     )
 
 
@@ -241,6 +257,10 @@ def build_machine_read_script(desktop_key: SecretStr, machine_key_file: Path) ->
             f'  echo "{_READ_PERMISSIONS_PREFIX}$(base64 < "$_lk_remote_dir/{PERMISSIONS_CONFIG_FILENAME}" '
             "| tr -d '\\n')\"",
             "fi",
+            f'if [ -f "$_lk_remote_dir/{DESKTOP_EGRESS_RULES_FILENAME}" ]; then',
+            f'  echo "{_READ_DESKTOP_EGRESS_RULES_PREFIX}$(base64 < "$_lk_remote_dir/{DESKTOP_EGRESS_RULES_FILENAME}" '
+            "| tr -d '\\n')\"",
+            "fi",
             f'if [ -s "$_lk_remote_dir/{CREDENTIALS_STORE_FILENAME}" ]; then',
             '  if ! [ -s "$_lk_key_file" ]; then',
             f"    echo {shlex.quote(_outcome_marker(_MachineScriptOutcome.KEY_MISSING))}",
@@ -274,15 +294,16 @@ def fetch_machine_state(
     host_id: HostId,
     machine_key: SecretStr,
 ) -> FetchedMachineState:
-    """Read what a machine holds -- its credentials and its policy -- in one round trip.
+    """Read what a machine holds -- its credentials, its policy and its desktop egress rules -- in one round trip.
 
     Deliberately does not write anything here: the caller decides what to adopt
     (see :func:`adopt_machine_state`), and a read that lands over this
     computer's copies before the caller has looked at them would erase the
     comparison it came to make.
 
-    A machine with no store yet (nothing has ever been connected for it), or
-    with no policy yet (nothing has provisioned it), reports those as ``None``
+    A machine with no store yet (nothing has ever been connected for it), with
+    no policy yet (nothing has provisioned it), or with no desktop egress rules
+    file (its gateway run script predates the file) reports those as ``None``
     rather than as an error.
 
     Raises:
@@ -299,6 +320,7 @@ def fetch_machine_state(
     credentials = _decoded_answer(host_id, stdout, _READ_CREDENTIALS_PREFIX)
     data_format_version = _decoded_answer(host_id, stdout, _READ_DATA_FORMAT_VERSION_PREFIX)
     permissions = _decoded_answer(host_id, stdout, _READ_PERMISSIONS_PREFIX)
+    desktop_egress_rules = _decoded_answer(host_id, stdout, _READ_DESKTOP_EGRESS_RULES_PREFIX)
     if credentials is not None and not data_format_version:
         raise RemoteGatewayError(
             f"Failed to read the latchkey state of host {host_id} from VPS {host.get_name()}: its credential store "
@@ -308,6 +330,7 @@ def fetch_machine_state(
         credentials=credentials,
         data_format_version=data_format_version.decode("utf-8") if data_format_version is not None else "",
         permissions_json=permissions.decode("utf-8") if permissions is not None else None,
+        desktop_egress_rules_json=desktop_egress_rules.decode("utf-8") if desktop_egress_rules is not None else None,
     )
 
 
@@ -346,6 +369,46 @@ def adopt_machine_permissions(latchkey_directory: Path, host_id: HostId, permiss
             atomic_write(local_path, permissions_json)
     except OSError as e:
         raise RemoteGatewayError(f"Failed to store the permissions of host {host_id} at {local_path}: {e}") from e
+
+
+def adopt_machine_desktop_egress_rules(
+    latchkey_directory: Path, host_id: HostId, desktop_egress_rules_json: str | None
+) -> None:
+    """Take the machine's desktop egress rules as this computer's copy of them.
+
+    The machine always wins, for the reason its policy does (see
+    :func:`adopt_machine_permissions`): another of the user's computers may
+    have changed the rules. ``None`` means the machine has no rules file, and
+    removes the copy here, so this computer never shows rules the machine does
+    not have. Text is validated before it is stored and written only when it
+    actually differs, so unchanged rules cost nothing.
+
+    Raises:
+        RemoteGatewayError: when the rules are not ones this build
+            understands, or the copy cannot be stored or removed.
+    """
+    local_path = desktop_egress_rules_path_for_host(plugin_data_dir(latchkey_directory), host_id)
+    if desktop_egress_rules_json is None:
+        try:
+            local_path.unlink(missing_ok=True)
+        except OSError as e:
+            raise RemoteGatewayError(
+                f"Failed to remove the desktop egress rules of host {host_id} at {local_path}: {e}"
+            ) from e
+        return
+    try:
+        parse_desktop_egress_rules(desktop_egress_rules_json)
+    except DesktopEgressError as e:
+        raise RemoteGatewayError(
+            f"The machine of host {host_id} holds a desktop egress rules file this build cannot read: {e}"
+        ) from e
+    try:
+        if not local_path.is_file() or local_path.read_text() != desktop_egress_rules_json:
+            atomic_write(local_path, desktop_egress_rules_json)
+    except OSError as e:
+        raise RemoteGatewayError(
+            f"Failed to store the desktop egress rules of host {host_id} at {local_path}: {e}"
+        ) from e
 
 
 def _decoded_answer(host_id: HostId, stdout: str, prefix: str) -> bytes | None:
@@ -410,6 +473,7 @@ def push_credentials(
             _MachineScriptInputs(
                 config_json=config_json,
                 credential_change=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
+                desktop_egress_rules_json=None,
                 permissions_json=None,
             ),
             machine_key,
@@ -451,6 +515,7 @@ def push_credentials_with_permissions(
             _MachineScriptInputs(
                 config_json=config_json,
                 credential_change=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
+                desktop_egress_rules_json=None,
                 permissions_json=permissions_json,
             ),
             machine_key,
@@ -487,6 +552,7 @@ def clear_remote_credentials(
                     service_name=service_name,
                     account=account,
                 ),
+                desktop_egress_rules_json=None,
                 permissions_json=None,
             ),
             machine_key,
@@ -516,9 +582,44 @@ def push_permissions_snapshot(host: OuterHostInterface, host_id: HostId, permiss
         _apply_machine_script(
             host,
             host_id,
-            _MachineScriptInputs(credential_change=None, permissions_json=permissions_json),
+            _MachineScriptInputs(
+                credential_change=None, desktop_egress_rules_json=None, permissions_json=permissions_json
+            ),
             machine_key=None,
             failure_description=f"apply the permissions of host {host_id}",
+        )
+
+
+def push_permissions_and_desktop_egress_rules(
+    host: OuterHostInterface, host_id: HostId, permissions_json: str, desktop_egress_rules_json: str
+) -> None:
+    """Make both snapshots what ``host_id``'s machine holds -- its policy and its desktop egress rules -- in one round trip.
+
+    How turning desktop egress on or off for a service reaches the machine: the
+    policy carries the device-gated rule and the rules file carries the routing,
+    and they change together. Both are validated before anything is sent, and
+    each is installed atomically. Like :func:`push_permissions_snapshot`, this
+    carries no key gate, because neither file is encrypted.
+
+    Raises:
+        RemoteGatewayError: when either snapshot is not one this build can
+            read, or the machine refuses or fails the script.
+    """
+    _validate_permissions_snapshot(host_id, permissions_json)
+    _validate_desktop_egress_rules_snapshot(host_id, desktop_egress_rules_json)
+    with log_span(
+        "Applying a permissions snapshot and desktop egress rules for host {} to VPS {}", host_id, host.get_name()
+    ):
+        _apply_machine_script(
+            host,
+            host_id,
+            _MachineScriptInputs(
+                credential_change=None,
+                desktop_egress_rules_json=desktop_egress_rules_json,
+                permissions_json=permissions_json,
+            ),
+            machine_key=None,
+            failure_description=f"apply the permissions and desktop egress rules of host {host_id}",
         )
 
 
@@ -560,6 +661,17 @@ def build_machine_script(inputs: _MachineScriptInputs) -> str:
             pass
         case _ as unreachable:
             assert_never(unreachable)
+    # The script can stop between these two files. With the rules first, a
+    # service being turned on is left routed without its device-gated rule on
+    # the machine; with the policy first, a service being turned off is left
+    # routed after its rule is gone. Either way the desktop refuses the routed
+    # requests (in the first case, once a refresh has adopted the machine's
+    # policy) until the push is repeated. Neither order is safer, and this one
+    # keeps the policy the last thing a push installs.
+    if inputs.desktop_egress_rules_json is not None:
+        prologue.append(f'_lk_desktop_egress_rules_tmp="$_lk_remote_dir/.{DESKTOP_EGRESS_RULES_FILENAME}.$$.tmp"')
+        scratch_variable_names.append("_lk_desktop_egress_rules_tmp")
+        body.extend(_desktop_egress_rules_lines(inputs.desktop_egress_rules_json))
     if inputs.permissions_json is not None:
         prologue.append(f'_lk_permissions_tmp="$_lk_remote_dir/.{PERMISSIONS_CONFIG_FILENAME}.$$.tmp"')
         scratch_variable_names.append("_lk_permissions_tmp")
@@ -659,6 +771,16 @@ def _config_lines(config_json: str) -> tuple[str, ...]:
         f"_lk_config_b64={base64.b64encode(config_json.encode('utf-8')).decode('ascii')}",
         'printf \'%s\' "$_lk_config_b64" | base64 -d > "$_lk_config_tmp"',
         f'mv -f "$_lk_config_tmp" "$_lk_remote_dir/{CONFIG_FILENAME}"',
+    )
+
+
+@pure
+def _desktop_egress_rules_lines(desktop_egress_rules_json: str) -> tuple[str, ...]:
+    """Lines that install the desktop egress rules atomically, so the router never reads a half-written file."""
+    return (
+        f"_lk_desktop_egress_rules_b64={base64.b64encode(desktop_egress_rules_json.encode('utf-8')).decode('ascii')}",
+        'printf \'%s\' "$_lk_desktop_egress_rules_b64" | base64 -d > "$_lk_desktop_egress_rules_tmp"',
+        f'mv -f "$_lk_desktop_egress_rules_tmp" "$_lk_remote_dir/{DESKTOP_EGRESS_RULES_FILENAME}"',
     )
 
 
@@ -813,6 +935,13 @@ def _validate_permissions_snapshot(host_id: HostId, permissions_json: str) -> No
         load_permissions_from_text(permissions_json)
     except LatchkeyStoreError as e:
         raise RemoteGatewayError(f"Refusing to apply an unreadable permissions snapshot to host {host_id}: {e}") from e
+
+
+def _validate_desktop_egress_rules_snapshot(host_id: HostId, desktop_egress_rules_json: str) -> None:
+    try:
+        parse_desktop_egress_rules(desktop_egress_rules_json)
+    except DesktopEgressError as e:
+        raise RemoteGatewayError(f"Refusing to apply unreadable desktop egress rules to host {host_id}: {e}") from e
 
 
 def _desktop_encryption_key(latchkey: Latchkey) -> SecretStr:

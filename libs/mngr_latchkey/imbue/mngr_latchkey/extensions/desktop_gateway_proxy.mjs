@@ -18,28 +18,7 @@ const DESKTOP_PERMISSIONS_OVERRIDE_FILE_ENV_VAR =
   'LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE';
 const GATEWAY_PASSWORD_HEADER = 'X-Latchkey-Gateway-Password';
 const PERMISSIONS_OVERRIDE_HEADER = 'X-Latchkey-Gateway-Permissions-Override';
-// Prefix that asks for a third-party request to leave from the user's own
-// machine rather than from this VPS (e.g. because the destination blocks
-// datacenter IPs). The rest of the path is the absolute target URL, exactly
-// as the gateway's own ``/gateway/<url>`` endpoint spells it, so unwrapping
-// is a prefix swap: ``/via-desktop/https://a.com/x`` is forwarded to the
-// desktop gateway as ``/gateway/https://a.com/x`` and handled there by its
-// native outbound proxy. Credentials are injected, and the permission check
-// runs, on the desktop -- against the same host permissions file this proxy
-// already targets -- so routing this way grants nothing extra.
-//
-// Local workspaces never send this prefix: their gateway already runs on the
-// user's machine, so minds leaves their prefix env var empty and they call
-// ``/gateway/<url>`` directly.
-const VIA_DESKTOP_PATH_PREFIX = '/via-desktop';
-const GATEWAY_PATH_PREFIX = '/gateway/';
-
-const PROXY_PATH_PREFIXES = [
-  '/permissions',
-  '/permission-requests',
-  '/minds-api-proxy',
-  VIA_DESKTOP_PATH_PREFIX,
-];
+const PROXY_PATH_PREFIXES = ['/permissions', '/permission-requests', '/minds-api-proxy'];
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -132,37 +111,6 @@ function isProxyRoute(pathOnly) {
 }
 
 /**
- * Translate an inbound request URL into the path to request upstream.
- *
- * Every proxied family but ``/via-desktop`` is forwarded verbatim, because the
- * desktop serves it from an extension mounted at the same path. ``/via-desktop``
- * is unwrapped onto the desktop gateway's native ``/gateway/<url>`` endpoint,
- * so the desktop needs no extension of its own.
- *
- * The remainder is required to be an absolute http(s) URL -- the same rule
- * ``extractTargetUrl`` enforces on the native route -- so a malformed target
- * fails here, on the machine the caller can see, rather than as an opaque 400
- * from a gateway two hops away. Operating on the raw request URL (never a
- * parsed one) keeps the target byte-identical to what the caller sent, matching
- * how the native endpoint slices its own prefix.
- */
-function buildUpstreamPath(rawUrl, pathOnly) {
-  const isViaDesktop =
-    pathOnly === VIA_DESKTOP_PATH_PREFIX || pathOnly.startsWith(`${VIA_DESKTOP_PATH_PREFIX}/`);
-  if (!isViaDesktop) return rawUrl;
-  const target = rawUrl.startsWith(`${VIA_DESKTOP_PATH_PREFIX}/`)
-    ? rawUrl.slice(VIA_DESKTOP_PATH_PREFIX.length + 1)
-    : '';
-  if (!target.startsWith('http://') && !target.startsWith('https://')) {
-    throw new DesktopGatewayProxyError(
-      400,
-      `${VIA_DESKTOP_PATH_PREFIX} must be followed by an absolute http:// or https:// URL.`,
-    );
-  }
-  return `${GATEWAY_PATH_PREFIX}${target}`;
-}
-
-/**
  * Copy the inbound headers, minus the two the desktop hop authenticates itself with.
  *
  * The caller's password authenticates it to *this* gateway and is a different
@@ -228,14 +176,14 @@ function pickRequestImpl(upstreamBase) {
   return upstreamBase.protocol === 'https:' ? httpsRequest : httpRequest;
 }
 
-function proxyRequest(request, response, upstreamBase, desktopCredentials, upstreamPath) {
+function proxyRequest(request, response, upstreamBase, desktopCredentials) {
   return new Promise((resolve) => {
     const upstreamRequest = pickRequestImpl(upstreamBase)({
       protocol: upstreamBase.protocol,
       hostname: upstreamBase.hostname,
       port: upstreamBase.port.length > 0 ? upstreamBase.port : undefined,
       method: (request.method ?? 'GET').toUpperCase(),
-      path: upstreamPath,
+      path: request.url ?? '/',
       headers: buildUpstreamHeaders(request, upstreamBase, desktopCredentials),
     });
 
@@ -278,11 +226,9 @@ export default async function desktopGatewayProxyExtension(request, response) {
 
   let upstreamBase;
   let desktopCredentials;
-  let upstreamPath;
   try {
     upstreamBase = resolveDesktopGatewayBase();
     desktopCredentials = await resolveDesktopCredentials();
-    upstreamPath = buildUpstreamPath(request.url ?? '/', pathOnly);
   } catch (error) {
     if (error instanceof DesktopGatewayProxyError) {
       sendError(response, error.statusCode, error.message);
@@ -294,7 +240,7 @@ export default async function desktopGatewayProxyExtension(request, response) {
   }
 
   try {
-    await proxyRequest(request, response, upstreamBase, desktopCredentials, upstreamPath);
+    await proxyRequest(request, response, upstreamBase, desktopCredentials);
   } catch (error) {
     if (!response.headersSent) {
       const message = error instanceof Error ? error.message : String(error);

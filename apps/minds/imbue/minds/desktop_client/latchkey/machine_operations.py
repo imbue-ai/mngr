@@ -47,6 +47,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
+from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
@@ -181,11 +182,49 @@ class MachineOperator(MutableModel):
             if permissions_json is not None:
                 machine.set_permissions(permissions_json)
 
+    def push_permissions_and_desktop_egress_rules(self, workspace_agent_id: str) -> None:
+        """Make this computer's copies of a workspace's policy and desktop egress rules the ones its machine holds.
+
+        Called once both copies have been edited here. Both travel as whole
+        snapshots in one round trip, so the machine never holds a policy that
+        allows forwarding without the rules that route to it, or the reverse.
+        A host with no copy of the policy here pushes nothing, as in
+        :meth:`push_permissions`.
+
+        Raises:
+            MachineOperationError: when a snapshot cannot be read, when there
+                is no copy of the rules to push, or when the machine does not
+                take the pair.
+        """
+        with self._machine(workspace_agent_id, PERMISSIONS_FAILURE_DESCRIPTION) as machine:
+            if machine is None:
+                return
+            permissions_json = self._host_permissions(machine.host_id, PERMISSIONS_FAILURE_DESCRIPTION)
+            if permissions_json is None:
+                return
+            desktop_egress_rules_json = self._host_desktop_egress_rules(
+                machine.host_id, PERMISSIONS_FAILURE_DESCRIPTION
+            )
+            machine.set_permissions_and_desktop_egress_rules(permissions_json, desktop_egress_rules_json)
+
     def _host_permissions(self, host_id: HostId, failure_description: str) -> str | None:
         try:
             return read_host_permissions(self.access.latchkey.plugin_data_dir, host_id)
         except LatchkeyStoreError as e:
             raise MachineOperationError(f"Could not {failure_description}: {e}") from e
+
+    def _host_desktop_egress_rules(self, host_id: HostId, failure_description: str) -> str:
+        try:
+            desktop_egress_rules_json = read_host_desktop_egress_rules(self.access.latchkey.plugin_data_dir, host_id)
+        except LatchkeyStoreError as e:
+            raise MachineOperationError(f"Could not {failure_description}: {e}") from e
+        if desktop_egress_rules_json is None:
+            # The caller writes the copy immediately before pushing it.
+            raise MachineOperationError(
+                f"Could not {failure_description}: this computer has no copy of the desktop egress rules "
+                f"of host {host_id}."
+            )
+        return desktop_egress_rules_json
 
     @contextmanager
     def _machine(self, workspace_agent_id: str, failure_description: str) -> Iterator[MachineCredentials | None]:

@@ -220,6 +220,14 @@ class DesktopClientState(MutableModel):
             "change."
         ),
     )
+    device_id: str = Field(
+        default="",
+        frozen=True,
+        description=(
+            "This install's device id. Empty when the app was built without one (minimal setups, tests), "
+            "and desktop egress is then unsupported."
+        ),
+    )
     permission_requests_consumer: PermissionRequestsConsumer | None = Field(
         default=None, description="Streaming permission-requests consumer (wired post-construction)"
     )

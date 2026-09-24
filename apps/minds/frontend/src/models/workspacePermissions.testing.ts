@@ -8,6 +8,7 @@
 
 import type {
   UiAvailableConnection,
+  UiDesktopEgressToggle,
   UiPathSync,
   UiPermissionConnection,
   UiSharedPath,
@@ -59,9 +60,18 @@ export function credentialsSignIn(overrides: Partial<UiServiceSignIn> = {}): UiS
   };
 }
 
+/** The toggle of a workspace that runs on this computer: not offered at all. */
+export const DESKTOP_EGRESS_UNSUPPORTED: UiDesktopEgressToggle = { is_supported: false, is_enabled: false };
+
+/** The toggle of a remote workspace: offered, and off. */
+export function desktopEgress(overrides: Partial<UiDesktopEgressToggle> = {}): UiDesktopEgressToggle {
+  return { is_supported: true, is_enabled: false, ...overrides };
+}
+
 export function slackConnection(overrides: Partial<UiPermissionConnection> = {}): UiPermissionConnection {
   return {
     sign_in: BROWSER_SIGN_IN,
+    desktop_egress: DESKTOP_EGRESS_UNSUPPORTED,
     service_name: "slack",
     display_name: "Slack",
     account: "",

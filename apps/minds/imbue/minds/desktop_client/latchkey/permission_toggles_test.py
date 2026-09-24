@@ -1,18 +1,23 @@
 """Unit tests for the per-workspace permission-toggle module."""
 
+import json
 from pathlib import Path
 
 import pytest
 from pydantic import Field
 from pydantic import JsonValue
+from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
+from imbue.minds.desktop_client.latchkey.permission_overview import revoke_service_account_for_workspace
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspacePermissionsView
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_connector_toggle
+from imbue.minds.desktop_client.latchkey.permission_toggles import apply_desktop_egress_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_self_toggle
+from imbue.minds.desktop_client.latchkey.permission_toggles import build_desktop_egress_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_file_sharing_toggles
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_permissions_view
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_toggles
@@ -20,6 +25,8 @@ from imbue.minds.desktop_client.latchkey.permission_toggles import classify_perm
 from imbue.minds.desktop_client.latchkey.permission_toggles import compute_connector_permissions
 from imbue.minds.desktop_client.latchkey.permission_toggles import compute_self_permissions
 from imbue.minds.desktop_client.latchkey.permission_toggles import connect_service_with_credentials
+from imbue.minds.desktop_client.latchkey.permission_toggles import derive_desktop_egress_routed_service_names
+from imbue.minds.desktop_client.latchkey.permission_toggles import describe_why_desktop_egress_is_unsupported
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
@@ -32,24 +39,42 @@ from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressGrant
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
+from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
+from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 _ACCOUNT = "alice@example.com"
+_DEVICE_ID = "device-7f3a91"
+_OTHER_DEVICE_ID = "device-c04e55"
+
+# Slack has one scope and GitHub two.
+_DESKTOP_EGRESS_CATALOG_PAYLOAD: dict[str, object] = {
+    "slack": [{"scope": "slack-api", "display_name": "Slack", "permissions": [{"name": "slack-read-all"}]}],
+    "github": [
+        {"scope": "github-rest-api", "display_name": "GitHub", "permissions": [{"name": "github-read-all"}]},
+        {"scope": "github-git", "display_name": "GitHub Git", "permissions": [{"name": "github-git-read"}]},
+    ],
+}
+
+
+def _desktop_egress_catalog() -> ServicesCatalog:
+    return ServicesCatalog.from_catalog_payload(_DESKTOP_EGRESS_CATALOG_PAYLOAD)
 
 
 def _slack_info() -> ServicePermissionInfo:
     info = build_permissions_test_catalog().get_by_scope("slack-api")
     assert info is not None
     return info
-
-
-# -- classify_permission -------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -80,9 +105,6 @@ def test_classify_permission_covers_the_catalog_naming_conventions(
     assert (heading, label) == (expected_heading, expected_label)
 
 
-# -- compute_connector_permissions ---------------------------------------------
-
-
 def test_compute_connector_permissions_returns_the_full_set_after_a_flip() -> None:
     info = _slack_info()
     enabled = compute_connector_permissions(info, ("slack-read-all",), "slack-chat-write", True)
@@ -108,9 +130,6 @@ def test_compute_connector_permissions_can_empty_the_set_and_grant_the_wildcard(
 def test_compute_connector_permissions_rejects_a_permission_outside_the_catalog() -> None:
     with pytest.raises(PermissionToggleError):
         compute_connector_permissions(_slack_info(), (), "slack-users-read", True)
-
-
-# -- compute_self_permissions --------------------------------------------------
 
 
 _SHARED_PATH_PERMISSION = "minds-file-server-read-/Users/me/notes"
@@ -146,9 +165,6 @@ def test_compute_self_permissions_rejects_non_toggleable_names() -> None:
     """Baseline / accounts names on the shared rule must not be reachable from the toggle routes."""
     with pytest.raises(PermissionToggleError):
         compute_self_permissions(_self_config((_BASELINE_PERMISSION,)), _BASELINE_PERMISSION, False)
-
-
-# -- latchkey-self toggle rows -------------------------------------------------
 
 
 def test_build_file_sharing_toggles_includes_revoked_but_restorable_paths() -> None:
@@ -213,9 +229,6 @@ def test_build_workspace_toggles_labels_verbs_and_targets() -> None:
     assert by_permission[targeted_name].description == targeted_verb.description
 
 
-# -- build_workspace_permissions_view ------------------------------------------
-
-
 def test_build_workspace_permissions_view_marks_granted_toggles(tmp_path: Path) -> None:
     agent_id, host = AgentId(), HostId()
     latchkey = FakeAccountsLatchkey(
@@ -233,6 +246,7 @@ def test_build_workspace_permissions_view_marks_granted_toggles(tmp_path: Path) 
         latchkey=latchkey,
         machine_latchkey=latchkey,
         workspace_agent_id=str(agent_id),
+        device_id=_DEVICE_ID,
     )
 
     assert view.host_id == str(host)
@@ -266,6 +280,7 @@ def test_build_workspace_permissions_view_lists_granted_but_disconnected_account
         latchkey=latchkey,
         machine_latchkey=latchkey,
         workspace_agent_id=str(agent_id),
+        device_id=_DEVICE_ID,
     )
 
     assert [connection.service_name for connection in view.connections] == ["slack"]
@@ -332,6 +347,7 @@ def _build_view(
     agent_id: AgentId,
     host: HostId,
     machine_latchkey: FakeAccountsLatchkey | None = None,
+    device_id: str = _DEVICE_ID,
 ) -> WorkspacePermissionsView:
     return build_workspace_permissions_view(
         backend_resolver=FixedHostBackendResolver(
@@ -342,6 +358,7 @@ def _build_view(
         latchkey=latchkey,
         machine_latchkey=machine_latchkey if machine_latchkey is not None else latchkey,
         workspace_agent_id=str(agent_id),
+        device_id=device_id,
     )
 
 
@@ -417,10 +434,200 @@ def test_build_workspace_permissions_view_rejects_unknown_workspaces(tmp_path: P
             latchkey=latchkey,
             machine_latchkey=latchkey,
             workspace_agent_id=str(AgentId()),
+            device_id=_DEVICE_ID,
         )
 
 
-# -- apply_connector_toggle / apply_self_toggle --------------------------------
+def _egress_grant(scope: str, device_id: str) -> DesktopEgressGrant:
+    rule_key, _, _ = build_desktop_egress_grant(scope, device_id, None)
+    return DesktopEgressGrant(rule_key=rule_key, scope=scope, device_id=device_id)
+
+
+def _egress_config(scopes_and_device_ids: tuple[tuple[str, str], ...]) -> LatchkeyPermissionsConfig:
+    rules: list[dict[str, list[str]]] = []
+    schemas: dict[str, JsonValue] = {}
+    for scope, device_id in scopes_and_device_ids:
+        rule_key, permissions, grant_schemas = build_desktop_egress_grant(scope, device_id, None)
+        rules.append({rule_key: list(permissions)})
+        schemas.update(grant_schemas)
+    return LatchkeyPermissionsConfig(rules=tuple(rules), schemas=schemas)
+
+
+@pytest.mark.parametrize(
+    "device_id,is_machine_of_its_own,expected_fragment",
+    [
+        ("", True, "device id"),
+        (_DEVICE_ID, False, "machine of its own"),
+    ],
+)
+def test_describe_why_desktop_egress_is_unsupported_names_the_condition_that_is_not_met(
+    device_id: str,
+    is_machine_of_its_own: bool,
+    expected_fragment: str,
+) -> None:
+    reason = describe_why_desktop_egress_is_unsupported(device_id, is_machine_of_its_own)
+    assert reason is not None
+    assert expected_fragment in reason
+
+
+def test_describe_why_desktop_egress_is_unsupported_is_none_when_every_condition_is_met() -> None:
+    assert describe_why_desktop_egress_is_unsupported(_DEVICE_ID, True) is None
+
+
+def test_build_desktop_egress_toggle_is_enabled_only_when_every_scope_is_granted_and_the_service_is_routed() -> None:
+    scopes = ("github-rest-api", "github-git")
+    every_grant = tuple(_egress_grant(scope, _DEVICE_ID) for scope in scopes)
+
+    def _toggle(grants: tuple[DesktopEgressGrant, ...], rules: dict[str, JsonValue]) -> tuple[bool, bool]:
+        toggle = build_desktop_egress_toggle(_DEVICE_ID, True, "github", scopes, grants, rules)
+        return toggle.is_supported, toggle.is_enabled
+
+    assert _toggle(every_grant, {"github": True}) == (True, True)
+    assert _toggle(every_grant[:1], {"github": True}) == (True, False)
+    assert _toggle(every_grant, {"github": False}) == (True, False)
+    assert _toggle(every_grant, {"slack": True}) == (True, False)
+    assert _toggle((), {}) == (True, False)
+
+
+def test_build_desktop_egress_toggle_does_not_count_a_grant_for_another_device() -> None:
+    toggle = build_desktop_egress_toggle(
+        _DEVICE_ID,
+        True,
+        "slack",
+        ("slack-api",),
+        (_egress_grant("slack-api", _OTHER_DEVICE_ID),),
+        {"slack": True},
+    )
+    assert (toggle.is_supported, toggle.is_enabled) == (True, False)
+
+
+def test_build_desktop_egress_toggle_is_never_enabled_when_unsupported() -> None:
+    """A grant and a routed service left behind do not make an unsupported toggle read as on."""
+    toggle = build_desktop_egress_toggle(
+        "",
+        True,
+        "slack",
+        ("slack-api",),
+        (_egress_grant("slack-api", _DEVICE_ID),),
+        {"slack": True},
+    )
+    assert (toggle.is_supported, toggle.is_enabled) == (False, False)
+
+
+def test_derive_desktop_egress_routed_service_names_lists_every_service_granted_for_any_device() -> None:
+    catalog = _desktop_egress_catalog().as_mapping()
+
+    assert derive_desktop_egress_routed_service_names(LatchkeyPermissionsConfig(), catalog) == ()
+    # One granted scope is enough to route the whole service, for any device.
+    assert derive_desktop_egress_routed_service_names(
+        _egress_config((("github-git", _OTHER_DEVICE_ID),)), catalog
+    ) == ("github",)
+    assert derive_desktop_egress_routed_service_names(
+        _egress_config((("slack-api", _DEVICE_ID), ("github-git", _OTHER_DEVICE_ID))), catalog
+    ) == ("github", "slack")
+
+
+def _desktop_egress_latchkey(
+    tmp_path: Path,
+    accounts_by_service: dict[str, list[str]] | None = None,
+) -> FakeAccountsLatchkey:
+    return FakeAccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        accounts_by_service=accounts_by_service if accounts_by_service is not None else {"slack": [_ACCOUNT]},
+    )
+
+
+def _give_host_a_machine_of_its_own(latchkey: FakeAccountsLatchkey, host: HostId) -> None:
+    store_machine_encryption_key(latchkey.plugin_data_dir, host, SecretStr("machine-key-5820"))
+
+
+def _grant_desktop_egress(latchkey: FakeAccountsLatchkey, host: HostId, scope: str, device_id: str) -> None:
+    rule_key, permissions, schemas = build_desktop_egress_grant(scope, device_id, None)
+    build_fake_gateway_client().set_permission_rule(
+        permissions_path_for_host(latchkey.plugin_data_dir, host), rule_key, permissions, schemas
+    )
+
+
+def _write_desktop_egress_rules_copy(latchkey: FakeAccountsLatchkey, host: HostId, rules_json: str) -> None:
+    rules_path = desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(rules_json)
+
+
+def _slack_desktop_egress_states(view: WorkspacePermissionsView) -> list[tuple[bool, bool]]:
+    """``(is_supported, is_enabled)`` of every Slack connection panel, in nav order."""
+    return [
+        (connection.desktop_egress.is_supported, connection.desktop_egress.is_enabled)
+        for connection in view.connections
+        if connection.service_name == "slack"
+    ]
+
+
+def test_view_offers_no_desktop_egress_for_a_workspace_with_no_machine_of_its_own(tmp_path: Path) -> None:
+    agent_id, host = AgentId(), HostId()
+    latchkey = _desktop_egress_latchkey(tmp_path)
+
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(False, False)]
+
+
+def test_view_offers_no_desktop_egress_when_the_app_has_no_device_id(tmp_path: Path) -> None:
+    agent_id, host = AgentId(), HostId()
+    latchkey = _desktop_egress_latchkey(tmp_path)
+    _give_host_a_machine_of_its_own(latchkey, host)
+
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host, device_id="")) == [(False, False)]
+
+
+def test_view_reports_desktop_egress_enabled_only_with_this_devices_grant_and_the_routed_service(
+    tmp_path: Path,
+) -> None:
+    agent_id, host = AgentId(), HostId()
+    latchkey = _desktop_egress_latchkey(tmp_path)
+    _give_host_a_machine_of_its_own(latchkey, host)
+
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, False)]
+
+    # Routed with no grant: the desktop gateway would refuse the requests.
+    _write_desktop_egress_rules_copy(latchkey, host, json.dumps({"slack": True}))
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, False)]
+
+    _grant_desktop_egress(latchkey, host, "slack-api", _DEVICE_ID)
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, True)]
+
+    # Granted with nothing routed: the machine would make the requests itself.
+    _write_desktop_egress_rules_copy(latchkey, host, "{}")
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, False)]
+
+
+def test_view_reads_a_desktop_egress_grant_for_another_device_as_not_enabled_here(tmp_path: Path) -> None:
+    agent_id, host = AgentId(), HostId()
+    latchkey = _desktop_egress_latchkey(tmp_path)
+    _give_host_a_machine_of_its_own(latchkey, host)
+    _grant_desktop_egress(latchkey, host, "slack-api", _OTHER_DEVICE_ID)
+    _write_desktop_egress_rules_copy(latchkey, host, json.dumps({"slack": True}))
+
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, False)]
+
+
+def test_view_treats_an_unparseable_desktop_egress_rules_copy_as_routing_nothing(tmp_path: Path) -> None:
+    agent_id, host = AgentId(), HostId()
+    latchkey = _desktop_egress_latchkey(tmp_path)
+    _give_host_a_machine_of_its_own(latchkey, host)
+    _grant_desktop_egress(latchkey, host, "slack-api", _DEVICE_ID)
+    _write_desktop_egress_rules_copy(latchkey, host, "[not rules")
+
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, False)]
+
+
+def test_view_carries_the_same_desktop_egress_toggle_on_every_account_of_a_service(tmp_path: Path) -> None:
+    agent_id, host = AgentId(), HostId()
+    latchkey = _desktop_egress_latchkey(tmp_path, accounts_by_service={"slack": [_ACCOUNT, "bob@example.com"]})
+    _give_host_a_machine_of_its_own(latchkey, host)
+    _grant_desktop_egress(latchkey, host, "slack-api", _DEVICE_ID)
+    _write_desktop_egress_rules_copy(latchkey, host, json.dumps({"slack": True}))
+
+    assert _slack_desktop_egress_states(_build_view(latchkey, agent_id, host)) == [(True, True), (True, True)]
 
 
 class _ToggleHarness(FrozenModel):
@@ -436,6 +643,10 @@ class _ToggleHarness(FrozenModel):
         default_factory=list,
         description="The workspace agent id of every edit pushed to a machine, in order.",
     )
+    carried_with_desktop_egress_rules: list[str] = Field(
+        default_factory=list,
+        description="The workspace agent id of every push of the policy together with the rules file, in order.",
+    )
 
     def apply_connector(self, scope: str, account: str, permission: str, enabled: bool) -> None:
         apply_connector_toggle(
@@ -449,6 +660,19 @@ class _ToggleHarness(FrozenModel):
             permission=permission,
             enabled=enabled,
             push_permissions_to_machine=self.carried_to_machines.append,
+        )
+
+    def apply_desktop_egress(self, service_name: str, enabled: bool, device_id: str = _DEVICE_ID) -> None:
+        apply_desktop_egress_toggle(
+            backend_resolver=self.backend_resolver,
+            gateway_client=self.gateway_client,
+            services_catalog=self.services_catalog,
+            latchkey=self.latchkey,
+            workspace_agent_id=self.workspace_agent_id,
+            service_name=service_name,
+            enabled=enabled,
+            device_id=device_id,
+            push_permissions_and_desktop_egress_rules_to_machine=self.carried_with_desktop_egress_rules.append,
         )
 
     def apply_self(self, permission: str, enabled: bool) -> None:
@@ -583,7 +807,173 @@ def test_apply_self_toggle_rewrites_only_the_toggled_name(tmp_path: Path) -> Non
     assert config.rules == ({SELF_SCOPE: [_BASELINE_PERMISSION, _SHARED_PATH_PERMISSION]},)
 
 
-# -- connect_service_with_credentials ------------------------------------------
+def _desktop_egress_harness(
+    tmp_path: Path,
+    host: HostId,
+    is_machine_of_its_own: bool = True,
+) -> _ToggleHarness:
+    agent_id = AgentId()
+    latchkey = _desktop_egress_latchkey(tmp_path)
+    if is_machine_of_its_own:
+        _give_host_a_machine_of_its_own(latchkey, host)
+    return _ToggleHarness(
+        backend_resolver=FixedHostBackendResolver(
+            url_by_agent_and_service={}, fixed_host_id=host, known_agent_ids=(agent_id,)
+        ),
+        gateway_client=build_fake_gateway_client(),
+        services_catalog=_desktop_egress_catalog(),
+        latchkey=latchkey,
+        workspace_agent_id=str(agent_id),
+        permissions_path=permissions_path_for_host(latchkey.plugin_data_dir, host),
+    )
+
+
+def _desktop_egress_grants(harness: _ToggleHarness) -> set[tuple[str, str]]:
+    """``(scope, device_id)`` of every desktop egress grant in the host's file."""
+    return {
+        (grant.scope, grant.device_id)
+        for grant in list_desktop_egress_grants(load_permissions(harness.permissions_path))
+    }
+
+
+def _desktop_egress_rules_copy(harness: _ToggleHarness, host: HostId) -> dict[str, JsonValue]:
+    rules_path = desktop_egress_rules_path_for_host(harness.latchkey.plugin_data_dir, host)
+    return parse_desktop_egress_rules(rules_path.read_text())
+
+
+def test_turning_desktop_egress_on_grants_every_scope_and_routes_the_service(tmp_path: Path) -> None:
+    host = HostId()
+    harness = _desktop_egress_harness(tmp_path, host)
+
+    harness.apply_desktop_egress("github", True)
+
+    assert _desktop_egress_grants(harness) == {("github-rest-api", _DEVICE_ID), ("github-git", _DEVICE_ID)}
+    assert _desktop_egress_rules_copy(harness, host) == {"github": True}
+    rules_path = desktop_egress_rules_path_for_host(harness.latchkey.plugin_data_dir, host)
+    assert rules_path.stat().st_mode & 0o777 == 0o600
+    # One push carries the policy and the rules file together, and the plain
+    # policy push is not used.
+    assert harness.carried_with_desktop_egress_rules == [harness.workspace_agent_id]
+    assert harness.carried_to_machines == []
+
+
+def test_turning_desktop_egress_off_deletes_only_this_devices_grants(tmp_path: Path) -> None:
+    host = HostId()
+    harness = _desktop_egress_harness(tmp_path, host)
+    harness.apply_desktop_egress("github", True)
+    harness.apply_desktop_egress("github", True, device_id=_OTHER_DEVICE_ID)
+
+    harness.apply_desktop_egress("github", False)
+
+    assert _desktop_egress_grants(harness) == {("github-rest-api", _OTHER_DEVICE_ID), ("github-git", _OTHER_DEVICE_ID)}
+    # The other computer still forwards GitHub, so it stays routed.
+    assert _desktop_egress_rules_copy(harness, host) == {"github": True}
+    assert len(harness.carried_with_desktop_egress_rules) == 3
+
+
+def test_turning_one_service_off_leaves_the_entry_of_another_granted_service_in_place(tmp_path: Path) -> None:
+    host = HostId()
+    harness = _desktop_egress_harness(tmp_path, host)
+    harness.apply_desktop_egress("slack", True)
+    harness.apply_desktop_egress("github", True)
+    assert _desktop_egress_rules_copy(harness, host) == {"github": True, "slack": True}
+
+    harness.apply_desktop_egress("github", False)
+
+    assert _desktop_egress_grants(harness) == {("slack-api", _DEVICE_ID)}
+    assert _desktop_egress_rules_copy(harness, host) == {"slack": True}
+
+    harness.apply_desktop_egress("slack", False)
+
+    assert _desktop_egress_grants(harness) == set()
+    assert _desktop_egress_rules_copy(harness, host) == {}
+
+
+def test_a_desktop_egress_write_replaces_a_rules_copy_that_drifted_from_the_grants(tmp_path: Path) -> None:
+    host = HostId()
+    harness = _desktop_egress_harness(tmp_path, host)
+    _write_desktop_egress_rules_copy(harness.latchkey, host, json.dumps({"github": True}))
+
+    harness.apply_desktop_egress("slack", True)
+
+    assert _desktop_egress_rules_copy(harness, host) == {"slack": True}
+
+
+@pytest.mark.parametrize(
+    "device_id,is_machine_of_its_own,expected_fragment",
+    [
+        ("", True, "device id"),
+        (_DEVICE_ID, False, "machine of its own"),
+    ],
+)
+def test_turning_desktop_egress_on_where_it_is_unsupported_is_refused_and_writes_nothing(
+    tmp_path: Path,
+    device_id: str,
+    is_machine_of_its_own: bool,
+    expected_fragment: str,
+) -> None:
+    host = HostId()
+    harness = _desktop_egress_harness(tmp_path, host, is_machine_of_its_own=is_machine_of_its_own)
+
+    with pytest.raises(PermissionToggleError, match=expected_fragment):
+        harness.apply_desktop_egress("slack", True, device_id=device_id)
+
+    assert harness.gateway_client.set_calls == ()
+    assert not desktop_egress_rules_path_for_host(harness.latchkey.plugin_data_dir, host).exists()
+    assert harness.carried_with_desktop_egress_rules == []
+
+
+def test_a_device_id_that_cannot_name_a_rule_is_refused_as_a_toggle_error(tmp_path: Path) -> None:
+    """The library's own refusal must not escape as an unhandled error."""
+    harness = _desktop_egress_harness(tmp_path, HostId())
+
+    with pytest.raises(PermissionToggleError, match="Could not build the Slack grant"):
+        harness.apply_desktop_egress("slack", True, device_id="device:with-separator")
+
+    assert harness.gateway_client.set_calls == ()
+
+
+def test_apply_desktop_egress_toggle_rejects_an_unknown_service(tmp_path: Path) -> None:
+    harness = _desktop_egress_harness(tmp_path, HostId())
+
+    with pytest.raises(PermissionToggleError, match="Unknown service 'not-a-service'"):
+        harness.apply_desktop_egress("not-a-service", True)
+
+
+def test_account_and_self_toggles_and_a_revoke_leave_desktop_egress_grants_in_place(tmp_path: Path) -> None:
+    """The machine's gateway checks the account before it routes, so a grant left behind allows nothing."""
+    host = HostId()
+    harness = _desktop_egress_harness(tmp_path, host)
+    harness.apply_desktop_egress("slack", True)
+    harness.gateway_client.set_permission_rule(
+        harness.permissions_path,
+        SELF_SCOPE,
+        [_BASELINE_PERMISSION, _SHARED_PATH_PERMISSION],
+        schemas={_SHARED_PATH_PERMISSION: {"type": "object"}},
+    )
+
+    harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-read-all", enabled=True)
+    harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-read-all", enabled=False)
+    harness.apply_self(permission=_SHARED_PATH_PERMISSION, enabled=False)
+    harness.apply_connector(scope="slack-api", account=_ACCOUNT, permission="slack-read-all", enabled=True)
+    revoke_service_account_for_workspace(
+        backend_resolver=harness.backend_resolver,
+        gateway_client=harness.gateway_client,
+        services_catalog=harness.services_catalog,
+        latchkey=harness.latchkey,
+        workspace_agent_id=harness.workspace_agent_id,
+        service_name="slack",
+        account=_ACCOUNT,
+        push_permissions_to_machine=harness.carried_to_machines.append,
+    )
+
+    assert _desktop_egress_grants(harness) == {("slack-api", _DEVICE_ID)}
+    assert _desktop_egress_rules_copy(harness, host) == {"slack": True}
+    # The account's own grant is gone, which is what the revoke is for.
+    assert [
+        grant.account
+        for grant in harness.services_catalog.list_service_account_grants(load_permissions(harness.permissions_path))
+    ] == []
 
 
 def _connect_aws(

@@ -11,6 +11,7 @@ import {
   awsAvailable,
   awsConnection,
   credentialsSignIn,
+  desktopEgress,
   pathSync,
   permissionsView,
   sharedPath,
@@ -27,6 +28,7 @@ import {
   connectServiceRowKey,
   connectionSectionId,
   connectorToggleRowKey,
+  desktopEgressRowKey,
   disconnectRowKey,
   fileSharingAccessLabel,
   folderSyncConflictLabel,
@@ -270,6 +272,46 @@ describe("PermissionsModel writes", () => {
       method: "POST",
       body: { permission: "shared-path-1", enabled: false },
     });
+  });
+
+  it("posts the service and new state of a desktop egress flip and adopts the returned view", async () => {
+    const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
+    const refreshed = permissionsView({
+      connections: [slackConnection({ desktop_egress: desktopEgress({ is_enabled: true }) })],
+    });
+    const { model, requests } = makeModel((url) =>
+      okWith(url.endsWith("/desktop-egress-toggle") ? refreshed : before),
+    );
+    await model.load();
+
+    await model.toggleDesktopEgress("slack", true);
+
+    expect(requests[1]).toEqual({
+      url: `${PERMISSIONS_URL}/desktop-egress-toggle`,
+      method: "POST",
+      body: { service_name: "slack", enabled: true },
+    });
+    expect(model.data).toEqual(refreshed);
+    expect(model.errorMessage).toBe("");
+  });
+
+  it("marks the desktop egress row busy while its write is in flight", async () => {
+    let release: (response: StubResponse) => void = () => {};
+    const { model } = makeModel((url) =>
+      url.endsWith("/desktop-egress-toggle")
+        ? new Promise<StubResponse>((resolve) => (release = resolve))
+        : okWith(permissionsView()),
+    );
+    await model.load();
+
+    const flip = model.toggleDesktopEgress("slack", true);
+    await settle();
+
+    expect(model.isRowBusy(desktopEgressRowKey("slack"))).toBe(true);
+    expect(model.isRowBusy(desktopEgressRowKey("aws"))).toBe(false);
+    release(okWith(permissionsView()));
+    await flip;
+    expect(model.isRowBusy(desktopEgressRowKey("slack"))).toBe(false);
   });
 
   it("posts the service and account on revoke all", async () => {

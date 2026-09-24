@@ -224,41 +224,174 @@ settings.
 ## Desktop egress
 
 Some destinations block the datacenter IP ranges a remote workspace's VPS sits
-in, so a request has to leave from the user's own machine to be accepted at all.
-Workspaces ask for that by *prefixing* the target URL, because latchkey's
-gateway routes on the request path alone -- a header cannot divert a request
-that already looks like `/gateway/<url>`.
+in, so a request to them is only accepted when it leaves from the user's own
+computer. Desktop egress sends a remote workspace's requests to a chosen
+service out through the user's computer. The workspace does nothing different:
+it calls its gateway as usual, and the machine's gateway decides per request
+where the request leaves from.
 
-`prepare_agent_latchkey` publishes the prefix to use as `MINDS_VIA_DESKTOP_URL_PREFIX`
-in every workspace's env:
+A request to a routed service takes these steps:
 
-| Workspace | Value | Why |
-|---|---|---|
-| VPS gateway | `https://latchkey-self.invalid/via-desktop` | `latchkey curl` recognizes the reserved `latchkey-self.invalid` host and rewrites such URLs onto the gateway's own origin, so the wrapped URL arrives as `/via-desktop/<target>` and the forwarding extension hands it to the desktop |
-| desktop gateway | `""` (empty) | the gateway already runs on the user's machine, so a plain request is already desktop egress and a prefix would only add a hop |
+1. The workspace sends the request to the machine's gateway (on the VPS).
+2. The machine's gateway runs its permission check, including the per-account
+   rules, and injects the credentials from the machine's own store. It names
+   the service it matched the request to in the request header
+   `X-Latchkey-Matched-Service`.
+3. The machine's gateway runs curl through the curl router
+   (`LATCHKEY_CURL`). The router looks up the matched service in the rules
+   file, finds that it is routed, removes the `X-Latchkey-Matched-Service`
+   header, and sends the request to the desktop gateway over the
+   desktop-to-VPS reverse tunnel, with a header asking the desktop gateway to
+   inject no credentials. It authenticates with the connected computer's
+   gateway password and that computer's permissions-override JWT for this
+   host, read on every request from the two files provisioning writes for the
+   forwarding extension
+   (`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE` and
+   `LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE`).
+4. The desktop gateway runs its own permission check, then makes the request
+   to the third party from the user's computer.
 
-In-workspace tooling therefore concatenates the value without branching on
-topology, and gets the right behavior in both. It is always set (empty rather
-than absent) so tooling can tell "minds configured no prefix" apart from "this
-workspace predates the feature".
+Credentials never leave the machine's store for this: they are injected on the
+machine, and the desktop only forwards.
 
-The name is `MINDS_*` rather than `LATCHKEY_*` even though the value is a
-latchkey URL. A workspace's env names each var after the tool that *reads* it
-(`LATCHKEY_GATEWAY` for latchkey, `MNGR_HOST_DIR` for the inner mngr), and
-latchkey never reads this one -- it only receives the concatenated result as a
-URL argument. With no single reader to name it after, it takes the name of the
-authority that decides the value: minds, which alone knows the topology.
+### The rules file
 
-```sh
-latchkey curl "$MINDS_VIA_DESKTOP_URL_PREFIX/https://api.example.com/v1/thing"
+`~/.latchkey/proxyRules.json` on the machine says which requests are routed. It
+is one JSON object. Each key is a latchkey service name, and a request that
+latchkey matched to a service whose value is truthy is sent through the desktop
+gateway:
+
+```json
+{
+  "github": true,
+  "slack": true
+}
 ```
 
-This grants nothing: the agent baseline opens the *route*, and what may be
-reached through it is decided by the ordinary per-service, per-account rules,
-which the desktop evaluates against the real target URL after unwrapping. A
-service the user has granted is reachable both ways with one grant, and a
-service they have not granted is reachable neither way -- so desktop egress
-never appears as its own consent prompt.
+- The router does not match URLs itself. Latchkey states which service it
+  matched a request to in the request header `X-Latchkey-Matched-Service`, and
+  the router looks that name up in the file. Latchkey sets the header only on
+  a request it injected credentials into, so a request it injected nothing
+  into is never routed.
+- Latchkey sets that header only with its diagnostic headers turned on. The
+  gateway run script exports `LATCHKEY_DIAGNOSTIC_HEADERS=1` for that.
+- Latchkey puts its header ahead of the caller's arguments and leaves a header
+  of the same name that the caller supplied in place. The router reads the
+  first occurrence, which is latchkey's, and removes every occurrence before
+  curl runs.
+- Every catalog service can be routed, including the ones whose URLs latchkey
+  matches by regular expression, such as GitHub and AWS.
+- A URL can belong to several services. The Google Drive files API, for
+  example, is shared by Google Drive, Google Docs and Google Sheets. Latchkey
+  reports the service whose credentials it used, so routing `google-docs` does
+  not route a request that latchkey served with `google-drive` credentials.
+- The gateway run script creates the file as `{}` when the machine has none,
+  and exports its path as `LATCHKEY_DESKTOP_PROXY_CONFIG`. The router fails
+  every request when that variable names a missing file, which is why the
+  script that exports the variable also creates the file.
+- The router reads the file on every request, so an edit takes effect without
+  restarting the gateway.
+- The values are booleans rather than device ids. A machine can reach only one
+  desktop gateway, because the reverse tunnel binds one port on the VPS, so
+  there is no second desktop to choose. The router treats any truthy JSON
+  value as on, in the JavaScript sense: an empty list or object is on.
+
+This needs latchkey 3.15.0 or later, which added `LATCHKEY_DIAGNOSTIC_HEADERS`,
+and latchkey-curl-shims v0.4.0 or later, which reads service-keyed rules. Both
+are what the install pins. With an older latchkey nothing is routed, because it
+ignores the variable and so never names the service. With an older router
+nothing is routed either: it looks for a key that the request URL starts with,
+and no URL starts with a service name.
+
+This computer keeps a copy of the file at
+`<latchkey_directory>/mngr_latchkey/hosts/<host_id>/proxyRules.json`, handled
+like its copy of the host's permissions file:
+
+- `MachineCredentials.refresh` reads the machine's file in the same remote
+  command as the credentials and the policy, and adopts it. The machine always
+  wins. When the machine has no file, the copy here is removed. Unlike the
+  policy, the machine is never seeded from the copy here.
+- `read_host_desktop_egress_rules` returns the copy's text.
+- A writer edits the copy here and its copy of the permissions file, then
+  pushes snapshots of both with
+  `MachineCredentials.set_permissions_and_desktop_egress_rules`, which costs
+  one remote command. An edit that is not pushed is discarded by the next
+  refresh.
+
+### The device-gated rule
+
+The desktop gateway checks a routed request against the host's permissions
+file (`hosts/<host_id>/latchkey_permissions.json` on this computer), like any
+other request from that host. The rule that allows it is gated on a device id:
+
+```json
+{
+  "rules": [{ "desktop-egress:<device id>:slack-api": ["any"] }],
+  "schemas": {
+    "desktop-egress:<device id>:slack-api": {
+      "allOf": [
+        { "$ref": "#/$defs/slack-api" },
+        {
+          "properties": {
+            "customMetadata": {
+              "type": "object",
+              "properties": {
+                "deviceId": { "const": "<device id>" },
+                "account": { "type": "null" }
+              },
+              "required": ["deviceId"]
+            }
+          },
+          "required": ["customMetadata"]
+        }
+      ]
+    }
+  }
+}
+```
+
+The gate is on the device id because the permissions file is shared between
+the user's computers: it is pushed to the machine, and every other computer
+the user connects from adopts it. Without the gate, a rule written on one
+computer would make every other computer forward the service's requests too.
+
+The device id reaches the check through detent's custom metadata. An embedder
+starts the desktop gateway with `DETENT_CUSTOM_METADATA={"deviceId": "<id>"}`
+in its environment (`imbue.mngr_latchkey.device_metadata.build_device_metadata_env`
+builds the value; minds passes it through the forward supervisor's
+`extra_env`). Detent reads that variable as `customMetadata` whenever latchkey
+supplies none of its own. Latchkey supplies `{"account": ...}` for every
+request it injects credentials into, and supplies nothing for a routed
+request, because it injects nothing into one. So `customMetadata.deviceId` is
+visible only to checks on requests that carry their own credentials.
+
+The `"account": { "type": "null" }` clause says the same thing in the rule
+itself: latchkey reports the account whose credentials it injects, and it
+injects none into a forwarded request, so the rule refuses any request that
+carries one. One consequence is that a device-gated rule and a [per-account
+grant](#per-account-grants) never match the same request: one requires
+`customMetadata.account` and the other refuses it. Their order in the file
+does not matter.
+
+The permission is `any` because the desktop's check is only about whether this
+computer sends the service's requests from its network. What the workspace may
+do with the service was already decided on the machine, whose gateway ran the
+per-account check before routing.
+
+The desktop gateway runs with `LATCHKEY_PASSTHROUGH_UNKNOWN=1`. Latchkey
+refuses a request that asks for no credential injection unless that is set.
+The permission check still runs on such a request, and denies whatever no rule
+allows.
+
+`imbue.mngr_latchkey.desktop_egress` is the single owner of both shapes:
+
+- `build_desktop_egress_grant` composes a rule (key, permissions, backing
+  schema), and `list_desktop_egress_grants` reads rules back by inspecting the
+  schema structure. As with per-account grants, the rule key is only a name
+  and is never parsed.
+- `build_desktop_egress_rules`, `serialize_desktop_egress_rules`,
+  `parse_desktop_egress_rules` and `is_service_routed` write and read the
+  rules file.
 
 ## Machine stores
 
@@ -276,6 +409,7 @@ what it says is about to be shown or acted on, never trusted between times:
     credentials.json.enc          this machine's credentials      (owned)
     data-format-version           the mirror's own format stamp   (owned)
     latchkey_permissions.json     the machine's policy, cached    (owned)
+    proxyRules.json               its desktop egress rules, cached (owned)
     machine_encryption_key        the machine's own key           (owned)
     machine_gateway_password      the machine's own password      (owned)
     permissions.json           -> latchkey_permissions.json
@@ -342,9 +476,10 @@ knowing:
 `MachineCredentials` is built for the duration of one exchange -- the caller
 opens the machine's outer host, does what it came to do, and lets both go --
 and every method costs a single remote command: `connect_service`,
-`disconnect_account`, `set_permissions` and `connect_service_with_permissions`
-push, and `refresh` reads the machine's credentials *and* its policy back in
-one go. Nothing is queued: an exchange either succeeds before its caller
+`disconnect_account`, `set_permissions`, `connect_service_with_permissions` and
+`set_permissions_and_desktop_egress_rules` push, and `refresh` reads the
+machine's credentials, its policy *and* its [desktop egress
+rules](#the-rules-file) back in one go. Nothing is queued: an exchange either succeeds before its caller
 returns or raises `RemoteGatewayError`, so an embedder (the minds desktop app)
 can block a user's click on it and report what the machine said.
 
@@ -444,19 +579,6 @@ grants back.
 Minds' own gateway-self scopes (`latchkey-self`, `minds-api-proxy-*`) stay
 account-agnostic: latchkey attaches no account metadata to requests an
 extension serves, so an account-gated schema would never match them.
-
-### Device id metadata
-
-A host's permissions file is shared by every computer the user connects to that
-machine from, so a rule that should hold on one computer only needs something
-to gate on. An embedder can start the desktop gateway with
-`DETENT_CUSTOM_METADATA={"deviceId": "<id>"}` in its environment
-(`imbue.mngr_latchkey.device_metadata.build_device_metadata_env` builds the
-value; minds passes it through the forward supervisor's `extra_env`). Detent
-reads that variable as `customMetadata` whenever latchkey supplies none of its
-own. Latchkey supplies `{"account": ...}` for every request it injects
-credentials into, so `customMetadata.deviceId` is visible only to checks on
-requests that carry their own credentials.
 
 ## Data-format changes
 
@@ -650,18 +772,6 @@ contend for both the desktop-to-VPS tunnel (whose VPS port only one can bind)
 and these files (which the last provisioning pass wins), so the desktop-owned
 routes can end up presenting one computer's secrets to the other's gateway and
 failing with 401 until the computer holding the tunnel provisions again.
-
-The same extension serves `/via-desktop/<absolute-target-url>`, which asks for a
-*third-party* request to leave from the user's machine rather than from the VPS
--- some destinations block datacenter IP ranges outright. That family is
-forwarded with its prefix swapped for `/gateway/`, so it lands on the desktop
-gateway's own outbound proxy and the desktop needs no extension of its own; the
-target is required to be an absolute `http(s)` URL and is sliced off the raw
-request URL, so it reaches the third party byte-identical to what the caller
-sent. Credentials are injected, and the permission check runs, on the desktop
-against the same host permissions file the proxy already targets, so this route
-reaches nothing a direct request could not. See [Desktop
-egress](#desktop-egress) for how a workspace asks for it.
 
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway

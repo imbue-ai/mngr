@@ -22,10 +22,12 @@ from imbue.mngr_latchkey.remote.credentials import FetchedMachineState
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _EMPTY_POLICY = '{"rules": []}'
 _SLACK_POLICY = '{"rules": [{"slack-api:a@example.com": ["slack-read-all"]}]}'
+_SLACK_DESKTOP_EGRESS_RULES = '{"slack": true}'
 
 
 class _RecordingMachine(MachineCredentials):
@@ -39,7 +41,7 @@ class _RecordingMachine(MachineCredentials):
 
     def refresh(self) -> FetchedMachineState:
         self._note("refresh")
-        return FetchedMachineState(credentials=None, permissions_json=None)
+        return FetchedMachineState(credentials=None, permissions_json=None, desktop_egress_rules_json=None)
 
     def connect_service(self, service_name: str, account: str) -> None:
         self._note(f"connect {service_name} {account}")
@@ -49,6 +51,9 @@ class _RecordingMachine(MachineCredentials):
 
     def set_permissions(self, permissions_json: str) -> None:
         self._note(f"set_permissions {permissions_json}")
+
+    def set_permissions_and_desktop_egress_rules(self, permissions_json: str, desktop_egress_rules_json: str) -> None:
+        self._note(f"set_permissions_and_desktop_egress_rules {permissions_json} {desktop_egress_rules_json}")
 
     def connect_service_with_permissions(self, service_name: str, account: str, permissions_json: str) -> None:
         self._note(f"grant {service_name} {account} {permissions_json}")
@@ -85,6 +90,7 @@ def _operator(
     *,
     is_machine_of_its_own: bool,
     policy: str | None = None,
+    desktop_egress_rules: str | None = None,
     refusal: str = "",
     store_failure: str = "",
     opening_refusal: str = "",
@@ -101,6 +107,10 @@ def _operator(
         permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
         permissions_path.parent.mkdir(parents=True, exist_ok=True)
         permissions_path.write_text(policy)
+    if desktop_egress_rules is not None:
+        rules_path = desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id)
+        rules_path.parent.mkdir(parents=True, exist_ok=True)
+        rules_path.write_text(desktop_egress_rules)
     machine = _RecordingMachine(
         host=cast(OuterHostInterface, object()),
         latchkey=latchkey,
@@ -125,6 +135,7 @@ def test_a_local_workspaces_state_is_already_where_its_gateway_reads_it(tmp_path
     operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=False, policy=_EMPTY_POLICY)
 
     operator.push_permissions(agent_id)
+    operator.push_permissions_and_desktop_egress_rules(agent_id)
     operator.connect_service(agent_id, "slack", "a@example.com")
     operator.refresh(agent_id)
 
@@ -146,6 +157,53 @@ def test_a_permissions_edit_with_no_canonical_file_pushes_nothing(tmp_path: Path
     operator.push_permissions(agent_id)
 
     assert machine.calls == []
+
+
+def test_a_desktop_egress_edit_travels_as_both_snapshots_in_one_exchange(tmp_path: Path) -> None:
+    operator, machine, agent_id = _operator(
+        tmp_path,
+        is_machine_of_its_own=True,
+        policy=_SLACK_POLICY,
+        desktop_egress_rules=_SLACK_DESKTOP_EGRESS_RULES,
+    )
+
+    operator.push_permissions_and_desktop_egress_rules(agent_id)
+
+    assert machine.calls == [f"set_permissions_and_desktop_egress_rules {_SLACK_POLICY} {_SLACK_DESKTOP_EGRESS_RULES}"]
+
+
+def test_a_desktop_egress_edit_with_no_rules_copy_to_push_fails(tmp_path: Path) -> None:
+    """The caller writes the copy right before the push, so a missing one is a failed write, not an empty file."""
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY)
+
+    with pytest.raises(MachineOperationError, match="no copy of the desktop egress rules") as failure:
+        operator.push_permissions_and_desktop_egress_rules(agent_id)
+
+    assert "apply the permission change on that workspace" in str(failure.value)
+    assert machine.calls == []
+
+
+def test_a_desktop_egress_edit_with_no_canonical_policy_pushes_nothing(tmp_path: Path) -> None:
+    operator, machine, agent_id = _operator(
+        tmp_path, is_machine_of_its_own=True, desktop_egress_rules=_SLACK_DESKTOP_EGRESS_RULES
+    )
+
+    operator.push_permissions_and_desktop_egress_rules(agent_id)
+
+    assert machine.calls == []
+
+
+def test_a_machine_that_refuses_a_desktop_egress_edit_fails_the_call_that_asked_for_it(tmp_path: Path) -> None:
+    operator, _machine, agent_id = _operator(
+        tmp_path,
+        is_machine_of_its_own=True,
+        policy=_SLACK_POLICY,
+        desktop_egress_rules=_SLACK_DESKTOP_EGRESS_RULES,
+        refusal="the VPS said no",
+    )
+
+    with pytest.raises(MachineOperationError, match="the VPS said no"):
+        operator.push_permissions_and_desktop_egress_rules(agent_id)
 
 
 def test_a_grant_carries_the_account_and_the_policy_that_grants_it_together(tmp_path: Path) -> None:

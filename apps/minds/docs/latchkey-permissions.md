@@ -827,6 +827,82 @@ that cannot be reached shows as "permissions can't be loaded" rather than
 an empty, misleading "nothing granted", and does not take Share machine or
 Machine settings down with it.
 
+### Proxy through this desktop
+
+Some services refuse requests that come from the datacenter IP ranges a remote
+workspace's machine sits in. Each connection panel of a remote workspace
+therefore has a **Proxy through this desktop** toggle. While it is on, the
+requests the workspace makes to that service leave from this computer instead
+of from the workspace's machine. This computer has to be running and connected
+to the workspace for those requests to succeed. The mechanism is described
+under "Desktop egress" in `libs/mngr_latchkey/README.md`.
+
+The toggle is per service and per desktop:
+
+* Per service: it is drawn in every account panel of the service and has the
+  same value in each, because the machine routes requests by the service
+  latchkey matched them to, not by account.
+* Per desktop: the permissions file is shared between every computer the user
+  connects to the machine from, so each grant names the device id of the
+  computer that forwards. The toggle on this computer reads and writes only the
+  grants that carry this computer's device id.
+
+The toggle is offered only when both of these hold. When either of them does
+not, the row is not drawn at all.
+
+1. Minds knows this computer's device id.
+2. The workspace has a machine of its own, meaning a machine encryption key is
+   recorded for its host on this computer. A workspace that runs on this
+   computer already sends its requests from here.
+
+Every catalog service can be routed, so the toggle does not depend on the
+service.
+
+The toggle reads as on for this computer when every scope of the service has a
+grant for this computer's device id, and the service is routed according to
+this computer's copy of the machine's rules file
+(`hosts/<host_id>/proxyRules.json`), which is keyed by latchkey service name. A
+missing copy, or one that cannot be parsed, routes nothing.
+
+A flip posts `{ "service_name", "enabled" }` to
+`permissions/desktop-egress-toggle`, and the server does the following
+(`apply_desktop_egress_toggle` in `latchkey/permission_toggles.py`):
+
+1. Turning on writes one device-gated grant per scope of the service through
+   the gateway's `permissions` extension. Turning off deletes this computer's
+   grant of each scope, and leaves the grants of other computers alone.
+2. It reads the permissions file back and rebuilds the rules file from it. The
+   rules file names every catalog service that has a grant on any of its
+   scopes, for any device. The grants are the only record of what is enabled,
+   and the rules file is never edited by itself. Two consequences follow.
+   Turning a service off on this computer keeps it routed while another of the
+   user's computers still has a grant for it. A rules file that no longer
+   matches the grants is corrected by the next flip.
+3. It writes the rebuilt rules to this computer's copy, then pushes the
+   permissions file and the rules file to the machine in one round trip
+   (`MachineOperator.push_permissions_and_desktop_egress_rules`). The response
+   is the refreshed view, as for every other write in this tab.
+
+A machine can reach only one desktop at a time, because its reverse tunnel
+binds one port. When the user turns the toggle on from a second computer,
+that computer adds its own grant and nothing is taken away from the first. The
+computer that is connected to the machine is the one that forwards, and it
+forwards only when it has a grant of its own. A computer without one refuses
+the routed requests.
+
+Some addresses are used by several services. The Google Drive files API, for
+example, is used by Google Drive, Google Docs and Google Sheets. The machine
+routes a request by the service whose credentials latchkey used for it. So
+turning the toggle on for Google Docs does not send a request through this
+computer when latchkey made that request with the Google Drive account's
+credentials. To send those requests through this computer too, turn the toggle
+on for Google Drive as well.
+
+Revoke all and Sign out do not remove these grants, and neither does turning an
+account's permissions off. That is deliberate. The machine's gateway runs the
+per-account permission check before it routes a request, so a grant that is
+left behind allows nothing by itself.
+
 ### Keeping a copy on the machine
 
 The three routes behind this half live under

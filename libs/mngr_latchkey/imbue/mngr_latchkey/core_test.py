@@ -1018,9 +1018,9 @@ def test_create_permissions_override_jwt_clears_latchkey_gateway_env(
     assert report_path.read_text() == "<unset>"
 
 
-def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
-    """The spawned gateway must receive the derived password as ``LATCHKEY_GATEWAY_LISTEN_PASSWORD``."""
-    report_path = tmp_path / "password_report"
+def test_start_gateway_passes_password_and_uninjected_forwarding_to_subprocess(tmp_path: Path) -> None:
+    """The spawned gateway gets the derived listen password, and forwards requests it injects nothing into."""
+    report_path = tmp_path / "gateway_env_report"
     script = tmp_path / "latchkey"
     script.write_text(
         "#!/usr/bin/env python3\n"
@@ -1037,8 +1037,10 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
         'assert sys.argv[1] == "gateway"\n'
         "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
         "port = int(os.environ['LATCHKEY_GATEWAY_LISTEN_PORT'])\n"
-        "password = os.environ.get('LATCHKEY_GATEWAY_LISTEN_PASSWORD', '<unset>')\n"
-        f"open({str(report_path)!r}, 'w').write(password)\n"
+        "names = ('LATCHKEY_GATEWAY_LISTEN_PASSWORD', 'LATCHKEY_PASSTHROUGH_UNKNOWN')\n"
+        "report = '\\n'.join(os.environ.get(name, '<unset>') for name in names)\n"
+        f"open({str(report_path)!r} + '.tmp', 'w').write(report)\n"
+        f"os.replace({str(report_path)!r} + '.tmp', {str(report_path)!r})\n"
         "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
         "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
         "sock.bind((host, port))\n"
@@ -1058,7 +1060,8 @@ def test_start_gateway_passes_password_to_subprocess(tmp_path: Path) -> None:
         while time.monotonic() < deadline and not report_path.is_file():
             threading.Event().wait(timeout=_POLL_INTERVAL_SECONDS)
         assert report_path.is_file()
-        assert report_path.read_text() == manager.derive_gateway_password()
+        # Latchkey reads any non-empty value of the second variable as "on".
+        assert report_path.read_text().split("\n") == [manager.derive_gateway_password(), "1"]
         manager.stop_gateway()
 
 

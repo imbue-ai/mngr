@@ -158,6 +158,8 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiConnectorRevokeAllRequest",
             "UiConnectorToggleRequest",
             "UiCredentialParameter",
+            "UiDesktopEgressToggle",
+            "UiDesktopEgressToggleRequest",
             "UiDiscoveryHealthMessage",
             "UiEnvironmentMessage",
             "UiFolderSyncDiscardCopyRequest",

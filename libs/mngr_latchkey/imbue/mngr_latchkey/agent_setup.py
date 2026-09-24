@@ -87,42 +87,6 @@ ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE: Final[str] = "LATCHKEY_GATEWAY_PERMIS
 # always set it so each agent does not get counted as a separate user.
 ENV_LATCHKEY_DISABLE_COUNTING: Final[str] = "LATCHKEY_DISABLE_COUNTING"
 
-# What in-host tooling prepends to a target URL when that request must
-# leave from the user's own machine rather than from the host's own egress
-# -- e.g. a destination that blocks datacenter IPs. It is a *prefix*, not a
-# flag, because latchkey's gateway routes on the request path alone: a header
-# cannot divert a request that already looks like ``/gateway/<url>``.
-#
-# Its value differs by topology, and the empty string is the meaningful default:
-#
-# * VPS-gateway hosts get ``https://latchkey-self.invalid/via-desktop``.
-#   Prepending it produces a URL the latchkey CLI rewrites onto the VPS
-#   gateway's own ``/via-desktop/<url>`` path, which the forwarding extension
-#   hands to the desktop gateway's native outbound proxy.
-# * Desktop-gateway hosts get ``""``. Their gateway already runs on the
-#   user's machine, so a plain request is already desktop egress and prepending
-#   anything would only add a hop.
-#
-# Callers therefore never branch on topology: they concatenate whatever this
-# holds and get the right behavior in both. It is always set (empty for
-# desktop-gateway hosts) so tooling can tell "the desktop app configured no
-# prefix" apart from "this host predates the feature".
-#
-# It is namespaced ``MINDS_`` rather than ``LATCHKEY_`` even though its value is
-# a latchkey URL. A host's env names each var after the tool that *reads*
-# it -- ``LATCHKEY_GATEWAY`` for latchkey, ``MNGR_HOST_DIR`` for the inner mngr
-# -- and latchkey never reads this one: it only ever receives the concatenated
-# result as a URL argument. There is no single reader to name it after (datalib
-# today, any in-host tooling later), so it is named for the authority that
-# decides the value, the desktop app: the answer follows from the gateway
-# topology, something only that app knows.
-ENV_MINDS_VIA_DESKTOP_URL_PREFIX: Final[str] = "MINDS_VIA_DESKTOP_URL_PREFIX"
-
-# The prefix handed to VPS-gateway hosts. ``latchkey-self.invalid`` is
-# upstream latchkey's reserved "this gateway" host: the CLI recognizes it and
-# rewrites such URLs onto the gateway's own origin instead of proxying them out.
-VIA_DESKTOP_URL_PREFIX: Final[str] = "https://latchkey-self.invalid/via-desktop"
-
 # The subset of the latchkey wiring env vars whose values are secrets: the
 # gateway listen password and the permissions-override JWT. Callers that render
 # a command carrying these as ``--host-env NAME=VALUE`` flags (e.g. minds'
@@ -438,8 +402,7 @@ class AgentLatchkeySetup(FrozenModel):
     env: Mapping[str, str] = Field(
         description=(
             "Environment variables to inject into the agent. Contains "
-            f"``{ENV_LATCHKEY_GATEWAY}``, ``{ENV_LATCHKEY_DISABLE_COUNTING}`` and "
-            f"``{ENV_MINDS_VIA_DESKTOP_URL_PREFIX}`` (empty for desktop-gateway hosts) "
+            f"``{ENV_LATCHKEY_GATEWAY}`` and ``{ENV_LATCHKEY_DISABLE_COUNTING}`` "
             "whenever a gateway URL is available, plus "
             f"``{ENV_LATCHKEY_GATEWAY_PASSWORD}`` whenever a real ``Latchkey`` is supplied. "
             f"Desktop-gateway hosts also contain ``{ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE}``; "
@@ -503,11 +466,6 @@ def prepare_agent_latchkey(
     gateway's synchronized default ``permissions.json``; its forwarding
     extension adds a separate desktop-target JWT only on the desktop hop.
 
-    It also decides ``MINDS_VIA_DESKTOP_URL_PREFIX``: VPS-gateway hosts get a
-    real prefix to route an outbound request back through the user's machine,
-    desktop-gateway hosts get the empty string because they already egress
-    there (see :data:`ENV_MINDS_VIA_DESKTOP_URL_PREFIX`).
-
     ``latchkey=None`` is a degraded mode for tests / no-password-gateway
     setups: we still inject the constant agent-side gateway URL when
     ``is_tunneled=True`` (the URL alone is meaningful) but skip the
@@ -546,12 +504,6 @@ def prepare_agent_latchkey(
 
     env: dict[str, str] = {ENV_LATCHKEY_GATEWAY: gateway_url}
     opaque_path: Path | None = None
-
-    # Only a VPS gateway needs the desktop-egress detour; a desktop gateway is
-    # already on the user's machine, so its hosts get the empty prefix.
-    env[ENV_MINDS_VIA_DESKTOP_URL_PREFIX] = (
-        VIA_DESKTOP_URL_PREFIX if gateway_location is LatchkeyGatewayLocation.VPS else ""
-    )
 
     if latchkey is not None:
         env[ENV_LATCHKEY_GATEWAY_PASSWORD] = latchkey.derive_gateway_password()

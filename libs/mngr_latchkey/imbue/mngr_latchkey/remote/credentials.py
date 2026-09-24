@@ -18,7 +18,8 @@ meant from a difference between two stores: an account the machine holds that
 this computer has not seen belongs to another of the user's computers, and is
 adopted rather than deleted. The policy the machine's gateway enforces is read
 back the same way and for the same reason -- another computer may have granted
-something this one has never seen.
+something this one has never seen. So are the desktop egress rules its router
+reads.
 
 Every exchange is synchronous and costs a single remote command: the caller
 opens the machine's outer host, does what it came to do, and lets both go.
@@ -56,14 +57,17 @@ from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key as 
 # Re-exported (the redundant alias marks it as such): what :meth:`MachineCredentials.refresh` answers with.
 from imbue.mngr_latchkey.remote._transfer import FetchedMachineState as FetchedMachineState
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_credentials
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
 from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
+from imbue.mngr_latchkey.remote._transfer import push_permissions_and_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import push_permissions_snapshot
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
@@ -90,10 +94,11 @@ class MachineCredentials(FrozenModel):
     def refresh(self) -> FetchedMachineState:
         """Read the machine back and reconcile it with this computer, and return what it held.
 
-        Both halves come back in one command: the credential store the
+        Everything comes back in one command: the credential store the
         machine's gateway is refreshing tokens in, re-encrypted for this
-        computer, and the policy that gateway is enforcing. They are reconciled
-        differently, because they are owned differently.
+        computer, the policy that gateway is enforcing, and the desktop egress
+        rules its router reads. They are reconciled differently, because they
+        are owned differently.
 
         The **credentials are the machine's**. Only it can rotate the tokens it
         holds, so what it says is simply adopted, and the copy here goes back to
@@ -108,10 +113,18 @@ class MachineCredentials(FrozenModel):
         That is only safe because the copy here is never edited without being
         pushed (see :func:`read_host_permissions`), which leaves nothing local
         for an adopt to lose.
+
+        The **desktop egress rules are the machine's** for the same reason the
+        policy is, and are adopted the same way. Unlike the policy they are
+        never seeded from here: the machine's gateway run script creates the
+        file, and a machine without one routes nothing.
         """
         fetched = fetch_machine_state(self.host, self.latchkey, self.host_id, self._machine_key())
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
         self._reconcile_permissions(fetched.permissions_json)
+        adopt_machine_desktop_egress_rules(
+            self.latchkey.latchkey_directory, self.host_id, fetched.desktop_egress_rules_json
+        )
         return fetched
 
     def _reconcile_permissions(self, machine_permissions_json: str | None) -> None:
@@ -183,6 +196,18 @@ class MachineCredentials(FrozenModel):
         :func:`~imbue.mngr_latchkey.remote._transfer.push_permissions_snapshot`).
         """
         push_permissions_snapshot(self.host, self.host_id, permissions_json)
+
+    def set_permissions_and_desktop_egress_rules(self, permissions_json: str, desktop_egress_rules_json: str) -> None:
+        """Make both snapshots what the machine holds: the policy its gateway enforces and the rules its router reads.
+
+        A pure push, under the contract :meth:`set_permissions` has: the caller
+        edits this computer's copies first and hands over snapshots of them
+        (:func:`read_host_permissions`, :func:`read_host_desktop_egress_rules`),
+        and nothing here writes those copies. Both land in one remote command,
+        and neither needs a key (see
+        :func:`~imbue.mngr_latchkey.remote._transfer.push_permissions_and_desktop_egress_rules`).
+        """
+        push_permissions_and_desktop_egress_rules(self.host, self.host_id, permissions_json, desktop_egress_rules_json)
 
     def disconnect_account(self, service_name: str, account: str) -> None:
         """Clear one account from the machine's own store.
@@ -276,6 +301,28 @@ def read_host_permissions(data_dir: Path, host_id: HostId) -> str | None:
         return permissions_path.read_text()
     except OSError as e:
         raise LatchkeyStoreError(f"Failed to read the permissions of host {host_id} at {permissions_path}: {e}") from e
+
+
+def read_host_desktop_egress_rules(data_dir: Path, host_id: HostId) -> str | None:
+    """Return this computer's copy of the desktop egress rules for ``host_id``, or ``None`` when it has none.
+
+    What a push to the machine carries, as a whole snapshot, under the rule
+    :func:`read_host_permissions` states: every writer of this file must push
+    what it wrote in the same operation, because the next refresh adopts the
+    machine's rules over it.
+
+    Raises:
+        LatchkeyStoreError: when the file exists but cannot be read.
+    """
+    rules_path = desktop_egress_rules_path_for_host(data_dir, host_id)
+    if not rules_path.is_file():
+        return None
+    try:
+        return rules_path.read_text()
+    except OSError as e:
+        raise LatchkeyStoreError(
+            f"Failed to read the desktop egress rules of host {host_id} at {rules_path}: {e}"
+        ) from e
 
 
 def has_machine_of_its_own(data_dir: Path, host_id: HostId) -> bool:

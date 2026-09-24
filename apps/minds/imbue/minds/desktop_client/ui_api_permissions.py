@@ -9,7 +9,9 @@ the user typed into the pane (the browser-sign-in half of Add connection is the
 settings page's own route). A fifth signs an account out: it clears the stored
 credential of the store this workspace's machine reads, so the account is gone
 for every workspace that reads the same store -- that one alone for a machine
-of its own, every local workspace for this computer's.
+of its own, every local workspace for this computer's. A sixth turns desktop
+egress on or off for one service: whether a remote workspace's requests to it
+are sent out through this computer.
 
 Every write posts exactly one flip. The SERVER then recomputes the affected
 rule's COMPLETE permission set from the workspace's current permissions file
@@ -90,6 +92,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_servi
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspacePermissionsView
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_connector_toggle
+from imbue.minds.desktop_client.latchkey.permission_toggles import apply_desktop_egress_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_self_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_permissions_view
 from imbue.minds.desktop_client.latchkey.permission_toggles import connect_service_with_credentials
@@ -104,6 +107,7 @@ from imbue.minds.desktop_client.ui_models import UiConnectCredentialsRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorDisconnectRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorRevokeAllRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorToggleRequest
+from imbue.minds.desktop_client.ui_models import UiDesktopEgressToggleRequest
 from imbue.minds.desktop_client.ui_models import UiPathSync
 from imbue.minds.desktop_client.ui_models import UiPermissionConnection
 from imbue.minds.desktop_client.ui_models import UiSelfPermissionToggle
@@ -148,6 +152,19 @@ def _push_permissions_to_machine() -> Callable[[str], None]:
     if operator is None:
         return lambda workspace_agent_id: None
     return operator.push_permissions
+
+
+def _push_permissions_and_desktop_egress_rules_to_machine() -> Callable[[str], None]:
+    """How a desktop egress edit made here reaches the workspace's own machine.
+
+    The same contract as :func:`_push_permissions_to_machine`, for the write
+    that edits the rules file as well as the policy: both are pushed in one
+    round trip.
+    """
+    operator = get_state().machine_operator
+    if operator is None:
+        return lambda workspace_agent_id: None
+    return operator.push_permissions_and_desktop_egress_rules
 
 
 def _waiting_request_title_and_service(
@@ -251,6 +268,7 @@ def _build_permissions_view_or_none(agent_id: str) -> WorkspacePermissionsView |
             latchkey=handler.latchkey,
             machine_latchkey=machine_latchkey_for_workspace(handler.latchkey, get_state().backend_resolver, agent_id),
             workspace_agent_id=agent_id,
+            device_id=get_state().device_id,
         )
     except (PermissionToggleError, PermissionOverviewError, LatchkeyGatewayClientError) as e:
         logger.warning("Could not build the workspace permissions view for {}: {}", agent_id, e)
@@ -542,6 +560,35 @@ def _handle_self_toggle(agent_id: str) -> Response:
             permission=toggle_request.permission,
             enabled=toggle_request.enabled,
             push_permissions_to_machine=_push_permissions_to_machine(),
+        ),
+    )
+
+
+def _handle_desktop_egress_toggle(agent_id: str) -> Response:
+    """POST .../permissions/desktop-egress-toggle: send one service's requests through this computer, or stop."""
+    prelude = _write_prelude(agent_id)
+    if isinstance(prelude, Response):
+        return prelude
+    body, handler = prelude
+    try:
+        toggle_request = UiDesktopEgressToggleRequest.model_validate(body)
+    except ValidationError as e:
+        logger.debug("Rejected a malformed desktop-egress-toggle body: {}", e)
+        return make_json_error_response("service_name and enabled are required.", 400)
+    return _apply_and_refresh(
+        agent_id,
+        lambda: apply_desktop_egress_toggle(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=handler.gateway_client,
+            services_catalog=handler.services_catalog,
+            latchkey=handler.latchkey,
+            workspace_agent_id=agent_id,
+            service_name=toggle_request.service_name,
+            enabled=toggle_request.enabled,
+            device_id=get_state().device_id,
+            push_permissions_and_desktop_egress_rules_to_machine=(
+                _push_permissions_and_desktop_egress_rules_to_machine()
+            ),
         ),
     )
 
@@ -1020,6 +1067,11 @@ def register_permissions_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule(
         "/api/workspaces/<agent_id>/permissions/connector-toggle",
         view_func=_handle_connector_toggle,
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/api/workspaces/<agent_id>/permissions/desktop-egress-toggle",
+        view_func=_handle_desktop_egress_toggle,
         methods=["POST"],
     )
     blueprint.add_url_rule(

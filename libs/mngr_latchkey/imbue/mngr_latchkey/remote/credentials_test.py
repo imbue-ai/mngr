@@ -17,6 +17,7 @@ from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentialsError
+from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import MACHINE_KEY
 from imbue.mngr_latchkey.remote.mock_outer_host_test import SLACK_GRANTED
@@ -29,11 +30,13 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import machine_script_varia
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_accounts
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.remote.mock_outer_host_test import stub_machine
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 # Where the machine keeps the key its gateway runs under, in RAM.
 _MACHINE_KEY_PATH = "/run/mngr-latchkey/gateway_encryption_key"
+_SLACK_ROUTED = '{\n  "slack": true\n}\n'
 
 
 def _credentials_of(
@@ -418,6 +421,56 @@ def test_a_read_seeds_a_machine_that_has_no_policy_of_its_own(tmp_path: Path) ->
     MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh()
 
     assert as_stub(outer).machine_permissions == SLACK_GRANTED
+
+
+def test_a_read_adopts_the_desktop_egress_rules_the_machine_holds(tmp_path: Path) -> None:
+    """The machine owns the rules for the reason it owns the policy: another computer can change them."""
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    desktop_egress_rules_path_for_host(data_dir, host_id).write_text("{}")
+    outer = stub_machine({}, machine_permissions=SLACK_GRANTED)
+    as_stub(outer).machine_desktop_egress_rules = _SLACK_ROUTED
+
+    fetched = MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh()
+
+    assert fetched.desktop_egress_rules_json == _SLACK_ROUTED
+    assert read_host_desktop_egress_rules(data_dir, host_id) == _SLACK_ROUTED
+    assert len(as_stub(outer).recorded) == 1
+
+
+def test_a_read_never_seeds_a_machine_that_has_no_desktop_egress_rules(tmp_path: Path) -> None:
+    """Unlike the policy: a machine without the file routes nothing, so the copy here is dropped instead."""
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    desktop_egress_rules_path_for_host(data_dir, host_id).write_text(_SLACK_ROUTED)
+    outer = stub_machine({}, machine_permissions=SLACK_GRANTED)
+
+    MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh()
+
+    assert read_host_desktop_egress_rules(data_dir, host_id) is None
+    assert as_stub(outer).machine_desktop_egress_rules is None
+    assert len(as_stub(outer).recorded) == 1
+
+
+def test_permissions_and_desktop_egress_rules_reach_the_machine_without_touching_the_copies_here(
+    tmp_path: Path,
+) -> None:
+    """A pure push: the caller edits this computer's copies first, and nothing here writes them."""
+    host_id = HostId.generate()
+    outer = stub_machine({})
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
+
+    credentials.set_permissions_and_desktop_egress_rules(SLACK_GRANTED, _SLACK_ROUTED)
+
+    assert as_stub(outer).machine_permissions == SLACK_GRANTED
+    assert as_stub(outer).machine_desktop_egress_rules == _SLACK_ROUTED
+    assert len(as_stub(outer).recorded) == 1
+    assert as_stub(outer).written == []
+    assert read_host_desktop_egress_rules(data_dir, host_id) is None
+    assert not permissions_path_for_host(data_dir, host_id).exists()
 
 
 def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ import pytest
 from flask.testing import FlaskClient
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
@@ -26,6 +27,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissio
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
+from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
@@ -46,7 +48,12 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
+from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
+from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
@@ -60,6 +67,7 @@ _SHARED_PATH_PERMISSION: str = "minds-file-server-read-/Users/me/notes"
 # must leave it exactly where it was.
 _BASELINE_PERMISSION: str = "minds-api-proxy-call-agent-123"
 _AWS_CREDENTIALS = {"access-key-id": "AKIAEXAMPLE", "secret-access-key": "s3cret"}
+_DEVICE_ID: str = "device-2b9d64"
 
 
 class _UnreachableGatewayClient(FakeLatchkeyGatewayClient):
@@ -130,6 +138,7 @@ def _build_client(
     host_by_agent: dict[str, str] | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
     machine_operator: MachineOperator | None = None,
+    device_id: str = "",
 ) -> FlaskClient:
     resolver = _WorkspaceResolver(
         url_by_agent_and_service={},
@@ -147,6 +156,7 @@ def _build_client(
         pending_requests=inbox,
         folder_sync_manager=folder_sync_manager,
         machine_operator=machine_operator,
+        device_id=device_id,
     )
     return client
 
@@ -163,25 +173,35 @@ class _RecordingMachineOperator(MachineOperator):
     model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     pushed_agent_ids: list[str] = Field(default_factory=list, description="Workspaces whose policy was pushed")
+    pushed_with_desktop_egress_rules_agent_ids: list[str] = Field(
+        default_factory=list, description="Workspaces whose policy and desktop egress rules were pushed together"
+    )
     refreshed_agent_ids: list[str] = Field(
         default_factory=list, description="Workspaces whose machine was read back, one SSH round trip each"
     )
+    push_refusal: str = Field(default="", description="When set, the reason every push is refused with")
 
     def push_permissions(self, workspace_agent_id: str) -> None:
         self.pushed_agent_ids.append(workspace_agent_id)
+
+    def push_permissions_and_desktop_egress_rules(self, workspace_agent_id: str) -> None:
+        if self.push_refusal:
+            raise MachineOperationError(self.push_refusal)
+        self.pushed_with_desktop_egress_rules_agent_ids.append(workspace_agent_id)
 
     def refresh(self, workspace_agent_id: str) -> None:
         self.refreshed_agent_ids.append(workspace_agent_id)
 
 
-def _recording_operator(tmp_path: Path, latchkey: Latchkey) -> _RecordingMachineOperator:
+def _recording_operator(tmp_path: Path, latchkey: Latchkey, push_refusal: str = "") -> _RecordingMachineOperator:
     """An operator whose machine access is never opened, because nothing here reaches one."""
     return _RecordingMachineOperator(
         access=MachineAccess(
             latchkey=latchkey,
             concurrency_group=ConcurrencyGroup(name="test-machine-access"),
             backend_resolver=MngrCliBackendResolver(),
-        )
+        ),
+        push_refusal=push_refusal,
     )
 
 
@@ -218,6 +238,7 @@ _WRITE_ROUTES: tuple[tuple[str, dict[str, object]], ...] = (
         {"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-read", "enabled": True},
     ),
     ("permissions/self-toggle", {"permission": _SHARED_PATH_PERMISSION, "enabled": False}),
+    ("permissions/desktop-egress-toggle", {"service_name": "slack", "enabled": True}),
     ("permissions/connector-revoke-all", {"service_name": "slack", "account": _ACCOUNT}),
     ("permissions/connector-disconnect", {"service_name": "slack", "account": _ACCOUNT}),
     ("permissions/connect-credentials", {"service_name": "aws", "value_by_parameter_name": _AWS_CREDENTIALS}),
@@ -811,6 +832,159 @@ def test_connect_credentials_rejects_a_malformed_body(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 400
+
+
+def _remote_slack_latchkey(tmp_path: Path, host_id: HostId) -> FakeAccountsLatchkey:
+    """A latchkey for a host with a machine of its own.
+
+    Such a host's accounts are read from its machine store, which this double
+    does not answer for, so the Slack connection the tests read comes from a
+    grant left in the host's file.
+    """
+    latchkey = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path / "latchkey",
+        latchkey_binary="/nonexistent",
+    )
+    store_machine_encryption_key(latchkey.plugin_data_dir, host_id, SecretStr("machine-key-6093"))
+    build_fake_gateway_client().set_permission_rule(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        *build_account_grant("slack-api", _ACCOUNT, ("slack-chat-read",)),
+    )
+    return latchkey
+
+
+def test_desktop_egress_toggle_turns_it_on_and_returns_the_refreshed_view(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    before = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
+        json={"service_name": "slack", "enabled": True},
+    )
+
+    assert _slack_connection(before)["desktop_egress"] == {"is_supported": True, "is_enabled": False}
+    assert response.status_code == 200
+    assert _slack_connection(json.loads(response.data))["desktop_egress"] == {"is_supported": True, "is_enabled": True}
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    assert [(grant.scope, grant.device_id) for grant in list_desktop_egress_grants(config)] == [
+        ("slack-api", _DEVICE_ID)
+    ]
+    rules_path = desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id)
+    assert parse_desktop_egress_rules(rules_path.read_text()) == {"slack": True}
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == [str(agent_id)]
+
+    off_response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
+        json={"service_name": "slack", "enabled": False},
+    )
+
+    assert off_response.status_code == 200
+    assert _slack_connection(json.loads(off_response.data))["desktop_egress"] == {
+        "is_supported": True,
+        "is_enabled": False,
+    }
+    assert parse_desktop_egress_rules(rules_path.read_text()) == {}
+
+
+def test_desktop_egress_toggle_rejects_a_malformed_body(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    client = _build_client(tmp_path, _latchkey(tmp_path), (agent_id,), host_id, device_id=_DEVICE_ID)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
+        json={"service_name": "slack", "enabled": "yes please"},
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.data) == {"error": "service_name and enabled are required."}
+
+
+def test_desktop_egress_toggle_refuses_a_workspace_that_runs_on_this_computer(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path / "latchkey",
+        latchkey_binary="/nonexistent",
+        accounts_by_service={"slack": [_ACCOUNT]},
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, device_id=_DEVICE_ID)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
+        json={"service_name": "slack", "enabled": True},
+    )
+
+    assert response.status_code == 400
+    assert "machine of its own" in json.loads(response.data)["error"]
+    # Nothing was granted: the refusal comes before the first write.
+    assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+
+
+def test_desktop_egress_toggle_reports_a_machine_that_would_not_take_it_as_502(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey, push_refusal="Could not reach that workspace: it is asleep")
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
+        json={"service_name": "slack", "enabled": True},
+    )
+
+    assert response.status_code == 502
+    assert json.loads(response.data) == {"error": "Could not reach that workspace: it is asleep"}
+
+
+def test_revoke_all_leaves_desktop_egress_grants_in_place(tmp_path: Path) -> None:
+    """The machine's gateway checks the account before it routes, so a grant left behind allows nothing."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+    client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
+        json={"service_name": "slack", "enabled": True},
+    )
+
+    revoke_response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-revoke-all",
+        json={"service_name": "slack", "account": _ACCOUNT},
+    )
+
+    assert revoke_response.status_code == 200
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    assert [(grant.scope, grant.device_id) for grant in list_desktop_egress_grants(config)] == [
+        ("slack-api", _DEVICE_ID)
+    ]
+    assert list(config.rules) == [{grant.rule_key: ["any"]} for grant in list_desktop_egress_grants(config)]
+
+
+def test_disconnect_leaves_desktop_egress_grants_in_place(tmp_path: Path) -> None:
+    """A sign-out strips the account's own grants, and a desktop egress grant is not one of them."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    gateway_client = build_fake_gateway_client()
+    gateway_client.set_permission_rule(
+        permissions_path, *build_account_grant("slack-api", _ACCOUNT, ("slack-chat-read",))
+    )
+    gateway_client.set_permission_rule(permissions_path, *build_desktop_egress_grant("slack-api", _DEVICE_ID, None))
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, device_id=_DEVICE_ID)
+
+    response = client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/connector-disconnect",
+        json={"service_name": "slack", "account": _ACCOUNT},
+    )
+
+    assert response.status_code == 200
+    assert latchkey.cleared_calls == [("slack", _ACCOUNT)]
+    config = load_permissions(permissions_path)
+    assert [(grant.scope, grant.device_id) for grant in list_desktop_egress_grants(config)] == [
+        ("slack-api", _DEVICE_ID)
+    ]
+    assert list(config.rules) == [{grant.rule_key: ["any"]} for grant in list_desktop_egress_grants(config)]
 
 
 def test_workspace_permissions_degrades_when_the_gateway_is_unreachable(tmp_path: Path) -> None:

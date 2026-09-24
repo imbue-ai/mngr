@@ -115,6 +115,12 @@ export function selfToggleRowKey(permission: string): string {
   return ["self", permission].join("\u0000");
 }
 
+/** Keyed by service alone: the toggle is one value per service, drawn in every
+ * account panel of it. */
+export function desktopEgressRowKey(serviceName: string): string {
+  return ["desktop-egress", serviceName].join("\u0000");
+}
+
 export function revokeAllRowKey(serviceName: string, account: string): string {
   return ["revoke-all", serviceName, account].join("\u0000");
 }
@@ -485,6 +491,18 @@ export class PermissionsModel {
       connectorToggleRowKey(scope, account, permission),
       "connector-toggle",
       { scope, account, permission, enabled },
+      "Could not save the change: ",
+    );
+  }
+
+  async toggleDesktopEgress(
+    serviceName: string,
+    enabled: boolean,
+  ): Promise<void> {
+    await this.writeFlip(
+      desktopEgressRowKey(serviceName),
+      "desktop-egress-toggle",
+      { service_name: serviceName, enabled },
       "Could not save the change: ",
     );
   }

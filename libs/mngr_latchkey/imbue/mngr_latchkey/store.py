@@ -95,6 +95,15 @@ _EVENTS_LOG_FILENAME: Final[str] = "events.jsonl"
 _DEFAULT_PERMISSIONS_FILENAME: Final[str] = "latchkey_default_permissions.json"
 _ADMIN_PERMISSIONS_FILENAME: Final[str] = "latchkey_admin_permissions.json"
 _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
+# File saying which requests a remote machine's gateway sends out through the
+# user's computer instead of making itself. It lives in the machine's
+# ``~/.latchkey``, and this computer keeps a copy of it under the same name in
+# the host's directory. One JSON object: each key is a latchkey service name,
+# and a request latchkey matched to a service whose value is truthy is sent
+# through the desktop gateway. The machine's curl router reads it on every
+# request, so an edit takes effect without a restart. The shape is owned by
+# :mod:`imbue.mngr_latchkey.desktop_egress`.
+DESKTOP_EGRESS_RULES_FILENAME: Final[str] = "proxyRules.json"
 _HOSTS_DIR_NAME: Final[str] = "hosts"
 _OPAQUE_PERMISSIONS_DIR_NAME: Final[str] = "permissions"
 
@@ -446,6 +455,11 @@ def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     host inherit the same gateway credentials and the same permissions.
     """
     return data_dir / _HOSTS_DIR_NAME / str(host_id) / _PERMISSIONS_FILENAME
+
+
+def desktop_egress_rules_path_for_host(data_dir: Path, host_id: HostId) -> Path:
+    """Return the path to this computer's copy of a remote host's desktop egress rules file."""
+    return data_dir / _HOSTS_DIR_NAME / str(host_id) / DESKTOP_EGRESS_RULES_FILENAME
 
 
 def list_host_permissions_paths(data_dir: Path) -> list[Path]:

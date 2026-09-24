@@ -31,14 +31,17 @@ from imbue.mngr_latchkey.remote._transfer import _MachineScriptInputs
 from imbue.mngr_latchkey.remote._transfer import _MachineScriptOutcome
 from imbue.mngr_latchkey.remote._transfer import _READ_CREDENTIALS_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _READ_DATA_FORMAT_VERSION_PREFIX
+from imbue.mngr_latchkey.remote._transfer import _READ_DESKTOP_EGRESS_RULES_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _READ_PERMISSIONS_PREFIX
 from imbue.mngr_latchkey.remote._transfer import _outcome_marker
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import build_machine_read_script
 from imbue.mngr_latchkey.remote._transfer import build_machine_script
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
 from imbue.mngr_latchkey.remote._transfer import push_credentials
 from imbue.mngr_latchkey.remote._transfer import push_credentials_with_permissions
+from imbue.mngr_latchkey.remote._transfer import push_permissions_and_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import push_permissions_snapshot
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import MACHINE_KEY
@@ -50,10 +53,13 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import fake_latchkey_binary
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_accounts
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.remote.mock_outer_host_test import stub_machine
+from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
 _MACHINE_KEY_PATH = str(TMPFS_SECRETS_DIR / GATEWAY_ENCRYPTION_KEY_FILENAME)
 _SLACK_ANY = '{"rules": [{"slack-api": ["any"]}]}'
+_SLACK_ROUTED = '{\n  "slack": true\n}\n'
 _SHELL_TIMEOUT_SECONDS = 30.0
 
 
@@ -111,7 +117,11 @@ def _clear(machine: _FakeMachine, account: str) -> _CredentialClear:
 
 def _grant_script(machine: _FakeMachine, bundle: bytes, account: str, permissions_json: str = _SLACK_ANY) -> str:
     return build_machine_script(
-        _MachineScriptInputs(credential_change=_merge(machine, bundle, account), permissions_json=permissions_json)
+        _MachineScriptInputs(
+            credential_change=_merge(machine, bundle, account),
+            desktop_egress_rules_json=None,
+            permissions_json=permissions_json,
+        )
     )
 
 
@@ -155,6 +165,7 @@ def test_the_connect_script_merges_without_touching_the_machines_policy(tmp_path
     (machine.latchkey_dir / PERMISSIONS_CONFIG_FILENAME).write_text('{"rules": []}')
     inputs = _MachineScriptInputs(
         credential_change=_merge(machine, store_document({"slack": ["a@example.com"]}), "a@example.com"),
+        desktop_egress_rules_json=None,
         permissions_json=None,
     )
 
@@ -170,7 +181,9 @@ def test_the_disconnect_script_takes_one_account_away_and_leaves_its_siblings(tm
     machine = _FakeMachine(tmp_path)
     machine.key_file.write_text(MACHINE_KEY)
     machine.hold({"slack": ["gone@example.com", "kept@example.com"], "github": ["also-kept@example.com"]})
-    inputs = _MachineScriptInputs(credential_change=_clear(machine, "gone@example.com"), permissions_json=None)
+    inputs = _MachineScriptInputs(
+        credential_change=_clear(machine, "gone@example.com"), desktop_egress_rules_json=None, permissions_json=None
+    )
 
     completed = machine.run(build_machine_script(inputs))
 
@@ -183,7 +196,9 @@ def test_the_disconnect_script_reports_a_missing_key_rather_than_failing(tmp_pat
     """Clearing rewrites the store, so it needs the machine's key like every other credential change."""
     machine = _FakeMachine(tmp_path)
     machine.hold({"slack": ["gone@example.com"]})
-    inputs = _MachineScriptInputs(credential_change=_clear(machine, "gone@example.com"), permissions_json=None)
+    inputs = _MachineScriptInputs(
+        credential_change=_clear(machine, "gone@example.com"), desktop_egress_rules_json=None, permissions_json=None
+    )
 
     completed = machine.run(build_machine_script(inputs))
 
@@ -204,7 +219,9 @@ def test_the_disconnect_script_takes_the_credential_away_under_whatever_key_the_
     machine = _FakeMachine(tmp_path)
     machine.key_file.write_text("another-computers-key")
     machine.hold({"slack": ["gone@example.com", "kept@example.com"]})
-    inputs = _MachineScriptInputs(credential_change=_clear(machine, "gone@example.com"), permissions_json=None)
+    inputs = _MachineScriptInputs(
+        credential_change=_clear(machine, "gone@example.com"), desktop_egress_rules_json=None, permissions_json=None
+    )
 
     completed = machine.run(build_machine_script(inputs))
 
@@ -215,7 +232,7 @@ def test_the_disconnect_script_takes_the_credential_away_under_whatever_key_the_
 def test_the_permissions_script_needs_no_key_at_all(tmp_path: Path) -> None:
     """A policy is not encrypted, so a machine that rebooted still takes one."""
     machine = _FakeMachine(tmp_path)
-    inputs = _MachineScriptInputs(credential_change=None, permissions_json=_SLACK_ANY)
+    inputs = _MachineScriptInputs(credential_change=None, desktop_egress_rules_json=None, permissions_json=_SLACK_ANY)
 
     completed = machine.run(build_machine_script(inputs))
 
@@ -357,9 +374,87 @@ def test_the_read_script_answers_the_policy_of_a_machine_that_lost_its_key(tmp_p
     assert _read_answers(completed.stdout) == {_READ_PERMISSIONS_PREFIX: _SLACK_ANY.encode("utf-8")}
 
 
+def test_the_read_script_answers_the_desktop_egress_rules_even_of_a_machine_that_lost_its_key(tmp_path: Path) -> None:
+    """The rules are not encrypted, so they are printed ahead of the point a missing key stops the script."""
+    machine = _FakeMachine(tmp_path)
+    machine.hold({"slack": ["a@example.com"]})
+    (machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).write_text(_SLACK_ROUTED)
+
+    completed = machine.run(build_machine_read_script(SecretStr("desktop-key-7781"), machine.key_file))
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == _outcome_marker(_MachineScriptOutcome.KEY_MISSING)
+    assert _read_answers(completed.stdout) == {_READ_DESKTOP_EGRESS_RULES_PREFIX: _SLACK_ROUTED.encode("utf-8")}
+
+
+def test_the_permissions_and_rules_script_installs_the_rules_ahead_of_the_policy(tmp_path: Path) -> None:
+    """Both files are whole snapshots installed atomically at 0600, and neither needs the machine's key."""
+    machine = _FakeMachine(tmp_path)
+    (machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).write_text("{}")
+    script = build_machine_script(
+        _MachineScriptInputs(
+            credential_change=None, desktop_egress_rules_json=_SLACK_ROUTED, permissions_json=_SLACK_ANY
+        )
+    )
+
+    completed = machine.run(script)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == _outcome_marker(_MachineScriptOutcome.APPLIED)
+    rules_path = machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME
+    assert rules_path.read_text() == _SLACK_ROUTED
+    assert stat.S_IMODE(rules_path.stat().st_mode) == 0o600
+    assert (machine.latchkey_dir / PERMISSIONS_CONFIG_FILENAME).read_text() == _SLACK_ANY
+    # Neither temp file is left behind.
+    assert machine.entries() == sorted([PERMISSIONS_CONFIG_FILENAME, DESKTOP_EGRESS_RULES_FILENAME])
+    lines = script.splitlines()
+    assert next(
+        i for i, line in enumerate(lines) if f"/{DESKTOP_EGRESS_RULES_FILENAME}" in line and "mv -f" in line
+    ) < next(i for i, line in enumerate(lines) if f"/{PERMISSIONS_CONFIG_FILENAME}" in line and "mv -f" in line)
+    trap_line = next(line for line in lines if line.startswith("trap "))
+    assert '"$_lk_desktop_egress_rules_tmp"' in trap_line
+    assert '"$_lk_permissions_tmp"' in trap_line
+
+
+def test_a_failed_merge_leaves_the_desktop_egress_rules_alone_and_cleans_up(tmp_path: Path) -> None:
+    machine = _FakeMachine(tmp_path)
+    machine.key_file.write_text(MACHINE_KEY)
+    (machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).write_text("{}")
+    script = build_machine_script(
+        _MachineScriptInputs(
+            credential_change=_merge(machine, b"not a credential store", ""),
+            desktop_egress_rules_json=_SLACK_ROUTED,
+            permissions_json=_SLACK_ANY,
+        )
+    )
+
+    completed = machine.run(script)
+
+    assert completed.returncode != 0
+    assert (machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).read_text() == "{}"
+    assert machine.entries() == [DESKTOP_EGRESS_RULES_FILENAME]
+
+
+def test_a_script_without_desktop_egress_rules_leaves_the_machines_alone(tmp_path: Path) -> None:
+    machine = _FakeMachine(tmp_path)
+    (machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).write_text(_SLACK_ROUTED)
+    script = build_machine_script(
+        _MachineScriptInputs(credential_change=None, desktop_egress_rules_json=None, permissions_json=_SLACK_ANY)
+    )
+
+    assert DESKTOP_EGRESS_RULES_FILENAME not in script
+    assert machine.run(script).returncode == 0
+    assert (machine.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).read_text() == _SLACK_ROUTED
+
+
 def _read_answers(stdout: str) -> dict[str, bytes]:
     """The prefixed, base64-encoded lines a read script answered with, decoded."""
-    prefixes = (_READ_CREDENTIALS_PREFIX, _READ_DATA_FORMAT_VERSION_PREFIX, _READ_PERMISSIONS_PREFIX)
+    prefixes = (
+        _READ_CREDENTIALS_PREFIX,
+        _READ_DATA_FORMAT_VERSION_PREFIX,
+        _READ_PERMISSIONS_PREFIX,
+        _READ_DESKTOP_EGRESS_RULES_PREFIX,
+    )
     return {
         prefix: base64.b64decode(line[len(prefix) :], validate=True)
         for line in stdout.splitlines()
@@ -476,6 +571,108 @@ def test_a_permissions_snapshot_this_build_cannot_read_never_reaches_the_machine
         push_permissions_snapshot(outer, host_id, '{"rules": "not-a-list"}')
 
     assert as_stub(outer).recorded == []
+
+
+def test_permissions_and_desktop_egress_rules_cost_one_remote_command_between_them(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = stub_machine({})
+
+    push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, _SLACK_ROUTED)
+
+    assert len(as_stub(outer).recorded) == 1
+    assert as_stub(outer).written == []
+    assert as_stub(outer).machine_permissions == _SLACK_ANY
+    assert as_stub(outer).machine_desktop_egress_rules == _SLACK_ROUTED
+
+
+@pytest.mark.parametrize("desktop_egress_rules_json", ["[]", "not json", '{"slack": NaN}'])
+def test_desktop_egress_rules_the_router_could_not_read_never_reach_the_machine(
+    desktop_egress_rules_json: str,
+) -> None:
+    host_id = HostId.generate()
+    outer = stub_machine({})
+
+    with pytest.raises(RemoteGatewayError, match="unreadable desktop egress rules"):
+        push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, desktop_egress_rules_json)
+
+    assert as_stub(outer).recorded == []
+
+
+def test_an_unreadable_policy_stops_the_desktop_egress_rules_from_reaching_the_machine_too() -> None:
+    host_id = HostId.generate()
+    outer = stub_machine({})
+
+    with pytest.raises(RemoteGatewayError, match="unreadable permissions snapshot"):
+        push_permissions_and_desktop_egress_rules(outer, host_id, '{"rules": "not-a-list"}', _SLACK_ROUTED)
+
+    assert as_stub(outer).recorded == []
+
+
+def test_a_read_answers_with_the_desktop_egress_rules_the_machine_holds(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    outer = stub_machine({}, machine_permissions=_SLACK_ANY)
+    as_stub(outer).machine_desktop_egress_rules = _SLACK_ROUTED
+
+    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+
+    assert fetched.desktop_egress_rules_json == _SLACK_ROUTED
+    assert fetched.permissions_json == _SLACK_ANY
+    assert len(as_stub(outer).recorded) == 1
+
+
+def test_a_read_of_a_machine_with_no_desktop_egress_rules_file_answers_none(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    outer = stub_machine({}, machine_permissions=_SLACK_ANY)
+
+    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+
+    assert fetched.desktop_egress_rules_json is None
+
+
+def test_adopting_desktop_egress_rules_stores_them_as_this_computers_copy(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    local_path = desktop_egress_rules_path_for_host(plugin_data_dir(tmp_path), host_id)
+
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, _SLACK_ROUTED)
+
+    assert local_path.read_text() == _SLACK_ROUTED
+
+
+def test_adopting_identical_desktop_egress_rules_does_not_rewrite_the_copy(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    local_path = desktop_egress_rules_path_for_host(plugin_data_dir(tmp_path), host_id)
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, _SLACK_ROUTED)
+    modified_at_before = local_path.stat().st_mtime_ns
+
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, _SLACK_ROUTED)
+
+    assert local_path.stat().st_mtime_ns == modified_at_before
+
+
+def test_adopting_a_machine_with_no_desktop_egress_rules_removes_this_computers_copy(tmp_path: Path) -> None:
+    """This computer must never show rules the machine does not have."""
+    host_id = HostId.generate()
+    local_path = desktop_egress_rules_path_for_host(plugin_data_dir(tmp_path), host_id)
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, _SLACK_ROUTED)
+
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, None)
+    # Removing a copy that is already gone is not an error.
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, None)
+
+    assert not local_path.exists()
+
+
+def test_adopting_desktop_egress_rules_this_build_cannot_read_keeps_the_copy_it_has(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    local_path = desktop_egress_rules_path_for_host(plugin_data_dir(tmp_path), host_id)
+    adopt_machine_desktop_egress_rules(tmp_path, host_id, _SLACK_ROUTED)
+
+    with pytest.raises(RemoteGatewayError, match="cannot read"):
+        adopt_machine_desktop_egress_rules(tmp_path, host_id, '["slack"]')
+
+    assert local_path.read_text() == _SLACK_ROUTED
 
 
 def test_a_grant_to_a_rebooted_machine_writes_its_key_back_and_runs_again(tmp_path: Path) -> None:
@@ -626,6 +823,7 @@ def test_the_grant_script_installs_the_config_ahead_of_the_credential(tmp_path: 
                 "me@example.com",
                 service_name="custom_api_example_com",
             ),
+            desktop_egress_rules_json=None,
             permissions_json=None,
         )
     )
@@ -649,6 +847,7 @@ def test_a_script_without_a_config_leaves_the_machines_alone(tmp_path: Path) -> 
     script = build_machine_script(
         _MachineScriptInputs(
             credential_change=_merge(machine, store_document({"slack": ["a@example.com"]}), "a@example.com"),
+            desktop_egress_rules_json=None,
             permissions_json=None,
         )
     )

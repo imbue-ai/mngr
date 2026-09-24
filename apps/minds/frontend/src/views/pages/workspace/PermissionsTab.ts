@@ -46,6 +46,7 @@ import {
   connectServiceRowKey,
   connectionSectionId,
   connectorToggleRowKey,
+  desktopEgressRowKey,
   fileSharingAccessLabel,
   folderSyncConflictLabel,
   folderSyncStateLabel,
@@ -107,6 +108,9 @@ const catalogFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: 
 const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";
 const CONNECTOR_TOGGLE_BLOCKED_TITLE = "Connect this account before granting permissions.";
+const DESKTOP_EGRESS_LABEL = "Proxy through this desktop";
+/** Identifies the desktop egress switch among a panel's permission switches. */
+const DESKTOP_EGRESS_SWITCH_ID = "desktop-egress";
 /** Why every other control is inert while one change is being applied. */
 const PANE_BUSY_TITLE = "Waiting for the last change to reach this machine.";
 
@@ -470,6 +474,7 @@ function renderConnectionPanel(
           "This account isn't connected, so agents can't use these grants right now. Reconnect it " +
             "from Add connection, or turn the leftover grants off here.",
         ),
+    connection.desktop_egress.is_supported ? renderDesktopEgressRow(model, connection) : null,
     connection.scopes.map((scopePanel) => [
       connection.scopes.length > 1
         ? m("h3", { class: "type-heading text-primary mt-6 mb-1" }, scopePanel.heading)
@@ -1331,6 +1336,36 @@ function renderOtherMachinesPanel(model: PermissionsModel): m.Children {
             ]),
           ),
         ),
+  ]);
+}
+
+/** The per-service desktop egress row. Drawn in every account panel of the
+ * service with the same value, since the server keys it by service alone. */
+function renderDesktopEgressRow(model: PermissionsModel, connection: UiPermissionConnection): m.Children {
+  const rowKey = desktopEgressRowKey(connection.service_name);
+  return m("div", { class: "flex flex-col pr-4", "data-perm-desktop-egress": connection.service_name }, [
+    m("div", { class: TOGGLE_ROW_CLASS }, [
+      m("div", { class: "min-w-0" }, [
+        m("p", { class: "type-body text-primary truncate" }, DESKTOP_EGRESS_LABEL),
+        m(
+          "p",
+          { class: "type-helper text-tertiary mt-0.5" },
+          `Requests this workspace makes to ${connection.display_name} leave from this computer instead ` +
+            "of from the workspace's machine. This computer has to be running and connected for them to " +
+            "succeed.",
+        ),
+      ]),
+      renderSwitch({
+        isGranted: connection.desktop_egress.is_enabled,
+        isBusy: model.isRowBusy(rowKey),
+        isLocked: isLockedByAnotherWrite(model, rowKey),
+        isBlocked: false,
+        blockedTitle: "",
+        label: DESKTOP_EGRESS_LABEL,
+        permission: DESKTOP_EGRESS_SWITCH_ID,
+        onFlip: (enabled) => void model.toggleDesktopEgress(connection.service_name, enabled),
+      }),
+    ]),
   ]);
 }
 

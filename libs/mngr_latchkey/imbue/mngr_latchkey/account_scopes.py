@@ -79,8 +79,12 @@ ACCOUNT_SCOPE_SEPARATOR: Final[str] = ":"
 # pass just introduced (``":"`` and ``"%3A"`` would both become ``"%253A"``).
 _SCOPE_ESCAPES: Final[tuple[tuple[str, str], ...]] = (("%", "%25"), (ACCOUNT_SCOPE_SEPARATOR, "%3A"))
 
+# Key of ``customMetadata`` under which latchkey reports the account whose
+# credentials it injected.
+ACCOUNT_METADATA_KEY: Final[str] = "account"
+
 # JSON-pointer prefix detent resolves named schemas through.
-_SCHEMA_REFERENCE_PREFIX: Final[str] = "#/$defs/"
+SCHEMA_REFERENCE_PREFIX: Final[str] = "#/$defs/"
 
 # Bound on how deep the ``$ref`` closure walk follows file-local schemas. The
 # generated shape is one level deep; the bound only guards a hand-edited file
@@ -154,13 +158,13 @@ def build_account_scope_schema(scope: str, account: str) -> dict[str, JsonValue]
     """
     return {
         "allOf": [
-            {"$ref": f"{_SCHEMA_REFERENCE_PREFIX}{scope}"},
+            {"$ref": f"{SCHEMA_REFERENCE_PREFIX}{scope}"},
             {
                 "properties": {
                     "customMetadata": {
                         "type": "object",
-                        "properties": {"account": {"const": account}},
-                        "required": ["account"],
+                        "properties": {ACCOUNT_METADATA_KEY: {"const": account}},
+                        "required": [ACCOUNT_METADATA_KEY],
                     },
                 },
                 "required": ["customMetadata"],
@@ -211,33 +215,33 @@ def _as_object(value: JsonValue | None) -> Mapping[str, JsonValue] | None:
     return value if isinstance(value, dict) else None
 
 
-def _referenced_schema_name(value: JsonValue) -> str | None:
+def referenced_schema_name(value: JsonValue) -> str | None:
     """Return the schema name a ``{"$ref": "#/$defs/<name>"}`` node points at."""
     node = _as_object(value)
     if node is None:
         return None
     reference = node.get("$ref")
-    if not isinstance(reference, str) or not reference.startswith(_SCHEMA_REFERENCE_PREFIX):
+    if not isinstance(reference, str) or not reference.startswith(SCHEMA_REFERENCE_PREFIX):
         return None
     # Detent lets a pointer reach *into* a definition
     # (``#/$defs/<name>/properties/domain``); the enclosing definition is what
     # matters here.
-    return reference.removeprefix(_SCHEMA_REFERENCE_PREFIX).split("/", 1)[0] or None
+    return reference.removeprefix(SCHEMA_REFERENCE_PREFIX).split("/", 1)[0] or None
 
 
-def _account_from_metadata_gate(value: JsonValue) -> str | None:
-    """Return the account a ``customMetadata.account`` const gate pins, if any."""
+def custom_metadata_const_gate(value: JsonValue, metadata_key: str) -> str | None:
+    """Return the string a ``customMetadata.<metadata_key>`` const gate pins, if any."""
     node = _as_object(value)
     if node is None:
         return None
     properties = _as_object(node.get("properties"))
     custom_metadata = None if properties is None else _as_object(properties.get("customMetadata"))
     metadata_properties = None if custom_metadata is None else _as_object(custom_metadata.get("properties"))
-    account_gate = None if metadata_properties is None else _as_object(metadata_properties.get("account"))
-    if account_gate is None:
+    gate = None if metadata_properties is None else _as_object(metadata_properties.get(metadata_key))
+    if gate is None:
         return None
-    account = account_gate.get("const")
-    return account if isinstance(account, str) else None
+    pinned = gate.get("const")
+    return pinned if isinstance(pinned, str) else None
 
 
 @pure
@@ -257,9 +261,11 @@ def resolve_account_scope(schema: JsonValue) -> tuple[str, str] | None:
     members = node.get("allOf")
     if not isinstance(members, list):
         return None
-    scopes = [name for name in (_referenced_schema_name(member) for member in members) if name is not None]
+    scopes = [name for name in (referenced_schema_name(member) for member in members) if name is not None]
     accounts = [
-        account for account in (_account_from_metadata_gate(member) for member in members) if account is not None
+        account
+        for account in (custom_metadata_const_gate(member, ACCOUNT_METADATA_KEY) for member in members)
+        if account is not None
     ]
     # Exactly one of each: anything else is not the shape we generate, and
     # guessing would risk reporting a grant as narrower than it really is.
@@ -332,7 +338,7 @@ def _iter_referenced_schema_names(value: JsonValue) -> list[str]:
             continue
         if not isinstance(node, dict):
             continue
-        referenced = _referenced_schema_name(node)
+        referenced = referenced_schema_name(node)
         if referenced is not None:
             found.append(referenced)
         stack.extend(node.values())

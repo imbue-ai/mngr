@@ -21,7 +21,14 @@ Three families of toggles, mirroring the permission-request types:
 * **Machine (cross-workspace) toggles** -- the ``minds-workspaces-*`` verb
   names on the same ``latchkey-self`` rule, preserved the same way.
 
-``Add connection`` is the fourth write: it connects a service that has no
+**Desktop egress** is a fourth family, per service rather than per account: a
+remote workspace's requests to a service can be sent out through this computer
+(see :mod:`imbue.mngr_latchkey.desktop_egress`). The device-gated grants in the
+host's permissions file say what is enabled and on which computer; the rules
+file that routes the requests is rebuilt from those grants on every write, so
+it is never edited on its own.
+
+``Add connection`` is the last write: it connects a service that has no
 account yet (or a further account of one that has). Most services are connected
 by latchkey's browser sign-in, which the settings page's route already runs;
 the rest -- AWS, Coolify, ... -- are connected by
@@ -50,10 +57,12 @@ unrelated ``latchkey-self`` baselines), and the gateway merges the write.
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Final
 
 from loguru import logger
 from pydantic import Field
+from pydantic import JsonValue
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
@@ -70,6 +79,8 @@ from imbue.minds.desktop_client.latchkey.permission_overview import parse_worksp
 from imbue.minds.desktop_client.latchkey.permission_overview import probe_service_sign_in_options
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_target_workspace_name
 from imbue.minds.desktop_client.latchkey.permission_overview import resolve_workspace_host_id
+from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.account_scopes import list_account_grants
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
@@ -81,10 +92,22 @@ from imbue.mngr_latchkey.credential_commands import build_credential_command_arg
 from imbue.mngr_latchkey.credential_commands import describe_credential_command_failure
 from imbue.mngr_latchkey.credential_commands import fallback_set_credentials_example
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressGrant
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_rules
+from imbue.mngr_latchkey.desktop_egress import is_service_routed
+from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
+from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
+from imbue.mngr_latchkey.desktop_egress import serialize_desktop_egress_rules
+from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
+from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import LatchkeyStoreError
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
@@ -193,6 +216,24 @@ class ServiceSignIn(FrozenModel):
     )
 
 
+class DesktopEgressToggle(FrozenModel):
+    """Whether one service's requests from this workspace are sent out through this computer."""
+
+    is_supported: bool = Field(
+        description=(
+            "Whether the toggle can be offered: the app knows its device id, and the workspace has a "
+            "machine of its own."
+        ),
+    )
+    is_enabled: bool = Field(
+        description=(
+            "Whether this computer forwards the service's requests: every scope of the service has a "
+            "desktop egress grant for this device, and the service is routed by this computer's copy of "
+            "the machine's rules file."
+        ),
+    )
+
+
 class ConnectionPanel(FrozenModel):
     """One left-nav connection entry: a (service, account) pair with its toggle panels."""
 
@@ -215,6 +256,9 @@ class ConnectionPanel(FrozenModel):
     scopes: tuple[ScopeTogglePanel, ...] = Field(description="One toggle panel per scope the service exposes.")
     sign_in: ServiceSignIn = Field(
         description="How the service's *next* account is connected; identical across its accounts.",
+    )
+    desktop_egress: DesktopEgressToggle = Field(
+        description="The service's desktop egress toggle; identical across its accounts.",
     )
 
 
@@ -428,6 +472,92 @@ def _sorted_panel_accounts(stored: Sequence[str], granted: frozenset[str]) -> tu
     return tuple(stored) + tuple(extra)
 
 
+@pure
+def describe_why_desktop_egress_is_unsupported(device_id: str, is_machine_of_its_own: bool) -> str | None:
+    """The reason a workspace's desktop egress toggles cannot be offered, or ``None`` when they can."""
+    if not device_id:
+        return "Minds does not know this computer's device id, so it cannot send requests through this computer."
+    if not is_machine_of_its_own:
+        return (
+            "This workspace does not run on a machine of its own that Minds has set up from this computer, "
+            "so its requests cannot be sent through this computer."
+        )
+    return None
+
+
+@pure
+def build_desktop_egress_toggle(
+    device_id: str,
+    is_machine_of_its_own: bool,
+    service_name: str,
+    service_scopes: Sequence[str],
+    # Every desktop egress grant in the host's permissions file, for every device.
+    grants: Sequence[DesktopEgressGrant],
+    # This computer's copy of the machine's rules file; empty when it has none.
+    rules: Mapping[str, JsonValue],
+) -> DesktopEgressToggle:
+    """Decide whether one service's toggle is offered, and whether it is on for this computer.
+
+    A grant for another device does not count: the permissions file is shared
+    between the user's computers, and each one forwards only under its own grant.
+    """
+    if describe_why_desktop_egress_is_unsupported(device_id, is_machine_of_its_own) is not None:
+        return DesktopEgressToggle(is_supported=False, is_enabled=False)
+    scopes_granted_to_this_device = frozenset(grant.scope for grant in grants if grant.device_id == device_id)
+    is_every_scope_granted = all(scope in scopes_granted_to_this_device for scope in service_scopes)
+    return DesktopEgressToggle(
+        is_supported=True, is_enabled=is_every_scope_granted and is_service_routed(rules, service_name)
+    )
+
+
+@pure
+def derive_desktop_egress_routed_service_names(
+    config: LatchkeyPermissionsConfig,
+    infos_by_service_name: Mapping[str, Sequence[ServicePermissionInfo]],
+) -> tuple[str, ...]:
+    """The services the machine's rules file has to route, given the grants in ``config``.
+
+    A service is routed when any of its scopes has a desktop egress grant for
+    any device, so turning a service off on this computer keeps it routed while
+    another of the user's computers still has it turned on.
+    """
+    granted_scopes = frozenset(grant.scope for grant in list_desktop_egress_grants(config))
+    return tuple(
+        sorted(
+            service_name
+            for service_name, infos in infos_by_service_name.items()
+            if any(info.scope in granted_scopes for info in infos)
+        )
+    )
+
+
+def _has_machine_of_its_own(data_dir: Path, host_id: HostId) -> bool:
+    try:
+        return has_machine_of_its_own(data_dir, host_id)
+    except LatchkeyStoreError as e:
+        raise PermissionToggleError(f"Could not open the machine store of host '{host_id}': {e}") from e
+
+
+def _read_desktop_egress_rules_copy(data_dir: Path, host_id: HostId) -> dict[str, JsonValue]:
+    """This computer's copy of the machine's rules file, empty when there is none or it cannot be used."""
+    try:
+        rules_json = read_host_desktop_egress_rules(data_dir, host_id)
+    except LatchkeyStoreError as e:
+        logger.warning(
+            "Could not read the desktop egress rules of host {}; treating nothing as routed: {}", host_id, e
+        )
+        return {}
+    if rules_json is None:
+        return {}
+    try:
+        return parse_desktop_egress_rules(rules_json)
+    except DesktopEgressError as e:
+        logger.warning(
+            "Could not parse the desktop egress rules of host {}; treating nothing as routed: {}", host_id, e
+        )
+        return {}
+
+
 def build_workspace_permissions_view(
     backend_resolver: BackendResolverInterface,
     gateway_client: LatchkeyGatewayClient,
@@ -435,6 +565,8 @@ def build_workspace_permissions_view(
     latchkey: Latchkey,
     machine_latchkey: Latchkey,
     workspace_agent_id: str,
+    # This install's device id; empty when the app was built without one.
+    device_id: str,
 ) -> WorkspacePermissionsView:
     """Assemble the Permissions tab's full view for one workspace.
 
@@ -454,7 +586,10 @@ def build_workspace_permissions_view(
     :func:`_sorted_panel_accounts`' order. Every
     offered service carries how its next account is connected
     (:func:`_build_service_sign_in`), so the pane never offers a browser sign-in
-    for a service latchkey cannot sign in to.
+    for a service latchkey cannot sign in to. Every connection also carries its
+    service's desktop egress toggle (:func:`build_desktop_egress_toggle`), read
+    from the grants in the same file and from this computer's copy of the
+    machine's rules file.
 
     Raises :class:`PermissionToggleError` for an unresolvable workspace and
     lets :class:`LatchkeyGatewayClientError` propagate when the gateway cannot
@@ -467,6 +602,9 @@ def build_workspace_permissions_view(
         )
     config = gateway_client.get_permissions_config(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
     granted = _granted_by_scope_account(services_catalog, config)
+    desktop_egress_grants = list_desktop_egress_grants(config)
+    desktop_egress_rules = _read_desktop_egress_rules_copy(latchkey.plugin_data_dir, host_id)
+    is_machine_of_its_own = _has_machine_of_its_own(latchkey.plugin_data_dir, host_id)
     accounts_by_service = machine_latchkey.auth_list(is_offline=True)
     # Every catalog service is offered somewhere in the pane -- under Add
     # connection when it has no account, under Add another account when it has
@@ -494,16 +632,21 @@ def build_workspace_permissions_view(
             account for (scope, account) in granted if any(info.scope == scope for info in infos)
         )
         panel_accounts = _sorted_panel_accounts(stored, granted_accounts)
-        sign_in = _build_service_sign_in(
-            service_name,
-            service_info_by_name.get(service_name),
-            is_account_stored=bool(stored),
-        )
+        service_info = service_info_by_name.get(service_name)
+        sign_in = _build_service_sign_in(service_name, service_info, is_account_stored=bool(stored))
         if not panel_accounts:
             available.append(
                 AvailableConnection(service_name=service_name, display_name=display_name, sign_in=sign_in)
             )
             continue
+        desktop_egress = build_desktop_egress_toggle(
+            device_id=device_id,
+            is_machine_of_its_own=is_machine_of_its_own,
+            service_name=service_name,
+            service_scopes=tuple(info.scope for info in infos),
+            grants=desktop_egress_grants,
+            rules=desktop_egress_rules,
+        )
         for position, account in enumerate(panel_accounts):
             scopes = tuple(_build_scope_panel(info, granted.get((info.scope, account), frozenset())) for info in infos)
             connections.append(
@@ -520,6 +663,7 @@ def build_workspace_permissions_view(
                         granted_count=sum(len(granted.get((info.scope, account), frozenset())) for info in infos),
                         scopes=scopes,
                         sign_in=sign_in,
+                        desktop_egress=desktop_egress,
                     ),
                 )
             )
@@ -701,6 +845,78 @@ def apply_connector_toggle(
     else:
         gateway_client.set_permission_rule(path, rule_key, granted_permissions, schemas)
     push_permissions_to_machine(workspace_agent_id)
+
+
+def _write_desktop_egress_rules_copy(data_dir: Path, host_id: HostId, rules: Mapping[str, bool]) -> None:
+    rules_path = desktop_egress_rules_path_for_host(data_dir, host_id)
+    try:
+        atomic_write(rules_path, serialize_desktop_egress_rules(rules))
+    except OSError as e:
+        raise PermissionToggleError(f"Could not store the desktop egress rules at {rules_path}: {e}") from e
+
+
+def apply_desktop_egress_toggle(
+    backend_resolver: BackendResolverInterface,
+    gateway_client: LatchkeyGatewayClient,
+    services_catalog: ServicesCatalog,
+    latchkey: Latchkey,
+    workspace_agent_id: str,
+    service_name: str,
+    enabled: bool,
+    # This install's device id; empty when the app was built without one.
+    device_id: str,
+    push_permissions_and_desktop_egress_rules_to_machine: Callable[[str], None],
+) -> None:
+    """Turn sending one service's requests through this computer on or off for the workspace.
+
+    Turning on writes one desktop egress grant per scope of the service for
+    this device; turning off deletes this device's grants and leaves those of
+    the user's other computers alone. Either way the rules file is then rebuilt
+    from the grants the host's file now holds
+    (:func:`derive_desktop_egress_routed_service_names`), written to this
+    computer's copy, and pushed to the machine together with the policy, and
+    this does not return until both land there.
+
+    Raises :class:`PermissionToggleError` for an unknown service, an
+    unresolvable workspace, and turning on a toggle that is not supported;
+    gateway failures propagate as :class:`LatchkeyGatewayClientError` and a
+    machine that would not take the change as :class:`MachineOperationError`.
+    """
+    infos = services_catalog.get(service_name)
+    if not infos:
+        raise PermissionToggleError(f"Unknown service '{service_name}'.")
+    host_id = resolve_workspace_host_id(backend_resolver, workspace_agent_id)
+    if host_id is None:
+        raise PermissionToggleError(
+            f"Could not resolve host for workspace '{workspace_agent_id}'; cannot change permissions.",
+        )
+    data_dir = latchkey.plugin_data_dir
+    path = permissions_path_for_host(data_dir, host_id)
+    if enabled:
+        unsupported_reason = describe_why_desktop_egress_is_unsupported(
+            device_id, _has_machine_of_its_own(data_dir, host_id)
+        )
+        if unsupported_reason is not None:
+            raise PermissionToggleError(unsupported_reason)
+        try:
+            grants = tuple(build_desktop_egress_grant(info.scope, device_id, info.scope_schema) for info in infos)
+        except DesktopEgressError as e:
+            raise PermissionToggleError(
+                f"Could not build the {infos[0].service_display_name} grant for this computer: {e}"
+            ) from e
+        for rule_key, permissions, schemas in grants:
+            gateway_client.set_permission_rule(path, rule_key, permissions, schemas)
+    else:
+        service_scopes = frozenset(info.scope for info in infos)
+        for grant in list_desktop_egress_grants(gateway_client.get_permissions_config(path)):
+            if grant.device_id == device_id and grant.scope in service_scopes:
+                gateway_client.delete_permission_rule(path, grant.rule_key)
+
+    routed_service_names = derive_desktop_egress_routed_service_names(
+        gateway_client.get_permissions_config(path), services_catalog.as_mapping()
+    )
+    _write_desktop_egress_rules_copy(data_dir, host_id, build_desktop_egress_rules(routed_service_names))
+    push_permissions_and_desktop_egress_rules_to_machine(workspace_agent_id)
 
 
 def connect_service_with_credentials(
