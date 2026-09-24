@@ -145,7 +145,7 @@ def test_slice_rebuild_config_runs_a_gen2_container_under_the_account_runtime_wi
         "--tmpfs",
         "/run",
         "--tmpfs",
-        "/tmp",
+        "/tmp:exec",
     )
     assert slice_config.box_generation == 2
     # The cap is sized from the guest's RAM exactly as the bake sizes it: a gen-2
