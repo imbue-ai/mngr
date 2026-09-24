@@ -1463,20 +1463,46 @@ def test_help_assist_reports_unreachable_workspace(tmp_path: Path) -> None:
 _ASSIST_SKILL_PRESENT_STDOUT = "MNGR_ASSIST_SKILL_PRESENT\n"
 
 
+def test_help_assist_asks_the_machines_chat_app_for_the_chat(tmp_path: Path) -> None:
+    """A supported machine whose template's script can create chats: the skill probe, then the script run
+    inside the machine, which the chat app answers once the chat exists; no resolver, no bare create."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT, has_chat_create_script=True),
+        )
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 200
+    assert len(caller.calls) == 2
+    assert caller.calls[0][0] == "exec"
+    create = caller.calls[1]
+    assert create[:2] == ["exec", "--agent"]
+    assert "system/scripts/message_chat.py --create" in create[3]
+    assert "--label assist=true" in create[3] and "--label auto_open=true" in create[3]
+    assert "-m '/assist it broke'" in create[3]
+    assert "mngr create" not in create[3]
+
+
 def test_help_assist_spawns_when_the_skill_is_present(tmp_path: Path) -> None:
-    """A supported machine that writes no create defaults probes clean, is asked its resolver, and the chat is
-    created bound to the account it named."""
+    """A supported machine that writes no create defaults probes clean; its script declines the create (a
+    template from before that mode), so the machine is asked its resolver and the chat is created bound
+    to the account it named."""
     caller = RecordingMngrCaller(
         result=MngrCallResult(returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT))
     )
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
     assert response.status_code == 200
-    # The skill probe, the account probe, then the inner ``mngr create``.
-    assert len(caller.calls) == 3
+    # The skill probe, the script's declined create, the account probe, then the inner ``mngr create``.
+    assert len(caller.calls) == 4
     assert caller.calls[0][0] == "exec"
-    assert "system/scripts/default_account_args.py" in caller.calls[1][3]
-    create = caller.calls[2]
+    assert "system/scripts/message_chat.py --create" in caller.calls[1][3]
+    assert "system/scripts/default_account_args.py" in caller.calls[2][3]
+    create = caller.calls[3]
     assert create[:2] == ["exec", "--agent"]
     assert "mngr create" in create[3]
     # An unbound chat would answer every turn "Not logged in".
@@ -1495,13 +1521,14 @@ def test_help_assist_spawns_unbound_on_a_machine_whose_template_keeps_no_account
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
 
     assert response.status_code == 200
-    create = caller.calls[2]
+    create = caller.calls[3]
     assert "mngr create" in create[3]
     assert "CLAUDE_CONFIG_DIR" not in create[3]
 
 
 def test_help_assist_spawns_bare_on_a_machine_that_writes_its_create_defaults(tmp_path: Path) -> None:
-    """The machine's own mngr resolves the account and harness: one probe, then a create naming neither."""
+    """The machine's own mngr resolves the account and harness: one probe, the script's declined create, then
+    a create naming neither."""
     caller = RecordingMngrCaller(
         result=MngrCallResult(
             returncode=0,
@@ -1513,8 +1540,8 @@ def test_help_assist_spawns_bare_on_a_machine_that_writes_its_create_defaults(tm
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
 
     assert response.status_code == 200
-    assert len(caller.calls) == 2
-    create = caller.calls[1][3]
+    assert len(caller.calls) == 3
+    create = caller.calls[2][3]
     assert "mngr create" in create
     assert "CLAUDE_CONFIG_DIR" not in create and "--type" not in create
     # The one setting the app adds: the lever for a machine whose claude no longer matches its pin.
@@ -1534,7 +1561,7 @@ def test_help_assist_spawns_unbound_when_the_resolver_names_no_account(tmp_path:
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
 
     assert response.status_code == 200
-    create = caller.calls[2][3]
+    create = caller.calls[3][3]
     assert "mngr create" in create
     assert "CLAUDE_CONFIG_DIR" not in create
 

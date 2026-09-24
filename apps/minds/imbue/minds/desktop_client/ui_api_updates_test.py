@@ -1037,10 +1037,39 @@ def test_a_machine_whose_template_keeps_no_accounts_is_dispatched_unbound(
     assert "CLAUDE_CONFIG_DIR" not in spawn[0][3]
 
 
+def test_a_machine_whose_script_creates_chats_gets_its_update_chat_from_its_chat_app(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """The template's `message_chat.py --create` makes the chat through the workspace's chat app, so
+    the app runs no `mngr create` of its own and asks no resolver: one probe, one script run."""
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(
+            returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, has_chat_create_script=True)
+        ),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 200
+    caller = _service(app).mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    execs = [call for call in caller.calls if call[0] == "exec"]
+    assert len(execs) == 2
+    assert not any("mngr create" in call[3] or "default_account_args.py" in call[3] for call in execs)
+    create = execs[1][3]
+    assert "system/scripts/message_chat.py --create" in create
+    assert "--label auto_open=true" in create
+    assert "/update-self" in create
+
+
 def test_a_machine_that_writes_its_create_defaults_gets_one_probe_and_a_bare_create(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """The machine's own mngr resolves the account and harness, so the app asks nothing and names nothing."""
+    """The machine's own mngr resolves the account and harness, so the app asks nothing and names nothing
+    once the script has declined to make the chat (its template predates the create mode)."""
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
@@ -1056,9 +1085,10 @@ def test_a_machine_that_writes_its_create_defaults_gets_one_probe_and_a_bare_cre
     caller = _service(app).mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     execs = [call for call in caller.calls if call[0] == "exec"]
-    assert len(execs) == 2
+    assert len(execs) == 3
     assert not any("default_account_args.py" in call[3] for call in execs)
-    create = execs[1][3]
+    assert "message_chat.py --create" in execs[1][3]
+    create = execs[2][3]
     assert "mngr create" in create
     assert "CLAUDE_CONFIG_DIR" not in create and "--type" not in create
     assert "agent_types.claude.check_installation=false" in create

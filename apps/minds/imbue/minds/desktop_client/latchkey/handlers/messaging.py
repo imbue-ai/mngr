@@ -6,14 +6,18 @@ shared epilogue in :mod:`.resolution` calls :meth:`MngrMessageSender.send`).
 The request's ``agent_id`` is the CHAT the request belongs to (the workspace
 template's chat-agent split, ``docs/system/blueprint/chat-agent-split/`` there):
 a chat can move to a new agent, so the nudge goes to the chat app inside the
-workspace, which delivers it to whichever agent the chat runs on now, with a
-direct ``mngr message`` as the backoff for a workspace whose template predates
-that script. The class lives alongside the handlers rather than inside any one
-of them so no handler has to import from another.
+workspace (:func:`~imbue.minds.desktop_client.chat_app.ask_chat_app`, the same
+path the app creates chats through), which delivers it to whichever agent the
+chat runs on now. The backoff for a workspace whose template predates that
+script is an ``mngr message`` run *inside* the workspace too, as the inner
+command of an ``mngr exec``: sending from the laptop works only for harnesses
+whose plugin has a remote send path, and codex's has none (it reaches its
+app-server over a unix socket that resolves inside the container), while inside
+the workspace every agent's host is local. The class lives alongside the
+handlers rather than inside any one of them so no handler has to import from
+another.
 """
 
-import json
-import shlex
 from typing import Final
 
 from loguru import logger
@@ -22,19 +26,24 @@ from pydantic import Field
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.minds.desktop_client.chat_app import ChatAppVerdict
+from imbue.minds.desktop_client.chat_app import ask_chat_app
+from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
+from imbue.minds.desktop_client.in_workspace_mngr import exec_log_detail
+from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
+from imbue.minds.desktop_client.in_workspace_mngr import jsonl_events
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.primitives import AgentId
 
-_MNGR_MESSAGE_TIMEOUT_SECONDS: Final[float] = 30.0
-# The chat app's send route blocks through the harness's paste-and-confirm, and the
-# script retries a not-ready chat app for half a minute before giving up.
-_MESSAGE_CHAT_TIMEOUT_SECONDS: Final[float] = 90.0
-
-# The in-workspace script that messages a chat by id through the chat app; relative to the
-# workspace repo root, which is the cwd ``mngr exec`` gives every command there.
-MESSAGE_CHAT_SCRIPT: Final[str] = "system/scripts/message_chat.py"
+# Ceiling for one delivery attempt, either way. Generous because an exec pays the outer
+# mngr's provider discovery, the hop into the container, and a python or mngr start
+# inside it before the message moves; the chat app's send route then blocks through the
+# harness's paste-and-confirm, and the script retries a not-ready chat app for half a
+# minute. The send runs on a background thread behind a retry ramp, so a high ceiling
+# only delays a retry.
+_DELIVER_TIMEOUT_SECONDS: Final[float] = 90.0
 
 # Backoff ramp for :meth:`MngrMessageSender.send`; after it, retries continue
 # at the final interval until delivery or app shutdown, so a workspace that
@@ -71,71 +80,50 @@ def stdout_reports_message_delivered(stdout: str) -> bool:
     scoped by an include filter to a single target, the presence of any
     ``message_sent`` event means that target received the message.
 
-    This is the source of truth for delivery -- the process exit code is
-    not, because ``mngr message`` exits 0 both when it delivers AND when no
-    agent matches the target (so exit code alone cannot distinguish
-    "delivered" from "the agent does not exist yet").
+    This is the source of truth for delivery -- neither process's exit code is,
+    because ``mngr message`` exits 0 both when it delivers AND when no agent
+    matches the target (so exit code alone cannot distinguish "delivered" from
+    "the agent does not exist yet").
     """
-    for raw_line in stdout.splitlines():
-        line = raw_line.strip()
-        # mngr interleaves human-readable warnings on stdout; only attempt to
-        # parse lines that look like a JSONL record (mirrors the ``mngr
-        # create`` event sniff in ``agent_creator._CreateEventCapture``).
-        if not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict) and event.get("event") == "message_sent":
-            return True
-    return False
+    return any(event.get("event") == "message_sent" for event in jsonl_events(stdout))
 
 
 @pure
-def message_chat_argv(exec_agent_id: str, chat_id: str, text: str) -> list[str]:
-    """The ``mngr exec`` that messages a chat through its workspace's chat app.
+def message_failure_reason(stdout: str) -> str:
+    """Why ``mngr message --format jsonl`` did not deliver, in its own words; '' if it said nothing.
 
-    ``mngr exec`` runs the script on ``exec_agent_id``, an agent of the chat's workspace
-    (the chat's newest member, which the backend resolver names for a chat id: a seeded
-    chat's id is its seed's, not any agent's). The script runs from the workspace root,
-    where it finds the chat app and posts to its send route by chat id; the chat app
-    delivers to the chat's active agent, or holds the message while the chat moves to a
-    new one.
-
-    ``mngr exec`` takes every positional but the last as an agent and the last as ONE shell
-    command string, so the script invocation is shell-quoted into a single argument; the
-    notice text carries spaces and parentheses. ``--no-start``: a verdict for a stopped
-    workspace waits for it to come up (the caller retries) rather than booting it.
+    ``mngr message`` reports each failure as a
+    ``{"event": "message_error", "agent": ..., "error": ...}`` line. That reason
+    is the only account of *what* went wrong: the exit code says only that
+    something did, and mngr's stderr carries provider-discovery chatter that
+    reads like a cause but is not.
     """
-    return ["exec", exec_agent_id, shlex.join(["python3", MESSAGE_CHAT_SCRIPT, chat_id, "-m", text]), "--no-start"]
-
-
-# The start of what python prints when the script it was told to run is not there (a workspace
-# whose template predates the script): `python3: can't open file '<path>': [Errno 2] No such file or directory`.
-_SCRIPT_MISSING_MARKER: Final[str] = "can't open file"
+    return "; ".join(
+        str(event["error"])
+        for event in jsonl_events(stdout)
+        if event.get("event") == "message_error" and "error" in event
+    )
 
 
 @pure
-def is_message_chat_unavailable(stderr: str) -> bool:
-    """Whether a failed ``mngr exec`` of the chat script failed for want of the script rather than by its verdict.
+def mngr_message_argv(target: str, text: str) -> list[str]:
+    """The ``mngr exec`` that runs ``mngr message`` to ``target`` inside its own workspace.
 
-    ``mngr exec`` folds every failure into exit 1, so the script's own verdict (refused, or
-    blocked on a dialog) and a missing script look alike by code; only the missing script has
-    python's complaint about that script on stderr. Any other failure, an unrelated missing
-    file included, is retried rather than second-guessed with a direct send: while a chat moves
-    to a new agent the chat app holds the message for it, and a send around the app would land
-    on the agent the chat is leaving.
+    ``-m`` and ``--`` are required: ``mngr message`` treats every positional argument as an
+    agent identifier (``nargs=-1``), so passing the text as a positional would be parsed as
+    a second agent and the actual message content would be read from stdin (silently empty
+    here).
     """
-    return any(_SCRIPT_MISSING_MARKER in line and MESSAGE_CHAT_SCRIPT in line for line in stderr.splitlines())
+    inner_command = build_in_workspace_mngr_command(["message", "--format", "jsonl", "-m", text, "--", target])
+    return ["exec", "--agent", target, inner_command, "--no-start", "--format", "jsonl"]
 
 
 class MngrMessageSender(MutableModel):
     """Delivers a resolution notice to the chat a permission request belongs to.
 
-    The chat app inside the workspace is tried first (``message_chat_argv``), so a chat that
-    moved to another agent still hears its verdict; ``mngr message <agent-id> <text>`` is the
-    backoff for a workspace without the script.
+    The chat app inside the workspace is tried first (:func:`ask_chat_app`), so a chat that
+    moved to another agent still hears its verdict; an ``mngr message`` inside the same
+    workspace (``mngr_message_argv``) is the backoff for a workspace without the script.
 
     Failures are logged at warning level but never raised: the response
     event has already been written, so an undelivered nudge is recoverable
@@ -168,8 +156,9 @@ class MngrMessageSender(MutableModel):
     def send(self, chat_id: AgentId, text: str, exec_agent_id: AgentId) -> None:
         """Dispatch the message to ``chat_id`` without blocking the caller, retrying until it lands.
 
-        ``exec_agent_id`` is the agent the chat script runs on (see ``message_chat_argv``);
-        for a chat that is its own first agent it is the chat id itself.
+        ``exec_agent_id`` is the agent the chat script runs on: the chat's newest member,
+        which the backend resolver names for a chat id (a seeded chat's id is its seed's, not
+        any agent's). For a chat that is its own first agent it is the chat id itself.
 
         The send runs on a thread tracked by :attr:`concurrency_group` and
         never raises -- failures are logged. Undelivered attempts retry on the
@@ -226,53 +215,54 @@ class MngrMessageSender(MutableModel):
     def deliver(self, target: str, text: str, exec_agent_id: str) -> bool:
         """Deliver the notice to the chat ``target`` names and return whether it landed.
 
-        The chat app is tried first: ``mngr exec`` on ``exec_agent_id`` (an agent of the
-        chat's workspace) runs the workspace's messaging script, and exit 0 is the chat
-        app's word that the message was delivered or queued. Only when the script is not
-        there to run (an older workspace, whose chats are their own agents) does the direct
-        ``mngr message`` to that agent run; any other failure is retried by the caller.
+        The chat app's word is final unless it gave none: a notice delivered behind a dialog
+        is in the pane already, and a refusal is never second-guessed with a send around the
+        chat app, since while a chat moves to a new agent the chat app holds the message for
+        it and a direct send would land on the agent the chat is leaving; the caller retries
+        instead, as it does a workspace the exec never reached. Only a template from before
+        the script, whose chats are their own agents, gets the in-workspace ``mngr message``.
+        A stopped workspace is not booted for a notice; the caller waits for it to come up.
         """
-        exec_result = self.mngr_caller.call(
-            message_chat_argv(exec_agent_id, target, text), timeout=_MESSAGE_CHAT_TIMEOUT_SECONDS
-        )
-        if exec_result.returncode == 0:
+        answer = ask_chat_app(self.mngr_caller, exec_agent_id, [target, "-m", text], timeout=_DELIVER_TIMEOUT_SECONDS)
+        if answer.verdict is ChatAppVerdict.DELIVERED_BEHIND_DIALOG:
+            logger.info("resolution nudge to target {} landed behind a dialog: {}", target, answer.detail)
+        if answer.is_delivered:
             return True
-        if not is_message_chat_unavailable(exec_result.stderr):
-            logger.debug(
-                "the chat app of target {} did not take the message (exit {}); stderr: {}",
+        if answer.verdict is ChatAppVerdict.NO_VERDICT:
+            logger.warning(
+                "target {} gave no verdict on the nudge through its chat app ({}); falling back to mngr message",
                 target,
-                exec_result.returncode,
-                exec_result.stderr.strip(),
+                answer.detail,
             )
-            return False
-        logger.debug("target {} has no chat app script to message through; falling back to mngr message", target)
-        return self._deliver_through_mngr_message(exec_agent_id, text)
+            return self._deliver_through_mngr_message(exec_agent_id, text)
+        logger.debug(
+            "the chat app of target {} did not take the message (script exit {}, exec exit {}): {}",
+            target,
+            answer.script_exit_code,
+            answer.exec_returncode,
+            answer.log_detail,
+        )
+        return False
 
     def _deliver_through_mngr_message(self, target: str, text: str) -> bool:
-        """Send with ``mngr message`` and return whether the TARGET agent actually received it.
+        """Send with ``mngr message`` inside the agent's workspace and return whether the TARGET agent received it.
 
-        ``target`` is matched by ``mngr message`` against agent ids and names,
-        so a caller can address an agent by its host name before its canonical
-        id is known. Delivery is judged from the structured ``--format jsonl``
-        output (a ``message_sent`` event) rather than the process exit code:
-        ``mngr message`` exits 0 both when it delivers AND when no agent
-        matches the target, so a caller that retries until the agent exists
-        must inspect the output.
-
-        ``-m`` and ``--`` are required: ``mngr message`` treats every positional
-        argument as an agent identifier (``nargs=-1``), so passing the text as a
-        positional would be parsed as a second agent and the actual message
-        content would be read from stdin (silently empty here).
+        ``target`` is matched by both commands against agent ids and names, so a
+        caller can address an agent by its host name before its canonical id is
+        known. Delivery is judged from the inner command's structured ``--format
+        jsonl`` output (a ``message_sent`` event) rather than either process's exit
+        code: ``mngr message`` exits 0 both when it delivers AND when no agent
+        matches the target, so a caller that retries until the agent exists must
+        inspect the output.
         """
-        result = self.mngr_caller.call(
-            ["message", "--format", "jsonl", "-m", text, "--", target], timeout=_MNGR_MESSAGE_TIMEOUT_SECONDS
+        result = self.mngr_caller.call(mngr_message_argv(target, text), timeout=_DELIVER_TIMEOUT_SECONDS)
+        inner_stdout = inner_stdout_from_exec_result(result.stdout)
+        if stdout_reports_message_delivered(inner_stdout):
+            return True
+        logger.debug(
+            "mngr message to target {} not yet delivered (exit {}): {}",
+            target,
+            result.returncode,
+            message_failure_reason(inner_stdout) or exec_log_detail(result),
         )
-        is_delivered = stdout_reports_message_delivered(result.stdout)
-        if not is_delivered:
-            logger.debug(
-                "mngr message to target {} not yet delivered (exit {}); stderr: {}",
-                target,
-                result.returncode,
-                result.stderr.strip(),
-            )
-        return is_delivered
+        return False

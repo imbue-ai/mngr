@@ -1,11 +1,17 @@
 """Spawn an in-workspace chat that drives a template skill, and probe for the skill first.
 
-The app runs ``mngr create`` *inside* the workspace's container (via ``mngr exec``)
-so the create resolves the template's ``chat`` create-template and lands in the
-right work dir, exactly as the workspace's own UI creates chats, while the
-coupling stays at the mngr CLI level. ``mngr exec`` runs its COMMAND through a
-shell on the host, so the inner create is one ``shlex.join``-ed string and the
-seed message cannot break out of its ``--message`` argument.
+The app asks the workspace's own chat app for the chat, through the template's
+``system/scripts/message_chat.py --create`` run *inside* the workspace's container
+(:func:`~imbue.minds.desktop_client.chat_app.ask_chat_app`, the same run that
+messages a chat, plus ``--create``): the chat app mints the chat's id, binds the
+workspace's default account and harness, labels it, seeds the message, and answers
+once its ``mngr create`` has finished, exactly as a launcher-started chat is made. On a template
+whose script predates the create mode (or has no script), the app runs a bare
+``mngr create`` inside the container instead, which resolves the template's
+``chat`` create-template and lands in the right work dir, while the coupling
+stays at the mngr CLI level. ``mngr exec`` runs its COMMAND through a shell on
+the host, so either inner command is one ``shlex.join``-ed string and the seed
+message cannot break out of its own argument.
 
 A workspace created from a template older than the skill would accept the inner
 ``mngr create`` and then hang on the unknown slash command, leaving a
@@ -23,10 +29,11 @@ accounts but write no file, and for their one update the app falls back to askin
 the template's own resolver (:func:`resolve_account_binding`) and splicing its
 answer in, as it did before the file existed.
 
-The one setting the app does add, ``agent_types.claude.check_installation=false``,
-is the lever for a workspace whose claude binary no longer matches the template's
-pin: its in-container mngr refuses every claude create, including the update that
-would fix it, and only a create arriving from outside can wave the check.
+The one setting the bare create adds, ``agent_types.claude.check_installation=false``,
+is the lever for a workspace whose claude binary no longer matches the template's pin:
+its in-container mngr refuses every claude create, including the update that would fix
+it, and only a create arriving from outside can wave the check. The script's create
+waves it on every create itself.
 """
 
 import secrets
@@ -40,6 +47,8 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.chat_app import ChatAppVerdict
+from imbue.minds.desktop_client.chat_app import ask_chat_app
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -52,6 +61,15 @@ _PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 # The inner create spawns a fresh chat agent (tmux window, claude process) on an
 # existing host: no provisioning or git transfer, but slower than a plain message.
 _SPAWN_TIMEOUT_SECONDS: Final[float] = 120.0
+
+# The same create asked of the chat app, which holds its answer until the create has
+# finished. This ceiling has to sit ABOVE the two windows inside it -- the chat app's own
+# 300s wait (``CHAT_CREATION_WAIT_TIMEOUT_SECONDS`` in the template's ``agent_manager.py``)
+# and the 30s the script spends retrying a chat app that is not ready yet -- because the
+# inner 504 is the only answer that can tell the user the chat is still coming. Cut the
+# wait short here instead and the create runs on regardless, the chat's window opens moments
+# later, and all the user was given is minds' own word that the spawn failed.
+_SCRIPT_SPAWN_TIMEOUT_SECONDS: Final[float] = 360.0
 
 # The account probe runs the template's resolver under ``uv run``, so it pays a Python start.
 _ACCOUNT_PROBE_TIMEOUT_SECONDS: Final[float] = 90.0
@@ -105,7 +123,8 @@ _ACCOUNT_ARG_FLAG: Final[str] = "--env"
 # interfaces key on ``assist``, newer ones on the purpose-neutral ``auto_open``.
 AUTO_OPEN_CHAT_LABELS: Final[tuple[str, ...]] = ("assist", "auto_open")
 
-# Puts the chat in the workspace's chat memory band, as its own UI does for the chats it creates.
+# Puts the chat in the workspace's chat memory band, as its own UI does for the chats it
+# creates. The chat app's create route sets it itself; the bare create has to.
 USER_CREATED_LABEL: Final[str] = "user_created=true"
 
 # Waves the claude version check for this create alone; see the module docstring.
@@ -318,16 +337,29 @@ def generate_chat_name(skill_name: str) -> str:
     return f"{skill_name}-{secrets.token_hex(3)}"
 
 
+def build_create_chat_script_args(*, chat_name: str, message: str) -> list[str]:
+    """The messaging script's arguments that ask the chat app for a chat named ``chat_name`` seeded with ``message``.
+
+    The auto-open labels surface the chat's window; the route binds the account and marks
+    the chat user-created itself. The script waits for the chat app to finish the create,
+    so its answer comes once the chat exists or with the create's own failure.
+    """
+    script_args = ["--create", "--name", chat_name]
+    for label in AUTO_OPEN_CHAT_LABELS:
+        script_args += ["--label", f"{label}=true"]
+    return [*script_args, "-m", message]
+
+
 def build_skill_chat_mngr_args(
     workspace_agent_id: AgentId, *, chat_name: str, message: str, account_args: Sequence[str] = ()
 ) -> list[str]:
-    """Build the ``mngr`` CLI args (sans the leading ``mngr``) that spawn a chat seeded with ``message``.
+    """Build the ``mngr`` CLI args (sans the leading ``mngr``) that spawn a chat seeded with ``message`` with a bare ``mngr create``.
 
-    An ``exec`` targeting the workspace agent by id (a bare id is a valid agent
-    address) whose single COMMAND argument is the inner ``mngr create`` shell
-    string. The chat is grouped with its workspace by living in the same
-    container, so no grouping label is needed. The create names no harness and
-    no account: the workspace's own create defaults supply both.
+    The path for a template whose script cannot create a chat. An ``exec`` targeting the
+    workspace agent by id (a bare id is a valid agent address) whose single COMMAND
+    argument is the inner ``mngr create`` shell string. The chat is grouped with its
+    workspace by living in the same container, so no grouping label is needed. The create
+    names no harness and no account: the workspace's own create defaults supply both.
 
     ``account_args`` are the resolver's arguments for a workspace that writes no
     create defaults (:func:`resolve_legacy_account_args`); empty otherwise.
@@ -372,18 +404,66 @@ def spawn_skill_chat(
     *,
     chat_name: str,
     message: str,
-    account_args: Sequence[str] = (),
+    probe: SkillProbe,
 ) -> SkillChatSpawn:
-    """Spawn the chat and wait for ``mngr create`` to finish; report how it went.
+    """Spawn the chat and wait for its create to finish; report how it went.
 
     Synchronous on purpose: the caller holds its "starting..." state until the
     chat actually exists rather than dismissing into a blank gap before the chat's window
     appears.
 
+    The workspace's chat app is asked first, through the template's script. Only when the
+    script gave no verdict (no script, or one from before its create mode) does the bare
+    ``mngr create`` run, bound through the workspace's create defaults or, on a template
+    that writes none, the resolver ``probe`` chose. A verdict from the
+    script is final either way: a refusal names a chat already made or a workspace that
+    cannot make one, and a second create would not change that.
+
     A failure carries the workspace's verdict rather than only logging it: the
     refusals that stick are the ones retrying cannot fix, and a workspace with no
     provider account signed in refuses in its own words.
     """
+    answer = ask_chat_app(
+        mngr_caller,
+        str(workspace_agent_id),
+        build_create_chat_script_args(chat_name=chat_name, message=message),
+        timeout=_SCRIPT_SPAWN_TIMEOUT_SECONDS,
+    )
+    if answer.is_delivered:
+        return SkillChatSpawn(is_started=True)
+    if answer.verdict is ChatAppVerdict.NO_VERDICT:
+        # Warning, with the script's own words: an argument the script rejected would otherwise
+        # read as an old template.
+        logger.warning(
+            "Machine {} gave no verdict on creating chat {} through its chat app ({}); spawning it with a bare create",
+            workspace_agent_id,
+            chat_name,
+            answer.detail,
+        )
+        account_args = resolve_legacy_account_args(mngr_caller, workspace_agent_id, probe)
+        return _spawn_with_bare_create(
+            mngr_caller, workspace_agent_id, chat_name=chat_name, message=message, account_args=account_args
+        )
+    logger.error(
+        "Spawning chat {} in machine {} through its chat app failed (script exit {}, exec exit {}): {}",
+        chat_name,
+        workspace_agent_id,
+        answer.script_exit_code,
+        answer.exec_returncode,
+        answer.log_detail,
+    )
+    return SkillChatSpawn(is_started=False, failure_detail=answer.detail)
+
+
+def _spawn_with_bare_create(
+    mngr_caller: MngrCaller,
+    workspace_agent_id: AgentId,
+    *,
+    chat_name: str,
+    message: str,
+    account_args: Sequence[str],
+) -> SkillChatSpawn:
+    """Spawn the chat with a bare ``mngr create`` inside the workspace and wait for it to finish."""
     args = build_skill_chat_mngr_args(
         workspace_agent_id, chat_name=chat_name, message=message, account_args=account_args
     )

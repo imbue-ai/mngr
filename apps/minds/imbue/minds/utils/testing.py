@@ -75,3 +75,20 @@ class RecordingMngrCaller(MngrCaller):
     def called_event(self) -> threading.Event:
         """Set once at least one call has been recorded; lets tests await a background send."""
         return self._called_event
+
+
+class ScriptedMngrCaller(RecordingMngrCaller):
+    """A :class:`RecordingMngrCaller` returning one scripted result per call; the last one repeats."""
+
+    results: tuple[MngrCallResult, ...] = Field(description="Results returned call-by-call; the last one repeats.")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        index = min(len(self.calls), len(self.results) - 1)
+        super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        return self.results[index]

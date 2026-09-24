@@ -28,7 +28,6 @@ from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_j
 from imbue.minds.desktop_client.skill_chat import SkillSupport
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
 from imbue.minds.desktop_client.skill_chat import probe_skill
-from imbue.minds.desktop_client.skill_chat import resolve_legacy_account_args
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
@@ -201,7 +200,7 @@ class WorkspaceUpdateService(MutableModel):
         spawn = spawn_skill_chat(
             self.mngr_caller,
             agent_id,
-            account_args=resolve_legacy_account_args(self.mngr_caller, agent_id, probe),
+            probe=probe,
             chat_name=chat_name,
             # Read here rather than carried from the press: a schedule armed days ago is not
             # evidence about the backups this run is actually about to go without.

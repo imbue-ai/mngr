@@ -4,7 +4,12 @@ import subprocess
 
 from imbue.minds.desktop_client.in_workspace_mngr import FAILURE_DETAIL_MAX_CHARS
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
+from imbue.minds.desktop_client.in_workspace_mngr import exec_failure_reason
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
+from imbue.minds.desktop_client.in_workspace_mngr import inner_stderr_from_exec_result
+from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
+from imbue.minds.desktop_client.testing import exec_error_stdout
+from imbue.minds.desktop_client.testing import exec_result_stdout
 
 # The shape a wedged workspace answers with: outer discovery chatter, the
 # in-container mngr's refusal, and the outer exec's own closing verdict.
@@ -107,3 +112,25 @@ def test_a_log_dump_is_bounded_before_it_reaches_the_user() -> None:
 
     assert len(detail) == FAILURE_DETAIL_MAX_CHARS
     assert detail.startswith("Error: it broke")
+
+
+def test_the_inner_output_is_unwrapped_from_the_exec_result_event() -> None:
+    stdout = "WARNING: outer discovery chatter\n" + exec_result_stdout(
+        '{"chat_id": "agent-1"}\n', inner_stderr="Falling back to `mngr create`\n"
+    )
+    assert inner_stdout_from_exec_result(stdout) == '{"chat_id": "agent-1"}\n'
+    assert inner_stderr_from_exec_result(stdout) == "Falling back to `mngr create`\n"
+    assert inner_stdout_from_exec_result("ERROR: Command failed on agent x\n") == ""
+
+
+def test_an_exec_that_never_ran_the_command_says_why_on_stdout_alone() -> None:
+    """``--format jsonl`` writes the exec's own failure as an event and leaves stderr to the
+    outer mngr's chatter, so the reason has to be read off stdout or it is lost."""
+    stdout = "WARNING: outer SSH unreachable for host host-other\n" + exec_error_stdout(
+        "Agent chat-1 is not running (state: STOPPED)"
+    )
+
+    assert exec_failure_reason(stdout) == "Agent chat-1 is not running (state: STOPPED)"
+    assert exec_failure_reason(exec_result_stdout("done\n")) == ""
+    assert exec_failure_reason("") == ""
+    assert len(exec_failure_reason(exec_error_stdout("x" * 5000))) == FAILURE_DETAIL_MAX_CHARS

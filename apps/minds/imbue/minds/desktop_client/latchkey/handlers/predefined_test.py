@@ -1002,8 +1002,9 @@ def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: 
 
 
 def _nudge_text(argv: list[str]) -> str:
-    """The notice text inside the nudge's ``mngr exec`` command string (``... -m <text>``)."""
-    command_tokens = shlex.split(argv[2])
+    """The notice text inside the nudge's ``mngr exec`` command string (``... -m <text>; echo ...``)."""
+    script, _, _ = argv[3].rpartition("; ")
+    command_tokens = shlex.split(script)
     return command_tokens[command_tokens.index("-m") + 1]
 
 

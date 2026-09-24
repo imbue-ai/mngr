@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -969,22 +970,47 @@ def account_binding_probe_stdout(*, account_dir: str | None = SIGNED_IN_ACCOUNT_
     )
 
 
+def exec_result_stdout(inner_stdout: str, inner_stderr: str = "", agent: str = "workspace") -> str:
+    """One ``mngr exec --format jsonl`` stdout: the ``exec_result`` event carrying the inner command's output."""
+    event = {"event": "exec_result", "agent": agent, "stdout": inner_stdout, "stderr": inner_stderr, "success": True}
+    return json.dumps(event) + "\n"
+
+
+def exec_error_stdout(error: str, agent: str = "workspace") -> str:
+    """One ``mngr exec --format jsonl`` stdout for a run that never reached the command: only its reason."""
+    return json.dumps({"event": "exec_error", "agent": agent, "error": error}) + "\n"
+
+
+def script_exit_stdout(exit_code: int, inner_stdout: str = "", inner_stderr: str = "") -> str:
+    """The exec stdout of a ``build_message_chat_command`` run whose script exited with ``exit_code``."""
+    return exec_result_stdout(f"{inner_stdout}{EXIT_SENTINEL}{exit_code}\n", inner_stderr)
+
+
 def ready_machine_probe_stdout(
     skill_probe_stdout: str,
     *,
     account_dir: str | None = SIGNED_IN_ACCOUNT_DIR,
     is_local_settings_present: bool = False,
+    has_chat_create_script: bool = False,
 ) -> str:
-    """The one answer a machine ready to host a skill chat gives, whichever pre-spawn probe asks.
+    """The one answer a machine ready to host a skill chat gives, whichever pre-spawn step asks.
 
     ``RecordingMngrCaller`` answers every call alike, so this carries the skill sentinel,
-    the local-settings sentinel, and the account probe's fenced binding together.
-    ``is_local_settings_present`` renders a workspace that writes its own create defaults
-    (the app then asks its resolver nothing); ``account_dir`` keeps
-    ``account_binding_probe_stdout``'s three-way contract for one that does not.
+    the local-settings sentinel, the account probe's fenced binding, and the exec result of
+    the chat-creating script together. ``has_chat_create_script`` renders a template whose
+    script makes the chat (exit 0); the default renders one whose script predates its create
+    mode (argparse's 2), so the app's bare create runs. ``is_local_settings_present``
+    renders a workspace that writes its own create defaults (the app then asks its resolver
+    nothing); ``account_dir`` keeps ``account_binding_probe_stdout``'s three-way contract
+    for one that does not.
     """
     local_settings = LOCAL_SETTINGS_PRESENT_SENTINEL if is_local_settings_present else LOCAL_SETTINGS_ABSENT_SENTINEL
-    return f"{skill_probe_stdout}{local_settings}\n" + account_binding_probe_stdout(account_dir=account_dir)
+    script = (
+        script_exit_stdout(0, '{"chat_id": "agent-1"}\n')
+        if has_chat_create_script
+        else script_exit_stdout(2, inner_stderr="message_chat.py: error: unrecognized arguments: --create\n")
+    )
+    return f"{skill_probe_stdout}{local_settings}\n" + account_binding_probe_stdout(account_dir=account_dir) + script
 
 
 def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:

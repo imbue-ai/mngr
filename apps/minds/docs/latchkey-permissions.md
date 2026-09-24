@@ -135,10 +135,11 @@ second gateway URL or a different agent skill.
       describing the decision (with the request's id embedded, so the chat
       harness can pair the notice with the right card); the agent wakes up
       and decides whether to retry. The notice goes through the workspace's
-      chat app, so a chat that has moved to a new agent still hears it; a
-      direct `mngr message` to the agent is the backoff for a workspace
-      whose template has no chat-messaging script. Delivery is retried with
-      backoff for as long as the app runs, so a nudge for a stopped
+      chat app, so a chat that has moved to a new agent still hears it; an
+      `mngr message` run inside the workspace is the backoff for one whose
+      template has no chat-messaging script (inside, every harness's send
+      path works; codex's does not from the laptop). Delivery is retried
+      with backoff for as long as the app runs, so a nudge for a stopped
       workspace lands when that workspace next comes up; the in-chat card
       does not depend on it (see step 8). A `FAILED` or manual-credentials
       outcome leaves the request pending and notifies only the user (in the

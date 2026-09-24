@@ -2,6 +2,8 @@ import shlex
 
 import pytest
 
+from imbue.minds.desktop_client.chat_app import MESSAGE_CHAT_SCRIPT
+from imbue.minds.desktop_client.chat_app import build_message_chat_args
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
@@ -14,6 +16,7 @@ from imbue.minds.desktop_client.skill_chat import SkillProbe
 from imbue.minds.desktop_client.skill_chat import SkillSupport
 from imbue.minds.desktop_client.skill_chat import USER_CREATED_LABEL
 from imbue.minds.desktop_client.skill_chat import build_account_binding_probe_args
+from imbue.minds.desktop_client.skill_chat import build_create_chat_script_args
 from imbue.minds.desktop_client.skill_chat import build_skill_chat_mngr_args
 from imbue.minds.desktop_client.skill_chat import build_skill_support_probe_args
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
@@ -22,8 +25,11 @@ from imbue.minds.desktop_client.skill_chat import resolve_account_binding
 from imbue.minds.desktop_client.skill_chat import resolve_legacy_account_args
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.testing import account_binding_probe_stdout
+from imbue.minds.desktop_client.testing import exec_error_stdout
+from imbue.minds.desktop_client.testing import script_exit_stdout
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
 
 
@@ -80,7 +86,125 @@ def test_the_probe_reports_whether_the_workspace_writes_its_create_defaults(sent
     assert probe.is_local_settings_present is is_present
 
 
-def test_the_spawn_runs_a_chat_create_inside_the_workspace_with_the_seed_message() -> None:
+_READY_PROBE = SkillProbe(support=SkillSupport.SUPPORTED, is_local_settings_present=True)
+_SCRIPT_CREATED = MngrCallResult(returncode=0, stdout=script_exit_stdout(0, '{"chat_id": "agent-1"}\n'))
+# A script from before its create mode (argparse's 2), or none at all (python's 2).
+_SCRIPT_NO_VERDICT = MngrCallResult(
+    returncode=0,
+    stdout=script_exit_stdout(2, inner_stderr="message_chat.py: error: unrecognized arguments: --create\n"),
+)
+
+
+def _script_call(agent_id: AgentId, *, chat_name: str, message: str) -> list[str]:
+    return build_message_chat_args(str(agent_id), build_create_chat_script_args(chat_name=chat_name, message=message))
+
+
+def test_the_spawn_asks_the_chat_app_for_a_labeled_chat_with_the_seed_message() -> None:
+    script_args = build_create_chat_script_args(chat_name="assist-abc123", message="/assist it broke")
+    assert script_args[:3] == ["--create", "--name", "assist-abc123"]
+    labels = [script_args[i + 1] for i, token in enumerate(script_args) if token == "--label"]
+    assert labels == [f"{label}=true" for label in AUTO_OPEN_CHAT_LABELS]
+    # The route marks the chat user-created and binds the account itself.
+    assert USER_CREATED_LABEL not in script_args and "--env" not in script_args
+    assert script_args[-2:] == ["-m", "/assist it broke"]
+
+
+def test_the_seed_message_cannot_break_out_of_the_script_command() -> None:
+    hostile = 'oops"; rm -rf /; echo $(whoami) `id` && touch /tmp/pwned\n\nsecond line'
+    args = _script_call(AgentId.generate(), chat_name="x", message=hostile)
+    script, _, _ = args[3].rpartition("; ")
+    inner = shlex.split(script)
+    assert inner[2:4] == ["python3", MESSAGE_CHAT_SCRIPT]
+    assert inner[-2:] == ["-m", hostile]
+
+
+def test_a_spawn_the_chat_app_made_makes_exactly_the_script_call() -> None:
+    caller = RecordingMngrCaller(result=_SCRIPT_CREATED)
+    agent_id = AgentId.generate()
+
+    spawn = spawn_skill_chat(
+        caller, agent_id, chat_name="assist-abc123", message="/assist it broke", probe=_READY_PROBE
+    )
+
+    assert spawn.is_started is True
+    assert spawn.failure_detail == ""
+    assert caller.calls == [_script_call(agent_id, chat_name="assist-abc123", message="/assist it broke")]
+
+
+def test_a_spawn_the_chat_app_refused_is_final_in_the_chat_apps_words() -> None:
+    """A refusal names a chat already made or a workspace that cannot make one; a bare create
+    behind it would make a second chat or fail the same way."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=script_exit_stdout(
+                1,
+                inner_stderr=(
+                    "Falling back to nothing\nThe chat app did not create the chat: mngr create exited with code 1\n"
+                ),
+            ),
+        )
+    )
+
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke", probe=_READY_PROBE)
+
+    assert spawn.is_started is False
+    assert spawn.failure_detail == "The chat app did not create the chat: mngr create exited with code 1"
+    assert len(caller.calls) == 1
+
+
+def test_a_script_without_a_create_mode_falls_back_to_the_bare_create() -> None:
+    """A template with the messaging script but not yet its create mode answers argparse's 2,
+    which is no verdict on the chat: the app's own create runs, bound the way it was before."""
+    caller = ScriptedMngrCaller(results=(_SCRIPT_NO_VERDICT, MngrCallResult(returncode=0)))
+    agent_id = AgentId.generate()
+
+    spawn = spawn_skill_chat(
+        caller, agent_id, chat_name="assist-abc123", message="/assist it broke", probe=_READY_PROBE
+    )
+
+    assert spawn.is_started is True
+    assert caller.calls == [
+        _script_call(agent_id, chat_name="assist-abc123", message="/assist it broke"),
+        build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke"),
+    ]
+
+
+def test_the_chat_apps_create_waits_longer_than_the_bare_create_behind_it() -> None:
+    """The chat app holds its answer until the create has finished, so a ceiling no higher than
+    the bare create's would always expire first: the user would get minds' silence about a run
+    it never heard back from, while the chat goes on being made and opens its window moments later."""
+    caller = ScriptedMngrCaller(results=(_SCRIPT_NO_VERDICT, MngrCallResult(returncode=0)))
+
+    spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke", probe=_READY_PROBE)
+
+    through_chat_app, bare_create = caller.recorded_calls
+    assert through_chat_app.timeout is not None and bare_create.timeout is not None
+    assert through_chat_app.timeout > bare_create.timeout
+
+
+def test_the_bare_create_fallback_binds_a_legacy_workspace_through_its_resolver() -> None:
+    """Only the fallback asks the resolver: a chat the chat app makes is bound by the chat app."""
+    legacy_probe = SkillProbe(support=SkillSupport.SUPPORTED, is_local_settings_present=False)
+    caller = ScriptedMngrCaller(
+        results=(
+            _SCRIPT_NO_VERDICT,
+            MngrCallResult(returncode=0, stdout=account_binding_probe_stdout(account_dir="/home/user/acc/a1")),
+            MngrCallResult(returncode=0),
+        )
+    )
+    agent_id = AgentId.generate()
+
+    spawn = spawn_skill_chat(caller, agent_id, chat_name="x", message="/update-self", probe=legacy_probe)
+
+    assert spawn.is_started is True
+    assert caller.calls[1] == build_account_binding_probe_args(agent_id)
+    assert caller.calls[2] == build_skill_chat_mngr_args(
+        agent_id, chat_name="x", message="/update-self", account_args=("--env", "CLAUDE_CONFIG_DIR=/home/user/acc/a1")
+    )
+
+
+def test_the_bare_create_runs_a_chat_create_inside_the_workspace_with_the_seed_message() -> None:
     agent_id = AgentId.generate()
     args = build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke")
     # Outer: exec targets the workspace agent by id and carries one inner-command string.
@@ -124,27 +248,18 @@ def test_generated_chat_names_carry_the_skill_and_do_not_repeat() -> None:
     assert first != generate_chat_name("update-self")
 
 
-def test_a_successful_spawn_makes_exactly_the_built_call() -> None:
-    caller = RecordingMngrCaller()
-    agent_id = AgentId.generate()
-    spawn = spawn_skill_chat(caller, agent_id, chat_name="assist-abc123", message="/assist it broke")
-    assert spawn.is_started is True
-    assert spawn.failure_detail == ""
-    assert caller.calls == [
-        build_skill_chat_mngr_args(agent_id, chat_name="assist-abc123", message="/assist it broke")
-    ]
-
-
-def test_a_failed_spawn_carries_the_machines_own_refusal() -> None:
+def test_a_failed_bare_create_carries_the_machines_own_refusal() -> None:
     """The caller renders this; without it the user is told only to try again."""
     stderr = (
         "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
         "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
         "ERROR: Command failed on agent system-services\n"
     )
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr=stderr, is_mngr_output=True))
+    caller = ScriptedMngrCaller(
+        results=(_SCRIPT_NO_VERDICT, MngrCallResult(returncode=1, stderr=stderr, is_mngr_output=True))
+    )
 
-    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke")
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke", probe=_READY_PROBE)
 
     assert spawn.is_started is False
     assert spawn.failure_detail.startswith("Error: Unknown fields in agent_types.opencode")
@@ -169,13 +284,38 @@ def test_a_failed_spawn_carries_the_machines_own_refusal() -> None:
     ids=("timed_out", "warm_process_died"),
 )
 def test_a_spawn_the_workspace_never_answered_quotes_nothing_at_the_user(result: MngrCallResult) -> None:
-    """These stderrs are minds' own lines, so showing them as the machine's verdict misattributes our own fault."""
+    """These stderrs are minds' own lines, so showing them as the machine's verdict misattributes our own fault.
+
+    No answer is also no verdict from the script, but not the kind a bare create may follow:
+    a timed-out create may well have made the chat."""
     caller = RecordingMngrCaller(result=result)
 
-    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist my laptop")
+    spawn = spawn_skill_chat(
+        caller, AgentId.generate(), chat_name="x", message="/assist my laptop", probe=_READY_PROBE
+    )
 
     assert spawn.is_started is False
     assert spawn.failure_detail == ""
+    assert len(caller.calls) == 1
+
+
+def test_a_spawn_the_exec_could_not_run_carries_the_reason_mngr_gave_not_its_chatter() -> None:
+    """``--format jsonl`` puts the exec's own refusal in an event on stdout and leaves stderr to
+    the outer mngr's discovery chatter, which would otherwise be shown as the machine's verdict."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=1,
+            stdout=exec_error_stdout("Agent 123 is not running (state: STOPPED)"),
+            stderr="WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n",
+            is_mngr_output=True,
+        )
+    )
+
+    spawn = spawn_skill_chat(caller, AgentId.generate(), chat_name="x", message="/assist it broke", probe=_READY_PROBE)
+
+    assert spawn.is_started is False
+    assert spawn.failure_detail == "Agent 123 is not running (state: STOPPED)"
+    assert len(caller.calls) == 1
 
 
 # CLEANUP: the resolver tests below go with the resolver (see skill_chat.py).

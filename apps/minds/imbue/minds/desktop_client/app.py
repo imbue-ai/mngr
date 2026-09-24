@@ -105,7 +105,6 @@ from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
 from imbue.minds.desktop_client.skill_chat import SkillSupport
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
 from imbue.minds.desktop_client.skill_chat import probe_skill
-from imbue.minds.desktop_client.skill_chat import resolve_legacy_account_args
 from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
@@ -649,12 +648,13 @@ def _handle_help_assist() -> Response:
     Only valid when the help flow was opened from a loaded workspace: the body carries that
     workspace's agent id and the user's description. Before spawning, we probe the workspace for the
     ``/assist`` skill and return 409 if it lacks it (an older default workspace template) or 502 if the workspace is
-    unreachable -- so we never spawn a chat that could only hang. Then we ask it which signed-in account the chat
-    should run on, and return 409 if it names none or 502 if that probe could not run either. Otherwise the
-    desktop app runs ``mngr create`` inside that workspace's container (via ``mngr exec``) to spawn a new chat seeded
-    with ``/assist <description>``; the workspace's desktop opens its window. The call blocks until
-    ``mngr create`` finishes so the get-help modal can hold its "starting..." state until the chat
-    exists, then returns 200 on success or 502 if the spawn failed.
+    unreachable -- so we never spawn a chat that could only hang. Then the desktop app asks that workspace's chat
+    app for a new chat seeded with ``/assist <description>`` (through the template's ``message_chat.py --create``,
+    run inside the container via ``mngr exec``; a bare ``mngr create`` on a template without it); the workspace's
+    desktop opens its window. The chat runs on the workspace's own default account, and a workspace with none
+    signed in refuses the create in its own words, which rides back in the 502 below. The call blocks until the
+    create finishes so the get-help modal can hold its "starting..." state until the chat exists, then returns 200
+    on success or 502 if the spawn failed.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -716,7 +716,7 @@ def _handle_help_assist() -> Response:
         workspace_agent_id,
         chat_name=generate_chat_name(ASSIST_SKILL_NAME),
         message=build_assist_chat_message(description),
-        account_args=resolve_legacy_account_args(mngr_caller, workspace_agent_id, probe),
+        probe=probe,
     )
     if not spawn.is_started:
         # The same wall that stops an /assist chat stops every other agent
