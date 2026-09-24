@@ -8,7 +8,9 @@ import json
 
 import pytest
 
+from imbue.mngr.e2e.conftest import BOUND_EXPIRED_EXIT_CODE
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 # The tutorial documents that every event is a JSON object guaranteed to carry
@@ -84,17 +86,17 @@ def test_event_follow(e2e: E2eSession) -> None:
 
     Scope: `--follow` keeps the event stream open indefinitely instead of
     emitting the backlog and exiting the way the bare `mngr event` does. Wrapped
-    in `timeout 3`, it is still running when killed (exit code 124), proving the
+    in a 3-second bound, it is still running when killed, proving the
     stream stayed open.
     """
     _create_my_task(e2e, 100701)
     # --follow polls for new events forever (it blocks after emitting any
     # backlog), so wrap it in `timeout` to stop it. A clean timeout kill exits
-    # 124; observing that exit code is the meaningful assertion here: it proves
+    # on the bound; observing that exit code is the meaningful assertion here: it proves
     # --follow kept the stream open instead of emitting events and exiting on its
     # own the way the non-follow `mngr event` command does.
-    result = e2e.run("timeout 3 mngr event my-task --follow", comment="follow events in real time")
-    expect(result).to_have_exit_code(124)
+    result = e2e.run(time_bounded(3, "mngr event my-task --follow"), comment="follow events in real time")
+    expect(result).to_have_exit_code(BOUND_EXPIRED_EXIT_CODE)
 
 
 @pytest.mark.release
@@ -110,18 +112,18 @@ def test_event_follow_filter_source(e2e: E2eSession) -> None:
     Scope: passing a source argument restricts `--follow` to that source. The
     sleep command agent emits no "claude/common_transcript" events, so the filter
     excludes everything and stdout is empty, while `--follow` still keeps the
-    stream open (killed by `timeout 1`, exit code 124) rather than crashing early.
+    stream open (killed by the 1-second bound) rather than crashing early.
     """
     _create_my_task(e2e, 100702)
-    # --follow streams indefinitely, so `timeout 1` kills it after 1s and the
-    # shell reports exit code 124. Asserting on 124 (rather than swallowing the
+    # --follow streams indefinitely, so the bound kills it after 1s and the
+    # shell reports the bound's exit code. Asserting on it (rather than swallowing the
     # exit code with `|| true`) confirms the stream actually started and kept
     # running instead of crashing early -- any other exit code is a failure.
     result = e2e.run(
-        "timeout 1 mngr event my-task --follow claude/common_transcript",
+        time_bounded(1, "mngr event my-task --follow claude/common_transcript"),
         comment="restrict the event stream to a specific source",
     )
-    expect(result).to_have_exit_code(124)
+    expect(result).to_have_exit_code(BOUND_EXPIRED_EXIT_CODE)
     # The sleep command agent emits no "claude/common_transcript" events, so the
     # source filter must exclude everything and produce no output.
     expect(result.stdout).to_be_empty()

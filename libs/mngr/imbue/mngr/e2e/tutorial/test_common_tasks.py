@@ -8,6 +8,7 @@ in place of modal claude agents) so the test stays fast.
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 
@@ -158,7 +159,8 @@ def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     # mngr wait blocks indefinitely on sleep agents; wrap each one to keep the
     # test fast. We mainly want to verify the && chain parses.
     e2e.run(
-        "timeout 1 mngr wait agent-auth && timeout 1 mngr wait agent-tests && timeout 1 mngr wait agent-docs || true",
+        f"{time_bounded(1, 'mngr wait agent-auth')} && {time_bounded(1, 'mngr wait agent-tests')}"
+        f" && {time_bounded(1, 'mngr wait agent-docs')} || true",
         comment="wait for them to finish",
     )
     # The fan-out (`mngr list --ids | mngr exec -`) should reach every agent.

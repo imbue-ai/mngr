@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 
@@ -94,7 +95,7 @@ def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
     # remote-provider exit code, since a real user's environment may have remote
     # backends enabled without credentials).
     expect(
-        e2e.run("timeout 1 watch -n 5 mngr list --running || true", comment="watch refreshing dashboard")
+        e2e.run(f"{time_bounded(1, 'watch -n 5 mngr list --running')} || true", comment="watch refreshing dashboard")
     ).to_succeed()
     # Verify the actual behavior of the command `watch` re-runs each tick: the
     # underlying `mngr list --running` query succeeds and emits a well-formed
@@ -137,7 +138,7 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
     # the first poll's snapshots are written, so the bound must comfortably exceed
     # startup for those snapshots to be captured before the process is killed.
     result = e2e.run(
-        "timeout 60 mngr observe --discovery-only || true",
+        f"{time_bounded(60, 'mngr observe --discovery-only')} || true",
         comment="JSONL stream of discovery events",
         timeout=90.0,
     )
@@ -318,7 +319,7 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     # Now run the actual tutorial command: watch refreshes every 5s, and a short
     # timeout confirms the dashboard launches and exits cleanly.
     expect(
-        e2e.run("timeout 1 watch -n 5 mngr list || true", comment="watch with list for a live dashboard")
+        e2e.run(f"{time_bounded(1, 'watch -n 5 mngr list')} || true", comment="watch with list for a live dashboard")
     ).to_succeed()
 
 

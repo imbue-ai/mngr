@@ -8,7 +8,9 @@ import json
 
 import pytest
 
+from imbue.mngr.e2e.conftest import BOUND_EXPIRED_EXIT_CODE
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.skitwright.expect import expect
 
@@ -551,7 +553,7 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
     merely starting up.
     """
     # `watch` blocks until SIGINT; wrap with a short `timeout` so the test
-    # exits without waiting for a full refresh interval. `timeout` returns 124
+    # exits without waiting for a full refresh interval. The bound expiring
     # on expiry (then `|| true` masks it), so a clean exit is expected. The
     # window must be long enough for `watch` to run `mngr list` to completion
     # *and* render its first frame -- watch renders only after the wrapped
@@ -565,7 +567,7 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
     # made it into that frame, proving watch genuinely executed the wrapped
     # command rather than merely starting up.
     result = e2e.run(
-        "timeout 25 watch -n5 mngr list || true",
+        f"{time_bounded(25, 'watch -n5 mngr list')} || true",
         comment="watch mode: refresh the list every 5 seconds",
         timeout=60.0,
     )
@@ -642,13 +644,13 @@ def test_observe_discovery_only(e2e: E2eSession) -> None:
     # resource.
     # `mngr observe` streams indefinitely; wrap with a short `timeout` so the
     # test doesn't hang. The stream never self-exits, so a healthy run is always
-    # terminated by the timeout (exit 124). Masking *only* 124 to a clean exit --
+    # terminated by the bound. Masking *only* that exit code to a clean exit --
     # rather than a blanket `|| true` -- means the assertion still fails if observe
     # crashes early with any other exit code, which is what verifies the command
     # "starts and streams discovery events without error" instead of merely that a
     # `|| true` pipeline exited 0.
     result = e2e.run(
-        'timeout 1 mngr observe --discovery-only; test "$?" -eq 124',
+        f'{time_bounded(1, "mngr observe --discovery-only")}; test "$?" -eq {BOUND_EXPIRED_EXIT_CODE}',
         comment="continually stream discovery events as JSONL",
     )
     expect(result).to_succeed()

@@ -15,6 +15,7 @@ from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Final
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -41,6 +42,27 @@ from imbue.skitwright.session import Session
 # and attaches instead of failing with "open terminal failed: not a terminal".
 # Run via ``python -c`` in a background subprocess by ``run_connecting_command``.
 _PTY_CONNECT_LAUNCHER = "import pty, sys; raise SystemExit(pty.spawn(['sh', '-c', sys.argv[1]]))"
+
+# What a command bounded by ``time_bounded`` reports when it runs to its deadline:
+# the alarm kills it, and a shell reports a signal death as 128 + the signal.
+BOUND_EXPIRED_EXIT_CODE: Final[int] = 128 + int(signal.SIGALRM)
+
+
+def time_bounded(seconds: float, command: str) -> str:
+    """Wrap ``command`` so it is killed after ``seconds`` under any userland.
+
+    ``timeout(1)`` is GNU-only and macOS ships a BSD userland without it, so this
+    is the perl form the style guide's portable-shell section prescribes. ``exec``
+    replaces perl with the command, so the command keeps perl's pid and reports its
+    own exit status; on expiry the alarm kills it and the shell reports
+    :data:`BOUND_EXPIRED_EXIT_CODE`.
+    """
+    # Parenthesised so a shell always survives to report the status. Bare, the
+    # shell may exec itself away for a simple command and leave the caller reaping
+    # the signal death directly, which reads as the negated signal instead -- macOS
+    # ``sh`` does that and Linux ``sh`` does not. A subshell keeps the result a
+    # plain exit status, so callers can still append ``|| true`` or test ``$?``.
+    return f"(perl -MTime::HiRes=alarm -e 'alarm shift; exec @ARGV or exit 127' {seconds} {command})"
 
 
 class E2eSession(Session):

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 
@@ -212,15 +213,19 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     # snapshot is real discovery JSONL: it carries the DISCOVERY_FULL event type.
     expect(e2e.run("mngr list", comment="warm the discovery cache")).to_succeed()
     raw = e2e.run(
-        "timeout 5 mngr observe --discovery-only || true",
+        f"{time_bounded(5, 'mngr observe --discovery-only')} || true",
         comment="capture the raw discovery stream",
         timeout=45.0,
     )
     expect(raw.stdout).to_contain("DISCOVERY_FULL")
-    # observe blocks indefinitely; wrap with timeout so the while-loop exits.
+    # observe blocks indefinitely; bound it so the while-loop exits.
+    pipe_into_python = (
+        'bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | '
+        'python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\''
+    )
     result = e2e.run(
-        'timeout 5 bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | python -c "import sys, json; d=json.load(sys.stdin); print(d.get(\\"name\\", \\"unknown\\"))"; done\' || true',
-        comment="pipe discovery stream into python (timeout-capped)",
+        f"{time_bounded(5, pipe_into_python)} || true",
+        comment="pipe discovery stream into python (time-bounded)",
         timeout=45.0,
     )
     expect(result).to_succeed()

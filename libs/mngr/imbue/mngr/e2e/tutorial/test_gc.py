@@ -6,6 +6,7 @@ Each test corresponds 1:1 to a tutorial script block.
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 # Creating a Modal-backed agent has to provision a fresh Modal environment and
@@ -173,7 +174,7 @@ def test_gc_background_watch(e2e: E2eSession) -> None:
     Scope: covers the two commands of the block -- `mngr config set
     commands.destroy.gc false` succeeds (disabling automatic gc on destroy), and
     `watch -n60 mngr gc` can start to run gc in the background (capped with
-    `timeout 1` since watch would otherwise block indefinitely).
+    a 1-second bound since watch would otherwise block indefinitely).
     """
     expect(
         e2e.run(
@@ -181,11 +182,11 @@ def test_gc_background_watch(e2e: E2eSession) -> None:
             comment="disable automatic gc on destroy",
         )
     ).to_succeed()
-    # `watch -n60 mngr gc` would block indefinitely; cap it with `timeout 1`
+    # `watch -n60 mngr gc` would block indefinitely; cap it with a 1-second bound
     # so the test only confirms watch can start.
     expect(
         e2e.run(
-            "timeout 1 watch -n60 mngr gc || true",
+            f"{time_bounded(1, 'watch -n60 mngr gc')} || true",
             comment="run gc in the background via watch",
         )
     ).to_succeed()

@@ -6,6 +6,7 @@ import pytest
 
 from imbue.mngr.api.discovery_events import DiscoveryEventType
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 
@@ -164,7 +165,7 @@ def test_observe_discovery_recap(e2e: E2eSession) -> None:
     # line on a fresh run is the full discovery snapshot. The outer `timeout` is
     # only a safety cap so the test can never hang waiting on the stream.
     result = e2e.run(
-        "timeout 30 sh -c 'mngr observe --discovery-only | head -n 1' || true",
+        f"""{time_bounded(30, "sh -c 'mngr observe --discovery-only | head -n 1'")} || true""",
         comment="stream discovery events as JSONL",
         timeout=45.0,
     )

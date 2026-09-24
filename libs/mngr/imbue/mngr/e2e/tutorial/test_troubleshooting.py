@@ -12,7 +12,9 @@ import json
 
 import pytest
 
+from imbue.mngr.e2e.conftest import BOUND_EXPIRED_EXIT_CODE
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
 
@@ -106,19 +108,19 @@ def test_troubleshoot_follow_events(e2e: E2eSession) -> None:
         mngr event my-task --follow
 
     Scope: `mngr event my-task --follow` streams events forever until interrupted.
-    Bounded by `timeout 12` (a window exceeding mngr's cold-start cost), a clean
+    Bounded to 12 seconds (a window exceeding mngr's cold-start cost), a clean
     follow run reaches and stays in the follow loop and is killed by `timeout`
-    (exit code 124) rather than exiting early.
+    (killed by the bound) rather than exiting early.
     """
     _create_my_task(e2e, 101022)
     # --follow streams forever until interrupted, so bound it with `timeout`.
     # The window must exceed mngr's cold-start cost so the command actually
     # reaches and stays in the follow loop rather than being killed mid-startup.
-    # A clean follow run gets killed by `timeout` and exits 124; any earlier
+    # A clean follow run gets killed by the bound; any earlier
     # exit (e.g. a crash or an error resolving the target) yields a different
     # code, which this assertion would catch -- unlike a `|| true` guard.
-    follow_result = e2e.run("timeout 12 mngr event my-task --follow", comment="follow events while reproducing")
-    expect(follow_result).to_have_exit_code(124)
+    follow_result = e2e.run(time_bounded(12, "mngr event my-task --follow"), comment="follow events while reproducing")
+    expect(follow_result).to_have_exit_code(BOUND_EXPIRED_EXIT_CODE)
 
 
 @pytest.mark.release
@@ -136,10 +138,12 @@ def test_troubleshoot_follow_events_unknown_agent(e2e: E2eSession) -> None:
     """
     # `timeout` is only a safety net: a correct resolution failure exits long
     # before it fires. If the command instead hung, `timeout` would kill it and
-    # the exit-code-124 assertion below would catch the regression.
-    result = e2e.run("timeout 30 mngr event no-such-agent --follow", comment="follow events for a nonexistent agent")
+    # the exit-code assertion below would catch the regression.
+    result = e2e.run(
+        time_bounded(30, "mngr event no-such-agent --follow"), comment="follow events for a nonexistent agent"
+    )
     expect(result).to_fail()
-    assert result.exit_code != 124, f"command hung until `timeout` killed it: {result.stderr!r}"
+    assert result.exit_code != BOUND_EXPIRED_EXIT_CODE, f"command hung until the bound killed it: {result.stderr!r}"
     expect(result.stderr).to_contain("no-such-agent")
 
 
