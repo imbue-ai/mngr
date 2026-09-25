@@ -27,6 +27,7 @@ dependencies = [
     "sentry-sdk>=2.63.0",
     "tenacity>=8.0",
     "traceback-with-variables>=2.0",
+    "urllib3>=2.0",
 ]
 
 [project.optional-dependencies]

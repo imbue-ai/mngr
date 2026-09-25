@@ -42,6 +42,7 @@ from sentry_sdk.integrations.stdlib import StdlibIntegration
 from sentry_sdk.types import Event
 from sentry_sdk.types import Hint
 from traceback_with_variables import Format
+from urllib3.util.retry import Retry
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
@@ -369,7 +370,40 @@ class ImbueSentryHttpTransport(HttpTransport):
 
     The actual sentry web API does return a status code (413) if the event was rejected,
     so we need to handle this at the level of the sentry HttpTransport and do something with it.
+
+    It also sets the connection pool's retry policy, which the SDK leaves at urllib3's default;
+    see ``_get_pool_options``.
     """
+
+    def _get_pool_options(self) -> dict[str, Any]:
+        """Retry an envelope whose connection accepted it and then never answered.
+
+        urllib3's default retries connection failures for any method but gates read failures on the
+        method being idempotent, and envelopes are POSTs. A send that never got a connection was
+        therefore already retried; one written into a connection that then went silent was dropped
+        outright. That is the case this reaches -- urllib3 detects and replaces a pooled connection
+        the peer closed, for both a clean close and a reset, so no answer at all is what is left.
+
+        ``Retry`` rather than the ``tenacity`` style_guide.md asks for elsewhere: urllib3 owns the
+        pool, discards the dead connection between attempts, and already retries connect failures, so
+        an outer loop would nest inside it and compound the attempt count.
+
+        A retry can duplicate an envelope whose response was lost. Sentry deduplicates on
+        ``event_id``, though that is reported to land after group aggregates update, so a duplicate
+        may still perturb an issue's counts.
+
+        ``respect_retry_after_header`` is off because urllib3 otherwise retries any 413, 429 or 503
+        carrying a ``Retry-After``, sleeping that header's full duration before each attempt, instead
+        of handing the response to ``_send_request``.
+        """
+        options = super()._get_pool_options()
+        options["retries"] = Retry(
+            total=3,
+            allowed_methods=Retry.DEFAULT_ALLOWED_METHODS | {"POST"},
+            backoff_factor=0.5,
+            respect_retry_after_header=False,
+        )
+        return options
 
     def _send_request(
         self,

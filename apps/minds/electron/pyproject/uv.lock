@@ -764,6 +764,7 @@ dependencies = [
     { name = "sentry-sdk" },
     { name = "tenacity" },
     { name = "traceback-with-variables" },
+    { name = "urllib3" },
 ]
 
 [package.metadata]
@@ -783,6 +784,7 @@ requires-dist = [
     { name = "sentry-sdk", specifier = ">=2.63.0" },
     { name = "tenacity", specifier = ">=8.0" },
     { name = "traceback-with-variables", specifier = ">=2.0" },
+    { name = "urllib3", specifier = ">=2.0" },
 ]
 provides-extras = ["dev", "testing"]
 

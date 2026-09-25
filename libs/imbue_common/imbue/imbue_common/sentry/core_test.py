@@ -2,18 +2,23 @@ import gzip
 import io
 import logging
 import os
+import socket
 import sys
+import threading
 import zipfile
 from collections.abc import Callable
 from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from typing import cast
 
 import pytest
 import sentry_sdk
+import urllib3
 from loguru import logger
 from pydantic import Field
+from sentry_sdk.consts import DEFAULT_OPTIONS
 from sentry_sdk.integrations.logging import EventHandler
 from sentry_sdk.integrations.logging import unignore_logger
 from sentry_sdk.types import Event
@@ -21,6 +26,7 @@ from sentry_sdk.types import Hint
 
 from imbue.imbue_common.sentry.core import BUG_REPORT_DESCRIPTION_EXTRA_KEY
 from imbue.imbue_common.sentry.core import ErrorAttachmentsS3Uploader
+from imbue.imbue_common.sentry.core import ImbueSentryHttpTransport
 from imbue.imbue_common.sentry.core import MANUALLY_SUBMITTED_TAG
 from imbue.imbue_common.sentry.core import _before_send_wrapper
 from imbue.imbue_common.sentry.core import _bug_report_description_bytes
@@ -907,3 +913,129 @@ def test_submit_manual_bug_report_returns_none_when_sentry_inactive() -> None:
     # With no active Sentry client (the default in tests), the submit is a no-op that returns None
     # (no event id) rather than raising.
     assert submit_manual_bug_report(title="t", description="d", report={"description": "d"}, logs_folder=None) is None
+
+
+_RECV_BUFFER_SIZE = 65536
+_ACCEPT_POLL_SECONDS = 0.05
+_ACCEPT_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+_REQUEST_LINE_PREFIX = b"POST "
+_OK_RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok"
+_RATE_LIMITED_RESPONSE = (
+    b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 2\r\nRetry-After: 1\r\nConnection: keep-alive\r\n\r\nok"
+)
+
+
+@contextmanager
+def _local_http_server(handle_connection: Callable[[socket.socket, int], None]) -> Iterator[int]:
+    """Serve loopback connections with `handle_connection`, given each connection and its 1-based index."""
+    listener = socket.socket()
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    # Polled rather than blocking, so `is_stopping` is what ends the accept loop: closing a socket a
+    # thread is blocked in `accept()` on does not wake it on Linux.
+    listener.settimeout(_ACCEPT_POLL_SECONDS)
+    is_stopping = threading.Event()
+
+    def _serve(connection: socket.socket, index: int) -> None:
+        with connection:
+            try:
+                handle_connection(connection, index)
+            except OSError as error:
+                logger.trace("Test server connection {} ended: {}", index, error)
+
+    def _accept_forever() -> None:
+        index = 0
+        while not is_stopping.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            except OSError as error:
+                logger.trace("Test server stopped accepting: {}", error)
+                return
+            index += 1
+            threading.Thread(target=_serve, args=(connection, index), daemon=True).start()
+
+    accepting_thread = threading.Thread(target=_accept_forever, daemon=True)
+    accepting_thread.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        is_stopping.set()
+        accepting_thread.join(timeout=_ACCEPT_SHUTDOWN_TIMEOUT_SECONDS)
+        listener.close()
+
+
+def _each_request(connection: socket.socket) -> Iterator[None]:
+    """Yield once per request arriving on `connection`, until the client closes it.
+
+    Counted by request line rather than by read: urllib3 writes the headers and the body of the
+    first request on a connection separately, so they arrive as two reads.
+    """
+    while data := connection.recv(_RECV_BUFFER_SIZE):
+        for _ in range(data.count(_REQUEST_LINE_PREFIX)):
+            yield
+
+
+def _answer_then_strand_the_first_connection(connection: socket.socket, index: int) -> None:
+    """Answer one request per connection, but leave the first connection open and mute afterwards.
+
+    Models the path failure urllib3 cannot detect in advance: the first connection answers, is
+    pooled, and then stops answering without ever closing, so a request reused onto it is written
+    and never replied to. A second connection behaves normally, which is what a retry gets.
+    """
+    for request_number, _ in enumerate(_each_request(connection), start=1):
+        if index == 1 and request_number > 1:
+            continue
+        connection.sendall(_OK_RESPONSE)
+
+
+@contextmanager
+def _transport_pool() -> Iterator[urllib3.PoolManager]:
+    """A pool built from the options the transport gives urllib3 for its own."""
+    options = dict(DEFAULT_OPTIONS)
+    options["dsn"] = "https://public@o1.ingest.us.sentry.io/1"
+    transport = ImbueSentryHttpTransport(options)
+    try:
+        with urllib3.PoolManager(**transport._get_pool_options()) as pool:
+            yield pool
+    finally:
+        transport.kill()
+
+
+def test_envelope_post_is_retried_when_its_connection_stops_answering() -> None:
+    """An envelope whose pooled connection has silently died is resent, not dropped.
+
+    urllib3 gates retrying a read failure on the method being idempotent, and envelopes are POSTs,
+    so without the transport's own retry configuration this send is lost outright.
+    """
+    with _local_http_server(_answer_then_strand_the_first_connection) as port:
+        with _transport_pool() as pool:
+            url = f"http://127.0.0.1:{port}/api/1/envelope/"
+            timeout = urllib3.Timeout(total=2.0)
+            assert pool.request("POST", url, body=b"envelope", timeout=timeout).status == 200
+            # Reuses the pooled connection, which no longer answers.
+            assert pool.request("POST", url, body=b"envelope", timeout=timeout).status == 200
+
+
+def test_rate_limited_envelope_post_is_handed_back_rather_than_retried() -> None:
+    """A 429 reaches the transport on the first attempt, so it can record the rate limit.
+
+    Making POST retryable would otherwise also make urllib3 retry the statuses it honours
+    `Retry-After` for, sleeping that header's duration before re-sending an envelope the server has
+    already refused.
+    """
+    request_count = 0
+
+    def _rate_limit_every_request(connection: socket.socket, index: int) -> None:
+        nonlocal request_count
+        for _ in _each_request(connection):
+            request_count += 1
+            connection.sendall(_RATE_LIMITED_RESPONSE)
+
+    with _local_http_server(_rate_limit_every_request) as port:
+        with _transport_pool() as pool:
+            response = pool.request("POST", f"http://127.0.0.1:{port}/api/1/envelope/", body=b"envelope")
+    assert response.status == 429
+    assert request_count == 1
