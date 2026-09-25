@@ -1,0 +1,9 @@
+- Recorded the minds 0.7.1 release in `docs/deploy/history/minds-v0.7.1.md`: the tag pair and the mirror commit the template pins, the three launch-to-msg runs, both tiers' deploys and bakes with their slice verification, the alpha promotion, and the verification of the connector concurrency reshape those deploys carried.
+
+- Recorded the minds 0.7.2 release in `docs/deploy/history/minds-v0.7.2.md`: the tag pair, which the unattended launch-to-msg run pinned on the template rather than a hand-made branch; the three connector migrations both tiers applied; the 18-slice production bake and the five-slice staging bake with their verification; the alpha promotion; the retirement of half of two dead pool generations; and the desktop crash that a `macos_launch` failure turned out to be hiding.
+
+- Reset `docs/deploy/next_deploy.md` for what the two releases discharged: the deploy-before-pin ordering and the concurrency reshape are done and gone from the list, and the connector migrations are applied on staging and production -- but the `dev-josh-1` database still has to be dropped and recreated, since it is the only one that ran 045 in its pre-rename form, so that half stays on the list, which now also names the `minds-v0.7.0` pool rows that only become retirable once the beta and stable web channels move off that tag.
+
+- Release runbook: step 8's tag run now passes `force=true`, without which it skips in under two minutes on a fast-forward cut, because the pair it names is the one step 4 already marked green.
+
+- Pool runbook: the slice-verification script no longer reports `SSH_FAILED` when the remote command merely exits non-zero -- `git config --get` does exactly that when the key is unset -- and the git-identity check now says a parked slice may carry `minds-bootstrap` or nothing at all, since both were seen on the same tag on different boxes. The only failure is seeing the operator's own name.
