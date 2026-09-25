@@ -2978,7 +2978,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "sentry-sdk", specifier = ">=2.63.0" },
     { name = "simple-websocket", specifier = ">=1.0" },
-    { name = "spectree", specifier = ">=1.4" },
+    { name = "spectree", specifier = ">=1.4,<3" },
     { name = "telethon", specifier = ">=1.40.0" },
     { name = "tenacity" },
     { name = "tomlkit", specifier = ">=0.12.0" },

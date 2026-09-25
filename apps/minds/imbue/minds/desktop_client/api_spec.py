@@ -39,8 +39,13 @@ def _emit_custom_validation_error(
     resp: Any,
     req_validation_error: Any,
     instance: Any,
+    *_: Any,
 ) -> None:
-    """spectree ``before`` hook: turn a request-validation failure into the stable 422 body."""
+    """spectree ``before`` hook: turn a request-validation failure into the stable 422 body.
+
+    spectree owns this signature and calls the hook on every validated request,
+    not only on a failure; ``*_`` absorbs positional arguments it adds.
+    """
     if req_validation_error:
         errors = [
             {

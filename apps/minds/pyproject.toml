@@ -41,7 +41,9 @@ dependencies = [
     "playwright>=1.40.0",
     "psycopg2-binary>=2.9",
     "pydantic>=2.0",
-    "spectree>=1.4",
+    # <3: spectree 3.0.0 changed the arity of the `before` hook this project
+    # implements, and calls that hook on every validated request.
+    "spectree>=1.4,<3",
     "tenacity",
     "tomlkit>=0.12.0",
     "tzlocal>=5",

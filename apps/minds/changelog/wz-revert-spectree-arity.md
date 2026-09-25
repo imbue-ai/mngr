@@ -1,1 +1,0 @@
-- Reverted the spectree cap and the validation-hook change so they can land through review instead of straight on `main`. Until that lands, a build whose dependency resolve picks up spectree 3.0.0 answers 500 on every `/api/v1` endpoint, workspace create included.
