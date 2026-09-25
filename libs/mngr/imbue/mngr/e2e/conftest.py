@@ -28,9 +28,10 @@ from imbue.mngr.api.connect import CONNECT_COMMAND_ACTIVE_ENV_VAR
 from imbue.mngr.config.consts import PROFILES_DIRNAME
 from imbue.mngr.config.consts import ROOT_CONFIG_FILENAME
 from imbue.mngr.config.data_types import USER_ID_FILENAME
+from imbue.mngr.utils.env_utils import TEST_USER_ID_RANDOM_SUFFIX_LENGTH
+from imbue.mngr.utils.env_utils import build_test_user_id
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_modal.backend import MODAL_NAME_MAX_LENGTH
-from imbue.mngr_modal.backend import truncate_modal_name
 from imbue.skitwright.data_types import CommandResult
 from imbue.skitwright.data_types import OutputLine
 from imbue.skitwright.data_types import OutputSource
@@ -334,6 +335,18 @@ _DEBUGGING_DOC = "libs/mngr/imbue/mngr/e2e/DEBUGGING.md"
 
 _ASCIINEMA_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
+# `mngr destroy` has no destroy-everything flag; this is the documented form.
+# It runs under pipefail so a failing `mngr list` cannot hide behind a destroy
+# that simply saw no ids, and under bash because the Linux test image's /bin/sh
+# is dash.
+_DESTROY_ALL_AGENTS_COMMAND: Final[str] = "bash -o pipefail -c 'mngr list --ids | mngr destroy - --force'"
+_DESTROY_ALL_AGENTS_TIMEOUT_SECONDS: Final[float] = 120.0
+
+# Matched in `modal environment delete`'s output: a modal-marked test that never
+# reached the point of creating its environment has nothing to delete, and that
+# is not worth a warning.
+_MODAL_NO_SUCH_ENVIRONMENT_TEXT: Final[str] = "No such environment"
+
 
 _LEVEL = {"no": 0, "on-failure": 1, "yes": 2}
 
@@ -511,13 +524,13 @@ def _stop_asciinema_processes(test_output_dir: Path) -> None:
         pid_file.unlink(missing_ok=True)
 
 
-def _setup_test_profile(host_dir: Path) -> str:
+def _setup_test_profile(host_dir: Path, max_user_id_length: int) -> str:
     """Create a mngr profile in the test's host directory.
 
     Sets up config.toml, profile directory, user_id, and tmux_onboarding_shown
     so that the subprocess mngr uses a predictable profile with a user_id that
     follows the mngr_test-YYYY-MM-DD-HH-MM-SS convention (parseable by the
-    Modal environment cleanup script).
+    Modal environment cleanup script) and fits ``max_user_id_length``.
 
     Returns the user_id that was written.
     """
@@ -537,10 +550,16 @@ def _setup_test_profile(host_dir: Path) -> str:
 
     # Build a user_id that produces a Modal environment name matching the
     # mngr_test-YYYY-MM-DD-HH-MM-SS-{identifier} pattern (recognized by
-    # cleanup_old_modal_test_environments).
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M-%S")
-    identifier = os.environ.get("MNGR_AGENT_NAME") or uuid4().hex[:8]
-    user_id = f"{timestamp}-{identifier}"
+    # cleanup_old_modal_test_environments). The agent name makes the id
+    # readable; the random suffix keeps sessions apart even when identically
+    # named agents start in the same second, and the length cap keeps the
+    # provider from truncating the name into a collision.
+    user_id = build_test_user_id(
+        timestamp=datetime.now(timezone.utc),
+        agent_name=os.environ.get("MNGR_AGENT_NAME"),
+        random_suffix=uuid4().hex[:TEST_USER_ID_RANDOM_SUFFIX_LENGTH],
+        max_length=max_user_id_length,
+    )
     # Write without trailing newline (matching the format used by get_or_create_user_id)
     user_id_path = profile_dir / USER_ID_FILENAME
     user_id_path.write_text(user_id)
@@ -561,42 +580,87 @@ def _delete_modal_environment(environment_name: str, env: dict[str, str], cwd: P
             cwd=cwd,
             timeout=30.0,
         )
-        if result.exit_code != 0:
-            logger.warning("Failed to delete Modal environment {}: {}", environment_name, result.stderr.strip())
-        else:
+        output = (result.stdout + result.stderr).strip()
+        if result.exit_code == 0:
             logger.info("Deleted Modal environment: {}", environment_name)
+        elif _MODAL_NO_SUCH_ENVIRONMENT_TEXT in output:
+            logger.info("No Modal environment {} to delete; the test never created one", environment_name)
+        else:
+            logger.warning("Failed to delete Modal environment {}: {}", environment_name, output)
     except (FileNotFoundError, OSError) as exc:
         logger.warning("Error deleting Modal environment {}: {}", environment_name, exc)
 
 
 def _write_destroy_script(
     test_output_dir: Path,
-    env: dict[str, str],
+    teardown_env: dict[str, str],
     temp_git_repo: Path,
     tmux_tmpdir: Path,
+    modal_environment_name: str | None,
 ) -> None:
-    """Write a destroy-env script that cleans up the kept test environment."""
+    """Write a destroy-env script that cleans up the kept test environment.
+
+    The script runs every step even after one fails, then reports which steps
+    failed and exits non-zero, so a leaked agent or Modal environment is never
+    announced as destroyed.
+    """
     socket_path = tmux_tmpdir / f"tmux-{os.getuid()}" / "default"
+    mngr_exports = "".join(
+        f"export {key}={shlex.quote(value)}\n" for key, value in sorted(teardown_env.items()) if key.startswith("MNGR")
+    )
+    modal_step = (
+        (
+            f'echo "Deleting Modal environment {modal_environment_name}..."\n'
+            f'if ! (cd "{temp_git_repo}" && uv run modal environment delete {shlex.quote(modal_environment_name)} --yes); then\n'
+            '  echo "Failed to delete the Modal environment" >&2\n'
+            "  status=1\n"
+            "fi\n"
+            "\n"
+        )
+        if modal_environment_name is not None
+        else ""
+    )
     script_path = test_output_dir / "destroy-env"
     script_path.write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        f'export MNGR_HOST_DIR="{env["MNGR_HOST_DIR"]}"\n'
+        f"{mngr_exports}"
         f'export TMUX_TMPDIR="{tmux_tmpdir}"\n'
         "unset TMUX\n"
+        "status=0\n"
         "\n"
         'echo "Destroying all agents..."\n'
-        f'cd "{temp_git_repo}" && mngr destroy --all --force || true\n'
+        f'if ! (cd "{temp_git_repo}" && {_DESTROY_ALL_AGENTS_COMMAND}); then\n'
+        '  echo "Failed to destroy the agents" >&2\n'
+        "  status=1\n"
+        "fi\n"
         "\n"
+        f"{modal_step}"
         'echo "Killing tmux server..."\n'
         f'tmux -S "{socket_path}" kill-server 2>/dev/null || true\n'
         "\n"
         f'echo "Removing tmux tmpdir..."\n'
         f'rm -rf "{tmux_tmpdir}"\n'
         "\n"
+        'if [ "$status" -ne 0 ]; then\n'
+        '  echo "Environment NOT fully destroyed; see the errors above." >&2\n'
+        '  exit "$status"\n'
+        "fi\n"
         'echo "Environment destroyed."\n'
     )
     script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _teardown_env(env: dict[str, str], enabled_backends: list[str], is_modal_test: bool) -> dict[str, str]:
+    """The test's environment narrowed to the backends its teardown has to walk.
+
+    Only a modal-marked test can have created a Modal agent (the resource guard
+    fails any other test that reaches Modal), so every other test's listing,
+    destroy and post-destroy garbage collection leave Modal out and skip the
+    network round trip.
+    """
+    teardown_backends = [backend for backend in enabled_backends if backend != "modal" or is_modal_test]
+    return {**env, "MNGR__ENABLED_BACKENDS": json.dumps(teardown_backends)}
 
 
 # Resolve the real home directory at import time, before any test fixture
@@ -689,6 +753,7 @@ def e2e(
     # The parent autouse fixture isolates the in-process tmux server, but
     # subprocesses need their own isolation since they inherit env vars.
     tmux_tmpdir = Path(tempfile.mkdtemp(prefix="mngr-e2e-tmux-", dir="/tmp"))
+    is_modal_test = request.node.get_closest_marker("modal") is not None
 
     # Set up per-test output directory under the run directory
     test_name = request.node.name
@@ -750,10 +815,14 @@ def e2e(
     # Create the mngr profile proactively so that:
     # 1. The user_id follows the timestamp convention for Modal cleanup
     # 2. The tmux onboarding screen is suppressed in test transcripts
-    test_user_id = _setup_test_profile(temp_host_dir)
+    test_user_id = _setup_test_profile(temp_host_dir, max_user_id_length=MODAL_NAME_MAX_LENGTH - len(test_prefix))
     # Pre-compute the Modal environment name so create (inside the mngr
     # subprocess) and delete (below) agree without either side re-deriving it.
-    test_modal_env_name = truncate_modal_name(f"{test_prefix}{test_user_id}", max_length=MODAL_NAME_MAX_LENGTH)
+    # It must fit Modal's limit as is: the backend would otherwise truncate it,
+    # and a truncated name is shared by every concurrent session whose id
+    # starts the same way.
+    test_modal_env_name = f"{test_prefix}{test_user_id}"
+    assert len(test_modal_env_name) <= MODAL_NAME_MAX_LENGTH, test_modal_env_name
 
     # Add the e2e bin directory to PATH so the connect script is available
     env["PATH"] = f"{_BIN_DIR}:{env.get('PATH', '')}"
@@ -846,8 +915,15 @@ def e2e(
         logger.warning("Test output: {}", test_output_dir)
         logger.warning("Debugging tips: {} (relative to git root)", _DEBUGGING_DOC)
 
+    teardown_env = _teardown_env(env, enabled_backends, is_modal_test)
     if keep_env:
-        _write_destroy_script(test_output_dir, env, temp_git_repo, tmux_tmpdir)
+        _write_destroy_script(
+            test_output_dir,
+            teardown_env,
+            temp_git_repo,
+            tmux_tmpdir,
+            modal_environment_name=test_modal_env_name if is_modal_test else None,
+        )
         logger.info("Environment kept alive. To clean up: {}/destroy-env", test_output_dir)
         logger.info("MNGR_HOST_DIR={}", temp_host_dir)
         logger.info("TMUX_TMPDIR={}", tmux_tmpdir)
@@ -858,15 +934,23 @@ def e2e(
     _stop_asciinema_processes(test_output_dir)
 
     # Destroy all agents before killing tmux
-    run_command(
-        "mngr destroy --all --force",
-        env=env,
+    destroy_result = run_command(
+        _DESTROY_ALL_AGENTS_COMMAND,
+        env=teardown_env,
         cwd=temp_git_repo,
-        timeout=30.0,
+        timeout=_DESTROY_ALL_AGENTS_TIMEOUT_SECONDS,
     )
+    if destroy_result.exit_code != 0:
+        logger.warning(
+            "Failed to destroy the test's agents (exit code {}): {}",
+            destroy_result.exit_code,
+            (destroy_result.stdout + destroy_result.stderr).strip(),
+        )
 
-    # Delete the Modal environment (if one was created)
-    _delete_modal_environment(test_modal_env_name, env=env, cwd=temp_git_repo)
+    # Delete the Modal environment. Only a modal-marked test can have created
+    # one; for every other test the delete is a network round trip that fails.
+    if is_modal_test:
+        _delete_modal_environment(test_modal_env_name, env=env, cwd=temp_git_repo)
 
     # Kill the isolated tmux server
     tmux_tmpdir_str = str(tmux_tmpdir)

@@ -91,9 +91,7 @@ _ = SimpleFocusListWalker
 _remove_deprecated_urwid_module_aliases()
 
 
-# =============================================================================
 # Shared plugin fixtures (single-sourced from plugin_testing.py)
-# =============================================================================
 #
 # Most of mngr's test fixtures (HOME isolation, temp host/profile/config dirs,
 # git-repo helpers, the autouse setup_test_mngr_env, the shell-stub fixtures,
@@ -184,9 +182,7 @@ def log_warnings() -> Generator[list[str], None, None]:
         yield messages
 
 
-# =============================================================================
 # Autouse fixtures
-# =============================================================================
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -419,9 +415,7 @@ def plugin_manager(
     reset_provider_instances()
 
 
-# =============================================================================
 # Session Cleanup - Detect and clean up leaked test resources
-# =============================================================================
 
 
 def _get_tmux_sessions_with_prefix(prefix: str) -> list[str]:
@@ -475,7 +469,20 @@ def _is_alive_non_zombie(process: psutil.Process) -> bool:
         return False
 
 
-def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple[str, str]]:
+# The text every resource guard rejection carries. docker-py wraps the guard's
+# ResourceGuardViolation in its own DockerException while fetching the server
+# version, so the wrapped message is the only way to tell a rejection from an
+# unreachable daemon.
+_RESOURCE_GUARD_REJECTION_TEXT: Final[str] = "RESOURCE GUARD"
+
+_STALE_DOCKER_CONTAINER_AGE_SECONDS: Final[int] = 3600
+
+
+def _is_resource_guard_rejection(exc: docker.errors.DockerException) -> bool:
+    return _RESOURCE_GUARD_REJECTION_TEXT in str(exc)
+
+
+def _get_stale_docker_test_containers(max_age_seconds: int) -> list[tuple[str, str]]:
     """Get Docker containers from tests that are older than max_age_seconds.
 
     Returns a list of (container_id, container_name) tuples for containers
@@ -492,6 +499,11 @@ def _get_stale_docker_test_containers(max_age_seconds: int = 3600) -> list[tuple
     try:
         client = create_docker_client()
     except docker.errors.DockerException as e:
+        if _is_resource_guard_rejection(e):
+            logger.warning(
+                "Skipped stale docker container sweep because the docker_sdk resource guard rejected it: {}", e
+            )
+            return []
         # Called unconditionally at session end, including in sessions with no
         # Docker daemon (e.g. offload sandboxes), so a connection failure here
         # is expected -- log at debug only.
@@ -565,6 +577,11 @@ def _get_leaked_state_containers_for_prefixes(prefixes: list[str]) -> list[tuple
     try:
         client = create_docker_client()
     except docker.errors.DockerException as e:
+        if _is_resource_guard_rejection(e):
+            logger.error(
+                "Skipped the leaked state container check because the docker_sdk resource guard rejected it: {}", e
+            )
+            return []
         # We only reach here when this worker's docker fixtures ran (non-empty
         # prefixes), so the daemon was reachable during the tests. Failing to
         # connect now means we cannot verify our own cleanup -- this is
@@ -698,16 +715,15 @@ def session_cleanup() -> Generator[None, None, None]:
     and checks for:
     1. Leftover child processes (excluding xdist workers on the leader)
     2. Leftover tmux sessions created by this worker's tests
-    3. Docker state containers leaked under one of this worker's registered
-       prefixes (an own-fixture leak)
-    4. Stale Docker test containers from other/older sessions (older than 1
-       hour) that cannot be attributed to this worker
 
     If any leaked resources are found:
-    - An error is raised to fail the test suite for leaks we can attribute to
-      this worker (processes, tmux sessions, prefix-matched state containers);
-      stale containers from other sessions are warn-and-cleaned without failing
-    - The resources are killed/removed as a last-ditch cleanup measure
+    - An error is raised to fail the test suite
+    - The resources are killed as a last-ditch cleanup measure
+
+    Leaked Docker containers are handled by ``pytest_sessionfinish`` below: a
+    session fixture tears down inside the last test's teardown, where the
+    docker_sdk resource guard still enforces that test's marks, so a Docker
+    client cannot be created here unless that test happened to be marked.
 
     Tests should always clean up after themselves! This is just a safety net.
     """
@@ -759,30 +775,7 @@ def session_cleanup() -> Generator[None, None, None]:
             + "\n".join(f"  {s}" for s in leftover_sessions)
         )
 
-    # 3. Check for Docker state containers leaked by THIS worker's fixtures.
-    # These carry one of the prefixes our docker fixtures registered, so they
-    # are unambiguously our own leaks (a fixture failed to clean up). We fail
-    # the suite for these. We cannot fail on arbitrary containers from other
-    # concurrent workers/sessions (we have no way to attribute them), so those
-    # are handled by the age-based sweep below (warn + clean, no failure).
-    leaked_state_containers = _get_leaked_state_containers_for_prefixes(worker_docker_state_prefixes)
-    if leaked_state_containers:
-        container_lines = [f"  {name} ({cid[:12]})" for cid, name in leaked_state_containers]
-        errors.append(
-            "Leaked Docker state containers found!\n"
-            "A docker fixture failed to remove its state container before completing.\n" + "\n".join(container_lines)
-        )
-
-    # 4. Check for stale Docker test containers from other/older sessions (older
-    # than 1 hour). These cannot be attributed to this worker, so we warn and
-    # clean them but do not fail the suite.
-    stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=3600)
-    if stale_docker_containers:
-        logger.warning(
-            "Cleaning {} stale docker test container(s) from other/older sessions", len(stale_docker_containers)
-        )
-
-    # 5. Clean up leaked resources (last-ditch safety measure)
+    # 3. Clean up leaked resources (last-ditch safety measure)
     for process in leftover_processes:
         try:
             process.kill()
@@ -790,10 +783,8 @@ def session_cleanup() -> Generator[None, None, None]:
             pass
 
     _kill_tmux_sessions(leftover_sessions)
-    _remove_docker_containers(leaked_state_containers)
-    _remove_docker_containers(stale_docker_containers)
 
-    # 6. Fail the test suite if any issues were found
+    # 4. Fail the test suite if any issues were found
     if errors:
         raise AssertionError(
             "=" * 70 + "\n"
@@ -809,6 +800,56 @@ _GNU_ONLY_BINARIES: Final[tuple[str, ...]] = ("tac", "timeout")
 # macOS ships bash 3.2, which has no associative arrays (`declare -A`).
 _BASH_CANDIDATES: Final[tuple[str, ...]] = ("bash", "/opt/homebrew/bin/bash", "/usr/local/bin/bash")
 _MINIMUM_BASH_MAJOR_VERSION: Final[int] = 4
+
+
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    """Find and remove leaked Docker test containers once every test has finished.
+
+    Session fixtures tear down inside the last test's teardown, where the
+    docker_sdk resource guard still enforces that test's marks, so a Docker
+    client created there is rejected unless that test happened to carry
+    ``@pytest.mark.docker_sdk``. This hook runs after that teardown, once the
+    guard's per-test environment is gone.
+
+    Two kinds of container are handled, mirroring what ``session_cleanup`` does
+    for processes and tmux sessions:
+    - State containers under one of this worker's registered prefixes are the
+      worker's own leaks (a docker fixture failed to clean up). They fail the
+      run through ``pytest.exit``, since a session-finish hook has no test
+      report to fail. That reaches pytest's exit code when pytest runs without
+      xdist, which is how CI's offload sandboxes run it; an xdist controller
+      ignores a worker's exit status, so there the leak is logged and removed
+      but cannot fail the run.
+    - Stale test containers from other or older sessions cannot be attributed
+      to this worker, so they are removed with a warning and no failure.
+    """
+    is_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER") is not None
+    is_xdist_leader = not is_xdist_worker and os.environ.get("PYTEST_XDIST_TESTRUNUID") is not None
+    if is_xdist_leader:
+        return
+
+    leaked_state_containers = _get_leaked_state_containers_for_prefixes(worker_docker_state_prefixes)
+    stale_docker_containers = _get_stale_docker_test_containers(max_age_seconds=_STALE_DOCKER_CONTAINER_AGE_SECONDS)
+    logger.debug(
+        "Checked Docker for leaked test containers: {} from this worker's fixtures, {} stale from other sessions",
+        len(leaked_state_containers),
+        len(stale_docker_containers),
+    )
+    if stale_docker_containers:
+        logger.warning(
+            "Cleaning {} stale docker test container(s) from other/older sessions", len(stale_docker_containers)
+        )
+    _remove_docker_containers(leaked_state_containers)
+    _remove_docker_containers(stale_docker_containers)
+
+    if leaked_state_containers:
+        container_lines = [f"  {name} ({cid[:12]})" for cid, name in leaked_state_containers]
+        message = (
+            "Leaked Docker state containers found!\n"
+            "A docker fixture failed to remove its state container before completing.\n" + "\n".join(container_lines)
+        )
+        logger.error(message)
+        pytest.exit(message, returncode=1)
 
 
 @pytest.fixture

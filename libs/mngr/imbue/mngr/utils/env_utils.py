@@ -1,5 +1,6 @@
 import re
 import shlex
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Final
@@ -7,6 +8,7 @@ from typing import Final
 from dotenv import dotenv_values
 
 from imbue.imbue_common.pure import pure
+from imbue.mngr.errors import MngrError
 
 _TRUTHY_VALUES = frozenset(("1", "true", "yes"))
 
@@ -25,6 +27,45 @@ TEST_ENV_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mngr_test-(\d{4})-(\d{2
 # session cleanup to recognise leaked test resources (e.g. docker containers)
 # whose names carry this prefix.
 TEST_PREFIX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^mngr_[0-9a-f]{32}-")
+
+# Random suffix ending every test user id, so that sessions started in the same
+# second under the same agent name (TMR mappers share a long name prefix) still
+# get distinct ids, and so that a provider truncating the id from the right
+# cannot strip the part that makes it unique.
+TEST_USER_ID_RANDOM_SUFFIX_LENGTH: Final[int] = 8
+
+_TEST_USER_ID_TIMESTAMP_FORMAT: Final[str] = "%Y-%m-%d-%H-%M-%S"
+
+
+class InvalidTestUserIdBudgetError(MngrError, ValueError):
+    """Raised when a test user id's maximum length cannot even hold its timestamp and random suffix."""
+
+    ...
+
+
+@pure
+def build_test_user_id(timestamp: datetime, agent_name: str | None, random_suffix: str, max_length: int) -> str:
+    """Build a ``YYYY-MM-DD-HH-MM-SS[-<agent name>]-<random suffix>`` test user id of at most ``max_length``.
+
+    The timestamp comes first so the id matches ``TEST_ENV_PATTERN`` once
+    prefixed, and the random suffix comes last so it survives any truncation
+    the agent name is cut to make room for.
+
+    Raises InvalidTestUserIdBudgetError when ``max_length`` cannot hold the timestamp
+    and the suffix.
+    """
+    stamp = timestamp.strftime(_TEST_USER_ID_TIMESTAMP_FORMAT)
+    shortest_id = f"{stamp}-{random_suffix}"
+    if len(shortest_id) > max_length:
+        raise InvalidTestUserIdBudgetError(
+            f"A test user id needs at least {len(shortest_id)} characters for its timestamp and suffix, "
+            f"but at most {max_length} are allowed"
+        )
+    name_budget = max_length - len(shortest_id) - 1
+    name_part = (agent_name or "")[:name_budget].rstrip("-")
+    if not name_part:
+        return shortest_id
+    return f"{stamp}-{name_part}-{random_suffix}"
 
 
 @pure

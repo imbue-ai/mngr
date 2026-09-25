@@ -84,4 +84,4 @@ When you're done debugging, run the destroy script that was saved alongside the 
 ./libs/mngr/imbue/mngr/e2e/.test_output/<timestamp>/<test_name>/destroy-env
 ```
 
-This destroys all agents and kills the isolated tmux server.
+This destroys all agents, deletes the test's Modal environment when the test was Modal-marked, and kills the isolated tmux server. It runs every step even if one fails, then reports the failed steps and exits non-zero, so check its exit status before assuming the environment is gone.
