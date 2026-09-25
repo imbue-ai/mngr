@@ -83,6 +83,15 @@ _OPUS_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     cache_creation_input_token_cost=0.00000625,
     cache_read_input_token_cost=0.0000005,
 )
+# Opus 5.5 is cheaper than the Opus 5 generation it leads ($4/$20 per MTok against
+# $5/$25), and cuts the cache read to 0.05x the input rate rather than the 0.1x the
+# rest of the family charges -- so it needs its own entry rather than sharing theirs.
+_OPUS_5_5_PRICES: Final[PerTokenPrices] = PerTokenPrices(
+    input_cost_per_token=0.000004,
+    output_cost_per_token=0.00002,
+    cache_creation_input_token_cost=0.000005,
+    cache_read_input_token_cost=0.0000002,
+)
 _SONNET_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.000003,
     output_cost_per_token=0.000015,
@@ -146,6 +155,7 @@ _O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-fable-5-1": _FABLE_5_1_PRICES,
     "anthropic/claude-fable-5": _FABLE_PRICES,
+    "anthropic/claude-opus-5-5": _OPUS_5_5_PRICES,
     "anthropic/claude-opus-5": _OPUS_PRICES,
     "anthropic/claude-opus-4-8": _OPUS_PRICES,
     "anthropic/claude-opus-4-7": _OPUS_PRICES,
@@ -168,18 +178,20 @@ MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
 
 
 # Fast mode is a per-request tier that returns the same tokens faster for twice the
-# price ($10/$50 per MTok against $5/$25), across the full context window. It is a
-# flat multiplier rather than a second price table because it doubles *every*
-# bucket: the cache multipliers are defined against the input rate (a write costs
-# 1.25x an input token, a read 0.1x), so doubling the input rate carries them along.
+# model's standard price ($8/$40 per MTok against Opus 5.5's $4/$20), across the full
+# context window. It is a flat multiplier rather than a second price table because
+# it doubles *every* bucket: the cache multipliers are defined against the input rate
+# (a write costs 1.25x an input token, a read a fixed fraction of one), so doubling
+# the input rate carries them along.
 FAST_MODE_PRICE_MULTIPLIER: Final[float] = 2.0
 # Which models can serve a request in fast mode. This is keyed by model id rather
-# than carried on PerTokenPrices because the two do not partition the same way: one
-# price set is shared across the whole Opus generation, but only these members of it
-# offer fast mode. The API rejects ``speed`` outright on Sonnet and Haiku, and runs
+# than carried on PerTokenPrices because the two do not partition the same way: Opus
+# models billed at identical rates differ in whether they offer fast mode (4.6 shares
+# 4.8's price set). The API rejects ``speed`` outright on Sonnet and Haiku, and runs
 # Opus 4.6 and older at standard speed and standard rates.
 FAST_MODE_MODELS: Final[frozenset[str]] = frozenset(
     {
+        "anthropic/claude-opus-5-5",
         "anthropic/claude-opus-5",
         "anthropic/claude-opus-4-8",
     }

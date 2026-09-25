@@ -9,6 +9,7 @@ import pytest
 from imbue.mngr_claude.dialogs import ALL_KNOWN_AND_UNKNOWN_DIALOGS
 from imbue.mngr_claude.dialogs import ALL_KNOWN_DIALOGS
 from imbue.mngr_claude.dialogs import Answerable
+from imbue.mngr_claude.dialogs import CLAUDE_CODE_VERSION
 from imbue.mngr_claude.dialogs import DIALOGS
 from imbue.mngr_claude.dialogs import DialogBlocked
 from imbue.mngr_claude.dialogs import EffortSwitchWarning
@@ -86,7 +87,7 @@ class FakePane:
         return nickname in self._accepted
 
 
-# -- classify ---------------------------------------------------------------------------
+# classify
 
 
 def test_idle_pane_has_no_dialog() -> None:
@@ -144,7 +145,7 @@ def test_pending_shell_command_refuses() -> None:
     assert pane.keys == []
 
 
-# -- behaviour --------------------------------------------------------------------------
+# behaviour
 
 
 def test_benign_dialog_presses_escape() -> None:
@@ -251,7 +252,7 @@ def test_accept_refuses_when_its_option_never_appears() -> None:
     assert "Enter" not in pane.keys
 
 
-# -- option predicate -------------------------------------------------------------------
+# option predicate
 
 
 def test_is_option_highlighted_reads_only_the_arrow_row() -> None:
@@ -279,7 +280,7 @@ def test_cycle_gives_up_after_max_steps() -> None:
     assert pane.keys == ["Down", "Down", "Down"]
 
 
-# -- registry invariants ----------------------------------------------------------------
+# registry invariants
 
 
 def test_generic_benign_is_tried_last() -> None:
@@ -317,7 +318,7 @@ def test_messages_do_not_leak_config_names() -> None:
         assert "sensibly_deal_with_dialogs" not in dialog.get_message()
 
 
-# -- regressions from review ------------------------------------------------------------
+# regressions
 
 
 def test_transcript_quoting_a_footer_is_not_a_dialog() -> None:
@@ -450,9 +451,27 @@ def test_option_highlight_reads_the_last_arrow_row() -> None:
     assert not is_option_highlighted(pane, "Stale row")
 
 
-# -- drift ------------------------------------------------------------------------------
+# drift
 
-_CLAUDE_BINARY = Path("/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+# These guards are a snapshot check against ONE claude build, so they look for that build by
+# name rather than for whichever claude is on PATH. claude.ai/install.sh -- the mngr Dockerfile
+# offload CI runs in, the workspace image, a developer laptop -- keeps every build it installs
+# under ~/.local/share/claude/versions, so that path is tried first. An npm global install's
+# layout encodes no version, so one there is only a fallback, taken to be the pinned build.
+_INSTALL_SH_CLAUDE_BINARY = Path.home() / ".local" / "share" / "claude" / "versions" / CLAUDE_CODE_VERSION
+_NPM_CLAUDE_BINARY = Path("/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+
+
+def _find_pinned_claude_binary() -> Path | None:
+    """The installed claude build this file was written against, or None when it is not installed."""
+    for candidate in (_INSTALL_SH_CLAUDE_BINARY, _NPM_CLAUDE_BINARY):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+_CLAUDE_BINARY = _find_pinned_claude_binary()
+_SKIP_REASON = f"no claude {CLAUDE_CODE_VERSION} binary installed"
 
 # Patterns whose text claude assembles at runtime, so no single literal appears in the
 # binary. Checked by the live-agent release tests instead.
@@ -463,7 +482,7 @@ _CLAUDE_BINARY = Path("/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claud
 _ASSEMBLED_AT_RUNTIME = frozenset({"Status window", "Model switch warning", "Effort switch warning"})
 
 
-@pytest.mark.skipif(not _CLAUDE_BINARY.exists(), reason="claude binary not installed")
+@pytest.mark.skipif(_CLAUDE_BINARY is None, reason=_SKIP_REASON)
 def test_patterns_match_installed_binary() -> None:
     """Every pattern must still find its text in the shipped claude.
 
@@ -471,6 +490,7 @@ def test_patterns_match_installed_binary() -> None:
     ``EffortCalloutIndicator`` matched a string absent from every version this repo has ever
     shipped and nothing noticed across two pins.
     """
+    assert _CLAUDE_BINARY is not None
     blob = _CLAUDE_BINARY.read_bytes()
     for dialog in DIALOGS:
         if not isinstance(dialog, MatchesPattern) or dialog.get_nickname() in _ASSEMBLED_AT_RUNTIME:
@@ -482,9 +502,10 @@ def test_patterns_match_installed_binary() -> None:
         assert probe.encode() in blob, f"{dialog.get_nickname()}: {probe!r} not in binary"
 
 
-@pytest.mark.skipif(not _CLAUDE_BINARY.exists(), reason="claude binary not installed")
+@pytest.mark.skipif(_CLAUDE_BINARY is None, reason=_SKIP_REASON)
 def test_option_labels_match_installed_binary() -> None:
     """A stale option label refuses the send rather than answering it, so pin them too."""
+    assert _CLAUDE_BINARY is not None
     blob = _CLAUDE_BINARY.read_bytes()
     for dialog in DIALOGS:
         if isinstance(dialog, Answerable):

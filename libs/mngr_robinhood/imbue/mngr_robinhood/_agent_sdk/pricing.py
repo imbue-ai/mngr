@@ -53,6 +53,13 @@ _OPUS_PRICING: Final[ModelPricing] = ModelPricing(
     cache_write_usd_per_million=Decimal("6.25"),
     cache_read_usd_per_million=Decimal("0.50"),
 )
+# Opus 5.5 undercuts the rest of the Opus family and reads the cache at 0.05x input, not 0.1x.
+_OPUS_5_5_PRICING: Final[ModelPricing] = ModelPricing(
+    input_usd_per_million=Decimal("4.00"),
+    output_usd_per_million=Decimal("20.00"),
+    cache_write_usd_per_million=Decimal("5.00"),
+    cache_read_usd_per_million=Decimal("0.20"),
+)
 _FABLE_PRICING: Final[ModelPricing] = ModelPricing(
     input_usd_per_million=Decimal("10.00"),
     output_usd_per_million=Decimal("50.00"),
@@ -73,8 +80,9 @@ _FABLE_5_1_PRICING: Final[ModelPricing] = ModelPricing(
 _PRICING_BY_FAMILY_SUBSTRING: Final[Sequence[tuple[str, ModelPricing]]] = (
     ("haiku", _HAIKU_PRICING),
     ("sonnet", _SONNET_PRICING),
+    # A point release goes before the family substring that would otherwise claim it.
+    ("opus-5-5", _OPUS_5_5_PRICING),
     ("opus", _OPUS_PRICING),
-    # The point release goes before the family substring that would otherwise claim it.
     ("fable-5-1", _FABLE_5_1_PRICING),
     ("fable", _FABLE_PRICING),
 )

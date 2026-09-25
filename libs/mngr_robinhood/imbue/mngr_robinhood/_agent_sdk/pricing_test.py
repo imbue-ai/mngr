@@ -7,6 +7,8 @@ def test_resolve_model_pricing_matches_family_for_dated_and_alias_ids() -> None:
     assert resolve_model_pricing("claude-haiku-4-5-20251001") is resolve_model_pricing("haiku")
     assert resolve_model_pricing("claude-sonnet-4-6") is resolve_model_pricing("sonnet")
     assert resolve_model_pricing("claude-opus-4-8") is resolve_model_pricing("opus")
+    assert resolve_model_pricing("claude-opus-5-5") is resolve_model_pricing("opus-5-5")
+    assert resolve_model_pricing("claude-opus-5-5") is not resolve_model_pricing("opus")
     assert resolve_model_pricing("claude-fable-5") is resolve_model_pricing("fable")
     assert resolve_model_pricing("claude-fable-5-1") is resolve_model_pricing("fable-5-1")
     assert resolve_model_pricing("claude-fable-5-1") is not resolve_model_pricing("fable")

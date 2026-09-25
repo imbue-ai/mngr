@@ -1,11 +1,11 @@
-"""Claude Code TUI dialogs, for 2.1.269.
+"""Claude Code TUI dialogs, for 2.1.280.
 
 A SNAPSHOT OF ONE BINARY. Every pattern and option label below was read out of the
-shipped claude 2.1.269 executable. On a version bump, rewrite this file against the
+shipped claude 2.1.280 executable. On a version bump, rewrite this file against the
 new binary and change ``CLAUDE_CODE_VERSION`` -- do not annotate what moved, do not
 keep patterns "for compatibility". ``test_patterns_match_installed_binary`` asserts every
-pattern here still matches the installed claude, and that check is only meaningful if
-nothing in the file is historical.
+pattern here still matches the claude build ``CLAUDE_CODE_VERSION`` names, and that check
+is only meaningful if nothing in the file is historical.
 
 Three kinds of surface, told apart by what answering one costs:
 
@@ -39,14 +39,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 
 # The claude build these patterns were read out of. Keep it equal to the pinned version in
-# libs/mngr/.../resources/Dockerfile: `test_patterns_match_installed_binary` checks the file
-# against whatever claude is actually installed, and that is only meaningful if the two agree.
-CLAUDE_CODE_VERSION: Final[str] = "2.1.269"
+# libs/mngr/.../resources/Dockerfile: the drift guards in dialogs_test.py look up the build
+# this names, so on a mismatch they find nothing in the CI image and skip.
+CLAUDE_CODE_VERSION: Final[str] = "2.1.280"
 
 
-# ---------------------------------------------------------------------------
-# Pane predicates (from PR #397, moved unchanged)
-# ---------------------------------------------------------------------------
+# Pane predicates
 
 # Claude Code's input-prompt glyph. Context decides what it means: a line that
 # BEGINS with it (column 0, no leading whitespace) is the input box; the same glyph
@@ -195,9 +193,7 @@ def is_option_highlighted(pane_content: str, option_label: str) -> bool:
     return highlighted is not None and option_label in highlighted
 
 
-# ---------------------------------------------------------------------------
 # What a dialog needs from the pane
-# ---------------------------------------------------------------------------
 
 
 class DialogPane(Protocol):
@@ -267,9 +263,7 @@ def cycle_to_option(pane: DialogPane, option_label: str, max_steps: int = _MAX_O
     return False
 
 
-# ---------------------------------------------------------------------------
 # Dialog kinds
-# ---------------------------------------------------------------------------
 
 
 class DialogBlocked(Exception):
@@ -383,9 +377,7 @@ class Blocking(Dialog, ABC):
         raise DialogBlocked(self.get_nickname(), self.get_message())
 
 
-# ---------------------------------------------------------------------------
 # ACCEPT -- selectable in `sensibly_deal_with_dialogs`
-# ---------------------------------------------------------------------------
 
 
 class ModelSwitchWarning(MatchesPattern, Answerable):
@@ -463,9 +455,7 @@ class LspPluginInstall(MatchesPattern, Answerable):
         return "Claude is waiting for you to say whether to install an LSP plugin. Answer it in the agent's terminal."
 
 
-# ---------------------------------------------------------------------------
 # BENIGN -- always handled, never selectable
-# ---------------------------------------------------------------------------
 
 
 class StatusWindow(MatchesPattern, SelfClearing):
@@ -552,9 +542,7 @@ class GenericBenign(MatchesPattern, SelfClearing):
         return self.get_pattern().search(get_benign_footer_region(pane_content)) is not None
 
 
-# ---------------------------------------------------------------------------
-# SHELL MODE -- not a dialog, but the same shape (PR #397)
-# ---------------------------------------------------------------------------
+# SHELL MODE -- not a dialog, but the same shape
 
 
 class EmptyShellMode(SelfClearing):
@@ -600,9 +588,7 @@ class PendingShellCommand(Blocking):
         return is_pending_shell_command(pane_content)
 
 
-# ---------------------------------------------------------------------------
 # RAISE -- the floor
-# ---------------------------------------------------------------------------
 
 
 class Unrecognized(Dialog):
@@ -648,9 +634,7 @@ class Unrecognized(Dialog):
         pane.press_key(UNKNOWN_DIALOG_ANSWER_KEY)
 
 
-# ---------------------------------------------------------------------------
 # The registry -- ORDER IS LOAD-BEARING
-# ---------------------------------------------------------------------------
 
 # classify() returns on first match, so:
 #   1. named ACCEPT classes first -- several carry an "Esc to cancel" footer of their own,
