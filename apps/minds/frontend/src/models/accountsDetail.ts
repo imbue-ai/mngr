@@ -1,22 +1,17 @@
-// Accounts page model: the account list from /ui/api/accounts plus each
-// account's asynchronously-loaded plan/usage section (the connector round
-// trip that must never block first paint). While a backup trim runs the
-// plan section re-polls so progress stays visible.
+// Accounts page model: each account's asynchronously-loaded plan/usage
+// section (the connector round trip that must never block first paint) and
+// the account actions. The account list itself is the accounts store's,
+// kept current by the channel. While a backup trim runs the plan section
+// re-polls so progress stays visible.
 //
 // The mutating account actions reuse the legacy form-POST routes unchanged
 // (set-default, logout, plan switch, trim); their 303-redirect success
 // responses are followed by fetch and land on the SPA index, so response.ok
-// is the success signal and a reload refreshes the list.
+// is the success signal. The server republishes the accounts frame after
+// set-default and logout, which is what updates the list.
 
 import m from "mithril";
-
-export interface AccountEntry {
-  user_id: string;
-  email: string;
-  workspace_count: number;
-  is_default: boolean;
-  is_enabled: boolean;
-}
+import type { UiAccountEntry } from "../channel/messages";
 
 export interface PlanUsageRow {
   label: string;
@@ -65,9 +60,6 @@ type FetchLike = typeof fetch;
 type ScheduleLike = (callback: () => void, delayMs: number) => void;
 
 export class AccountsDetailModel {
-  accounts: AccountEntry[] = [];
-  isListLoaded = false;
-  isLoadFailed = false;
   actionError = "";
   planByUserId = new Map<string, AccountPlanState>();
   verifyEmailPromptByUserId = new Map<string, VerifyEmailPrompt>();
@@ -78,6 +70,8 @@ export class AccountsDetailModel {
   private readonly redraw: () => void;
   private readonly schedule: ScheduleLike;
   private isDisposed = false;
+  // is_enabled by user_id, as of the last syncPlans.
+  private listedIsEnabledByUserId = new Map<string, boolean>();
 
   constructor(
     // A plain-call wrapper: passing the global `fetch` itself would invoke it
@@ -97,22 +91,21 @@ export class AccountsDetailModel {
     this.isDisposed = true;
   }
 
-  async load(): Promise<void> {
-    this.isLoadFailed = false;
-    try {
-      const response = await this.fetchImpl("/ui/api/accounts", {
-        credentials: "same-origin",
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload = (await response.json()) as { accounts: AccountEntry[] };
-      this.accounts = payload.accounts;
-      this.isListLoaded = true;
-    } catch {
-      this.isLoadFailed = true;
-    }
-    this.redraw();
-    for (const account of this.accounts) {
-      void this.loadPlan(account.user_id);
+  /** Load the plan section of each account that is newly listed or was just
+   * signed back in, dropping its old answer: a plan loaded while signed out
+   * reads as unavailable, and a sign-in while the page is open must replace
+   * it. */
+  syncPlans(accounts: readonly UiAccountEntry[]): void {
+    const previous = this.listedIsEnabledByUserId;
+    this.listedIsEnabledByUserId = new Map(
+      accounts.map((account) => [account.user_id, account.is_enabled]),
+    );
+    for (const account of accounts) {
+      const wasEnabled = previous.get(account.user_id);
+      if (wasEnabled === undefined || (!wasEnabled && account.is_enabled)) {
+        this.planByUserId.delete(account.user_id);
+        void this.loadPlan(account.user_id);
+      }
     }
   }
 
@@ -161,14 +154,14 @@ export class AccountsDetailModel {
     this.redraw();
   }
 
-  /** POST one of the legacy form routes; on success reload the whole list.
+  /** POST one of the legacy form routes, reporting whether it succeeded.
    * `onFailure` may consume a non-OK response (returning true suppresses the
    * generic actionError). */
   async submitAccountForm(
     url: string,
     fields: Record<string, string>,
     onFailure?: (status: number, bodyText: string) => boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.actionError = "";
     try {
       const response = await this.fetchImpl(url, {
@@ -184,12 +177,13 @@ export class AccountsDetailModel {
             text || `The action failed (HTTP ${response.status}).`;
         }
         this.redraw();
-        return;
+        return false;
       }
-      await this.load();
+      return true;
     } catch {
       this.actionError = "The action failed (network error).";
       this.redraw();
+      return false;
     }
   }
 
@@ -223,7 +217,7 @@ export class AccountsDetailModel {
   }
 
   async switchPlan(userId: string, plan: string): Promise<void> {
-    // Switching runs a connector round trip plus a full reload (several
+    // Switching runs a connector round trip plus a plan reload (several
     // seconds); the card's button reads this set to show a busy state and
     // swallow double-clicks, like the log-out button.
     if (this.switchingPlanUserIds.has(userId)) return;
@@ -231,7 +225,7 @@ export class AccountsDetailModel {
     this.redraw();
     try {
       this.verifyEmailPromptByUserId.delete(userId);
-      await this.submitAccountForm(
+      const isSwitched = await this.submitAccountForm(
         `/accounts/${encodeURIComponent(userId)}/plan`,
         { plan },
         (status, bodyText) => {
@@ -246,6 +240,7 @@ export class AccountsDetailModel {
           return true;
         },
       );
+      if (isSwitched) await this.loadPlan(userId);
     } finally {
       this.switchingPlanUserIds.delete(userId);
       this.redraw();

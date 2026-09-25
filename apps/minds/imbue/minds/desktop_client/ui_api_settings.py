@@ -27,7 +27,6 @@ from pydantic import Field
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
 from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
@@ -41,7 +40,6 @@ from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationRequest
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
-from imbue.minds.mngr_settings.imbue_cloud_accounts import is_imbue_cloud_provider_enabled_for_account
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
 
@@ -103,22 +101,6 @@ class UiUpdateWindowWrite(FrozenModel):
 
     start_hour: int = Field(ge=0, le=23, description="Local hour the window opens")
     end_hour: int = Field(ge=0, le=23, description="Local hour the window closes")
-
-
-class UiAccountEntry(FrozenModel):
-    """One signed-in account row on the Accounts page."""
-
-    user_id: str = Field(description="The account's user id")
-    email: str = Field(description="The account's email")
-    workspace_count: int = Field(description="Number of machines owned by this account")
-    is_default: bool = Field(description="Whether this account is the default for new machines")
-    is_enabled: bool = Field(description="False when the provider block was disabled (shown as signed out)")
-
-
-class UiAccountsDetail(FrozenModel):
-    """The Accounts page's account list."""
-
-    accounts: tuple[UiAccountEntry, ...] = Field(description="Signed-in accounts, session-store order")
 
 
 class UiPlanUsageRow(FrozenModel):
@@ -397,29 +379,6 @@ def _handle_update_window_write() -> Response:
     return _json_response(UiUpdateWindowWrite(start_hour=write.start_hour, end_hour=write.end_hour))
 
 
-def _handle_accounts_detail() -> Response:
-    """GET /ui/api/accounts: the Accounts page's account list."""
-    if not is_ui_request_authenticated():
-        return _unauthenticated_response()
-    session_store = get_state().session_store
-    minds_config = get_state().minds_config
-    accounts = session_store.list_accounts() if session_store else []
-    default_account_id = minds_config.get_default_account_id() if minds_config else None
-    entries = tuple(
-        UiAccountEntry(
-            user_id=str(account.user_id),
-            email=str(account.email),
-            workspace_count=len(account.workspace_ids),
-            is_default=str(account.user_id) == default_account_id,
-            is_enabled=is_imbue_cloud_provider_enabled_for_account(
-                str(account.email), root=MindsRoot.from_environment()
-            ),
-        )
-        for account in accounts
-    )
-    return _json_response(UiAccountsDetail(accounts=entries))
-
-
 def _trim_status_payload(trim_status: BackupTrimStatus | None) -> UiTrimStatus | None:
     if trim_status is None:
         return None
@@ -524,6 +483,5 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
-    blueprint.add_url_rule("/api/accounts", view_func=_handle_accounts_detail)
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)
     blueprint.add_url_rule("/api/ai-keys", view_func=_handle_ai_keys_context)

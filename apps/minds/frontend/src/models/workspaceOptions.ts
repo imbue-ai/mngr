@@ -874,8 +874,10 @@ export class WorkspaceOptionsModel {
   renameErrorMessage = "";
   isRenameSaving = false;
   colorErrorMessage = "";
-  isColorSaving = false;
+  /** The latest color pick not yet confirmed saved, shown in place of the saved one; null when none. */
+  pendingColor: string | null = null;
   lastSavedColor = "";
+  private colorPickCount = 0;
   accountErrorMessage = "";
   isAccountBusy = false;
   destroyErrorMessage = "";
@@ -988,14 +990,23 @@ export class WorkspaceOptionsModel {
     return true;
   }
 
-  async saveColor(
-    normalizedHex: string,
-    previewAccent: (hex: string) => void,
-  ): Promise<boolean> {
-    if (normalizedHex === this.lastSavedColor) return true;
-    previewAccent(normalizedHex);
-    this.isColorSaving = true;
+  /**
+   * Show a color pick at once and save it; resolves once this pick's save has answered.
+   *
+   * Every pick is sent the moment it is made: the server shows it in every
+   * window as soon as it arrives, and writes the picks to the machine one at a
+   * time, dropping any a newer pick replaced. Only the latest pick's answer
+   * counts here: its failure is reported, and the shown color reverts to the
+   * saved one.
+   */
+  async pickColor(normalizedHex: string): Promise<void> {
     this.colorErrorMessage = "";
+    if (this.pendingColor === null && normalizedHex === this.lastSavedColor) {
+      this.redrawImpl();
+      return;
+    }
+    const pick = ++this.colorPickCount;
+    this.pendingColor = normalizedHex;
     this.redrawImpl();
     const result = await this.fetchJsonImpl(
       `/api/v1/workspaces/${encodeURIComponent(this.agentId)}`,
@@ -1005,18 +1016,15 @@ export class WorkspaceOptionsModel {
         body: JSON.stringify({ color: normalizedHex }),
       },
     );
-    this.isColorSaving = false;
+    if (pick !== this.colorPickCount) return;
     if (result.ok) {
       this.lastSavedColor = normalizedHex;
       if (this.data) this.data = { ...this.data, color: normalizedHex };
-      this.redrawImpl();
-      return true;
+    } else {
+      this.colorErrorMessage = colorErrorMessageFor(result.status, result.body);
     }
-    this.colorErrorMessage = colorErrorMessageFor(result.status, result.body);
-    // Revert the optimistic paint to the persisted color.
-    previewAccent(this.lastSavedColor);
+    this.pendingColor = null;
     this.redrawImpl();
-    return false;
   }
 
   async setAccount(accountId: string | null): Promise<boolean> {

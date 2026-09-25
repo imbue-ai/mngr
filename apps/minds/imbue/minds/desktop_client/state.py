@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_operations import InMemoryWorkspaceOperationRegistry
 from imbue.minds.desktop_client.workspace_operations import WorkspaceOperationRegistryInterface
 from imbue.minds.primitives import OutputFormat
@@ -203,6 +204,11 @@ class DesktopClientState(MutableModel):
     )
     mngr_host_dir: Path = Field(
         default_factory=lambda: Path.home() / ".mngr", frozen=True, description="MNGR_HOST_DIR"
+    )
+    workspace_color_writes: WorkspaceColorWrites = Field(
+        default_factory=WorkspaceColorWrites,
+        frozen=True,
+        description="Serializes each workspace's color label writes, dropping picks a newer one replaced",
     )
     minds_api_key: str | None = Field(
         default=None, frozen=True, description="Central minds API key for /api/v1 + WebDAV"

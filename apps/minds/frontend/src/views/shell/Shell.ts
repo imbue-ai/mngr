@@ -472,9 +472,6 @@ export function Shell(): m.Component<ShellAttrs> {
               onClose: () => shell.closeUpdateModal(),
             })
           : null,
-        // The browser sign-in waiting modal: any page (the start flow,
-        // accounts, create) can trigger it through the shared webLogin model.
-        m(WebLoginModal),
         // The creation page's crossing into the workspace; it outlives that
         // page's route, so the shell owns it.
         m(Wash),
@@ -561,6 +558,10 @@ export function Shell(): m.Component<ShellAttrs> {
           // card -- see shell-state.ts).
           overlay,
         ]),
+        // The browser sign-in modal, raised through the shared webLogin model.
+        // After the overlay slot, which shares its z-[110], so it paints over
+        // an app modal (Manage Accounts) that opened it.
+        m(WebLoginModal),
       ]);
     },
   };

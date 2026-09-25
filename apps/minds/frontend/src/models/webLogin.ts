@@ -25,6 +25,12 @@ export const POLL_INTERVAL_MS = 1000;
 
 type FetchLike = typeof fetch;
 
+export interface WebLoginStartOptions {
+  // Close the modal when the sign-in lands instead of showing "You're signed
+  // in": for a page that shows the new account itself (Manage Accounts).
+  isClosedOnSignIn?: boolean;
+}
+
 export class WebLoginModel {
   state: WebLoginState = "idle";
   // Why the user is being asked to sign in (e.g. the Electron shell's
@@ -37,6 +43,7 @@ export class WebLoginModel {
   private readonly redraw: () => void;
   private readonly bringAppToFront: () => void;
   private activeFlowId = "";
+  private isClosedOnSignIn = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
   // Bumped by dismiss() (and each start()) so a start() continuation that
   // resolves after the user cancelled can detect it has been superseded and
@@ -62,7 +69,7 @@ export class WebLoginModel {
   }
 
   /** Start (or surface the already-running) browser sign-in flow. */
-  async start(message = ""): Promise<void> {
+  async start(message = "", options: WebLoginStartOptions = {}): Promise<void> {
     this.message = message;
     if (this.state === "starting" || this.state === "waiting" || this.state === "finishing") {
       // Already in flight: just make sure the modal is visible.
@@ -70,6 +77,7 @@ export class WebLoginModel {
       return;
     }
     this.state = "starting";
+    this.isClosedOnSignIn = options.isClosedOnSignIn ?? false;
     this.loginUrl = "";
     this.error = "";
     this.email = "";
@@ -98,6 +106,11 @@ export class WebLoginModel {
       this.error = "Could not reach the app backend. Please try again.";
     }
     this.redraw();
+  }
+
+  /** Start the flow again after an error, as it was first started. */
+  async retry(): Promise<void> {
+    await this.start(this.message, { isClosedOnSignIn: this.isClosedOnSignIn });
   }
 
   /** Hide the modal. The plugin subprocess (if still waiting) keeps running. */
@@ -180,8 +193,12 @@ export class WebLoginModel {
     this.loginUrl = body.login_url ?? this.loginUrl;
     this.email = body.email ?? this.email;
     if (body.state === "done") {
-      this.state = "done";
       this.raiseApp();
+      if (this.isClosedOnSignIn) {
+        this.dismiss();
+        return;
+      }
+      this.state = "done";
     } else if (body.state === "error") {
       this.state = "error";
       this.error = body.error || "Sign-in failed. Please try again.";

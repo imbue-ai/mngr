@@ -87,8 +87,9 @@ function shouldOpenWindowOnActivate({ isShuttingDown, isQuitSequenceRunning, has
  *   'none'            a quit has committed -- opening a window would fight it.
  *   'focus-existing'  bring the most recent window forward. A second loading
  *                     or error window would say nothing the open one doesn't,
- *                     and a pending startup route belongs to the window that
- *                     is already waiting for it.
+ *                     a pending startup route belongs to the window that is
+ *                     already waiting for it, and reopening an app that has a
+ *                     window means showing that window.
  *   'error-takeover'  open shell.html replaying the recorded error, whose
  *                     Retry button restarts the backend.
  *   'loading'         open shell.html's loading screen; the backend is still
@@ -100,7 +101,11 @@ function shouldOpenWindowOnActivate({ isShuttingDown, isQuitSequenceRunning, has
  *                     the backend publishing its URL and that route being
  *                     computed, so a request in that window waits on the
  *                     loading screen instead of landing on home and being
- *                     yanked off it a moment later.
+ *                     yanked off it a moment later. Also reached when the app
+ *                     is reopened with no window open (a dock-icon click or a
+ *                     second launch): reopening lands where a fresh launch
+ *                     would, back on the workspaces open when the last window
+ *                     closed.
  *   'home'            load the backend's home page.
  *
  * Error state is checked before the backend URL because after a crash the URL
@@ -114,6 +119,9 @@ function shouldOpenWindowOnActivate({ isShuttingDown, isQuitSequenceRunning, has
  * @param {boolean} state.isStartupRoutingPending The first-window route has not landed yet.
  * @param {boolean} state.isShuttingDown          A shutdown has already committed.
  * @param {boolean} state.isQuitSequenceRunning   The quit sequence is already running.
+ * @param {boolean} state.isReopen                The request reopens the app (dock-icon click,
+ *                                                second launch) rather than asking for a new
+ *                                                window (Cmd+N, File > New Window, the dock menu).
  * @returns {'none'|'focus-existing'|'error-takeover'|'loading'|'startup-route'|'home'}
  */
 function decideNewWindowTarget({
@@ -123,11 +131,12 @@ function decideNewWindowTarget({
   isStartupRoutingPending,
   isShuttingDown,
   isQuitSequenceRunning,
+  isReopen,
 }) {
   if (isShuttingDown || isQuitSequenceRunning) return 'none';
   if (hasErrorTakeover) return hasLiveWindow ? 'focus-existing' : 'error-takeover';
   if (!hasBackendUrl) return hasLiveWindow ? 'focus-existing' : 'loading';
-  if (isStartupRoutingPending) return hasLiveWindow ? 'focus-existing' : 'startup-route';
+  if (isStartupRoutingPending || isReopen) return hasLiveWindow ? 'focus-existing' : 'startup-route';
   return 'home';
 }
 

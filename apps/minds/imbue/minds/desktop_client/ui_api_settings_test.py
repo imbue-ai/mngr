@@ -348,15 +348,6 @@ def test_malformed_stored_notification_style_serves_the_default_on_the_overview(
     assert json.loads(response.data)["notification_prefs"]["style"] == "both"
 
 
-def test_accounts_detail_returns_an_empty_list_without_a_session_store(tmp_path: Path) -> None:
-    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
-
-    response = client.get("/ui/api/accounts")
-
-    assert response.status_code == 200
-    assert json.loads(response.data) == {"accounts": []}
-
-
 def test_account_plan_degrades_to_null_plan_view_without_a_connector(tmp_path: Path) -> None:
     client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
 
@@ -423,8 +414,6 @@ def test_ai_keys_context_reports_a_missing_account_association(tmp_path: Path) -
     assert payload["workspace_id"] == "host-00000000000000000000000000000abc"
     assert "no associated Imbue account" in payload["error_message"]
 
-
-# -- Populated permissions overview (mirrors the deleted settings_routes_test.py coverage) --
 
 _CONNECTOR_CATALOG_PAYLOAD: dict[str, object] = {
     "slack": [

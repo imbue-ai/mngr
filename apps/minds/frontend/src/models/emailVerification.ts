@@ -1,7 +1,11 @@
-// The start flow's email-verification gate: whether the signed-in account's
-// email is verified (the connector refuses a cloud create until it is), and
-// the re-send of the verification email. Both go through the local app,
-// which answers only for an account this install has signed in.
+// The email-verification gate shared by the start flow and the create form:
+// whether the signed-in account's email is verified (the connector refuses a
+// cloud create until it is), and the re-send of the verification email. Both
+// go through the local app, which answers only for an account this install
+// has signed in.
+
+/** How often a gate asks whether the email is verified while it waits on the link. */
+export const VERIFICATION_POLL_MS = 3000;
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 

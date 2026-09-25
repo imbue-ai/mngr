@@ -10,7 +10,8 @@
 //
 // The shared invariant under test: with the app alive and no windows open,
 // every "give me a window" request resolves to a window showing the app's
-// REAL state -- home, still-starting, or the error screen and its Retry.
+// REAL state -- home (or, for a dock reopen, the launch's route),
+// still-starting, or the error screen and its Retry.
 //
 // These drive the real signed bundle's MAIN process through
 // electronApplication.evaluate, which is how a dock activate, a window close,
@@ -35,6 +36,8 @@ const {
 test.skip(() => process.platform !== 'darwin', 'windowless app state is macOS-only');
 
 const BACKEND_READY_RE = /\[startup\] Backend ready at (http:\/\/localhost:\d+)/;
+// Logged each time main computes the first-window route (computeStartupRouting).
+const STARTUP_ROUTE_LINES_RE = /\[startup\] route=/g;
 
 // shell.html renders the error view only once main sends it an error-details
 // payload, so a visible #retry-btn means "this window is showing the error
@@ -111,6 +114,31 @@ test.describe('healthy app', () => {
     await expect
       .poll(() => liveUrl(opened), { timeout: 60 * 1000 })
       .toMatch(/^http:\/\/localhost:\d+\//);
+  });
+
+  test('a dock reopen lands where the launch did, not on the workspace selector', async ({ mindsApp }) => {
+    const { app, pickContentWindow } = mindsApp;
+    const output = captureAppOutput(app);
+    const countRouteComputations = () => (output.text().match(STARTUP_ROUTE_LINES_RE) || []).length;
+
+    const first = await pickContentWindow(app, { timeoutMs: 5 * 60 * 1000 });
+    await output.waitForLine(STARTUP_ROUTE_LINES_RE);
+    const launchPath = new URL(await liveUrl(first)).pathname;
+    const launchRouteComputations = countRouteComputations();
+    await closeAllWindows(app);
+
+    // Reopening recomputes the launch's route from the saved session, so it
+    // lands on the same screen: the restored workspace for a returning user,
+    // the start flow on a fresh runner. The path alone cannot tell a reopen from
+    // a home-page load on a fresh runner -- home redirects a new user to /start
+    // too -- so also assert the route was recomputed.
+    const reopened = await windowOpenedBy(app, () => emitActivate(app));
+    await expect
+      .poll(countRouteComputations, { timeout: 2 * 60 * 1000 })
+      .toBeGreaterThan(launchRouteComputations);
+    await expect
+      .poll(async () => new URL(await liveUrl(reopened)).pathname, { timeout: 2 * 60 * 1000 })
+      .toBe(launchPath);
   });
 
   test('#482 a backend crash with no window open reopens to Retry, not the dead port', async ({ mindsApp }) => {

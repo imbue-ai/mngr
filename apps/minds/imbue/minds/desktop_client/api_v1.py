@@ -157,6 +157,7 @@ from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
 from imbue.minds.desktop_client.system_interface_health import HostRecoveryKind
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_api_inbox import build_agent_message_card
@@ -2442,6 +2443,7 @@ def _handle_patch_workspace(agent_id: str) -> Response:
                 state.mngr_binary,
                 state.mngr_host_dir,
                 state.root_concurrency_group,
+                state.workspace_color_writes,
             )
         except workspace_settings.WorkspaceColorError as exc:
             return _json_error(exc.code, exc.status_code)
@@ -2972,6 +2974,9 @@ def _handle_patch_provider(provider_name: str) -> ProviderToggleResponse | Respo
         )
     except desktop_control.ProviderHasActiveWorkspacesError as exc:
         return _json_error(str(exc), 409)
+    if changed:
+        # An Imbue Cloud account whose provider is off is listed as signed out.
+        wake_ui_state_publisher()
     return ProviderToggleResponse(provider_name=provider_name, enabled=enabled, changed=changed)
 
 

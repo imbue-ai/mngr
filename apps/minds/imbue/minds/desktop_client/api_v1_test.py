@@ -1615,9 +1615,6 @@ def test_operation_logs_requires_bearer(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-# -- Shared builders for the new routes --
-
-
 def _build_client(
     tmp_path: Path,
     resolver: BackendResolverInterface,
@@ -1650,11 +1647,11 @@ def _build_client(
     return app.test_client()
 
 
-def _write_fake_mngr(directory: Path) -> str:
-    """Write an executable fake ``mngr`` that always exits 0; return its path."""
+def _write_fake_mngr(directory: Path, exit_code: int = 0) -> str:
+    """Write an executable fake ``mngr`` that always exits ``exit_code``; return its path."""
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "mngr"
-    script.write_text("#!/bin/sh\nexit 0\n")
+    script.write_text(f"#!/bin/sh\nexit {exit_code}\n")
     script.chmod(0o755)
     return str(script)
 
@@ -1745,9 +1742,6 @@ def _associated_session_store(
     return store
 
 
-# -- PATCH /api/v1/workspaces/<id> (color + account) --
-
-
 def test_patch_workspace_color_success(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
     agent_id = AgentId()
     resolver = make_resolver_with_data(make_agents_json(agent_id))
@@ -1760,6 +1754,23 @@ def test_patch_workspace_color_success(tmp_path: Path, root_concurrency_group: C
     assert json.loads(response.data)["color"] == "#ffffff"
     # The optimistic local update is reflected in the resolver snapshot.
     assert resolver.get_workspace_color(agent_id) == "#ffffff"
+
+
+def test_patch_workspace_color_shows_the_pick_before_the_label_write_and_reverts_when_it_fails(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    agent_id = AgentId()
+    resolver = make_resolver_with_data(make_agents_json(agent_id, labels={"is_primary": "true", "color": "#0b292b"}))
+    colors_at_each_change: list[str | None] = []
+    resolver.add_on_change_callback(lambda: colors_at_each_change.append(resolver.get_workspace_color(agent_id)))
+    failing_mngr = _write_fake_mngr(tmp_path / "bin", exit_code=1)
+    client = _build_client(tmp_path, resolver, root_concurrency_group=root_concurrency_group, mngr_binary=failing_mngr)
+
+    response = client.patch(f"/api/v1/workspaces/{agent_id}", headers=_auth_header(), json={"color": "#abcdef"})
+
+    assert response.status_code == 502
+    assert colors_at_each_change == ["#abcdef", "#0b292b"]
+    assert resolver.get_workspace_color(agent_id) == "#0b292b"
 
 
 def test_patch_workspace_color_invalid_hex(tmp_path: Path) -> None:
@@ -1929,9 +1940,6 @@ def test_patch_workspace_disassociate_leased_host_returns_403(tmp_path: Path) ->
     assert "leased from imbue_cloud" in json.loads(response.data)["error"]
 
 
-# -- DELETE /api/v1/workspaces/operations/destroy/<id> (dismiss) --
-
-
 def test_dismiss_destroy_operation_is_idempotent_noop(tmp_path: Path) -> None:
     client = _client_with_workspace(tmp_path, AgentId())
 
@@ -1947,9 +1955,6 @@ def test_dismiss_operation_requires_bearer(tmp_path: Path) -> None:
     response = client.delete(f"/api/v1/workspaces/operations/destroy/{AgentId()}")
 
     assert response.status_code == 401
-
-
-# -- Desktop provider toggle --
 
 
 def test_patch_provider_enable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -2009,9 +2014,6 @@ def test_patch_provider_requires_bearer(tmp_path: Path) -> None:
     response = client.patch("/api/v1/desktop/providers/docker", json={"enabled": True})
 
     assert response.status_code == 401
-
-
-# -- Desktop running-workspaces / stop-hosts / state-container --
 
 
 def test_desktop_running_workspaces(tmp_path: Path) -> None:
@@ -2082,8 +2084,6 @@ def test_desktop_running_workspaces_requires_bearer(tmp_path: Path) -> None:
 
     assert response.status_code == 401
 
-
-# -- Machine sharing --
 
 _TEST_HOST_ID = "host-00000000000000000000000000000000"
 _TEST_CLIENT_ENV_CONFIG = ClientEnvConfig(
@@ -2635,9 +2635,6 @@ def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path)
     }
 
 
-# -- Workspace recovery: health probe + restart --
-
-
 def _resolver_with_services_agent(agent_id: AgentId, services_id: AgentId) -> BackendResolverInterface:
     """Build a resolver where ``agent_id`` and a ``system-services`` peer share a host.
 
@@ -2969,9 +2966,6 @@ def test_operation_logs_streams_restart_log_lines(tmp_path: Path) -> None:
     text = response.get_data(as_text=True)
     assert "restarting now" in text
     assert '"done": true' in text
-
-
-# -- Backup service routes --
 
 
 def test_workspace_backup_check_reports_offline_workspace_with_verification_enabled(

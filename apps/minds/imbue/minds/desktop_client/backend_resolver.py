@@ -248,6 +248,19 @@ class BackendResolverInterface(MutableModel, ABC):
         Default implementation is a no-op.
         """
 
+    def set_workspace_color_override(self, agent_id: AgentId, color_hex: str) -> None:
+        """Optimistically report ``color_hex`` for a workspace while its color label is being written.
+
+        Lets a color pick repaint every window at once instead of after the
+        ``mngr label`` write, which can take many seconds. The override is
+        dropped once discovery reports the same color, when
+        :meth:`clear_workspace_color_override` is called, or after a TTL.
+        Default implementation is a no-op.
+        """
+
+    def clear_workspace_color_override(self, agent_id: AgentId) -> None:
+        """Drop a workspace's optimistic color (its label write failed). Default implementation is a no-op."""
+
     @abstractmethod
     def list_services_for_agent(self, agent_id: AgentId) -> tuple[ServiceName, ...]:
         """Return all known service names for an agent, sorted alphabetically."""
@@ -792,6 +805,18 @@ def _does_discovery_confirm_override(override_state: HostState, discovery_state:
 
 _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS: Final[float] = 90.0
 
+# Outlasts the slowest ``mngr label`` write (its 120s command timeout) plus a
+# discovery tick; purely a backstop, since the write's outcome clears or
+# confirms the override first.
+_WORKSPACE_COLOR_OVERRIDE_TTL_SECONDS: Final[float] = 180.0
+
+
+class _WorkspaceColorOverride(FrozenModel):
+    """A short-lived optimistic workspace color set by a UI color pick."""
+
+    color_hex: str = Field(description="The normalized hex color to report until discovery confirms it")
+    set_at_monotonic: float = Field(description="time.monotonic() when the override was set, for TTL expiry")
+
 
 class _WorkspaceNameOverride(FrozenModel):
     """A short-lived optimistic workspace name set by a UI-initiated rename."""
@@ -897,6 +922,10 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # rename, masking discovery in ``get_workspace_name`` / ``get_host_name`` until
     # discovery re-reads the renamed labels (or the TTL elapses). Guarded by _lock.
     _workspace_name_override_by_agent_id: dict[str, _WorkspaceNameOverride] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> the color a UI pick is writing, masking discovery in
+    # ``get_workspace_color`` until discovery re-reads the label, the write
+    # fails, or the TTL elapses. Guarded by _lock.
+    _workspace_color_override_by_agent_id: dict[str, _WorkspaceColorOverride] = PrivateAttr(default_factory=dict)
     # host_id_str -> the host's agents captured when a UI-initiated stop/start
     # began, so the workspace row survives the brief discovery gap while the VM
     # transitions (see _HostTransitionRetention). Guarded by _lock; swept once
@@ -990,6 +1019,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             self._sweep_host_state_overrides_locked(result.host_state_by_host_id)
             self._sweep_transition_retentions_locked(result)
             self._sweep_workspace_name_overrides_locked()
+            self._sweep_workspace_color_overrides_locked()
             if (
                 self._merge_last_good_topology_locked(result.discovered_agents, result.host_state_by_host_id)
                 and path is not None
@@ -1065,6 +1095,15 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 now - override.set_at_monotonic
             ) > _WORKSPACE_NAME_OVERRIDE_TTL_SECONDS:
                 del self._workspace_name_override_by_agent_id[agent_id_str]
+
+    def _sweep_workspace_color_overrides_locked(self) -> None:
+        """Drop color overrides the current snapshot has confirmed or that have expired. Must hold self._lock."""
+        now = time.monotonic()
+        for agent_id_str in tuple(self._workspace_color_override_by_agent_id):
+            override = self._workspace_color_override_by_agent_id[agent_id_str]
+            is_confirmed = self._discovery_workspace_color_locked(AgentId(agent_id_str)) == override.color_hex
+            if is_confirmed or (now - override.set_at_monotonic) > _WORKSPACE_COLOR_OVERRIDE_TTL_SECONDS:
+                del self._workspace_color_override_by_agent_id[agent_id_str]
 
     def _merge_last_good_topology_locked(
         self, agents: tuple[DiscoveredAgent, ...], host_state_by_host_id: Mapping[str, HostState]
@@ -1545,7 +1584,9 @@ class MngrCliBackendResolver(BackendResolverInterface):
     def get_workspace_color(self, agent_id: AgentId) -> str | None:
         """Return the normalized ``#rrggbb`` color label for an agent.
 
-        Returns ``None`` when the agent has no ``color`` label (callers
+        Prefers a fresh optimistic override (set while a UI color pick is being
+        written) over discovery, so a pick shows everywhere at once. Otherwise
+        returns ``None`` when the agent has no ``color`` label (callers
         fall back to the default workspace color). Defensively parses the stored
         value: if it is non-empty but not a recognized hex literal, logs
         once at WARNING and returns the default workspace color so the
@@ -1554,23 +1595,47 @@ class MngrCliBackendResolver(BackendResolverInterface):
         carry junk.
         """
         with self._lock:
-            for agent in agents_named_by_id(self._agents_result.discovered_agents, agent_id):
-                raw = agent.labels.get("color")
-                if raw is None:
-                    return None
-                normalized = normalize_workspace_color(raw)
-                if normalized is None:
-                    if str(agent_id) not in self._logged_malformed_color_agents:
-                        logger.warning(
-                            "Ignoring malformed color label {!r} for agent {}; "
-                            "rendering as default. Repick in machine settings to fix.",
-                            raw,
-                            agent_id,
-                        )
-                        self._logged_malformed_color_agents.add(str(agent_id))
-                    return DEFAULT_WORKSPACE_COLOR
-                return normalized
-            return None
+            override = self._workspace_color_override_by_agent_id.get(str(agent_id))
+            if override is not None:
+                if (time.monotonic() - override.set_at_monotonic) <= _WORKSPACE_COLOR_OVERRIDE_TTL_SECONDS:
+                    return override.color_hex
+                del self._workspace_color_override_by_agent_id[str(agent_id)]
+            return self._discovery_workspace_color_locked(agent_id)
+
+    def _discovery_workspace_color_locked(self, agent_id: AgentId) -> str | None:
+        """Return the color from the discovery snapshot alone (ignoring any override). Must hold self._lock."""
+        for agent in agents_named_by_id(self._agents_result.discovered_agents, agent_id):
+            raw = agent.labels.get("color")
+            if raw is None:
+                return None
+            normalized = normalize_workspace_color(raw)
+            if normalized is None:
+                if str(agent_id) not in self._logged_malformed_color_agents:
+                    logger.warning(
+                        "Ignoring malformed color label {!r} for agent {}; "
+                        "rendering as default. Repick in machine settings to fix.",
+                        raw,
+                        agent_id,
+                    )
+                    self._logged_malformed_color_agents.add(str(agent_id))
+                return DEFAULT_WORKSPACE_COLOR
+            return normalized
+        return None
+
+    def set_workspace_color_override(self, agent_id: AgentId, color_hex: str) -> None:
+        """Optimistically report ``color_hex`` for ``agent_id`` until discovery confirms it; fires on-change."""
+        with self._lock:
+            self._workspace_color_override_by_agent_id[str(agent_id)] = _WorkspaceColorOverride(
+                color_hex=color_hex, set_at_monotonic=time.monotonic()
+            )
+        self._fire_on_change()
+
+    def clear_workspace_color_override(self, agent_id: AgentId) -> None:
+        """Drop ``agent_id``'s optimistic color, firing on-change when there was one."""
+        with self._lock:
+            existed = self._workspace_color_override_by_agent_id.pop(str(agent_id), None) is not None
+        if existed:
+            self._fire_on_change()
 
     def set_workspace_color_locally(self, agent_id: AgentId, color_hex: str) -> bool:
         """Optimistically update the cached ``color`` label for an agent.

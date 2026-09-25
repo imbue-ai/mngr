@@ -75,8 +75,10 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     end, and to 22 when a shared path lost ``is_directory`` -- nothing read it
     once the reason a folder cannot be synced was sent as a sentence, and an
     older window reads its absence as "not a folder" and hides the option on
-    every row."""
-    assert UI_SCHEMA_VERSION == 22
+    every row, and to 23 when the accounts frame gained the account list and
+    ``/ui/api/accounts`` was removed -- an older window's Manage Accounts still
+    fetches that route, and would say its accounts could not be loaded."""
+    assert UI_SCHEMA_VERSION == 23
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -85,7 +87,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 22}
+    assert parsed == {"type": "hello", "schema_version": 23}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -148,6 +150,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "NotificationKind",
             "NotificationOutcome",
             "ProviderPanelStatus",
+            "UiAccountEntry",
             "UiAccountsMessage",
             "UiAvailableConnection",
             "UiBootstrap",

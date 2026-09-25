@@ -38,9 +38,6 @@ _SERVICE_WEB: ServiceName = ServiceName("web")
 _SERVICE_API: ServiceName = ServiceName("api")
 
 
-# -- StaticBackendResolver tests --
-
-
 def test_static_get_backend_url_returns_url_for_known_agent_and_service() -> None:
     resolver = StaticBackendResolver(
         url_by_agent_and_service={str(_AGENT_A): {"web": "http://localhost:3001"}},
@@ -96,9 +93,6 @@ def test_static_list_services_for_agent_returns_empty_for_unknown_agent() -> Non
     resolver = StaticBackendResolver(url_by_agent_and_service={})
     servers = resolver.list_services_for_agent(_AGENT_A)
     assert servers == ()
-
-
-# -- parse_service_log_records tests --
 
 
 def test_parse_service_log_records_parses_valid_jsonl() -> None:
@@ -183,9 +177,6 @@ def test_parse_service_log_records_returns_multiple_records() -> None:
     assert records[1].service == ServiceName("api")
 
 
-# -- parse_agent_ids_from_json tests --
-
-
 def test_parse_agent_ids_from_json_parses_valid_output() -> None:
     json_output = make_agents_json(_AGENT_A, _AGENT_B)
     ids = parse_agent_ids_from_json(json_output)
@@ -200,9 +191,6 @@ def test_parse_agent_ids_from_json_returns_empty_for_none() -> None:
 
 def test_parse_agent_ids_from_json_returns_empty_for_invalid_json() -> None:
     assert parse_agent_ids_from_json("not json") == ()
-
-
-# -- MngrCliBackendResolver tests (using direct state updates) --
 
 
 def test_mngr_cli_resolver_returns_url_for_specific_service() -> None:
@@ -351,8 +339,6 @@ def _workspace_agent(
     )
 
 
-# -- get_workspace_color tests ----------------------------------------
-#
 # The color label is the storage substrate the workspace color picker
 # writes to and the SSE workspaces payload reads from. Tests cover all
 # four states the resolver may see on a label read:
@@ -413,6 +399,48 @@ def test_get_workspace_color_recovers_to_default_when_label_malformed() -> None:
 def test_get_workspace_color_returns_none_for_unknown_agent() -> None:
     resolver = MngrCliBackendResolver()
     assert resolver.get_workspace_color(AgentId.generate()) is None
+
+
+def test_workspace_color_override_shows_at_once_and_holds_until_discovery_confirms_it() -> None:
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "#0b292b"})
+    changes: list[None] = []
+    resolver.add_on_change_callback(lambda: changes.append(None))
+
+    resolver.set_workspace_color_override(agent, "#e8a7a8")
+    assert resolver.get_workspace_color(agent) == "#e8a7a8"
+    assert changes == [None]
+
+    # A refresh from before the label write landed does not flip the color back.
+    resolver.update_agents(
+        ParsedAgentsResult(
+            agent_ids=(agent,),
+            discovered_agents=(_workspace_agent(HostId.generate(), agent, extra_labels={"color": "#0b292b"}),),
+        )
+    )
+    assert resolver.get_workspace_color(agent) == "#e8a7a8"
+
+    # Once discovery reports the new color the override is gone, so a later label shows directly.
+    for label in ("#e8a7a8", "#123456"):
+        resolver.update_agents(
+            ParsedAgentsResult(
+                agent_ids=(agent,),
+                discovered_agents=(_workspace_agent(HostId.generate(), agent, extra_labels={"color": label}),),
+            )
+        )
+    assert resolver.get_workspace_color(agent) == "#123456"
+
+
+def test_clearing_a_workspace_color_override_reverts_to_the_saved_color() -> None:
+    resolver, agent = _resolver_with_workspace_agent(extra_labels={"color": "#0b292b"})
+    resolver.set_workspace_color_override(agent, "#e8a7a8")
+    changes: list[None] = []
+    resolver.add_on_change_callback(lambda: changes.append(None))
+
+    resolver.clear_workspace_color_override(agent)
+    resolver.clear_workspace_color_override(agent)
+
+    assert resolver.get_workspace_color(agent) == "#0b292b"
+    assert changes == [None]
 
 
 def test_set_workspace_color_locally_updates_the_cached_label() -> None:
@@ -1379,9 +1407,6 @@ def test_mngr_cli_resolver_replaces_labels_and_defaults_to_empty() -> None:
     assert resolver.list_service_labels_for_agent(_AGENT_A) == {}
 
 
-# -- parse_agents_from_json tests --
-
-
 def _make_agents_json_with_ssh(*agents: tuple[str, Mapping[str, object] | None]) -> str:
     """Build mngr list --format json output with optional SSH info per agent."""
     agent_list = []
@@ -1517,9 +1542,6 @@ def test_parse_agents_from_json_skips_agents_with_invalid_ssh() -> None:
     assert str(_AGENT_A) not in result.ssh_info_by_agent_id
 
 
-# -- MngrCliBackendResolver.get_ssh_info tests --
-
-
 def test_mngr_cli_resolver_get_ssh_info_returns_info_for_remote_agent() -> None:
     ssh_data = {
         "user": "root",
@@ -1550,9 +1572,6 @@ def test_mngr_cli_resolver_get_ssh_info_returns_none_for_unknown_agent() -> None
     assert resolver.get_ssh_info(_AGENT_B) is None
 
 
-# -- BackendResolverInterface.get_ssh_info default --
-
-
 def test_backend_resolver_interface_default_get_ssh_info_returns_none() -> None:
     """The base class default get_ssh_info returns None for all agents."""
 
@@ -1568,9 +1587,6 @@ def test_backend_resolver_interface_default_get_ssh_info_returns_none() -> None:
 
     resolver = MinimalResolver()
     assert resolver.get_ssh_info(_AGENT_A) is None
-
-
-# -- MngrCliBackendResolver.get_agent_display_info tests --
 
 
 def test_mngr_cli_resolver_get_agent_display_info_returns_info_for_known_agent() -> None:
@@ -1615,9 +1631,6 @@ def test_mngr_cli_resolver_get_agent_display_info_picks_smallest_host_for_duplic
     assert info.host_id == host_id_small
 
 
-# -- BackendResolverInterface.get_agent_display_info default --
-
-
 def test_backend_resolver_interface_default_get_agent_display_info_returns_info_for_known() -> None:
     """The base class default get_agent_display_info returns info using agent_id as name."""
 
@@ -1655,8 +1668,6 @@ def test_backend_resolver_interface_default_get_agent_display_info_returns_none_
     assert resolver.get_agent_display_info(_AGENT_A) is None
 
 
-# -- workspace name override (optimistic rename) tests ----------------
-#
 # A UI rename writes the new name via ``mngr label`` / ``mngr rename``, but
 # the settings page reads the name from the discovery-fed cache, which lags.
 # ``set_workspace_name_override`` masks that lag until discovery re-reads the

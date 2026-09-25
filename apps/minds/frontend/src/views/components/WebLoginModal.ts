@@ -128,7 +128,7 @@ export function WebLoginModal(): m.Component {
           webLogin.state === "error"
             ? m(
                 Button,
-                { variant: "primary", id: "web-login-retry-btn", onclick: () => void webLogin.start(webLogin.message) },
+                { variant: "primary", id: "web-login-retry-btn", onclick: () => void webLogin.retry() },
                 "Try again",
               )
             : null,

@@ -7,6 +7,7 @@ import { Shell } from "./Shell";
 import { ToastLayer } from "./ToastLayer";
 import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { UpdateModal } from "../components/UpdateModal";
+import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import type { UiNotificationEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
@@ -697,6 +698,22 @@ describe("Shell help overlay", () => {
       (vnode) => attrsOf(vnode).id === "help-panel",
     );
     expect(String(attrsOf(panel as AnyVnode).className)).toContain("w-[400px]");
+  });
+});
+
+describe("Shell sign-in modal layering", () => {
+  it("paints the sign-in modal over the Manage Accounts card that opened it", () => {
+    // Both sit at z-[110], so DOM order decides which is on top.
+    const { state } = makeShell();
+    const root = renderShell(state, "/accounts", m("div#accounts-page"), {
+      workspaceParam: null,
+    });
+
+    const order = collectVnodes(root);
+    const overlayIndex = order.indexOf(appOverlay(root) as AnyVnode);
+    const signInIndex = order.findIndex((vnode) => vnode.tag === WebLoginModal);
+    expect(overlayIndex).toBeGreaterThanOrEqual(0);
+    expect(signInIndex).toBeGreaterThan(overlayIndex);
   });
 });
 

@@ -145,11 +145,10 @@ test('activate: never opens a window while a quit / shutdown is in flight', () =
   );
 });
 
-// -- decideNewWindowTarget --
-//
-// The invariant these guard: with the app alive and no windows open, every
-// "give me a window" request must resolve to a window. Returning nothing was
-// the #480 / #482 / #483 defect -- an app inert in the dock until Cmd+Q.
+// decideNewWindowTarget. The invariant these guard: with the app alive and no
+// windows open, every "give me a window" request must resolve to a window.
+// Returning nothing was the #480 / #482 / #483 defect -- an app inert in the
+// dock until Cmd+Q.
 //
 // READY is the steady state (backend serving, first-window route landed); each
 // test overrides only the fields it is about, so a new field added to the
@@ -161,6 +160,7 @@ const READY = {
   isStartupRoutingPending: false,
   isShuttingDown: false,
   isQuitSequenceRunning: false,
+  isReopen: false,
 };
 const decide = (overrides) => decideNewWindowTarget({ ...READY, ...overrides });
 
@@ -208,6 +208,22 @@ test('new window: the startup route outranks home but not a failure', () => {
   assert.equal(decide({ isStartupRoutingPending: true, hasBackendUrl: false }), 'loading');
 });
 
+// Reopening the app with nothing open (dock-icon click, second launch) lands
+// where a fresh launch would -- the saved session -- rather than on the
+// workspace selector, so the user is back in their workspaces without a click.
+test('reopen: with no window open, the app reopens on its startup route, not home', () => {
+  assert.equal(decide({ isReopen: true }), 'startup-route');
+});
+
+test('reopen: with a window open, that window is focused rather than restoring over it', () => {
+  assert.equal(decide({ isReopen: true, hasLiveWindow: true }), 'focus-existing');
+});
+
+test('reopen: failures and a starting backend still outrank a session restore', () => {
+  assert.equal(decide({ isReopen: true, hasErrorTakeover: true }), 'error-takeover');
+  assert.equal(decide({ isReopen: true, hasBackendUrl: false }), 'loading');
+});
+
 test('new window: a committed quit opens nothing, in every state', () => {
   // Matches the three sibling decisions in this module, which all short-circuit
   // on an in-flight quit. Without this, second-instance and the deeplink path
@@ -217,5 +233,6 @@ test('new window: a committed quit opens nothing, in every state', () => {
     assert.equal(decide({ [flag]: true, hasLiveWindow: true }), 'none');
     assert.equal(decide({ [flag]: true, hasErrorTakeover: true }), 'none');
     assert.equal(decide({ [flag]: true, isStartupRoutingPending: true }), 'none');
+    assert.equal(decide({ [flag]: true, isReopen: true }), 'none');
   }
 });

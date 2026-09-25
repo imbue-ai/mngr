@@ -18,6 +18,7 @@ import secrets
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlencode
@@ -40,6 +41,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
+from imbue.minds.desktop_client.ui_publisher import UiStatePublisher
 from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
 from imbue.minds.mngr_settings.imbue_cloud_accounts import unset_imbue_cloud_provider_for_account
 from imbue.minds.primitives import OutputFormat
@@ -122,6 +124,24 @@ def bounce_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor | N
         logger.warning("Failed to bounce mngr latchkey forward: {}", e)
 
 
+def _hand_off_default_account(signed_out_user_id: str, session_store: MultiAccountSessionStore) -> None:
+    """Make the first account still signed in the default when the default account signs out.
+
+    With none left the default is cleared, so the next sign-in takes it. The
+    default is left as it was when the account listing fails (it cannot name
+    a successor) or still lists the account (its signout did not go through).
+    """
+    minds_config = get_state().minds_config
+    if minds_config is None or minds_config.get_default_account_id() != signed_out_user_id:
+        return
+    remaining = session_store.list_accounts()
+    if session_store.is_last_identity_read_failed:
+        return
+    if any(str(account.user_id) == signed_out_user_id for account in remaining):
+        return
+    minds_config.set_default_account_id(str(remaining[0].user_id) if remaining else None)
+
+
 def signout_user_via_plugin(user_id: str) -> None:
     """Sign ``user_id`` out via the mngr_imbue_cloud plugin and clear local state.
 
@@ -151,6 +171,7 @@ def signout_user_via_plugin(user_id: str) -> None:
         except ImbueCloudCliError as exc:
             logger.warning("`mngr imbue_cloud auth signout` failed for {}: {}", signed_out_email, exc)
     session_store.invalidate_identity_cache()
+    _hand_off_default_account(user_id, session_store)
     _kick_background_syncs()
     wake_ui_state_publisher()
     if signed_out_email and unset_imbue_cloud_provider_for_account(
@@ -164,6 +185,17 @@ def _kick_background_syncs() -> None:
     state = get_state()
     if state.sync_scheduler is not None:
         state.sync_scheduler.kick()
+
+
+def _publisher_notifier(publisher: UiStatePublisher | None) -> Callable[[], None]:
+    """``publisher.notify_change``, for a thread that has no Flask app context to find it from."""
+    if publisher is None:
+        return _do_nothing
+    return publisher.notify_change
+
+
+def _do_nothing() -> None:
+    pass
 
 
 def wake_ui_state_publisher() -> None:
@@ -261,6 +293,7 @@ def _run_web_login_subprocess(
     output_format: OutputFormat,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
     connector_url: str,
+    notify_accounts_changed: Callable[[], None],
 ) -> None:
     """Run ``mngr imbue_cloud auth login`` in a background thread.
 
@@ -327,6 +360,7 @@ def _run_web_login_subprocess(
             output_format=output_format,
             latchkey_forward_supervisor=latchkey_forward_supervisor,
             connector_url=connector_url,
+            notify_accounts_changed=notify_accounts_changed,
         )
         _record_web_login_status(
             flow_id,
@@ -364,6 +398,7 @@ def _mirror_signin_result(
     output_format: OutputFormat,
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None,
     connector_url: str,
+    notify_accounts_changed: Callable[[], None],
 ) -> None:
     """Mirror a completed plugin signin into the desktop client.
 
@@ -373,8 +408,17 @@ def _mirror_signin_result(
     session_store.invalidate_identity_cache()
     if sync_scheduler is not None:
         sync_scheduler.note_account_signin(str(result.user_id), str(result.email))
-    if minds_config is not None and minds_config.get_default_account_id() is None:
-        minds_config.set_default_account_id(str(result.user_id))
+    if minds_config is not None:
+        stored_default_account_id = minds_config.get_default_account_id()
+        # A stored default whose account has since signed out is as good as none. A failed
+        # account listing proves nothing about it, so the user's choice is kept then.
+        is_stored_default_signed_out = (
+            stored_default_account_id is not None
+            and session_store.get_session(stored_default_account_id) is None
+            and not session_store.is_last_identity_read_failed
+        )
+        if stored_default_account_id is None or is_stored_default_signed_out:
+            minds_config.set_default_account_id(str(result.user_id))
 
     # Explicit signin -- always re-enable the provider entry, even if the
     # user previously clicked Disable on it in the providers panel.
@@ -385,6 +429,9 @@ def _mirror_signin_result(
         force_enable=True,
     ):
         bounce_latchkey_forward_supervisor(latchkey_forward_supervisor)
+    # Last, so the accounts frame the open windows re-read already has the
+    # account both listed and re-enabled.
+    notify_accounts_changed()
 
     emit_event(
         "auth_success",
@@ -435,6 +482,7 @@ def _handle_web_login_start() -> Response:
             "output_format": output_format,
             "latchkey_forward_supervisor": latchkey_forward_supervisor,
             "connector_url": _get_connector_url(),
+            "notify_accounts_changed": _publisher_notifier(state.ui_publisher),
         },
         name="imbue-cloud-web-login",
         is_checked=False,

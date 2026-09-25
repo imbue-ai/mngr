@@ -237,6 +237,24 @@ export class CreateFormModel {
     if (!this.imbueCloudNeedsAccount()) this.isAccountErrorShown = false;
   }
 
+  /**
+   * Take up the accounts a sign-in added while the form was open. Every edit
+   * in the form stays; only an account pick that is empty or no longer signed
+   * in moves, to the new default.
+   */
+  adoptAccounts(defaults: CreateFormDefaults): void {
+    if (this.defaults === null) return;
+    this.defaults = { ...this.defaults, accounts: defaults.accounts, default_account_id: defaults.default_account_id };
+    if (!defaults.accounts.some((account) => account.user_id === this.accountId)) {
+      this.accountId = defaults.default_account_id || (defaults.accounts[0]?.user_id ?? "");
+    }
+  }
+
+  /** The email of the picked account, or "" when none (or an unknown one) is picked. */
+  selectedAccountEmail(): string {
+    return this.defaults?.accounts.find((account) => account.user_id === this.accountId)?.email ?? "";
+  }
+
   imbueCloudNeedsAccount(): boolean {
     return this.accountId === "" && (this.launchValue === "IMBUE_CLOUD" || this.backupProvider === "IMBUE_CLOUD");
   }

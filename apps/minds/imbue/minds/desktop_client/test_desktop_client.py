@@ -27,6 +27,8 @@ from imbue.imbue_common.sentry.testing import TEST_S3_BUCKET
 from imbue.imbue_common.sentry.testing import capturing_sentry_client
 from imbue.imbue_common.sentry.testing import recording_s3_bucket
 from imbue.imbue_common.sentry.testing import registered_attachments_uploader
+from imbue.minds.bootstrap import MINDS_ROOT_NAME_ENV_VAR
+from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.app import _build_requests_payload
@@ -89,10 +91,12 @@ from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIV
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceSecretsPayload
 from imbue.minds.desktop_client.workspace_record_store import encode_encrypted_secrets
+from imbue.minds.mngr_settings.imbue_cloud_accounts import set_imbue_cloud_provider_for_account
 from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.minds.primitives import CookieSigningKey
 from imbue.minds.primitives import OneTimeCode
 from imbue.minds.primitives import ServiceName
+from imbue.minds.testing import stub_mngr_host_dir
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
@@ -555,7 +559,7 @@ def test_expired_session_cookie_is_unauthenticated(tmp_path: Path) -> None:
     assert response.headers["location"] == _UNAUTHENTICATED_LOCATION
 
 
-# -- Leased imbue_cloud host account-binding tests --
+# Leased imbue_cloud host account-binding tests
 
 
 @pytest.mark.witnesses("browser-authorization.already-authenticated")
@@ -597,7 +601,7 @@ def test_unhandled_exception_returns_500_with_message(tmp_path: Path) -> None:
     assert "test boom" in response.text
 
 
-# -- Workspace-list / destroying-marker derivation helpers --
+# Workspace-list / destroying-marker derivation helpers
 
 
 def test_build_workspace_list_returns_workspaces_for_the_channel(tmp_path: Path) -> None:
@@ -1097,7 +1101,7 @@ def test_build_requests_payload_distinguishes_equal_count_different_contents() -
     assert payload_b["request_ids"] == [request_b.request_id]
 
 
-# -- Tests for new account management and request routes --
+# Account management and request routes
 
 
 def _create_test_client_with_stores(
@@ -1146,18 +1150,6 @@ def _create_test_client_with_stores(
     )
     client = app.test_client()
     return client, auth_store
-
-
-def test_accounts_listing_shows_logged_in_accounts(tmp_path: Path) -> None:
-    """The accounts listing the SPA renders carries every logged-in account."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-test-123", email="test@example.com")
-    client, auth_store = _create_test_client_with_stores(tmp_path, cli=cli)
-    _authenticate_client(client, auth_store)
-
-    response = client.get("/ui/api/accounts")
-    assert response.status_code == 200
-    assert "test@example.com" in response.get_data(as_text=True)
 
 
 def test_account_plan_modal_unknown_account_returns_404(tmp_path: Path) -> None:
@@ -1216,7 +1208,7 @@ def test_sharing_urls_redirect_to_the_options_panels_share_tab(tmp_path: Path) -
     assert modal_response.headers["Location"] == f"/workspace/{agent_id}/options?tab=share&target=frontend"
 
 
-# -- Workspace options panel routes --
+# Workspace options panel routes
 
 
 def test_old_requests_panel_route_removed(tmp_path: Path) -> None:
@@ -1250,7 +1242,44 @@ def test_set_default_account(tmp_path: Path) -> None:
     assert config.get_default_account_id() == "user-default-123"
 
 
-# -- error-reporting consent + settings tests --
+def test_disabling_an_account_provider_republishes_the_accounts_frame(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Manage Accounts renders from the accounts frame and lists an account whose provider is off as signed out."""
+    stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
+    monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-tname")
+    email = "only@example.com"
+    set_imbue_cloud_provider_for_account(
+        email, connector_url="https://test--rsc-api.modal.run", root=MindsRoot.from_environment()
+    )
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-only", email=email)
+    client, auth_store = _create_test_client_with_stores(
+        tmp_path, cli=cli, root_concurrency_group=root_concurrency_group
+    )
+    _authenticate_client(client, auth_store)
+    publisher = get_state(client.application).ui_publisher
+    assert publisher is not None
+    client_queue = publisher.broadcaster.register()
+    publisher.publish_now()
+    baseline = [frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "accounts"]
+    assert baseline[-1]["accounts"][0]["is_enabled"] is True
+
+    publisher.start(root_concurrency_group)
+    try:
+        response = client.patch(
+            f"/api/v1/desktop/providers/{imbue_cloud_provider_name_for_account(email)}", json={"enabled": False}
+        )
+        assert response.status_code == 200
+
+        frame = _await_ui_frame(client_queue, "accounts")
+    finally:
+        publisher.stop()
+
+    assert [(entry["email"], entry["is_enabled"]) for entry in frame["accounts"]] == [(email, False)]
+
+
+# error-reporting consent + settings tests
 
 
 def test_consent_page_requires_auth(tmp_path: Path) -> None:
@@ -1422,7 +1451,7 @@ def test_backup_password_change_refuses_accounts_locked_on_this_device(tmp_path:
     assert not is_account_unlocked(InstallationPaths(data_dir=tmp_path), "user-1")
 
 
-# -- get-help / report-a-bug tests --
+# get-help / report-a-bug tests
 
 
 def test_help_assist_requires_a_workspace(tmp_path: Path) -> None:
@@ -2009,17 +2038,19 @@ def test_api_v1_bug_report_rejects_empty_description(tmp_path: Path) -> None:
     assert any(error["field"] == "description" for error in response.get_json()["errors"])
 
 
-# -- system-interface health + recovery tests --
+# system-interface health + recovery tests
 
 
-def _await_workspaces_frame(client_queue: "queue.Queue[str | None]", timeout_seconds: float = 3.0) -> dict[str, Any]:
-    """Block for the next ``workspaces`` frame on one connection's queue.
+def _await_ui_frame(
+    client_queue: "queue.Queue[str | None]", frame_type: str, timeout_seconds: float = 3.0
+) -> dict[str, Any]:
+    """Block for the next frame of ``frame_type`` on one connection's queue.
 
     The publish strand wakes on an event, so this returns in well under a
     millisecond in practice; the budget is only there so a wake that never comes
     fails the test with a sentence instead of hanging it, which is why it sits
-    well inside the suite's own per-test timeout. Frames of other types (the
-    health edge publishes its own) are skipped.
+    well inside the suite's own per-test timeout. Frames of other types are
+    skipped.
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -2030,9 +2061,9 @@ def _await_workspaces_frame(client_queue: "queue.Queue[str | None]", timeout_sec
         if raw is None:
             continue
         frame = json.loads(raw)
-        if frame.get("type") == "workspaces":
+        if frame.get("type") == frame_type:
             return frame
-    raise AssertionError("no workspaces frame was published within the timeout")
+    raise AssertionError(f"no {frame_type} frame was published within the timeout")
 
 
 def _await_health_frame(
@@ -2114,7 +2145,7 @@ def test_a_health_edge_republishes_the_workspace_lists_backend_verdict(
         tracker.record_failure(workspace_agent)
         tracker.record_probe_failure(workspace_agent)
 
-        frame = _await_workspaces_frame(client_queue)
+        frame = _await_ui_frame(client_queue, "workspaces")
         assert frame["workspaces"][0]["is_backend_unreachable"] is False
 
         # The unattended start has by now run and cleared the failure run. The
@@ -2148,7 +2179,7 @@ def test_create_desktop_client_stashes_system_interface_health_tracker(tmp_path:
     assert get_state(app).system_interface_health_tracker is tracker
 
 
-# -- sync unlock / remove-record tests --
+# sync unlock / remove-record tests
 
 
 def test_sync_unlock_installs_the_dek_for_a_locked_account(tmp_path: Path) -> None:

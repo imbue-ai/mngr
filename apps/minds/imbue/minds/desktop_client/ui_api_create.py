@@ -54,6 +54,7 @@ from imbue.minds.desktop_client.local_prerequisites import LocalBackendPrerequis
 from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
 from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
+from imbue.minds.desktop_client.minds_config import resolve_default_account_id
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -125,7 +126,7 @@ class CreateRetryPrefill(FrozenModel):
     docker_runtime: str = Field(description="Container runtime value")
     backup_provider: str = Field(description="Backup provider value")
     backup_api_key_env: str = Field(description="restic env block for the manual backup provider")
-    account_id: str = Field(description="Associated account id, empty for private")
+    account_id: str = Field(description="Associated account id while it is signed in, empty otherwise")
     region: str = Field(description="Chosen region, empty when not applicable")
     cloud_account: str = Field(description="BYOK account name; empty unless the retry targeted one that still exists")
     instance_type: str = Field(description="Chosen machine size, empty when not applicable")
@@ -283,8 +284,19 @@ def _read_pending_record(create_attempt_id: str) -> PendingCreateAttemptRecord |
     return store.read_record(create_attempt_id) if store is not None else None
 
 
+def _signed_in_account_id(account_id: str | None, accounts: tuple[CreateAccountOption, ...]) -> str:
+    """``account_id`` when it is one of the signed-in ``accounts``, else "".
+
+    A failed attempt's request keeps the account it was made with after that
+    account signs out; only a signed-in account can be pre-selected.
+    """
+    return account_id if account_id and any(account.user_id == account_id for account in accounts) else ""
+
+
 def _read_retry_prefill(
-    retry_create_attempt_id: str, cloud_accounts: tuple[CloudAccountOption, ...]
+    retry_create_attempt_id: str,
+    accounts: tuple[CreateAccountOption, ...],
+    cloud_accounts: tuple[CloudAccountOption, ...],
 ) -> CreateRetryPrefill | None:
     """The ``?retry=<id>`` pre-fill from a pending record, when usable (not DONE)."""
     record = _read_pending_record(retry_create_attempt_id)
@@ -304,7 +316,7 @@ def _read_retry_prefill(
         docker_runtime=retry_request.docker_runtime.value,
         backup_provider=retry_request.backup_provider.value,
         backup_api_key_env=retry_request.backup_api_key_env,
-        account_id=retry_request.account_id or "",
+        account_id=_signed_in_account_id(retry_request.account_id, accounts),
         region=retry_request.region or "",
         cloud_account=retained_cloud_account,
         instance_type=retry_request.instance_type or "",
@@ -322,7 +334,13 @@ def _handle_create_form_defaults() -> Response:
         for account in (session_store.list_accounts() if session_store is not None else [])
     )
     minds_config = state.minds_config
-    default_account_id = (minds_config.get_default_account_id() if minds_config is not None else None) or ""
+    default_account_id = (
+        resolve_default_account_id(
+            stored_default_account_id=minds_config.get_default_account_id() if minds_config is not None else None,
+            signed_in_user_ids=[account.user_id for account in accounts],
+        )
+        or ""
+    )
     region_options, region_selected = _region_form_context()
     cloud_accounts = tuple(
         CloudAccountOption(name=account.name, alias=account.alias, backend=account.backend, region=account.region)
@@ -363,7 +381,7 @@ def _handle_create_form_defaults() -> Response:
         git_url=default_workspace_git_url(),
         branch=default_workspace_template_ref(),
         color=_suggested_create_color(state.backend_resolver),
-        prefill=_read_retry_prefill(request.args.get("retry", ""), cloud_accounts),
+        prefill=_read_retry_prefill(request.args.get("retry", ""), accounts, cloud_accounts),
         local_prerequisites=local_prerequisites,
         local_launch_mode=local_launch_mode_for(host_platform, local_prerequisites).value,
     )

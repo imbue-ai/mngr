@@ -14,7 +14,7 @@ import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
-import { fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
+import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
 import { markOnboardingComplete } from "../../models/onboarding";
 import {
   CHAT_STREAM_STEP_MS,
@@ -57,8 +57,6 @@ import {
   userTurn,
 } from "./start/transcript";
 
-/** How often the flow asks whether the email is verified while it waits on the link. */
-export const VERIFICATION_POLL_MS = 3000;
 /** How long "I verified it" keeps checking before the agent says it is not verified yet. */
 export const VERIFICATION_PRESS_WAIT_MS = 10000;
 export const VERIFICATION_PRESS_STEP_MS = 2000;

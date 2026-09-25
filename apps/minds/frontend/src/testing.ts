@@ -3,6 +3,8 @@
 
 import m from "mithril";
 import type {
+  UiAccountEntry,
+  UiAccountsMessage,
   UiNotificationEntry,
   UiWorkspacesMessage,
 } from "./channel/messages";
@@ -65,6 +67,45 @@ export function workspacesMessage(
     remote_workspace_states: {},
     ...overrides,
   };
+}
+
+/** The accounts frame listing `accounts`, labelled with the default one as
+ * the server labels it. */
+export function accountsMessage(
+  accounts: UiAccountEntry[] = [accountEntry()],
+): UiAccountsMessage {
+  const labelled =
+    accounts.find((account) => account.is_default) ?? accounts[0];
+  return {
+    type: "accounts",
+    has_accounts: accounts.length > 0,
+    account_email: labelled?.email ?? "",
+    extra_account_count: Math.max(accounts.length - 1, 0),
+    accounts,
+  };
+}
+
+/** One signed-in account entry: alice, the default account. */
+export function accountEntry(
+  overrides: Partial<UiAccountEntry> = {},
+): UiAccountEntry {
+  return {
+    user_id: "user-1",
+    email: "alice@example.com",
+    workspace_count: 0,
+    is_default: true,
+    is_enabled: true,
+    ...overrides,
+  };
+}
+
+/** A second, non-default account signed in beside accountEntry's. */
+export function secondAccountEntry(): UiAccountEntry {
+  return accountEntry({
+    user_id: "user-2",
+    email: "bob@example.com",
+    is_default: false,
+  });
 }
 
 /** One notification-feed entry as the wire carries it: an unresolved

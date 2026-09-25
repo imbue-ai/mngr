@@ -1,13 +1,15 @@
 'use strict';
 
-// Pure decision logic for the desktop client's cold-start landing screen.
+// Pure decision logic for the desktop client's cold-start landing screen,
+// which is also where the app lands when it is reopened with no window open.
 // Kept free of any `electron` imports so it can be unit-tested under plain
 // node (see ../test/unit/startup-routing.test.js). main.js computes the
 // inputs from the /ui/api/app-status probe + saved window-state and acts on
 // the returned route.
 
 /**
- * Decide which screen the desktop client lands on at cold start.
+ * Decide which screen the desktop client lands on at cold start, or when it
+ * is reopened (dock-icon click, second launch) with no window open.
  *
  * Returns one of:
  *   'start'   -> the first-run start flow (`/start`): the manifesto exchange

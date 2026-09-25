@@ -179,6 +179,49 @@ describe("CreateFormModel", () => {
     expect(model.imbueCloudNeedsAccount()).toBe(false);
   });
 
+  it("takes up a mid-form sign-in's account without disturbing the rest of the form", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults({ accounts: [], default_account_id: "" }));
+    model.hostName = "my-machine";
+    expect(model.imbueCloudNeedsAccount()).toBe(true);
+    expect(model.selectedAccountEmail()).toBe("");
+
+    model.adoptAccounts(
+      buildDefaults({ accounts: [{ user_id: "user-new", email: "new@example.com" }], default_account_id: "user-new" }),
+    );
+
+    expect(model.accountId).toBe("user-new");
+    expect(model.selectedAccountEmail()).toBe("new@example.com");
+    expect(model.imbueCloudNeedsAccount()).toBe(false);
+    expect(model.hostName).toBe("my-machine");
+    expect(model.launchValue).toBe("IMBUE_CLOUD");
+  });
+
+  it("keeps an explicit account pick when a sign-in adds another account", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.adoptAccounts(
+      buildDefaults({
+        accounts: [
+          { user_id: "user-1", email: "alice@example.com" },
+          { user_id: "user-2", email: "bob@example.com" },
+        ],
+        default_account_id: "user-2",
+      }),
+    );
+    expect(model.accountId).toBe("user-1");
+  });
+
+  it("moves an account pick that has signed out to the re-listed default", () => {
+    const model = new CreateFormModel();
+    model.applyDefaults(buildDefaults());
+    model.adoptAccounts(
+      buildDefaults({ accounts: [{ user_id: "user-2", email: "bob@example.com" }], default_account_id: "user-2" }),
+    );
+    expect(model.accountId).toBe("user-2");
+    expect(model.selectedAccountEmail()).toBe("bob@example.com");
+  });
+
   it("resolves a BYOK selection into the backend mode plus the account name", () => {
     const model = new CreateFormModel();
     model.applyDefaults(buildDefaults());

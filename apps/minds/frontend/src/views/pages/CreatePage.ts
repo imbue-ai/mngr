@@ -10,6 +10,8 @@
 // and a successful submit reports the operation id instead of routing.
 
 import m from "mithril";
+import { getAppContext } from "../../app-context";
+import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
 import {
   backupProviderLabel,
@@ -17,17 +19,20 @@ import {
   launchModeLabel,
   submitCreateRequest,
 } from "../../models/create";
+import type { WebLoginState } from "../../models/webLogin";
 import { webLogin } from "../../models/webLogin";
 import { Button, ButtonSubmit } from "../components/Button";
 import { FormLabel, Select, TextInput, Textarea } from "../components/FormControls";
 import { Link } from "../components/Link";
 import { PageNarrowContainer } from "../components/Layout";
 import { DialogCloseButton, Modal } from "../components/Modal";
+import { Notice } from "../components/Notice";
 import { CloudAccountsModal, CloudAccountsModalState } from "./create/CloudAccountsModal";
 import { PresetCards } from "./create/PresetCards";
 import { PrerequisiteNotice } from "./create/PrerequisiteNotice";
-import type { PresetName } from "./create/form-model";
+import type { CreateSubmitBody, PresetName } from "./create/form-model";
 import { CreateFormModel, normalizeCreateApiError } from "./create/form-model";
+import { VerificationWait } from "./create/verification-wait";
 
 export interface CreatePageAttrs {
   /** `page` (the default) is the routed /create page; `embedded` is the form inside a modal. */
@@ -59,11 +64,37 @@ export function createFormModal(
   ]);
 }
 
+/**
+ * Where a sign-in the form is waiting on stands. Either signal settles it: the
+ * flow's own verdict, or an account landing on the accounts channel (which can
+ * beat the poll). Closing the modal without signing in abandons it, and with
+ * it the create; pressing Create asks again.
+ */
+export function signInOutcome(
+  webLoginState: WebLoginState,
+  isSignedIn: boolean,
+): "signed-in" | "abandoned" | "pending" {
+  if (webLoginState === "done" || isSignedIn) return "signed-in";
+  if (webLoginState === "idle") return "abandoned";
+  return "pending";
+}
+
+const LINK_BUTTON_EXTRA =
+  "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline " +
+  "whitespace-nowrap";
+
 export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) => {
   const attrs = initialVnode.attrs;
   const isEmbedded = attrs.mode === "embedded";
   const model = new CreateFormModel();
   const byokModal = new CloudAccountsModalState();
+  const verificationWait = new VerificationWait({
+    redraw: () => m.redraw(),
+    bringAppToFront: () => electronBridge.bringAppToFront(),
+  });
+  let isAwaitingSignIn = false;
+  // Set once the form is gone, so a create a sign-in enabled does not go out from it.
+  let isRemoved = false;
   let hostNameDebounce: ReturnType<typeof setTimeout> | null = null;
   let availabilitySequence = 0;
 
@@ -114,27 +145,122 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
 
   function submit(event: SubmitEvent): void {
     event.preventDefault();
+    // A create is already on its way (or waiting on the emailed link).
+    if (model.isSubmitting) return;
+    createNow(false);
+  }
+
+  /**
+   * Imbue Cloud was asked for while signed out. The form already says what
+   * to create, so the sign-in only supplies the account: once one lands the
+   * create goes out on its own (see syncSignIn).
+   */
+  function signInThenCreate(): void {
+    // The form's defaults can predate an account that has since landed (a
+    // sign-in finished after its modal was closed); a new sign-in would only
+    // open the browser again.
+    if (getAppContext().stores.accounts.hasAccounts) {
+      createForSignedInAccount();
+      return;
+    }
+    isAwaitingSignIn = true;
+    void webLogin.start(
+      "Sign in or create an Imbue account to run your machine on Imbue Cloud. " +
+        "You can also cancel and run it directly on your computer.",
+    );
+  }
+
+  function syncSignIn(): void {
+    if (!isAwaitingSignIn) return;
+    switch (signInOutcome(webLogin.state, getAppContext().stores.accounts.hasAccounts)) {
+      case "signed-in":
+        isAwaitingSignIn = false;
+        webLogin.noteSignedIn();
+        webLogin.dismiss();
+        createForSignedInAccount();
+        return;
+      case "abandoned":
+        isAwaitingSignIn = false;
+        return;
+      case "pending":
+        return;
+    }
+  }
+
+  function createForSignedInAccount(): void {
+    model.isSubmitting = true;
+    model.submitError = "";
+    fetchCreateFormDefaults(null).then(
+      (defaults) => {
+        if (isRemoved) return;
+        model.adoptAccounts(defaults);
+        model.isSubmitting = false;
+        createNow(true);
+        m.redraw();
+      },
+      (error: unknown) => {
+        console.error("Could not load the signed-in account for the create", error);
+        if (isRemoved) return;
+        model.isSubmitting = false;
+        model.submitError = "Signed in, but could not load your account. Press Create to try again.";
+        m.redraw();
+      },
+    );
+  }
+
+  function cancelVerificationWait(): void {
+    verificationWait.cancel();
+    model.isSubmitting = false;
+  }
+
+  /** `isAfterSignIn`: a create a sign-in just enabled, which must not ask for another. */
+  function createNow(isAfterSignIn: boolean): void {
     // The button is held while a prerequisite is unmet; a submit that still
     // arrives (Enter in a field) is refused the same way.
     if (model.unmetPrerequisiteForSubmit() !== null) return;
+    if (!model.validateHostNameFormatForSubmit()) {
+      model.isAdvancedOpen = true;
+      return;
+    }
     if (model.imbueCloudNeedsAccount()) {
       if ((model.defaults?.accounts.length ?? 0) > 0) {
         model.isAccountErrorShown = true;
+      } else if (isAfterSignIn) {
+        model.submitError = "Signed in, but the account is not available yet. Press Create to try again.";
       } else {
-        // Signed out entirely: sign-in lives on the Accounts page now (the
-        // overlay sign-in modal is the accounts tranche's surface).
-        m.route.set("/accounts");
+        signInThenCreate();
       }
-      return;
-    }
-    if (!model.validateHostNameFormatForSubmit()) {
-      model.isAdvancedOpen = true;
       return;
     }
     model.isSubmitting = true;
     model.submitError = "";
     model.submitErrorField = "";
-    void submitCreateRequest({ ...model.submitBody() }).then((result) => {
+    // Taken now: the form stays editable while the emailed link is awaited,
+    // and the create that goes out must be the one whose account was checked.
+    const body = model.submitBody();
+    if (model.launchSelection().mode !== "IMBUE_CLOUD") {
+      postCreate(body, isAfterSignIn);
+      return;
+    }
+    const email = model.selectedAccountEmail();
+    if (email === "") {
+      refuseUncheckedVerification();
+      return;
+    }
+    // The connector refuses an Imbue Cloud create for an unverified email, so
+    // Create stays held until the emailed link is clicked rather than letting
+    // the create fail on the creation page.
+    verificationWait.require(email, () => postCreate(body, isAfterSignIn), refuseUncheckedVerification);
+  }
+
+  function refuseUncheckedVerification(): void {
+    model.isSubmitting = false;
+    model.submitError = "Could not check whether your email is verified. Please try again.";
+    m.redraw();
+  }
+
+  function postCreate(body: CreateSubmitBody, isAfterSignIn: boolean): void {
+    void submitCreateRequest({ ...body }).then((result) => {
       if (result.status === 0) {
         model.isSubmitting = false;
         model.submitError = "Could not reach the server. Please try again.";
@@ -150,15 +276,10 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         return;
       }
       const error = normalizeCreateApiError(result.data);
-      if (error.redirectUrl) {
-        // The remote preset needs a signed-in Imbue account: launch the
-        // browser sign-in and stay on the create form (the user re-submits
-        // once signed in).
+      if (error.redirectUrl && !isAfterSignIn) {
+        // The server's no-account backstop: sign in, as the form would have.
         model.isSubmitting = false;
-        void webLogin.start(
-          "Sign in or create an Imbue account to run your machine on Imbue Cloud. " +
-            "You can also cancel and run it directly on your computer.",
-        );
+        signInThenCreate();
         m.redraw();
         return;
       }
@@ -168,6 +289,33 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
       if (error.field) model.isAdvancedOpen = true;
       m.redraw();
     });
+  }
+
+  function verificationNotice(): m.Children {
+    const email = verificationWait.email;
+    if (email === null) return null;
+    const resendOutcome =
+      verificationWait.isResendSent === null
+        ? null
+        : verificationWait.isResendSent
+          ? "Sent another email."
+          : "An email was sent a moment ago; check your inbox.";
+    return m(Notice, { variant: "info", id: "verification-wait", role: "status", extra: "!mt-6 !mb-0 !px-5 !py-4 text-center" }, [
+      m("p", { class: "type-body text-primary" }, [
+        "Workspaces on Imbue Cloud require a verified email. Please click the link we sent to ",
+        m("strong", email),
+        " and your workspace will be created.",
+      ]),
+      m("div", { class: "mt-3 flex justify-center gap-3" }, [
+        m(
+          Button,
+          { variant: "secondary", id: "verification-resend", onclick: () => verificationWait.resend() },
+          "Resend email",
+        ),
+        m(Button, { variant: "ghost", id: "verification-cancel", onclick: cancelVerificationWait }, "Cancel"),
+      ]),
+      resendOutcome === null ? null : m("p", { class: "mt-2 type-helper text-secondary" }, resendOutcome),
+    ]);
   }
 
   function fieldRing(fieldId: string): string {
@@ -521,8 +669,13 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         model.selectedPreset = null;
       }
     },
+    onupdate() {
+      syncSignIn();
+    },
     onremove() {
+      isRemoved = true;
       if (hostNameDebounce !== null) clearTimeout(hostNameDebounce);
+      verificationWait.cancel();
     },
     view() {
       const defaults = model.defaults;
@@ -592,6 +745,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                   // hidden with the panel.
                   prerequisiteNotice(model.unmetPrerequisiteForSubmit(), "submit-prerequisite"),
                 ]),
+                verificationNotice(),
                 m("div", { class: "flex items-center justify-between mt-8 type-helper" }, [
                   m(
                     "select",
@@ -629,9 +783,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                           {
                             variant: "ghost",
                             id: "toggle-advanced",
-                            extra:
-                              "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent " +
-                              "hover:!text-primary hover:underline whitespace-nowrap",
+                            extra: LINK_BUTTON_EXTRA,
                             onclick: () => {
                               model.isAdvancedOpen = true;
                             },
@@ -647,9 +799,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                           {
                             variant: "ghost",
                             id: "back-to-simple",
-                            extra:
-                              "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent " +
-                              "hover:!text-primary hover:underline whitespace-nowrap",
+                            extra: LINK_BUTTON_EXTRA,
                             onclick: () => {
                               model.isAdvancedOpen = false;
                             },
@@ -676,7 +826,11 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
                       extra: "w-80",
                       disabled: model.isSubmitting || model.unmetPrerequisiteForSubmit() !== null,
                     },
-                    model.isSubmitting ? "Creating..." : "Create",
+                    verificationWait.email !== null
+                      ? "Waiting for email verification..."
+                      : model.isSubmitting
+                        ? "Creating..."
+                        : "Create",
                   ),
                 ),
                 m(CloudAccountsModal, {

@@ -3,7 +3,14 @@ import type {
   UiNotificationsMessage,
   UiRequestsMessage,
 } from "../channel/messages";
-import { notificationEntry, workspacesMessage } from "../testing";
+import {
+  accountEntry,
+  accountsMessage,
+  notificationEntry,
+  secondAccountEntry,
+  workspacesMessage,
+} from "../testing";
+import { AccountsStore } from "./accounts";
 import {
   applySnapshotToStores,
   bootFromBootstrap,
@@ -63,6 +70,24 @@ describe("WorkspacesStore", () => {
     store.onChanged(() => (notified += 1));
     store.applyWorkspacesMessage(workspacesMessage());
     expect(notified).toBe(1);
+  });
+});
+
+describe("AccountsStore", () => {
+  it("takes the launcher label and the account list from the same frame", () => {
+    const store = new AccountsStore();
+    store.applyAccountsMessage(accountsMessage([accountEntry()]));
+
+    store.applyAccountsMessage(
+      accountsMessage([accountEntry(), secondAccountEntry()]),
+    );
+
+    expect(store.accountEmail).toBe("alice@example.com");
+    expect(store.extraAccountCount).toBe(1);
+    expect(store.accounts.map((account) => account.email)).toEqual([
+      "alice@example.com",
+      "bob@example.com",
+    ]);
   });
 });
 
@@ -271,12 +296,10 @@ describe("boot seeding", () => {
       schema_version: 1,
       snapshot: {
         workspaces: workspacesMessage(),
-        accounts: {
-          type: "accounts",
-          has_accounts: true,
-          account_email: "a@b.c",
-          extra_account_count: 1,
-        },
+        accounts: accountsMessage([
+          accountEntry({ email: "a@b.c" }),
+          secondAccountEntry(),
+        ]),
         providers: {
           type: "providers",
           providers: [],
@@ -329,12 +352,7 @@ describe("boot seeding", () => {
     applySnapshotToStores(stores, {
       snapshot: {
         workspaces: workspacesMessage(),
-        accounts: {
-          type: "accounts",
-          has_accounts: true,
-          account_email: "a@b.c",
-          extra_account_count: 0,
-        },
+        accounts: accountsMessage([accountEntry({ email: "a@b.c" })]),
         providers: {
           type: "providers",
           providers: [],

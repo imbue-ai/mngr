@@ -41,6 +41,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
 from imbue.minds.desktop_client.latchkey.permission_overview import clear_service_sign_in_options_cache
+from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -73,7 +74,8 @@ class FakeImbueCloudCli(ImbueCloudCli):
     """In-memory test double for :class:`ImbueCloudCli`.
 
     Tests register accounts via :meth:`set_accounts` /
-    :meth:`add_account`; only :meth:`auth_list` is exercised. Other
+    :meth:`add_account`; :meth:`auth_list` reads them and
+    :meth:`auth_signout` drops one. Other
     subprocess-driven methods on the real CLI keep their default
     implementations and will spawn ``mngr imbue_cloud …`` if a test
     invokes them, so prefer narrower stubs when those paths matter.
@@ -100,6 +102,9 @@ class FakeImbueCloudCli(ImbueCloudCli):
     is_auth_list_failing: bool = Field(
         default=False,
         description="When True, auth_list raises ImbueCloudCliError (simulates a transient subprocess failure)",
+    )
+    is_auth_signout_failing: bool = Field(
+        default=False, description="When True, auth_signout raises ImbueCloudCliError and the account stays signed in"
     )
     shares_by_account: dict[str, dict[str, str]] = Field(
         default_factory=dict, description="account email -> {host_id: share state}"
@@ -169,9 +174,14 @@ class FakeImbueCloudCli(ImbueCloudCli):
     ) -> ImbueCloudAuthSession:
         if url_file is not None:
             url_file.write_text(self.login_url_to_write + "\n")
-        if self.login_session_to_return is None:
+        session = self.login_session_to_return
+        if session is None:
             raise ImbueCloudCliError("auth login: no fake login session configured on FakeImbueCloudCli")
-        return self.login_session_to_return
+        # The real plugin writes the session to its state dir (replacing any earlier one for the
+        # same user), so the account is listed once from then on.
+        self.remove_account(session.user_id)
+        self.add_account(user_id=session.user_id, email=session.email, display_name=session.display_name)
+        return session
 
     def set_accounts(self, accounts: list[ImbueCloudAuthAccount]) -> None:
         self.accounts_to_return = list(accounts)
@@ -197,7 +207,12 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def remove_account(self, user_id: str) -> None:
         self.accounts_to_return = [a for a in self.accounts_to_return if a.user_id != user_id]
 
-    # -- In-memory machine shares (drives the teardown tests) --
+    def auth_signout(self, account: str) -> None:
+        if self.is_auth_signout_failing:
+            raise ImbueCloudCliError("fake auth signout failure")
+        self.accounts_to_return = [a for a in self.accounts_to_return if a.email != account]
+
+    # In-memory machine shares (drives the teardown tests)
 
     def add_share(self, account: str, host_id: str) -> None:
         self.shares_by_account.setdefault(account, {})[host_id] = "active"
@@ -223,7 +238,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         return {region: tuple(endpoints) for region, endpoints in self.relays_to_return.items()}
 
-    # -- In-memory storage-cleanup backend (drives the backup-trim tests) --
+    # In-memory storage-cleanup backend (drives the backup-trim tests)
 
     storage_recheck_results: list[dict[str, object]] = Field(
         default_factory=list,
@@ -245,7 +260,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
         self.cleanup_grant_call_count += 1
         return dict(self.cleanup_grant_result)
 
-    # -- In-memory machine listing (drives the stop-kind tracker) --
+    # In-memory machine listing (drives the stop-kind tracker)
 
     machines: list[MachineSizeCliInfo] = Field(
         default_factory=list, description="The machines list_machines and show_machine answer from, every account"
@@ -266,7 +281,7 @@ class FakeImbueCloudCli(ImbueCloudCli):
         self.machine_show_call_count += 1
         return next((machine for machine in self.machines if machine.host_id == machine_ref), None)
 
-    # -- In-memory workspace-sync backend (mirrors the connector's semantics) --
+    # In-memory workspace-sync backend (mirrors the connector's semantics)
 
     sync_records_by_email: dict[str, dict[str, dict[str, object]]] = Field(
         default_factory=dict, description="email -> workspace id -> wire record (the fake server state)"
@@ -538,6 +553,32 @@ def build_desktop_client_for_test(
     if is_authenticated:
         client.set_cookie(SESSION_COOKIE_NAME, create_session_cookie(signing_key=auth_store.get_signing_key()))
     return client, app, auth_store
+
+
+def build_desktop_client_with_accounts(
+    tmp_path: Path,
+    signed_in_user_ids: tuple[str, ...],
+    stored_default_account_id: str,
+    cli: FakeImbueCloudCli | None = None,
+) -> tuple[FlaskClient, MindsConfig]:
+    """An authenticated desktop client whose config stores ``stored_default_account_id`` as the default account.
+
+    Each of ``signed_in_user_ids`` is signed in (as ``<user_id>@example.com``)
+    on ``cli``, a fresh fake by default. Returns the client and its config.
+    """
+    effective_cli = cli or make_fake_imbue_cloud_cli()
+    for user_id in signed_in_user_ids:
+        effective_cli.add_account(user_id=user_id, email=f"{user_id}@example.com")
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.set_default_account_id(stored_default_account_id)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        imbue_cloud_cli=effective_cli,
+        session_store=make_session_store_for_test(tmp_path / "session-store", effective_cli),
+        minds_config=minds_config,
+    )
+    return client, minds_config
 
 
 @pytest.fixture

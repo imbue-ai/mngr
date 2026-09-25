@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, getAppContext, registerAppContext } from "../../../app-context";
 import { createEmptyStores } from "../../../models/boot";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
+import type { SettingsGroup } from "../../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
@@ -26,7 +27,7 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
 interface Harness {
   /** Draw the pane for one machine against the same component instance, as a
    * route change would. */
-  draw: (agentId: string) => m.Children;
+  draw: (agentId: string, group?: SettingsGroup) => m.Children;
   requests: string[];
 }
 
@@ -64,7 +65,9 @@ function press(node: AnyVnode, label: string): void {
   (attrsOf(pressable).onclick as () => void)();
 }
 
-function harness(respond: (url: string) => Promise<Response> = () => Promise.resolve(jsonResponse({}))): Harness {
+function harness(
+  respond: (url: string, init?: RequestInit) => Promise<Response> = () => Promise.resolve(jsonResponse({})),
+): Harness {
   const shell = new ShellState(createEmptyStores());
   registerAppContext({ stores: shell.stores, shell });
   shell.stores.updates.applyUpdatesMessage({
@@ -76,9 +79,9 @@ function harness(respond: (url: string) => Promise<Response> = () => Promise.res
     update_window: "2:00 AM-5:00 AM",
   });
   const requests: string[] = [];
-  vi.stubGlobal("fetch", (url: string) => {
+  vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
     requests.push(url);
-    return respond(url);
+    return respond(url, init);
   });
   // No ?override=1, which would open the specific-version field. A successful
   // dispatch enters the machine and redraws; there is no mount for either.
@@ -88,7 +91,7 @@ function harness(respond: (url: string) => Promise<Response> = () => Promise.res
 
   const models = new Map<string, WorkspaceOptionsModel>();
   const instance = SettingsGroups() as unknown as m.Component;
-  function draw(agentId: string): m.Children {
+  function draw(agentId: string, group: SettingsGroup = "updates"): m.Children {
     let model = models.get(agentId);
     if (model === undefined) {
       model = new WorkspaceOptionsModel(agentId);
@@ -97,7 +100,7 @@ function harness(respond: (url: string) => Promise<Response> = () => Promise.res
         host_id: `host-${agentId}`,
         name: agentId,
         color: "#aabbcc",
-        palette: { blue: "#aabbcc" },
+        palette: { blue: "#aabbcc", pink: "#e8a7a8" },
         is_stale: false,
         is_leased_imbue_cloud: false,
         has_account: false,
@@ -110,9 +113,10 @@ function harness(respond: (url: string) => Promise<Response> = () => Promise.res
         service_labels: {},
         whole_service: "",
       };
+      model.lastSavedColor = model.data.color;
       models.set(agentId, model);
     }
-    const attrs = { model, selectedGroup: "updates", onSelectGroup: () => undefined };
+    const attrs = { model, selectedGroup: group, onSelectGroup: () => undefined };
     const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
     return (instance.view as unknown as (v: m.Vnode) => m.Children).call(instance, vnode);
   }
@@ -283,5 +287,69 @@ describe("the Updates settings group's specific-version field", () => {
 
     // Kept for the machine it was typed for, not wiped on every switch.
     expect(attrsOf(overrideField(updatesGroup(draw(UNBACKED)))).value).toBe("upstream/some-branch");
+  });
+});
+
+describe("the General settings group's color picker", () => {
+  function swatch(root: m.Children, hex: string): AnyVnode {
+    const found = collectVnodes(root).find((vnode) => attrsOf(vnode).hex === hex);
+    if (found === undefined) throw new Error(`no ${hex} swatch was drawn`);
+    return found;
+  }
+
+  function hexInput(root: m.Children): AnyVnode {
+    const found = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "color-hex-input");
+    if (found === undefined) throw new Error("the hex input was not drawn");
+    return found;
+  }
+
+  /** A pane whose color saves record the sent color and stay unanswered until released, oldest first. */
+  function heldSaveHarness(): { draw: Harness["draw"]; sentColors: string[]; releaseOldest: () => void } {
+    const sentColors: string[] = [];
+    const heldReplies: (() => void)[] = [];
+    const { draw } = harness((_url, init) => {
+      sentColors.push((JSON.parse(String(init?.body)) as { color: string }).color);
+      return new Promise<Response>((resolve) => heldReplies.push(() => resolve(jsonResponse({}))));
+    });
+    const releaseOldest = (): void => {
+      const release = heldReplies.shift();
+      if (release === undefined) throw new Error("no color save is in flight");
+      release();
+    };
+    return { draw, sentColors, releaseOldest };
+  }
+
+  it("keeps the swatches live and sends each pick at once while a save is still running", async () => {
+    const { draw, sentColors, releaseOldest } = heldSaveHarness();
+
+    (attrsOf(swatch(draw(UNBACKED, "general"), "#e8a7a8")).onclick as () => void)();
+    const whileSaving = draw(UNBACKED, "general");
+
+    expect(attrsOf(swatch(whileSaving, "#e8a7a8")).selected).toBe(true);
+    expect(attrsOf(swatch(whileSaving, "#aabbcc")).disabled).toBe(false);
+    expect(allText(whileSaving)).not.toContain("Saving");
+
+    (attrsOf(hexInput(whileSaving)).oninput as (event: unknown) => void)({ target: { value: "#12" } });
+    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#e8a7a8")).selected).toBe(true);
+
+    (attrsOf(swatch(whileSaving, "#aabbcc")).onclick as () => void)();
+    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#aabbcc")).selected).toBe(true);
+    expect(sentColors).toEqual(["#e8a7a8", "#aabbcc"]);
+
+    releaseOldest();
+    await settleDispatch();
+    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#aabbcc")).selected).toBe(true);
+  });
+
+  it("saves a valid hex draft on blur and then shows the normalized pick", () => {
+    const { draw, sentColors } = heldSaveHarness();
+
+    (attrsOf(hexInput(draw(UNBACKED, "general"))).oninput as (event: unknown) => void)({ target: { value: "#123" } });
+    (attrsOf(hexInput(draw(UNBACKED, "general"))).onblur as () => void)();
+    const afterBlur = draw(UNBACKED, "general");
+
+    expect(sentColors).toEqual(["#112233"]);
+    expect(attrsOf(hexInput(afterBlur)).value).toBe("#112233");
+    expect(allText(afterBlur)).not.toContain("not valid");
   });
 });

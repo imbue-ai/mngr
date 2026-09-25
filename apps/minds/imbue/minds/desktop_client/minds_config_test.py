@@ -5,6 +5,7 @@ import pytest
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
+from imbue.minds.desktop_client.minds_config import resolve_default_account_id
 from imbue.minds.desktop_client.testing import ReadCountingMindsConfig
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.errors import MindsConfigError
@@ -28,6 +29,30 @@ def test_onboarding_complete_defaults_false_and_round_trips(tmp_path: Path) -> N
     assert config.get_is_onboarding_complete() is True
     # Persisted to the file, not held in memory: a second store reads it back.
     assert _make_config(tmp_path).get_is_onboarding_complete() is True
+
+
+@pytest.mark.parametrize(
+    ("stored_default_account_id", "signed_in_user_ids", "expected"),
+    [
+        ("user-kept", ["user-other", "user-kept"], "user-kept"),
+        ("user-departed", ["user-only"], "user-only"),
+        (None, ["user-only"], "user-only"),
+        ("user-departed", ["user-first", "user-second"], None),
+        (None, ["user-first", "user-second"], None),
+        ("user-departed", [], None),
+    ],
+)
+def test_resolve_default_account_id(
+    stored_default_account_id: str | None,
+    signed_in_user_ids: list[str],
+    expected: str | None,
+) -> None:
+    """A signed-in stored default wins; otherwise a sole signed-in account is the default."""
+    resolved = resolve_default_account_id(
+        stored_default_account_id=stored_default_account_id,
+        signed_in_user_ids=signed_in_user_ids,
+    )
+    assert resolved == expected
 
 
 def test_set_and_get_default_account_id(tmp_path: Path) -> None:

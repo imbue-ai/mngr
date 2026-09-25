@@ -414,7 +414,8 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
   const data = model.data;
   if (data === null) return null;
   const nameValue = local.nameDraft ?? data.name;
-  const colorValue = local.colorDraft ?? data.color;
+  const shownColor = model.pendingColor ?? data.color;
+  const colorValue = local.colorDraft ?? shownColor;
   const normalizedDraft = normalizeWorkspaceColorHex(colorValue);
   const isCustomColor = normalizedDraft !== null && !Object.values(data.palette).includes(normalizedDraft);
 
@@ -465,12 +466,9 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
         : null,
     ]),
 
-    m(SectionHeader, { extra: "flex items-center gap-2" }, [
-      "Color ",
-      model.isColorSaving
-        ? m("span", { class: "type-section text-primary bg-surface-primary rounded-sm px-1.5 py-1" }, "Saving")
-        : null,
-    ]),
+    // A pick shows here at once, but the titlebar accent follows only once the save lands: its
+    // channel round trip (mngr label -> resolver -> publisher -> workspaces message) repaints it.
+    m(SectionHeader, "Color"),
     m("div", { id: "color-section", class: "mb-8" }, [
       data.is_stale
         ? m(
@@ -494,11 +492,11 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
               hex: hexValue,
               name,
               size: "md",
-              selected: hexValue === (normalizedDraft ?? data.color),
-              disabled: data.is_stale || model.isColorSaving,
+              selected: hexValue === (normalizedDraft ?? shownColor),
+              disabled: data.is_stale,
               onclick: () => {
-                local.colorDraft = hexValue;
-                void saveColorDraft(model, local, hexValue);
+                local.colorDraft = null;
+                void model.pickColor(hexValue);
               },
             }),
           ),
@@ -516,11 +514,11 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
             autocomplete: "off",
             "aria-label": "Workspace color hex",
             size: 8,
-            disabled: data.is_stale || model.isColorSaving,
+            disabled: data.is_stale,
             oninput: (event: InputEvent) => {
               local.colorDraft = (event.target as HTMLInputElement).value;
             },
-            onblur: () => void commitHexDraft(model, local),
+            onblur: () => commitHexDraft(model, local),
             onkeydown: (event: KeyboardEvent) => {
               if (event.key === "Enter") {
                 event.preventDefault();
@@ -587,29 +585,16 @@ function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
   ];
 }
 
-async function saveColorDraft(
-  model: WorkspaceOptionsModel,
-  local: SettingsGroupsLocalState,
-  normalizedHex: string,
-): Promise<void> {
-  // No optimistic accent preview here: pages have no ShellState handle, and
-  // the save's channel round trip (mngr label -> resolver -> publisher ->
-  // workspaces message) repaints the titlebar within a tick.
-  const isSaved = await model.saveColor(normalizedHex, () => undefined);
-  if (isSaved) local.colorDraft = null;
-  else local.colorDraft = model.lastSavedColor;
-}
-
-async function commitHexDraft(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): Promise<void> {
+function commitHexDraft(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): void {
   if (local.colorDraft === null) return;
   const normalized = normalizeWorkspaceColorHex(local.colorDraft);
+  local.colorDraft = null;
   if (normalized === null) {
     model.colorErrorMessage = "That hex value is not valid. Use #rrggbb or #rgb.";
-    local.colorDraft = null;
     m.redraw();
     return;
   }
-  await saveColorDraft(model, local, normalized);
+  void model.pickColor(normalized);
 }
 
 function renderAccountGroup(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): m.Children {

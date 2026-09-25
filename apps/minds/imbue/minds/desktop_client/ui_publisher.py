@@ -62,7 +62,9 @@ class UiStatePublisher(MutableModel):
 
     broadcaster: UiChannelBroadcaster = Field(frozen=True, description="Fan-out target for every frame")
     derive_workspaces: Callable[[], UiWorkspacesMessage] = Field(frozen=True, description="Current workspace list")
-    derive_accounts: Callable[[], UiAccountsMessage] = Field(frozen=True, description="Current account launcher state")
+    derive_accounts: Callable[[], UiAccountsMessage] = Field(
+        frozen=True, description="Current signed-in accounts (the launcher label and Manage Accounts' list)"
+    )
     derive_providers: Callable[[], UiProvidersMessage] = Field(
         frozen=True, description="Current providers panel state"
     )

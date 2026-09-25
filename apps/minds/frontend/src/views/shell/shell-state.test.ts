@@ -2,6 +2,7 @@ import m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEmptyStores } from "../../models/boot";
 import { takePendingHelpLaunch } from "../../models/help";
+import { WebLoginModel } from "../../models/webLogin";
 import { workspacesMessage } from "../../testing";
 import type { WaitingRequestList } from "./shell-state";
 import { ShellState } from "./shell-state";
@@ -1300,8 +1301,8 @@ describe("ShellState.handleEscape", () => {
   });
 
   it("gives the key to the switcher popover over an open card", () => {
-    // The popover is the one surface that can open ON TOP of the card, so it
-    // has to be asked first -- and the card must survive the keypress.
+    // The popover (z-[200]) sits over every other surface, the card included,
+    // so it has to be asked first -- and the card must survive the keypress.
     displaying(shell, AGENT);
     shell.openRecoveryModal(AGENT);
     shell.openSidebar({ x: 0, y: 0, width: 10, height: 10 });
@@ -1325,8 +1326,27 @@ describe("ShellState.handleEscape", () => {
     expect(shell.isRecoveryModalOpenFor(AGENT)).toBe(false);
   });
 
+  it("gives the key to the sign-in modal over the z-[110] surface beneath it", () => {
+    // The Shell paints the sign-in modal over every other z-[110] surface
+    // (Manage Accounts, the feed), so Escape must close it and leave the
+    // surface that opened it standing.
+    const webLoginModel = new WebLoginModel(
+      undefined,
+      () => {},
+      () => {},
+    );
+    webLoginModel.state = "waiting";
+    shell = new ShellState(createEmptyStores(), webLoginModel);
+    shell.openNotifications();
+
+    expect(shell.handleEscape()).toBe(true);
+
+    expect(webLoginModel.isOpen).toBe(false);
+    expect(shell.isNotificationsOpen).toBe(true);
+  });
+
   it("gives the key to the notification feed over an open card", () => {
-    // The feed is the other surface that can open ON TOP of the card (see
+    // The feed is another surface that can open ON TOP of the card (see
     // handleEscape's own doc comment), so it takes the keypress first and the
     // card must survive it.
     displaying(shell, AGENT);

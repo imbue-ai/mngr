@@ -12,12 +12,14 @@ from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.conftest import build_desktop_client_with_accounts
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
+from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import write_dead_destroy_marker
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
@@ -77,6 +79,31 @@ def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(t
     assert payload["color"].startswith("#")
     assert payload["prefill"] is None
     assert payload["accounts"] == []
+
+
+@pytest.mark.parametrize(
+    ("user_ids", "configured_default", "expected_default"),
+    [
+        pytest.param(("user-a", "user-b"), "user-b", "user-b", id="signed-in-configured-default"),
+        pytest.param(("user-current",), "user-departed", "user-current", id="sole-account-over-departed-default"),
+        pytest.param(("user-a", "user-b"), "user-gone", "", id="departed-default-among-several"),
+        pytest.param((), "user-gone", "", id="every-account-signed-out"),
+    ],
+)
+def test_form_defaults_preselect_the_resolved_default_account(
+    tmp_path: Path, user_ids: tuple[str, ...], configured_default: str, expected_default: str
+) -> None:
+    """A stored default that has signed out is never preselected; a sole signed-in account is instead."""
+    client, _minds_config = build_desktop_client_with_accounts(
+        tmp_path, user_ids, stored_default_account_id=configured_default
+    )
+
+    response = client.get("/ui/api/create/form-defaults")
+
+    assert response.status_code == 200
+    payload = json.loads(response.get_data(as_text=True))
+    assert [account["user_id"] for account in payload["accounts"]] == list(user_ids)
+    assert payload["default_account_id"] == expected_default
 
 
 def test_form_defaults_report_what_each_local_backend_needs_from_this_machine(tmp_path: Path) -> None:
@@ -246,10 +273,6 @@ def test_create_attempt_detail_reports_gone_for_unknown_and_malformed_ids(tmp_pa
     assert json.loads(malformed.get_data(as_text=True))["kind"] == "gone"
 
 
-# -- Record-backed retry prefill and attempt detail (mirrors the deleted
-# -- create_attempt_rows_pages_test.py coverage) --
-
-
 def _record(
     create_attempt_id: str,
     state: PendingCreateAttemptState,
@@ -259,6 +282,7 @@ def _record(
     log_tail: tuple[str, ...] = (),
     cloud_account: str = "",
     instance_type: str = "",
+    account_id: str = "",
 ) -> PendingCreateAttemptRecord:
     now = datetime.now(timezone.utc)
     return PendingCreateAttemptRecord(
@@ -280,6 +304,7 @@ def _record(
             backup_api_key_env="",
             cloud_account=cloud_account,
             instance_type=instance_type,
+            account_id=account_id,
         ),
     )
 
@@ -288,11 +313,13 @@ def _make_client_with_store(
     tmp_path: Path,
     root_concurrency_group: ConcurrencyGroup,
     mngr_caller: MngrCaller | None = None,
+    session_store: MultiAccountSessionStore | None = None,
 ) -> tuple[FlaskClient, PendingCreateAttemptStore, AgentCreator]:
     """A desktop-client test app whose agent creator carries a pending-create-attempt store.
 
     ``mngr_caller`` is what the app reaches workspaces through; the default leaves the app on
     the process-wide caller, which the routes here never use unless a test seeds a chat.
+    ``session_store`` holds the signed-in accounts; the default has none.
     """
     store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
     creator = AgentCreator(
@@ -308,6 +335,7 @@ def _make_client_with_store(
         paths=InstallationPaths(data_dir=tmp_path / "minds"),
         root_concurrency_group=root_concurrency_group,
         mngr_caller=mngr_caller,
+        session_store=session_store,
     )
     return client, store, creator
 
@@ -319,7 +347,8 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     """A ?retry naming a pending record restores the stored request into the prefill.
 
     The record names a BYOK cloud account that no longer exists (this test env
-    has none configured), so the prefill drops it while still threading the
+    has none configured) and an Imbue account that is no longer signed in (it
+    has none signed in), so the prefill drops both while still threading the
     stored machine size through.
     """
     client, store, _creator = _make_client_with_store(tmp_path, root_concurrency_group)
@@ -330,6 +359,7 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
             PendingCreateAttemptState.IN_FLIGHT,
             cloud_account="byok-gcp-ghost",
             instance_type="e2-standard-4",
+            account_id="user-signed-out",
         )
     )
 
@@ -344,8 +374,27 @@ def test_form_defaults_prefill_the_form_from_a_known_retry_record(
     assert prefill["launch_mode"] == "LIMA"
     assert prefill["color"] == "#a1b2c3"
     assert prefill["instance_type"] == "e2-standard-4"
-    # The ghost account is not offered, so it must not be pre-selected either.
+    # The ghost accounts are not offered, so they must not be pre-selected either.
     assert prefill["cloud_account"] == ""
+    assert prefill["account_id"] == ""
+
+
+def test_form_defaults_prefill_keeps_a_retried_account_that_is_still_signed_in(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-kept", email="kept@example.com")
+    client, store, _creator = _make_client_with_store(
+        tmp_path, root_concurrency_group, session_store=make_session_store_for_test(tmp_path / "session-store", cli)
+    )
+    create_attempt_id = str(CreateAttemptId.generate())
+    store.write_record(_record(create_attempt_id, PendingCreateAttemptState.FAILED, account_id="user-kept"))
+
+    response = client.get(f"/ui/api/create/form-defaults?retry={create_attempt_id}")
+
+    assert response.status_code == 200
+    assert json.loads(response.get_data(as_text=True))["prefill"]["account_id"] == "user-kept"
 
 
 def test_create_attempt_detail_carries_error_and_log_tail_for_a_failed_record(

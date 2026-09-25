@@ -4,20 +4,20 @@
 // previously-checked agreement.
 
 import m from "mithril";
-import { describe, expect, it } from "vitest";
-import type { AccountEntry } from "../../../models/accountsDetail";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { UiAccountEntry } from "../../../channel/messages";
 import { AccountsDetailModel } from "../../../models/accountsDetail";
+import { webLogin } from "../../../models/webLogin";
 import type { AnyVnode } from "../../../testing";
-import { attrsOf, collectText, collectVnodes } from "../../../testing";
+import {
+  accountEntry,
+  attrsOf,
+  collectText,
+  collectVnodes,
+} from "../../../testing";
 import { AccountCard } from "./AccountCard";
 
-const ACCOUNT: AccountEntry = {
-  user_id: "user-1",
-  email: "person@example.com",
-  workspace_count: 0,
-  is_default: true,
-  is_enabled: true,
-};
+const ACCOUNT = accountEntry({ email: "person@example.com" });
 
 const PRIVACY_POLICY_URL = "https://accounts.example.com/privacy-policy";
 
@@ -40,14 +40,21 @@ function modelOnPlan(planName: string): AccountsDetailModel {
 /** One mounted AccountCard whose re-renders keep the closure's draft state
  * (the picked plan and the checked agreement), the way mithril redraws do --
  * `renderRoot` would instantiate a fresh closure per call and lose it. */
-function mountCard(model: AccountsDetailModel): () => m.Vnode {
+function mountCard(
+  model: AccountsDetailModel,
+  account: UiAccountEntry = ACCOUNT,
+): () => m.Vnode {
   const instance = AccountCard() as unknown as m.Component;
   return () =>
     (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
       instance,
-      m(instance, { model, account: ACCOUNT } as m.Attributes) as m.Vnode,
+      m(instance, { model, account } as m.Attributes) as m.Vnode,
     );
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function switchPlanButton(root: m.Vnode): AnyVnode {
   const button = collectVnodes(root).find(
@@ -150,5 +157,25 @@ describe("the plan switcher's explorer agreement", () => {
 
     model.switchingPlanUserIds.delete(ACCOUNT.user_id);
     expect(attrsOf(switchPlanButton(render())).disabled).toBe(false);
+  });
+});
+
+describe("a signed-out account's card", () => {
+  it("signs back in to close on landing, with no confirmation over the list", () => {
+    const start = vi
+      .spyOn(webLogin, "start")
+      .mockImplementation(() => Promise.resolve());
+    const render = mountCard(
+      modelOnPlan("free"),
+      accountEntry({ email: "person@example.com", is_enabled: false }),
+    );
+
+    const signInAgain = collectVnodes(render()).find(
+      (node) => collectText(node).join("").trim() === "Sign in again",
+    );
+    expect(signInAgain).toBeDefined();
+    (attrsOf(signInAgain as AnyVnode).onclick as () => void)();
+
+    expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
   });
 });

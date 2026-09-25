@@ -1,13 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { jsonResponse, withReceiverGuardedGlobalFetch } from "../testing";
-import { AccountsDetailModel, type AccountEntry } from "./accountsDetail";
+import {
+  accountEntry,
+  jsonResponse,
+  secondAccountEntry,
+  settle,
+  withReceiverGuardedGlobalFetch,
+} from "../testing";
+import { AccountsDetailModel, type AccountPlanView } from "./accountsDetail";
 
-const ACCOUNT: AccountEntry = {
-  user_id: "user-1",
-  email: "alice@example.com",
-  workspace_count: 2,
-  is_default: true,
-  is_enabled: true,
+const ACCOUNT = accountEntry();
+
+const PLAN_VIEW: AccountPlanView = {
+  plan_name: "explorer",
+  plan_display_name: "Explorer",
+  available_plans: ["explorer"],
+  usage_rows: [],
+  is_over_storage_quota: false,
+  is_at_bucket_quota: false,
 };
 
 describe("AccountsDetailModel", () => {
@@ -15,26 +24,27 @@ describe("AccountsDetailModel", () => {
     // Browsers reject the global fetch when it is invoked with any other
     // receiver (as `this.fetchImpl(...)` would if the default were the bare
     // global), so the default must wrap it in a plain call.
-    await withReceiverGuardedGlobalFetch({ accounts: [ACCOUNT] }, async () => {
-      const model = new AccountsDetailModel(
-        undefined,
-        () => {},
-        (callback) => callback(),
-      );
-      await model.load();
-      expect(model.isLoadFailed).toBe(false);
-      expect(model.accounts).toHaveLength(1);
-    });
+    await withReceiverGuardedGlobalFetch(
+      { plan_view: PLAN_VIEW, trim_status: null },
+      async () => {
+        const model = new AccountsDetailModel(
+          undefined,
+          () => {},
+          (callback) => callback(),
+        );
+        await model.loadPlan(ACCOUNT.user_id);
+        expect(model.planStateFor(ACCOUNT.user_id).planView).toEqual(
+          PLAN_VIEW,
+        );
+      },
+    );
   });
 
-  it("loads the account list and then each account's plan section", async () => {
+  it("loads each listed account's plan section once, and a newly listed account's too", async () => {
     const urls: string[] = [];
     const model = new AccountsDetailModel(
       async (input) => {
-        const url = String(input);
-        urls.push(url);
-        if (url === "/ui/api/accounts")
-          return jsonResponse({ accounts: [ACCOUNT] });
+        urls.push(String(input));
         return jsonResponse({
           plan_view: null,
           trim_status: null,
@@ -45,27 +55,61 @@ describe("AccountsDetailModel", () => {
       (callback) => callback(),
     );
 
-    await model.load();
-    // The plan load is fired without awaiting; flush the microtask queue.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    model.syncPlans([ACCOUNT]);
+    await settle();
+    model.syncPlans([ACCOUNT, secondAccountEntry()]);
+    await settle();
 
-    expect(model.isListLoaded).toBe(true);
-    expect(model.accounts).toEqual([ACCOUNT]);
-    expect(urls).toContain("/ui/api/accounts/user-1/plan");
+    expect(urls).toEqual([
+      "/ui/api/accounts/user-1/plan",
+      "/ui/api/accounts/user-2/plan",
+    ]);
     expect(model.planStateFor("user-1").isUnavailable).toBe(true);
     expect(model.planStateFor("user-1").privacyPolicyUrl).toBe(
       "https://accounts.example.com/privacy-policy",
     );
   });
 
+  it("reloads the plan of an account signed back in, or logged out and added back", async () => {
+    // A plan loaded while signed out reads as unavailable; the sign-in that
+    // follows must replace it rather than leave the card saying so.
+    let planView: AccountPlanView | null = null;
+    const urls: string[] = [];
+    const model = new AccountsDetailModel(
+      async (input) => {
+        urls.push(String(input));
+        return jsonResponse({ plan_view: planView, trim_status: null });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+    const signedOut = accountEntry({ is_enabled: false });
+
+    model.syncPlans([signedOut]);
+    await settle();
+    expect(model.planStateFor("user-1").isUnavailable).toBe(true);
+
+    planView = PLAN_VIEW;
+    model.syncPlans([ACCOUNT]);
+    await settle();
+    expect(model.planStateFor("user-1").planView).toEqual(PLAN_VIEW);
+
+    model.syncPlans([]);
+    model.syncPlans([ACCOUNT]);
+    await settle();
+
+    expect(urls).toEqual([
+      "/ui/api/accounts/user-1/plan",
+      "/ui/api/accounts/user-1/plan",
+      "/ui/api/accounts/user-1/plan",
+    ]);
+  });
+
   it("re-polls the plan section while a trim is running", async () => {
     let planFetchCount = 0;
     const scheduled: (() => void)[] = [];
     const model = new AccountsDetailModel(
-      async (input) => {
-        const url = String(input);
-        if (url === "/ui/api/accounts")
-          return jsonResponse({ accounts: [ACCOUNT] });
+      async () => {
         planFetchCount += 1;
         const isStillRunning = planFetchCount === 1;
         return jsonResponse({
@@ -80,8 +124,7 @@ describe("AccountsDetailModel", () => {
       (callback) => scheduled.push(callback),
     );
 
-    await model.load();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await model.loadPlan(ACCOUNT.user_id);
     expect(planFetchCount).toBe(1);
     expect(scheduled.length).toBe(1);
 
@@ -99,8 +142,6 @@ describe("AccountsDetailModel", () => {
     const model = new AccountsDetailModel(
       async (input) => {
         const url = String(input);
-        if (url === "/ui/api/accounts")
-          return jsonResponse({ accounts: [ACCOUNT] });
         if (url === "/accounts/user-1/plan")
           return new Response("No plan selected.", { status: 422 });
         return jsonResponse({ plan_view: null, trim_status: null });
@@ -108,11 +149,34 @@ describe("AccountsDetailModel", () => {
       () => {},
       (callback) => callback(),
     );
-    await model.load();
 
     await model.switchPlan("user-1", "");
 
     expect(model.actionError).toBe("No plan selected.");
+  });
+
+  it("reloads the account's plan section after a successful switch", async () => {
+    const urls: string[] = [];
+    const model = new AccountsDetailModel(
+      async (input) => {
+        const url = String(input);
+        urls.push(url);
+        if (url === "/accounts/user-1/plan")
+          return new Response("", { status: 200 });
+        return jsonResponse({ plan_view: PLAN_VIEW, trim_status: null });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+
+    await model.switchPlan("user-1", "explorer");
+
+    expect(urls).toEqual([
+      "/accounts/user-1/plan",
+      "/ui/api/accounts/user-1/plan",
+    ]);
+    expect(model.planStateFor("user-1").planView).toEqual(PLAN_VIEW);
+    expect(model.isSwitchingPlan("user-1")).toBe(false);
   });
 
   it("sends form-encoded bodies to the legacy account routes", async () => {
@@ -126,7 +190,7 @@ describe("AccountsDetailModel", () => {
           observedContentType = new Headers(init?.headers).get("Content-Type");
           return new Response("", { status: 200 });
         }
-        return jsonResponse({ accounts: [] });
+        throw new Error(`unexpected fetch: ${url}`);
       },
       () => {},
       (callback) => callback(),
@@ -147,8 +211,6 @@ describe("verify-email prompt", () => {
     return new AccountsDetailModel(
       async (input) => {
         const url = String(input);
-        if (url === "/ui/api/accounts")
-          return jsonResponse({ accounts: [ACCOUNT] });
         if (url === "/accounts/user-1/plan") return planResponse();
         if (url === "/accounts/user-1/resend-verification" && onResend)
           return onResend();
@@ -171,7 +233,6 @@ describe("verify-email prompt", () => {
           { status: 403 },
         ),
     );
-    await model.load();
 
     await model.switchPlan("user-1", "ally");
 
@@ -196,7 +257,6 @@ describe("verify-email prompt", () => {
           { status: 403 },
         ),
     );
-    await model.load();
 
     await model.switchPlan("user-1", "ally");
 
@@ -212,7 +272,6 @@ describe("verify-email prompt", () => {
     const model = makeModelWithPlanResponse(
       () => new Response("The 'ally' plan requires partner access", { status: 403 }),
     );
-    await model.load();
 
     await model.switchPlan("user-1", "ally");
 
@@ -229,7 +288,6 @@ describe("verify-email prompt", () => {
         ),
       () => jsonResponse({ sent: false, email: "alice@example.com" }),
     );
-    await model.load();
     await model.switchPlan("user-1", "ally");
 
     await model.resendVerification("user-1");
@@ -250,7 +308,6 @@ describe("verify-email prompt", () => {
       },
       () => jsonResponse({ sent: true, email: "alice@example.com" }),
     );
-    await model.load();
     await model.switchPlan("user-1", "ally");
 
     await model.resendVerification("user-1");
@@ -268,8 +325,6 @@ describe("log-out busy state", () => {
     const model = new AccountsDetailModel(
       async (input) => {
         const url = String(input);
-        if (url === "/ui/api/accounts")
-          return jsonResponse({ accounts: [ACCOUNT] });
         if (url === "/accounts/user-1/logout")
           return new Promise<Response>((resolve) => {
             releaseLogout = resolve;
@@ -279,7 +334,6 @@ describe("log-out busy state", () => {
       () => {},
       (callback) => callback(),
     );
-    await model.load();
 
     const logoutDone = model.logOut("user-1");
     expect(model.isLoggingOut("user-1")).toBe(true);
@@ -300,8 +354,6 @@ describe("plan-switch busy state", () => {
     const model = new AccountsDetailModel(
       async (input) => {
         const url = String(input);
-        if (url === "/ui/api/accounts")
-          return jsonResponse({ accounts: [ACCOUNT] });
         if (url === "/accounts/user-1/plan") {
           switchPostCount += 1;
           return new Promise<Response>((resolve) => {
@@ -313,7 +365,6 @@ describe("plan-switch busy state", () => {
       () => {},
       (callback) => callback(),
     );
-    await model.load();
 
     const switchDone = model.switchPlan("user-1", "explorer");
     expect(model.isSwitchingPlan("user-1")).toBe(true);

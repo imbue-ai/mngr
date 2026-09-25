@@ -3,10 +3,8 @@
 // in templates/pages/Accounts.jinja + AccountPlanSection.jinja + accounts.js.
 
 import m from "mithril";
-import type {
-  AccountEntry,
-  AccountsDetailModel,
-} from "../../../models/accountsDetail";
+import type { UiAccountEntry } from "../../../channel/messages";
+import type { AccountsDetailModel } from "../../../models/accountsDetail";
 import { Button } from "../../components/Button";
 import { webLogin } from "../../../models/webLogin";
 import { Card } from "../../components/Card";
@@ -19,7 +17,7 @@ import { StatusBadge } from "../../components/StatusBadge";
 
 interface AccountCardAttrs {
   model: AccountsDetailModel;
-  account: AccountEntry;
+  account: UiAccountEntry;
 }
 
 // Shared plan copy (mirrors the hosted signup page's plan selector).
@@ -78,7 +76,7 @@ function pendingPlanDetails(
 
 function planSection(
   model: AccountsDetailModel,
-  account: AccountEntry,
+  account: UiAccountEntry,
   selectedPlanByUserId: Map<string, string>,
   isExplorerAgreementCheckedByUserId: Map<string, boolean>,
 ): m.Children {
@@ -278,7 +276,7 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
             !account.is_enabled
               ? m(
                   Button,
-                  { variant: "primary", onclick: () => void webLogin.start() },
+                  { variant: "primary", onclick: () => void webLogin.start("", { isClosedOnSignIn: true }) },
                   "Sign in again",
                 )
               : null,

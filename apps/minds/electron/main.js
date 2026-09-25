@@ -869,12 +869,15 @@ function openTakeoverWindow() {
 }
 
 // Open a window and land the app's first-window route on it: the launch that
-// computed it lost its window (closed mid-startup), or the route has not been
-// computed yet. The route is recomputed here rather than replayed from a
-// snapshot taken at startup, so a session restored an hour later reflects the
-// workspaces that exist NOW.
+// computed it lost its window (closed mid-startup), the route has not been
+// computed yet, or the app is being reopened with no window open. The route is
+// recomputed here rather than replayed from a snapshot taken at startup, so a
+// session restored an hour later reflects the workspaces that exist NOW.
 function openStartupRoutedWindow() {
   const bundle = openTakeoverWindow(); // the loading screen, while we ask
+  // Sized from the saved session up front, as the launch's window is, so it
+  // does not surface at the default bounds and jump once the route lands.
+  const isSizedFromSavedSession = sizeFromSavedSession(bundle);
   // The launch is already computing that route and lands it on the most recent
   // window, which is this one. Computing a second here would apply two routes
   // to it -- duplicating every window of a multi-window session restore -- off
@@ -892,7 +895,7 @@ function openStartupRoutedWindow() {
       // quit -- and landing the route now would navigate it off that, for a
       // crash onto the dead port the error screen exists to replace.
       if (lastErrorTakeover || isShuttingDown || isQuitSequenceRunning) return;
-      applyStartupRouting(bundle, routing);
+      applyStartupRouting(bundle, routing, { boundsAlreadyApplied: isSizedFromSavedSession });
       // A deeplink that arrived while this window sat on the loading screen was
       // held for a window ready to take it, and this is the only loading state
       // the backend start does not itself flush.
@@ -907,8 +910,8 @@ function openStartupRoutedWindow() {
 // Every "give me a window" request (dock activate, Cmd+N, File > New Window,
 // the dock menu, a second launch, a deeplink with nothing open) lands here, and
 // always resolves to a window unless a quit has committed. See
-// decideNewWindowTarget for what each state produces.
-function openOrFocusWindow() {
+// decideNewWindowTarget for what each state (and ``isReopen``) produces.
+function openOrFocusWindow({ isReopen = false } = {}) {
   const target = decideNewWindowTarget({
     hasBackendUrl: !!backendBaseUrl,
     hasErrorTakeover: !!lastErrorTakeover,
@@ -916,6 +919,7 @@ function openOrFocusWindow() {
     isStartupRoutingPending,
     isShuttingDown,
     isQuitSequenceRunning,
+    isReopen,
   });
   if (target === 'none') return null;
   if (target === 'focus-existing') {
@@ -1170,6 +1174,16 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
     results.push(entry);
   }
   return results;
+}
+
+// Size a window about to take the startup route to the saved session's first
+// entry, before it surfaces. Returns whether there was an entry to size from,
+// which is applyStartupRouting's ``boundsAlreadyApplied``.
+function sizeFromSavedSession(bundle) {
+  const [first] = loadSessionState().windows;
+  if (!first) return false;
+  restoreWindowBounds(bundle, first);
+  return true;
 }
 
 function restoreWindowBounds(bundle, entry) {
@@ -1624,13 +1638,12 @@ if (!gotLock) {
       return;
     }
     // Launching the app again brings the app forward, so focus the window it
-    // has. With none open there is nothing to focus, so open one rather than
-    // dropping the launch. (Not openOrFocusWindow() unconditionally: with the
-    // backend serving that opens a SECOND window, which is right for Cmd+N and
-    // wrong for a re-launch.)
+    // has -- even mid-quit, where openOrFocusWindow() would do nothing. With
+    // none open there is nothing to focus, so reopen the app rather than
+    // dropping the launch.
     const mru = getMostRecentWindow();
     if (mru) focusBundle(mru);
-    else openOrFocusWindow();
+    else openOrFocusWindow({ isReopen: true });
   });
   const coldStartDeeplinkUrl = extractDeeplinkUrlFromArgv(process.argv);
   if (coldStartDeeplinkUrl) handleDeeplink(coldStartDeeplinkUrl);
@@ -1695,10 +1708,7 @@ async function onReady() {
   powerMonitor.on('unlock-screen', () => repaintAllWindowsAfterWake('unlock-screen'));
 
   initialBundle = createBundle();
-  const initialSavedState = loadSessionState();
-  if (initialSavedState.windows.length > 0) {
-    restoreWindowBounds(initialBundle, initialSavedState.windows[0]);
-  }
+  sizeFromSavedSession(initialBundle);
   updater.init({ onStatus: broadcastUpdateStatus });
   // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the "Mind"
   // rename has been on stable long enough for installs to have launched once.
@@ -1907,11 +1917,12 @@ function consumeOneTimeLoginCode(loginUrl) {
   });
 }
 
-// Where the app's first window should land, from the backend's app-status and
-// the saved session. Deliberately independent of having a window to put it in,
-// and cheap enough to re-run: openStartupRoutedWindow calls it again when the
-// route is claimed later, so a session restored well after launch reflects the
-// workspaces that exist then rather than a snapshot from startup.
+// Where the app's first window -- or a reopen with no window open -- should
+// land, from the backend's app-status and the saved session. Deliberately
+// independent of having a window to put it in, and cheap enough to re-run:
+// openStartupRoutedWindow calls it again when the route is claimed later, so a
+// session restored well after launch reflects the workspaces that exist then
+// rather than a snapshot from startup.
 async function computeStartupRouting() {
   const savedState = loadSessionState();
   const appStatus = await fetchAppStatus();
@@ -1942,9 +1953,9 @@ async function computeStartupRouting() {
 }
 
 // Land ``bundle`` on a computed startup route, opening the extra windows a
-// multi-window session restore needs. ``boundsAlreadyApplied`` is set for the
-// window onReady already sized from the saved state, so its bounds are only
-// re-applied when the route picked a different entry.
+// multi-window session restore needs. ``boundsAlreadyApplied`` is set for a
+// window already sized from the saved state's first entry, so its bounds are
+// only re-applied when the route picked a different entry.
 function applyStartupRouting(bundle, { route, restorable, savedState }, { boundsAlreadyApplied = false } = {}) {
   // The window is leaving the takeover for real content. Clearing the error
   // flag matters when this window IS the takeover a Retry restarted the backend
@@ -2604,9 +2615,10 @@ app.on('window-all-closed', () => {
 });
 
 // macOS: activating the app (clicking the dock icon) with no open windows
-// re-opens one on whatever the app's state warrants -- the home page, the
-// loading screen, or the error takeover. With a window already open the OS
-// just brings it forward, so we act only when none remain.
+// re-opens one on whatever the app's state warrants -- the session that was
+// open when the last window closed, the loading screen, or the error takeover.
+// With a window already open the OS just brings it forward, so we act only
+// when none remain.
 app.on('activate', () => {
   if (!shouldOpenWindowOnActivate({
     isShuttingDown,
@@ -2615,7 +2627,7 @@ app.on('activate', () => {
   })) {
     return;
   }
-  openOrFocusWindow();
+  openOrFocusWindow({ isReopen: true });
 });
 
 app.on('before-quit', (event) => {

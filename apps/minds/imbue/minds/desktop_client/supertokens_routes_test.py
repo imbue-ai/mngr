@@ -24,6 +24,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
+from imbue.minds.desktop_client.conftest import build_desktop_client_with_accounts
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
@@ -102,6 +103,10 @@ class _ExplodingSessionStore(MultiAccountSessionStore):
         raise ImbueCloudCliError("identity cache invalidation exploded (test)")
 
 
+def _do_nothing() -> None:
+    pass
+
+
 def test_run_web_login_subprocess_marks_flow_done_without_flask_app_context(tmp_path: Path) -> None:
     """The login thread runs outside any Flask app context and must resolve the flow to "done".
 
@@ -133,6 +138,7 @@ def test_run_web_login_subprocess_marks_flow_done_without_flask_app_context(tmp_
         output_format=OutputFormat.JSON,
         latchkey_forward_supervisor=None,
         connector_url=str(FAKE_CONNECTOR_URL),
+        notify_accounts_changed=_do_nothing,
     )
 
     status = _read_web_login_status(flow_id)
@@ -143,6 +149,163 @@ def test_run_web_login_subprocess_marks_flow_done_without_flask_app_context(tmp_
     # the temp file itself is cleaned up once the subprocess exits.
     assert status.login_url == cli.login_url_to_write
     assert not url_file.exists()
+
+
+def _sign_in_with_stored_default(
+    tmp_path: Path, stored_default_account_id: str, is_auth_list_failing: bool = False
+) -> tuple[MindsConfig, str]:
+    """Run a sign-in of a fresh account over a config whose stored default is ``stored_default_account_id``.
+
+    ``user-kept`` is signed in alongside the fresh account. Returns the config
+    and the newly signed-in account's user id.
+    """
+    new_user_id = f"user-{uuid4().hex}"
+    new_email = f"{new_user_id}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-kept", email="kept@example.com")
+    cli.add_account(user_id=new_user_id, email=new_email)
+    cli.login_session_to_return = ImbueCloudAuthSession(user_id=new_user_id, email=new_email, display_name=None)
+    cli.is_auth_list_failing = is_auth_list_failing
+    minds_config = MindsConfig(data_dir=tmp_path / "minds-config")
+    minds_config.set_default_account_id(stored_default_account_id)
+    flow_id = f"flow-{uuid4().hex}"
+    url_file = tmp_path / "login-url.txt"
+    _record_web_login_status(
+        flow_id, _WebLoginFlowStatus(state="running", login_url_file=str(url_file), deadline=time.monotonic() + 60)
+    )
+
+    _run_web_login_subprocess(
+        flow_id=flow_id,
+        url_file=url_file,
+        imbue_cloud_cli=cli,
+        session_store=make_session_store_for_test(tmp_path, cli),
+        sync_scheduler=None,
+        minds_config=minds_config,
+        output_format=OutputFormat.JSON,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
+        notify_accounts_changed=lambda: None,
+    )
+
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.state == "done"
+    return minds_config, new_user_id
+
+
+@pytest.mark.parametrize(
+    ("stored_default_account_id", "is_auth_list_failing", "is_new_account_expected"),
+    [
+        # Switching accounts (sign out, then sign in as another) makes the new account the default.
+        pytest.param("user-departed", False, True, id="signed-out-default-replaced"),
+        pytest.param("user-kept", False, False, id="signed-in-default-kept"),
+        # A transient ``auth list`` failure must not pass for the stored default having signed out.
+        pytest.param("user-kept", True, False, id="failed-listing-keeps-default"),
+    ],
+)
+def test_sign_in_replaces_only_a_signed_out_default(
+    tmp_path: Path,
+    stored_default_account_id: str,
+    is_auth_list_failing: bool,
+    is_new_account_expected: bool,
+) -> None:
+    minds_config, new_user_id = _sign_in_with_stored_default(
+        tmp_path, stored_default_account_id=stored_default_account_id, is_auth_list_failing=is_auth_list_failing
+    )
+
+    expected_default = new_user_id if is_new_account_expected else stored_default_account_id
+    assert minds_config.get_default_account_id() == expected_default
+
+
+@pytest.mark.parametrize(
+    (
+        "signed_in_user_ids",
+        "stored_default",
+        "signed_out_user_id",
+        "is_auth_signout_failing",
+        "is_auth_list_failing",
+        "expected_default",
+    ),
+    [
+        pytest.param(
+            ("user-a", "user-b", "user-c"),
+            "user-b",
+            "user-b",
+            False,
+            False,
+            "user-a",
+            id="default-hands-off-to-first-remaining",
+        ),
+        pytest.param(
+            ("user-a", "user-b"), "user-b", "user-a", False, False, "user-b", id="other-account-keeps-default"
+        ),
+        pytest.param(("user-a",), "user-a", "user-a", False, False, None, id="last-account-clears-default"),
+        # An account whose plugin signout failed is still signed in, so it stays the default.
+        pytest.param(
+            ("user-a", "user-b"), "user-b", "user-b", True, False, "user-b", id="failed-signout-keeps-default"
+        ),
+        # A failed listing cannot name a successor; its empty fallback must not clear the default.
+        pytest.param(
+            ("user-a", "user-b"), "user-b", "user-b", False, True, "user-b", id="failed-listing-keeps-default"
+        ),
+    ],
+)
+def test_signing_out_hands_off_the_default_account(
+    tmp_path: Path,
+    signed_in_user_ids: tuple[str, ...],
+    stored_default: str,
+    signed_out_user_id: str,
+    is_auth_signout_failing: bool,
+    is_auth_list_failing: bool,
+    expected_default: str | None,
+) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_auth_signout_failing = is_auth_signout_failing
+    cli.is_auth_list_failing = is_auth_list_failing
+    client, minds_config = build_desktop_client_with_accounts(
+        tmp_path, signed_in_user_ids, stored_default_account_id=stored_default, cli=cli
+    )
+
+    response = client.post(f"/accounts/{signed_out_user_id}/logout")
+
+    assert response.status_code == 303
+    assert minds_config.get_default_account_id() == expected_default
+
+
+def test_run_web_login_subprocess_notifies_once_the_new_account_is_listed(tmp_path: Path) -> None:
+    """The open windows' accounts frame is re-derived only on a notify, so it must come after the mirror.
+
+    The notify is what lists a newly signed-in account in both the bottom-left
+    launcher and Manage Accounts.
+    """
+    email = f"user-{uuid4().hex}@example.com"
+    cli = make_fake_imbue_cloud_cli()
+    cli.login_session_to_return = ImbueCloudAuthSession(
+        user_id=f"user-{uuid4().hex}",
+        email=email,
+        display_name="Test User",
+    )
+    session_store = make_session_store_for_test(tmp_path, cli)
+    listed_at_notify: list[list[str]] = []
+    flow_id = f"flow-{uuid4().hex}"
+    _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+
+    _run_web_login_subprocess(
+        flow_id=flow_id,
+        url_file=tmp_path / "login-url.txt",
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+        sync_scheduler=None,
+        minds_config=None,
+        output_format=OutputFormat.JSON,
+        latchkey_forward_supervisor=None,
+        connector_url=str(FAKE_CONNECTOR_URL),
+        notify_accounts_changed=lambda: listed_at_notify.append(
+            [str(account.email) for account in session_store.list_accounts()]
+        ),
+    )
+
+    assert listed_at_notify == [[email]]
 
 
 def test_run_web_login_subprocess_records_error_status_when_mirroring_crashes(tmp_path: Path) -> None:
@@ -172,6 +335,7 @@ def test_run_web_login_subprocess_records_error_status_when_mirroring_crashes(tm
             output_format=OutputFormat.JSON,
             latchkey_forward_supervisor=None,
             connector_url=str(FAKE_CONNECTOR_URL),
+            notify_accounts_changed=_do_nothing,
         )
 
     status = _read_web_login_status(flow_id)
@@ -216,6 +380,7 @@ def test_run_web_login_subprocess_marks_finishing_before_mirroring(tmp_path: Pat
         output_format=OutputFormat.JSON,
         latchkey_forward_supervisor=None,
         connector_url=str(FAKE_CONNECTOR_URL),
+        notify_accounts_changed=_do_nothing,
     )
 
     # The mirror observed the flow already flipped to "finishing"...
@@ -244,6 +409,7 @@ def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: 
         output_format=OutputFormat.JSON,
         latchkey_forward_supervisor=None,
         connector_url=str(FAKE_CONNECTOR_URL),
+        notify_accounts_changed=_do_nothing,
     )
 
     status = _read_web_login_status(flow_id)

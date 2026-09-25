@@ -25,7 +25,6 @@ from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
-from imbue.imbue_common.errors import SwitchError
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.mutable_model import MutableModel
@@ -87,6 +86,7 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
+from imbue.minds.desktop_client.minds_config import resolve_default_account_id
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
@@ -132,6 +132,7 @@ from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_login import handle_static_login_page
 from imbue.minds.desktop_client.ui_models import NotificationOutcome
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
+from imbue.minds.desktop_client.ui_models import UiAccountEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
@@ -731,45 +732,40 @@ def _handle_help_assist() -> Response:
     return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
 
 
-def _account_launcher_context(session_store: MultiAccountSessionStore | None) -> tuple[str, int]:
-    """Resolve the home screen's bottom-left account launcher label.
+def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:
+    """The `/ui/ws` ``accounts`` frame: every signed-in account, plus the launcher's label.
 
-    Returns ``(email, extra_count)``: the default (or first) signed-in
-    account's email plus how many further accounts are signed in, or
-    ``("", 0)`` when signed out (the launcher then reads "Log in").
+    The home screen's bottom-left launcher and Manage Accounts both render from
+    this one frame, so a sign-in, sign-out, or default switch updates them
+    together, without a reload. The launcher names the default (or first)
+    account and counts the rest. ``has_accounts`` is derived from the account
+    list rather than the email so the start flow's account step keeps its exact
+    "any account at all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
-    if not accounts:
-        return "", 0
     minds_config: MindsConfig | None = get_state().minds_config
-    default_account_id = minds_config.get_default_account_id() if minds_config else None
-    shown = accounts[0]
-    for account in accounts:
-        if default_account_id is not None and str(account.user_id) == default_account_id:
-            shown = account
-            break
-    return str(shown.email), len(accounts) - 1
-
-
-def _build_account_launcher_payload(session_store: MultiAccountSessionStore | None) -> dict[str, object]:
-    """The account-identity fields the `/ui/ws` ``accounts`` frame carries.
-
-    The home screen's bottom-left launcher renders from these fields (via
-    ``_derive_ui_accounts_message``), but the page stays put across a sign-out /
-    sign-in / default-account switch made in a modal. Carrying the identity on
-    the channel is what lets the launcher re-label itself (and flip its
-    signed-in state, which decides whether clicking it opens Manage Accounts
-    or the sign-in modal) without a reload. ``has_accounts`` is derived from the
-    account list rather than the email so the start flow's account step keeps
-    its exact "any account at all" meaning.
-    """
-    accounts = session_store.list_accounts() if session_store else []
-    launcher_email, launcher_extra_count = _account_launcher_context(session_store)
-    return {
-        "has_accounts": bool(accounts),
-        "account_email": launcher_email,
-        "extra_account_count": launcher_extra_count,
-    }
+    default_account_id = resolve_default_account_id(
+        stored_default_account_id=minds_config.get_default_account_id() if minds_config else None,
+        signed_in_user_ids=[str(account.user_id) for account in accounts],
+    )
+    root = MindsRoot.from_environment()
+    entries = tuple(
+        UiAccountEntry(
+            user_id=str(account.user_id),
+            email=str(account.email),
+            workspace_count=len(account.workspace_ids),
+            is_default=str(account.user_id) == default_account_id,
+            is_enabled=is_imbue_cloud_provider_enabled_for_account(str(account.email), root=root),
+        )
+        for account in accounts
+    )
+    launcher_entry = next((entry for entry in entries if entry.is_default), entries[0] if entries else None)
+    return UiAccountsMessage(
+        has_accounts=bool(entries),
+        account_email=launcher_entry.email if launcher_entry is not None else "",
+        extra_account_count=max(len(entries) - 1, 0),
+        accounts=entries,
+    )
 
 
 def _compute_cloud_tile_state(
@@ -1778,15 +1774,7 @@ def _derive_ui_workspaces_message(
 
 def _derive_ui_accounts_message(app: Flask, session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:
     with app.app_context():
-        payload = _build_account_launcher_payload(session_store)
-        extra_account_count = payload["extra_account_count"]
-        if not isinstance(extra_account_count, int):
-            raise SwitchError(f"Account launcher payload carried a non-int extra_account_count: {payload!r}")
-        return UiAccountsMessage(
-            has_accounts=bool(payload["has_accounts"]),
-            account_email=str(payload["account_email"]),
-            extra_account_count=extra_account_count,
-        )
+        return _build_ui_accounts_message(session_store)
 
 
 def _derive_ui_providers_message(app: Flask, backend_resolver: BackendResolverInterface) -> UiProvidersMessage:

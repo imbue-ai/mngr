@@ -470,7 +470,9 @@ def build_ui_state_publisher_for_test(
     publisher = UiStatePublisher(
         broadcaster=broadcaster,
         derive_workspaces=derive_workspaces,
-        derive_accounts=lambda: UiAccountsMessage(has_accounts=False, account_email="", extra_account_count=0),
+        derive_accounts=lambda: UiAccountsMessage(
+            has_accounts=False, account_email="", extra_account_count=0, accounts=()
+        ),
         derive_providers=lambda: UiProvidersMessage(providers=(), last_event_at=None, last_full_snapshot_at=None),
         derive_requests=lambda: UiRequestsMessage(count=0, request_ids=()),
         derive_notifications=lambda: UiNotificationsMessage(entries=(), unresolved_count=0),

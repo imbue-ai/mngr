@@ -972,8 +972,7 @@ describe("WorkspaceOptionsModel", () => {
     expect(model.renameErrorMessage).toBe("name taken");
   });
 
-  it("reverts the color preview when the save is refused", async () => {
-    const painted: string[] = [];
+  it("reverts a color pick to the saved color when the save is refused", async () => {
     const stub = makeFetchStub(() => ({
       ok: false,
       status: 422,
@@ -985,13 +984,106 @@ describe("WorkspaceOptionsModel", () => {
     });
     model.lastSavedColor = "#0b292b";
 
-    const isSaved = await model.saveColor("#123456", (hex) =>
-      painted.push(hex),
-    );
+    const saved = model.pickColor("#123456");
+    expect(model.pendingColor).toBe("#123456");
+    await saved;
 
-    expect(isSaved).toBe(false);
-    expect(painted).toEqual(["#123456", "#0b292b"]);
+    expect(model.pendingColor).toBeNull();
+    expect(model.lastSavedColor).toBe("#0b292b");
     expect(model.colorErrorMessage).toContain("hex value is not valid");
+  });
+
+  describe("color picks during a slow save", () => {
+    type Reply = { ok: boolean; status: number; body: unknown };
+
+    function makeHeldColorModel(): {
+      model: WorkspaceOptionsModel;
+      sentColors: string[];
+      reply: (response: Reply) => Promise<void>;
+    } {
+      const sentColors: string[] = [];
+      const heldReplies: ((response: Reply) => void)[] = [];
+      const model = new WorkspaceOptionsModel("agent-" + "f".repeat(32), {
+        fetchJson: (_url, init) => {
+          sentColors.push(
+            (JSON.parse(String(init?.body)) as { color: string }).color,
+          );
+          return new Promise((resolve) => heldReplies.push(resolve));
+        },
+        redraw: () => undefined,
+      });
+      model.lastSavedColor = "#0b292b";
+      const reply = async (response: Reply): Promise<void> => {
+        const resolveOldest = heldReplies.shift();
+        if (resolveOldest === undefined) throw new Error("no save in flight");
+        resolveOldest(response);
+        await settle();
+      };
+      return { model, sentColors, reply };
+    }
+
+    it("sends every pick at once and settles on the latest pick's answer", async () => {
+      const { model, sentColors, reply } = makeHeldColorModel();
+
+      void model.pickColor("#111111");
+      void model.pickColor("#222222");
+      void model.pickColor("#333333");
+
+      expect(sentColors).toEqual(["#111111", "#222222", "#333333"]);
+      expect(model.pendingColor).toBe("#333333");
+
+      await reply({ ok: true, status: 200, body: {} });
+      await reply({ ok: true, status: 200, body: {} });
+      expect(model.pendingColor).toBe("#333333");
+
+      await reply({ ok: true, status: 200, body: {} });
+      expect(model.lastSavedColor).toBe("#333333");
+      expect(model.pendingColor).toBeNull();
+      expect(model.colorErrorMessage).toBe("");
+    });
+
+    it("does not report a superseded pick's failure", async () => {
+      const { model, sentColors, reply } = makeHeldColorModel();
+
+      void model.pickColor("#111111");
+      void model.pickColor("#222222");
+      await reply({
+        ok: false,
+        status: 502,
+        body: { error: "host_unreachable" },
+      });
+
+      expect(sentColors).toEqual(["#111111", "#222222"]);
+      expect(model.colorErrorMessage).toBe("");
+      expect(model.pendingColor).toBe("#222222");
+
+      await reply({ ok: true, status: 200, body: {} });
+      expect(model.lastSavedColor).toBe("#222222");
+      expect(model.colorErrorMessage).toBe("");
+    });
+
+    it("sends nothing when the pick is the already saved color", async () => {
+      const { model, sentColors } = makeHeldColorModel();
+
+      await model.pickColor("#0b292b");
+
+      expect(sentColors).toEqual([]);
+      expect(model.pendingColor).toBeNull();
+      expect(model.lastSavedColor).toBe("#0b292b");
+    });
+
+    it("sends the saved color back when a pick returns to it while another is saving", async () => {
+      const { model, sentColors, reply } = makeHeldColorModel();
+
+      void model.pickColor("#111111");
+      void model.pickColor("#0b292b");
+      await reply({ ok: true, status: 200, body: {} });
+      await reply({ ok: true, status: 200, body: {} });
+
+      expect(sentColors).toEqual(["#111111", "#0b292b"]);
+      expect(model.lastSavedColor).toBe("#0b292b");
+      expect(model.pendingColor).toBeNull();
+    });
   });
 });
 

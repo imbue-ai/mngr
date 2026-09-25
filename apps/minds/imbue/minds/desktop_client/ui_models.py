@@ -54,7 +54,7 @@ from imbue.minds.desktop_client.update_status import UpdateVerdict
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 22
+UI_SCHEMA_VERSION: int = 23
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -173,13 +173,24 @@ class UiWorkspacesMessage(FrozenModel):
     )
 
 
+class UiAccountEntry(FrozenModel):
+    """One signed-in account, as Manage Accounts lists it."""
+
+    user_id: str = Field(description="The account's user id")
+    email: str = Field(description="The account's email")
+    workspace_count: int = Field(description="Number of machines owned by this account")
+    is_default: bool = Field(description="Whether this account is the default for new machines")
+    is_enabled: bool = Field(description="False when the provider block was disabled (shown as signed out)")
+
+
 class UiAccountsMessage(FrozenModel):
-    """Account-launcher identity (bottom-left launcher label + signed-in flag)."""
+    """The signed-in accounts: the bottom-left launcher's label and Manage Accounts' list."""
 
     type: Literal["accounts"] = "accounts"
     has_accounts: bool = Field(description="Whether any account is signed in")
     account_email: str = Field(description="Label email for the launcher, empty when signed out")
     extra_account_count: int = Field(description="How many additional signed-in accounts beyond the label one")
+    accounts: tuple[UiAccountEntry, ...] = Field(description="Every signed-in account, session-store order")
 
 
 class ProviderPanelStatus(UpperCaseStrEnum):
@@ -568,7 +579,7 @@ class UiBootstrap(FrozenModel):
     snapshot: UiSnapshot = Field(description="Connect-time state snapshot")
 
 
-# -- Per-workspace permissions payloads (GET/POST /ui/api/workspaces/<agent_id>/permissions) --
+# Per-workspace permissions payloads (GET/POST /ui/api/workspaces/<agent_id>/permissions)
 #
 # Field-for-field mirrors of the ``WorkspacePermissionsView`` tree that
 # ``latchkey/permission_toggles.py`` builds. They are mirrors rather than the
@@ -890,7 +901,7 @@ class UiConnectCredentialsRequest(FrozenModel):
     )
 
 
-# -- Grant-dialog permission rows (nested in the inbox detail payload) --
+# Grant-dialog permission rows (nested in the inbox detail payload)
 #
 # The same classification the Permissions pane's toggles use, so one service
 # reads the same way in the pane and in the dialog that grants it.

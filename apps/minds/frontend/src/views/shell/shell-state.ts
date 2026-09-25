@@ -21,6 +21,7 @@ import {
 } from "./classify";
 import { recoveryRoute } from "../../models/create";
 import { setPendingHelpLaunch } from "../../models/help";
+import { WebLoginModel, webLogin } from "../../models/webLogin";
 import type { UiWorkspaceEntry } from "../../channel/messages";
 import { rowClickActionFor } from "../pages/landing-controls";
 
@@ -58,6 +59,7 @@ export interface WorkspaceFrameHandle {
 
 export class ShellState {
   readonly stores: AppStores;
+  private readonly webLogin: WebLoginModel;
   channel: UiChannelClient | null = null;
   /** The notification arrival controller (toasts, badge relay, OS hint),
    * installed by index.ts like the channel; null only before boot wiring. */
@@ -167,8 +169,9 @@ export class ShellState {
    * request was in. */
   private waitingRequestList: WaitingRequestList | null = null;
 
-  constructor(stores: AppStores) {
+  constructor(stores: AppStores, webLoginModel: WebLoginModel = webLogin) {
     this.stores = stores;
+    this.webLogin = webLoginModel;
   }
 
   /** Rebuild this window's workspace view, if its frame is showing the one named. */
@@ -552,11 +555,13 @@ export class ShellState {
    * plain ordered list rather than something the surfaces negotiate through
    * listener registration order (which follows mount order, not z-order).
    *
-   * The switcher popover and the notification feed lead: they are the only
-   * surfaces that can open over the recovery card. The card comes before the
-   * two route-based overlays because
-   * it is not one -- it can be raised over the workspace options overlay, and
-   * it sits above it. It is never raised over an app-level modal, so this never
+   * The switcher popover (z-[200]) leads, then the browser sign-in modal: the
+   * Shell emits it after every other z-[110] surface, so it sits over the app
+   * modal (Manage Accounts) that opened it, and over the recovery card too.
+   * Next the notification feed, which can also open over the recovery card.
+   * The card comes before the two route-based overlays because it is not one
+   * -- it can be raised over the workspace options overlay, and it sits above
+   * it. It is never raised over an app-level modal, so this never
    * has to choose between those two. The two route-based closers gate on the
    * live route, so a request popup floating over the options panel closes
    * alone (the route is the popup's) and leaves the panel standing.
@@ -564,6 +569,10 @@ export class ShellState {
   handleEscape(): boolean {
     if (this.isSidebarOpen) {
       this.closeSidebar();
+      return true;
+    }
+    if (this.webLogin.isOpen) {
+      this.webLogin.dismiss();
       return true;
     }
     if (this.isNotificationsOpen) {

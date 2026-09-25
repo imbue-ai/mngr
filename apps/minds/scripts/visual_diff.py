@@ -65,6 +65,7 @@ from imbue.minds.desktop_client.ui_api import read_vite_entry_tags
 from imbue.minds.desktop_client.ui_models import NotificationKind
 from imbue.minds.desktop_client.ui_models import ProviderPanelStatus
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
+from imbue.minds.desktop_client.ui_models import UiAccountEntry
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
 from imbue.minds.desktop_client.ui_models import UiBootstrap
 from imbue.minds.desktop_client.ui_models import UiBootstrapSeed
@@ -313,7 +314,23 @@ def _build_spa_fixture_bootstrap() -> UiBootstrap:
             ),
             remote_workspace_states={"agent-00000000000000000000000000000004": ""},
         ),
-        accounts=UiAccountsMessage(has_accounts=True, account_email="alice@example.com", extra_account_count=1),
+        accounts=UiAccountsMessage(
+            has_accounts=True,
+            account_email="alice@example.com",
+            extra_account_count=1,
+            accounts=(
+                UiAccountEntry(
+                    user_id="user-alice",
+                    email="alice@example.com",
+                    workspace_count=3,
+                    is_default=True,
+                    is_enabled=True,
+                ),
+                UiAccountEntry(
+                    user_id="user-bob", email="bob@example.com", workspace_count=0, is_default=False, is_enabled=True
+                ),
+            ),
+        ),
         providers=UiProvidersMessage(
             providers=(
                 UiProviderEntry(name="local", backend="local", status=ProviderPanelStatus.OK, is_enabled=True),

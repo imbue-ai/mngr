@@ -28,9 +28,11 @@
  *
  * This never rejects a legitimate save: while the app is running with windows
  * open, every save computes a non-empty list. The only in-app path to zero
- * windows is closing the last window, and that saves through the quit sequence
- * while the last window is still alive (a non-empty list). So a computed-empty
- * list while a non-empty file exists is always a race, never a real state.
+ * windows is closing the last window, and that saves while the last window is
+ * still alive (a non-empty list): from its close handler on macOS, where the
+ * app keeps running, and from the quit sequence the close is routed into
+ * elsewhere. So a computed-empty list while a non-empty file exists is always
+ * a race, never a real state.
  *
  * @param {object} counts
  * @param {number} counts.computedWindowCount   Windows in the just-computed snapshot.

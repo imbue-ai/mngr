@@ -205,6 +205,41 @@ describe("WebLoginModel", () => {
     expect(raiseCount()).toBe(0);
   });
 
+  it("closes on sign-in instead of confirming it when asked to", async () => {
+    // Manage Accounts shows the new account itself, so "You're signed in" on
+    // top of it would only be one more thing to dismiss.
+    vi.useFakeTimers();
+    try {
+      const { model, raiseCount } = makeModelWithStatusScript(["done"]);
+      await model.start("", { isClosedOnSignIn: true });
+
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+      expect(model.state).toBe("idle");
+      expect(model.isOpen).toBe(false);
+      expect(raiseCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps closing on sign-in across a retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const { model } = makeModelWithStatusScript(["error", "done"]);
+      await model.start("", { isClosedOnSignIn: true });
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      expect(model.state).toBe("error");
+
+      await model.retry();
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+
+      expect(model.state).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not bring the app to the front when the sign-in fails", async () => {
     vi.useFakeTimers();
     try {

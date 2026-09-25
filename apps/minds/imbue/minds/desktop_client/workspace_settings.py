@@ -28,6 +28,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
+from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import WorkspaceSyncError
 from imbue.mngr.primitives import AgentId
@@ -81,13 +82,17 @@ def set_workspace_color(
     mngr_binary: str,
     mngr_host_dir: Path,
     concurrency_group: ConcurrencyGroup | None,
+    color_writes: WorkspaceColorWrites,
 ) -> str:
     """Validate + write the per-workspace ``color`` label; return the normalized ``#rrggbb`` hex.
 
     Writes via ``mngr label`` (CLI merge semantics, so other labels are
-    preserved) and optimistically updates the resolver snapshot so the next SSE
-    workspaces tick reflects the new color. Raises :class:`WorkspaceColorError`
-    for every failure mode.
+    preserved). The resolver reports the new color from before the write
+    starts, since the write can take many seconds, so every window repaints at
+    once; a failed write of the latest pick takes it back. A pick that a newer
+    one replaces before its turn to write is not written (see
+    :class:`WorkspaceColorWrites`). Raises :class:`WorkspaceColorError` for
+    every failure mode.
     """
     normalized = normalize_workspace_color(raw_hex)
     if normalized is None:
@@ -108,11 +113,19 @@ def set_workspace_color(
     env = dict(os.environ)
     env["MNGR_HOST_DIR"] = str(mngr_host_dir)
     argv = [mngr_binary, "label", build_agent_address(agent_id, backend_resolver), "-l", f"color={normalized}"]
-    try:
-        run_mngr_to_completion(concurrency_group, argv, env)
-    except MngrCommandError as exc:
-        logger.warning("mngr label failed for {}: {}", agent_id, exc)
-        raise WorkspaceColorError("host_unreachable", 502) from exc
+    pick = color_writes.register_pick(agent_id)
+    backend_resolver.set_workspace_color_override(agent_id, normalized)
+    with color_writes.turn_to_write(agent_id):
+        if not color_writes.is_latest_pick(agent_id, pick):
+            return normalized
+        try:
+            run_mngr_to_completion(concurrency_group, argv, env)
+        except MngrCommandError as exc:
+            # A newer pick owns the override by now; only the latest pick's failure takes it back.
+            if color_writes.is_latest_pick(agent_id, pick):
+                backend_resolver.clear_workspace_color_override(agent_id)
+            logger.warning("mngr label failed for {}: {}", agent_id, exc)
+            raise WorkspaceColorError("host_unreachable", 502) from exc
 
     if isinstance(backend_resolver, MngrCliBackendResolver):
         backend_resolver.set_workspace_color_locally(agent_id, normalized)

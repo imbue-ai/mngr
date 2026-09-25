@@ -10,6 +10,7 @@ only for genuinely user-personal preferences and never carries tier state.
 """
 
 import threading
+from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
 from typing import Callable
@@ -22,6 +23,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.errors import MindsConfigError
 
 _CONFIG_FILENAME: Final[str] = "config.toml"
@@ -90,6 +92,19 @@ def _as_str_keyed_dict(value: object) -> dict[str, object] | None:
     if not isinstance(value, dict):
         return None
     return {str(key): item for key, item in value.items()}
+
+
+@pure
+def resolve_default_account_id(
+    stored_default_account_id: str | None,
+    signed_in_user_ids: Sequence[str],
+) -> str | None:
+    """Return the account new workspaces default to: the stored default while it is signed in, else a sole signed-in account."""
+    if stored_default_account_id is not None and stored_default_account_id in signed_in_user_ids:
+        return stored_default_account_id
+    if len(signed_in_user_ids) == 1:
+        return signed_in_user_ids[0]
+    return None
 
 
 class MindsConfig(MutableModel):
