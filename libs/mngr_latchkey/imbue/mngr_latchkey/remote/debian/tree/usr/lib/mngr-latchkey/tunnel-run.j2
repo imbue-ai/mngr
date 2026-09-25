@@ -1,0 +1,36 @@
+#!/bin/sh
+# CLEANUP: drop this program with the reverse tunnel (see the note above
+# CONTAINER_TUNNEL_KEY_FILENAME in package.py).
+# What supervisord runs as the reverse-tunnel program, for an agent whose fixed
+# LATCHKEY_GATEWAY URL names its own loopback (a container created without the
+# host.docker.internal mapping, or one an older client wired): an ssh from this
+# machine into the agent's container that binds the container's loopback
+# gateway port and forwards it back to the address the gateway binds here.
+#
+# It runs in the foreground under supervisord: the keepalive flags make ssh
+# exit when the far end is unreachable (a VM paused for a week and resumed), so
+# supervisord restarts a fresh tunnel; ExitOnForwardFailure makes ssh exit
+# rather than sit forwarding-less when the remote bind fails. Host-key checking
+# is off because the target is our own container reached over this machine's
+# loopback.
+set -eu
+. '{{ layout.install_dir }}/functions'
+
+if [ ! -f "$LK_TUNNEL_CONF" ]; then
+  lk_fail "no tunnel target configured at $LK_TUNNEL_CONF yet; awaiting provisioning"
+fi
+. "$LK_TUNNEL_CONF"
+lk_source_gateway_conf
+exec {{ ssh_binary_path }} -N -T \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o ExitOnForwardFailure=yes \
+  -o BatchMode=yes \
+  -o TCPKeepAlive=yes \
+  -o ConnectTimeout={{ ssh_connect_timeout_seconds }} \
+  -o ServerAliveInterval={{ ssh_server_alive_interval_seconds }} \
+  -o ServerAliveCountMax={{ ssh_server_alive_count_max }} \
+  -i "$LK_TUNNEL_KEY" \
+  -p "$LK_CONTAINER_SSH_PORT" \
+  -R "127.0.0.1:{{ agent_side_port }}:$LK_GATEWAY_LISTEN_HOST:{{ outer_port }}" \
+  "$LK_CONTAINER_SSH_USER@127.0.0.1"

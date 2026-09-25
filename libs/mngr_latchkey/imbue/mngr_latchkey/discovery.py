@@ -72,11 +72,10 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
-from imbue.mngr_latchkey.remote.credentials import RemoteLatchkeyDirectory
+from imbue.mngr_latchkey.remote.provisioning import DEFAULT_REMOTE_PACKAGE_LAYOUT
 from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote.provisioning import DesktopGatewaySecrets
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
-from imbue.mngr_latchkey.remote.provisioning import sync_permissions
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 # How many consecutive discovery cycles a wiring step may fail with transient SSH errors
@@ -1017,18 +1016,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 host_id=host_id,
                 container_ssh_user=ssh_info.user,
                 container_ssh_port=container_ssh_port,
-                latchkey_directory=self.latchkey.latchkey_directory,
+                latchkey=self.latchkey,
                 desktop_secrets=desktop_secrets,
-            )
-            # Seed (or adopt) the machine's policy while its outer host is
-            # still open. A gateway with no permissions file at all is an
-            # allow-all gateway, so this is the one thing that cannot wait
-            # for a user to open the workspace's Permissions tab.
-            sync_permissions(
-                outer,
-                self.latchkey.latchkey_directory,
-                host_id,
-                RemoteLatchkeyDirectory(host=outer).resolve(),
+                package_layout=DEFAULT_REMOTE_PACKAGE_LAYOUT,
             )
         logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
         # Record success so later discovery cycles skip the expensive re-run.

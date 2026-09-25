@@ -1,0 +1,189 @@
+# Shared definitions for the mngr-latchkey helper scripts. Sourced, never run.
+#
+# Rendered from a template when the package is built: every path, filename and
+# tunable below is a constant decided by the build, so the scripts that source
+# this file agree with the computer that built them about where everything is.
+
+LK_HOME="${HOME:-/root}"
+LK_LATCHKEY_DIR="$LK_HOME/{{ remote_latchkey_dir_name }}"
+LK_CREDENTIALS_STORE="$LK_LATCHKEY_DIR/{{ credentials_store_filename }}"
+LK_DATA_FORMAT_STAMP="$LK_LATCHKEY_DIR/{{ data_format_version_filename }}"
+LK_PERMISSIONS_FILE="$LK_LATCHKEY_DIR/{{ permissions_filename }}"
+LK_DESKTOP_EGRESS_RULES_FILE="$LK_LATCHKEY_DIR/{{ desktop_egress_rules_filename }}"
+LK_CONFIG_FILE="$LK_LATCHKEY_DIR/{{ config_filename }}"
+LK_EXTENSIONS_DIR="$LK_LATCHKEY_DIR/{{ extensions_dir_name }}"
+LK_PACKAGE_EXTENSION='{{ layout.install_dir }}/{{ extensions_dir_name }}/{{ extension_filename }}'
+LK_GATEWAY_CONF="$LK_LATCHKEY_DIR/{{ gateway_conf_filename }}"
+LK_TUNNEL_KEY="$LK_LATCHKEY_DIR/{{ container_tunnel_key_filename }}"
+LK_TUNNEL_CONF="$LK_LATCHKEY_DIR/{{ tunnel_conf_filename }}"
+
+LK_SECRETS_DIR='{{ layout.secrets_dir }}'
+LK_ENCRYPTION_KEY_FILE="$LK_SECRETS_DIR/{{ encryption_key_filename }}"
+LK_LISTEN_PASSWORD_FILE="$LK_SECRETS_DIR/{{ listen_password_filename }}"
+LK_DESKTOP_PASSWORD_FILE="$LK_SECRETS_DIR/{{ desktop_gateway_password_filename }}"
+LK_DESKTOP_OVERRIDE_FILE="$LK_SECRETS_DIR/{{ desktop_permissions_override_filename }}"
+
+LK_GATEWAY_PROGRAM='{{ gateway_program_name }}'
+LK_TUNNEL_PROGRAM='{{ tunnel_program_name }}'
+LK_OUTCOME_DONE='{{ outcome_done_marker }}'
+LK_ANSWER_PREFIX='{{ answer_prefix }}'
+
+lk_fail() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+# The gateway's secrets live in RAM only: a key file on the disk beside the
+# encrypted credential store would be the credentials in plaintext against a
+# disk-snapshot threat model. So before anything is written there, the
+# directory is checked to really be on a RAM-backed filesystem, and a machine
+# whose /run is not one is refused rather than quietly given a key on disk.
+lk_require_secrets_dir() {
+  mkdir -p "$LK_SECRETS_DIR"
+  chmod 700 "$LK_SECRETS_DIR"
+  _lk_fstype="$(stat -f -c %T "$LK_SECRETS_DIR")"
+  case "$_lk_fstype" in
+    {{ ram_backed_filesystem_types | join('|') }}) ;;
+    *) lk_fail "refusing to store the latchkey encryption key: $LK_SECRETS_DIR is on a $_lk_fstype filesystem, not RAM-backed ({{ ram_backed_filesystem_types | join('/') }})" ;;
+  esac
+}
+
+# A document is what the user's computer hands a script on stdin: one
+# "<key> <base64>" line per entry. Each entry lands as a file named after its
+# key under the scratch directory given here, so a script can ask whether an
+# entry is there and read it as bytes without any further parsing. The
+# scratch directory is the caller's to place (and to remove): entries can
+# carry secrets, so it belongs in RAM like everything else that does.
+lk_read_document() {
+  LK_DOC="$1"
+  mkdir -p "$LK_DOC"
+  while read -r _lk_key _lk_value; do
+    [ -n "$_lk_key" ] || continue
+    case "$_lk_key" in
+      *[!a-z_]*) lk_fail "malformed document entry: $_lk_key" ;;
+    esac
+    printf '%s' "$_lk_value" > "$LK_DOC/$_lk_key.b64"
+    base64 -d < "$LK_DOC/$_lk_key.b64" > "$LK_DOC/$_lk_key"
+    rm -f "$LK_DOC/$_lk_key.b64"
+  done
+}
+
+lk_doc_has() {
+  [ -f "$LK_DOC/$1" ]
+}
+
+lk_doc_file() {
+  printf '%s' "$LK_DOC/$1"
+}
+
+lk_doc_get() {
+  cat "$LK_DOC/$1"
+}
+
+# An answer is one "<prefix><NAME>=<base64>" line on stdout, holding whatever
+# arrived on stdin. Prefixed rather than positional so that anything else a
+# script (or a latchkey invocation in the middle of it) prints on stdout can
+# never be mistaken for one.
+lk_answer() {
+  printf '%s%s=%s\n' "$LK_ANSWER_PREFIX" "$1" "$(base64 | tr -d '\n')"
+}
+
+lk_answer_flag() {
+  _lk_flag_name="$1"
+  shift
+  if "$@"; then
+    printf '1' | lk_answer "$_lk_flag_name"
+  else
+    printf '0' | lk_answer "$_lk_flag_name"
+  fi
+}
+
+# A secret file holds one token; surrounding whitespace is never part of it.
+lk_secret_value() {
+  tr -d '[:space:]' < "$1"
+}
+
+# Every write publishes a complete file: a sibling is filled first and renamed
+# over the destination, so a reader (the gateway, on every request) never sees
+# a half-written one. The rename keeps the sibling's mode, which umask 077
+# already made owner-only.
+lk_install_file() {
+  cp "$2" "$1.tmp.$$"
+  chmod 600 "$1.tmp.$$"
+  mv -f "$1.tmp.$$" "$1"
+}
+
+lk_write_secret() {
+  lk_install_file "$1" "$(lk_doc_file "$2")"
+}
+
+# The machine's own secrets are adopted, never replaced: one already there that
+# differs from what arrived means another of the user's computers changed it
+# since this one last looked, and the next provisioning pass from here adopts
+# it. Replacing it would break the gateway running under it, and (for the
+# listen password) lock out every agent created with it.
+lk_adopt_secret() {
+  if [ -s "$1" ] && [ "$(lk_secret_value "$1")" != "$(lk_secret_value "$(lk_doc_file "$2")")" ]; then
+    lk_fail "Error: $3"
+  fi
+  lk_write_secret "$1" "$2"
+}
+
+# What a rebooted machine (whose RAM-backed copy is gone) is handed back; a
+# machine still holding one keeps it, whatever it is.
+lk_restore_secret() {
+  if ! [ -s "$1" ]; then
+    lk_write_secret "$1" "$2"
+  fi
+}
+
+# The address the gateway binds, decided by the user's computer (this machine's
+# docker bridge address, which the agent's container reaches by name) and
+# written by apply-state; a program that needs it before any pass wrote it
+# exits for supervisord to retry.
+lk_source_gateway_conf() {
+  if [ ! -f "$LK_GATEWAY_CONF" ]; then
+    lk_fail "no gateway listen address configured at $LK_GATEWAY_CONF yet; awaiting provisioning"
+  fi
+  . "$LK_GATEWAY_CONF"
+}
+
+# The agent's container, found by the host-id label every mngr container
+# carries (the machine owns the docker daemon).
+lk_find_container() {
+  _lk_found="$(docker ps -a --filter "label={{ container_host_id_label }}=$1" --format '{% raw %}{{.Names}}{% endraw %}' | head -n 1)"
+  if [ -z "$_lk_found" ]; then
+    lk_fail "Error: no container labeled {{ container_host_id_label }}=$1 found on this machine"
+  fi
+  printf '%s' "$_lk_found"
+}
+
+# Every latchkey invocation on this machine runs under the machine's own key,
+# read from its RAM-backed file so it never appears in a process listing.
+lk_export_encryption_key() {
+  if ! [ -s "$LK_ENCRYPTION_KEY_FILE" ]; then
+    lk_fail "Error: the machine has no encryption key in $LK_SECRETS_DIR (rebooted since it was provisioned?); it has to be provisioned again"
+  fi
+  LATCHKEY_ENCRYPTION_KEY="$(lk_secret_value "$LK_ENCRYPTION_KEY_FILE")"
+  LATCHKEY_DIRECTORY="$LK_LATCHKEY_DIR"
+  export LATCHKEY_ENCRYPTION_KEY LATCHKEY_DIRECTORY
+}
+
+# A program that has to be up for the apply to count as done: a bounce that
+# does not come up fails the script.
+lk_supervisor_restart() {
+  supervisorctl restart "$1" || supervisorctl start "$1"
+}
+
+# A program whose coming up is supervisord's business, not the apply's: the
+# tunnel's ssh may exit before it counts as started (the container's sshd
+# still coming up, a stale bind clearing), and supervisord keeps retrying it
+# with the target it reads on every start, so a bounce that did not come up at
+# once is not a failure of the apply.
+lk_supervisor_restart_tolerant() {
+  supervisorctl restart "$1" || true
+}
+
+lk_supervisor_start() {
+  supervisorctl start "$1" || true
+}

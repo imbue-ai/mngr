@@ -1,0 +1,177 @@
+#!/bin/sh
+# Read a document from the user's computer (see lk_read_document) and make this
+# machine match it. Every entry is optional; the ones present are applied in
+# the order below, under one "set -e", so nothing is reported done that was
+# not. The last stdout line says the script ran to its end.
+#
+#   encryption_key                the machine's own key (adopted: refused if it
+#                                 already runs under a different one)
+#   fallback_encryption_key       the machine's own key, written only if it has
+#                                 none (a reboot wiped it)
+#   listen_password               the machine's own gateway password (adopted)
+#   abandon_credential_store      remove the store: nobody present holds its key
+#   desktop_gateway_password      what the forwarding extension presents to the
+#   desktop_permissions_override  desktop gateway (this computer's; replaced)
+#   config_json                   the gateway's config.json
+#   credential_bundle             a store to merge into this machine's, with
+#   credential_data_format_version   its format stamp, the one
+#   credential_service            service to take from it and (when present)
+#   credential_account            the one account of that service
+#   clear_service, clear_account  an account to take away from the store
+#   desktop_egress_rules_json     the services the curl router sends out
+#                                 through the desktop
+#   permissions_json              the policy the gateway enforces
+#   gateway_listen_host           the address the gateway binds (the docker
+#                                 bridge address the agent's container reaches
+#                                 by name), and the reverse tunnel's far end
+#   tunnel_host_id                the agent's container's host id, and the
+#   tunnel_ssh_user               user and loopback port its sshd is reached
+#   tunnel_ssh_port               with: (re)wires the reverse tunnel into it
+#                                 (only for a container that needs one)
+#   restart_gateway               restart the gateway so new secrets take effect
+#
+# Whatever the document carries, the gateway's extension is refreshed from the
+# package's copy, so the restart at the end (or the next one) loads this
+# package's version of it.
+set -eu
+umask 077
+. '{{ layout.install_dir }}/functions'
+
+lk_require_secrets_dir
+_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/apply.XXXXXX")"
+trap 'rm -rf "$_lk_scratch"' EXIT
+lk_read_document "$_lk_scratch/doc"
+mkdir -p "$LK_LATCHKEY_DIR"
+
+# The machine's own secrets first: a machine running under a key other than
+# the one this document carries refuses the whole document here, before
+# anything below (the abandon in particular) touches what its gateway serves.
+if lk_doc_has encryption_key; then
+  lk_adopt_secret "$LK_ENCRYPTION_KEY_FILE" encryption_key {{ different_key_message | shquote }}
+fi
+if lk_doc_has fallback_encryption_key; then
+  lk_restore_secret "$LK_ENCRYPTION_KEY_FILE" fallback_encryption_key
+fi
+if lk_doc_has listen_password; then
+  lk_adopt_secret "$LK_LISTEN_PASSWORD_FILE" listen_password {{ different_password_message | shquote }}
+fi
+
+if lk_doc_has abandon_credential_store; then
+  rm -f "$LK_CREDENTIALS_STORE"
+fi
+
+# The desktop-owned pair.
+if lk_doc_has desktop_gateway_password; then
+  lk_write_secret "$LK_DESKTOP_PASSWORD_FILE" desktop_gateway_password
+fi
+if lk_doc_has desktop_permissions_override; then
+  lk_write_secret "$LK_DESKTOP_OVERRIDE_FILE" desktop_permissions_override
+fi
+
+if lk_doc_has config_json; then
+  lk_install_file "$LK_CONFIG_FILE" "$(lk_doc_file config_json)"
+fi
+
+# The credential store. A bundle is merged rather than written over: the
+# accounts already here (with whatever the gateway refreshed in them since)
+# survive gaining a new one. What the merge takes is decided by the flags, not
+# by what the bundle carries.
+if lk_doc_has credential_bundle; then
+  lk_export_encryption_key
+  _lk_bundle="$_lk_scratch/bundle"
+  mkdir -p "$_lk_bundle"
+  cp "$(lk_doc_file credential_bundle)" "$_lk_bundle/{{ credentials_store_filename }}"
+  cp "$(lk_doc_file credential_data_format_version)" "$_lk_bundle/{{ data_format_version_filename }}"
+  set -- --services "$(lk_doc_get credential_service)"
+  if lk_doc_has credential_account; then
+    set -- "$@" --account "$(lk_doc_get credential_account)"
+  fi
+  printf '' | LATCHKEY_DIRECTORY="$_lk_bundle" latchkey auth re-encrypt "$LK_LATCHKEY_DIR" "$@"
+fi
+if lk_doc_has clear_service; then
+  lk_export_encryption_key
+  latchkey auth clear -y "$(lk_doc_get clear_service)" --account "$(lk_doc_get clear_account)"
+fi
+
+# The script can stop between these two files. With the rules first, a
+# service being turned on is left routed without its device-gated rule; with
+# the policy first, a service being turned off is left routed after its rule is
+# gone. Either way the desktop refuses the routed requests until the apply is
+# repeated. Neither order is safer, and this one keeps the policy the last
+# thing an apply installs.
+if lk_doc_has desktop_egress_rules_json; then
+  lk_install_file "$LK_DESKTOP_EGRESS_RULES_FILE" "$(lk_doc_file desktop_egress_rules_json)"
+fi
+if lk_doc_has permissions_json; then
+  lk_install_file "$LK_PERMISSIONS_FILE" "$(lk_doc_file permissions_json)"
+fi
+
+# The address the gateway binds, read by its program on every start (and by the
+# tunnel as its far end, so a change bounces the tunnel below too). Validated
+# to the characters an address can carry, since the file is sourced.
+_lk_gateway_conf_changed=0
+if lk_doc_has gateway_listen_host; then
+  _lk_listen_host="$(lk_doc_get gateway_listen_host)"
+  case "$_lk_listen_host" in
+    ''|*[!A-Za-z0-9.:-]*) lk_fail "Error: refusing a gateway listen address with unexpected characters: $_lk_listen_host" ;;
+  esac
+  printf "LK_GATEWAY_LISTEN_HOST='%s'\n" "$_lk_listen_host" > "$_lk_scratch/gateway.conf"
+  if [ ! -f "$LK_GATEWAY_CONF" ] || ! cmp -s "$_lk_scratch/gateway.conf" "$LK_GATEWAY_CONF"; then
+    lk_install_file "$LK_GATEWAY_CONF" "$_lk_scratch/gateway.conf"
+    _lk_gateway_conf_changed=1
+  fi
+fi
+
+# CLEANUP: drop this block with the reverse tunnel (see the note above
+# CONTAINER_TUNNEL_KEY_FILENAME in package.py).
+# The reverse tunnel into the agent's container, for an agent that reaches the
+# gateway at its own loopback rather than over the docker bridge; the user's
+# computer decides which, and leaves these entries out otherwise. The machine
+# owns the docker daemon, so the container is found by the host-id label every
+# mngr container carries and the tunnel's public key is authorized in it
+# through docker exec: no prior SSH access to the container is needed. The
+# keypair is minted once and reused; re-authorizing is a no-op.
+if lk_doc_has tunnel_host_id; then
+  _lk_ssh_user="$(lk_doc_get tunnel_ssh_user)"
+  _lk_ssh_port="$(lk_doc_get tunnel_ssh_port)"
+  case "$_lk_ssh_user" in
+    ''|*[!A-Za-z0-9_.-]*) lk_fail "Error: refusing a tunnel target with an unexpected ssh user: $_lk_ssh_user" ;;
+  esac
+  case "$_lk_ssh_port" in
+    ''|*[!0-9]*) lk_fail "Error: refusing a tunnel target with a non-numeric ssh port: $_lk_ssh_port" ;;
+  esac
+  _lk_container="$(lk_find_container "$(lk_doc_get tunnel_host_id)")"
+  _lk_key_minted=0
+  if [ ! -f "$LK_TUNNEL_KEY" ]; then
+    ssh-keygen -t ed25519 -N '' -q -f "$LK_TUNNEL_KEY"
+    _lk_key_minted=1
+  fi
+  TUNNEL_PUBKEY="$(cat "$LK_TUNNEL_KEY.pub")"
+  docker exec -u "$_lk_ssh_user" -e TUNNEL_PUBKEY="$TUNNEL_PUBKEY" "$_lk_container" sh -c \
+    'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh" && touch "$HOME/.ssh/authorized_keys" && chmod 600 "$HOME/.ssh/authorized_keys" && { grep -qxF "$TUNNEL_PUBKEY" "$HOME/.ssh/authorized_keys" || echo "$TUNNEL_PUBKEY" >> "$HOME/.ssh/authorized_keys"; }'
+  # The tunnel program is static; what it connects to (and forwards to) is read
+  # from the two files, so it is only bounced when either changed (or the key
+  # it presents is new). It is not autostarted, so a container that needs no
+  # tunnel never gets one started.
+  printf "LK_CONTAINER_SSH_USER='%s'\nLK_CONTAINER_SSH_PORT='%s'\n" "$_lk_ssh_user" "$_lk_ssh_port" > "$_lk_scratch/tunnel.conf"
+  if [ "$_lk_key_minted" = 1 ] || [ "$_lk_gateway_conf_changed" = 1 ] || [ ! -f "$LK_TUNNEL_CONF" ] || ! cmp -s "$_lk_scratch/tunnel.conf" "$LK_TUNNEL_CONF"; then
+    lk_install_file "$LK_TUNNEL_CONF" "$_lk_scratch/tunnel.conf"
+    lk_supervisor_restart_tolerant "$LK_TUNNEL_PROGRAM"
+  else
+    lk_supervisor_start "$LK_TUNNEL_PROGRAM"
+  fi
+fi
+
+# The desktop-gateway proxy extension. The gateway loads every .mjs under its
+# extensions directory at startup. A copy, not a symlink: the gateway lists the
+# directory with Dirent.isFile(), which is false for a symlink, so a linked
+# extension is silently never loaded.
+mkdir -p "$LK_EXTENSIONS_DIR"
+chmod 700 "$LK_EXTENSIONS_DIR"
+lk_install_file "$LK_EXTENSIONS_DIR/{{ extension_filename }}" "$LK_PACKAGE_EXTENSION"
+
+if lk_doc_has restart_gateway; then
+  lk_supervisor_restart "$LK_GATEWAY_PROGRAM"
+fi
+
+printf '%s\n' "$LK_OUTCOME_DONE"

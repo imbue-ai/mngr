@@ -75,7 +75,7 @@ _FAKE_LATCHKEY_VERSION: Final[str] = LATCHKEY_MIN_VERSION
 _HOST_ID_ONE: Final[HostId] = HostId("host-" + "0" * 31 + "1")
 
 
-# -- Fixtures ---------------------------------------------------------------
+# Fixtures
 
 
 @pytest.fixture
@@ -144,7 +144,7 @@ def _make_ctx(plugins: dict[PluginName, LatchkeyPluginConfig] | None = None) -> 
     )
 
 
-# -- _resolve_latchkey_settings ---------------------------------------------
+# _resolve_latchkey_settings
 
 
 def test_resolve_falls_back_to_built_in_defaults(clean_latchkey_env: None) -> None:
@@ -217,7 +217,7 @@ def test_resolve_expands_user_in_settings(clean_latchkey_env: None) -> None:
     assert directory == Path("~/lk-test").expanduser()
 
 
-# -- create-agent-env --------------------------------------------------------
+# create-agent-env
 
 
 def test_create_agent_env_emits_expected_json_shape(
@@ -312,7 +312,7 @@ def test_create_agent_env_exits_nonzero_when_binary_missing(
     assert "LATCHKEY_GATEWAY" not in result.output
 
 
-# -- admin-jwt --------------------------------------------------------------
+# admin-jwt
 
 
 def test_admin_jwt_prints_jwt_and_creates_admin_file(
@@ -349,7 +349,7 @@ def test_admin_jwt_prints_jwt_and_creates_admin_file(
     assert on_disk == {"rules": [{"any": ["any"]}]}
 
 
-# -- gateway-info -----------------------------------------------------------
+# gateway-info
 
 
 @contextlib.contextmanager
@@ -508,7 +508,7 @@ def test_gateway_info_exits_nonzero_while_supervisor_still_warming_up(
     assert "has not finished binding" in result.output
 
 
-# -- link-permissions -------------------------------------------------------
+# link-permissions
 
 
 def test_link_permissions_replaces_opaque_with_symlink_to_canonical(
@@ -620,7 +620,7 @@ def test_link_permissions_rejects_missing_opaque_path(
     assert "does not exist" in result.output
 
 
-# -- forward ----------------------------------------------------------------
+# forward
 
 
 def test_forward_refuses_to_start_when_the_directory_is_already_owned(
@@ -731,7 +731,7 @@ def test_forward_reports_an_unclaimable_directory_as_a_clean_failure(
     assert load_forward_info(data_dir) is None
 
 
-# -- register-agent ---------------------------------------------------------
+# register-agent
 
 
 def _registered_agent_ids(latchkey_root: Path, host_id: HostId) -> set[str]:
@@ -805,7 +805,7 @@ def test_register_agent_fails_loudly_when_the_host_has_a_machine_it_cannot_reach
     assert _registered_agent_ids(latchkey_root, _HOST_ID_ONE) == {str(agent_id)}
 
 
-# -- Group wiring -----------------------------------------------------------
+# Group wiring
 
 
 def test_group_exposes_documented_subcommands() -> None:
@@ -882,7 +882,7 @@ def test_run_forward_with_error_reporting_does_not_log_on_clean_return() -> None
     assert not any("unhandled error" in message for message in captured)
 
 
-# -- SIGHUP bounce watcher --------------------------------------------------
+# SIGHUP bounce watcher
 
 
 class _FlakyBounceConsumer(DiscoveryStreamConsumer):

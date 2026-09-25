@@ -59,6 +59,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_GATEWAY_LOG_FILENAME
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_LOG_DIR
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_TUNNEL_LOG_FILENAME
 
 # Where the workspace template installs the resident collector. The contract
@@ -230,9 +231,13 @@ def build_latchkey_logs_argv(
     fruitless ``find`` from reading as a failed command: an empty stdout is the
     observation "nothing to tail", and it must arrive as a success.
     """
+    # CLEANUP: drop the ``$HOME/.latchkey`` location once every remote host has
+    # been provisioned by a build that ships the gateway as a package (its
+    # supervisord programs log under ``REMOTE_LOG_DIR``); until then a host not
+    # yet re-provisioned still logs beside its store.
     latchkey_dir = f'"$HOME"/{REMOTE_LATCHKEY_DIR_NAME}'
     command = (
-        f"find {latchkey_dir} -maxdepth 1 "
+        f"find {REMOTE_LOG_DIR} {latchkey_dir} -maxdepth 1 "
         f"\\( -name {REMOTE_GATEWAY_LOG_FILENAME} -o -name {REMOTE_TUNNEL_LOG_FILENAME} \\) "
         f"-mmin -{LATCHKEY_LOG_MAX_AGE_MINUTES} "
         f"-exec tail -v -c {LATCHKEY_LOG_TAIL_BYTES} {{}} + 2>/dev/null; true"

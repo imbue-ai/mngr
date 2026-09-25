@@ -1,0 +1,14 @@
+#!/bin/sh
+# The one command the user's computer runs on this machine. Each subcommand is
+# a script under {{ layout.install_dir }}; stdin (the document) passes through.
+set -eu
+
+case "${1:-}" in
+  read-state|apply-state)
+    exec '{{ layout.install_dir }}'/"$1"
+    ;;
+  *)
+    printf 'usage: %s read-state|apply-state\n' "$0" >&2
+    exit 2
+    ;;
+esac

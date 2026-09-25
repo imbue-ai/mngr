@@ -1,21 +1,39 @@
-"""A stub VPS outer host, and a fake latchkey CLI, for exercising the remote modules.
+"""A fake VPS, and a fake latchkey CLI, for exercising the remote modules.
 
-``StubOuter`` records every command and file write it is handed and acts out
-the handful of remote behaviors the code under test relies on ($HOME
-resolution, the docker container lookup, the credential handover's ``latchkey``
-invocations). The fake latchkey binary is a tiny store-backed CLI: it reads and
-writes a plaintext JSON stand-in for ``credentials.json.enc`` recording which
-accounts a store holds and which key it was written with. That is enough for a
-credential exchange to be exercised end to end -- what is pulled really is read
-back, what is pushed really is what the machine ends up holding -- without a
-real latchkey or a real VPS.
+``FakeVps`` is an outer host backed by a directory tree standing in for the
+machine: its ``$HOME/.latchkey``, its RAM-backed secrets directory, and the
+package's files unpacked where the package would put them. Commands the code
+under test sends it run under a real ``sh`` with that tree as the machine, so
+what a test exercises is the package's own scripts -- ``mngr-latchkey
+read-state`` and ``apply-state`` as built -- rather than a re-enactment of
+them. What the scripts shell out to that a test cannot run for real is faked
+on PATH: ``latchkey`` (a tiny store-backed CLI, below), ``docker`` (finds the
+one container, reports the mappings it was created with, and runs an exec in a
+fake container home), ``ssh-keygen``
+(mints a stand-in keypair), ``supervisorctl`` (records what it was asked) and
+the one ``stat`` probe that says whether the secrets directory is RAM-backed.
+The install itself (apt, dpkg) is faked too: the bootstrap command unpacks
+whatever ``.deb`` was last uploaded.
+
+The fake latchkey binary reads and writes a plaintext JSON stand-in for
+``credentials.json.enc`` recording which accounts a store holds and which key
+it was written with, and refuses to open a store under any other key. That is
+enough for a credential exchange to be exercised end to end -- what is pulled
+really is read back, what is pushed really is what the machine ends up holding
+-- without a real latchkey or a real VPS.
+
+``ScriptedOuter`` is the other kind of stand-in: an outer host that runs
+nothing and answers by command substring, for code that drives a machine
+through many commands and only needs to see which ran, in what order, with
+what uploads.
 """
 
 import base64
-import hashlib
 import json
-import re
-import shlex
+import os
+import shutil
+import stat
+import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,32 +52,49 @@ from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
+from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
+from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
+from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CONTAINER_TUNNEL_KEY
+from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CREDENTIAL_STORE
+from imbue.mngr_latchkey.remote._machine import _ANSWER_HOME
+from imbue.mngr_latchkey.remote._machine import _ANSWER_PACKAGE_VERSION
+from imbue.mngr_latchkey.remote._machine import _APPLY_STATE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import _READ_STATE_SUBCOMMAND
 from imbue.mngr_latchkey.remote._mirror import machine_store_dir
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
-from imbue.mngr_latchkey.remote._transfer import _MachineScriptOutcome
-from imbue.mngr_latchkey.remote._transfer import _READ_CREDENTIALS_PREFIX
-from imbue.mngr_latchkey.remote._transfer import _READ_DATA_FORMAT_VERSION_PREFIX
-from imbue.mngr_latchkey.remote._transfer import _READ_DESKTOP_EGRESS_RULES_PREFIX
-from imbue.mngr_latchkey.remote._transfer import _READ_PERMISSIONS_PREFIX
-from imbue.mngr_latchkey.remote._transfer import _SCRIPT_OUTCOME_PREFIX
-from imbue.mngr_latchkey.remote._transfer import _outcome_marker
+from imbue.mngr_latchkey.remote.package import CONTAINER_TUNNEL_KEY_FILENAME
+from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT
+from imbue.mngr_latchkey.remote.package import GATEWAY_CONF_FILENAME
+from imbue.mngr_latchkey.remote.package import RemotePackageLayout
+from imbue.mngr_latchkey.remote.package import TUNNEL_CONF_FILENAME
+from imbue.mngr_latchkey.remote.package import build_remote_package
+from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.testing import extract_deb_data
+from imbue.mngr_latchkey.testing import read_deb_control_field
 
 # Stand-in for the key a machine keeps its own credential store under.
 MACHINE_KEY = "machine-key-5518"
 
-# The docker bridge address a stub machine resolves by default: where its
+# The docker bridge address a fake machine resolves by default: where its
 # owner-exec daemon and latchkey gateway bind.
 DEFAULT_DOCKER_BRIDGE_ADDRESS = "172.17.0.1"
 
-# The variable block a single-round-trip machine script opens with: every
-# payload it carries is assigned to a ``_lk_*`` shell variable before the body.
-_SCRIPT_VARIABLE_LINE = re.compile(r"^(_lk_[a-z0-9_]+)=(.*)$")
+# The ``--add-host`` mapping the VPS provider creates every container with, as
+# ``docker inspect`` reports it.
+OUTER_HOST_EXTRA_HOST = "host.docker.internal:host-gateway"
+
+# The filesystem type the fake secrets directory reports unless a test says otherwise.
+_RAM_BACKED_FSTYPE = "tmpfs"
+_SHELL_TIMEOUT_SECONDS = 60.0
+_FAKE_BIN_DIR_NAME = "fakebin"
 
 
 class RecordedCommand(MutableModel):
@@ -78,68 +113,208 @@ class WrittenFile(MutableModel):
     path: str = Field(description="Destination path on the VPS")
     content: bytes = Field(description="Bytes written")
     mode: str | None = Field(default=None, description="chmod mode requested (if any)")
-    is_atomic: bool = Field(default=False, description="Whether the write was requested atomically (tmp + rename)")
+    is_atomic: bool = Field(default=True, description="Whether the write was requested atomically (tmp + rename)")
 
 
-class StubOuter(MutableModel):
-    """Stub outer host that records commands / writes and returns a canned result.
+def rooted_layout(root: Path) -> RemotePackageLayout:
+    """The default layout with every directory moved under ``root``: the machine as a directory tree."""
+    return RemotePackageLayout.model_validate(
+        {name: root / path.relative_to("/") for name, path in DEFAULT_REMOTE_PACKAGE_LAYOUT.model_dump().items()}
+    )
 
-    Implements only the subset of ``OuterHostInterface`` that the functions
-    under test touch (``execute_idempotent_command``, ``write_file``,
-    ``write_text_file``, ``get_name``).
+
+class FakeVps(MutableModel):
+    """An outer host whose machine is a directory tree, running the package's scripts for real.
+
+    Implements only the subset of ``OuterHostInterface`` that the code under
+    test touches (``execute_idempotent_command``, the file writes, ``get_name``).
     """
 
+    root: Path = Field(description="The directory standing in for the machine's filesystem root.")
     name: str = Field(default="vps-test", description="Display name returned by get_name")
-    result: CommandResult = Field(
-        default_factory=lambda: CommandResult(stdout="", stderr="", success=True),
-        description="Canned result returned for every command",
-    )
-    home: str = Field(default="/root", description="Value returned for the $HOME resolution command")
-    config_json: str | None = Field(
-        default=None, description="Pre-existing ~/.latchkey/config.json content on the VPS (None means absent)"
-    )
-    container_name: str = Field(default="mngr-ws", description="Container name returned for the 'docker ps' lookup")
-    docker_bridge_address: str = Field(
-        default=DEFAULT_DOCKER_BRIDGE_ADDRESS,
-        description="Address the docker-bridge probe resolves to; empty for a machine with no docker bridge.",
+    container_name: str = Field(
+        default="mngr-ws", description="Name of the one container docker finds on the machine."
     )
     container_extra_hosts: tuple[str, ...] = Field(
-        default=("host.docker.internal:host-gateway",),
+        default=(OUTER_HOST_EXTRA_HOST,),
         description=(
-            "The ``--add-host`` mappings the container was created with, as 'docker inspect' reports them. "
-            "Empty for a container created before the outer-host mapping existed."
+            "The ``--add-host`` mappings the container was created with, as ``docker inspect`` reports them; "
+            "empty for a container created before the outer-host mapping existed."
         ),
     )
-    is_remote_latchkey_dir_present: bool = Field(
-        default=False,
-        description="Whether ~/.latchkey already exists on the VPS (i.e. an older build provisioned it)",
-    )
-    machine_accounts: dict[str, list[str]] = Field(
-        default_factory=dict,
-        description="Accounts this machine's own credential store holds, keyed by service.",
-    )
-    machine_store_key: str = Field(
-        default=MACHINE_KEY,
-        description="The key this machine's own credential store is encrypted under.",
-    )
-    machine_permissions: str | None = Field(
-        default=None, description="The permissions policy this machine is enforcing, or None when it has none."
-    )
-    machine_desktop_egress_rules: str | None = Field(
-        default=None, description="The desktop egress rules file this machine holds, or None when it has none."
-    )
-    remote_files: dict[str, bytes] = Field(
-        default_factory=dict, description="Files written to the machine, by absolute path."
-    )
-    latchkey_commands: list[str] = Field(
-        default_factory=list, description="Every ``latchkey`` invocation this machine was asked to run."
+    docker_bridge_address: str = Field(
+        default=DEFAULT_DOCKER_BRIDGE_ADDRESS,
+        description="What the docker-bridge probe resolves to; empty for a machine with no docker bridge.",
     )
     is_local: bool = Field(default=False, description="Whether this outer host is the local machine")
+    is_install_failing: bool = Field(default=False, description="Whether the package install is to fail.")
     recorded: list[RecordedCommand] = Field(default_factory=list, description="Each command recorded in order")
     written: list[WrittenFile] = Field(default_factory=list, description="Each file write recorded in order")
+    installed_versions: list[str] = Field(
+        default_factory=list, description="The version of every package the bootstrap installed, in order."
+    )
+
+    @property
+    def layout(self) -> RemotePackageLayout:
+        return rooted_layout(self.root)
+
+    @property
+    def home(self) -> Path:
+        return self.root / "root"
+
+    @property
+    def latchkey_dir(self) -> Path:
+        return self.home / REMOTE_LATCHKEY_DIR_NAME
+
+    @property
+    def secrets_dir(self) -> Path:
+        return self.layout.secrets_dir
 
     def get_name(self) -> str:
         return self.name
+
+    # The machine, as a test sets it up.
+
+    def setup(self) -> None:
+        """Lay out the machine and install the package on it, the way a provisioned VPS would look."""
+        self.home.mkdir(parents=True, exist_ok=True)
+        self.secrets_dir.parent.mkdir(parents=True, exist_ok=True)
+        (self.root / "fstype").write_text(_RAM_BACKED_FSTYPE)
+        self._write_fake_binaries()
+        self.install_package()
+
+    def install_package(self) -> None:
+        """Unpack a build of the package for this machine's layout, as dpkg would."""
+        artifact = build_remote_package(remote_package_context(self.layout))
+        extract_deb_data(artifact.content, self.root)
+
+    def hold(self, accounts_by_service: Mapping[str, Sequence[str]], key: str = MACHINE_KEY) -> None:
+        """Give the machine a credential store holding ``accounts_by_service`` under ``key`` (none when empty)."""
+        if not accounts_by_service:
+            return
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / CREDENTIALS_STORE_FILENAME).write_bytes(store_document(accounts_by_service, key))
+        (self.latchkey_dir / UPSTREAM_DATA_FORMAT_VERSION_FILENAME).write_text("2")
+
+    def hold_permissions(self, permissions_json: str) -> None:
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / PERMISSIONS_CONFIG_FILENAME).write_text(permissions_json)
+
+    def hold_desktop_egress_rules(self, desktop_egress_rules_json: str) -> None:
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME).write_text(desktop_egress_rules_json)
+
+    def hold_config(self, config_json: str) -> None:
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / CONFIG_FILENAME).write_text(config_json)
+
+    def run_under(self, secret_filename: str, value: str) -> None:
+        """Put a secret in the machine's RAM-backed directory, as its running gateway would have it."""
+        self.secrets_dir.mkdir(parents=True, exist_ok=True)
+        (self.secrets_dir / secret_filename).write_text(value)
+
+    def run_under_key(self, key: str) -> None:
+        self.run_under(GATEWAY_ENCRYPTION_KEY_FILENAME, key)
+
+    def set_secrets_dir_filesystem_type(self, filesystem_type: str) -> None:
+        (self.root / "fstype").write_text(filesystem_type)
+
+    def fail_supervisorctl_for(self, program_name: str) -> None:
+        """Make every supervisorctl call naming ``program_name`` fail, as when the program does not come up."""
+        (self.root / "supervisorctl.fail").write_text(program_name)
+
+    # The machine, as a test reads it back.
+
+    def secret(self, filename: str) -> str | None:
+        path = self.secrets_dir / filename
+        return path.read_text().strip() if path.is_file() else None
+
+    def secret_mode(self, filename: str) -> int:
+        return stat.S_IMODE((self.secrets_dir / filename).stat().st_mode)
+
+    def machine_accounts(self) -> dict[str, list[str]]:
+        path = self.latchkey_dir / CREDENTIALS_STORE_FILENAME
+        return store_accounts(path.read_bytes()) if path.is_file() else {}
+
+    def machine_permissions(self) -> str | None:
+        path = self.latchkey_dir / PERMISSIONS_CONFIG_FILENAME
+        return path.read_text() if path.is_file() else None
+
+    def machine_desktop_egress_rules(self) -> str | None:
+        path = self.latchkey_dir / DESKTOP_EGRESS_RULES_FILENAME
+        return path.read_text() if path.is_file() else None
+
+    def machine_config(self) -> str | None:
+        path = self.latchkey_dir / CONFIG_FILENAME
+        return path.read_text() if path.is_file() else None
+
+    def tunnel_conf(self) -> str | None:
+        path = self.latchkey_dir / TUNNEL_CONF_FILENAME
+        return path.read_text() if path.is_file() else None
+
+    def gateway_conf(self) -> str | None:
+        path = self.latchkey_dir / GATEWAY_CONF_FILENAME
+        return path.read_text() if path.is_file() else None
+
+    def tunnel_key(self) -> str | None:
+        path = self.latchkey_dir / CONTAINER_TUNNEL_KEY_FILENAME
+        return path.read_text() if path.is_file() else None
+
+    def predate_outer_host_mapping(self) -> None:
+        """Make the container one created before containers carried the outer-host mapping."""
+        self.container_extra_hosts = ()
+
+    def mint_tunnel_key(self) -> None:
+        """Leave the keypair an earlier build's tunnel authenticated with, as a machine it tunneled into holds."""
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / CONTAINER_TUNNEL_KEY_FILENAME).write_text("FAKE PRIVATE KEY earlier\n")
+        (self.latchkey_dir / f"{CONTAINER_TUNNEL_KEY_FILENAME}.pub").write_text("ssh-ed25519 FAKEearlier fake@vps\n")
+
+    def latchkey_dir_entries(self) -> list[str]:
+        return sorted(path.name for path in self.latchkey_dir.iterdir()) if self.latchkey_dir.is_dir() else []
+
+    def secrets_dir_entries(self) -> list[str]:
+        return sorted(path.name for path in self.secrets_dir.iterdir()) if self.secrets_dir.is_dir() else []
+
+    def supervisorctl_calls(self) -> list[str]:
+        path = self.root / "supervisorctl.log"
+        return path.read_text().splitlines() if path.is_file() else []
+
+    def latchkey_calls(self) -> list[str]:
+        path = self.root / "latchkey.log"
+        return path.read_text().splitlines() if path.is_file() else []
+
+    def docker_calls(self) -> list[str]:
+        path = self.root / "docker.log"
+        return path.read_text().splitlines() if path.is_file() else []
+
+    def container_authorized_keys(self, container: str, user: str) -> str:
+        path = self.root / "containers" / container / user / ".ssh" / "authorized_keys"
+        return path.read_text() if path.is_file() else ""
+
+    def recorded_commands(self) -> list[str]:
+        return [entry.command for entry in self.recorded]
+
+    def has_received(self, secret: str) -> bool:
+        """Whether ``secret`` reached the machine: in a command, in a document entry (decoded), or in a file."""
+        encoded_secret = secret.encode("utf-8")
+        return (
+            any(secret in command for command in self.recorded_commands())
+            or any(encoded_secret in value for document in self._sent_documents() for value in document.values())
+            or any(encoded_secret in entry.content for entry in self.written)
+        )
+
+    def _sent_documents(self) -> list[dict[str, bytes]]:
+        """Every document a machine command carried, entry by entry and decoded."""
+        documents: list[dict[str, bytes]] = []
+        for command in self.recorded_commands():
+            first_line, *document_lines = command.splitlines()
+            if first_line.startswith(REMOTE_COMMAND_NAME):
+                entries = (line.split(" ", 1) for line in document_lines[:-1])
+                documents.append({name: base64.b64decode(value) for name, value in entries})
+        return documents
+
+    # OuterHostInterface.
 
     def execute_idempotent_command(
         self,
@@ -151,210 +326,28 @@ class StubOuter(MutableModel):
     ) -> CommandResult:
         self.recorded.append(
             RecordedCommand(
-                command=command,
-                timeout_seconds=timeout_seconds,
-                is_kept_out_of_logs=is_command_logging_suppressed(),
+                command=command, timeout_seconds=timeout_seconds, is_kept_out_of_logs=is_command_logging_suppressed()
             )
         )
-        # Only the dedicated $HOME-resolution probe gets the home response; the
-        # container lookup returns the configured name and the container
-        # inspection its creation-time extra hosts; the docker-bridge probe
-        # (owner-exec vm daemon + gateway listen host) resolves to a bridge
-        # address, so neither fails closed unless the configured result is a
-        # failure; everything else (install/gateway/keypair/tunnel scripts)
-        # returns the configured result.
-        if command.strip() == 'echo "$HOME"':
-            return CommandResult(stdout=f"{self.home}\n", stderr="", success=True)
-        if command.startswith("docker ps"):
-            return CommandResult(stdout=f"{self.container_name}\n", stderr="", success=True)
-        if command.startswith("docker inspect") and self.result.success:
-            # ``docker inspect`` renders a container's absent extra hosts as ``null``.
-            extra_hosts_json = json.dumps(list(self.container_extra_hosts)) if self.container_extra_hosts else "null"
-            return CommandResult(stdout=f"{extra_hosts_json}\n", stderr="", success=True)
-        if "addr show docker0" in command and self.result.success:
+        # The owner-exec vm daemon's install and start (which curl a release and
+        # drive systemd) and its docker-bridge probe are answered rather than
+        # run; the package bootstrap (apt, dpkg) is acted out by unpacking the
+        # uploaded package; everything else runs on the fake machine.
+        if "owner-exec" in command:
+            return CommandResult(stdout="", stderr="", success=True)
+        if "addr show docker0" in command:
             return CommandResult(stdout=f"{self.docker_bridge_address}\n", stderr="", success=True)
-        if _SCRIPT_OUTCOME_PREFIX in command:
-            return self._run_machine_script(command)
-        if "latchkey auth" in command:
-            return self._run_machine_latchkey(command)
-        if command.startswith("rm -f ") and CREDENTIALS_STORE_FILENAME in command:
-            # Abandoning the machine's own store, not a scratch path.
-            self.machine_accounts.clear()
-            return CommandResult(stdout="", stderr="", success=True)
-        if command.startswith("rm -rf"):
-            removed = shlex.split(command)[-1]
-            for path in [path for path in self.remote_files if path.startswith(removed)]:
-                del self.remote_files[path]
-            self.remote_files.pop(removed, None)
-            return CommandResult(stdout="", stderr="", success=True)
-        return self.result
-
-    def path_exists(self, path: Path) -> bool:
-        # Files the test (or the code under test) actually wrote win over the
-        # canned answers below -- notably the gateway's tmpfs key file.
-        if str(path) in self.remote_files:
-            return True
-        if path.name == REMOTE_LATCHKEY_DIR_NAME:
-            return self.is_remote_latchkey_dir_present
-        if str(path) == "/root/.latchkey/credentials.json.enc":
-            return bool(self.machine_accounts)
-        if path.name == PERMISSIONS_CONFIG_FILENAME:
-            return self.machine_permissions is not None
-        return path.name == CONFIG_FILENAME and self.config_json is not None
-
-    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
-        written = self.remote_files.get(str(path))
-        if written is not None:
-            return written.decode(encoding)
-        if path.name == CONFIG_FILENAME and self.config_json is not None:
-            return self.config_json
-        if path.name == UPSTREAM_DATA_FORMAT_VERSION_FILENAME:
-            return "2"
-        if path.name == PERMISSIONS_CONFIG_FILENAME and self.machine_permissions is not None:
-            return self.machine_permissions
-        raise FileNotFoundError(str(path))
-
-    def read_file(self, path: Path) -> bytes:
-        content = self.remote_files.get(str(path))
-        if content is None:
-            raise FileNotFoundError(str(path))
-        return content
-
-    def recorded_commands(self) -> list[str]:
-        return [entry.command for entry in self.recorded]
-
-    def _run_machine_latchkey(self, script: str) -> CommandResult:
-        """Act out the one bare ``latchkey`` invocation left: provisioning's key-verification probe.
-
-        Everything else -- every push, and the read-back -- travels as a machine
-        script instead (:meth:`_run_machine_script`). Anything else here is a
-        test writing a command this machine was never taught, which fails
-        loudly rather than passing vacuously.
-        """
-        self.latchkey_commands.append(script)
-        assert "auth list" in script, f"this machine was never taught to run: {script}"
-        # Succeeds only under the key this machine's store is actually written with.
-        is_readable = _script_encryption_key(script) == self.machine_store_key
-        return CommandResult(
-            stdout="",
-            stderr="" if is_readable else "Error: Failed to decrypt the credential store.",
-            success=is_readable,
-        )
-
-    def _merge_uploaded_bundle(self, uploaded: bytes, selected: Sequence[str], account: str | None) -> None:
-        """Take the named services (and, when named, the one account) of a bundle into this machine's store.
-
-        What the bundle carries beyond them is not this machine's business.
-        Mirrors the real CLI: without ``--account`` a selected service is
-        *replaced* by the bundle's copy; with it, only that account is
-        overwritten and the service's other accounts stay exactly as the
-        machine holds them.
-        """
-        for service_name, accounts in store_accounts(uploaded).items():
-            if service_name not in selected:
-                continue
-            if account is None:
-                self.machine_accounts[service_name] = sorted(accounts)
-            elif account in accounts:
-                merged = set(self.machine_accounts.get(service_name, [])) | {account}
-                self.machine_accounts[service_name] = sorted(merged)
-            else:
-                # The bundle carries nothing for this account of this service,
-                # so there is nothing to take from it -- as with the real CLI.
-                pass
-
-    def _run_machine_script(self, script: str) -> CommandResult:
-        """Act out a single-round-trip machine script, from the variables it opens with.
-
-        Mirrors what the script does on a real machine, in order: report a
-        missing tmpfs key (a script that touches the credential store needs
-        one), refuse a key that is not the one the script expects (only a
-        script that *brings* credential material names one), then apply
-        whichever parts it carries: credential first, then the desktop egress
-        rules, and the policy last.
-        """
-        self.latchkey_commands.append(script)
-        variable_by_name = _parse_script_variables(script)
-        if "_lk_out_key" in variable_by_name:
-            return self._answer_machine_read(variable_by_name)
-        key_file = variable_by_name.get("_lk_key_file")
-        expected_key_sha256 = variable_by_name.get("_lk_expected_key_sha256")
-        if key_file is not None:
-            key_content = self.remote_files.get(key_file)
-            if key_content is None or not key_content.strip():
-                return CommandResult(
-                    stdout=f"{_outcome_marker(_MachineScriptOutcome.KEY_MISSING)}\n", stderr="", success=True
-                )
-            if (
-                expected_key_sha256 is not None
-                and hashlib.sha256(key_content.strip()).hexdigest() != expected_key_sha256
-            ):
-                return CommandResult(
-                    stdout="", stderr="Error: the machine runs under a different key\n", success=False
-                )
-        config_b64 = variable_by_name.get("_lk_config_b64")
-        if config_b64 is not None:
-            config = base64.b64decode(config_b64)
-            remote_dir = variable_by_name["_lk_remote_dir"].replace("$HOME", self.home)
-            self.remote_files[f"{remote_dir}/{CONFIG_FILENAME}"] = config
-            self.config_json = config.decode("utf-8")
-        bundle_b64 = variable_by_name.get("_lk_bundle_b64")
-        if bundle_b64 is not None:
-            self._merge_uploaded_bundle(
-                base64.b64decode(bundle_b64),
-                [variable_by_name["_lk_service"]],
-                variable_by_name["_lk_account"] or None,
-            )
-        if "latchkey auth clear" in script:
-            self._clear_account(variable_by_name["_lk_service"], variable_by_name["_lk_account"])
-        desktop_egress_rules_b64 = variable_by_name.get("_lk_desktop_egress_rules_b64")
-        if desktop_egress_rules_b64 is not None:
-            desktop_egress_rules = base64.b64decode(desktop_egress_rules_b64)
-            remote_dir = variable_by_name["_lk_remote_dir"].replace("$HOME", self.home)
-            self.remote_files[f"{remote_dir}/{DESKTOP_EGRESS_RULES_FILENAME}"] = desktop_egress_rules
-            self.machine_desktop_egress_rules = desktop_egress_rules.decode("utf-8")
-        permissions_b64 = variable_by_name.get("_lk_permissions_b64")
-        if permissions_b64 is not None:
-            permissions = base64.b64decode(permissions_b64)
-            remote_dir = variable_by_name["_lk_remote_dir"].replace("$HOME", self.home)
-            self.remote_files[f"{remote_dir}/{PERMISSIONS_CONFIG_FILENAME}"] = permissions
-            self.machine_permissions = permissions.decode("utf-8")
-        return CommandResult(stdout=f"{_outcome_marker(_MachineScriptOutcome.APPLIED)}\n", stderr="", success=True)
-
-    def _answer_machine_read(self, variable_by_name: Mapping[str, str]) -> CommandResult:
-        """Act out the single-round-trip read of everything this machine holds.
-
-        The policy and the desktop egress rules are answered whatever key the
-        machine is running under -- neither is encrypted -- while the credential store needs the tmpfs key, so a
-        machine that has one but lost the key reports that instead, exactly as
-        the script does.
-        """
-        lines: list[str] = []
-        if self.machine_permissions is not None:
-            lines.append(_READ_PERMISSIONS_PREFIX + _b64(self.machine_permissions.encode("utf-8")))
-        if self.machine_desktop_egress_rules is not None:
-            lines.append(_READ_DESKTOP_EGRESS_RULES_PREFIX + _b64(self.machine_desktop_egress_rules.encode("utf-8")))
-        if self.machine_accounts:
-            key_content = self.remote_files.get(variable_by_name["_lk_key_file"])
-            if key_content is None or not key_content.strip():
-                return CommandResult(
-                    stdout=f"{_outcome_marker(_MachineScriptOutcome.KEY_MISSING)}\n", stderr="", success=True
-                )
-            lines.append(_READ_CREDENTIALS_PREFIX + _b64(store_document(self.machine_accounts)))
-            lines.append(_READ_DATA_FORMAT_VERSION_PREFIX + _b64(b"2"))
-        lines.append(_outcome_marker(_MachineScriptOutcome.APPLIED))
-        return CommandResult(stdout="\n".join(lines) + "\n", stderr="", success=True)
-
-    def _clear_account(self, service_name: str, account: str) -> None:
-        remaining = [entry for entry in self.machine_accounts.get(service_name, []) if entry != account]
-        if remaining:
-            self.machine_accounts[service_name] = remaining
-        else:
-            self.machine_accounts.pop(service_name, None)
+        if "dpkg -i" in command:
+            return self._install_uploaded_package()
+        return self._run_shell(command)
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         self.written.append(WrittenFile(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
-        self.remote_files[str(path)] = content
+        local_path = self._local_path(path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(content)
+        if mode is not None:
+            local_path.chmod(int(mode, 8))
 
     def write_text_file(
         self,
@@ -364,58 +357,205 @@ class StubOuter(MutableModel):
         mode: str | None = None,
         is_atomic: bool = True,
     ) -> None:
-        self.written.append(
-            WrittenFile(path=str(path), content=content.encode(encoding), mode=mode, is_atomic=is_atomic)
+        self.write_file(path, content.encode(encoding), mode=mode, is_atomic=is_atomic)
+
+    def _local_path(self, path: Path) -> Path:
+        """Where a path on the machine lives here: a layout path is already under the root, any other is rooted."""
+        return path if path.is_relative_to(self.root) else self.root / path.relative_to("/")
+
+    def _run_shell(self, command: str) -> CommandResult:
+        (self.root / "docker-container-name").write_text(self.container_name)
+        # ``docker inspect`` renders a container created with no mapping as ``null``.
+        (self.root / "docker-container-extra-hosts").write_text(
+            json.dumps(list(self.container_extra_hosts)) if self.container_extra_hosts else "null"
+        )
+        completed = subprocess.run(
+            ["sh", "-c", command],
+            env=self._shell_environment(),
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=_SHELL_TIMEOUT_SECONDS,
+        )
+        return CommandResult(
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            success=completed.returncode == 0,
+            exit_code=completed.returncode,
         )
 
+    def _shell_environment(self) -> dict[str, str]:
+        return {
+            "PATH": os.pathsep.join(
+                (str(self.layout.bin_dir), str(self.root / _FAKE_BIN_DIR_NAME), os.environ["PATH"])
+            ),
+            "HOME": str(self.home),
+            "FAKE_VPS_ROOT": str(self.root),
+        }
 
-def _b64(content: bytes) -> str:
-    return base64.b64encode(content).decode("ascii")
+    def _install_uploaded_package(self) -> CommandResult:
+        if self.is_install_failing:
+            return CommandResult(stdout="", stderr="E: Unable to locate package nodejs", success=False)
+        uploads = [entry for entry in self.written if entry.path.endswith(".deb")]
+        assert uploads, "the bootstrap ran before any package was uploaded"
+        content = uploads[-1].content
+        extract_deb_data(content, self.root)
+        version = read_deb_control_field(content, "Version")
+        self.installed_versions.append(version)
+        return CommandResult(stdout=f"Unpacking mngr-latchkey ({version}) ...\n", stderr="", success=True)
+
+    def _write_fake_binaries(self) -> None:
+        bin_dir = self.root / _FAKE_BIN_DIR_NAME
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "latchkey").symlink_to(fake_latchkey_binary(bin_dir))
+        real_stat = shutil.which("stat")
+        assert real_stat is not None
+        for name, source in (
+            ("docker", _FAKE_DOCKER_SOURCE),
+            ("ssh-keygen", _FAKE_SSH_KEYGEN_SOURCE),
+            ("supervisorctl", _FAKE_SUPERVISORCTL_SOURCE),
+            ("stat", _FAKE_STAT_SOURCE.replace("REAL_STAT", real_stat)),
+        ):
+            script = bin_dir / name
+            script.write_text(source)
+            script.chmod(0o755)
 
 
-def _script_encryption_key(script: str) -> str | None:
-    """Return the literal LATCHKEY_ENCRYPTION_KEY a verification script carries, if any."""
-    for line in script.splitlines():
-        if line.startswith("LATCHKEY_ENCRYPTION_KEY=") and "$(" not in line:
-            return shlex.split(line.split("=", 1)[1])[0]
-    return None
+def fake_vps(
+    tmp_path: Path,
+    accounts_by_service: Mapping[str, Sequence[str]] | None = None,
+    machine_permissions: str | None = None,
+    container_name: str = "mngr-ws",
+    is_local: bool = False,
+) -> OuterHostInterface:
+    """A fake VPS with the package installed, holding a credential store (and optionally a policy) of its own.
 
-
-def machine_script_variables(outer: OuterHostInterface) -> dict[str, str]:
-    """The ``_lk_*`` payload variables of the last machine script this stub was handed."""
-    return _parse_script_variables(as_stub(outer).recorded[-1].command)
-
-
-def machine_script_line(outer: OuterHostInterface, marker: str) -> str:
-    """The one line of the last machine script containing ``marker``, for asserting on what it told the CLI."""
-    matching = [line for line in as_stub(outer).recorded[-1].command.splitlines() if marker in line]
-    assert len(matching) == 1, f"expected exactly one line containing {marker!r}, found {len(matching)}"
-    return matching[0]
-
-
-def _parse_script_variables(script: str) -> dict[str, str]:
-    """Read the ``_lk_*`` assignments a consolidated script opens with, shell-unquoted."""
-    variable_by_name: dict[str, str] = {}
-    for line in script.splitlines():
-        match = _SCRIPT_VARIABLE_LINE.match(line)
-        if match is None:
-            continue
-        variable_by_name[match.group(1)] = "".join(shlex.split(match.group(2)))
-    return variable_by_name
-
-
-def stub_outer(result: CommandResult, name: str = "vps-test") -> OuterHostInterface:
-    """Build a stub outer host typed as ``OuterHostInterface``.
-
-    ``cast`` is used because the stub is structurally-but-not-nominally an
-    OuterHostInterface (the interface has many other abstract methods that the
-    function under test never calls).
+    Its RAM-backed secrets directory starts empty, like a machine that rebooted
+    since it was provisioned; ``run_under_key`` gives it the key its gateway
+    would be running under. ``cast`` is used because the fake is
+    structurally-but-not-nominally an OuterHostInterface (the interface has many
+    other abstract methods that the code under test never calls).
     """
-    return cast(OuterHostInterface, StubOuter(name=name, result=result))
+    vps = FakeVps(root=tmp_path / "vps", container_name=container_name, is_local=is_local)
+    vps.setup()
+    vps.hold(accounts_by_service or {})
+    if machine_permissions is not None:
+        vps.hold_permissions(machine_permissions)
+    return cast(OuterHostInterface, vps)
 
 
-def as_stub(outer: OuterHostInterface) -> StubOuter:
-    return cast(StubOuter, outer)
+def as_vps(outer: OuterHostInterface) -> FakeVps:
+    return cast(FakeVps, outer)
+
+
+class AnsweringVps(FakeVps):
+    """A fake machine that answers every command with a canned result instead of running it."""
+
+    canned: CommandResult = Field(description="What every command is answered with.")
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded.append(
+            RecordedCommand(
+                command=command, timeout_seconds=timeout_seconds, is_kept_out_of_logs=is_command_logging_suppressed()
+            )
+        )
+        return self.canned
+
+
+class ScriptedOuter(MutableModel):
+    """An outer host that runs nothing: it answers by command substring and logs commands and writes in order.
+
+    A ``read-state`` is answered as a machine holding nothing whose home is
+    ``home``, an ``apply-state`` as applied, and any other command with an
+    empty success -- unless ``result_by_substring`` names it (first match
+    wins). Implements only the subset of ``OuterHostInterface`` the code under
+    test touches.
+    """
+
+    name: str = Field(default="vps-test", description="Display name returned by get_name")
+    home: Path = Field(default=Path("/root"), description="The home a read-state answers with.")
+    docker_bridge_address: str = Field(
+        default=DEFAULT_DOCKER_BRIDGE_ADDRESS, description="What the docker-bridge probe is answered with."
+    )
+    is_local: bool = Field(default=False, description="Whether this outer host is the local machine")
+    result_by_substring: dict[str, CommandResult] = Field(
+        default_factory=dict, description="The result for any command containing the key (first match wins)"
+    )
+    events: list[str] = Field(default_factory=list, description="``run:<command>`` and ``write:<path>`` in order")
+    recorded: list[RecordedCommand] = Field(default_factory=list, description="Each command recorded in order")
+    written: list[WrittenFile] = Field(default_factory=list, description="Each file write recorded in order")
+
+    def get_name(self) -> str:
+        return self.name
+
+    def recorded_commands(self) -> list[str]:
+        return [entry.command for entry in self.recorded]
+
+    def execute_idempotent_command(
+        self,
+        command: str,
+        user: str | None = None,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.recorded.append(
+            RecordedCommand(
+                command=command, timeout_seconds=timeout_seconds, is_kept_out_of_logs=is_command_logging_suppressed()
+            )
+        )
+        self.events.append(f"run:{command}")
+        for substring, result in self.result_by_substring.items():
+            if substring in command:
+                return result
+        if "addr show docker0" in command:
+            return CommandResult(stdout=f"{self.docker_bridge_address}\n", stderr="", success=True)
+        canned = canned_machine_answer(command, self.home)
+        return canned if canned is not None else CommandResult(stdout="", stderr="", success=True)
+
+    def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
+        self.written.append(WrittenFile(path=str(path), content=content, mode=mode, is_atomic=is_atomic))
+        self.events.append(f"write:{path}")
+
+    def write_text_file(
+        self,
+        path: Path,
+        content: str,
+        encoding: str = "utf-8",
+        mode: str | None = None,
+        is_atomic: bool = True,
+    ) -> None:
+        self.write_file(path, content.encode(encoding), mode=mode, is_atomic=is_atomic)
+
+
+def scripted_outer(**kwargs: object) -> tuple[OuterHostInterface, ScriptedOuter]:
+    """A ``ScriptedOuter`` both as the interface the code under test takes and as itself, for the assertions."""
+    stub = ScriptedOuter.model_validate(kwargs)
+    return cast(OuterHostInterface, stub), stub
+
+
+def canned_machine_answer(command: str, home: Path) -> CommandResult | None:
+    """What a machine holding nothing answers one of the package's two commands with; ``None`` for any other command."""
+    first_line = command.split("\n", 1)[0]
+    if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_READ_STATE_SUBCOMMAND}"):
+        answers = {
+            _ANSWER_PACKAGE_VERSION: b"0+test",
+            _ANSWER_HOME: str(home).encode("utf-8"),
+            _ANSWER_HAS_CREDENTIAL_STORE: b"0",
+            _ANSWER_HAS_CONTAINER_TUNNEL_KEY: b"0",
+        }
+        lines = [f"{ANSWER_PREFIX}{name}={base64.b64encode(value).decode('ascii')}" for name, value in answers.items()]
+        return CommandResult(stdout="\n".join((*lines, OUTCOME_DONE_MARKER)) + "\n", stderr="", success=True)
+    if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_APPLY_STATE_SUBCOMMAND}"):
+        return CommandResult(stdout=f"{OUTCOME_DONE_MARKER}\n", stderr="", success=True)
+    return None
 
 
 def store_document(accounts_by_service: Mapping[str, Sequence[str]], key: str = "") -> bytes:
@@ -445,14 +585,31 @@ _FAKE_LATCHKEY_SOURCE = (
     "def accounts_of(data, name):\n"
     "    return {account: {'credentialType': 'oauth', 'credentialStatus': 'valid'}\n"
     "            for account in data['accounts'].get(name, [])}\n"
+    # A store written under a key opens only under that key, as the real
+    # store does, and is refused in upstream's words, which is what a caller
+    # tells a wrong key from any other failure by; one written under none (the
+    # desktop's, in these tests) opens under any.
+    "WRONG_KEY = ('Error: Failed to read credential store: Failed to decrypt file: Failed to decrypt data: '\n"
+    "             'Unsupported state or unable to authenticate data. The encryption key may have changed.')\n"
+    "def require_key(data):\n"
+    "    if data['key'] and data['key'] != os.environ.get('LATCHKEY_ENCRYPTION_KEY', ''):\n"
+    "        sys.exit(WRONG_KEY)\n"
     "directory = os.environ['LATCHKEY_DIRECTORY']\n"
     "argv = sys.argv[1:]\n"
+    # On the fake machine every invocation is logged, so a test can see what
+    # the scripts told the CLI to do.
+    "if 'FAKE_VPS_ROOT' in os.environ:\n"
+    "    with open(os.path.join(os.environ['FAKE_VPS_ROOT'], 'latchkey.log'), 'a') as log:\n"
+    "        log.write(' '.join(argv) + '\\n')\n"
     "data = load(directory)\n"
     "if argv[:2] == ['auth', 'list']:\n"
+    "    require_key(data)\n"
     "    out = {name: accounts_of(data, name) for name in data['accounts']}\n"
     "elif argv[:2] == ['services', 'info']:\n"
+    "    require_key(data)\n"
     "    out = {'credentials': accounts_of(data, argv[2])}\n"
     "elif argv[:2] == ['auth', 'clear']:\n"
+    "    require_key(data)\n"
     "    rest = [item for item in argv[2:] if item != '-y']\n"
     "    service, account = rest[0], rest[rest.index('--account') + 1]\n"
     "    remaining = [entry for entry in data['accounts'].get(service, []) if entry != account]\n"
@@ -464,9 +621,10 @@ _FAKE_LATCHKEY_SOURCE = (
     "        json.dump(data, handle)\n"
     "    out = None\n"
     "elif argv[:2] == ['auth', 're-encrypt']:\n"
-    # Upstream's wording (latchkey 3.10.1), repeated rather than imported: the
-    # script under test copes with what the real CLI prints, so the fake has to
-    # print that and not whatever the script happens to look for.
+    "    require_key(data)\n"
+    # Upstream's wording, repeated rather than imported: the script under test
+    # copes with what the real CLI prints, so the fake has to print that and
+    # not whatever the script happens to look for.
     "    if not data['accounts'] and '--services' not in argv:\n"
     "        sys.exit('Error: No stored credentials found to re-encrypt.')\n"
     "    destination, rest = argv[2], argv[3:]\n"
@@ -475,7 +633,14 @@ _FAKE_LATCHKEY_SOURCE = (
     "        account = rest[rest.index('--account') + 1]\n"
     "        rest = rest[: rest.index('--account')]\n"
     "    wanted = rest[1:] if rest[:1] == ['--services'] else None\n"
-    "    merged = dict(load(destination)['accounts'])\n"
+    # The real CLI decrypts the destination to merge into it, so a store there
+    # written under a key other than the one it is to be written under (stdin,
+    # else the source's) is refused the way any store under the wrong key is.
+    "    destination_key = sys.stdin.read().strip() or data['key']\n"
+    "    existing = load(destination)\n"
+    "    if existing['key'] and existing['key'] != destination_key:\n"
+    "        sys.exit(WRONG_KEY)\n"
+    "    merged = dict(existing['accounts'])\n"
     "    for name, accounts in data['accounts'].items():\n"
     "        if wanted is not None and name not in wanted:\n"
     "            continue\n"
@@ -485,12 +650,93 @@ _FAKE_LATCHKEY_SOURCE = (
     "            merged[name] = sorted(set(merged.get(name, [])) | {account})\n"
     "    os.makedirs(destination, exist_ok=True)\n"
     "    with open(os.path.join(destination, STORE), 'w') as handle:\n"
-    "        json.dump({'accounts': merged, 'key': sys.stdin.read().strip() or data['key']}, handle)\n"
+    "        json.dump({'accounts': merged, 'key': destination_key}, handle)\n"
+    # The real CLI runs its migrations against the destination and stamps it.
+    "    with open(os.path.join(destination, 'data-format-version'), 'w') as handle:\n"
+    "        handle.write('2')\n"
     "    out = None\n"
     "else:\n"
     "    sys.exit('unsupported invocation: ' + ' '.join(argv))\n"
     "if out is not None:\n"
     "    sys.stdout.write(json.dumps(out))\n"
+)
+
+# ``docker ps`` finds the one container the fake machine runs (none when the
+# name is empty); ``docker inspect`` reports the mappings it was created with
+# the way the real one formats ``{{json .HostConfig.ExtraHosts}}``; ``docker
+# exec`` runs the command in a home directory of its own per container and
+# user, with the ``-e`` variables in its environment, so an authorized_keys
+# append really lands somewhere a test can read.
+_FAKE_DOCKER_SOURCE = (
+    "#!/usr/bin/env python3\n"
+    "import os, pathlib, subprocess, sys\n"
+    "root = pathlib.Path(os.environ['FAKE_VPS_ROOT'])\n"
+    "argv = sys.argv[1:]\n"
+    "with (root / 'docker.log').open('a') as log:\n"
+    "    log.write(' '.join(argv) + '\\n')\n"
+    "if argv[:1] == ['ps']:\n"
+    "    name = (root / 'docker-container-name').read_text().strip()\n"
+    "    if name:\n"
+    "        print(name)\n"
+    "elif argv[:1] == ['inspect']:\n"
+    "    name = (root / 'docker-container-name').read_text().strip()\n"
+    "    if argv[1:] != ['-f', '{{json .HostConfig.ExtraHosts}}', name]:\n"
+    "        sys.exit('Error: No such object: ' + ' '.join(argv[1:]))\n"
+    "    print((root / 'docker-container-extra-hosts').read_text().strip())\n"
+    "elif argv[:1] == ['exec']:\n"
+    "    rest, user, extra = argv[1:], 'root', {}\n"
+    "    while rest[0].startswith('-'):\n"
+    "        flag = rest.pop(0)\n"
+    "        if flag == '-u':\n"
+    "            user = rest.pop(0)\n"
+    "        elif flag == '-e':\n"
+    "            key, _, value = rest.pop(0).partition('=')\n"
+    "            extra[key] = value\n"
+    "        else:\n"
+    "            sys.exit('unsupported docker exec flag: ' + flag)\n"
+    "    container = rest.pop(0)\n"
+    "    home = root / 'containers' / container / user\n"
+    "    home.mkdir(parents=True, exist_ok=True)\n"
+    "    sys.exit(subprocess.call(rest, env={**os.environ, **extra, 'HOME': str(home)}))\n"
+    "else:\n"
+    "    sys.exit('unsupported docker invocation: ' + ' '.join(argv))\n"
+)
+
+# Mints a "keypair" at the ``-f`` path: a private file and a ``.pub`` beside it,
+# unique per mint so a test can tell a re-minted key from a reused one.
+_FAKE_SSH_KEYGEN_SOURCE = (
+    "#!/bin/sh\n"
+    "set -eu\n"
+    "while [ $# -gt 1 ]; do\n"
+    '  if [ "$1" = -f ]; then _key="$2"; fi\n'
+    "  shift\n"
+    "done\n"
+    "_nonce=\"$(od -An -N8 -tx1 /dev/urandom | tr -d ' \\n')\"\n"
+    'printf \'FAKE PRIVATE KEY %s\\n\' "$_nonce" > "$_key"\n'
+    'chmod 600 "$_key"\n'
+    'printf \'ssh-ed25519 FAKE%s fake@vps\\n\' "$_nonce" > "$_key.pub"\n'
+)
+
+# Records every call; a call naming the program a test marked as failing
+# (``fail_supervisorctl_for``) exits non-zero the way the real one does when
+# the program does not come up.
+_FAKE_SUPERVISORCTL_SOURCE = (
+    "#!/bin/sh\n"
+    'printf \'%s\\n\' "$*" >> "$FAKE_VPS_ROOT/supervisorctl.log"\n'
+    'if [ -f "$FAKE_VPS_ROOT/supervisorctl.fail" ]; then\n'
+    '  case " $* " in *" $(cat "$FAKE_VPS_ROOT/supervisorctl.fail") "*) exit 1 ;; esac\n'
+    "fi\n"
+)
+
+# Only the one probe the package's scripts make is faked: the filesystem type
+# of a directory, answered from a file a test can change.
+_FAKE_STAT_SOURCE = (
+    "#!/bin/sh\n"
+    'if [ "$1" = -f ] && [ "$2" = -c ] && [ "$3" = %T ]; then\n'
+    '  cat "$FAKE_VPS_ROOT/fstype"\n'
+    "  exit 0\n"
+    "fi\n"
+    'exec REAL_STAT "$@"\n'
 )
 
 
@@ -529,18 +775,3 @@ def grant_host_permissions(latchkey: Latchkey, host_id: HostId, rules_json: str)
 
 
 SLACK_GRANTED = '{"rules": [{"slack-api": ["slack-read-all"]}]}'
-
-
-def stub_machine(
-    accounts_by_service: Mapping[str, Sequence[str]] | None = None,
-    machine_permissions: str | None = None,
-) -> OuterHostInterface:
-    """A stub VPS holding a credential store -- and optionally a policy -- of its own."""
-    return cast(
-        OuterHostInterface,
-        StubOuter(
-            result=CommandResult(stdout="", stderr="", success=True),
-            machine_accounts={name: list(accounts) for name, accounts in (accounts_by_service or {}).items()},
-            machine_permissions=machine_permissions,
-        ),
-    )

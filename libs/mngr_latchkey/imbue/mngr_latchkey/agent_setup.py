@@ -113,6 +113,7 @@ _REVERSE_TUNNELED_GATEWAY_HOST: Final[str] = "127.0.0.1"
 CONTAINER_HOSTS_FILE_PATH: Final[Path] = Path("/etc/hosts")
 
 
+@pure
 def _tunneled_gateway_host(gateway_location: LatchkeyGatewayLocation) -> str:
     """The host in a tunneled agent's fixed ``LATCHKEY_GATEWAY`` URL.
 
@@ -548,7 +549,7 @@ def finalize_host_permissions(
     would overwrite whatever policy the machine is already enforcing --
     including grants another of the user's computers made. Seeding a
     machine that has no policy of its own is provisioning's job
-    (:func:`~imbue.mngr_latchkey.remote.provisioning.sync_permissions`).
+    (:func:`~imbue.mngr_latchkey.remote.provisioning.provision_remote_gateway`).
     """
     if opaque_permissions_path is None:
         return

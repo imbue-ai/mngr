@@ -46,13 +46,16 @@ c. Pushing the workspace's state to its machine the way the desktop app does
 
 Gating: this test is deliberately invasive on the machine that runs it (it
 needs passwordless ``sudo`` to run a root sshd, apt-installs ``supervisor``
-and ``nftables`` on the "VPS" = this machine, npm-installs the latchkey CLI
-globally as root, writes under ``/root/.latchkey`` + ``/etc/supervisor/conf.d/``,
-and leaves an enabled nftables policy -- ``/etc/nftables.d/`` plus the
-``mngr-bridge-services-firewall`` systemd unit -- dropping the gateway's and
-owner-exec's ports off ``docker0``/loopback and every other new connection any
-container on this machine opens into it over ``docker0``), so it is opt-in via
-``MNGR_LATCHKEY_E2E_TESTS=1``. CI sets the variable in the
+and ``nftables`` on the "VPS" = this machine, dpkg-installs the
+``mngr-latchkey`` package (which lays its files down system-wide --
+``/usr/lib/mngr-latchkey``, the supervisord drop-ins under
+``/etc/supervisor/conf.d/``, the curl shims under ``/usr/local/bin``, and the
+nftables policy plus the ``mngr-bridge-services-firewall`` systemd unit that
+drop the gateway's and owner-exec's ports off ``docker0``/loopback and every
+other new connection any container on this machine opens into it over
+``docker0`` -- and npm-installs the latchkey CLI globally as root), and
+writes under ``/root/.latchkey`` + ``/run/mngr-latchkey``), so it is
+opt-in via ``MNGR_LATCHKEY_E2E_TESTS=1``. CI sets the variable in the
 ``test-minds-release`` job (the ``run_minds_release_tests`` manual dispatch),
 which runs on a throwaway GitHub ubuntu runner. Once opted in, missing
 prerequisites are hard *failures*, not skips, so a broken CI environment can
@@ -104,8 +107,8 @@ from imbue.mngr_latchkey.encryption_key import encryption_key_path
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import stored_machine_encryption_key
+from imbue.mngr_latchkey.remote.provisioning import CONTAINER_TUNNEL_KEY_FILENAME
 from imbue.mngr_latchkey.remote.provisioning import LATCHKEY_VERSION
-from imbue.mngr_latchkey.remote.provisioning import SUPERVISOR_CONFD_DIR
 from imbue.mngr_latchkey.remote.provisioning import TUNNEL_CONF_FILENAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import forward_events_log_path
@@ -155,15 +158,19 @@ _WORKSPACE_GATEWAY_URL: Final[str] = f"http://{OUTER_HOST_HOSTNAME_IN_CONTAINER}
 _OUTER_HOST_START_ARG: Final[str] = "=".join(OUTER_HOST_ADD_HOST_ARGS)
 
 # Paths the remote-gateway provisioning writes on the "VPS" (= this machine,
-# as root). Mirrors mngr_latchkey.remote.provisioning's remote layout: the remote
-# LATCHKEY_DIRECTORY is ``$HOME/.latchkey`` for the root ssh user.
+# as root). Mirrors mngr_latchkey.remote.package's remote layout: the remote
+# LATCHKEY_DIRECTORY is ``$HOME/.latchkey`` for the root ssh user, and the
+# gateway itself (its supervisord programs, scripts and extension) is the
+# ``mngr-latchkey`` Debian package.
 _VPS_LATCHKEY_DIR: Final[str] = "/root/.latchkey"
 _VPS_PERMISSIONS_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/permissions.json"
 _VPS_CREDENTIALS_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/credentials.json.enc"
-_VPS_SUPERVISOR_CONF_GLOB: Final[str] = "/etc/supervisor/conf.d/latchkey-*.conf"
-# The reverse-tunnel drop-in provisioning registers only for a container that
-# cannot resolve the outer host; this test's container can, so it must not exist.
-_VPS_TUNNEL_CONF_PATH: Final[str] = str(SUPERVISOR_CONFD_DIR / TUNNEL_CONF_FILENAME)
+_VPS_PACKAGE_NAME: Final[str] = "mngr-latchkey"
+# The reverse tunnel's target and keypair, which provisioning writes only for a
+# container that cannot resolve the outer host; this test's container can, so
+# neither may exist.
+_VPS_TUNNEL_CONF_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/{TUNNEL_CONF_FILENAME}"
+_VPS_TUNNEL_KEY_PATH: Final[str] = f"{_VPS_LATCHKEY_DIR}/{CONTAINER_TUNNEL_KEY_FILENAME}"
 
 # Latchkey scope granted in step (c). Must be a scope the bundled
 # services.json catalog maps back to the ``slack`` service, so the
@@ -679,7 +686,7 @@ def _closed_port_probe_command(port: int) -> str:
 
 def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: Path) -> None:
     """Remote workspace uses one VPS gateway; desktop routes and local state sync still work."""
-    # -- Prerequisites (hard failures once opted in; see _require) ----------
+    # Prerequisites (hard failures once opted in; see _require)
     _require(shutil.which("docker") is not None, "docker CLI not found")
     docker_probe = subprocess.run(["docker", "version"], capture_output=True, text=True, timeout=60)
     _require(docker_probe.returncode == 0, f"docker daemon not reachable:\n{docker_probe.stderr}")
@@ -709,7 +716,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
         forward_process: subprocess.Popen[bytes] | None = None
         agent_address: str | None = None
         try:
-            # -- Step 1: latchkey env for the new workspace (minds' create flow) --
+            # Step 1: latchkey env for the new workspace (minds' create flow)
             agent_env_result = _run_mngr(
                 env,
                 repo,
@@ -727,7 +734,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             assert "LATCHKEY_GATEWAY_SECONDARY" not in latchkey_env
             assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in latchkey_env
 
-            # -- Step 2: create the remote workspace with the latchkey env --
+            # Step 2: create the remote workspace with the latchkey env
             host_name = f"lk-e2e-{uuid.uuid4().hex}"
             agent_address = f"svc@{host_name}.docker"
             host_env_args: list[str] = []
@@ -757,7 +764,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             )
             _agent_id, host_id = _parse_created_event(create_result.stdout)
 
-            # -- Step 3: swing the opaque permissions handle to the canonical host path --
+            # Step 3: swing the opaque permissions handle to the canonical host path
             link_result = _run_mngr(
                 env,
                 repo,
@@ -780,7 +787,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 f"unexpected {ENV_LATCHKEY_GATEWAY} value:\n{env_probe.stdout}"
             )
 
-            # -- Step 4: run the forward supervisor (gateway + discovery + provisioning + sync) --
+            # Step 4: run the forward supervisor (gateway + discovery + provisioning + sync)
             forward_log_path = tmp_path / "latchkey-forward.log"
             # ``--log-file`` mirrors how the production supervisor spawns the
             # forward process: it routes the structured JSONL log (the only
@@ -800,7 +807,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
 
             password = latchkey_env[ENV_LATCHKEY_GATEWAY_PASSWORD]
 
-            # -- (a) the VPS gateway forwards desktop-owned extension routes --
+            # (a) the VPS gateway forwards desktop-owned extension routes
             desktop_self_command = _curl_gateway_command(
                 _WORKSPACE_GATEWAY_URL,
                 {"X-Latchkey-Gateway-Password": password},
@@ -827,7 +834,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 f"{_forward_diagnostics(latchkey_directory, forward_log_path)}"
             )
 
-            # -- (b) native third-party routing terminates on the same VPS gateway --
+            # (b) native third-party routing terminates on the same VPS gateway
             vps_gateway_probe_command = (
                 f"curl -sS -m 10 -o /dev/null -w '{_HTTP_STATUS_MARKER}%{{http_code}}' "
                 f"-H {shlex.quote(f'X-Latchkey-Gateway-Password: {password}')} "
@@ -870,7 +877,7 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 f"stdout:\n{retired_port_probe.stdout}\nstderr:\n{retired_port_probe.stderr}"
             )
 
-            # -- (c) the desktop's synchronous pushes and read of the machine --
+            # (c) the desktop's synchronous pushes and read of the machine
             # Precondition: provisioning seeded the deny-all baseline
             # permissions and (nothing connected yet) no credential bundle.
             initial_sync_ok = poll_until(
@@ -884,10 +891,11 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
             # took is settled: the container reached the gateway over its docker
             # bridge, and no VPS->container reverse tunnel was registered nor
             # anything tunneled onto the container's own loopback port.
-            assert _run_on_vps(ssh_config_path, f"test -f {_VPS_TUNNEL_CONF_PATH}").returncode != 0, (
-                f"provisioning registered the reverse tunnel {_VPS_TUNNEL_CONF_PATH} on the VPS for a container "
-                "that resolves its outer host"
-            )
+            for tunnel_path in (_VPS_TUNNEL_CONF_PATH, _VPS_TUNNEL_KEY_PATH):
+                assert _run_on_vps(ssh_config_path, f"test -e {tunnel_path}").returncode != 0, (
+                    f"provisioning wired the reverse tunnel ({tunnel_path} exists on the VPS) for a container "
+                    "that resolves its outer host"
+                )
             bridge_firewall = _run_on_vps(ssh_config_path, f"nft list table inet {BRIDGE_SERVICES_NFT_TABLE}")
             assert bridge_firewall.returncode == 0, (
                 f"the nftables table {BRIDGE_SERVICES_NFT_TABLE} is not loaded on the VPS:\n"
@@ -961,12 +969,13 @@ def test_latchkey_remote_workspace_gateways_and_state_sync_end_to_end(tmp_path: 
                 except subprocess.TimeoutExpired:
                     forward_process.kill()
                     forward_process.wait()
+            # Purging the package stops and unregisters its supervisord
+            # programs, unloads its nftables table and drops the RAM-backed
+            # secrets and the logs; the latchkey directory (the machine's own
+            # data) is the test's to remove.
             _run_on_vps(
                 ssh_config_path,
-                "supervisorctl stop latchkey-gateway latchkey-tunnel >/dev/null 2>&1; "
-                f"rm -f {_VPS_SUPERVISOR_CONF_GLOB}; "
-                "supervisorctl reread >/dev/null 2>&1; supervisorctl update >/dev/null 2>&1; "
-                f"rm -rf {_VPS_LATCHKEY_DIR} /run/mngr-latchkey",
+                f"dpkg --purge {_VPS_PACKAGE_NAME} >/dev/null 2>&1; rm -rf {_VPS_LATCHKEY_DIR} /run/mngr-latchkey",
             )
             _cleanup_test_containers()
 

@@ -20,6 +20,8 @@ dependencies = [
     # Cross-process read/write file lock; its read side is what lets a probe ask
     # who owns a latchkey directory without contending with another probe.
     "filelock>=3.31",
+    # Renders the Debian package that provisions a remote host's gateway.
+    "jinja2>=3.1",
     "pydantic>=2.0",
 ]
 
@@ -29,6 +31,15 @@ latchkey = "imbue.mngr_latchkey.plugin"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# The remote gateway package's source tree mirrors the Debian filesystem, so
+# part of it sits under a ``usr/lib/`` that the repository's ``**/lib/`` ignore
+# rule matches; ship it regardless (``remote/debian/.gitignore`` re-includes it
+# for git). Declared for every build target rather than the wheel alone: the
+# publish workflow builds the wheel from the sdist, so an sdist without these
+# files would give a wheel without them.
+[tool.hatch.build]
+artifacts = ["imbue/mngr_latchkey/remote/debian/tree/usr/lib/**"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["imbue"]

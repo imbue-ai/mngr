@@ -1,0 +1,11 @@
+#!/bin/sh
+# On removal, stop the programs before their configs go away; an upgrade keeps
+# them running (the pass that installs the upgrade restarts the gateway itself).
+set -eu
+
+case "${1:-}" in
+  remove)
+    supervisorctl stop '{{ gateway_program_name }}' '{{ tunnel_program_name }}' >/dev/null 2>&1 || true
+    ;;
+  *) ;;
+esac

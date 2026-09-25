@@ -1,0 +1,55 @@
+#!/bin/sh
+# What supervisord runs as the gateway program. Reads the machine's own key and
+# listen password from their RAM-backed files into the environment, the address
+# to bind from the file apply-state wrote, and execs the gateway, so supervisord
+# tracks the gateway's own PID and no secret ever appears in the supervisord
+# config or a process listing.
+#
+# The desktop-owned pair is handed over as file paths: the forwarding extension
+# reads them on every request it proxies, so a provisioning pass from another
+# of the user's computers takes effect without a restart. Their absence is not
+# a launch failure either -- the extension answers the desktop-owned routes
+# with a 503 saying so, while third-party calls keep working.
+set -eu
+. '{{ layout.install_dir }}/functions'
+
+# The npm global bin directory has to be on PATH whatever supervisord's is.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+# A reboot wipes the RAM-backed secrets. Refuse to run a keyless gateway: exit
+# non-zero so supervisord records a failed start, and the gateway stays down
+# until the next provisioning pass re-writes them.
+if ! [ -s "$LK_ENCRYPTION_KEY_FILE" ] || ! [ -s "$LK_LISTEN_PASSWORD_FILE" ]; then
+  lk_fail "latchkey gateway secrets are missing (tmpfs cleared by a reboot?); awaiting re-provision"
+fi
+LATCHKEY_ENCRYPTION_KEY="$(lk_secret_value "$LK_ENCRYPTION_KEY_FILE")"
+LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")"
+export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD
+export LATCHKEY_DIRECTORY="$LK_LATCHKEY_DIR"
+export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE="$LK_DESKTOP_PASSWORD_FILE"
+export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE="$LK_DESKTOP_OVERRIDE_FILE"
+export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL='http://127.0.0.1:{{ desktop_gateway_vps_port }}'
+# The gateway binds the machine's docker bridge address only (never a public
+# interface): the agent's container reaches it there by docker's name for its
+# host, and the reverse tunnel into a container that predates that route
+# forwards to the same address. LATCHKEY_GATEWAY_LISTEN_PORT is the name
+# upstream reads.
+lk_source_gateway_conf
+export LATCHKEY_GATEWAY_LISTEN_PORT={{ outer_port }}
+export LATCHKEY_GATEWAY_LISTEN_HOST="$LK_GATEWAY_LISTEN_HOST"
+export LATCHKEY_DISABLE_COUNTING=1
+# Requests carrying the X-Imbue-Impersonate marker header get Chrome TLS
+# impersonation through the curl router; everything else uses system curl.
+export LATCHKEY_CURL='{{ curl_router_path }}'
+# The router fails every request when the desktop egress rules file it is
+# pointed at is missing, so one with no rules is created for a machine that has
+# none. A machine's existing rules are left alone.
+if [ ! -f "$LK_DESKTOP_EGRESS_RULES_FILE" ]; then
+  (umask 077 && printf '{}\n' > "$LK_DESKTOP_EGRESS_RULES_FILE")
+fi
+export LATCHKEY_DESKTOP_PROXY_CONFIG="$LK_DESKTOP_EGRESS_RULES_FILE"
+# The router routes on the service latchkey reports for a request (the
+# X-Latchkey-Matched-Service header), which latchkey sends only with its
+# diagnostic headers on.
+export LATCHKEY_DIAGNOSTIC_HEADERS=1
+exec latchkey gateway --max-body-size {{ max_body_size_bytes }}

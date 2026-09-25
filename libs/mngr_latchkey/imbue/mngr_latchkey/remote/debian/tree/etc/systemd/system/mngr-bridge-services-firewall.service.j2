@@ -1,0 +1,12 @@
+[Unit]
+Description=Keep mngr's bridge-bound services (latchkey gateway, owner-exec) on the docker bridge
+After=nftables.service
+Before=docker.service owner-exec-vm.service supervisor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ nft_binary_path }} -f {{ nft_policy_path }}
+
+[Install]
+WantedBy=multi-user.target

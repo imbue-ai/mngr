@@ -1,0 +1,6 @@
+# The package tree mirrors the Debian filesystem, so its usr/lib/ is not a
+# build output: re-include it under the root **/lib/ rule. The offload sandbox
+# images never see this file (their .dockerignore is derived from the root
+# .gitignore alone), so scripts/generate_dockerignore.sh re-includes the same
+# path in docker form; keep the two together.
+!tree/usr/lib/

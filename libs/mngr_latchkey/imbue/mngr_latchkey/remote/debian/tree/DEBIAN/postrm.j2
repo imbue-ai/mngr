@@ -1,0 +1,22 @@
+#!/bin/sh
+# Runs after the package's files are gone, so nothing here may source them.
+# Purging also drops what the package created outside its own file list: the
+# RAM-backed secrets, the extension copy, the logs, and the loaded nftables
+# table. The latchkey directory itself (the machine's credentials and policy)
+# is the user's and is kept.
+set -eu
+
+case "${1:-}" in
+  remove|purge)
+    supervisorctl reread >/dev/null 2>&1 || true
+    supervisorctl update >/dev/null 2>&1 || true
+    systemctl disable '{{ firewall_unit_name }}' >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    ;;
+  *) ;;
+esac
+if [ "${1:-}" = purge ]; then
+  {{ nft_binary_path }} delete table inet '{{ nft_table_name }}' >/dev/null 2>&1 || true
+  rm -rf '{{ layout.secrets_dir }}' '{{ layout.log_dir }}'
+  rm -f "${HOME:-/root}/{{ remote_latchkey_dir_name }}/{{ extensions_dir_name }}/{{ extension_filename }}"
+fi

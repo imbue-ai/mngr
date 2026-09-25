@@ -42,6 +42,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_GATEWAY_LOG_FILENAME
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.remote.provisioning import REMOTE_LOG_DIR
 from imbue.mngr_latchkey.remote.provisioning import REMOTE_TUNNEL_LOG_FILENAME
 
 _WORKSPACE_AGENT_ID: AgentId = AgentId("agent-" + "0" * 31 + "3")
@@ -155,7 +156,7 @@ def _collect(
     )
 
 
-# --- the mngr exec argvs ---------------------------------------------------
+# the mngr exec argvs
 
 
 def test_build_diagnostics_argv_runs_the_collector_through_the_json_envelope() -> None:
@@ -228,12 +229,13 @@ def test_build_latchkey_logs_argv_targets_the_outer_host() -> None:
     assert "--no-start" in argv
     command = argv[3]
     assert f'"$HOME"/{REMOTE_LATCHKEY_DIR_NAME}' in command
+    assert f"find {REMOTE_LOG_DIR} " in command
     assert f"-name {REMOTE_GATEWAY_LOG_FILENAME}" in command
     assert f"-name {REMOTE_TUNNEL_LOG_FILENAME}" in command
     assert f"-mmin -{LATCHKEY_LOG_MAX_AGE_MINUTES}" in command
 
 
-# --- staging the archive ---------------------------------------------------
+# staging the archive
 
 
 def test_collection_stages_the_returned_zip_in_the_reports_private_dir(
@@ -294,7 +296,7 @@ def test_two_collections_stage_side_by_side_instead_of_overwriting_each_other(
     assert second.staged_zip_path.read_bytes() == second_bytes
 
 
-# --- the one-line notes ----------------------------------------------------
+# the one-line notes
 
 
 @pytest.mark.parametrize(
@@ -451,7 +453,7 @@ def test_an_empty_remote_stdout_notes_that_nothing_was_collected(
     assert result.note == "the workspace collected nothing"
 
 
-# --- the latchkey gateway-tail mirror --------------------------------------
+# the latchkey gateway-tail mirror
 
 
 def test_the_gateway_tail_is_mirrored_into_the_latchkey_dir_for_the_group_sweep(

@@ -4,6 +4,8 @@ Per CLAUDE.md, do not create tests for this module itself; the helpers
 are exercised through the tests that import them.
 """
 
+import io
+import tarfile
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
@@ -247,3 +249,44 @@ def make_full_fake_latchkey(latchkey_directory: Path) -> FakeLatchkey:
         jwt="header.payload.signature",
     )
     return fake
+
+
+# The ``ar`` container a ``.deb`` is: a magic line, then 60-byte member headers
+# each followed by the member's bytes (padded to an even length).
+_AR_MAGIC = b"!<arch>\n"
+_AR_HEADER_SIZE = 60
+
+
+def read_deb_members(content: bytes) -> dict[str, bytes]:
+    """The members of a ``.deb`` (``debian-binary``, ``control.tar.gz``, ``data.tar.gz``), in archive order."""
+    assert content.startswith(_AR_MAGIC), "not an ar archive"
+    members: dict[str, bytes] = {}
+    offset = len(_AR_MAGIC)
+    while offset < len(content):
+        header = content[offset : offset + _AR_HEADER_SIZE]
+        name = header[:16].decode("ascii").strip()
+        size = int(header[48:58].decode("ascii").strip())
+        members[name] = content[offset + _AR_HEADER_SIZE : offset + _AR_HEADER_SIZE + size]
+        offset += _AR_HEADER_SIZE + size + (size % 2)
+    return members
+
+
+def read_deb_tar(content: bytes, member_name: str) -> tarfile.TarFile:
+    return tarfile.open(fileobj=io.BytesIO(read_deb_members(content)[member_name]), mode="r:gz")
+
+
+def extract_deb_data(content: bytes, destination: Path) -> None:
+    """Unpack the package's files under ``destination``, the way dpkg would under ``/``."""
+    with read_deb_tar(content, "data.tar.gz") as tar:
+        tar.extractall(destination, filter="data")
+
+
+def read_deb_control_field(content: bytes, field_name: str) -> str:
+    with read_deb_tar(content, "control.tar.gz") as tar:
+        control_file = tar.extractfile("./control")
+        assert control_file is not None
+        control = control_file.read().decode("utf-8")
+    for line in control.splitlines():
+        if line.startswith(f"{field_name}: "):
+            return line.removeprefix(f"{field_name}: ")
+    raise AssertionError(f"no {field_name} field in the control file:\n{control}")

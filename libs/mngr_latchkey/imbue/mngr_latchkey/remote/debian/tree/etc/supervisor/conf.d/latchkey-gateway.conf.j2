@@ -1,0 +1,18 @@
+; supervisord keeps the gateway up and relaunches it whenever it exits, so a
+; crash is recovered without a desktop round-trip. The small startretries is
+; deliberate: the one expected repeated start failure is a reboot (the RAM-backed
+; secrets are gone), where going quietly FATAL is the desired "down until
+; re-provisioned" state rather than an endless retry loop.
+[program:{{ gateway_program_name }}]
+command={{ sh_binary_path }} {{ layout.install_dir }}/gateway-run
+user=root
+autostart=true
+autorestart=true
+startsecs={{ supervisor_start_seconds }}
+startretries={{ supervisor_gateway_start_retries }}
+stopasgroup=true
+killasgroup=true
+stdout_logfile={{ layout.log_dir }}/{{ gateway_log_filename }}
+stdout_logfile_maxbytes={{ supervisor_log_max_bytes }}
+stdout_logfile_backups={{ supervisor_log_backups }}
+redirect_stderr=true

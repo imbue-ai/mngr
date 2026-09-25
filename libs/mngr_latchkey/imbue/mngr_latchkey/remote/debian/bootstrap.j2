@@ -1,0 +1,45 @@
+set -e
+export DEBIAN_FRONTEND=noninteractive
+_lk_deb='{{ artifact_path }}'
+
+# The Debian dependencies the package declares. "dpkg -i" checks them but does
+# not resolve them, and the package's own scripts cannot run apt (dpkg holds
+# its lock while they run), so they are put in place here first.
+_lk_missing=""
+for _lk_pkg in {{ debian_dependencies | join(' ') }}; do
+  if ! dpkg -s "$_lk_pkg" >/dev/null 2>&1; then
+    _lk_missing="$_lk_missing $_lk_pkg"
+  fi
+done
+if [ -n "$_lk_missing" ]; then
+  apt-get update
+  apt-get install -y $_lk_missing
+fi
+# The distro package starts supervisord on install; repeating it is idempotent
+# and recovers a host where the service was left stopped. Tolerated on the rare
+# non-systemd host: the package's supervisorctl calls then fail loudly instead
+# of silently degrading.
+systemctl enable --now supervisor >/dev/null 2>&1 || true
+
+# Node.js + npm via NodeSource, version-gated rather than presence-gated: a
+# preinstalled distro node (Debian bookworm's 18.x) exists but cannot run the
+# pinned latchkey (modern npm refuses node < 20.17). The setup script is
+# downloaded to a file rather than piped so that "set -e" still aborts on a
+# failed download without bash-only pipefail.
+_lk_node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+case "$_lk_node_major" in ''|*[!0-9]*) _lk_node_major=0 ;; esac
+if [ "$_lk_node_major" -lt {{ minimum_node_major_version }} ] || ! command -v npm >/dev/null 2>&1; then
+  curl -fsSL 'https://deb.nodesource.com/setup_{{ node_major_version }}.x' -o /tmp/nodesource_setup.sh
+  bash /tmp/nodesource_setup.sh
+  apt-get install -y nodejs
+  rm -f /tmp/nodesource_setup.sh
+fi
+
+# Install (or reinstall, which re-runs its postinst) the package. This command
+# may be replayed after a transient SSH failure without knowing whether the
+# first run finished, so an already installed build whose artifact is gone is
+# recognized as done rather than failing on the missing file.
+if [ -f "$_lk_deb" ] || [ "$(dpkg-query -W -f '${Version}' '{{ package_name }}' 2>/dev/null || true)" != '{{ package_version }}' ]; then
+  dpkg -i "$_lk_deb"
+fi
+rm -f "$_lk_deb"

@@ -1,0 +1,107 @@
+#!/bin/sh
+# Runs after every install of the package (dpkg -i re-runs it for an already
+# installed version too, which is how a provisioning pass repairs a machine).
+# Idempotent: each component is installed only when missing or -- for the
+# latchkey CLI and the curl shims, which live under version-less names -- when
+# the recorded version differs from the one this build pins.
+#
+# apt is never run here: dpkg holds its lock while this runs, so the Debian
+# dependencies and Node.js are put in place by the bootstrap script that
+# precedes the install.
+set -eu
+
+case "${1:-}" in
+  configure) ;;
+  *) exit 0 ;;
+esac
+
+. '{{ layout.install_dir }}/functions'
+
+# The curl router and the Chrome-impersonating curl it fronts, fetched from
+# the latchkey-curl-shims release: the statically linked musl build, so it
+# runs on any VPS image regardless of how old its glibc is, verified against
+# the sha256 pinned at build time rather than one downloaded beside it.
+# Fail-loud, like every other component: the gateway run script points
+# latchkey at the router unconditionally, so a missing pair would break every
+# request.
+_lk_arch="$(uname -m)"
+case "$_lk_arch" in
+{%- for uname_pattern, triple, sha256 in curl_shims_by_uname_pattern %}
+  {{ uname_pattern }}) _lk_triple={{ triple }}; _lk_sha256={{ sha256 }} ;;
+{%- endfor %}
+  *) lk_fail "no impersonating curl build for arch $_lk_arch" ;;
+esac
+_lk_curl_want="{{ curl_shims_version }} ${_lk_triple}"
+if [ ! -x '{{ curl_router_path }}' ] || [ "$(cat '{{ curl_version_stamp_path }}' 2>/dev/null)" != "$_lk_curl_want" ]; then
+  _lk_tarball="latchkey-curl-shims-${_lk_triple}.tar.gz"
+  _lk_url="https://github.com/{{ curl_shims_repo }}/releases/download/{{ curl_shims_version }}/${_lk_tarball}"
+  _lk_tmp="$(mktemp -d)"
+  trap 'rm -rf "$_lk_tmp"' EXIT
+  curl -fsSL --retry 3 --retry-delay 2 -o "${_lk_tmp}/${_lk_tarball}" "$_lk_url"
+  (cd "${_lk_tmp}" && echo "${_lk_sha256}  ${_lk_tarball}" | sha256sum -c - >/dev/null)
+  tar -xzf "${_lk_tmp}/${_lk_tarball}" -C "${_lk_tmp}" --strip-components=1
+  # Staged beside their destinations and renamed into place: overwriting a
+  # binary the running gateway is executing fails with ETXTBSY, and staging
+  # both before swapping either leaves the previous pair untouched if anything
+  # above failed. The router -- the one LATCHKEY_CURL names -- is swapped
+  # last, so no request reaches a new router fronting an old impersonator. The
+  # stamp is written only once both are in place.
+  install -m 0755 "${_lk_tmp}/{{ curl_router_bin }}" '{{ curl_router_path }}{{ curl_staged_suffix }}'
+  install -m 0755 "${_lk_tmp}/{{ curl_impersonate_bin }}" '{{ curl_impersonate_path }}{{ curl_staged_suffix }}'
+  mv -f '{{ curl_impersonate_path }}{{ curl_staged_suffix }}' '{{ curl_impersonate_path }}'
+  mv -f '{{ curl_router_path }}{{ curl_staged_suffix }}' '{{ curl_router_path }}'
+  printf '%s\n' "$_lk_curl_want" > '{{ curl_version_stamp_path }}'
+fi
+
+# Node.js is installed by the bootstrap (NodeSource); verified here because a
+# stale node earlier on PATH (a manually installed /usr/local/bin/node) can
+# still shadow it, which would surface below as a cryptic npm crash.
+_lk_node_major="$(node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1)"
+case "$_lk_node_major" in ''|*[!0-9]*) _lk_node_major=0 ;; esac
+if [ "$_lk_node_major" -lt {{ minimum_node_major_version }} ]; then
+  lk_fail "node at $(command -v node || echo missing) reports version $(node --version 2>/dev/null || echo none); latchkey needs Node.js >= {{ minimum_node_major_version }}. Remove or upgrade the shadowing installation."
+fi
+
+# The latchkey CLI, pinned. The installed version is read from the global
+# package's package.json rather than by running "latchkey --version": the CLI
+# resolves its encryption key before printing anything, so on a headless
+# machine with a credential store and no key in the environment it exits
+# non-zero, which would read as a permanent mismatch and reinstall on every
+# pass.
+_lk_gateway_needs_restart=0
+if [ "$(node -p 'require(process.argv[1]).version' "$(npm root -g)/latchkey/package.json" 2>/dev/null)" != '{{ latchkey_version }}' ]; then
+  npm install -g 'latchkey@{{ latchkey_version }}'
+  # supervisord keeps the old code in memory across an npm upgrade (reread /
+  # update only bounce a program whose config changed).
+  _lk_gateway_needs_restart=1
+fi
+
+# What the ad-hoc provisioning this package replaces left on a machine it set
+# up: the gateway wrapper it wrote beside the store (supervisord runs the
+# package's now), the extension copy it staged, and the secrets a build before
+# the RAM-backed directory kept on disk.
+rm -f "$LK_LATCHKEY_DIR/{{ encryption_key_filename }}" \
+  "$LK_LATCHKEY_DIR/{{ listen_password_filename }}" \
+  "$LK_LATCHKEY_DIR/{{ desktop_permissions_override_filename }}" \
+  "$LK_LATCHKEY_DIR/{{ legacy_gateway_run_script_filename }}" \
+  "$LK_EXTENSIONS_DIR/{{ extension_filename }}{{ legacy_extension_candidate_suffix }}"
+
+# The RAM-backed secrets directory the gateway reads its secrets from.
+lk_require_secrets_dir
+
+# The policy keeping the gateway's port (and the owner-exec daemon's) on the
+# docker bridge, loaded now and at every boot by the shipped oneshot, before
+# either bridge-bound service is started: binding the bridge address alone
+# would still deliver a packet for it that arrived on the public interface.
+# "restart" re-runs the oneshot so a changed policy is applied now, not only
+# at the next boot.
+systemctl daemon-reload
+systemctl enable --now '{{ firewall_unit_name }}'
+systemctl restart '{{ firewall_unit_name }}'
+
+# Register (or re-register) the supervisord programs.
+supervisorctl reread
+supervisorctl update
+if [ "$_lk_gateway_needs_restart" = 1 ]; then
+  supervisorctl restart "$LK_GATEWAY_PROGRAM" || true
+fi

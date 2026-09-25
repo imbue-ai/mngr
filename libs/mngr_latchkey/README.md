@@ -274,7 +274,8 @@ gateway:
   a request it injected credentials into, so a request it injected nothing
   into is never routed.
 - Latchkey sets that header only with its diagnostic headers turned on. The
-  gateway run script exports `LATCHKEY_DIAGNOSTIC_HEADERS=1` for that.
+  package's `gateway-run` script exports `LATCHKEY_DIAGNOSTIC_HEADERS=1` for
+  that.
 - Latchkey puts its header ahead of the caller's arguments and leaves a header
   of the same name that the caller supplied in place. The router reads the
   first occurrence, which is latchkey's, and removes every occurrence before
@@ -285,8 +286,8 @@ gateway:
   example, is shared by Google Drive, Google Docs and Google Sheets. Latchkey
   reports the service whose credentials it used, so routing `google-docs` does
   not route a request that latchkey served with `google-drive` credentials.
-- The gateway run script creates the file as `{}` when the machine has none,
-  and exports its path as `LATCHKEY_DESKTOP_PROXY_CONFIG`. The router fails
+- The package's `gateway-run` script creates the file as `{}` when the machine
+  has none, and exports its path as `LATCHKEY_DESKTOP_PROXY_CONFIG`. The router fails
   every request when that variable names a missing file, which is why the
   script that exports the variable also creates the file.
 - The router reads the file on every request, so an edit takes effect without
@@ -307,8 +308,8 @@ This computer keeps a copy of the file at
 `<latchkey_directory>/mngr_latchkey/hosts/<host_id>/proxyRules.json`, handled
 like its copy of the host's permissions file:
 
-- `MachineCredentials.refresh` reads the machine's file in the same remote
-  command as the credentials and the policy, and adopts it. The machine always
+- `MachineCredentials.refresh` reads the machine's file in the same
+  `read-state` as the credentials and the policy, and adopts it. The machine always
   wins. When the machine has no file, the copy here is removed. Unlike the
   policy, the machine is never seeded from the copy here.
 - `read_host_desktop_egress_rules` returns the copy's text.
@@ -393,6 +394,105 @@ allows.
   `parse_desktop_egress_rules` and `is_service_routed` write and read the
   rules file.
 
+## Remote gateway package
+
+A remote host's VPS gets its gateway as one Debian package, `mngr-latchkey`,
+built by `imbue.mngr_latchkey.remote.package` from the `remote/debian/tree/`
+directory in this repository, which is laid out exactly as the package's files
+land on the machine:
+
+```
+DEBIAN/control, postinst, prerm, postrm      the package, and what installing it does
+usr/bin/mngr-latchkey                        the one command the desktop drives the machine through
+usr/lib/mngr-latchkey/read-state             "mngr-latchkey read-state": assemble what the machine holds
+usr/lib/mngr-latchkey/apply-state            "mngr-latchkey apply-state": make the machine match a document
+usr/lib/mngr-latchkey/gateway-run            what supervisord runs as latchkey-gateway
+usr/lib/mngr-latchkey/tunnel-run             what supervisord runs as latchkey-tunnel (see below)
+usr/lib/mngr-latchkey/functions              sourced by all of the above
+usr/lib/mngr-latchkey/extensions/            the desktop-gateway proxy extension
+etc/supervisor/conf.d/latchkey-*.conf        the two supervisord programs
+etc/nftables.d/mngr-bridge-services.nft      the policy keeping the bridge-bound ports on the docker bridge
+etc/systemd/system/mngr-bridge-services-firewall.service   the oneshot that loads it at boot
+var/log/mngr-latchkey/                       gateway.log and tunnel.log
+```
+
+Files ending in `.j2` are jinja templates rendered from the versions, ports,
+paths and names the Python side decides (`RemotePackageContext`), so there is
+one source of truth for both. The build is pure Python (tar + ar), so it runs
+on a macOS desktop, and it is reproducible: the package version is
+`<plugin version>+<hash of the sources and context>`, so `dpkg -l mngr-latchkey`
+on a VPS says exactly which build it runs.
+
+The gateway's share of provisioning a host (`provision_remote_gateway`, which
+also provisions the owner-exec daemon on the same pass) is then five remote
+operations, whatever state the machine is in: resolve the VPS's docker bridge
+address (the one the gateway binds, and the owner-exec daemon with it), upload
+the `.deb`, run a short bootstrap (apt dependencies, Node.js from NodeSource,
+`dpkg -i`), read the machine, apply what it should hold. When this computer
+has no key recorded for the machine, the read also brings the machine's
+credential store back, still encrypted, so that if the machine knows no key
+either, the desktop's key can be tried against it here before the store is
+given up on. The package's `postinst` installs the pinned latchkey CLI and the curl
+shims from `imbue-ai/latchkey-curl-shims` (both version-gated, the shims
+verified against sha256 sums pinned in the package), loads the nftables policy
+(and enables the unit that re-loads it at boot) before either bridge-bound
+service can start, scrubs what the ad-hoc provisioning left on a machine it
+set up, and registers the supervisord programs. The package is installed before the owner-exec
+daemon is provisioned, for the same reason. apt is never run from a maintainer
+script (dpkg holds its lock), which is why the bootstrap exists.
+
+Every exchange with a provisioned machine afterwards is one of the two
+commands, each a single remote command with a document on its stdin
+(`<key> <base64>` lines in a quoted heredoc: data the shell never interprets,
+and nothing from it reaches the `argv` of `mngr-latchkey`; of the `latchkey`
+invocations its scripts make, only the service and account names travel in
+`argv`, never a secret):
+
+- `read-state` prints prefixed base64 answers: the secrets the gateway runs
+  under, whether the machine has a credential store, its config, its policy,
+  its desktop egress rules, whether it holds a reverse tunnel's keypair, when
+  the document carries `container_host_id` the `--add-host` mappings that
+  host's container was created with, and, when it carries
+  `include_credential_store`, its credential store as it holds it, still
+  encrypted under its own key. Nothing on the machine decrypts the store: the
+  asking computer re-encrypts it for itself, so no key of that computer's
+  reaches the machine.
+- `apply-state` applies whichever entries the document carries, in a fixed
+  order under one `set -e`: the machine's own key and listen password
+  (adopted, refused if the machine already runs under different ones), the
+  desktop-owned pair (replaced), the config, a credential bundle to merge or an
+  account to clear, the desktop egress rules, the policy, the address the
+  gateway binds (`gateway.conf`
+  under `~/.latchkey`), the container to tunnel into, and a gateway restart.
+  Whatever the document carries, it also refreshes the gateway's extension
+  from the package's copy, so a restart loads the installed package's version.
+  A machine that lost its key to a reboot is handed it back inside the same
+  document, so that costs no extra round trip.
+
+The gateway binds the VPS's docker bridge address, which the agent's container
+reaches as `http://host.docker.internal:1989` through the `--add-host` mapping
+the VPS provider creates every container with. The `latchkey-tunnel` program
+is not autostarted: provisioning hands `apply-state` a container to tunnel
+into only for an agent whose `LATCHKEY_GATEWAY` names its own loopback -- a
+container created without the mapping (the read reports none among its
+creation-time extra hosts), or one an earlier provisioning already tunneled
+into (the read reports the keypair that tunnel authenticates with) -- and the
+tunnel then forwards the container's loopback port to the address the gateway
+binds. That whole route is marked `CLEANUP:` in the code for removal once no
+such container remains; each kept tunnel is logged at `INFO` so it is known
+when that is.
+
+`imbue.mngr_latchkey.remote._machine` owns the Python side of that protocol;
+the credential transfers in `remote._transfer` and provisioning are both
+clients of it. To look at a machine by hand:
+
+```sh
+dpkg -l mngr-latchkey
+mngr-latchkey read-state </dev/null
+supervisorctl status latchkey-gateway latchkey-tunnel
+tail /var/log/mngr-latchkey/gateway.log
+```
+
 ## Machine stores
 
 Credentials belong to the machine that uses them: the user's computer owns one
@@ -432,9 +532,13 @@ knowing:
   the same per-directory key as the credential store, so this is what lets every
   machine store share one browser session (which keeps signing a second machine
   in to a service down to a consent click rather than a full re-login).
-  Transfers re-encrypt at the boundary instead: what is shipped to a machine is
-  encrypted with *its* key (`Latchkey.export_credentials_subset`'s
-  `destination_key`, handed to the CLI on stdin so it never reaches `argv`).
+  Transfers re-encrypt at the boundary instead, and always on this computer,
+  with the copy of the machine's key it records: what is shipped to a machine
+  is encrypted with *its* key (`Latchkey.export_credentials_subset`'s
+  `destination_key`, handed to the CLI on stdin so it never reaches `argv`),
+  and a store read back arrives under the machine's key and is re-encrypted
+  for the desktop here (`Latchkey.reencrypt_foreign_store`). The desktop's own
+  key never leaves this computer.
 
 - **Each machine's key is recorded in its machine store -- as a mirror, not the
   truth.** A machine holds its own key only in RAM (provisioning writes it to a
@@ -446,9 +550,10 @@ knowing:
   handed its key back. Only a machine that is not running a key, with none
   recorded here, gets one decided: a fresh key when it holds no credential
   store; the desktop's key when its store verifiably opens under it (a machine
-  provisioned by a build that predates per-machine keys, whose agents may carry
-  a permissions-override JWT the gateway validates with a key derived from it);
-  and otherwise -- a store written under a key held only by a computer that is
+  provisioned by a build older than minds-v0.5.1, which gave every machine the
+  desktop's key), tried here against the copy of the store the read brought
+  back, so the desktop's key reaches the machine only once it is known to be
+  the machine's own; and otherwise -- a store written under a key held only by a computer that is
   gone -- the store is abandoned and a fresh key minted, because signing in
   again is possible and waiting for a computer that may never return is not.
 
@@ -484,8 +589,7 @@ returns or raises `RemoteGatewayError`, so an embedder (the minds desktop app)
 can block a user's click on it and report what the machine said.
 
 Those scripts never reach the logs. Each one embeds what it is moving -- a
-credential store, the key the machine is to re-encrypt one under, or the policy
-being applied -- so its text is as sensitive as what it carries, and at a whole
+credential store, the machine's own key, or the policy being applied -- so its text is as sensitive as what it carries, and at a whole
 base64-encoded store on one line it is far too big to read anyway. Each is run
 inside `commands_kept_out_of_logs` (`imbue.mngr.utils.command_logging`), so the
 host layer traces a stand-in naming the kind of script and its size in place of
@@ -776,18 +880,10 @@ failing with 401 until the computer holding the tunnel provisions again.
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway
 continue to work, while desktop-owned extension routes fail with a clear HTTP
-502 response. Calls carrying an *expiring* credential -- an OAuth connection or
-Zoom -- keep working only until its access token runs out (typically an hour):
-the VPS gateway is launched with `LATCHKEY_DISABLE_CREDENTIALS_REFRESH=1`, so
-only the desktop renews those, and it does so from a periodic loop that stops
-with the machine. Static tokens are unaffected.
-
-Workspaces created *before* this one-gateway rollout still carry a
-permissions-override JWT in their host env file, naming a desktop-side opaque
-handle path that upstream latchkey resolves before dispatching anything
-(answering HTTP 400 when the named file is absent). Provisioning used to symlink
-that path at the VPS `permissions.json` on every reconcile; those symlinks live
-on the VPS and stay valid, so the shim itself is gone.
+502 response. That includes calls carrying an *expiring* credential -- an OAuth
+connection or Zoom: the store the VPS gateway runs on is the machine's own, so
+it renews the tokens in it itself rather than waiting for the desktop to (see
+[Machine stores](#machine-stores)).
 
 ### `permissions` extension
 

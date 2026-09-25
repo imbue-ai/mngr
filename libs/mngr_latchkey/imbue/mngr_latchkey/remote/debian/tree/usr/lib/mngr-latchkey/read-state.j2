@@ -1,0 +1,69 @@
+#!/bin/sh
+# Assemble everything this machine holds that the user's computer reads, in one
+# run: the secrets its gateway runs under, whether it has a credential store,
+# its config, the policy its gateway enforces, the
+# desktop egress rules its curl router reads, whether it holds a reverse
+# tunnel's keypair, and -- when asked for by an "include_credential_store"
+# entry -- its credential store exactly as it holds it, still encrypted under
+# its own key. Every answer is one prefixed base64 line on stdout (see
+# lk_answer), and the last line says the script ran to its end.
+#
+# The document may also carry "fallback_encryption_key" (handed to a machine
+# that lost its key to a reboot, so the key it answers with is the one its
+# store is written under) and "container_host_id" (the agent's container to
+# look up, answered as CONTAINER_EXTRA_HOSTS: the --add-host mappings it was
+# created with, as docker prints them; the read fails when there is no such
+# container).
+#
+# Nothing here decrypts the store: the computer asking re-encrypts it on its
+# own side, so no key of that computer's ever reaches this machine.
+set -eu
+umask 077
+. '{{ layout.install_dir }}/functions'
+
+lk_require_secrets_dir
+_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/read.XXXXXX")"
+trap 'rm -rf "$_lk_scratch"' EXIT
+lk_read_document "$_lk_scratch/doc"
+
+if lk_doc_has fallback_encryption_key; then
+  lk_restore_secret "$LK_ENCRYPTION_KEY_FILE" fallback_encryption_key
+fi
+
+printf '%s' '{{ package_version }}' | lk_answer PACKAGE_VERSION
+printf '%s' "$LK_HOME" | lk_answer HOME
+if [ -s "$LK_ENCRYPTION_KEY_FILE" ]; then
+  lk_secret_value "$LK_ENCRYPTION_KEY_FILE" | lk_answer ENCRYPTION_KEY
+fi
+if [ -s "$LK_LISTEN_PASSWORD_FILE" ]; then
+  lk_secret_value "$LK_LISTEN_PASSWORD_FILE" | lk_answer LISTEN_PASSWORD
+fi
+lk_answer_flag HAS_CREDENTIAL_STORE test -e "$LK_CREDENTIALS_STORE"
+# CLEANUP: drop with the reverse tunnel (see the note above
+# CONTAINER_TUNNEL_KEY_FILENAME in package.py). The keypair is what every build
+# so far minted exactly when it wired the tunnel, so its presence is how the
+# user's computer tells a container an earlier pass tunneled into.
+lk_answer_flag HAS_CONTAINER_TUNNEL_KEY test -f "$LK_TUNNEL_KEY"
+if lk_doc_has container_host_id; then
+  # Into a file first: a pipeline would report the answer's status, not a
+  # failed lookup or inspect.
+  _lk_container="$(lk_find_container "$(lk_doc_get container_host_id)")"
+  docker inspect -f '{% raw %}{{json .HostConfig.ExtraHosts}}{% endraw %}' "$_lk_container" > "$_lk_scratch/extra_hosts"
+  lk_answer CONTAINER_EXTRA_HOSTS < "$_lk_scratch/extra_hosts"
+fi
+if [ -f "$LK_CONFIG_FILE" ]; then
+  lk_answer CONFIG_JSON < "$LK_CONFIG_FILE"
+fi
+if [ -f "$LK_PERMISSIONS_FILE" ]; then
+  lk_answer PERMISSIONS_JSON < "$LK_PERMISSIONS_FILE"
+fi
+if [ -f "$LK_DESKTOP_EGRESS_RULES_FILE" ]; then
+  lk_answer DESKTOP_EGRESS_RULES_JSON < "$LK_DESKTOP_EGRESS_RULES_FILE"
+fi
+
+if lk_doc_has include_credential_store && [ -f "$LK_CREDENTIALS_STORE" ]; then
+  lk_answer CREDENTIALS < "$LK_CREDENTIALS_STORE"
+  lk_answer DATA_FORMAT_VERSION < "$LK_DATA_FORMAT_STAMP"
+fi
+
+printf '%s\n' "$LK_OUTCOME_DONE"

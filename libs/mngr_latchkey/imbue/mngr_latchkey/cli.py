@@ -245,9 +245,7 @@ def _build_initialized_latchkey(
     return latchkey
 
 
-# =============================================================================
 # Subcommand: create-agent-env
-# =============================================================================
 
 
 @click.command(name="create-agent-env")
@@ -348,9 +346,7 @@ no on-host (DEV) mode.""",
 add_pager_help_option(_create_agent_env_command)
 
 
-# =============================================================================
 # Subcommand: link-permissions
-# =============================================================================
 
 
 @click.command(name="link-permissions")
@@ -418,9 +414,7 @@ discards the freshly-created baseline.""",
 add_pager_help_option(_link_permissions_command)
 
 
-# =============================================================================
 # Subcommand: register-agent
-# =============================================================================
 
 
 @click.command(name="register-agent")
@@ -562,9 +556,7 @@ its own copy.""",
 add_pager_help_option(_register_agent_command)
 
 
-# =============================================================================
 # Subcommand: forward
-# =============================================================================
 
 
 @click.command(name="forward")
@@ -973,9 +965,7 @@ _add_common_latchkey_options(_forward_command)
 add_pager_help_option(_forward_command)
 
 
-# =============================================================================
 # Group
-# =============================================================================
 
 
 @click.group(name="latchkey")
@@ -985,9 +975,7 @@ def latchkey(ctx: click.Context) -> None:
     del ctx
 
 
-# =============================================================================
 # Subcommand: admin-jwt
-# =============================================================================
 
 
 @click.command(name="admin-jwt")
@@ -1040,9 +1028,7 @@ streaming pending permission requests from the
 add_pager_help_option(_admin_jwt_command)
 
 
-# =============================================================================
 # Subcommand: gateway-info
-# =============================================================================
 
 
 @click.command(name="gateway-info")

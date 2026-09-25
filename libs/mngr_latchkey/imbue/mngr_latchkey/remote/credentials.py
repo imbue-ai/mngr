@@ -43,10 +43,6 @@ from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
 
-# Re-exported (the redundant alias marks it as such): provisioning's own passes
-# share one lazily-resolved machine directory across their steps.
-from imbue.mngr_latchkey.remote._machine import RemoteLatchkeyDirectory as RemoteLatchkeyDirectory
-
 # Re-exported (the redundant alias marks them as such): the read side of the
 # machine store that outside consumers -- notably the Minds desktop app -- are
 # meant to reach through this module rather than through the private mirror.
@@ -81,8 +77,9 @@ class MachineCredentials(FrozenModel):
 
     Built for the duration of one exchange with the machine: the caller opens
     the outer host, does what it came to do, and lets both go. Every method
-    costs a single remote command, in either direction (a second only when a
-    rebooted machine has to be handed its key back).
+    costs a single remote command, in either direction: the key a rebooted
+    machine has to be handed back rides in the same document, so that costs
+    nothing extra.
     """
 
     model_config = {"arbitrary_types_allowed": True}

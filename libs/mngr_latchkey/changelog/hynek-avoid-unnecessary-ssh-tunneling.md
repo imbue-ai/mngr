@@ -15,12 +15,16 @@ Compatibility: a remote workspace whose `LATCHKEY_GATEWAY` still names its own
 loopback keeps the reverse tunnel, now pointed at the bridge address the
 gateway binds; neither the URL nor the container's mapping can change for the
 life of the container. Provisioning recognizes such a workspace by a container
-created without the mapping (inspected from its creation-time extra hosts), or
-by a tunnel an earlier provisioning registered on the VPS -- which is how a
-workspace an older client created in a container that already carried the
-mapping is told apart from a new one. A registered tunnel is therefore never
-dropped, and no tunnel is ever registered for a new workspace. Each kept tunnel
-is logged. The tunnel code is marked `CLEANUP:` for removal once no such
+created without the mapping (`mngr-latchkey read-state` reports the
+creation-time extra hosts of the container it is asked about), or by the
+tunnel keypair an earlier provisioning minted on the VPS (which the read
+reports too) -- which is how a workspace an older client created in a
+container that already carried the mapping is told apart from a new one. A
+tunnel once wired is therefore never dropped, and none is ever wired for a new
+workspace: `apply-state` is handed a container to tunnel into only then, and
+the package's `latchkey-tunnel` supervisord program is no longer autostarted.
+Each kept tunnel is logged. The tunnel code (in the package's scripts and in
+`remote/provisioning.py`) is marked `CLEANUP:` for removal once no such
 workspace remains.
 
 Rollout: the URL `mngr latchkey create-agent-env` emits is decided from the
@@ -42,4 +46,6 @@ VPS` emit the new URL. `imbue.mngr.primitives.OUTER_HOST_HOSTNAME_IN_CONTAINER`
 (shared with the VPS provider, which builds its `--add-host` mapping from it)
 names the host, and the docker-bridge address resolution the owner-exec VM
 daemon already used moved to a shared `docker_bridge.py`; a provisioning pass
-resolves the address once and binds both the daemon and the gateway to it.
+resolves the address once and binds both the daemon and the gateway to it (the
+gateway reads it from `~/.latchkey/gateway.conf`, which `apply-state` writes
+from the pass's document and the reverse tunnel reads as its far end).

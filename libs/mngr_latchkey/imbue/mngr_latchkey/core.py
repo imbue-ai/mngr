@@ -22,11 +22,15 @@ import json
 import os
 import shutil
 import socket
+import stat
+import tempfile
 import threading
 import time
 from collections.abc import Collection
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
+from contextlib import contextmanager
 from enum import auto
 from functools import cached_property
 from importlib import resources
@@ -46,6 +50,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ProcessSetupError
 from imbue.concurrency_group.local_process import RunningProcess
+from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
@@ -55,6 +60,7 @@ from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogError
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
+from imbue.mngr_latchkey.encryption_key import LATCHKEY_ENCRYPTION_KEY_ENV_VAR
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -101,6 +107,10 @@ _CREATE_JWT_TIMEOUT_SECONDS: Final[float] = 15.0
 # Empirically, reencryption takes around 0.1s.
 _REENCRYPT_TIMEOUT_SECONDS: Final[float] = 5.0
 
+# A run against another machine's store also migrates it when that machine's
+# CLI is older than this one.
+_FOREIGN_STORE_TIMEOUT_SECONDS: Final[float] = 15.0
+
 # Storing user-supplied credentials writes the credential store and, for some
 # services, validates the credentials over the network first. Unlike the browser
 # flows it never waits on a human, so it must not run unbounded.
@@ -135,6 +145,12 @@ BROWSER_STATE_FILENAME: Final[str] = "browser_state.json.enc"
 # Shared between the desktop and every machine store, which is a latchkey
 # directory of its own (see :mod:`imbue.mngr_latchkey.remote._mirror`).
 DAILY_COUNT_STAMP_FILENAME: Final[str] = "last-daily-count"
+
+# Upstream's own wording, matched rather than an exit code (every failure exits
+# 1): how it refuses a store read under a key other than the one it was written
+# with, and how ``auth re-encrypt`` refuses a store that holds no credentials.
+_WRONG_ENCRYPTION_KEY_MESSAGE: Final[str] = "The encryption key may have changed."
+_NOTHING_TO_REENCRYPT_MESSAGE: Final[str] = "No stored credentials found to re-encrypt."
 
 # Filename the upstream CLI reads a latchkey directory's permissions policy
 # from when no override JWT names another path. This plugin keeps the
@@ -318,6 +334,15 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
 # the distributed client.
 MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv7atmoaks8.apps.googleusercontent.com"
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
+
+
+class EncryptedCredentialStore(FrozenModel):
+    """A latchkey credential store as it sits on disk, and the upstream format stamp that says how to read it."""
+
+    content: bytes = Field(description="The ``credentials.json.enc`` bytes, still encrypted.")
+    data_format_version: str = Field(
+        description="The upstream ``data-format-version`` stamp the store was written in."
+    )
 
 
 class ServiceAccountCredential(FrozenModel):
@@ -607,6 +632,52 @@ def _build_env_with_latchkey_directory(
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     inject_encryption_key_into_env(env, encryption_key)
     return env
+
+
+def _build_foreign_store_env(store_directory: Path, encryption_key: SecretStr) -> dict[str, str]:
+    """Build the env for a local ``latchkey`` run against another machine's store, under that store's key.
+
+    The key is set outright rather than through
+    :func:`inject_encryption_key_into_env`: an operator's global override names
+    this computer's key, never another machine's. Usage counting is off because
+    the scratch directory has no daily-count stamp, so every run would ping.
+    """
+    env = _build_local_latchkey_env(store_directory)
+    env[LATCHKEY_ENCRYPTION_KEY_ENV_VAR] = encryption_key.get_secret_value()
+    env["LATCHKEY_DISABLE_COUNTING"] = "1"
+    return env
+
+
+@contextmanager
+def _foreign_store_directory(store: EncryptedCredentialStore) -> Iterator[Path]:
+    """Lay ``store`` out as a private scratch latchkey directory, removed on exit."""
+    with tempfile.TemporaryDirectory(prefix="mngr-latchkey-foreign-") as scratch:
+        store_directory = Path(scratch)
+        for filename, content in (
+            (UPSTREAM_DATA_FORMAT_VERSION_FILENAME, store.data_format_version.encode("utf-8")),
+            (CREDENTIALS_STORE_FILENAME, store.content),
+        ):
+            path = store_directory / filename
+            path.write_bytes(content)
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        yield store_directory
+
+
+def _read_reencrypted_store(destination: Path) -> EncryptedCredentialStore:
+    """Read back the store ``auth re-encrypt`` wrote into ``destination``, with the stamp it wrote beside it.
+
+    Raises:
+        LatchkeyError: when either file is missing or unreadable.
+    """
+    try:
+        return EncryptedCredentialStore(
+            content=(destination / CREDENTIALS_STORE_FILENAME).read_bytes(),
+            data_format_version=(destination / UPSTREAM_DATA_FORMAT_VERSION_FILENAME).read_text(),
+        )
+    except OSError as e:
+        raise LatchkeyError(
+            f"Failed to read the store 'latchkey auth re-encrypt' wrote into {destination}: {e}"
+        ) from e
 
 
 def _build_gateway_env(
@@ -980,7 +1051,7 @@ class Latchkey(MutableModel):
     _is_initialized: bool = PrivateAttr(default=False)
     _has_ensured_browser: bool = PrivateAttr(default=False)
 
-    # -- Gateway lifecycle ---------------------------------------------------
+    # Gateway lifecycle
 
     @property
     def plugin_data_dir(self) -> Path:
@@ -1144,7 +1215,7 @@ class Latchkey(MutableModel):
             running = self._running_gateway
         return running is not None and running.process.poll() is None
 
-    # -- Password / JWT derivation ------------------------------------------
+    # Password / JWT derivation
 
     def derive_gateway_password(self) -> str:
         """Return a stable password for this computer's own shared gateway.
@@ -1278,7 +1349,7 @@ class Latchkey(MutableModel):
             )
         return jwt
 
-    # -- Credential export ---------------------------------------------------
+    # Credential export
 
     def export_credentials_subset(
         self,
@@ -1355,7 +1426,95 @@ class Latchkey(MutableModel):
                 )
             )
 
-    # -- Service introspection -----------------------------------------------
+    # Another machine's store
+
+    def reencrypt_foreign_store(
+        self, store: EncryptedCredentialStore, store_key: SecretStr, destination_key: SecretStr
+    ) -> EncryptedCredentialStore | None:
+        """Return another machine's ``store`` re-encrypted under ``destination_key``, or ``None`` when it holds nothing.
+
+        The store is read under ``store_key``, the key its machine keeps it
+        under, from a scratch copy: this :class:`Latchkey`'s own directory and
+        key play no part. The copy comes back in the format this computer's CLI
+        writes, since the run migrates an older store first.
+
+        Raises:
+            LatchkeyError: when the CLI cannot be launched, or refuses the store
+                for any reason other than it holding no credentials (a
+                ``store_key`` that does not open it included).
+        """
+        with (
+            _foreign_store_directory(store) as store_directory,
+            tempfile.TemporaryDirectory(prefix="mngr-latchkey-reencrypted-") as destination,
+        ):
+            result = self._run_against_foreign_store(
+                store_directory,
+                store_key,
+                ["auth", "re-encrypt", destination],
+                stdin_bytes=destination_key.get_secret_value().encode("utf-8"),
+            )
+            if result.returncode != 0:
+                if _NOTHING_TO_REENCRYPT_MESSAGE in result.stderr:
+                    return None
+                raise LatchkeyError(
+                    "'latchkey auth re-encrypt' of another machine's store exited {}: {}".format(
+                        result.returncode, result.stderr.strip() or result.stdout.strip()
+                    )
+                )
+            return _read_reencrypted_store(Path(destination))
+
+    def does_key_open_foreign_store(self, store: EncryptedCredentialStore, candidate_key: SecretStr) -> bool:
+        """Whether another machine's ``store`` decrypts under ``candidate_key``.
+
+        Asked of an offline ``auth list`` against a scratch copy. Only
+        upstream's own wrong-key refusal counts as a no: a caller gives up on a
+        store no key it holds opens, so any other failure (a store in a format
+        newer than this CLI reads, say) is raised rather than read as one.
+
+        Raises:
+            LatchkeyError: when the CLI cannot be launched, or fails for any
+                reason other than the key.
+        """
+        with _foreign_store_directory(store) as store_directory:
+            result = self._run_against_foreign_store(
+                store_directory, candidate_key, ["auth", "list", "--offline"], stdin_bytes=b""
+            )
+        if result.returncode == 0:
+            return True
+        elif _WRONG_ENCRYPTION_KEY_MESSAGE in result.stderr:
+            return False
+        else:
+            raise LatchkeyError(
+                "'latchkey auth list' of another machine's store exited {}: {}".format(
+                    result.returncode, result.stderr.strip() or result.stdout.strip()
+                )
+            )
+
+    def _run_against_foreign_store(
+        self, store_directory: Path, store_key: SecretStr, argv: Sequence[str], stdin_bytes: bytes
+    ) -> FinishedProcess:
+        """Run ``latchkey <argv>`` against the store in ``store_directory``, under ``store_key``.
+
+        Raises:
+            LatchkeyError: when the CLI cannot be launched.
+        """
+        cg = ConcurrencyGroup(name="latchkey-foreign-store")
+        try:
+            with cg:
+                result = cg.run_process_to_completion(
+                    command=[self.latchkey_binary, *argv],
+                    timeout=_FOREIGN_STORE_TIMEOUT_SECONDS,
+                    is_checked_after=False,
+                    env=_build_foreign_store_env(store_directory, store_key),
+                    stdin_bytes=stdin_bytes,
+                )
+        except ConcurrencyExceptionGroup as group:
+            if not group.only_exception_is_instance_of(ProcessSetupError):
+                raise
+            raise LatchkeyError(f"Failed to launch 'latchkey {' '.join(argv[:2])}': {group}") from group
+        return result
+
+    # Service introspection
 
     def services_info(self, service_name: str, *, is_offline: bool = False) -> LatchkeyServiceInfo | None:
         """Run ``latchkey services info <service>`` and return the parsed output.
@@ -1483,7 +1642,7 @@ class Latchkey(MutableModel):
             for service_name, account_map in payload.items()
         }
 
-    # -- Interactive auth ----------------------------------------------------
+    # Interactive auth
 
     def add_account(self, service_name: str) -> tuple[bool, str]:
         """Sign in to a *new* account for ``service_name`` from the settings page.
@@ -1785,7 +1944,7 @@ class Latchkey(MutableModel):
         )
         return False, summarize_latchkey_failure(raw_message, fallback=f"latchkey {log_label} failed")
 
-    # -- Internals -----------------------------------------------------------
+    # Internals
 
     def _require_initialized_locked(self) -> None:
         if not self._is_initialized:

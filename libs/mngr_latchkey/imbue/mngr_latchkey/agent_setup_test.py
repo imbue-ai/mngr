@@ -69,7 +69,7 @@ def test_secret_latchkey_env_var_names_are_exactly_password_and_jwt() -> None:
     assert ENV_LATCHKEY_DISABLE_COUNTING not in SECRET_LATCHKEY_ENV_VAR_NAMES
 
 
-# -- prepare_agent_latchkey ---------------------------------------------------
+# prepare_agent_latchkey
 
 
 def test_prepare_no_latchkey_tunneled_returns_constant_url(tmp_path: Path) -> None:
@@ -232,7 +232,6 @@ def test_prepare_vps_gateway_omits_workspace_permissions_override(tmp_path: Path
     # container reaches by docker's conventional name for its host; a desktop
     # workspace keeps the loopback URL its reverse tunnel serves.
     assert setup.env[ENV_LATCHKEY_GATEWAY] == f"http://{OUTER_HOST_HOSTNAME_IN_CONTAINER}:{AGENT_SIDE_LATCHKEY_PORT}"
-    assert OUTER_HOST_HOSTNAME_IN_CONTAINER == "host.docker.internal"
     assert setup.env[ENV_LATCHKEY_GATEWAY_PASSWORD] == "hunter2"
     assert ENV_LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE not in setup.env
     assert setup.opaque_permissions_path is not None
@@ -312,7 +311,7 @@ def test_prepare_jwt_mint_failure_propagates(tmp_path: Path) -> None:
         prepare_agent_latchkey(fake, is_tunneled=True)
 
 
-# -- finalize_host_permissions ----------------------------------------------
+# finalize_host_permissions
 
 
 def test_finalize_links_opaque_to_canonical(tmp_path: Path) -> None:
@@ -351,7 +350,7 @@ def test_finalize_propagates_link_errors(tmp_path: Path) -> None:
         finalize_host_permissions(fake, missing_path, HostId())
 
 
-# -- maybe_recover_host_permissions_for_agent --------------------------------
+# maybe_recover_host_permissions_for_agent
 
 
 def test_recover_links_standalone_opaque_when_host_file_missing(tmp_path: Path) -> None:
@@ -433,7 +432,7 @@ def test_recover_materializes_baseline_when_opaque_handle_missing(tmp_path: Path
     assert phantom.resolve() == canonical.resolve()
 
 
-# -- AgentLatchkeySetup model -------------------------------------------------
+# AgentLatchkeySetup model
 
 
 def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:
@@ -442,7 +441,7 @@ def test_agent_latchkey_setup_default_opaque_path_is_none() -> None:
     assert isinstance(setup.env, Mapping)
 
 
-# -- Allowed-agent anyOf helpers ---------------------------------------------
+# Allowed-agent anyOf helpers
 
 
 def test_allowed_agent_anyof_round_trip() -> None:
@@ -483,7 +482,7 @@ def test_extract_agent_id_from_anyof_entry_raises_on_unrecognized_entry() -> Non
         _extract_agent_id_from_anyof_entry("not-even-a-dict")
 
 
-# -- register_agent_for_host -------------------------------------------------
+# register_agent_for_host
 
 
 def _allowed_anyof_for_host(tmp_path: Path, host_id: HostId) -> list[dict[str, str]]:
@@ -655,7 +654,7 @@ def test_register_agent_for_host_raises_when_anyof_was_hand_edited(tmp_path: Pat
 # in ``agent_setup`` anymore.
 
 
-# -- reconcile_baseline_permissions ------------------------------------------
+# reconcile_baseline_permissions
 
 
 def _stale_host_config(*allowed_agent_ids: str) -> LatchkeyPermissionsConfig:
