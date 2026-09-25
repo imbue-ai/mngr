@@ -1,9 +1,13 @@
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr_usage.data_types import TokenSnapshot
 from imbue.mngr_usage.pricing import FAST_MODE_MODELS
 from imbue.mngr_usage.pricing import MODEL_PRICING
+from imbue.mngr_usage.pricing import ModelPricingError
 from imbue.mngr_usage.pricing import compute_cost
+from imbue.mngr_usage.pricing import load_model_prices
 
 
 def test_compute_cost_matches_live_pi_reported_total() -> None:
@@ -59,3 +63,52 @@ def test_every_fast_mode_model_is_also_priced_at_standard_rates() -> None:
     # leave its ordinary traffic unpriced.
     for key in FAST_MODE_MODELS:
         assert key in MODEL_PRICING, f"{key!r} can serve fast mode but has no standard price"
+
+
+def test_load_model_prices_rejects_a_zero_input_rate(tmp_path: Path) -> None:
+    table_path = tmp_path / "model_prices.toml"
+    table_path.write_text(
+        '["anthropic/claude-opus-5"]\n'
+        "input_cost_per_token = 0.0\n"
+        "output_cost_per_token = 2.5e-05\n"
+        "cache_read_input_token_cost = 5e-07\n"
+        "cache_creation_input_token_cost = 6.25e-06\n"
+    )
+
+    with pytest.raises(ModelPricingError, match="Invalid price entry"):
+        load_model_prices(table_path)
+
+
+def test_load_model_prices_rejects_an_unqualified_key(tmp_path: Path) -> None:
+    table_path = tmp_path / "model_prices.toml"
+    table_path.write_text(
+        "[claude-opus-5]\n"
+        "input_cost_per_token = 5e-06\n"
+        "output_cost_per_token = 2.5e-05\n"
+        "cache_read_input_token_cost = 5e-07\n"
+        "cache_creation_input_token_cost = 6.25e-06\n"
+    )
+
+    with pytest.raises(ModelPricingError, match="claude-opus-5"):
+        load_model_prices(table_path)
+
+
+def test_load_model_prices_rejects_an_entry_missing_a_bucket(tmp_path: Path) -> None:
+    table_path = tmp_path / "model_prices.toml"
+    table_path.write_text('["anthropic/claude-opus-5"]\ninput_cost_per_token = 5e-06\n')
+
+    with pytest.raises(ModelPricingError, match="Invalid price entry"):
+        load_model_prices(table_path)
+
+
+def test_load_model_prices_rejects_malformed_toml(tmp_path: Path) -> None:
+    table_path = tmp_path / "model_prices.toml"
+    table_path.write_text('["anthropic/claude-opus-5"\ninput_cost_per_token = \n')
+
+    with pytest.raises(ModelPricingError, match="Invalid TOML"):
+        load_model_prices(table_path)
+
+
+def test_load_model_prices_reports_a_missing_table_rather_than_pricing_nothing(tmp_path: Path) -> None:
+    with pytest.raises(ModelPricingError, match="Cannot read"):
+        load_model_prices(tmp_path / "absent.toml")

@@ -188,6 +188,14 @@ test-share-relay:
 export-image-requirements:
     uv run python -c "from pathlib import Path; from imbue.imbue_common.modal_image_requirements import IMAGE_PINNED_PACKAGE_NAMES; from imbue.modal_app_kit.testing import regenerate_image_requirements; print('\n'.join(str(p) for p in regenerate_image_requirements(Path.cwd(), IMAGE_PINNED_PACKAGE_NAMES)))"
 
+# Move mngr_usage's committed price table in step with litellm's published
+# model-cost map. Reaches the network (litellm fetches that map when imported), so
+# it runs here rather than in any test; `litellm-price-sync.yml` runs it daily and
+# opens a PR when a rate moves. Pass `--check` to report drift without writing.
+[group("mngr dev")]
+sync-litellm-prices *args:
+    uv run python -m scripts.sync_litellm_prices {{args}}
+
 # Diffs against the real base branch, so it must run on a real checkout
 # (locally or the GitHub Actions runner), NOT inside an offload sandbox -- the
 # sandbox has no base ref and the check would pass vacuously. Bare `python`

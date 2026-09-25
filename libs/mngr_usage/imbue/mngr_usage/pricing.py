@@ -4,12 +4,13 @@
 token-only writer (e.g. Codex, or pi for a provider where it has no client-side
 cost) just emits ``tokens`` + ``model`` and the reader prices it.
 
-The numbers are litellm's, copied here rather than read at runtime: this table is
-consulted on agent machines that never import litellm (it ships in the ``mngr``
-wheel, litellm does not). ``litellm_pricing_test`` pins every entry litellm still
-lists -- OpenAI and Anthropic alike -- against litellm's ``model_prices_and_context_window``
-map, so the copy cannot drift from the source that the LiteLLM proxy actually bills from.
-An entry for a model litellm has since retired may stay, so older sessions on it stay priced.
+The rates live in ``model_prices.toml`` beside this module, which ships inside the
+wheel because this table is consulted on agent machines that never import litellm.
+``scripts/sync_litellm_prices.py`` moves it in step with litellm's
+``model_prices_and_context_window`` map -- the map the LiteLLM proxy bills from --
+as a reviewed edit rather than a runtime read. litellm resolves that map by
+fetching its own main branch when it is imported, and that file is edited hundreds
+of times a month, so a test pinned to it fails on other people's commits.
 
 This table is a *fallback*, not the main cost path: ``api.py`` prefers a
 harness-reported ``total_cost_usd`` and only prices tokens when the harness does
@@ -32,148 +33,78 @@ that wants an exact cost has to carry the tier through with the tokens.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
 from typing import Final
 
 from pydantic import Field
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.primitives import NonNegativeFloat
+from imbue.imbue_common.primitives import PositiveFloat
 from imbue.imbue_common.pure import pure
 from imbue.mngr_usage.data_types import TokenSnapshot
 
 
+class ModelPricingError(Exception):
+    """Raised when the per-token price table cannot be read."""
+
+    ...
+
+
 class PerTokenPrices(FrozenModel):
-    """USD price per single token for each billing bucket of one model.
+    """USD price per single token for each billing bucket of one model."""
 
-    Field names match litellm's ``model_prices_and_context_window`` schema so
-    entries are directly comparable to ``apps/modal_litellm``'s inline pricing.
-    """
-
-    input_cost_per_token: float = Field(description="USD per non-cached input token.")
-    output_cost_per_token: float = Field(description="USD per output token (incl. reasoning).")
-    cache_read_input_token_cost: float = Field(description="USD per cached input token read from the prompt cache.")
+    # Positive, not merely non-negative: a zero input or output rate reads as "this
+    # model is free", which is how a lost price entry stops counting spend without
+    # anything looking wrong.
+    input_cost_per_token: PositiveFloat = Field(description="USD per non-cached input token.")
+    output_cost_per_token: PositiveFloat = Field(description="USD per output token (incl. reasoning).")
+    cache_read_input_token_cost: NonNegativeFloat = Field(
+        description="USD per cached input token read from the prompt cache."
+    )
     # Anthropic charges a cache write by its TTL: a 5-minute write costs 1.25x an
     # input token, a 1-hour write 2x. This is the 5-minute rate, and it is the only
     # one modeled -- TokenSnapshot carries a single cache_creation bucket with no TTL
     # on it, so a 1-hour write is priced at 62.5% of what it actually cost. Modeling
     # the difference means splitting that bucket in every writer that fills it, not
     # just adding a rate here.
-    cache_creation_input_token_cost: float = Field(
+    cache_creation_input_token_cost: NonNegativeFloat = Field(
         description="USD per input token written to the prompt cache; 0 when a model bills no cache-write surcharge."
     )
 
 
-# Anthropic per-token pricing, mirrored verbatim from apps/modal_litellm/app.py
-# (which itself mirrors litellm's map). Grouped by tier so the "same price"
-# relationship across model ids stays explicit, exactly as modal_litellm does.
-_FABLE_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.00001,
-    output_cost_per_token=0.00005,
-    cache_creation_input_token_cost=0.0000125,
-    cache_read_input_token_cost=0.000001,
-)
-# Fable 5.1 shares Fable 5's rates except for cache reads, so it needs its own entry.
-_FABLE_5_1_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.00001,
-    output_cost_per_token=0.00005,
-    cache_creation_input_token_cost=0.0000125,
-    cache_read_input_token_cost=0.00000025,
-)
-_OPUS_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.000005,
-    output_cost_per_token=0.000025,
-    cache_creation_input_token_cost=0.00000625,
-    cache_read_input_token_cost=0.0000005,
-)
-# Opus 5.5 is cheaper than the Opus 5 generation it leads ($4/$20 per MTok against
-# $5/$25), and cuts the cache read to 0.05x the input rate rather than the 0.1x the
-# rest of the family charges -- so it needs its own entry rather than sharing theirs.
-_OPUS_5_5_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.000004,
-    output_cost_per_token=0.00002,
-    cache_creation_input_token_cost=0.000005,
-    cache_read_input_token_cost=0.0000002,
-)
-_SONNET_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.000003,
-    output_cost_per_token=0.000015,
-    cache_creation_input_token_cost=0.00000375,
-    cache_read_input_token_cost=0.0000003,
-)
-_HAIKU_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.000001,
-    output_cost_per_token=0.000005,
-    cache_creation_input_token_cost=0.00000125,
-    cache_read_input_token_cost=0.0000001,
-)
+# Keys are "<provider>/<model>": the provider qualifier disambiguates
+# multi-provider harnesses like pi, which report a bare model id for several.
+MODEL_PRICES_PATH: Final[Path] = Path(__file__).parent / "model_prices.toml"
 
-# OpenAI per-token pricing, mirrored verbatim from litellm's
-# model_prices_and_context_window map (the ultimate source). OpenAI caching is
-# automatic and normally carries no cache-*write* surcharge (only reads are
-# discounted), so cache_creation_input_token_cost is 0 unless the map bills
-# one for that model. Codex reports tokens (not dollars), so these drive its
-# estimated cost.
-_GPT5_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.00000125,
-    output_cost_per_token=0.00001,
-    cache_read_input_token_cost=0.000000125,
-    cache_creation_input_token_cost=0.0,
-)
-_GPT52_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.00000175,
-    output_cost_per_token=0.000014,
-    cache_read_input_token_cost=0.000000175,
-    cache_creation_input_token_cost=0.0,
-)
-_GPT5_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.00000025,
-    output_cost_per_token=0.000002,
-    cache_read_input_token_cost=0.000000025,
-    cache_creation_input_token_cost=0.0,
-)
-_GPT6_ASTRA_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.00001,
-    output_cost_per_token=0.00005,
-    cache_read_input_token_cost=0.000001,
-    cache_creation_input_token_cost=0.0000125,
-)
-_O3_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.000002,
-    output_cost_per_token=0.000008,
-    cache_read_input_token_cost=0.0000005,
-    cache_creation_input_token_cost=0.0,
-)
-_O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
-    input_cost_per_token=0.0000011,
-    output_cost_per_token=0.0000044,
-    cache_read_input_token_cost=0.000000275,
-    cache_creation_input_token_cost=0.0,
-)
 
-# Canonical pricing key is "<provider>/<model>" (the provider qualifier
-# disambiguates multi-provider harnesses like pi).
-MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
-    "anthropic/claude-fable-5-1": _FABLE_5_1_PRICES,
-    "anthropic/claude-fable-5": _FABLE_PRICES,
-    "anthropic/claude-opus-5-5": _OPUS_5_5_PRICES,
-    "anthropic/claude-opus-5": _OPUS_PRICES,
-    "anthropic/claude-opus-4-8": _OPUS_PRICES,
-    "anthropic/claude-opus-4-7": _OPUS_PRICES,
-    "anthropic/claude-opus-4-6": _OPUS_PRICES,
-    "anthropic/claude-opus-4-5": _OPUS_PRICES,
-    "anthropic/claude-sonnet-4-6": _SONNET_PRICES,
-    "anthropic/claude-sonnet-4-5": _SONNET_PRICES,
-    "anthropic/claude-haiku-4-5": _HAIKU_PRICES,
-    "anthropic/claude-haiku-4-5-20251001": _HAIKU_PRICES,
-    # OpenAI / Codex models (codex reports model ids like "gpt-5.3-codex").
-    "openai/gpt-6-astra": _GPT6_ASTRA_PRICES,
-    "openai/gpt-5": _GPT5_PRICES,
-    "openai/gpt-5.1": _GPT5_PRICES,
-    "openai/gpt-5.2": _GPT52_PRICES,
-    "openai/gpt-5.3-codex": _GPT52_PRICES,
-    "openai/gpt-5-mini": _GPT5_MINI_PRICES,
-    "openai/o3": _O3_PRICES,
-    "openai/o4-mini": _O4_MINI_PRICES,
-}
+def load_model_prices(model_prices_path: Path) -> dict[str, PerTokenPrices]:
+    """Read the price table; raises ModelPricingError if it is missing, malformed, or mis-keyed."""
+    try:
+        raw_toml = model_prices_path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise ModelPricingError(f"Cannot read the price table at {model_prices_path}") from e
+    try:
+        price_entry_by_key = tomllib.loads(raw_toml)
+    except tomllib.TOMLDecodeError as e:
+        raise ModelPricingError(f"Invalid TOML in the price table at {model_prices_path}") from e
+
+    # An unqualified key can never match a lookup, so it would silently price nothing.
+    unqualified_keys = sorted(key for key in price_entry_by_key if "/" not in key)
+    if unqualified_keys:
+        raise ModelPricingError(
+            f"Price table keys must be '<provider>/<model>', but {model_prices_path} has {unqualified_keys}"
+        )
+
+    try:
+        return {key: PerTokenPrices.model_validate(entry) for key, entry in price_entry_by_key.items()}
+    except ValidationError as e:
+        raise ModelPricingError(f"Invalid price entry in {model_prices_path}") from e
+
+
+MODEL_PRICING: Final[dict[str, PerTokenPrices]] = load_model_prices(MODEL_PRICES_PATH)
 
 
 # Fast mode is a per-request tier that returns the same tokens faster for twice the

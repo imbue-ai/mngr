@@ -1,0 +1,194 @@
+# Per-token USD prices, keyed by the canonical "<provider>/<model>" pricing key.
+#
+# This table is ours. Most rows are synced from litellm's
+# model_prices_and_context_window map by scripts/sync_litellm_prices.py, which a
+# daily workflow runs and opens a PR from. A row litellm no longer carries keeps
+# the rate it last agreed on: litellm prunes retired models from its catalog, and
+# a provider dropping a model from a catalog is not the provider ceasing to bill
+# for it. Costs here are derived at read time from stored token counts, so
+# removing a row also un-prices every session already recorded under it.
+#
+# Four buckets per model, matching litellm's schema. cache_creation is the
+# 5-minute-TTL cache-write rate, and is 0 for models that bill no cache-write
+# surcharge.
+
+["anthropic/claude-fable-5-1"]
+input_cost_per_token = 1e-05
+output_cost_per_token = 5e-05
+cache_read_input_token_cost = 2.5e-07
+cache_creation_input_token_cost = 1.25e-05
+
+["anthropic/claude-fable-5"]
+input_cost_per_token = 1e-05
+output_cost_per_token = 5e-05
+cache_read_input_token_cost = 1e-06
+cache_creation_input_token_cost = 1.25e-05
+
+# Opus 5.5 is cheaper than the Opus 5 generation it leads ($4/$20 per MTok against
+# $5/$25), and cuts the cache read to 0.05x the input rate rather than the 0.1x the
+# rest of the family charges.
+["anthropic/claude-opus-5-5"]
+input_cost_per_token = 4e-06
+output_cost_per_token = 2e-05
+cache_read_input_token_cost = 2e-07
+cache_creation_input_token_cost = 5e-06
+
+["anthropic/claude-opus-5"]
+input_cost_per_token = 5e-06
+output_cost_per_token = 2.5e-05
+cache_read_input_token_cost = 5e-07
+cache_creation_input_token_cost = 6.25e-06
+
+["anthropic/claude-opus-4-8"]
+input_cost_per_token = 5e-06
+output_cost_per_token = 2.5e-05
+cache_read_input_token_cost = 5e-07
+cache_creation_input_token_cost = 6.25e-06
+
+["anthropic/claude-opus-4-7"]
+input_cost_per_token = 5e-06
+output_cost_per_token = 2.5e-05
+cache_read_input_token_cost = 5e-07
+cache_creation_input_token_cost = 6.25e-06
+
+["anthropic/claude-opus-4-6"]
+input_cost_per_token = 5e-06
+output_cost_per_token = 2.5e-05
+cache_read_input_token_cost = 5e-07
+cache_creation_input_token_cost = 6.25e-06
+
+["anthropic/claude-opus-4-5"]
+input_cost_per_token = 5e-06
+output_cost_per_token = 2.5e-05
+cache_read_input_token_cost = 5e-07
+cache_creation_input_token_cost = 6.25e-06
+
+# Opus 4.1 and the original Opus 4 predate the Opus price drop and cost 3x.
+["anthropic/claude-opus-4-1"]
+input_cost_per_token = 1.5e-05
+output_cost_per_token = 7.5e-05
+cache_read_input_token_cost = 1.5e-06
+cache_creation_input_token_cost = 1.875e-05
+
+["anthropic/claude-opus-4-20250514"]
+input_cost_per_token = 1.5e-05
+output_cost_per_token = 7.5e-05
+cache_read_input_token_cost = 1.5e-06
+cache_creation_input_token_cost = 1.875e-05
+
+["anthropic/claude-sonnet-4-6"]
+input_cost_per_token = 3e-06
+output_cost_per_token = 1.5e-05
+cache_read_input_token_cost = 3e-07
+cache_creation_input_token_cost = 3.75e-06
+
+["anthropic/claude-sonnet-4-5"]
+input_cost_per_token = 3e-06
+output_cost_per_token = 1.5e-05
+cache_read_input_token_cost = 3e-07
+cache_creation_input_token_cost = 3.75e-06
+
+["anthropic/claude-sonnet-4-20250514"]
+input_cost_per_token = 3e-06
+output_cost_per_token = 1.5e-05
+cache_read_input_token_cost = 3e-07
+cache_creation_input_token_cost = 3.75e-06
+
+["anthropic/claude-haiku-4-5"]
+input_cost_per_token = 1e-06
+output_cost_per_token = 5e-06
+cache_read_input_token_cost = 1e-07
+cache_creation_input_token_cost = 1.25e-06
+
+["anthropic/claude-haiku-4-5-20251001"]
+input_cost_per_token = 1e-06
+output_cost_per_token = 5e-06
+cache_read_input_token_cost = 1e-07
+cache_creation_input_token_cost = 1.25e-06
+
+# OpenAI caching is automatic and normally carries no cache-write surcharge --
+# only reads are discounted -- so cache_creation is 0 unless a model bills one.
+# Codex reports tokens rather than dollars, so these drive its estimated cost.
+["openai/gpt-6-astra"]
+input_cost_per_token = 1e-05
+output_cost_per_token = 5e-05
+cache_read_input_token_cost = 1e-06
+cache_creation_input_token_cost = 1.25e-05
+
+["openai/gpt-5"]
+input_cost_per_token = 1.25e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1.25e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.1"]
+input_cost_per_token = 1.25e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1.25e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5-codex"]
+input_cost_per_token = 1.25e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1.25e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.1-codex"]
+input_cost_per_token = 1.25e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1.25e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.1-codex-max"]
+input_cost_per_token = 1.25e-06
+output_cost_per_token = 1e-05
+cache_read_input_token_cost = 1.25e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.2"]
+input_cost_per_token = 1.75e-06
+output_cost_per_token = 1.4e-05
+cache_read_input_token_cost = 1.75e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.2-codex"]
+input_cost_per_token = 1.75e-06
+output_cost_per_token = 1.4e-05
+cache_read_input_token_cost = 1.75e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.3-codex"]
+input_cost_per_token = 1.75e-06
+output_cost_per_token = 1.4e-05
+cache_read_input_token_cost = 1.75e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5-mini"]
+input_cost_per_token = 2.5e-07
+output_cost_per_token = 2e-06
+cache_read_input_token_cost = 2.5e-08
+cache_creation_input_token_cost = 0.0
+
+["openai/gpt-5.1-codex-mini"]
+input_cost_per_token = 2.5e-07
+output_cost_per_token = 2e-06
+cache_read_input_token_cost = 2.5e-08
+cache_creation_input_token_cost = 0.0
+
+["openai/codex-mini-latest"]
+input_cost_per_token = 1.5e-06
+output_cost_per_token = 6e-06
+cache_read_input_token_cost = 3.75e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/o3"]
+input_cost_per_token = 2e-06
+output_cost_per_token = 8e-06
+cache_read_input_token_cost = 5e-07
+cache_creation_input_token_cost = 0.0
+
+["openai/o4-mini"]
+input_cost_per_token = 1.1e-06
+output_cost_per_token = 4.4e-06
+cache_read_input_token_cost = 2.75e-07
+cache_creation_input_token_cost = 0.0
