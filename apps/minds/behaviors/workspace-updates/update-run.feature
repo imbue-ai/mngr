@@ -17,6 +17,14 @@ Feature: Running an update
     Then that workspace is started
     And an update agent is started inside that workspace
 
+  @running-workspace-not-restarted
+  Scenario: A running workspace is updated without being started again
+    Starting a workspace that is already up takes as long as starting the update itself, and shows the workspace as starting for all of it.
+    Given an out-of-date workspace that is running
+    When the user starts an update for that workspace
+    Then that workspace is not started again
+    And an update agent is started inside that workspace
+
   @template-too-old
   Scenario: A workspace whose template cannot update itself is refused
     Given an out-of-date workspace whose template predates the update capability

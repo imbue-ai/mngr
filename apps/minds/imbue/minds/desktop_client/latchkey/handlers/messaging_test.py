@@ -2,15 +2,16 @@ import shlex
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.chat_app import MESSAGE_CHAT_SCRIPT
-from imbue.minds.desktop_client.chat_app import build_message_chat_args
+from imbue.minds.desktop_client.chat_app import build_chat_app_exec_args
+from imbue.minds.desktop_client.chat_app import build_message_chat_command
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.messaging import build_inner_mngr_message_command
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
 from imbue.minds.desktop_client.latchkey.handlers.messaging import message_failure_reason
-from imbue.minds.desktop_client.latchkey.handlers.messaging import mngr_message_argv
 from imbue.minds.desktop_client.latchkey.handlers.messaging import stdout_reports_message_delivered
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
-from imbue.minds.desktop_client.testing import exec_result_stdout
 from imbue.minds.desktop_client.testing import script_exit_stdout
+from imbue.minds.desktop_client.testing import script_fallback_stdout
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
@@ -45,18 +46,26 @@ def test_stdout_reports_delivered_ignores_non_json_and_error_events() -> None:
     assert stdout_reports_message_delivered(stdout) is False
 
 
-# What ``mngr message --format jsonl`` prints on delivery, as the inner stdout of its exec.
-_MESSAGE_SENT_STDOUT = exec_result_stdout('{"event": "message_sent", "agent": "assistant", "message": "ok"}\n')
+def _chat_app_call(exec_agent_address: str, target: str, text: str) -> list[str]:
+    """The one exec a delivery makes: the chat's own chat app, with the in-workspace ``mngr message`` behind it."""
+    return build_chat_app_exec_args(
+        exec_agent_address,
+        build_message_chat_command([target, "-m", text], build_inner_mngr_message_command(exec_agent_address, text)),
+    )
+
+
+_SCRIPT_MISSING_STDERR = "python3: can't open file '/home/user/workspace/system/scripts/message_chat.py'\n"
 # The exec of the messaging script, by its verdict.
 _SCRIPT_DELIVERED = MngrCallResult(returncode=0, stdout=script_exit_stdout(0))
 _SCRIPT_REFUSED = MngrCallResult(
     returncode=0,
     stdout=script_exit_stdout(1, inner_stderr="The chat app refused the message: the chat is converging\n"),
 )
-_SCRIPT_MISSING = MngrCallResult(
+# A template from before the script, whose fallback ``mngr message`` delivered.
+_SCRIPT_MISSING_MESSAGE_SENT = MngrCallResult(
     returncode=0,
-    stdout=script_exit_stdout(
-        2, inner_stderr="python3: can't open file '/home/user/workspace/system/scripts/message_chat.py'\n"
+    stdout=script_fallback_stdout(
+        '{"event": "message_sent", "agent": "assistant", "message": "ok"}\n', script_stderr=_SCRIPT_MISSING_STDERR
     ),
 )
 # The exec never reached the workspace: no result event at all.
@@ -94,7 +103,7 @@ def test_send_dispatches_on_concurrency_group_thread(root_concurrency_group: Con
 
     assert caller.called_event.wait(5.0)
     # send goes to the chat's own chat app first, by chat id.
-    assert caller.calls == [build_message_chat_args(str(agent_id), [str(agent_id), "-m", "hello"])]
+    assert caller.calls == [_chat_app_call(str(agent_id), str(agent_id), "hello")]
 
 
 def test_send_retries_until_the_agent_receives_the_message(root_concurrency_group: ConcurrencyGroup) -> None:
@@ -137,7 +146,7 @@ def test_deliver_goes_through_the_chats_own_chat_app_first(root_concurrency_grou
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
 
     assert sender.deliver("agent-chat", "hello", "agent-chat") is True
-    assert caller.calls == [build_message_chat_args("agent-chat", ["agent-chat", "-m", "hello"])]
+    assert caller.calls == [_chat_app_call("agent-chat", "agent-chat", "hello")]
 
 
 def test_deliver_runs_the_script_on_the_chats_agent_and_names_the_chat(
@@ -152,7 +161,7 @@ def test_deliver_runs_the_script_on_the_chats_agent_and_names_the_chat(
     assert len(caller.calls) == 1
     context = exec_command.make_context("mngr exec", caller.calls[0][1:])
     assert [address.agent for address in context.params["agent_list"]] == ["agent-member"]
-    script, _, _ = context.params["command_arg"].rpartition("; ")
+    script, _, _ = context.params["command_arg"].partition("; mngr_chat_app_exit=")
     assert shlex.split(script)[2:] == ["python3", MESSAGE_CHAT_SCRIPT, "agent-seeded-chat", "-m", "hello"]
 
 
@@ -170,28 +179,22 @@ def test_deliver_true_when_the_notice_landed_behind_a_dialog(root_concurrency_gr
     assert len(caller.calls) == 1
 
 
-def test_deliver_falls_back_to_an_in_workspace_mngr_message_only_when_the_script_gave_no_verdict(
+def test_deliver_falls_back_to_an_in_workspace_mngr_message_in_the_same_exec_when_the_script_gave_no_verdict(
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
     """A template from before the script: python exits 2 with no chat-app verdict, so the app's
-    own ``mngr message`` runs -- inside the workspace, where every harness's send path works."""
-    caller = ScriptedMngrCaller(results=(_SCRIPT_MISSING, MngrCallResult(returncode=0, stdout=_MESSAGE_SENT_STDOUT)))
+    own ``mngr message`` runs right behind it -- inside the workspace, where every harness's send path works."""
+    caller = RecordingMngrCaller(result=_SCRIPT_MISSING_MESSAGE_SENT)
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
 
     assert sender.deliver("assistant", "hello", "assistant") is True
-    assert caller.calls == [
-        build_message_chat_args("assistant", ["assistant", "-m", "hello"]),
-        mngr_message_argv("assistant", "hello"),
-    ]
+    assert caller.calls == [_chat_app_call("assistant", "assistant", "hello")]
 
 
-def test_mngr_message_argv_runs_the_send_inside_the_agents_own_workspace() -> None:
-    argv = mngr_message_argv("assistant", "hello (resolution: granted)")
+def test_the_fallback_sends_inside_the_agents_own_workspace_to_the_bare_agent() -> None:
+    """Inside the workspace the pinned host is local, so the inner send names only the agent."""
+    inner = shlex.split(build_inner_mngr_message_command("assistant@host-1.provider-1", "hello (resolution: granted)"))
 
-    context = exec_command.make_context("mngr exec", argv[1:])
-    assert [address.agent for address in context.params["agent_list"]] == ["assistant"]
-    assert context.params["start"] is False
-    inner = shlex.split(context.params["command_arg"])
     assert inner[2:] == [
         "mngr",
         "message",
@@ -232,7 +235,9 @@ def test_deliver_false_when_mngr_message_exits_zero_but_no_message_sent_event(
 ) -> None:
     # The key regression on the backoff path: exit 0 with no message_sent event (agent not
     # found yet) must NOT be treated as delivered.
-    caller = ScriptedMngrCaller(results=(_SCRIPT_MISSING, MngrCallResult(returncode=0, stdout=exec_result_stdout(""))))
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=script_fallback_stdout("", script_stderr=_SCRIPT_MISSING_STDERR))
+    )
     sender = MngrMessageSender(mngr_caller=caller, concurrency_group=root_concurrency_group)
 
     assert sender.deliver("assistant", "hello", "assistant") is False

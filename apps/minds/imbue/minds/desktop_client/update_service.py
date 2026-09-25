@@ -8,6 +8,7 @@ from collections.abc import Callable
 from enum import auto
 from typing import Final
 from typing import Protocol
+from typing import assert_never
 
 from loguru import logger
 from pydantic import ConfigDict
@@ -26,10 +27,10 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROB
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
-from imbue.minds.desktop_client.skill_chat import SkillSupport
+from imbue.minds.desktop_client.skill_chat import SkillChatLaunch
+from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
-from imbue.minds.desktop_client.skill_chat import probe_skill
-from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
+from imbue.minds.desktop_client.skill_chat import launch_skill_chat
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_apply_window import UpdateAgentLiveness
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
@@ -79,9 +80,9 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
     UNSUPPORTED = auto()
     """The workspace predates the update-self skill; there is nothing to run."""
     UNREACHABLE = auto()
-    """The workspace could not be probed or started."""
+    """The launch could not reach the workspace, and starting it did not change that."""
     SPAWN_FAILED = auto()
-    """The workspace was reachable, but the create did not land; its verdict says why when it gave one."""
+    """The create did not land, or the launch was cut off partway; its verdict says why when it gave one."""
 
 
 class UpdateDispatch(FrozenModel):
@@ -125,10 +126,10 @@ class WorkspaceUpdateService(MutableModel):
     start_workspace: Callable[[AgentId], bool] = Field(
         frozen=True,
         description=(
-            "Brings a workspace's host up before the run, returning whether it is up. The shared host "
-            "lifecycle action, not a bare ``mngr start``: an update that wakes a machine the app had "
-            "stopped must clear its unattended-recovery suppression, or the machine stays unrecoverable "
-            "for the rest of the session."
+            "Brings a workspace's host up when the run's launch could not reach it, returning whether it is "
+            "up. The shared host lifecycle action, not a bare ``mngr start``: an update that wakes a machine "
+            "the app had stopped must clear its unattended-recovery suppression, or the machine stays "
+            "unrecoverable for the rest of the session."
         ),
     )
     paths: InstallationPaths | None = Field(
@@ -183,37 +184,48 @@ class WorkspaceUpdateService(MutableModel):
                 )
 
     def _start_claimed_run(self, agent_id: AgentId, chat_name: str, target_override: str | None) -> UpdateDispatch:
-        """Do the work of a dispatch that has already won the run slot."""
-        # A start no-ops against a running host, so this is unconditional rather
-        # than gated on a possibly-stale discovery answer.
-        if not self.start_workspace(agent_id):
-            return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
-        workspace_address = build_agent_address(agent_id, self.backend_resolver)
-        probe = probe_skill(self.mngr_caller, workspace_address, UPDATE_SKILL_NAME)
-        match probe.support:
-            case SkillSupport.UNSUPPORTED:
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNSUPPORTED)
-            case SkillSupport.UNREACHABLE:
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
-            case SkillSupport.SUPPORTED:
-                pass
-        # Which account the chat runs on is the workspace's own default; a workspace with none
-        # signed in refuses the create in its own words, which the spawn carries back.
-        spawn = spawn_skill_chat(
-            self.mngr_caller,
-            workspace_address,
-            probe=probe,
-            chat_name=chat_name,
-            # Read here rather than carried from the press: a schedule armed days ago is not
-            # evidence about the backups this run is actually about to go without.
-            message=build_update_chat_message(
-                target_override=target_override, is_backup_configured=self.is_backup_configured(agent_id)
-            ),
+        """Do the work of a dispatch that has already won the run slot.
+
+        The launch is tried against the host as it stands, and the host is started only when
+        the launch could not reach it: a start against a running host costs as much as the
+        launch itself and flips the row through STARTING for nothing. The launch's own reach
+        is the evidence, not discovery's possibly-stale host state.
+        """
+        # Read here rather than carried from the press: a schedule armed days ago is not
+        # evidence about the backups this run is actually about to go without.
+        message = build_update_chat_message(
+            target_override=target_override, is_backup_configured=self.is_backup_configured(agent_id)
         )
-        if not spawn.is_started:
-            return UpdateDispatch(outcome=UpdateDispatchOutcome.SPAWN_FAILED, failure_detail=spawn.failure_detail)
-        self.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
-        return UpdateDispatch(outcome=UpdateDispatchOutcome.DISPATCHED)
+        first_launch = self._launch_update_chat(agent_id, chat_name, message)
+        if first_launch.outcome is not SkillChatLaunchOutcome.UNREACHABLE:
+            launch = first_launch
+        elif self.start_workspace(agent_id):
+            launch = self._launch_update_chat(agent_id, chat_name, message)
+        else:
+            return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
+        match launch.outcome:
+            case SkillChatLaunchOutcome.STARTED:
+                self.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.DISPATCHED)
+            case SkillChatLaunchOutcome.UNSUPPORTED:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNSUPPORTED)
+            case SkillChatLaunchOutcome.UNREACHABLE:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
+            case SkillChatLaunchOutcome.SPAWN_FAILED:
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.SPAWN_FAILED, failure_detail=launch.failure_detail)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _launch_update_chat(self, agent_id: AgentId, chat_name: str, message: str) -> SkillChatLaunch:
+        # Which account the chat runs on is the workspace's own default; a workspace with none
+        # signed in refuses the create in its own words, which the launch carries back.
+        return launch_skill_chat(
+            self.mngr_caller,
+            build_agent_address(agent_id, self.backend_resolver),
+            skill_name=UPDATE_SKILL_NAME,
+            chat_name=chat_name,
+            message=message,
+        )
 
     def dispatch_for_scheduler(self, agent_id: AgentId, target_ref: str) -> bool:
         """The scheduler's dispatch hook: whether the run went out."""

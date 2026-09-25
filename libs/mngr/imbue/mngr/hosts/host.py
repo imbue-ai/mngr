@@ -551,6 +551,62 @@ _SIGWINCH_MODE_NUDGE: Final[str] = "nudge"
 # agent window sources rather than having it typed in. See _build_agent_launch_steps.
 _AGENT_LAUNCH_SCRIPT_NAME: Final[str] = "launch_agent.sh"
 
+# Opens each agent's data.json in the batched read.
+_AGENT_DATA_FILE_MARKER: Final[str] = "---MNGR_AGENT_DATA_FILE:"
+_AGENTS_DIR_MISSING_MARKER: Final[str] = "---MNGR_AGENTS_DIR_MISSING---"
+
+
+@pure
+def build_read_agent_data_files_command(agents_dir: Path) -> str:
+    """The shell command that prints every ``<agent dir>/data.json`` under ``agents_dir``, each behind a marker line.
+
+    A single ``awk`` reads all of them, so the cost does not grow a process per agent: on a
+    sandboxed runtime (gVisor) each spawn costs tens of milliseconds.
+    """
+    awk_program = (
+        f'BEGIN {{ for (i = 1; i < ARGC; i++) {{ print "{_AGENT_DATA_FILE_MARKER}" ARGV[i]; '
+        "while ((getline line < ARGV[i]) > 0) print line; close(ARGV[i]) } exit }"
+    )
+    return (
+        f"cd {shlex.quote(str(agents_dir))} 2>/dev/null || {{ echo '{_AGENTS_DIR_MISSING_MARKER}'; exit 0; }}; "
+        'set -- */data.json; [ -f "$1" ] || exit 0; '
+        f'awk {shlex.quote(awk_program)} "$@"'
+    )
+
+
+@pure
+def parse_agent_data_files_output(stdout: str) -> dict[str, str] | None:
+    """Each agent state dir's ``data.json`` contents from :func:`build_read_agent_data_files_command`'s output.
+
+    None when the host has no agents dir at all.
+    """
+    lines_by_agent_dir_name: dict[str, list[str]] = {}
+    current_lines: list[str] | None = None
+    for line in stdout.split("\n"):
+        if line == _AGENTS_DIR_MISSING_MARKER:
+            return None
+        elif line.startswith(_AGENT_DATA_FILE_MARKER):
+            agent_dir_name = line.removeprefix(_AGENT_DATA_FILE_MARKER).split("/", 1)[0]
+            current_lines = lines_by_agent_dir_name.setdefault(agent_dir_name, [])
+        elif current_lines is not None:
+            current_lines.append(line)
+        else:
+            pass
+    return {name: "\n".join(lines).strip() for name, lines in lines_by_agent_dir_name.items()}
+
+
+def _read_local_agent_data_files(agents_dir: Path) -> dict[str, str] | None:
+    """Each agent state dir's ``data.json`` contents under a local ``agents_dir``; None when it does not exist."""
+    if not agents_dir.is_dir():
+        return None
+    content_by_agent_dir_name: dict[str, str] = {}
+    for agent_dir in agents_dir.iterdir():
+        try:
+            content_by_agent_dir_name[agent_dir.name] = (agent_dir / "data.json").read_text()
+        except (FileNotFoundError, NotADirectoryError):
+            logger.trace("Skipped agent dir {} with no data.json", agent_dir)
+    return content_by_agent_dir_name
+
 
 def parse_certified_host_data(data_path: Path, content: str) -> CertifiedHostData:
     """Parse the contents of a host's data.json, read from ``data_path``."""
@@ -718,9 +774,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # are inherited unchanged from OuterHost. _get_file*, _put_file*,
     # _get_paramiko_transport, _create_sftp_client are also inherited.
 
-    # =========================================================================
     # Convenience methods (built on core primitives)
-    # =========================================================================
 
     def execute_idempotent_command(
         self,
@@ -808,20 +862,14 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     # read_file, write_file, read_text_file, write_text_file, _get_file_mtime,
     # and get_file_mtime are inherited unchanged from OuterHost.
 
-    def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
-        """List files in a directory on the host.
-
-        When ``timeout_seconds`` is set, the remote ``ls`` self-terminates on a
-        stall (surfacing as ``HostConnectionError`` after transient retries)
-        rather than blocking forever. Used by the per-host-bounded discovery read;
-        other callers leave it ``None`` (unbounded, prior behavior).
-        """
+    def _list_directory(self, path: Path) -> list[str]:
+        """List files in a directory on the host."""
         if self.is_local:
             try:
                 return list(entry.name for entry in path.iterdir())
             except (FileNotFoundError, OSError):
                 return []
-        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null", timeout_seconds=timeout_seconds)
+        result = self.execute_idempotent_command(f"ls -1 '{str(path)}' 2>/dev/null")
         if result.success and result.stdout.strip():
             return result.stdout.strip().split("\n")
         return []
@@ -841,9 +889,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
 
     # get_ssh_connection_info is inherited from OuterHost.
 
-    # =========================================================================
     # Outer Host Access
-    # =========================================================================
 
     @contextmanager
     def outer_host(self) -> Iterator["OuterHostInterface | None"]:
@@ -856,9 +902,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         with self.provider_instance.outer_host_for(self.id) as outer:
             yield outer
 
-    # =========================================================================
     # Activity Times
-    # =========================================================================
 
     def get_reported_activity_time(self, activity_type: ActivitySource) -> datetime | None:
         """Get the last reported activity time for the given type."""
@@ -897,9 +941,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         except FileNotFoundError:
             return None
 
-    # =========================================================================
     # Cooperative Locking
-    # =========================================================================
 
     @contextmanager
     def lock_cooperatively(self, timeout_seconds: float | None = _DEFAULT_HOST_LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
@@ -1279,9 +1321,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         result = self.execute_idempotent_command(command)
         return result.success and "HELD" in result.stdout and "NOT_HELD" not in result.stdout
 
-    # =========================================================================
     # Certified Data
-    # =========================================================================
 
     def get_certified_data(self) -> CertifiedHostData:
         """Get all certified data from data.json."""
@@ -1391,9 +1431,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def to_offline_host(self) -> HostInterface:
         return self.provider_instance.to_offline_host(self.id)
 
-    # =========================================================================
     # Reported Plugin Data
-    # =========================================================================
 
     def get_reported_plugin_state_file_data(self, plugin_name: str, filename: str) -> str:
         """Get a reported plugin state file."""
@@ -1417,9 +1455,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return []
         return self._list_directory(plugin_dir)
 
-    # =========================================================================
     # Environment
-    # =========================================================================
 
     def get_host_env_path(self) -> Path:
         """Get the path to the host env file."""
@@ -1451,9 +1487,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         env_vars[key] = value
         self.set_env_vars(env_vars)
 
-    # =========================================================================
     # Provider-Derived Information
-    # =========================================================================
 
     def get_seconds_since_stopped(self) -> float | None:
         """Return the number of seconds since this host was stopped (or None if it is running)."""
@@ -1533,9 +1567,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             )
         )
 
-    # =========================================================================
     # Agent Information
-    # =========================================================================
 
     def save_agent_data(self, agent_id: AgentId, agent_data: Mapping[str, object]) -> None:
         """Persist agent data to external storage via the provider."""
@@ -1548,17 +1580,15 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
     def get_agents(self) -> list[AgentInterface]:
         """Get all agents on this host."""
         agents_dir = get_agents_root_dir(self.host_dir)
-        if not self.is_directory(agents_dir):
+        content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=None)
+        if content_by_agent_dir_name is None:
             logger.trace("Failed to find agents directory for host {}", self.id)
             return []
 
-        agents: list[AgentInterface] = []
-        for agent_id_str in self._list_directory(agents_dir):
-            agent_dir = agents_dir / agent_id_str
-            if self.is_directory(agent_dir):
-                agent = self._load_agent_from_dir(agent_dir)
-                if agent is not None:
-                    agents.append(agent)
+        agents = [
+            self._load_agent_from_data(agents_dir / agent_dir_name, content)
+            for agent_dir_name, content in content_by_agent_dir_name.items()
+        ]
         logger.trace("Loaded {} agent(s) from host {}", len(agents), self.id)
         return agents
 
@@ -1572,53 +1602,52 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         Note that we override the base method in order to read more directly from the host,
         since that data is more likely to be up-to-date.
 
-        When ``timeout_seconds`` is set (the per-host-bounded discovery path), each
-        remote SSH read (the directory listing and every ``data.json`` read) is
-        bounded by that wall-clock so a wedged host self-terminates its reads
-        rather than leaving the discovery thread running forever. The bound is
-        per-command, so a host with N agents can take up to ~N x the timeout; the
-        outer per-host wall-clock wait remains the overall guarantee.
+        When ``timeout_seconds`` is set (the per-host-bounded discovery path), the one
+        remote read of every ``data.json`` is bounded by that wall-clock so a wedged
+        host self-terminates it rather than leaving the discovery thread running forever.
         """
         with log_span("Loading all agents from host {}", self.id):
             agents_dir = get_agents_root_dir(self.host_dir)
+            content_by_agent_dir_name = self._read_agent_data_files(timeout_seconds=timeout_seconds)
+            if content_by_agent_dir_name is None:
+                logger.trace("Failed to find agents directory for host {}", self.id)
+                return []
 
-            with log_span("Listing agent dir for host {}", self.id):
+            agent_refs: list[DiscoveredAgent] = []
+            for agent_dir_name, content in content_by_agent_dir_name.items():
                 try:
-                    dir_listing = self._list_directory(agents_dir, timeout_seconds=timeout_seconds)
-                except FileNotFoundError:
-                    logger.trace("Failed to find agents directory for host {}", self.id)
-                    return []
-
-            with log_span("Listing agent files from dir for host {}", self.id):
-                agent_refs: list[DiscoveredAgent] = []
-                for dir_name in dir_listing:
-                    agent_dir = agents_dir / dir_name
-                    data_path = agent_dir / "data.json"
-                    try:
-                        if timeout_seconds is not None:
-                            content = self.read_text_file_within_timeout(data_path, timeout_seconds)
-                        else:
-                            content = self.read_text_file(data_path)
-                    except FileNotFoundError:
-                        if not self.is_directory(agent_dir):
-                            logger.warning("Could not load agent reference from {}", data_path)
-                        continue
-                    try:
-                        data = json.loads(content)
-                    except json.JSONDecodeError as e:
-                        logger.warning(
-                            "Could not load agent reference from {} because json was invalid: {}", data_path, e
-                        )
-                        continue
-                    ref = self._validate_and_create_discovered_agent(data)
-                    if ref is not None:
-                        agent_refs.append(ref)
+                    data = json.loads(content)
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "Could not load agent reference from {} because json was invalid: {}",
+                        agents_dir / agent_dir_name / "data.json",
+                        e,
+                    )
+                    continue
+                ref = self._validate_and_create_discovered_agent(data)
+                if ref is not None:
+                    agent_refs.append(ref)
 
             logger.trace("Loaded {} agent reference(s) from host {}", len(agent_refs), self.id)
             return agent_refs
 
-    def _load_agent_from_dir(self, agent_dir: Path) -> AgentInterface | None:
-        """Load an agent from its state directory.
+    def _read_agent_data_files(self, timeout_seconds: float | None) -> dict[str, str] | None:
+        """Every agent's ``data.json`` contents keyed by its state dir name, read in one go.
+
+        None when the host has no agents dir. Agent dirs without a ``data.json`` are left out.
+        """
+        agents_dir = get_agents_root_dir(self.host_dir)
+        if self.is_local:
+            return _read_local_agent_data_files(agents_dir)
+        result = self.execute_idempotent_command(
+            build_read_agent_data_files_command(agents_dir), timeout_seconds=timeout_seconds
+        )
+        if not result.success:
+            raise HostError(f"Failed to read agent data from {agents_dir} on host {self.id}: {result.stderr.strip()}")
+        return parse_agent_data_files_output(result.stdout)
+
+    def _load_agent_from_data(self, agent_dir: Path, content: str) -> AgentInterface:
+        """Load an agent from the contents of the ``data.json`` in its state directory.
 
         If the agent's stored type is no longer registered (e.g. the plugin
         was uninstalled or the type was renamed since the agent was created),
@@ -1634,13 +1663,6 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         state as ``RUNNING_UNKNOWN_AGENT_TYPE`` so users see that something
         is off.
         """
-        data_path = agent_dir / "data.json"
-        try:
-            content = self.read_text_file(data_path)
-        except FileNotFoundError:
-            logger.trace("Failed to find agent data file at {}", data_path)
-            return None
-
         data = json.loads(content)
         logger.trace("Loaded agent {} from {}", data.get("name"), agent_dir)
 
@@ -3880,9 +3902,7 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
         data = json.loads(content)
         return AgentTmuxOptions.from_data_dict(data.get("tmux"))
 
-    # =========================================================================
     # Agent-Derived Information
-    # =========================================================================
 
     def get_idle_seconds(self) -> float:
         """Get the number of seconds since last activity.

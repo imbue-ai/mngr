@@ -8,6 +8,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import Any
 from typing import Final
+from typing import assert_never
 from urllib.parse import quote
 
 import httpx
@@ -103,10 +104,9 @@ from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
-from imbue.minds.desktop_client.skill_chat import SkillSupport
+from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
-from imbue.minds.desktop_client.skill_chat import probe_skill
-from imbue.minds.desktop_client.skill_chat import spawn_skill_chat
+from imbue.minds.desktop_client.skill_chat import launch_skill_chat
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.state import set_state
@@ -639,7 +639,7 @@ def _handle_help_report() -> Response:
     )
 
 
-# Every pre-spawn probe a machine does not answer reads the same to the user.
+# Shown when the launch's exec never reached the machine, so nothing was started there.
 _MACHINE_UNREACHABLE_ERROR: Final[str] = (
     "Couldn't reach this machine to start an agent. It may be starting up or unavailable."
 )
@@ -649,15 +649,14 @@ def _handle_help_assist() -> Response:
     """Spawn an in-workspace ``/assist`` chat to help with a problem (POST /help/assist).
 
     Only valid when the help flow was opened from a loaded workspace: the body carries that
-    workspace's agent id and the user's description. Before spawning, we probe the workspace for the
-    ``/assist`` skill and return 409 if it lacks it (an older default workspace template) or 502 if the workspace is
-    unreachable -- so we never spawn a chat that could only hang. Then the desktop app asks that workspace's chat
-    app for a new chat seeded with ``/assist <description>`` (through the template's ``message_chat.py --create``,
-    run inside the container via ``mngr exec``; a bare ``mngr create`` on a template without it); the workspace's
-    desktop opens its window. The chat runs on the workspace's own default account, and a workspace with none
-    signed in refuses the create in its own words, which rides back in the 502 below. The call blocks until the
-    create finishes so the get-help modal can hold its "starting..." state until the chat exists, then returns 200
-    on success or 502 if the spawn failed.
+    workspace's agent id and the user's description. One ``mngr exec`` into the workspace checks for the
+    ``/assist`` skill (409 if it lacks it, an older default workspace template; 502 if the exec cannot reach the
+    workspace) -- so we never spawn a chat that could only hang -- and then asks that workspace's chat app for a new
+    chat seeded with ``/assist <description>`` (through the template's ``message_chat.py --create``; a bare
+    ``mngr create`` on a template without it); the workspace's desktop opens its window. The chat runs on the
+    workspace's own default account, and a workspace with none signed in refuses the create in its own words,
+    which rides back in the 502 below. The call blocks until the create finishes so the get-help modal can hold
+    its "starting..." state until the chat exists, then returns 200 on success or 502 if the spawn failed.
     """
     body = request.get_json(silent=True, force=True)
     if not isinstance(body, dict):
@@ -686,50 +685,43 @@ def _handle_help_assist() -> Response:
     state = get_state()
     mngr_caller = state.mngr_caller or get_default_mngr_caller()
 
-    # Refuse before spawning if this workspace can't actually host an /assist chat.
-    # Workspaces created from a DEFAULT_WORKSPACE_TEMPLATE predating the /assist skill would otherwise accept
-    # the ``mngr create`` but hang on the ``/assist`` message (an unknown slash command
-    # never submits a prompt, so the send blocks to its full timeout) and leave a
-    # half-created chat behind. The probe is a quick filesystem check inside the
-    # container; on an unsupported/unreachable workspace we return a clear error the
-    # modal turns into a "report a bug instead" screen rather than a dead spinner.
-    workspace_address = build_agent_address(workspace_agent_id, state.backend_resolver)
-    probe = probe_skill(mngr_caller, workspace_address, ASSIST_SKILL_NAME)
-    if probe.support is SkillSupport.UNSUPPORTED:
-        return make_response(
-            status_code=409,
-            content=json.dumps(
-                {"error": "This machine doesn't have the agent-assist skill, so an agent can't help here yet."}
-            ),
-            media_type="application/json",
-        )
-    if probe.support is SkillSupport.UNREACHABLE:
-        return make_response(
-            status_code=502,
-            content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
-            media_type="application/json",
-        )
-
-    # Wait for the create to finish before responding so the get-help modal keeps its
-    # "starting..." state until the chat exists, rather than dismissing into a blank gap
-    # while the agent boots. The cheroot WSGI pool (50 threads) absorbs the blocking call.
-    # Which account the chat runs on is the workspace's own default; a workspace with none
-    # signed in refuses the create in its own words, which the spawn carries back.
-    spawn = spawn_skill_chat(
+    # An unsupported or unreachable workspace gets a clear error the modal turns into a "report a
+    # bug instead" screen rather than a dead spinner. The launch blocks until the create finishes,
+    # so the modal keeps its "starting..." state until the chat exists rather than dismissing into
+    # a blank gap; the cheroot WSGI pool (50 threads) absorbs the blocking call.
+    launch = launch_skill_chat(
         mngr_caller,
-        workspace_address,
+        build_agent_address(workspace_agent_id, state.backend_resolver),
+        skill_name=ASSIST_SKILL_NAME,
         chat_name=generate_chat_name(ASSIST_SKILL_NAME),
         message=build_assist_chat_message(description),
-        probe=probe,
     )
-    if not spawn.is_started:
-        # The same wall that stops an /assist chat stops every other agent
-        # here, so the machine's own refusal rides along when there was one.
-        body: dict[str, object] = {"error": "Couldn't start an agent in this machine."}
-        if spawn.failure_detail:
-            body["detail"] = spawn.failure_detail
-        return make_response(status_code=502, content=json.dumps(body), media_type="application/json")
-    return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
+    match launch.outcome:
+        case SkillChatLaunchOutcome.STARTED:
+            return make_response(status_code=200, content=json.dumps({"ok": True}), media_type="application/json")
+        case SkillChatLaunchOutcome.UNSUPPORTED:
+            return make_response(
+                status_code=409,
+                content=json.dumps(
+                    {"error": "This machine doesn't have the agent-assist skill, so an agent can't help here yet."}
+                ),
+                media_type="application/json",
+            )
+        case SkillChatLaunchOutcome.UNREACHABLE:
+            return make_response(
+                status_code=502,
+                content=json.dumps({"error": _MACHINE_UNREACHABLE_ERROR}),
+                media_type="application/json",
+            )
+        case SkillChatLaunchOutcome.SPAWN_FAILED:
+            # The same wall that stops an /assist chat stops every other agent
+            # here, so the machine's own refusal rides along when there was one.
+            body: dict[str, object] = {"error": "Couldn't start an agent in this machine."}
+            if launch.failure_detail:
+                body["detail"] = launch.failure_detail
+            return make_response(status_code=502, content=json.dumps(body), media_type="application/json")
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -> UiAccountsMessage:

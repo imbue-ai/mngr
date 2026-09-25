@@ -38,6 +38,7 @@ from typing import Final
 from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.mngr_command import mngr_verdict_block
 from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.mngr.api.exec import COMMAND_EXECUTION_FAILURE_PREFIX
 
 # Bare ``mngr`` resolves on the container's PATH (set up by ``mngr exec``'s
 # source-env prefix); the desktop app's outer binary path does not exist there.
@@ -142,6 +143,21 @@ def exec_failure_reason(stdout: str) -> str:
         if event.get("event") == "exec_error" and "error" in event
     )
     return reasons[:FAILURE_DETAIL_MAX_CHARS]
+
+
+@pure
+def is_exec_cut_off_on_reached_host(stdout: str) -> bool:
+    """Whether ``mngr exec --format jsonl`` failed after reaching the agent's host, where the command may have run.
+
+    Such a failure is an ``exec_error`` too, but unlike a host that was down or unreachable
+    it does not mean nothing ran: a connection lost mid-command leaves the command's work done
+    or in flight, with no ``exec_result`` to say so.
+    """
+    return any(
+        str(event.get("error", "")).startswith(COMMAND_EXECUTION_FAILURE_PREFIX)
+        for event in jsonl_events(stdout)
+        if event.get("event") == "exec_error"
+    )
 
 
 def in_workspace_failure_detail(stderr: str) -> str:

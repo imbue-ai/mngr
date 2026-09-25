@@ -21,16 +21,18 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
-from imbue.minds.desktop_client.testing import RefusingSpawnMngrCaller
 from imbue.minds.desktop_client.testing import SIGNED_IN_ACCOUNT_DIR
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
+from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import landed_verdict
-from imbue.minds.desktop_client.testing import ready_machine_probe_stdout
+from imbue.minds.desktop_client.testing import ready_machine_launch_stdout
+from imbue.minds.desktop_client.testing import skill_chat_launch_stdout
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
 from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_api_updates import run_bulk_dispatch
+from imbue.minds.desktop_client.update_chat import UPDATE_SKILL_NAME
 from imbue.minds.desktop_client.update_chat import build_update_chat_message
 from imbue.minds.desktop_client.update_service import UpdateDispatch
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
@@ -44,16 +46,24 @@ from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.utils.polling import poll_until
 
-_SKILL_PRESENT_STDOUT = "MNGR_UPDATE_SELF_SKILL_PRESENT\n"
-_SKILL_ABSENT_STDOUT = "MNGR_UPDATE_SELF_SKILL_ABSENT\n"
+_SKILL_ABSENT_STDOUT = skill_chat_launch_stdout(UPDATE_SKILL_NAME, is_skill_present=False)
 
 # The machine every dispatch test that is not about the binding runs against.
-_DISPATCH_READY_STDOUT = ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT)
+_DISPATCH_READY_STDOUT = ready_machine_launch_stdout(UPDATE_SKILL_NAME)
+
+# A launch that never reached the machine because its host is down: what a stopped machine answers first.
+_HOST_OFFLINE = host_offline_exec_result()
+
+
+def _stopped_machine_caller() -> ScriptedMngrCaller:
+    """A machine that is down until the dispatch starts it, and ready for the launch once it has."""
+    return ScriptedMngrCaller(results=(_HOST_OFFLINE, MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)))
 
 
 class _SystemServicesResolver(StaticBackendResolver):
@@ -430,15 +440,32 @@ def test_a_verdict_landing_while_the_probe_is_in_flight_is_kept_over_the_poll_s_
 def test_a_stopped_machine_is_started_before_its_update_runs(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """A start no-ops on a running host, so the dispatch issues it unconditionally."""
+    """The launch that could not reach the machine is what starts it; the launch then runs again."""
+    caller = _stopped_machine_caller()
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
+    _mark_out_of_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 200
+    assert _host_actions(tmp_path) == [f"start {agent_id} --quiet"]
+    assert [call[0] for call in caller.calls] == ["exec", "exec"], "and the start is not an in-workspace command"
+
+
+@pytest.mark.witnesses("workspace-updates.running-workspace-not-restarted")
+def test_a_running_machine_is_updated_without_being_started(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A start against a running machine costs as much as the launch and flips its row through STARTING for nothing."""
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT))
     client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     _mark_out_of_date(app, agent_id)
 
-    _post(client, f"/ui/api/updates/{agent_id}/now")
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
 
-    assert _host_actions(tmp_path) == [f"start {agent_id} --quiet"]
-    assert caller.calls[0][0] == "exec", "and the start is not an in-workspace command"
+    assert response.status_code == 200
+    assert _host_actions(tmp_path) == []
+    assert len(caller.calls) == 1
 
 
 def test_a_machine_the_app_stopped_may_be_recovered_again_once_an_update_starts_it(
@@ -452,9 +479,7 @@ def test_a_machine_the_app_stopped_may_be_recovered_again_once_an_update_starts_
     excluded from unattended recovery for the rest of the process's life -- and
     that exclusion only bites once it is already broken.
     """
-    client, app = _build_client(
-        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
-    )
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=_stopped_machine_caller())
     with app.app_context():
         tracker = get_state().system_interface_health_tracker
     assert tracker is not None
@@ -707,7 +732,7 @@ def test_a_bulk_now_run_goes_through_the_schedule_gate_rather_than_dispatching_b
 
 
 class _RaisingOnSpawnMngrCaller(RecordingMngrCaller):
-    """Answers the start and the skill probe, then raises ``raised_type`` on the ``mngr create``.
+    """Raises ``raised_type`` on the launch that carries the ``mngr create``.
 
     The warm-process transport is a socket, so a spawn can fail by raising
     rather than by exiting non-zero.
@@ -763,7 +788,7 @@ def test_a_second_dispatch_loses_while_the_first_is_still_starting_the_machine(
 ) -> None:
     """The run slot is claimed before the slow start, so concurrent dispatchers cannot both land a run."""
     release_path = tmp_path / "release_start"
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT))
+    caller = _stopped_machine_caller()
     _client, app = _build_client(
         tmp_path,
         root_concurrency_group,
@@ -793,16 +818,15 @@ def test_a_second_dispatch_loses_while_the_first_is_still_starting_the_machine(
     assert second.outcome is UpdateDispatchOutcome.ALREADY_RUNNING
     assert [dispatch.outcome for dispatch in outcomes] == [UpdateDispatchOutcome.DISPATCHED]
     assert _host_actions(tmp_path) == [f"start {agent_id} --quiet"]
-    assert len([call for call in caller.calls if any("mngr create" in arg for arg in call)]) == 1
+    # The first dispatch's launch before the start and its launch after; the second made none.
+    assert len(caller.calls) == 2
 
 
 def test_a_dispatch_that_cannot_reach_the_machine_hands_the_run_slot_back(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """Every non-dispatch exit must release the claim, or a merely-down machine could never be retried."""
-    client, app = _build_client(
-        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=1, stderr="connection refused")
-    )
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_HOST_OFFLINE)
     _mark_out_of_date(app, agent_id)
 
     assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
@@ -818,7 +842,7 @@ def test_a_machine_whose_start_fails_hands_the_run_slot_back(
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT),
+        mngr_result=_HOST_OFFLINE,
         mngr_binary=_write_recording_stub(tmp_path, "failing_stub_mngr", exit_code=1),
     )
     _mark_out_of_date(app, agent_id)
@@ -954,12 +978,17 @@ def test_a_refused_spawn_tells_the_user_what_the_machine_said(
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_caller=RefusingSpawnMngrCaller(
-            result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT),
-            refusal_stderr=(
-                "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
-                "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
-                "ERROR: Command failed on agent system-services\n"
+        mngr_result=MngrCallResult(
+            returncode=0,
+            stdout=skill_chat_launch_stdout(
+                UPDATE_SKILL_NAME,
+                script_exit_code=2,
+                fallback_stdout="",
+                fallback_exit_code=1,
+                fallback_stderr=(
+                    "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
+                    "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
+                ),
             ),
         ),
     )
@@ -982,7 +1011,7 @@ def test_an_outcome_with_nothing_to_add_carries_no_detail(
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_result=MngrCallResult(returncode=0, stdout="MNGR_UPDATE_SELF_SKILL_ABSENT\n"),
+        mngr_result=MngrCallResult(returncode=0, stdout=_SKILL_ABSENT_STDOUT),
     )
     _mark_out_of_date(app, agent_id)
 
@@ -1000,7 +1029,9 @@ def test_the_dispatched_update_chat_is_bound_to_the_machines_signed_in_account(
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_result=MngrCallResult(returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT)),
+        mngr_result=MngrCallResult(
+            returncode=0, stdout=ready_machine_launch_stdout(UPDATE_SKILL_NAME, is_bound_by_resolver=True)
+        ),
     )
     _mark_out_of_date(app, agent_id)
 
@@ -1009,9 +1040,9 @@ def test_the_dispatched_update_chat_is_bound_to_the_machines_signed_in_account(
     assert response.status_code == 200
     caller = _service(app).mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
-    spawn = [call for call in caller.calls if any("mngr create" in arg for arg in call)]
-    assert len(spawn) == 1
-    assert f"CLAUDE_CONFIG_DIR={SIGNED_IN_ACCOUNT_DIR}" in spawn[0][3]
+    # The launch, the account probe, then the bound create.
+    assert len(caller.calls) == 3
+    assert f"CLAUDE_CONFIG_DIR={SIGNED_IN_ACCOUNT_DIR}" in caller.calls[2][3]
 
 
 def test_a_machine_whose_template_keeps_no_accounts_is_dispatched_unbound(
@@ -1022,7 +1053,8 @@ def test_a_machine_whose_template_keeps_no_accounts_is_dispatched_unbound(
         tmp_path,
         root_concurrency_group,
         mngr_result=MngrCallResult(
-            returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, account_dir=None)
+            returncode=0,
+            stdout=ready_machine_launch_stdout(UPDATE_SKILL_NAME, is_bound_by_resolver=True, account_dir=None),
         ),
     )
     _mark_out_of_date(app, agent_id)
@@ -1032,21 +1064,21 @@ def test_a_machine_whose_template_keeps_no_accounts_is_dispatched_unbound(
     assert response.status_code == 200
     caller = _service(app).mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
-    spawn = [call for call in caller.calls if any("mngr create" in arg for arg in call)]
-    assert len(spawn) == 1
-    assert "CLAUDE_CONFIG_DIR" not in spawn[0][3]
+    create = caller.calls[2][3]
+    assert "mngr create" in create
+    assert "CLAUDE_CONFIG_DIR" not in create
 
 
 def test_a_machine_whose_script_creates_chats_gets_its_update_chat_from_its_chat_app(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """The template's `message_chat.py --create` makes the chat through the workspace's chat app, so
-    the app runs no `mngr create` of its own and asks no resolver: one probe, one script run."""
+    """The template's `message_chat.py --create` makes the chat through the workspace's chat app, in the
+    launch's one exec; no resolver is asked."""
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
         mngr_result=MngrCallResult(
-            returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, has_chat_create_script=True)
+            returncode=0, stdout=ready_machine_launch_stdout(UPDATE_SKILL_NAME, has_chat_create_script=True)
         ),
     )
     _mark_out_of_date(app, agent_id)
@@ -1056,26 +1088,21 @@ def test_a_machine_whose_script_creates_chats_gets_its_update_chat_from_its_chat
     assert response.status_code == 200
     caller = _service(app).mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
-    execs = [call for call in caller.calls if call[0] == "exec"]
-    assert len(execs) == 2
-    assert not any("mngr create" in call[3] or "default_account_args.py" in call[3] for call in execs)
-    create = execs[1][3]
-    assert "system/scripts/message_chat.py --create" in create
-    assert "--label auto_open=true" in create
-    assert "/update-self" in create
+    assert len(caller.calls) == 1
+    launch = caller.calls[0][3]
+    assert "system/scripts/message_chat.py --create" in launch
+    assert "--label auto_open=true" in launch
+    assert "/update-self" in launch
 
 
-def test_a_machine_that_writes_its_create_defaults_gets_one_probe_and_a_bare_create(
+def test_a_machine_whose_script_predates_its_create_mode_gets_a_bare_create_in_the_same_exec(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
-    """The machine's own mngr resolves the account and harness, so the app asks nothing and names nothing
-    once the script has declined to make the chat (its template predates the create mode)."""
+    """The machine's own mngr resolves the account and harness, so the app asks nothing and names nothing."""
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_result=MngrCallResult(
-            returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, is_local_settings_present=True)
-        ),
+        mngr_result=MngrCallResult(returncode=0, stdout=ready_machine_launch_stdout(UPDATE_SKILL_NAME)),
     )
     _mark_out_of_date(app, agent_id)
 
@@ -1084,15 +1111,12 @@ def test_a_machine_that_writes_its_create_defaults_gets_one_probe_and_a_bare_cre
     assert response.status_code == 200
     caller = _service(app).mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
-    execs = [call for call in caller.calls if call[0] == "exec"]
-    assert len(execs) == 3
-    assert not any("default_account_args.py" in call[3] for call in execs)
-    assert "message_chat.py --create" in execs[1][3]
-    create = execs[2][3]
-    assert "mngr create" in create
-    assert "CLAUDE_CONFIG_DIR" not in create and "--type" not in create
-    assert "agent_types.claude.check_installation=false" in create
-    assert "user_created=true" in create
+    assert len(caller.calls) == 1
+    launch = caller.calls[0][3]
+    assert "mngr create" in launch
+    assert "CLAUDE_CONFIG_DIR" not in launch and "--type" not in launch
+    assert "agent_types.claude.check_installation=false" in launch
+    assert "user_created=true" in launch
 
 
 @pytest.mark.witnesses("workspace-updates.workspace-refuses-the-agent")
@@ -1105,16 +1129,19 @@ def test_a_machine_that_refuses_the_agent_has_its_refusal_shown_and_the_run_slot
     client, app = _build_client(
         tmp_path,
         root_concurrency_group,
-        mngr_caller=RefusingSpawnMngrCaller(
-            result=MngrCallResult(
-                returncode=0, stdout=ready_machine_probe_stdout(_SKILL_PRESENT_STDOUT, account_dir="")
-            ),
-            refusal_stderr=(
-                "Error: Pre-command script(s) failed for 'create':\n"
-                "  Script: python3 system/scripts/require_create_account.py\n"
-                "  Exit code: 1\n"
-                f"  Stderr: {refusal}\n"
-                "ERROR: Command failed on agent system-services\n"
+        mngr_result=MngrCallResult(
+            returncode=0,
+            stdout=skill_chat_launch_stdout(
+                UPDATE_SKILL_NAME,
+                script_exit_code=2,
+                fallback_stdout="",
+                fallback_exit_code=1,
+                fallback_stderr=(
+                    "Error: Pre-command script(s) failed for 'create':\n"
+                    "  Script: python3 system/scripts/require_create_account.py\n"
+                    "  Exit code: 1\n"
+                    f"  Stderr: {refusal}\n"
+                ),
             ),
         ),
     )

@@ -72,14 +72,20 @@ def test_parse_listing_output_extracts_agent_data() -> None:
         "---MNGR_DATA_JSON_END---\n"
         "---MNGR_PS_START---\n"
         "---MNGR_PS_END---\n"
+        "TMUX_SESSION_PREFIX=mngr-\n"
+        "TMUX_WINDOW_NAME=agent\n"
+        "---MNGR_TMUX_PANES_START---\n"
+        "mngr-test-agent::MNGR::agent::MNGR::0|claude|456\n"
+        "---MNGR_TMUX_PANES_END---\n"
+        "---MNGR_AGENT_MTIMES_START---\n"
+        "1700000100 /mngr/agents/agent-123/activity/user\n"
+        "1700000200 /mngr/agents/agent-123/activity/agent\n"
+        "1700000050 /mngr/agents/agent-123/activity/start\n"
+        "---MNGR_AGENT_MTIMES_END---\n"
         "---MNGR_AGENT_START:agent-123---\n"
         "---MNGR_AGENT_DATA_START---\n"
         '{"id": "agent-123", "name": "test-agent", "type": "claude", "command": "claude"}\n'
         "---MNGR_AGENT_DATA_END---\n"
-        "USER_MTIME=1700000100\n"
-        "AGENT_MTIME=1700000200\n"
-        "START_MTIME=1700000050\n"
-        "TMUX_INFO=0|claude|456\n"
         "ACTIVE=true\n"
         "URL=https://example.com\n"
         "---MNGR_AGENT_END---\n"
@@ -118,9 +124,7 @@ def test_parse_listing_output_extracts_ps_output() -> None:
     assert "sshd" in result["ps_output"]
 
 
-# =========================================================================
 # _build_single_agent_details tests
-# =========================================================================
 
 
 def _make_host_details() -> HostDetails:

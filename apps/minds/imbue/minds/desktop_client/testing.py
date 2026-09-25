@@ -13,7 +13,6 @@ import uuid
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
-from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timedelta
@@ -42,6 +41,8 @@ from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
 from imbue.minds.desktop_client.backend_resolver import ParsedAgentsResult
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.chat_app import EXIT_SENTINEL
+from imbue.minds.desktop_client.chat_app import FALLBACK_BEGIN_SENTINEL
+from imbue.minds.desktop_client.chat_app import FALLBACK_EXIT_SENTINEL
 from imbue.minds.desktop_client.discovery_health import DiscoveryHealth
 from imbue.minds.desktop_client.discovery_health import ProducerRemediator
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -73,9 +74,9 @@ from imbue.minds.desktop_client.restic_cli import _get_restic_binary
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_END_SENTINEL
 from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_EXIT_SENTINEL
-from imbue.minds.desktop_client.skill_chat import LOCAL_SETTINGS_ABSENT_SENTINEL
-from imbue.minds.desktop_client.skill_chat import LOCAL_SETTINGS_PRESENT_SENTINEL
+from imbue.minds.desktop_client.skill_chat import NEEDS_ACCOUNT_BINDING_SENTINEL
 from imbue.minds.desktop_client.skill_chat import NO_ACCOUNT_STORE_SENTINEL
+from imbue.minds.desktop_client.skill_chat import skill_sentinel
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import set_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
@@ -736,31 +737,6 @@ def write_blocking_stub_mngr(tmp_path: Path, name: str, release_path: Path) -> s
 SUPPRESSION_WAIT_SECONDS: Final[float] = 5.0
 
 
-class RefusingSpawnMngrCaller(RecordingMngrCaller):
-    """Answers the skill probe, then refuses the ``mngr create`` the way a wedged machine does.
-
-    The refusal a wedged machine gives is not the outer ``mngr exec``'s: the inner
-    command's verdict arrives on the same stream, between the outer mngr's
-    discovery chatter and its own closing "command failed". Only a double that
-    fails the create alone -- while the probe ahead of it still answers -- puts
-    those three in the order the app has to read them apart in.
-    """
-
-    refusal_stderr: str = Field(default="", description="The stderr the refused inner ``mngr create`` answers with")
-
-    def call(
-        self,
-        argv: Sequence[str],
-        timeout: float | None = None,
-        env_overrides: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> MngrCallResult:
-        result = super().call(argv, timeout, env_overrides, cwd)
-        if any("mngr create" in arg for arg in argv):
-            return MngrCallResult(returncode=1, stderr=self.refusal_stderr, is_mngr_output=True)
-        return result
-
-
 class RecordingNotificationDispatcher(NotificationDispatcher):
     """Dispatcher double that records dispatch calls instead of writing the Electron event."""
 
@@ -979,8 +955,17 @@ def exec_result_stdout(inner_stdout: str, inner_stderr: str = "", agent: str = "
 
 
 def exec_error_stdout(error: str, agent: str = "workspace") -> str:
-    """One ``mngr exec --format jsonl`` stdout for a run that never reached the command: only its reason."""
+    """One ``mngr exec --format jsonl`` stdout for a run that failed without a result: only mngr's reason."""
     return json.dumps({"event": "exec_error", "agent": agent, "error": error}) + "\n"
+
+
+def host_offline_exec_result() -> MngrCallResult:
+    """What ``mngr exec --no-start`` answers when the agent's host is down: mngr's own refusal, before it reached the host."""
+    return MngrCallResult(
+        returncode=1,
+        stdout=exec_error_stdout("Host 'host-1' is offline and automatic starting is disabled."),
+        is_mngr_output=True,
+    )
 
 
 def script_exit_stdout(exit_code: int, inner_stdout: str = "", inner_stderr: str = "") -> str:
@@ -988,31 +973,92 @@ def script_exit_stdout(exit_code: int, inner_stdout: str = "", inner_stderr: str
     return exec_result_stdout(f"{inner_stdout}{EXIT_SENTINEL}{exit_code}\n", inner_stderr)
 
 
-def ready_machine_probe_stdout(
-    skill_probe_stdout: str,
+def _chat_app_command_streams(
     *,
-    account_dir: str | None = SIGNED_IN_ACCOUNT_DIR,
-    is_local_settings_present: bool = False,
-    has_chat_create_script: bool = False,
-) -> str:
-    """The one answer a machine ready to host a skill chat gives, whichever pre-spawn step asks.
+    script_exit_code: int,
+    script_stderr: str,
+    fallback_stdout: str | None,
+    fallback_exit_code: int | None,
+    fallback_stderr: str,
+) -> tuple[str, str]:
+    """The inner stdout and stderr of one ``build_message_chat_command`` run.
 
-    ``RecordingMngrCaller`` answers every call alike, so this carries the skill sentinel,
-    the local-settings sentinel, the account probe's fenced binding, and the exec result of
-    the chat-creating script together. ``has_chat_create_script`` renders a template whose
-    script makes the chat (exit 0); the default renders one whose script predates its create
-    mode (argparse's 2), so the app's bare create runs. ``is_local_settings_present``
-    renders a workspace that writes its own create defaults (the app then asks its resolver
-    nothing); ``account_dir`` keeps ``account_binding_probe_stdout``'s three-way contract
-    for one that does not.
+    ``fallback_stdout=None`` renders a script that gave a verdict, so no fallback ran;
+    ``fallback_exit_code=None`` renders a fallback cut off before it reported its status.
     """
-    local_settings = LOCAL_SETTINGS_PRESENT_SENTINEL if is_local_settings_present else LOCAL_SETTINGS_ABSENT_SENTINEL
-    script = (
-        script_exit_stdout(0, '{"chat_id": "agent-1"}\n')
-        if has_chat_create_script
-        else script_exit_stdout(2, inner_stderr="message_chat.py: error: unrecognized arguments: --create\n")
+    inner_stdout = f"{EXIT_SENTINEL}{script_exit_code}\n"
+    inner_stderr = script_stderr
+    if fallback_stdout is not None:
+        fallback_exit = "" if fallback_exit_code is None else f"{FALLBACK_EXIT_SENTINEL}{fallback_exit_code}\n"
+        inner_stdout += f"{FALLBACK_BEGIN_SENTINEL}\n{fallback_stdout}{fallback_exit}"
+        inner_stderr += f"{FALLBACK_BEGIN_SENTINEL}\n{fallback_stderr}"
+    return inner_stdout, inner_stderr
+
+
+def script_fallback_stdout(fallback_stdout: str, *, script_stderr: str = "", fallback_exit_code: int = 0) -> str:
+    """The exec stdout of a ``build_message_chat_command`` run whose script gave no verdict, so the fallback ran."""
+    return exec_result_stdout(
+        *_chat_app_command_streams(
+            script_exit_code=2,
+            script_stderr=script_stderr,
+            fallback_stdout=fallback_stdout,
+            fallback_exit_code=fallback_exit_code,
+            fallback_stderr="",
+        )
     )
-    return f"{skill_probe_stdout}{local_settings}\n" + account_binding_probe_stdout(account_dir=account_dir) + script
+
+
+def skill_chat_launch_stdout(
+    skill_name: str,
+    *,
+    is_skill_present: bool = True,
+    script_exit_code: int = 0,
+    script_stderr: str = "",
+    fallback_stdout: str | None = None,
+    fallback_exit_code: int | None = 0,
+    fallback_stderr: str = "",
+) -> str:
+    """The exec stdout of one skill-chat launch (``build_skill_chat_launch_command``).
+
+    The fallback arguments render as :func:`_chat_app_command_streams` describes.
+    """
+    if not is_skill_present:
+        return exec_result_stdout(f"{skill_sentinel(skill_name, 'ABSENT')}\n")
+    chat_app_stdout, chat_app_stderr = _chat_app_command_streams(
+        script_exit_code=script_exit_code,
+        script_stderr=script_stderr,
+        fallback_stdout=fallback_stdout,
+        fallback_exit_code=fallback_exit_code,
+        fallback_stderr=fallback_stderr,
+    )
+    return exec_result_stdout(f"{skill_sentinel(skill_name, 'PRESENT')}\n{chat_app_stdout}", chat_app_stderr)
+
+
+def ready_machine_launch_stdout(
+    skill_name: str,
+    *,
+    has_chat_create_script: bool = False,
+    is_bound_by_resolver: bool = False,
+    account_dir: str | None = SIGNED_IN_ACCOUNT_DIR,
+) -> str:
+    """The one answer a machine ready to host a skill chat gives, whichever step of the launch asks.
+
+    ``RecordingMngrCaller`` answers every call alike, so this carries the launch's exec result and,
+    for a legacy machine, the account probe's fenced binding too. ``has_chat_create_script``
+    renders a template whose script makes the chat (exit 0); the default renders one whose script
+    predates its create mode (argparse's 2), so the launch's bare create runs.
+    ``is_bound_by_resolver`` renders a machine that keeps accounts but writes no create defaults
+    (minds-v0.5.0 through v0.5.2), whose bare create waits on its resolver; ``account_dir`` keeps
+    ``account_binding_probe_stdout``'s three-way contract for it.
+    """
+    if has_chat_create_script:
+        return skill_chat_launch_stdout(skill_name, script_exit_code=0)
+    if is_bound_by_resolver:
+        launch = skill_chat_launch_stdout(
+            skill_name, script_exit_code=2, fallback_stdout=f"{NEEDS_ACCOUNT_BINDING_SENTINEL}\n"
+        )
+        return launch + account_binding_probe_stdout(account_dir=account_dir)
+    return skill_chat_launch_stdout(skill_name, script_exit_code=2, fallback_stdout="")
 
 
 def update_run_probe_stdout(*, run: str = "", agents: str | None = "") -> str:

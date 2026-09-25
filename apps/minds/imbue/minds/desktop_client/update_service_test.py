@@ -14,14 +14,15 @@ from pydantic import PrivateAttr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
-from imbue.minds.desktop_client.skill_chat import ACCOUNT_ARGS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import SYSTEM_SERVICES_PROVIDER_NAME
-from imbue.minds.desktop_client.testing import account_binding_probe_stdout
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
+from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import make_update_state_store
+from imbue.minds.desktop_client.testing import ready_machine_launch_stdout
 from imbue.minds.desktop_client.testing import update_run_probe_stdout
 from imbue.minds.desktop_client.update_apply_window import UpdateApplyWindowManager
+from imbue.minds.desktop_client.update_chat import UPDATE_SKILL_NAME
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
@@ -34,6 +35,7 @@ from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateSta
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
@@ -70,6 +72,7 @@ def _build_service(
     caller: MngrCaller,
     store: WorkspaceUpdateStateStore | None = None,
     started: list[AgentId] | None = None,
+    is_start_successful: bool = True,
     backend_resolver: MngrCliBackendResolver | None = None,
 ) -> _FixedHostStateService:
     store = store if store is not None else make_update_state_store(tmp_path)
@@ -97,17 +100,17 @@ def _build_service(
         mngr_caller=caller,
         backend_resolver=backend_resolver,
         paths=InstallationPaths(data_dir=tmp_path / "data"),
-        start_workspace=_record_and_succeed(started if started is not None else []),
+        start_workspace=_record_start(started if started is not None else [], is_up=is_start_successful),
         fixed_host_state=host_state,
     )
 
 
-def _record_and_succeed(started: list[AgentId]) -> Callable[[AgentId], bool]:
-    """A stand-in host start that records who it was asked for and always reports the machine up."""
+def _record_start(started: list[AgentId], *, is_up: bool) -> Callable[[AgentId], bool]:
+    """A stand-in host start that records who it was asked for and reports the machine up or not."""
 
     def start(agent_id: AgentId) -> bool:
         started.append(agent_id)
-        return True
+        return is_up
 
     return start
 
@@ -405,7 +408,7 @@ def test_the_poll_adopts_the_records_own_start_as_the_runs_identity(
 
 
 class _SpawnTimesOutAfterCreatingTheChatCaller(MngrCaller):
-    """Answers each step of a dispatch; the spawn times out after the chat was really created."""
+    """Times the launch out after the chat was really created."""
 
     store: WorkspaceUpdateStateStore = Field(description="Where the discovered run lands.")
     agent_id: AgentId = Field(description="The machine being dispatched to.")
@@ -417,12 +420,6 @@ class _SpawnTimesOutAfterCreatingTheChatCaller(MngrCaller):
         env_overrides: Mapping[str, str] | None = None,
         cwd: Path | None = None,
     ) -> MngrCallResult:
-        if argv[0] == "start":
-            return MngrCallResult(returncode=0)
-        if any("MNGR_UPDATE_SELF_SKILL_PRESENT" in arg for arg in argv):
-            return MngrCallResult(returncode=0, stdout="MNGR_UPDATE_SELF_SKILL_PRESENT\n")
-        if any(ACCOUNT_ARGS_BEGIN_SENTINEL in arg for arg in argv):
-            return MngrCallResult(returncode=0, stdout=account_binding_probe_stdout())
         self.store.set_activity(self.agent_id, UpdateActivity.RUNNING)
         return MngrCallResult(returncode=-1, is_timed_out=True)
 
@@ -444,10 +441,10 @@ def test_a_spawn_reported_as_failed_does_not_unlock_a_run_that_has_started(
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
 
 
-def test_an_update_probes_its_machine_by_the_host_discovery_placed_it_on(
+def test_an_update_launches_on_its_machine_by_the_host_discovery_placed_it_on(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """A bare id would make mngr list every host of the provider first, which can outlast the probe's budget."""
+    """A bare id would make mngr list every host of the provider before the launch reaches the workspace."""
     agent_id = AgentId.generate()
     host_id = HostId.generate()
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout=""))
@@ -462,3 +459,89 @@ def test_an_update_probes_its_machine_by_the_host_discovery_placed_it_on(
     service.dispatch_update(agent_id)
 
     assert caller.calls[0][:3] == ["exec", "--agent", f"{agent_id}@{host_id}.{SYSTEM_SERVICES_PROVIDER_NAME}"]
+
+
+_LAUNCHED_STDOUT = ready_machine_launch_stdout(UPDATE_SKILL_NAME, has_chat_create_script=True)
+_HOST_OFFLINE = host_offline_exec_result()
+
+
+def test_an_update_on_a_running_machine_launches_without_starting_it(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A start against a running host costs as much as the launch and flips the row through STARTING for nothing."""
+    started: list[AgentId] = []
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_LAUNCHED_STDOUT))
+    service = _build_service(
+        tmp_path, root_concurrency_group, host_state=HostState.RUNNING, caller=caller, started=started
+    )
+
+    dispatch = service.dispatch_update(AgentId.generate())
+
+    assert dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
+    assert started == []
+    assert len(caller.calls) == 1
+
+
+def test_an_update_the_launch_could_not_reach_starts_the_machine_and_launches_again(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """Discovery can think a stopped machine is up, so the launch's own reach decides, not the host state."""
+    started: list[AgentId] = []
+    agent_id = AgentId.generate()
+    caller = ScriptedMngrCaller(results=(_HOST_OFFLINE, MngrCallResult(returncode=0, stdout=_LAUNCHED_STDOUT)))
+    service = _build_service(
+        tmp_path, root_concurrency_group, host_state=HostState.RUNNING, caller=caller, started=started
+    )
+
+    dispatch = service.dispatch_update(agent_id)
+
+    assert dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
+    assert started == [agent_id]
+    assert len(caller.calls) == 2
+
+
+@pytest.mark.parametrize("is_start_successful", (True, False), ids=("started-but-still-unreachable", "start-failed"))
+def test_an_update_that_cannot_reach_its_machine_even_after_a_start_is_unreachable(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, is_start_successful: bool
+) -> None:
+    started: list[AgentId] = []
+    caller = RecordingMngrCaller(result=_HOST_OFFLINE)
+    service = _build_service(
+        tmp_path,
+        root_concurrency_group,
+        host_state=HostState.STOPPED,
+        caller=caller,
+        started=started,
+        is_start_successful=is_start_successful,
+    )
+
+    dispatch = service.dispatch_update(AgentId.generate())
+
+    assert dispatch.outcome is UpdateDispatchOutcome.UNREACHABLE
+    assert len(started) == 1
+    assert len(caller.calls) == (2 if is_start_successful else 1)
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        MngrCallResult(returncode=-1, is_timed_out=True),
+        MngrCallResult(returncode=1, stderr="mngr warm process exited without returning a result"),
+    ),
+    ids=("timed_out", "warm_process_died"),
+)
+def test_an_update_whose_launch_mngr_never_answered_does_not_start_the_machine_and_launch_again(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, result: MngrCallResult
+) -> None:
+    """A launch cut off before mngr answered may have made the chat, and a second launch would start a second update."""
+    started: list[AgentId] = []
+    caller = RecordingMngrCaller(result=result)
+    service = _build_service(
+        tmp_path, root_concurrency_group, host_state=HostState.RUNNING, caller=caller, started=started
+    )
+
+    dispatch = service.dispatch_update(AgentId.generate())
+
+    assert dispatch.outcome is UpdateDispatchOutcome.SPAWN_FAILED
+    assert started == []
+    assert len(caller.calls) == 1

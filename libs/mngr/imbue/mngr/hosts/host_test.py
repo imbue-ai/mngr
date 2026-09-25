@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
+from collections.abc import Mapping
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -65,6 +66,8 @@ from imbue.mngr.hosts.host import _increment_local_generation_counter
 from imbue.mngr.hosts.host import _merge_agent_type_provisioning
 from imbue.mngr.hosts.host import _parse_acquired_generation_token
 from imbue.mngr.hosts.host import _parse_boot_info_output
+from imbue.mngr.hosts.host import build_read_agent_data_files_command
+from imbue.mngr.hosts.host import parse_agent_data_files_output
 from imbue.mngr.hosts.outer_host import ActiveRemoteLock
 from imbue.mngr.hosts.outer_host import EXEC_WRITE_STDIN_CHUNK_BYTES
 from imbue.mngr.hosts.outer_host import SSH_CHANNEL_OPEN_TIMEOUT_SECONDS
@@ -433,9 +436,7 @@ def test_destroy_agent_continues_cleanup_when_on_destroy_raises(
     assert not agent_dir.exists()
 
 
-# =========================================================================
 # Tests for get_created_branch_name
-# =========================================================================
 
 
 def test_get_created_branch_name_returns_value_from_data_json(
@@ -644,9 +645,7 @@ def test_get_created_branch_name_returns_none_when_null(
     assert agent.get_created_branch_name() is None
 
 
-# =========================================================================
 # Tests for _ensure_work_dir_exists
-# =========================================================================
 
 
 def test_ensure_work_dir_exists_succeeds_when_dir_exists(
@@ -720,9 +719,7 @@ def test_ensure_work_dir_exists_recovers_a_branch_mngr_did_not_create(
         host._ensure_work_dir_exists(agent)
 
 
-# =========================================================================
 # Tests for _build_start_agent_shell_command
-# =========================================================================
 
 
 def _create_test_agent(
@@ -1184,9 +1181,7 @@ def test_build_start_agent_shell_command_sigwinch_hook_targets_named_window(
     assert f"mngr-{agent.name} primary" in result
 
 
-# =========================================================================
 # Tests for onboarding helpers
-# =========================================================================
 
 
 def test_onboarding_text_contains_keybindings() -> None:
@@ -1327,9 +1322,7 @@ def test_build_agent_launch_steps_writes_command_verbatim(tmp_path: Path) -> Non
     assert launch_script_path.read_text() == command + "\n"
 
 
-# =========================================================================
 # Tests for _parse_boot_info_output
-# =========================================================================
 
 
 def test_parse_boot_info_output_both_values() -> None:
@@ -1371,9 +1364,7 @@ def test_parse_boot_info_output_non_numeric() -> None:
     assert partial.uptime_seconds is None
 
 
-# =========================================================================
 # Tests for socket closed retry logic
-# =========================================================================
 
 
 class _FakePyinfraHost:
@@ -2443,15 +2434,13 @@ def test_run_shell_command_wraps_a_surviving_reset_in_host_connection_error(
         host._run_shell_command(StringCommand("true"))
 
 
-def test_discover_agents_threads_timeout_into_directory_and_file_reads(
+def test_discover_agents_reads_a_remote_host_in_one_command_bounded_by_the_timeout(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """When a per-host timeout is given, discover_agents bounds *both* reads it makes.
+    """A remote host's agents come back from ONE command, and a per-host timeout bounds it.
 
-    Change 1: an unbounded discovery read can leave an abandoned thread running forever.
-    Here we assert discover_agents(timeout_seconds=T) threads T into the directory listing
-    and into the per-agent data.json read (using the timeout-carrying read helper), rather
-    than falling back to the unbounded ``read_text_file`` path.
+    One round trip per agent is what made every command against a host with dozens of
+    agents slow; an unbounded read is what leaves an abandoned discovery thread running forever.
     """
     agent_id = AgentId.generate()
     agent_data = {
@@ -2460,20 +2449,30 @@ def test_discover_agents_threads_timeout_into_directory_and_file_reads(
         "type": "claude",
         "work_dir": "/tmp/work",
     }
-    recorded_list_timeouts: list[float | None] = []
-    recorded_read_timeouts: list[float] = []
+    recorded_timeouts: list[float | None] = []
 
     class _RecordingReadHost(Host):
-        def _list_directory(self, path: Path, timeout_seconds: float | None = None) -> list[str]:
-            recorded_list_timeouts.append(timeout_seconds)
-            return [str(agent_id)]
+        def execute_idempotent_command(
+            self,
+            command: str,
+            user: str | None = None,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            timeout_seconds: float | None = None,
+            raise_on_timeout: bool = False,
+        ) -> CommandResult:
+            recorded_timeouts.append(timeout_seconds)
+            stdout = f"---MNGR_AGENT_DATA_FILE:{agent_id}/data.json\n{json.dumps(agent_data, indent=2)}\n"
+            return CommandResult(stdout=stdout, stderr="", success=True)
 
-        def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
-            recorded_read_timeouts.append(timeout_seconds)
-            return json.dumps(agent_data)
-
-        def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
-            raise AssertionError("bounded discovery must not use the unbounded read_text_file path")
+        def _get_file(
+            self,
+            remote_filename: str,
+            filename_or_io: str | IO[bytes],
+            remote_temp_filename: str | None = None,
+            timeout_seconds: float | None = None,
+        ) -> bool:
+            raise AssertionError("agent data must come from the one batched command, not per-file reads")
 
     fake = _FakeHostWithSSH(ssh_client=_FakeSSHClient(transport_return=_FakeTransport()))
     connector = PyinfraConnector(cast(PyinfraHost, fake))
@@ -2488,20 +2487,14 @@ def test_discover_agents_threads_timeout_into_directory_and_file_reads(
     refs = host.discover_agents(timeout_seconds=7.0)
 
     assert [ref.agent_id for ref in refs] == [agent_id]
-    assert recorded_list_timeouts == [7.0]
-    assert recorded_read_timeouts == [7.0]
+    assert refs[0].certified_data == agent_data
+    assert recorded_timeouts == [7.0]
 
 
-def test_read_file_within_timeout_applies_timeout_to_sftp_channel(
+def test_get_file_applies_timeout_to_sftp_channel(
     local_provider: LocalProviderInstance,
 ) -> None:
-    """read_file_within_timeout must set the SFTP channel's socket timeout.
-
-    Change 1: bounding the per-agent ``data.json`` read is what stops an abandoned
-    discovery thread from hanging forever on a stalled SFTP transfer. This exercises
-    the real ``read_text_file_within_timeout`` -> ``_get_file`` -> ``_get_file_via_paramiko``
-    path (not a stubbed read) and asserts the timeout actually reaches the channel.
-    """
+    """A bounded ``_get_file`` must set the SFTP channel's socket timeout, so a stalled transfer cannot hang forever."""
     recorded_settimeouts: list[float] = []
     file_contents = b'{"hello": "world"}'
 
@@ -2518,9 +2511,10 @@ def test_read_file_within_timeout_applies_timeout_to_sftp_channel(
 
     host = _create_host_with_custom_sftp(local_provider, _TimeoutRecordingSFTP)
 
-    result = host.read_text_file_within_timeout(Path("/remote/data.json"), 7.0)
+    output = io.BytesIO()
+    host._get_file("/remote/data.json", output, timeout_seconds=7.0)
 
-    assert result == file_contents.decode()
+    assert output.getvalue() == file_contents
     assert recorded_settimeouts == [7.0]
 
 
@@ -3182,9 +3176,7 @@ def test_execute_idempotent_command_raises_command_timeout_error_on_remote_timeo
         host.execute_idempotent_command("echo hello", timeout_seconds=5.0)
 
 
-# =========================================================================
 # Tests for disconnect / _close_paramiko_client
-# =========================================================================
 
 
 def test_connecting_sets_transport_keepalives(
@@ -3255,9 +3247,7 @@ def test_disconnect_is_safe_without_paramiko_client(
     host.disconnect()
 
 
-# =========================================================================
 # Tests for _format_env_file
-# =========================================================================
 
 
 def test_format_env_file_simple_values() -> None:
@@ -3298,9 +3288,7 @@ def test_format_env_file_empty_dict() -> None:
     assert result == "\n"
 
 
-# =========================================================================
 # Tests for Host environment methods (local host)
-# =========================================================================
 
 
 def test_host_get_env_vars_returns_empty_when_not_set(
@@ -3345,9 +3333,7 @@ def test_host_set_env_var_adds_to_existing(
     assert host.get_env_var("NEW_KEY") == "new_value"
 
 
-# =========================================================================
 # Tests for Host activity methods
-# =========================================================================
 
 
 def test_host_record_and_get_boot_activity(
@@ -3396,9 +3382,7 @@ def test_host_get_reported_activity_content_returns_none_for_non_boot_type(
     assert host.get_reported_activity_content(ActivitySource.SSH) is None
 
 
-# =========================================================================
 # Tests for Host.get_name()
-# =========================================================================
 
 
 def test_host_get_connector_host_name_strips_at_prefix_for_local_host(
@@ -3420,9 +3404,7 @@ def test_host_get_name_returns_host_name(
     assert local_host.get_name() == HostName(LOCAL_HOST_NAME)
 
 
-# =========================================================================
 # Tests for Host certified data methods
-# =========================================================================
 
 
 def test_host_get_certified_data_returns_defaults_when_no_file(
@@ -3448,9 +3430,7 @@ def test_host_set_and_get_certified_data(
     assert result.host_name == initial_data.host_name
 
 
-# =========================================================================
 # Tests for Host plugin data methods
-# =========================================================================
 
 
 def test_host_set_and_get_plugin_data(
@@ -3467,9 +3447,7 @@ def test_host_set_and_get_plugin_data(
     assert certified.plugin["my-plugin"] == plugin_data
 
 
-# =========================================================================
 # Tests for Host reported plugin state files
-# =========================================================================
 
 
 def test_host_set_and_get_reported_plugin_state_file(
@@ -3502,9 +3480,7 @@ def test_host_get_reported_plugin_state_files_lists_files(
     assert result == ["file1.txt", "file2.json"]
 
 
-# =========================================================================
 # Tests for Host generated work dir tracking
-# =========================================================================
 
 
 def test_host_add_and_check_generated_work_dir(
@@ -3532,9 +3508,7 @@ def test_host_remove_generated_work_dir(
     assert host._is_generated_work_dir(work_dir) is False
 
 
-# =========================================================================
 # Tests for Host lock methods
-# =========================================================================
 
 
 def test_host_is_lock_held_returns_false_when_no_lock_file(
@@ -3690,9 +3664,7 @@ def test_hold_remote_host_lock_wraps_persistent_ssh_error_in_host_connection_err
             pass
 
 
-# ==========================================================================
 # Reconnect-safety for a held remote host lock (acquisition counter)
-# ==========================================================================
 
 
 def _make_locked_remote_host(
@@ -3981,9 +3953,7 @@ def test_host_get_reported_lock_time_returns_time_when_locked(
         assert result is not None
 
 
-# =========================================================================
 # Tests for Host create_agent_state with various options
-# =========================================================================
 
 
 def test_host_create_agent_state_with_initial_message(
@@ -4083,9 +4053,7 @@ def test_host_create_agent_state_with_additional_commands(
     assert data["additional_commands"][0]["window_name"] == "logs"
 
 
-# =========================================================================
 # Tests for Host.get_agents
-# =========================================================================
 
 
 def test_host_get_agents_returns_agents(
@@ -4156,9 +4124,48 @@ def test_host_get_agents_tolerates_agent_with_unregistered_type(
     assert isinstance(agents_by_name["orphan-agent"], BaseAgent)
 
 
-# =========================================================================
+def test_read_agent_data_files_command_returns_every_agents_data_json_verbatim(
+    local_host: Host,
+    tmp_path: Path,
+) -> None:
+    """The batched read, run through a real shell, returns each agent dir's data.json and skips dirs without one."""
+    agents_dir = tmp_path / "agents"
+    pretty_data = {"id": "agent-pretty", "name": "pretty", "labels": {"a": "b"}}
+    compact_data = {"id": "agent-compact", "name": "compact"}
+    (agents_dir / "agent-pretty").mkdir(parents=True)
+    (agents_dir / "agent-pretty" / "data.json").write_text(json.dumps(pretty_data, indent=2))
+    (agents_dir / "agent-compact").mkdir()
+    (agents_dir / "agent-compact" / "data.json").write_text(json.dumps(compact_data) + "\n")
+    (agents_dir / "agent-empty").mkdir()
+    (agents_dir / "agent-empty" / "data.json").write_text("")
+    (agents_dir / "agent-without-data").mkdir()
+
+    result = local_host.execute_idempotent_command(build_read_agent_data_files_command(agents_dir))
+    content_by_agent_dir_name = parse_agent_data_files_output(result.stdout)
+
+    assert result.success
+    assert content_by_agent_dir_name is not None
+    assert {name: content for name, content in content_by_agent_dir_name.items() if content} == {
+        "agent-pretty": json.dumps(pretty_data, indent=2),
+        "agent-compact": json.dumps(compact_data),
+    }
+    assert content_by_agent_dir_name["agent-empty"] == ""
+    assert "agent-without-data" not in content_by_agent_dir_name
+
+
+def test_read_agent_data_files_command_tells_a_missing_agents_dir_from_an_empty_one(
+    local_host: Host,
+    tmp_path: Path,
+) -> None:
+    missing_result = local_host.execute_idempotent_command(build_read_agent_data_files_command(tmp_path / "absent"))
+    (tmp_path / "empty").mkdir()
+    empty_result = local_host.execute_idempotent_command(build_read_agent_data_files_command(tmp_path / "empty"))
+
+    assert parse_agent_data_files_output(missing_result.stdout) is None
+    assert parse_agent_data_files_output(empty_result.stdout) == {}
+
+
 # Tests for Host.provision_agent
-# =========================================================================
 
 
 def test_host_provision_agent_basic(
@@ -4270,9 +4277,7 @@ def test_host_provision_agent_with_create_directories(
     assert new_dir.is_dir()
 
 
-# =========================================================================
 # Tests for Host._get_agent_command
-# =========================================================================
 
 
 def test_host_get_agent_command_returns_command(
@@ -4315,9 +4320,7 @@ def test_host_get_agent_command_raises_when_no_data_file(
         host._get_agent_command(agent)
 
 
-# =========================================================================
 # Tests for Host._get_agent_additional_commands
-# =========================================================================
 
 
 def test_host_get_agent_additional_commands_returns_commands(
@@ -4412,9 +4415,7 @@ def test_host_get_agent_additional_commands_returns_empty_when_no_file(
     assert result == []
 
 
-# =========================================================================
 # Tests for Host._get_agent_by_id
-# =========================================================================
 
 
 def test_host_get_agent_by_id_returns_agent(
@@ -4446,9 +4447,7 @@ def test_host_get_agent_by_id_returns_none_when_not_found(
     assert result is None
 
 
-# =========================================================================
 # Tests for Host._create_host_tmux_config
-# =========================================================================
 
 
 def test_host_create_host_tmux_config_creates_file(
@@ -4543,9 +4542,7 @@ def test_host_create_host_tmux_config_sources_additional_config_when_configured(
     assert f"'{additional_config_path}'" not in content
 
 
-# =========================================================================
 # Tests for Host._build_env_shell_command
-# =========================================================================
 
 
 def test_host_build_env_shell_command_returns_bash_command(
@@ -4567,9 +4564,7 @@ def test_host_build_env_shell_command_returns_bash_command(
     assert "MNGR_SAVED_DEFAULT_TMUX_COMMAND" in result
 
 
-# =========================================================================
 # Tests for Host._collect_agent_env_vars
-# =========================================================================
 
 
 def test_host_collect_agent_env_vars_includes_mngr_variables(
@@ -4658,9 +4653,7 @@ def test_host_collect_agent_env_vars_with_env_file(
     assert env["FROM_FILE"] == "file_value"
 
 
-# =========================================================================
 # Tests for Host._write_agent_env_file
-# =========================================================================
 
 
 def test_host_write_agent_env_file_creates_env_file(
@@ -4707,9 +4700,7 @@ def test_host_write_agent_env_file_skips_when_empty(
     assert not env_path.exists()
 
 
-# =========================================================================
 # Tests for Host.get_certified_data schema error
-# =========================================================================
 
 
 def test_host_get_certified_data_raises_on_invalid_json(
@@ -4726,9 +4717,7 @@ def test_host_get_certified_data_raises_on_invalid_json(
         host.get_certified_data()
 
 
-# =========================================================================
 # Tests for Host._apply_work_dir_extra_paths
-# =========================================================================
 
 
 def test_apply_work_dir_extra_paths_share_same_host_creates_symlink(
@@ -4924,9 +4913,7 @@ def test_remove_tags_syncs_to_certified_data(
     assert tags["team"] == "backend"
 
 
-# =============================================================================
 # Tests for _merge_agent_type_provisioning
-# =============================================================================
 
 
 def test_merge_agent_type_provisioning_returns_unchanged_when_no_fields() -> None:

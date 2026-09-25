@@ -9,8 +9,8 @@ a chat can move to a new agent, so the nudge goes to the chat app inside the
 workspace (:func:`~imbue.minds.desktop_client.chat_app.ask_chat_app`, the same
 path the app creates chats through), which delivers it to whichever agent the
 chat runs on now. The backoff for a workspace whose template predates that
-script is an ``mngr message`` run *inside* the workspace too, as the inner
-command of an ``mngr exec``: sending from the laptop works only for harnesses
+script is an ``mngr message`` run *inside* the workspace too, in the same
+``mngr exec`` right behind the script: sending from the laptop works only for harnesses
 whose plugin has a remote send path, and codex's has none (it reaches its
 app-server over a unix socket that resolves inside the container), while inside
 the workspace every agent's host is local. The class lives alongside the
@@ -29,10 +29,9 @@ from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.chat_app import ChatAppVerdict
 from imbue.minds.desktop_client.chat_app import ask_chat_app
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
-from imbue.minds.desktop_client.in_workspace_mngr import exec_log_detail
-from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
 from imbue.minds.desktop_client.in_workspace_mngr import jsonl_events
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
+from imbue.minds.desktop_client.mngr_command import mngr_failure_verdict
 from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.mngr_caller import get_default_mngr_caller
 from imbue.mngr.api.address_parsers import parse_agent_address
@@ -107,8 +106,8 @@ def message_failure_reason(stdout: str) -> str:
 
 
 @pure
-def mngr_message_argv(target_address: str, text: str) -> list[str]:
-    """The ``mngr exec`` that runs ``mngr message`` to ``target_address``'s agent inside its own workspace.
+def build_inner_mngr_message_command(target_address: str, text: str) -> str:
+    """The in-workspace shell string that runs ``mngr message`` to ``target_address``'s agent.
 
     The inner ``mngr message`` names the bare agent: a host the address pins is the laptop's
     view of it, and inside the workspace that host is local.
@@ -119,8 +118,7 @@ def mngr_message_argv(target_address: str, text: str) -> list[str]:
     here).
     """
     inner_target = str(parse_agent_address(target_address).agent)
-    inner_command = build_in_workspace_mngr_command(["message", "--format", "jsonl", "-m", text, "--", inner_target])
-    return ["exec", "--agent", target_address, inner_command, "--no-start", "--format", "jsonl"]
+    return build_in_workspace_mngr_command(["message", "--format", "jsonl", "-m", text, "--", inner_target])
 
 
 class MngrMessageSender(MutableModel):
@@ -128,7 +126,8 @@ class MngrMessageSender(MutableModel):
 
     The chat app inside the workspace is tried first (:func:`ask_chat_app`), so a chat that
     moved to another agent still hears its verdict; an ``mngr message`` inside the same
-    workspace (``mngr_message_argv``) is the backoff for a workspace without the script.
+    workspace (:func:`build_inner_mngr_message_command`), run right behind the script in the
+    same exec, is the backoff for a workspace without the script.
 
     Failures are logged at warning level but never raised: the response
     event has already been written, so an undelivered nudge is recoverable
@@ -225,11 +224,21 @@ class MngrMessageSender(MutableModel):
         chat app, since while a chat moves to a new agent the chat app holds the message for
         it and a direct send would land on the agent the chat is leaving; the caller retries
         instead, as it does a workspace the exec never reached. Only a template from before
-        the script, whose chats are their own agents, gets the in-workspace ``mngr message``.
-        A stopped workspace is not booted for a notice; the caller waits for it to come up.
+        the script, whose chats are their own agents, gets the in-workspace ``mngr message``,
+        which runs in the same exec. A stopped workspace is not booted for a notice; the caller
+        waits for it to come up.
+
+        The backoff's delivery is judged from its structured ``--format jsonl`` output (a
+        ``message_sent`` event) rather than its exit status: ``mngr message`` exits 0 both when
+        it delivers AND when no agent matches the target, so a caller that retries until the
+        agent exists must inspect the output.
         """
         answer = ask_chat_app(
-            self.mngr_caller, exec_agent_address, [target, "-m", text], timeout=_DELIVER_TIMEOUT_SECONDS
+            self.mngr_caller,
+            exec_agent_address,
+            [target, "-m", text],
+            fallback_command=build_inner_mngr_message_command(exec_agent_address, text),
+            timeout=_DELIVER_TIMEOUT_SECONDS,
         )
         if answer.verdict is ChatAppVerdict.DELIVERED_BEHIND_DIALOG:
             logger.info("resolution nudge to target {} landed behind a dialog: {}", target, answer.detail)
@@ -237,39 +246,30 @@ class MngrMessageSender(MutableModel):
             return True
         if answer.verdict is ChatAppVerdict.NO_VERDICT:
             logger.warning(
-                "target {} gave no verdict on the nudge through its chat app ({}); falling back to mngr message",
+                "target {} gave no verdict on the nudge through its chat app ({}); fell back to mngr message",
                 target,
                 answer.detail,
             )
-            return self._deliver_through_mngr_message(exec_agent_address, text)
+            fallback = answer.fallback
+            if fallback is None:
+                logger.debug(
+                    "mngr message to target {} never reported back: {}", exec_agent_address, answer.log_detail
+                )
+                return False
+            if stdout_reports_message_delivered(fallback.stdout):
+                return True
+            logger.debug(
+                "mngr message to target {} not yet delivered (exit {}): {}",
+                exec_agent_address,
+                fallback.exit_code,
+                message_failure_reason(fallback.stdout) or mngr_failure_verdict(fallback.stderr),
+            )
+            return False
         logger.debug(
             "the chat app of target {} did not take the message (script exit {}, exec exit {}): {}",
             target,
             answer.script_exit_code,
             answer.exec_returncode,
             answer.log_detail,
-        )
-        return False
-
-    def _deliver_through_mngr_message(self, target_address: str, text: str) -> bool:
-        """Send with ``mngr message`` inside the agent's workspace and return whether the TARGET agent received it.
-
-        ``target_address``'s agent is matched by both commands against agent ids and names, so a
-        caller can address an agent by its host name before its canonical id is
-        known. Delivery is judged from the inner command's structured ``--format
-        jsonl`` output (a ``message_sent`` event) rather than either process's exit
-        code: ``mngr message`` exits 0 both when it delivers AND when no agent
-        matches the target, so a caller that retries until the agent exists must
-        inspect the output.
-        """
-        result = self.mngr_caller.call(mngr_message_argv(target_address, text), timeout=_DELIVER_TIMEOUT_SECONDS)
-        inner_stdout = inner_stdout_from_exec_result(result.stdout)
-        if stdout_reports_message_delivered(inner_stdout):
-            return True
-        logger.debug(
-            "mngr message to target {} not yet delivered (exit {}): {}",
-            target_address,
-            result.returncode,
-            message_failure_reason(inner_stdout) or exec_log_detail(result),
         )
         return False

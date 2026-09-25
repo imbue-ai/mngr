@@ -41,6 +41,20 @@ SEP_AGENT_DATA_START: Final[str] = "---MNGR_AGENT_DATA_START---"
 SEP_AGENT_DATA_END: Final[str] = "---MNGR_AGENT_DATA_END---"
 SEP_PS_START: Final[str] = "---MNGR_PS_START---"
 SEP_PS_END: Final[str] = "---MNGR_PS_END---"
+SEP_AGENT_MTIMES_START: Final[str] = "---MNGR_AGENT_MTIMES_START---"
+SEP_AGENT_MTIMES_END: Final[str] = "---MNGR_AGENT_MTIMES_END---"
+SEP_TMUX_PANES_START: Final[str] = "---MNGR_TMUX_PANES_START---"
+SEP_TMUX_PANES_END: Final[str] = "---MNGR_TMUX_PANES_END---"
+
+# Separates a tmux pane line's session and window names from its lifecycle fields.
+_TMUX_PANE_FIELD_SEPARATOR: Final[str] = "::MNGR::"
+
+# The activity files whose mtimes the listing reports, by the agent-dict key each fills.
+_AGENT_ACTIVITY_MTIME_KEY_BY_FILE_NAME: Final[dict[str, str]] = {
+    "user": "user_activity_mtime",
+    "agent": "agent_activity_mtime",
+    "start": "start_activity_mtime",
+}
 
 
 @pure
@@ -93,8 +107,14 @@ def build_listing_collection_script(
     per host. Defaults to empty: a provider whose hosts only ever use its
     configured host_dir keeps today's single-candidate behavior.
     """
+    tmux_pane_format = _TMUX_PANE_FIELD_SEPARATOR.join(
+        ("#{session_name}", "#{window_name}", "#{pane_dead}|#{pane_current_command}|#{pane_pid}")
+    )
     return f"""
 {_build_host_dir_resolution_script(host_dir, fallback_host_dirs)}
+echo {shlex.quote(f"TMUX_SESSION_PREFIX={prefix}")}
+echo {shlex.quote(f"TMUX_WINDOW_NAME={window_name}")}
+
 # Uptime
 echo "UPTIME=$(cat /proc/uptime 2>/dev/null | awk '{{print $1}}')"
 
@@ -121,35 +141,64 @@ echo '{SEP_PS_START}'
 ps -e -o pid=,ppid=,comm= 2>/dev/null
 echo '{SEP_PS_END}'
 
-# Agents
+# Every pane on the server, joined to its agent by session and window name on the parsing side
+echo '{SEP_TMUX_PANES_START}'
+if [ -d "$HOST_DIR/agents" ]; then
+    tmux list-panes -a -F {shlex.quote(tmux_pane_format)} 2>/dev/null
+fi
+echo '{SEP_TMUX_PANES_END}'
+{_build_agents_section_script(is_host_running=True)}
+"""
+
+
+@pure
+def _build_agents_section_script(is_host_running: bool) -> str:
+    """Build the script section that emits every agent under ``$HOST_DIR/agents``.
+
+    Everything that can be collected for all agents at once is: one ``stat`` covers
+    every activity file, and the caller's tmux listing is one command. The per-agent
+    loop is left with its ``cat`` of the data.json (and a ``tr`` of the URL file for an
+    agent that has one), because on a sandboxed runtime (gVisor) each process spawn
+    costs tens of milliseconds and a host can carry dozens of agents. A stopped host
+    has no running agent, so its leftover ``active`` markers are not read.
+    """
+    active_check = (
+        """if [ -f "${agent_dir}active" ]; then
+            echo "ACTIVE=true"
+        else
+            echo "ACTIVE=false"
+        fi"""
+        if is_host_running
+        else 'echo "ACTIVE=false"'
+    )
+    return f"""
+echo '{SEP_AGENT_MTIMES_START}'
+# GNU stat exits non-zero when any one path is missing, so the flavor is probed once rather
+# than falling back on failure (BSD's ``-f`` means something else to GNU stat).
+if stat -c %Y / >/dev/null 2>&1; then
+    stat -c '%Y %n' "$HOST_DIR"/agents/*/activity/user "$HOST_DIR"/agents/*/activity/agent "$HOST_DIR"/agents/*/activity/start 2>/dev/null
+else
+    stat -f '%m %N' "$HOST_DIR"/agents/*/activity/user "$HOST_DIR"/agents/*/activity/agent "$HOST_DIR"/agents/*/activity/start 2>/dev/null
+fi
+echo '{SEP_AGENT_MTIMES_END}'
 if [ -d "$HOST_DIR/agents" ]; then
     for agent_dir in "$HOST_DIR/agents"/*/; do
         [ -d "$agent_dir" ] || continue
         data_file="${{agent_dir}}data.json"
         [ -f "$data_file" ] || continue
-        agent_id=$(basename "$agent_dir")
+        agent_id="${{agent_dir%/}}"
+        agent_id="${{agent_id##*/}}"
         echo '{SEP_AGENT_START}'"$agent_id"'---'
         echo '{SEP_AGENT_DATA_START}'
         cat "$data_file"
         echo ''
         echo '{SEP_AGENT_DATA_END}'
-        echo "USER_MTIME=$(stat -c %Y "${{agent_dir}}activity/user" 2>/dev/null)"
-        echo "AGENT_MTIME=$(stat -c %Y "${{agent_dir}}activity/agent" 2>/dev/null)"
-        echo "START_MTIME=$(stat -c %Y "${{agent_dir}}activity/start" 2>/dev/null)"
-        agent_name=$(jq -r '.name // empty' "$data_file" 2>/dev/null)
-        session_name='{prefix}'"$agent_name"
-        # `=$session:{window_name}` mirrors TmuxWindowTarget; required for list-panes since `-t`
-        # resolves as target-window/-pane (a bare `=name` would be parsed as a literal
-        # window/pane name). Targeting the window by name keeps this base-index agnostic.
-        tmux_info=$(tmux list-panes -t "=${{session_name}}:{window_name}" -F '#{{pane_dead}}|#{{pane_current_command}}|#{{pane_pid}}' 2>/dev/null | head -n 1)
-        echo "TMUX_INFO=$tmux_info"
-        if [ -f "${{agent_dir}}active" ]; then
-            echo "ACTIVE=true"
+        {active_check}
+        if [ -f "${{agent_dir}}status/url" ]; then
+            echo "URL=$(tr -d '\\n' < "${{agent_dir}}status/url")"
         else
-            echo "ACTIVE=false"
+            echo "URL="
         fi
-        url=$(cat "${{agent_dir}}status/url" 2>/dev/null | tr -d '\\n')
-        echo "URL=$url"
         echo '{SEP_AGENT_END}'
     done
 fi
@@ -178,27 +227,7 @@ echo ''
 echo '{SEP_DATA_JSON_END}'
 echo '{SEP_PS_START}'
 echo '{SEP_PS_END}'
-if [ -d "$HOST_DIR/agents" ]; then
-    for agent_dir in "$HOST_DIR/agents"/*/; do
-        [ -d "$agent_dir" ] || continue
-        data_file="${{agent_dir}}data.json"
-        [ -f "$data_file" ] || continue
-        agent_id=$(basename "$agent_dir")
-        echo '{SEP_AGENT_START}'"$agent_id"'---'
-        echo '{SEP_AGENT_DATA_START}'
-        cat "$data_file"
-        echo ''
-        echo '{SEP_AGENT_DATA_END}'
-        echo "USER_MTIME=$(stat -c %Y "${{agent_dir}}activity/user" 2>/dev/null)"
-        echo "AGENT_MTIME=$(stat -c %Y "${{agent_dir}}activity/agent" 2>/dev/null)"
-        echo "START_MTIME=$(stat -c %Y "${{agent_dir}}activity/start" 2>/dev/null)"
-        echo "TMUX_INFO="
-        echo "ACTIVE=false"
-        url=$(cat "${{agent_dir}}status/url" 2>/dev/null | tr -d '\\n')
-        echo "URL=$url"
-        echo '{SEP_AGENT_END}'
-    done
-fi
+{_build_agents_section_script(is_host_running=False)}
 """
 
 
@@ -343,15 +372,6 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
                     agent_raw["data"] = json.loads(agent_json_str)
                 except json.JSONDecodeError as e:
                     logger.warning("Failed to parse agent data.json in listing output: {}", e)
-        elif aline.startswith("USER_MTIME="):
-            agent_raw["user_activity_mtime"] = parse_optional_int(aline[len("USER_MTIME=") :])
-        elif aline.startswith("AGENT_MTIME="):
-            agent_raw["agent_activity_mtime"] = parse_optional_int(aline[len("AGENT_MTIME=") :])
-        elif aline.startswith("START_MTIME="):
-            agent_raw["start_activity_mtime"] = parse_optional_int(aline[len("START_MTIME=") :])
-        elif aline.startswith("TMUX_INFO="):
-            val = aline[len("TMUX_INFO=") :].strip()
-            agent_raw["tmux_info"] = val if val else None
         elif aline.startswith("ACTIVE="):
             agent_raw["is_active"] = aline[len("ACTIVE=") :].strip() == "true"
         elif aline.startswith("URL="):
@@ -364,10 +384,67 @@ def _parse_agent_section(lines: list[str], idx: int) -> tuple[dict[str, Any], in
     return agent_raw, idx
 
 
+@pure
+def _parse_agent_activity_mtimes(block: str) -> dict[tuple[str, str], int]:
+    """Each ``(agent dir name, activity file name)``'s mtime from the batched ``stat -c '%Y %n'`` block."""
+    mtime_by_agent_activity: dict[tuple[str, str], int] = {}
+    for line in block.splitlines():
+        mtime_text, _, path_text = line.strip().partition(" ")
+        path_parts = path_text.split("/")
+        mtime = parse_optional_int(mtime_text)
+        if mtime is not None and len(path_parts) >= 3 and path_parts[-2] == "activity":
+            mtime_by_agent_activity[(path_parts[-3], path_parts[-1])] = mtime
+    return mtime_by_agent_activity
+
+
+@pure
+def _parse_first_tmux_pane_by_window(block: str) -> dict[tuple[str, str], str]:
+    """Each ``(session, window)``'s first pane's ``dead|command|pid`` from the ``tmux list-panes -a`` block.
+
+    The first pane listed is the one targeting that window alone would have reported first.
+    """
+    pane_info_by_window: dict[tuple[str, str], str] = {}
+    for line in block.splitlines():
+        fields = line.split(_TMUX_PANE_FIELD_SEPARATOR)
+        if len(fields) == 3:
+            session_name, window_name, pane_info = fields
+            pane_info_by_window.setdefault((session_name, window_name), pane_info.strip())
+    return pane_info_by_window
+
+
+@pure
+def _join_batched_agent_fields(
+    agent_raw: Mapping[str, Any],
+    agent_dir_name: str,
+    mtime_by_agent_activity: Mapping[tuple[str, str], int],
+    pane_info_by_window: Mapping[tuple[str, str], str],
+    tmux_session_prefix: str | None,
+    tmux_window_name: str | None,
+) -> dict[str, Any]:
+    """The agent dict with the fields the script collected for all agents at once filled in."""
+    activity_mtimes = {
+        key: mtime_by_agent_activity.get((agent_dir_name, file_name))
+        for file_name, key in _AGENT_ACTIVITY_MTIME_KEY_BY_FILE_NAME.items()
+    }
+    agent_data = agent_raw["data"]
+    agent_name = agent_data.get("name") if isinstance(agent_data, dict) else None
+    is_tmux_listed = tmux_session_prefix is not None and tmux_window_name is not None
+    tmux_info = (
+        pane_info_by_window.get((f"{tmux_session_prefix}{agent_name}", str(tmux_window_name))) or None
+        if is_tmux_listed and agent_name
+        else None
+    )
+    return {**agent_raw, **activity_mtimes, "tmux_info": tmux_info}
+
+
 def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
     """Parse the structured output of the listing collection script."""
     result: dict[str, Any] = {}
-    agents: list[dict[str, Any]] = []
+    agent_raw_by_dir_name: dict[str, dict[str, Any]] = {}
+    mtime_by_agent_activity: dict[tuple[str, str], int] = {}
+    pane_info_by_window: dict[tuple[str, str], str] = {}
+    tmux_session_prefix: str | None = None
+    tmux_window_name: str | None = None
     lines = stdout.split("\n")
     idx = 0
 
@@ -381,6 +458,10 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             # it as optional and fall back to their configured value.
             host_dir_value = line[len("HOST_DIR=") :].strip()
             result["host_dir"] = host_dir_value if host_dir_value else None
+        elif line.startswith("TMUX_SESSION_PREFIX=") and tmux_session_prefix is None:
+            tmux_session_prefix = line[len("TMUX_SESSION_PREFIX=") :]
+        elif line.startswith("TMUX_WINDOW_NAME=") and tmux_window_name is None:
+            tmux_window_name = line[len("TMUX_WINDOW_NAME=") :]
         elif line.startswith("UPTIME=") and "uptime_seconds" not in result:
             result["uptime_seconds"] = parse_optional_float(line[len("UPTIME=") :])
         elif line.startswith("BTIME=") and "btime" not in result:
@@ -411,16 +492,35 @@ def parse_listing_collection_output(stdout: str) -> dict[str, Any]:
             idx += 1
             ps_content, idx = _extract_delimited_block(lines, idx, SEP_PS_END)
             result["ps_output"] = ps_content
+        elif line.strip() == SEP_TMUX_PANES_START:
+            idx += 1
+            tmux_block, idx = _extract_delimited_block(lines, idx, SEP_TMUX_PANES_END)
+            pane_info_by_window = _parse_first_tmux_pane_by_window(tmux_block)
+        elif line.strip() == SEP_AGENT_MTIMES_START:
+            idx += 1
+            mtimes_block, idx = _extract_delimited_block(lines, idx, SEP_AGENT_MTIMES_END)
+            mtime_by_agent_activity = _parse_agent_activity_mtimes(mtimes_block)
         elif line.strip().startswith(SEP_AGENT_START):
+            agent_dir_name = line.strip().removeprefix(SEP_AGENT_START).removesuffix("---")
             idx += 1
             agent_raw, idx = _parse_agent_section(lines, idx)
             if "data" in agent_raw:
-                agents.append(agent_raw)
+                agent_raw_by_dir_name[agent_dir_name] = agent_raw
         else:
             pass
         idx += 1
 
-    result["agents"] = agents
+    result["agents"] = [
+        _join_batched_agent_fields(
+            agent_raw,
+            agent_dir_name,
+            mtime_by_agent_activity,
+            pane_info_by_window,
+            tmux_session_prefix,
+            tmux_window_name,
+        )
+        for agent_dir_name, agent_raw in agent_raw_by_dir_name.items()
+    ]
     return result
 
 

@@ -1,6 +1,7 @@
 """Tests for the shared listing data collection utilities."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -52,19 +53,6 @@ def test_build_listing_collection_script_contains_key_sections() -> None:
     assert '"$HOST_DIR/agents"' in script
 
 
-def test_build_listing_collection_script_targets_named_primary_window() -> None:
-    """Lifecycle detection must target the agent window by name, not the literal :0,
-    so it works regardless of the user's tmux base-index."""
-    script = build_listing_collection_script("/mngr", "mngr-", window_name="agent")
-    assert ':agent" -F' in script
-    assert ':0" -F' not in script
-
-
-def test_build_listing_collection_script_uses_custom_window_name() -> None:
-    script = build_listing_collection_script("/mngr", "mngr-", window_name="primary")
-    assert ':primary" -F' in script
-
-
 def _run_listing_script(script: str) -> dict[str, Any]:
     """Execute a generated listing script and parse what it emitted.
 
@@ -72,7 +60,7 @@ def _run_listing_script(script: str) -> dict[str, Any]:
     only restate the implementation; running it against a real directory tree
     is what proves it picks the right candidate.
     """
-    finished = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
+    finished = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=60)
     assert finished.returncode == 0, finished.stderr
     return parse_listing_collection_output(finished.stdout)
 
@@ -196,40 +184,130 @@ def test_parse_listing_collection_output_basic() -> None:
     assert result["agents"] == []
 
 
-def test_parse_listing_collection_output_with_agent() -> None:
-    agent_data = {"id": "agent-123", "name": "test-agent", "type": "claude", "command": "claude"}
+@pytest.mark.tmux
+def test_listing_script_reports_each_agents_activity_active_marker_and_url(tmp_path: Path) -> None:
+    """The fields collected for all agents at once land on the right agent.
+
+    Marked ``tmux`` because the agent branch lists the tmux server's panes.
+    """
+    host_dir = tmp_path / "mngr"
+    busy_dir = host_dir / "agents" / "agent-busy"
+    idle_dir = host_dir / "agents" / "agent-idle"
+    (busy_dir / "activity").mkdir(parents=True)
+    (busy_dir / "status").mkdir()
+    (idle_dir / "activity").mkdir(parents=True)
+    (host_dir / "data.json").write_text(json.dumps({"host_id": "host-abc"}))
+    (busy_dir / "data.json").write_text(json.dumps({"id": "agent-busy", "name": "busy"}))
+    (idle_dir / "data.json").write_text(json.dumps({"id": "agent-idle", "name": "idle"}))
+    for activity_path, mtime in (
+        (busy_dir / "activity" / "user", 1700000301),
+        (busy_dir / "activity" / "agent", 1700000302),
+        (busy_dir / "activity" / "start", 1700000303),
+        (idle_dir / "activity" / "start", 1700000404),
+    ):
+        activity_path.write_text("")
+        os.utime(activity_path, (mtime, mtime))
+    (busy_dir / "active").write_text("")
+    (busy_dir / "status" / "url").write_text("http://localhost:8123\n")
+
+    result = _run_listing_script(build_listing_collection_script(str(host_dir), "mngr-"))
+    agents_by_id = {agent["data"]["id"]: agent for agent in result["agents"]}
+
+    assert agents_by_id["agent-busy"]["user_activity_mtime"] == 1700000301
+    assert agents_by_id["agent-busy"]["agent_activity_mtime"] == 1700000302
+    assert agents_by_id["agent-busy"]["start_activity_mtime"] == 1700000303
+    assert agents_by_id["agent-busy"]["is_active"] is True
+    assert agents_by_id["agent-busy"]["url"] == "http://localhost:8123"
+    assert agents_by_id["agent-idle"]["user_activity_mtime"] is None
+    assert agents_by_id["agent-idle"]["agent_activity_mtime"] is None
+    assert agents_by_id["agent-idle"]["start_activity_mtime"] == 1700000404
+    assert agents_by_id["agent-idle"]["is_active"] is False
+    assert agents_by_id["agent-idle"]["url"] is None
+
+
+@pytest.mark.tmux
+def test_listing_script_reports_the_pane_of_each_agents_named_window_on_a_real_tmux_server(tmp_path: Path) -> None:
+    """tmux's own rendering of the pane listing joins to the agent whose session holds the configured window.
+
+    The session of an agent whose window has another name reports no pane, so the window name
+    passed to the script is what the join matches on.
+    """
+    host_dir = tmp_path / "mngr"
+    for agent_id, agent_name in (("agent-busy", "busy"), ("agent-renamed", "renamed")):
+        (host_dir / "agents" / agent_id).mkdir(parents=True)
+        (host_dir / "agents" / agent_id / "data.json").write_text(json.dumps({"id": agent_id, "name": agent_name}))
+    (host_dir / "data.json").write_text(json.dumps({"host_id": "host-abc"}))
+    subprocess.run(["tmux", "new-session", "-d", "-s", "mngr-busy", "-n", "primary", "sleep 600"], check=True)
+    subprocess.run(["tmux", "new-session", "-d", "-s", "mngr-renamed", "-n", "agent", "sleep 600"], check=True)
+    busy_pane_pid = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", "=mngr-busy:primary", "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    result = _run_listing_script(build_listing_collection_script(str(host_dir), "mngr-", window_name="primary"))
+    agents_by_id = {agent["data"]["id"]: agent for agent in result["agents"]}
+
+    pane_dead, pane_command, pane_pid = agents_by_id["agent-busy"]["tmux_info"].split("|")
+    assert (pane_dead, pane_pid) == ("0", busy_pane_pid)
+    assert pane_command
+    assert agents_by_id["agent-renamed"]["tmux_info"] is None
+
+
+@pytest.mark.parametrize(
+    ("window_name", "expected_tmux_info"),
+    [("agent", "0|claude|42"), ("primary", "0|bash|77")],
+)
+def test_parse_listing_collection_output_joins_each_agent_to_its_primary_windows_first_pane(
+    window_name: str, expected_tmux_info: str
+) -> None:
+    """An agent's tmux info is the first pane of ITS session's primary window, whatever that window is named."""
     output = "\n".join(
         [
-            "UPTIME=100.0",
-            "BTIME=1700000000",
-            "---MNGR_DATA_JSON_START---",
-            "{}",
-            "---MNGR_DATA_JSON_END---",
-            "---MNGR_PS_START---",
-            "---MNGR_PS_END---",
+            "TMUX_SESSION_PREFIX=mngr-",
+            f"TMUX_WINDOW_NAME={window_name}",
+            "---MNGR_TMUX_PANES_START---",
+            "mngr-other::MNGR::agent::MNGR::0|vim|11",
+            "mngr-test-agent::MNGR::agent::MNGR::0|claude|42",
+            "mngr-test-agent::MNGR::agent::MNGR::0|bash|43",
+            "mngr-test-agent::MNGR::primary::MNGR::0|bash|77",
+            "---MNGR_TMUX_PANES_END---",
             "---MNGR_AGENT_START:agent-123---",
             "---MNGR_AGENT_DATA_START---",
-            json.dumps(agent_data),
+            json.dumps({"id": "agent-123", "name": "test-agent"}),
             "---MNGR_AGENT_DATA_END---",
-            "USER_MTIME=1700000200",
-            "AGENT_MTIME=",
-            "START_MTIME=1700000100",
-            "TMUX_INFO=0|claude|42",
-            "ACTIVE=true",
-            "URL=http://localhost:8080",
+            "---MNGR_AGENT_END---",
+            "---MNGR_AGENT_START:agent-456---",
+            "---MNGR_AGENT_DATA_START---",
+            json.dumps({"id": "agent-456", "name": "no-session"}),
+            "---MNGR_AGENT_DATA_END---",
             "---MNGR_AGENT_END---",
         ]
     )
-    result = parse_listing_collection_output(output)
-    assert len(result["agents"]) == 1
-    agent = result["agents"][0]
-    assert agent["data"]["id"] == "agent-123"
-    assert agent["user_activity_mtime"] == 1700000200
-    assert agent["agent_activity_mtime"] is None
-    assert agent["start_activity_mtime"] == 1700000100
-    assert agent["tmux_info"] == "0|claude|42"
-    assert agent["is_active"] is True
-    assert agent["url"] == "http://localhost:8080"
+
+    agents_by_id = {agent["data"]["id"]: agent for agent in parse_listing_collection_output(output)["agents"]}
+
+    assert agents_by_id["agent-123"]["tmux_info"] == expected_tmux_info
+    assert agents_by_id["agent-456"]["tmux_info"] is None
+
+
+def test_parse_listing_collection_output_reads_no_tmux_info_from_a_listing_without_panes() -> None:
+    """A stopped host's listing carries no tmux block, so no agent gets pane info."""
+    output = "\n".join(
+        [
+            "---MNGR_AGENT_START:agent-123---",
+            "---MNGR_AGENT_DATA_START---",
+            json.dumps({"id": "agent-123", "name": "test-agent"}),
+            "---MNGR_AGENT_DATA_END---",
+            "ACTIVE=false",
+            "---MNGR_AGENT_END---",
+        ]
+    )
+
+    agents = parse_listing_collection_output(output)["agents"]
+
+    assert [agent["tmux_info"] for agent in agents] == [None]
 
 
 def test_parse_listing_collection_output_empty() -> None:

@@ -2,6 +2,7 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
+from typing import Final
 
 from loguru import logger
 from pydantic import Field
@@ -30,6 +31,10 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import ErrorBehavior
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderInstanceName
+
+# Opens the error for a failure once the agent's host was reached: reading its agents, or running
+# the command there, which may already have done its work.
+COMMAND_EXECUTION_FAILURE_PREFIX: Final[str] = "Failed to execute command on agent"
 
 
 class MissingOuterBehavior(UpperCaseStrEnum):
@@ -268,7 +273,7 @@ def _execute_on_single_agent(
         return _record_failure(
             result,
             match.agent_name,
-            f"Failed to execute command on agent {match.agent_name}: {e}",
+            f"{COMMAND_EXECUTION_FAILURE_PREFIX} {match.agent_name}: {e}",
             on_error,
             error_behavior,
         )

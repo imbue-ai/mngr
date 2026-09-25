@@ -1003,9 +1003,8 @@ class OuterHost(OuterHostInterface):
         When ``timeout_seconds`` is set, the remote SFTP read is bounded by that
         wall-clock: a stalled transfer raises ``socket.timeout`` on the SFTP
         channel, which (after transient retries) surfaces as a
-        ``HostConnectionError``. Used by the per-host-bounded discovery read so a
-        wedged host cannot hang the read forever; other callers leave it ``None``
-        and fall back to the channel's default per-read silence bound
+        ``HostConnectionError``, so a wedged host cannot hang the read forever.
+        ``None`` falls back to the channel's default per-read silence bound
         (``SSH_CHANNEL_SILENCE_TIMEOUT_SECONDS``).
         """
         with (
@@ -1488,24 +1487,6 @@ class OuterHost(OuterHostInterface):
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file and return its contents as a string."""
         return self.read_file(path).decode(encoding)
-
-    def read_file_within_timeout(self, path: Path, timeout_seconds: float) -> bytes:
-        """Read a file's bytes, bounding the remote read by ``timeout_seconds``.
-
-        Like :meth:`read_file` but the remote SFTP transfer self-terminates on a
-        stall (surfacing as ``HostConnectionError``) instead of hanging. Local
-        reads ignore the timeout. Used by the per-host-bounded discovery read so
-        an abandoned read cannot leak a thread that runs forever.
-        """
-        if self.is_local:
-            return path.read_bytes()
-        output = io.BytesIO()
-        self._get_file(str(path), output, timeout_seconds=timeout_seconds)
-        return output.getvalue()
-
-    def read_text_file_within_timeout(self, path: Path, timeout_seconds: float, encoding: str = "utf-8") -> str:
-        """Read a file's text, bounding the remote read by ``timeout_seconds``."""
-        return self.read_file_within_timeout(path, timeout_seconds).decode(encoding)
 
     def write_text_file(
         self,

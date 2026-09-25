@@ -1,23 +1,20 @@
-"""Spawn an in-workspace chat that drives a template skill, and probe for the skill first.
+"""Launch an in-workspace chat that drives a template skill, checking the workspace has the skill first.
 
-The app asks the workspace's own chat app for the chat, through the template's
-``system/scripts/message_chat.py --create`` run *inside* the workspace's container
-(:func:`~imbue.minds.desktop_client.chat_app.ask_chat_app`, the same run that
-messages a chat, plus ``--create``): the chat app mints the chat's id, binds the
-workspace's default account and harness, labels it, seeds the message, and answers
-once its ``mngr create`` has finished, exactly as a launcher-started chat is made. On a template
-whose script predates the create mode (or has no script), the app runs a bare
-``mngr create`` inside the container instead, which resolves the template's
-``chat`` create-template and lands in the right work dir, while the coupling
-stays at the mngr CLI level. ``mngr exec`` runs its COMMAND through a shell on
-the host, so either inner command is one ``shlex.join``-ed string and the seed
-message cannot break out of its own argument.
-
-A workspace created from a template older than the skill would accept the inner
-``mngr create`` and then hang on the unknown slash command, leaving a
-half-created chat behind, so callers probe first and refuse rather than spawn a
-chat that can only fail. The probe echoes a sentinel rather than relying on the
-exit code, which would conflate "file absent" with "probe never ran".
+One ``mngr exec`` does the whole launch inside the workspace's container. It checks for the
+skill's ``SKILL.md`` first: a workspace created from a template older than the skill would
+accept the create and then hang on the unknown slash command, leaving a half-created chat
+behind, so the launch refuses instead. It then asks the workspace's own chat app for the chat,
+through the template's ``system/scripts/message_chat.py --create``
+(:func:`~imbue.minds.desktop_client.chat_app.build_message_chat_command`, the same run that
+messages a chat, plus ``--create``): the chat app mints the chat's id, binds the workspace's
+default account and harness, labels it, seeds the message, and answers once its ``mngr
+create`` has finished, exactly as a launcher-started chat is made. On a template whose script
+predates the create mode (or has no script), the same shell runs a bare ``mngr create``
+instead, which resolves the template's ``chat`` create-template and lands in the right work
+dir, while the coupling stays at the mngr CLI level. ``mngr exec`` runs its COMMAND through a
+shell on the host, so every inner command is ``shlex``-quoted and the seed message cannot
+break out of its own argument. Each exec is expensive (it pays the outer mngr's host read and
+an SSH hop), which is why the check, the chat app, and its fallback share one.
 
 **Which account and harness the chat runs on** is the workspace's own decision,
 not this app's. The workspace keeps its default provider account's harness and
@@ -27,7 +24,7 @@ account and no type and lands on whatever a launcher-started chat would. That fi
 on every workspace that writes it; the ones from minds-v0.5.0 through v0.5.2 keep
 accounts but write no file, and for their one update the app falls back to asking
 the template's own resolver (:func:`resolve_account_binding`) and splicing its
-answer in, as it did before the file existed.
+answer in, as it did before the file existed. That path costs two more execs.
 
 The one setting the bare create adds, ``agent_types.claude.check_installation=false``,
 is the lever for a workspace whose claude binary no longer matches the template's pin:
@@ -47,15 +44,16 @@ from pydantic import Field
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.chat_app import ChatAppAnswer
 from imbue.minds.desktop_client.chat_app import ChatAppVerdict
-from imbue.minds.desktop_client.chat_app import ask_chat_app
+from imbue.minds.desktop_client.chat_app import build_chat_app_exec_args
+from imbue.minds.desktop_client.chat_app import build_message_chat_command
+from imbue.minds.desktop_client.chat_app import read_chat_app_answer
 from imbue.minds.desktop_client.in_workspace_mngr import build_in_workspace_mngr_command
 from imbue.minds.desktop_client.in_workspace_mngr import in_workspace_failure_detail
+from imbue.minds.desktop_client.in_workspace_mngr import inner_stdout_from_exec_result
+from imbue.minds.desktop_client.in_workspace_mngr import is_exec_cut_off_on_reached_host
 from imbue.minds.utils.mngr_caller import MngrCaller
-
-# Two filesystem checks inside an already-running container, so it should
-# return near-instantly; a low ceiling makes an unreachable workspace fail fast.
-_PROBE_TIMEOUT_SECONDS: Final[float] = 30.0
 
 # The inner create spawns a fresh chat agent (tmux window, claude process) on an
 # existing host: no provisioning or git transfer, but slower than a plain message.
@@ -70,6 +68,10 @@ _SPAWN_TIMEOUT_SECONDS: Final[float] = 120.0
 # later, and all the user was given is minds' own word that the spawn failed.
 _SCRIPT_SPAWN_TIMEOUT_SECONDS: Final[float] = 360.0
 
+# The launch runs the chat app's create and, behind a script with no create mode, the bare
+# create, in one exec, so its ceiling has room for both.
+_LAUNCH_TIMEOUT_SECONDS: Final[float] = _SCRIPT_SPAWN_TIMEOUT_SECONDS + _SPAWN_TIMEOUT_SECONDS
+
 # The account probe runs the template's resolver under ``uv run``, so it pays a Python start.
 _ACCOUNT_PROBE_TIMEOUT_SECONDS: Final[float] = 90.0
 
@@ -78,24 +80,24 @@ _ACCOUNT_PROBE_TIMEOUT_SECONDS: Final[float] = 90.0
 # ``mngr exec`` lands.
 _LOCAL_SETTINGS_PATH: Final[str] = ".mngr/settings.local.toml"
 
-# Whether the workspace writes its create defaults, echoed by the skill probe so one exec
-# answers both questions.
-LOCAL_SETTINGS_PRESENT_SENTINEL: Final[str] = "MNGR_LOCAL_SETTINGS_PRESENT"
-LOCAL_SETTINGS_ABSENT_SENTINEL: Final[str] = "MNGR_LOCAL_SETTINGS_ABSENT"
-
 # CLEANUP: drop the account resolver below (``_ACCOUNT_ARGS_SCRIPT`` through
-# ``resolve_account_binding``, ``resolve_legacy_account_args``, and the ``account_args``
-# the create takes) together with the probe half that chooses between it and a bare
-# create (the two sentinels above, ``_LOCAL_SETTINGS_PATH``, its ``test -f`` in
-# ``build_skill_support_probe_args``, and ``SkillProbe.is_local_settings_present``), once
-# the release that ships the local settings writer (the first after minds-v0.5.2, which
-# is still a resolver template) has been the minimum updatable template for one release
-# cycle: every workspace then writes ``.mngr/settings.local.toml`` itself, so there is
-# nothing left to ask and nothing left to fall back to.
+# ``resolve_account_binding``, the ``account_args`` the bare create takes,
+# ``build_skill_chat_mngr_args``, and ``_spawn_with_bare_create``) together with the launch's
+# branch that chooses between it and a bare create (``NEEDS_ACCOUNT_BINDING_SENTINEL``, its
+# branch in ``_finish_bare_create_fallback``, and the ``_LOCAL_SETTINGS_PATH`` and
+# ``_ACCOUNT_ARGS_SCRIPT`` tests in ``_build_bare_create_fallback_command``), once the release
+# that ships the local settings writer (the first after minds-v0.5.2, which is still a resolver
+# template) has been the minimum updatable template for one release cycle: every workspace
+# then writes ``.mngr/settings.local.toml`` itself, so there is nothing left to ask and nothing
+# left to fall back to.
 
 # The template script that turns the workspace's default account into ``mngr create``
 # arguments. Its path is the contract; the package behind it is not.
 _ACCOUNT_ARGS_SCRIPT: Final[str] = "system/scripts/default_account_args.py"
+
+# What the launch's fallback says instead of creating, on a workspace that keeps accounts
+# but writes no create defaults: only the resolver can bind its chat.
+NEEDS_ACCOUNT_BINDING_SENTINEL: Final[str] = "MNGR_NEEDS_ACCOUNT_BINDING"
 
 # The ``chat`` create-template made a claude agent on the templates the resolver serves.
 _CHAT_HARNESS: Final[str] = "claude"
@@ -130,71 +132,9 @@ USER_CREATED_LABEL: Final[str] = "user_created=true"
 SKIP_CLAUDE_INSTALLATION_CHECK_SETTING: Final[str] = "agent_types.claude.check_installation=false"
 
 
-class SkillSupport(UpperCaseStrEnum):
-    """Whether a workspace can host a chat driving a given template skill."""
-
-    SUPPORTED = auto()
-    """The workspace has the skill; spawning a chat will work."""
-    UNSUPPORTED = auto()
-    """The workspace is reachable but predates the skill."""
-    UNREACHABLE = auto()
-    """The probe could not run (host/workspace down); support is unknown."""
-
-
-class SkillProbe(FrozenModel):
-    """What one probe of a workspace answered: whether it can host the skill, and whether it writes its create defaults."""
-
-    support: SkillSupport = Field(description="Whether the workspace can host a chat driving the skill")
-    is_local_settings_present: bool = Field(
-        default=False,
-        description=(
-            "Whether the workspace keeps its default account's create defaults in its local mngr "
-            "settings, so a bare create resolves the account; False when the probe did not answer"
-        ),
-    )
-
-
-def _sentinel(skill_name: str, state: str) -> str:
+def skill_sentinel(skill_name: str, state: str) -> str:
+    """The line the launch echoes for whether the workspace has ``skill_name`` (``state`` is PRESENT or ABSENT)."""
     return f"MNGR_{skill_name.upper().replace('-', '_')}_SKILL_{state}"
-
-
-def build_skill_support_probe_args(workspace_address: str, skill_name: str) -> list[str]:
-    """Build the ``mngr`` CLI args that probe a workspace for ``skill_name`` and its create defaults.
-
-    Runs, in the workspace's work_dir (where ``mngr exec`` lands by default), a
-    shell ``test`` for the skill's SKILL.md and one for the local settings file,
-    each echoing a present/absent sentinel.
-    """
-    skill_path = f".agents/skills/{skill_name}/SKILL.md"
-    check = (
-        f"if [ -f {shlex.quote(skill_path)} ]; "
-        f"then echo {_sentinel(skill_name, 'PRESENT')}; else echo {_sentinel(skill_name, 'ABSENT')}; fi; "
-        f"if [ -f {shlex.quote(_LOCAL_SETTINGS_PATH)} ]; "
-        f"then echo {LOCAL_SETTINGS_PRESENT_SENTINEL}; else echo {LOCAL_SETTINGS_ABSENT_SENTINEL}; fi"
-    )
-    # --no-start: probes run eagerly (a modal opening, a dispatch), and a
-    # support check must never cold-boot a container as a side effect.
-    return ["exec", "--agent", workspace_address, check, "--no-start"]
-
-
-def probe_skill(mngr_caller: MngrCaller, workspace_address: str, skill_name: str) -> SkillProbe:
-    """Probe ``workspace_address`` for ``skill_name`` and classify the result."""
-    result = mngr_caller.call(
-        build_skill_support_probe_args(workspace_address, skill_name), timeout=_PROBE_TIMEOUT_SECONDS
-    )
-    is_local_settings_present = LOCAL_SETTINGS_PRESENT_SENTINEL in result.stdout
-    if _sentinel(skill_name, "PRESENT") in result.stdout:
-        return SkillProbe(support=SkillSupport.SUPPORTED, is_local_settings_present=is_local_settings_present)
-    if _sentinel(skill_name, "ABSENT") in result.stdout:
-        return SkillProbe(support=SkillSupport.UNSUPPORTED, is_local_settings_present=is_local_settings_present)
-    logger.warning(
-        "The {} skill probe for machine {} produced no sentinel (exit {}): {}",
-        skill_name,
-        workspace_address,
-        result.returncode,
-        result.stderr.strip(),
-    )
-    return SkillProbe(support=SkillSupport.UNREACHABLE)
 
 
 class AccountBindingState(UpperCaseStrEnum):
@@ -240,7 +180,7 @@ def build_account_binding_probe_args(workspace_address: str) -> list[str]:
         f"echo {ACCOUNT_ARGS_EXIT_SENTINEL}$account_args_status; "
         f"else echo {NO_ACCOUNT_STORE_SENTINEL}; fi"
     )
-    # --no-start, like every other probe here: resolving a binding must not cold-boot a container.
+    # --no-start: resolving a binding must not cold-boot a container.
     return ["exec", "--agent", workspace_address, probe, "--no-start"]
 
 
@@ -315,20 +255,6 @@ def resolve_account_binding(mngr_caller: MngrCaller, workspace_address: str) -> 
     return AccountBinding(state=AccountBindingState.BOUND, create_args=args)
 
 
-def resolve_legacy_account_args(mngr_caller: MngrCaller, workspace_address: str, probe: SkillProbe) -> tuple[str, ...]:
-    """The account arguments a create in ``workspace_address`` still needs from this app, if any.
-
-    Nothing on a workspace that writes its create defaults: its own mngr binds the
-    chat. On one that keeps accounts but writes no file (minds-v0.5.0 through v0.5.2)
-    the template's resolver is asked, and only a resolved account is spliced in; a
-    workspace that resolves none, or cannot be asked, gets a bare create, and what the
-    workspace makes of that is the verdict the user sees.
-    """
-    if probe.is_local_settings_present:
-        return ()
-    return resolve_account_binding(mngr_caller, workspace_address).create_args
-
-
 def generate_chat_name(skill_name: str) -> str:
     """A unique-enough chat name for one run of ``skill_name`` (``<skill>-<hex>``)."""
     return f"{skill_name}-{secrets.token_hex(3)}"
@@ -347,19 +273,14 @@ def build_create_chat_script_args(*, chat_name: str, message: str) -> list[str]:
     return [*script_args, "-m", message]
 
 
-def build_skill_chat_mngr_args(
-    workspace_address: str, *, chat_name: str, message: str, account_args: Sequence[str] = ()
-) -> list[str]:
-    """Build the ``mngr`` CLI args (sans the leading ``mngr``) that spawn a chat seeded with ``message`` with a bare ``mngr create``.
+def build_bare_create_command(*, chat_name: str, message: str, account_args: Sequence[str]) -> str:
+    """The in-workspace shell string that spawns a chat seeded with ``message`` with a bare ``mngr create``.
 
-    The path for a template whose script cannot create a chat. An ``exec`` targeting the
-    workspace agent's address whose single COMMAND argument is the inner ``mngr create``
-    shell string. The chat is grouped with its workspace by living in the same container,
-    so no grouping label is needed. The create names no harness and no account: the
-    workspace's own create defaults supply both.
-
-    ``account_args`` are the resolver's arguments for a workspace that writes no
-    create defaults (:func:`resolve_legacy_account_args`); empty otherwise.
+    The path for a template whose script cannot create a chat. The chat is grouped with its
+    workspace by living in the same container, so no grouping label is needed. The create
+    names no harness and no account: the workspace's own create defaults supply both.
+    ``account_args`` are the resolver's arguments for a workspace that writes no create
+    defaults (:func:`resolve_account_binding`); empty otherwise.
     """
     inner_parts = ["create", chat_name, "--template", "chat", "--transfer", "none"]
     inner_parts.append("--no-connect")
@@ -369,77 +290,123 @@ def build_skill_chat_mngr_args(
     inner_parts += ["-S", SKIP_CLAUDE_INSTALLATION_CHECK_SETTING]
     inner_parts += list(account_args)
     inner_parts += ["--message", message]
-    # --no-start: the create is only reachable after the support probe succeeded
-    # (host running), so this guards the stop race; a chat create must never
-    # cold-boot a host either.
-    return [
-        "exec",
-        "--agent",
-        workspace_address,
-        build_in_workspace_mngr_command(inner_parts),
-        "--no-start",
-    ]
+    return build_in_workspace_mngr_command(inner_parts)
 
 
-class SkillChatSpawn(FrozenModel):
-    """Whether the inner ``mngr create`` landed, and what the workspace said when it did not."""
+def _build_bare_create_fallback_command(*, chat_name: str, message: str) -> str:
+    """The launch's fallback: a bare create, unless only the resolver can bind the chat.
 
-    is_started: bool = Field(description="Whether the chat now exists in the workspace")
+    A workspace that writes its create defaults binds the chat itself, and one whose template
+    has no resolver has one shared config dir that is the authenticated one; everywhere else
+    the fallback says so instead of creating an unbound chat.
+    """
+    bare_create = build_bare_create_command(chat_name=chat_name, message=message, account_args=())
+    return (
+        f"if [ -f {shlex.quote(_LOCAL_SETTINGS_PATH)} ] || [ ! -f {shlex.quote(_ACCOUNT_ARGS_SCRIPT)} ]; "
+        f"then {bare_create}; else echo {NEEDS_ACCOUNT_BINDING_SENTINEL}; fi"
+    )
+
+
+def build_skill_chat_launch_command(*, skill_name: str, chat_name: str, message: str) -> str:
+    """The in-workspace shell string that launches a ``skill_name`` chat, or says the workspace lacks the skill.
+
+    Runs in the workspace's work_dir, where ``mngr exec`` lands by default.
+    """
+    skill_path = f".agents/skills/{skill_name}/SKILL.md"
+    chat_app_command = build_message_chat_command(
+        build_create_chat_script_args(chat_name=chat_name, message=message),
+        _build_bare_create_fallback_command(chat_name=chat_name, message=message),
+    )
+    return (
+        f"if [ -f {shlex.quote(skill_path)} ]; then echo {skill_sentinel(skill_name, 'PRESENT')}; "
+        f"{chat_app_command}; else echo {skill_sentinel(skill_name, 'ABSENT')}; fi"
+    )
+
+
+class SkillChatLaunchOutcome(UpperCaseStrEnum):
+    """What one launch of a skill chat came to."""
+
+    STARTED = auto()
+    """The chat now exists in the workspace."""
+    UNSUPPORTED = auto()
+    """The workspace is reachable but predates the skill; nothing was created."""
+    UNREACHABLE = auto()
+    """The exec never reached the workspace (host down, stopped, or unreachable); nothing ran there."""
+    SPAWN_FAILED = auto()
+    """The workspace had the skill, but the create did not land, or the exec was cut off partway."""
+
+
+class SkillChatLaunch(FrozenModel):
+    """What a launch came to, and the workspace's own words when the create did not land."""
+
+    outcome: SkillChatLaunchOutcome = Field(description="What the launch came to")
     failure_detail: str = Field(
         default="",
         description=(
-            "The workspace's own verdict on a failed spawn, for the caller to show; '' on success and "
-            "when the workspace gave none. "
+            "The workspace's own verdict on a failed spawn, for the caller to show; '' for every other outcome "
+            "and when the workspace gave none. "
             "Bounded and stripped of the outer mngr's chatter, so it can be rendered as-is"
         ),
     )
 
 
-def spawn_skill_chat(
+def launch_skill_chat(
     mngr_caller: MngrCaller,
     workspace_address: str,
     *,
+    skill_name: str,
     chat_name: str,
     message: str,
-    probe: SkillProbe,
-) -> SkillChatSpawn:
-    """Spawn the chat and wait for its create to finish; report how it went.
+) -> SkillChatLaunch:
+    """Launch a ``skill_name`` chat named ``chat_name`` seeded with ``message``, and wait for its create to finish.
 
-    Synchronous on purpose: the caller holds its "starting..." state until the
-    chat actually exists rather than dismissing into a blank gap before the chat's window
-    appears.
-
-    The workspace's chat app is asked first, through the template's script. Only when the
-    script gave no verdict (no script, or one from before its create mode) does the bare
-    ``mngr create`` run, bound through the workspace's create defaults or, on a template
-    that writes none, the resolver ``probe`` chose. A verdict from the
-    script is final either way: a refusal names a chat already made or a workspace that
-    cannot make one, and a second create would not change that.
-
-    A failure carries the workspace's verdict rather than only logging it: the
-    refusals that stick are the ones retrying cannot fix, and a workspace with no
-    provider account signed in refuses in its own words.
+    Synchronous on purpose: the caller holds its "starting..." state until the chat
+    actually exists rather than dismissing into a blank gap before the chat's window appears.
+    A verdict from the chat app is final: a refusal names a chat already made or a workspace
+    that cannot make one, and a second create would not change that. ``--no-start``: a launch
+    never boots a stopped workspace; :data:`SkillChatLaunchOutcome.UNREACHABLE` is the caller's
+    cue that it may start the workspace and launch again, since nothing ran.
     """
-    answer = ask_chat_app(
-        mngr_caller,
-        workspace_address,
-        build_create_chat_script_args(chat_name=chat_name, message=message),
-        timeout=_SCRIPT_SPAWN_TIMEOUT_SECONDS,
-    )
-    if answer.is_delivered:
-        return SkillChatSpawn(is_started=True)
-    if answer.verdict is ChatAppVerdict.NO_VERDICT:
-        # Warning, with the script's own words: an argument the script rejected would otherwise
-        # read as an old template.
+    command = build_skill_chat_launch_command(skill_name=skill_name, chat_name=chat_name, message=message)
+    result = mngr_caller.call(build_chat_app_exec_args(workspace_address, command), timeout=_LAUNCH_TIMEOUT_SECONDS)
+    inner_stdout = inner_stdout_from_exec_result(result.stdout)
+    if skill_sentinel(skill_name, "ABSENT") in inner_stdout:
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.UNSUPPORTED)
+    answer = read_chat_app_answer(result)
+    if skill_sentinel(skill_name, "PRESENT") not in inner_stdout:
+        # Only mngr's own account of failing before it reached the host says the exec never ran
+        # the launch. A timeout, a warm process that died mid-call, or a failure on the reached
+        # host may have run it in the workspace before it was cut off, so none of them is the
+        # "nothing ran" a caller may retry after.
+        if not result.is_mngr_output:
+            logger.error(
+                "Launching chat {} in machine {} got no answer from mngr: {}",
+                chat_name,
+                workspace_address,
+                result.stderr,
+            )
+            return SkillChatLaunch(outcome=SkillChatLaunchOutcome.SPAWN_FAILED)
+        if is_exec_cut_off_on_reached_host(result.stdout):
+            logger.error(
+                "Launching chat {} in machine {} was cut off after reaching it: {}",
+                chat_name,
+                workspace_address,
+                answer.log_detail,
+            )
+            return SkillChatLaunch(outcome=SkillChatLaunchOutcome.SPAWN_FAILED, failure_detail=answer.detail)
         logger.warning(
-            "Machine {} gave no verdict on creating chat {} through its chat app ({}); spawning it with a bare create",
-            workspace_address,
+            "Launching chat {} never reached machine {} (exit {}): {}",
             chat_name,
-            answer.detail,
+            workspace_address,
+            result.returncode,
+            answer.log_detail,
         )
-        account_args = resolve_legacy_account_args(mngr_caller, workspace_address, probe)
-        return _spawn_with_bare_create(
-            mngr_caller, workspace_address, chat_name=chat_name, message=message, account_args=account_args
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.UNREACHABLE)
+    if answer.is_delivered:
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.STARTED)
+    if answer.verdict is ChatAppVerdict.NO_VERDICT:
+        return _finish_bare_create_fallback(
+            mngr_caller, workspace_address, answer, chat_name=chat_name, message=message
         )
     logger.error(
         "Spawning chat {} in machine {} through its chat app failed (script exit {}, exec exit {}): {}",
@@ -449,7 +416,59 @@ def spawn_skill_chat(
         answer.exec_returncode,
         answer.log_detail,
     )
-    return SkillChatSpawn(is_started=False, failure_detail=answer.detail)
+    return SkillChatLaunch(outcome=SkillChatLaunchOutcome.SPAWN_FAILED, failure_detail=answer.detail)
+
+
+def _finish_bare_create_fallback(
+    mngr_caller: MngrCaller, workspace_address: str, answer: ChatAppAnswer, *, chat_name: str, message: str
+) -> SkillChatLaunch:
+    """What the launch's bare create came to, behind a script that gave no verdict on the create."""
+    # Warning, with the script's own words: an argument the script rejected would otherwise
+    # read as an old template.
+    logger.warning(
+        "Machine {} gave no verdict on creating chat {} through its chat app ({}); fell back to a bare create",
+        workspace_address,
+        chat_name,
+        answer.detail,
+    )
+    fallback = answer.fallback
+    if fallback is None or fallback.exit_code is None:
+        logger.error("The bare create of chat {} in machine {} never reported back", chat_name, workspace_address)
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.SPAWN_FAILED)
+    if NEEDS_ACCOUNT_BINDING_SENTINEL in fallback.stdout:
+        binding = resolve_account_binding(mngr_caller, workspace_address)
+        return _spawn_with_bare_create(
+            mngr_caller, workspace_address, chat_name=chat_name, message=message, account_args=binding.create_args
+        )
+    if fallback.exit_code == 0:
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.STARTED)
+    logger.error(
+        "Spawning chat {} in machine {} exited {}: {}",
+        chat_name,
+        workspace_address,
+        fallback.exit_code,
+        fallback.stderr.strip(),
+    )
+    return SkillChatLaunch(
+        outcome=SkillChatLaunchOutcome.SPAWN_FAILED, failure_detail=in_workspace_failure_detail(fallback.stderr)
+    )
+
+
+def build_skill_chat_mngr_args(
+    workspace_address: str, *, chat_name: str, message: str, account_args: Sequence[str]
+) -> list[str]:
+    """The ``mngr`` args that run the bare create in its own ``mngr exec``, bound with the resolver's ``account_args``.
+
+    ``--no-start``: the create follows a launch that found the host running, so this only
+    guards the stop race; a chat create must never cold-boot a host.
+    """
+    return [
+        "exec",
+        "--agent",
+        workspace_address,
+        build_bare_create_command(chat_name=chat_name, message=message, account_args=account_args),
+        "--no-start",
+    ]
 
 
 def _spawn_with_bare_create(
@@ -459,8 +478,8 @@ def _spawn_with_bare_create(
     chat_name: str,
     message: str,
     account_args: Sequence[str],
-) -> SkillChatSpawn:
-    """Spawn the chat with a bare ``mngr create`` inside the workspace and wait for it to finish."""
+) -> SkillChatLaunch:
+    """Spawn the chat with a bare ``mngr create`` in its own exec and wait for it to finish."""
     args = build_skill_chat_mngr_args(
         workspace_address, chat_name=chat_name, message=message, account_args=account_args
     )
@@ -477,5 +496,5 @@ def _spawn_with_bare_create(
         # that -- a timeout's quotes the whole argv, the seed message with it --
         # and is not something the workspace said, so there is no verdict to carry.
         detail = in_workspace_failure_detail(result.stderr) if result.is_mngr_output else ""
-        return SkillChatSpawn(is_started=False, failure_detail=detail)
-    return SkillChatSpawn(is_started=True)
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.SPAWN_FAILED, failure_detail=detail)
+    return SkillChatLaunch(outcome=SkillChatLaunchOutcome.STARTED)
