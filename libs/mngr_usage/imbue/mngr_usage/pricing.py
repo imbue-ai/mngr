@@ -6,9 +6,10 @@ cost) just emits ``tokens`` + ``model`` and the reader prices it.
 
 The numbers are litellm's, copied here rather than read at runtime: this table is
 consulted on agent machines that never import litellm (it ships in the ``mngr``
-wheel, litellm does not). ``litellm_pricing_test`` pins every entry -- OpenAI and
-Anthropic alike -- against litellm's ``model_prices_and_context_window`` map, so
-the copy cannot drift from the source that the LiteLLM proxy actually bills from.
+wheel, litellm does not). ``litellm_pricing_test`` pins every entry litellm still
+lists -- OpenAI and Anthropic alike -- against litellm's ``model_prices_and_context_window``
+map, so the copy cannot drift from the source that the LiteLLM proxy actually bills from.
+An entry for a model litellm has since retired may stay, so older sessions on it stay priced.
 
 This table is a *fallback*, not the main cost path: ``api.py`` prefers a
 harness-reported ``total_cost_usd`` and only prices tokens when the harness does
@@ -110,8 +111,7 @@ _HAIKU_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 # automatic and normally carries no cache-*write* surcharge (only reads are
 # discounted), so cache_creation_input_token_cost is 0 unless the map bills
 # one for that model. Codex reports tokens (not dollars), so these drive its
-# estimated cost; mngr_usage's litellm_pricing_test enforces that they stay
-# in sync with litellm.
+# estimated cost.
 _GPT5_PRICES: Final[PerTokenPrices] = PerTokenPrices(
     input_cost_per_token=0.00000125,
     output_cost_per_token=0.00001,
@@ -150,8 +150,7 @@ _O4_MINI_PRICES: Final[PerTokenPrices] = PerTokenPrices(
 )
 
 # Canonical pricing key is "<provider>/<model>" (the provider qualifier
-# disambiguates multi-provider harnesses like pi). Every entry stays in sync with
-# litellm's map directly (litellm_pricing_test).
+# disambiguates multi-provider harnesses like pi).
 MODEL_PRICING: Final[dict[str, PerTokenPrices]] = {
     "anthropic/claude-fable-5-1": _FABLE_5_1_PRICES,
     "anthropic/claude-fable-5": _FABLE_PRICES,
