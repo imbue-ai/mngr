@@ -335,6 +335,19 @@ MINDS_GOOGLE_OAUTH_SERVICES: Final[frozenset[str]] = frozenset(
 MINDS_GOOGLE_OAUTH_CLIENT_ID: Final[str] = "991889009876-ms5ln5jnvqmsrgpmi2nipkv7atmoaks8.apps.googleusercontent.com"
 MINDS_GOOGLE_OAUTH_CLIENT_SECRET: Final[str] = "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"
 
+# Services whose OAuth client is registered dynamically at sign-in (no client
+# of ours to hand over), but whose sign-in must land on a Minds-hosted redirect
+# page rather than latchkey's loopback callback. Registered for the service via
+# ``latchkey auth prepare <service> '{"redirectUri": ...}'`` (latchkey >= 3.15)
+# right before the sign-in that would register the client; the page forwards
+# the authorization result to the loopback port latchkey encodes in ``state``.
+MINDS_OAUTH_REDIRECT_URI_BY_SERVICE: Final[Mapping[str, str]] = {
+    # This leads to a page that forwards the OAuth callback to the loopback port latchkey encodes in ``state``.
+    # That way the user doesn't get to see the scary-looking localhost URL.
+    # The page is updated from here: https://github.com/imbue-ai/oauth-callback.
+    "notion-mcp": "https://imbue-ai.github.io/oauth-callback/",
+}
+
 
 class EncryptedCredentialStore(FrozenModel):
     """A latchkey credential store as it sits on disk, and the upstream format stamp that says how to read it."""
@@ -1721,7 +1734,23 @@ class Latchkey(MutableModel):
         bare sign-in is skipped entirely and the prepare path runs unconditionally,
         so a fresh account is never bound to the client/session an existing
         account already left behind.
+
+        A service in :data:`MINDS_OAUTH_REDIRECT_URI_BY_SERVICE` needs no client
+        of ours but does need its Minds-hosted redirect URI in place before the
+        sign-in registers a client, so that is pinned first (via
+        :meth:`auth_prepare_redirect_uri`) whenever the sign-in draws on the
+        service-level preparation -- that is, unless ``account`` names a stored
+        account, whose own stored client and redirect URI latchkey reuses
+        instead. A failed pin fails the sign-in outright: a loopback sign-in is
+        exactly what the pin exists to avoid.
         """
+        minds_redirect_uri = MINDS_OAUTH_REDIRECT_URI_BY_SERVICE.get(service_name)
+        if minds_redirect_uri is not None and account is None:
+            is_redirect_prepared, redirect_prepare_detail = self.auth_prepare_redirect_uri(
+                service_name, minds_redirect_uri
+            )
+            if not is_redirect_prepared:
+                return False, redirect_prepare_detail
         if not is_ephemeral:
             is_success, detail = self.auth_browser_login(service_name, account=account)
             if is_success:
@@ -1788,11 +1817,13 @@ class Latchkey(MutableModel):
         (see :meth:`auth_browser`).
 
         Unlike :meth:`auth_browser`, this never auto-runs ``auth
-        browser-prepare`` on failure. It is the bare sign-in used once a
-        client has already been registered for the service -- either the
-        Minds OAuth client (via :meth:`auth_prepare`) or a client a prior
-        self-setup left behind. Returns ``(True, "")`` on a clean exit,
-        otherwise ``(False, detail)``.
+        browser-prepare`` on failure. It is the bare sign-in used once the
+        service's preparation is in place -- a registered client (the Minds
+        OAuth client via :meth:`auth_prepare`, or one a prior self-setup left
+        behind), or just a pinned redirect URI (via
+        :meth:`auth_prepare_redirect_uri`) for a service that registers its
+        client during the sign-in itself. Returns ``(True, "")`` on a clean
+        exit, otherwise ``(False, detail)``.
         """
         argv = ["auth", "browser", service_name]
         if account is not None:
@@ -1814,10 +1845,24 @@ class Latchkey(MutableModel):
         self-provision their own OAuth project. Returns ``(True, "")`` on a
         clean exit, otherwise ``(False, detail)``.
         """
-        payload = json.dumps({"clientId": client_id, "clientSecret": client_secret})
+        return self._auth_prepare_with_payload(service_name, {"clientId": client_id, "clientSecret": client_secret})
+
+    def auth_prepare_redirect_uri(self, service_name: str, redirect_uri: str) -> tuple[bool, str]:
+        """Pin the redirect URI a service's next dynamic client registration uses, via ``latchkey auth prepare``.
+
+        Runs ``latchkey auth prepare <service> '{"redirectUri":...}'`` (latchkey
+        >= 3.15) so a subsequent :meth:`auth_browser_login` registers its OAuth
+        client with, and sends the user back through, that page instead of
+        latchkey's loopback callback. Stores nothing but the preparation: no
+        browser, no network. Returns ``(True, "")`` on a clean exit, otherwise
+        ``(False, detail)``.
+        """
+        return self._auth_prepare_with_payload(service_name, {"redirectUri": redirect_uri})
+
+    def _auth_prepare_with_payload(self, service_name: str, payload: Mapping[str, str]) -> tuple[bool, str]:
         return self._run_latchkey_auth_command(
             log_label="auth prepare",
-            argv=["auth", "prepare", service_name, payload],
+            argv=["auth", "prepare", service_name, json.dumps(payload)],
             service_name=service_name,
         )
 

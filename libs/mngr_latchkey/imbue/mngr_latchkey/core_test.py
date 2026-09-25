@@ -55,6 +55,7 @@ from imbue.mngr_latchkey.core import LatchkeyVersionError
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_ID
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_CLIENT_SECRET
 from imbue.mngr_latchkey.core import MINDS_GOOGLE_OAUTH_SERVICES
+from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
@@ -2970,6 +2971,18 @@ def _read_recording_report(tmp_path: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in report_path.read_text().splitlines() if line.strip()]
 
 
+def _read_single_prepare_payload(tmp_path: Path, service_name: str) -> object:
+    """The decoded JSON payload of the one ``auth prepare <service>`` call the recording binary saw."""
+    records = _read_recording_report(tmp_path)
+    assert len(records) == 1
+    argv = records[0]["argv"]
+    assert isinstance(argv, list)
+    assert argv[:3] == ["auth", "prepare", service_name]
+    payload_arg = argv[3]
+    assert isinstance(payload_arg, str)
+    return json.loads(payload_arg)
+
+
 def test_auth_browser_runs_browser_prepare_and_retries_when_preparation_required(tmp_path: Path) -> None:
     """Auto-recovery path: latchkey signals preparation-required, we prepare and retry."""
     binary = _make_prepare_required_binary(tmp_path)
@@ -3055,14 +3068,10 @@ def test_auth_prepare_invokes_prepare_with_json_payload(tmp_path: Path) -> None:
 
     assert is_success is True
     assert detail == ""
-    records = _read_recording_report(tmp_path)
-    assert len(records) == 1
-    argv = records[0]["argv"]
-    assert isinstance(argv, list)
-    assert argv[:3] == ["auth", "prepare", "google-gmail"]
-    payload_arg = argv[3]
-    assert isinstance(payload_arg, str)
-    assert json.loads(payload_arg) == {"clientId": "client-id-123", "clientSecret": "secret-xyz"}
+    assert _read_single_prepare_payload(tmp_path, "google-gmail") == {
+        "clientId": "client-id-123",
+        "clientSecret": "secret-xyz",
+    }
 
 
 def test_auth_prepare_reports_failure_on_non_zero_exit(tmp_path: Path) -> None:
@@ -3429,3 +3438,81 @@ def test_auth_browser_google_existing_client_failure_is_never_cleared(tmp_path: 
     # only ever touch a client we registered ourselves.
     assert argv_calls == [["auth", "browser", "google-gmail"]]
     assert ["auth", "clear", "-y", "google-gmail", "--all"] not in argv_calls
+
+
+# The exact ``auth prepare`` invocation that pins the Minds-hosted redirect URI
+# for Notion MCP before a sign-in registers its OAuth client.
+_NOTION_MCP_REDIRECT_PREPARE_ARGV = [
+    "auth",
+    "prepare",
+    "notion-mcp",
+    json.dumps({"redirectUri": MINDS_OAUTH_REDIRECT_URI_BY_SERVICE["notion-mcp"]}),
+]
+
+
+def test_auth_prepare_redirect_uri_invokes_prepare_with_redirect_payload(tmp_path: Path) -> None:
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_prepare_redirect_uri("notion-mcp", "https://example.test/callback/")
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_single_prepare_payload(tmp_path, "notion-mcp") == {"redirectUri": "https://example.test/callback/"}
+
+
+def test_auth_browser_notion_mcp_pins_minds_redirect_uri_before_first_sign_in(tmp_path: Path) -> None:
+    """Notion MCP registers its client at sign-in, so the redirect URI is pinned before the bare sign-in."""
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("notion-mcp")
+
+    assert is_success is True
+    assert detail == ""
+    assert _read_argv_calls(tmp_path) == [
+        _NOTION_MCP_REDIRECT_PREPARE_ARGV,
+        ["auth", "browser", "notion-mcp"],
+    ]
+
+
+def test_auth_browser_notion_mcp_failed_redirect_pin_fails_without_signing_in(tmp_path: Path) -> None:
+    """A loopback sign-in is what the pin exists to avoid, so a failed pin is a failed sign-in."""
+    binary = _make_recording_binary(tmp_path, exit_code=1, stderr="Error: notion-mcp: redirectUri: Unrecognized key")
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.auth_browser("notion-mcp")
+
+    assert is_success is False
+    assert detail == "Error: notion-mcp: redirectUri: Unrecognized key"
+    assert _read_argv_calls(tmp_path) == [_NOTION_MCP_REDIRECT_PREPARE_ARGV]
+
+
+def test_auth_browser_notion_mcp_re_sign_in_of_stored_account_does_not_re_pin(tmp_path: Path) -> None:
+    """With ``--account`` latchkey reuses that account's stored client and redirect URI, not the preparation."""
+    binary = _make_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, _detail = latchkey.auth_browser("notion-mcp", account="jane@example.com:Acme")
+
+    assert is_success is True
+    assert _read_argv_calls(tmp_path) == [["auth", "browser", "notion-mcp", "--account", "jane@example.com:Acme"]]
+
+
+def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_path: Path) -> None:
+    binary = _make_env_recording_binary(tmp_path, exit_code=0)
+    latchkey = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(binary))
+
+    is_success, detail = latchkey.add_account("notion-mcp")
+
+    assert is_success is True
+    assert detail == ""
+    records = _read_recording_report(tmp_path)
+    assert [record["argv"] for record in records] == [
+        _NOTION_MCP_REDIRECT_PREPARE_ARGV,
+        ["auth", "browser-prepare", "notion-mcp"],
+        ["auth", "browser", "notion-mcp"],
+    ]
+    # Only the browser flows run from a fresh session; pinning the redirect
+    # URI opens no browser.
+    assert [record["env_ephemeral"] for record in records] == ["", "1", "1"]

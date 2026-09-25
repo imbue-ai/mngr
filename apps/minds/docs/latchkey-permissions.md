@@ -115,7 +115,16 @@ second gateway URL or a different agent skill.
       treated as the legacy fallback), runs `latchkey auth browser <service>`
       synchronously (transparently running the one-off `latchkey auth
       browser-prepare <service>` step first when latchkey asks for it).
-      Cancellation or failure of either step produces a `FAILED` outcome:
+      Two kinds of service get a Minds-specific preparation on the way: a
+      `google-*` service is signed in against the Minds-provided OAuth
+      client, and Notion MCP, which registers its OAuth client at sign-in,
+      first has its redirect URI pinned to the Minds-hosted callback page
+      (`latchkey auth prepare notion-mcp '{"redirectUri": ...}'`, latchkey
+      >= 3.15) so the sign-in returns through that page rather than
+      latchkey's loopback callback. The pin only applies to a sign-in that
+      draws on the service-level preparation; re-signing in to a stored
+      account reuses that account's own client and redirect URI.
+      Cancellation or failure of any of these steps produces a `FAILED` outcome:
       the grant is **not** applied and the request stays pending (no
       response event is written), so the dialog surfaces the reason and the
       user can click Approve again to retry. A failed approval is never

@@ -157,6 +157,10 @@ class FakeLatchkey(Latchkey):
         del service_name, client_id, client_secret
         return (True, "")
 
+    def auth_prepare_redirect_uri(self, service_name: str, redirect_uri: str) -> tuple[bool, str]:
+        del service_name, redirect_uri
+        return (True, "")
+
     def auth_clear(
         self,
         service_name: str,
