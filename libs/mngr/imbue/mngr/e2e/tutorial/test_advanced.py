@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import require_binary
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
@@ -80,13 +81,14 @@ def test_advanced_fan_out_create(e2e: E2eSession) -> None:
 @pytest.mark.release
 def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
     """Tutorial block:
-        # monitor all agents in a refreshing dashboard (uses Unix watch(1))
+        # monitor all agents in a refreshing dashboard (uses Unix watch(1); on macOS: brew install watch)
         watch -n 5 mngr list --running
 
     Scope: the `watch`-driven dashboard launches and exits cleanly, and the
     `mngr list --running` query it refreshes each tick succeeds and emits a
     well-formed dashboard (an `agents` list, empty here since nothing is running).
     """
+    require_binary("watch", "macOS: brew install watch")
     # No modal mark: the dashboard query below is scoped to the local provider,
     # so it never contacts modal (or any other remote backend). `watch` clears
     # the screen and emits terminal escape codes, so for the raw tutorial command
@@ -297,7 +299,7 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
 @pytest.mark.timeout(120)
 def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     """Tutorial block:
-        # use watch with list to keep a live dashboard in a terminal
+        # use watch with list to keep a live dashboard in a terminal (on macOS: brew install watch)
         watch -n 5 mngr list
 
     Scope: the `watch`-driven live dashboard launches and exits cleanly, and the
@@ -306,6 +308,7 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     test_advanced_watch_dashboard_running, this covers plain `mngr list` (not
     `--running`) with an agent actually present.
     """
+    require_binary("watch", "macOS: brew install watch")
     # Create an agent so the live dashboard has something to display.
     _create_my_task(e2e, 101017)
     # `mngr list` is the content the dashboard refreshes. Run it directly (under

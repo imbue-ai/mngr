@@ -48,6 +48,18 @@ _PTY_CONNECT_LAUNCHER = "import pty, sys; raise SystemExit(pty.spawn(['sh', '-c'
 BOUND_EXPIRED_EXIT_CODE: Final[int] = 128 + int(signal.SIGALRM)
 
 
+def require_binary(binary: str, install_hint: str) -> None:
+    """Fail immediately when ``binary`` is absent, naming how to install it.
+
+    Tutorial blocks wrap their commands in ``|| true``, which turns a missing
+    binary into an empty capture and an assertion that names something unrelated.
+    Checking up front reports the real cause. It fails rather than skips so that a
+    CI image losing the binary is loud: a skip here would leave the suite green
+    while these blocks exercised nothing.
+    """
+    assert shutil.which(binary) is not None, f"{binary} is not installed ({install_hint})"
+
+
 def time_bounded(seconds: float, command: str) -> str:
     """Wrap ``command`` so it is killed after ``seconds`` under any userland.
 

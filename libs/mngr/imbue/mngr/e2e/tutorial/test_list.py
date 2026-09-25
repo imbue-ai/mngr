@@ -10,6 +10,7 @@ import pytest
 
 from imbue.mngr.e2e.conftest import BOUND_EXPIRED_EXIT_CODE
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import require_binary
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.resource_guards.resource_guards import enforce_sdk_guard
 from imbue.skitwright.expect import expect
@@ -544,7 +545,7 @@ def test_list_limit(e2e: E2eSession) -> None:
 @pytest.mark.timeout(90)
 def test_list_watch_mode(e2e: E2eSession) -> None:
     """Tutorial block:
-        # watch mode: refresh the list every 5 seconds
+        # watch mode: refresh the list every 5 seconds (on macOS: brew install watch)
         watch -n5 mngr list
 
     Scope: wrapping `mngr list` in `watch -n5` genuinely runs the wrapped command
@@ -552,6 +553,7 @@ def test_list_watch_mode(e2e: E2eSession) -> None:
     verbatim in watch's rendered frame, proving watch executed it rather than
     merely starting up.
     """
+    require_binary("watch", "macOS: brew install watch")
     # `watch` blocks until SIGINT; wrap with a short `timeout` so the test
     # exits without waiting for a full refresh interval. The bound expiring
     # on expiry (then `|| true` masks it), so a clean exit is expected. The

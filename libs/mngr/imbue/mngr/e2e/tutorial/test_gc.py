@@ -6,6 +6,7 @@ Each test corresponds 1:1 to a tutorial script block.
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
+from imbue.mngr.e2e.conftest import require_binary
 from imbue.mngr.e2e.conftest import time_bounded
 from imbue.skitwright.expect import expect
 
@@ -167,7 +168,7 @@ def test_gc_background_watch(e2e: E2eSession) -> None:
     """Tutorial block:
         # if you wanted, you could disable automatic garbage collection on destroy by setting the appropriate setting:
         mngr config set commands.destroy.gc false
-        # then make sure you constantly run gc in the background (this runs it once every 60 seconds)
+        # then make sure you constantly run gc in the background (once every 60 seconds; on macOS: brew install watch)
         watch -n60 mngr gc
         # this would have the effect of making your calls to "mngr destroy" somewhat faster, at the cost of needing to have this background process running
 
@@ -176,6 +177,7 @@ def test_gc_background_watch(e2e: E2eSession) -> None:
     `watch -n60 mngr gc` can start to run gc in the background (capped with
     a 1-second bound since watch would otherwise block indefinitely).
     """
+    require_binary("watch", "macOS: brew install watch")
     expect(
         e2e.run(
             "mngr config set commands.destroy.gc false",

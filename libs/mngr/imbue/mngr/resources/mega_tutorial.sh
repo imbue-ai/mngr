@@ -334,7 +334,7 @@ mngr list --fields "name,state,host.provider,create_time" --sort "create_time de
 # limit the number of results
 mngr list --limit 10
 
-# watch mode: refresh the list every 5 seconds
+# watch mode: refresh the list every 5 seconds (on macOS: brew install watch)
 watch -n5 mngr list
 
 # output all objects as one big JSON array when complete  (useful for scripting)
@@ -649,7 +649,7 @@ mngr gc --provider modal
 
 # if you wanted, you could disable automatic garbage collection on destroy by setting the appropriate setting:
 mngr config set commands.destroy.gc false
-# then make sure you constantly run gc in the background (this runs it once every 60 seconds)
+# then make sure you constantly run gc in the background (once every 60 seconds; on macOS: brew install watch)
 watch -n60 mngr gc
 # this would have the effect of making your calls to "mngr destroy" somewhat faster, at the cost of needing to have this background process running
 
@@ -1299,7 +1299,7 @@ for task in "fix-auth" "add-logging" "update-deps" "write-docs"; do
   mngr create "$task"@.modal --no-connect --message "Work on: $task"
 done
 
-# monitor all agents in a refreshing dashboard (uses Unix watch(1))
+# monitor all agents in a refreshing dashboard (uses Unix watch(1); on macOS: brew install watch)
 watch -n 5 mngr list --running
 
 # or get a JSONL stream of host/agent discovery events for programmatic consumers
@@ -1327,7 +1327,7 @@ done
 # and not have to worry about remembering whether it is started, etc (because it will attach by default)
 mngr create --reuse --provider modal my-task
 
-# use watch with list to keep a live dashboard in a terminal
+# use watch with list to keep a live dashboard in a terminal (on macOS: brew install watch)
 watch -n 5 mngr list
 
 # use exec to quickly inspect an agent's environment
