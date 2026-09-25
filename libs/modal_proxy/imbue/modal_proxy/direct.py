@@ -2,7 +2,8 @@
 #
 # All modal.exception.* errors are translated to ModalProxy* errors at the
 # boundary so that callers never need to import the modal package.
-# Volume operations include retry logic for transient modal errors.
+# Calls that are safe to issue twice wait out a transient Modal failure; see
+# _retry_transient.
 
 import io
 import os
@@ -39,6 +40,7 @@ from tenacity import retry_if_result
 from tenacity import stop_after_attempt
 from tenacity import stop_after_delay
 from tenacity import wait_exponential
+from tenacity import wait_random
 
 from imbue.modal_proxy.data_types import FileEntry
 from imbue.modal_proxy.data_types import FileEntryType
@@ -171,13 +173,15 @@ def _unwrap_secret(iface: SecretInterface) -> modal.Secret:
     return iface.secret
 
 
-def _should_retry_volume_op(e: BaseException) -> bool:
-    """Decide whether a volume operation's exception should be retried.
+def _is_transient_modal_error(e: BaseException) -> bool:
+    """Decide whether a Modal failure is a blip worth re-issuing the call for.
 
-    Retries transient connection/server errors, plus environment-level
-    not-found errors (which can be transient during eventual-consistency
-    races or network issues). Path-level not-found errors are NOT retried
-    since they're expected during normal operations.
+    Names Modal's own exception classes rather than the ModalProxy* ones: this
+    runs inside the retry, which sits under ``_translate_exceptions``.
+
+    Environment-level not-found errors count -- they show up during
+    eventual-consistency races and network trouble. Path-level ones do not;
+    those are expected during normal operations.
     """
     if isinstance(
         e,
@@ -189,27 +193,61 @@ def _should_retry_volume_op(e: BaseException) -> bool:
     return False
 
 
-_VOLUME_RETRY = retry_if_exception(_should_retry_volume_op)
-_VOLUME_STOP = stop_after_attempt(5)
-_VOLUME_TRANSIENT_WAIT = wait_exponential(multiplier=1, min=1, max=10)
-_VOLUME_RATE_LIMIT_WAIT = wait_exponential(multiplier=5, min=5, max=30)
+# How long Modal is allowed to keep failing a call before we stop waiting it
+# out. Modal's own client sizes the same quantity at 63s -- the `total_timeout`
+# it gives a failing control-plane connection. Its per-call retry covers only
+# about 0.7s, which a multi-second blip outlasts, so the wait has to live here.
+_TRANSIENT_RETRY_BUDGET_SECONDS: Final[int] = 60
+_TRANSIENT_RETRY = retry_if_exception(_is_transient_modal_error)
+_TRANSIENT_STOP = stop_after_delay(_TRANSIENT_RETRY_BUDGET_SECONDS)
+
+# Discovery fans dozens of reads at one volume at once, so a blip fails them
+# all at the same instant; undithered, they march back in lockstep and turn the
+# blip into the rate limit below.
+_MAX_RETRY_JITTER_SECONDS: Final[int] = 2
+_RETRY_JITTER = wait_random(0, _MAX_RETRY_JITTER_SECONDS)
+_TRANSIENT_WAIT = wait_exponential(multiplier=1, min=1, max=10) + _RETRY_JITTER
+_RATE_LIMIT_WAIT = wait_exponential(multiplier=5, min=5, max=30) + _RETRY_JITTER
 
 
-def _volume_wait(retry_state: RetryCallState) -> float:
-    """Pick the backoff for a volume-op retry based on the failure kind.
+def _transient_wait(retry_state: RetryCallState) -> float:
+    """Pick the backoff for a transient-failure retry based on the failure kind.
 
-    Rate limits (ResourceExhaustedError: "VolumeListFiles rate limit exceeded.
-    Please wait and retry.") need substantially longer waits than ordinary
-    transient errors: the limit is shared across every concurrent client (e.g.
-    CI's parallel acceptance sandboxes), so a burst can outlast the ~15s total
-    that the ordinary curve provides across all attempts. The rate-limit curve
-    waits 5/10/20/30s between attempts (~65s total headroom); everything else
-    keeps the original 1/2/4/8s curve so genuine failures still surface fast.
+    A rate limit (ResourceExhaustedError: "VolumeListFiles rate limit exceeded.
+    Please wait and retry.") is shared across every concurrent client, so
+    retrying one as eagerly as an ordinary transient keeps it exhausted.
     """
     exception = retry_state.outcome.exception() if retry_state.outcome is not None else None
     if isinstance(exception, modal.exception.ResourceExhaustedError):
-        return _VOLUME_RATE_LIMIT_WAIT(retry_state)
-    return _VOLUME_TRANSIENT_WAIT(retry_state)
+        return _RATE_LIMIT_WAIT(retry_state)
+    return _TRANSIENT_WAIT(retry_state)
+
+
+def _log_transient_retry(retry_state: RetryCallState) -> None:
+    """Report each blip we wait out, so how long Modal's blips last is measurable."""
+    outcome = retry_state.outcome
+    logger.warning(
+        "Modal failed transiently ({}); retrying (attempt {}, {:.0f}s of a {}s budget spent)",
+        outcome.exception() if outcome is not None else "unknown",
+        retry_state.attempt_number,
+        retry_state.seconds_since_start or 0.0,
+        _TRANSIENT_RETRY_BUDGET_SECONDS,
+    )
+
+
+# Apply to control-plane calls that are safe to issue twice. Never to a create,
+# or to anything else a retry could perform a second time: Modal may have
+# applied a call it then failed to report on.
+#
+# The budget gates whether another attempt starts, so a call can overrun it by
+# a backoff plus an attempt.
+_retry_transient = retry(
+    retry=_TRANSIENT_RETRY,
+    stop=_TRANSIENT_STOP,
+    wait=_transient_wait,
+    before_sleep=_log_transient_retry,
+    reraise=True,
+)
 
 
 # Modal locks an app for the duration of a mutation, so two deploys targeting
@@ -384,7 +422,7 @@ class DirectImage(ImageInterface):
 
 
 class DirectVolume(VolumeInterface):
-    """Wraps a modal.Volume with retry logic for transient errors."""
+    """Wraps a modal.Volume."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -395,7 +433,7 @@ class DirectVolume(VolumeInterface):
         return self.volume_name
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
+    @_retry_transient
     def get_object_id(self) -> str:
         # from_name hands back an unhydrated handle, so hydrating is what actually
         # asks the server to resolve the name -- and raises NotFoundError if it cannot.
@@ -403,7 +441,7 @@ class DirectVolume(VolumeInterface):
         return self.volume.object_id
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
+    @_retry_transient
     def listdir(self, path: str) -> list[FileEntry]:
         entries = self.volume.listdir(path)
         return [
@@ -417,17 +455,17 @@ class DirectVolume(VolumeInterface):
         ]
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
+    @_retry_transient
     def read_file(self, path: str) -> bytes:
         return b"".join(self.volume.read_file(path))
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
+    @_retry_transient
     def remove_file(self, path: str, *, recursive: bool = False) -> None:
         self.volume.remove_file(path, recursive=recursive)
 
     @_translate_exceptions
-    @retry(retry=_VOLUME_RETRY, stop=_VOLUME_STOP, wait=_volume_wait, reraise=True)
+    @_retry_transient
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
         with self.volume.batch_upload(force=True) as batch:
             for path, file_data in file_contents_by_path.items():
@@ -467,11 +505,13 @@ class DirectSandbox(SandboxInterface):
         return DirectExecProcess.model_construct(process=process)
 
     @_translate_exceptions
+    @_retry_transient
     def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
         raw_tunnels = self.sandbox.tunnels(timeout=timeout)
         return {port: TunnelInfo(tcp_socket=tunnel.tcp_socket) for port, tunnel in raw_tunnels.items()}
 
     @_translate_exceptions
+    @_retry_transient
     def get_tags(self) -> dict[str, str]:
         return self.sandbox.get_tags()
 
@@ -485,6 +525,7 @@ class DirectSandbox(SandboxInterface):
         return DirectImage.model_construct(image=image)
 
     @_translate_exceptions
+    @_retry_transient
     def poll(self) -> int | None:
         return self.sandbox.poll()
 
@@ -559,6 +600,8 @@ class DirectModalInterface(ModalInterface):
     def app_create(self, name: str) -> AppInterface:
         return DirectApp.model_construct(app=modal.App(name))
 
+    @_translate_exceptions
+    @_retry_transient
     def app_lookup(
         self,
         name: str,
@@ -566,10 +609,8 @@ class DirectModalInterface(ModalInterface):
         create_if_missing: bool = True,
         environment_name: str,
     ) -> AppInterface:
-        try:
-            app = modal.App.lookup(name, create_if_missing=create_if_missing, environment_name=environment_name)
-        except modal.exception.Error as e:
-            raise _translate_modal_error(e) from e
+        # Get-or-create keyed by name, so re-issuing it cannot produce a second app.
+        app = modal.App.lookup(name, create_if_missing=create_if_missing, environment_name=environment_name)
         return DirectApp.model_construct(app=app)
 
     # Image
@@ -623,10 +664,12 @@ class DirectModalInterface(ModalInterface):
         return DirectSandbox.model_construct(sandbox=sandbox)
 
     @_translate_exceptions
+    @_retry_transient
     def sandbox_list(self, *, app_id: str) -> list[SandboxInterface]:
         return [DirectSandbox.model_construct(sandbox=sb) for sb in modal.Sandbox.list(app_id=app_id)]
 
     @_translate_exceptions
+    @_retry_transient
     def sandbox_from_id(self, sandbox_id: str) -> SandboxInterface:
         return DirectSandbox.model_construct(sandbox=modal.Sandbox.from_id(sandbox_id))
 
@@ -659,6 +702,7 @@ class DirectModalInterface(ModalInterface):
         return DirectVolume.model_construct(volume=vol, volume_name=name)
 
     @_translate_exceptions
+    @_retry_transient
     def volume_list(self, *, environment_name: str) -> list[VolumeInterface]:
         return [
             DirectVolume.model_construct(volume=vol, volume_name=vol.name)
@@ -690,6 +734,7 @@ class DirectModalInterface(ModalInterface):
         return DirectFunction.model_construct(function=func)
 
     @_translate_exceptions
+    @_retry_transient
     def is_function_deployed(
         self,
         name: str,

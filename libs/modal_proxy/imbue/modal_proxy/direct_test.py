@@ -2,7 +2,9 @@ import os
 from collections.abc import Callable
 from collections.abc import Generator
 from pathlib import Path
+from types import FunctionType
 from typing import Any
+from typing import Final
 from typing import Mapping
 from typing import Sequence
 from uuid import uuid4
@@ -15,6 +17,7 @@ from grpclib.exceptions import StreamTerminatedError
 from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
+from pydantic import BaseModel
 from tenacity import RetryCallState
 from tenacity import Retrying
 
@@ -28,16 +31,20 @@ from imbue.modal_proxy.direct import DirectModalInterface
 from imbue.modal_proxy.direct import DirectSandbox
 from imbue.modal_proxy.direct import DirectSecret
 from imbue.modal_proxy.direct import DirectVolume
-from imbue.modal_proxy.direct import _should_retry_volume_op
+from imbue.modal_proxy.direct import _MAX_RETRY_JITTER_SECONDS
+from imbue.modal_proxy.direct import _TRANSIENT_RETRY
+from imbue.modal_proxy.direct import _TRANSIENT_RETRY_BUDGET_SECONDS
+from imbue.modal_proxy.direct import _TRANSIENT_STOP
+from imbue.modal_proxy.direct import _is_transient_modal_error
 from imbue.modal_proxy.direct import _to_file_entry_type
 from imbue.modal_proxy.direct import _to_modal_stream_type
+from imbue.modal_proxy.direct import _transient_wait
 from imbue.modal_proxy.direct import _translate_modal_cli_not_found
 from imbue.modal_proxy.direct import _translate_modal_error
 from imbue.modal_proxy.direct import _unwrap_app
 from imbue.modal_proxy.direct import _unwrap_image
 from imbue.modal_proxy.direct import _unwrap_secret
 from imbue.modal_proxy.direct import _unwrap_volume
-from imbue.modal_proxy.direct import _volume_wait
 from imbue.modal_proxy.errors import ModalProxyAppLockedError
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
@@ -56,8 +63,6 @@ from imbue.modal_proxy.interface import ImageInterface
 from imbue.modal_proxy.interface import SecretInterface
 from imbue.modal_proxy.interface import VolumeInterface
 
-# --- Fake implementations for testing unwrap rejection ---
-#
 # These are deliberately local concrete stubs used only by
 # `test_unwrap_rejects_non_direct` to supply a non-`Direct*` instance of each
 # interface. They are intentionally minimal (every method raises) because the
@@ -136,9 +141,6 @@ class _FakeSecret(SecretInterface):
     """Non-Direct SecretInterface for testing unwrap rejection."""
 
 
-# --- Conversion tests ---
-
-
 @pytest.mark.parametrize(
     ("ours", "modals"),
     [
@@ -175,9 +177,6 @@ def test_to_file_entry_type_rejects_unsupported_value() -> None:
     unsupported_value: Any = object()
     with pytest.raises(ModalProxyError, match="Unsupported Modal FileEntryType"):
         _to_file_entry_type(unsupported_value)
-
-
-# --- Unwrap helpers ---
 
 
 @pytest.mark.parametrize(
@@ -218,9 +217,6 @@ def test_unwrap_secret_returns_underlying_modal_secret() -> None:
     assert _unwrap_secret(DirectSecret(secret=secret)) is secret
 
 
-# --- CLI not found tests ---
-
-
 def _make_file_not_found(filename: str) -> FileNotFoundError:
     e = FileNotFoundError(2, "No such file or directory")
     e.filename = filename
@@ -235,9 +231,6 @@ def test_translate_modal_cli_not_found_raises_for_modal() -> None:
 def test_translate_modal_cli_not_found_reraises_for_other() -> None:
     with pytest.raises(FileNotFoundError):
         _translate_modal_cli_not_found(_make_file_not_found("other_binary"))
-
-
-# --- Error translation tests ---
 
 
 @pytest.mark.parametrize(
@@ -288,9 +281,6 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
     assert str(result) == str(modal_exc)
 
 
-# --- Volume retry predicate tests ---
-
-
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
@@ -318,11 +308,11 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
         pytest.param(modal.exception.AuthError("bad token"), False, id="auth_error"),
     ],
 )
-def test_should_retry_volume_op(exc: BaseException, expected: bool) -> None:
-    assert _should_retry_volume_op(exc) is expected
+def test_is_transient_modal_error(exc: BaseException, expected: bool) -> None:
+    assert _is_transient_modal_error(exc) is expected
 
 
-def _make_volume_retry_state(exception: BaseException | None, attempt_number: int) -> RetryCallState:
+def _make_retry_state(exception: BaseException | None, attempt_number: int) -> RetryCallState:
     retry_state = RetryCallState(retry_object=Retrying(), fn=None, args=(), kwargs={})
     retry_state.attempt_number = attempt_number
     if exception is not None:
@@ -331,7 +321,7 @@ def _make_volume_retry_state(exception: BaseException | None, attempt_number: in
 
 
 @pytest.mark.parametrize(
-    ("exception", "attempt_number", "expected_wait"),
+    ("exception", "attempt_number", "expected_curve_wait"),
     [
         # Rate limits get the long curve (5/10/20/30s): the limit is shared
         # across every concurrent client, so a burst can outlast the ordinary
@@ -346,14 +336,14 @@ def _make_volume_retry_state(exception: BaseException | None, attempt_number: in
         pytest.param(None, 1, 1.0, id="no_outcome"),
     ],
 )
-def test_volume_wait_gives_rate_limits_longer_backoff(
-    exception: BaseException | None, attempt_number: int, expected_wait: float
+def test_transient_wait_gives_rate_limits_longer_backoff(
+    exception: BaseException | None, attempt_number: int, expected_curve_wait: float
 ) -> None:
-    retry_state = _make_volume_retry_state(exception, attempt_number)
-    assert _volume_wait(retry_state) == expected_wait
+    retry_state = _make_retry_state(exception, attempt_number)
+    waits = [_transient_wait(retry_state) for _ in range(20)]
 
-
-# --- App-locked detection tests ---
+    assert all(expected_curve_wait <= wait <= expected_curve_wait + _MAX_RETRY_JITTER_SECONDS for wait in waits)
+    assert len(set(waits)) > 1, "concurrent readers must not march back in lockstep"
 
 
 @pytest.mark.parametrize(
@@ -386,8 +376,6 @@ def test_is_app_locked_error(message: str, expected: bool) -> None:
 def test_is_deploy_function_vanished_error(message: str, expected: bool) -> None:
     assert is_deploy_function_vanished_error(message) is expected
 
-
-# --- Deploy retry tests ---
 
 # The real Modal message; deploy must classify this as retryable.
 _LOCKED_APP_MESSAGE = "Error: The selected app is locked - probably due to a concurrent modification"
@@ -457,9 +445,6 @@ def test_deploy_does_not_retry_on_non_lock_error(tmp_path: Path, monkeypatch: py
     assert counter.read_text().strip() == "1", "non-lock failures must not be retried"
 
 
-# --- Post-deploy lookup retry tests ---
-
-
 class _FakeFunction:
     """A stand-in modal.Function whose get_web_url raises a fixed number of times.
 
@@ -519,16 +504,37 @@ def test_direct_modal_interface_respects_explicit_sandbox_v2_opt_out(monkeypatch
 
 
 class _FakeModalSandbox:
-    """Minimal stand-in for modal.Sandbox that only supports poll()."""
+    """Minimal stand-in for modal.Sandbox.
 
-    def __init__(self, poll_result: int | None = None, error: modal.exception.Error | None = None) -> None:
+    Raises ``error`` until ``fail_times`` calls have been made (forever when it
+    is None), which drives the boundary's retry path without a Modal connection.
+    """
+
+    def __init__(
+        self,
+        poll_result: int | None = None,
+        error: modal.exception.Error | None = None,
+        fail_times: int | None = None,
+        tags: Mapping[str, str] = {},
+    ) -> None:
         self._poll_result = poll_result
         self._error = error
+        self._fail_times = fail_times
+        self._tags = dict(tags)
+        self.call_count = 0
+
+    def _fail_while_due(self) -> None:
+        self.call_count += 1
+        if self._error is not None and (self._fail_times is None or self.call_count <= self._fail_times):
+            raise self._error
 
     def poll(self) -> int | None:
-        if self._error is not None:
-            raise self._error
+        self._fail_while_due()
         return self._poll_result
+
+    def get_tags(self) -> dict[str, str]:
+        self._fail_while_due()
+        return self._tags
 
 
 def test_direct_sandbox_poll_returns_none_while_running() -> None:
@@ -545,3 +551,138 @@ def test_direct_sandbox_poll_translates_modal_errors() -> None:
     sandbox = DirectSandbox.model_construct(sandbox=_FakeModalSandbox(error=modal.exception.NotFoundError("gone")))
     with pytest.raises(ModalProxyNotFoundError):
         sandbox.poll()
+
+
+def test_get_tags_rides_out_a_transient_modal_failure() -> None:
+    """A tag read is made on every discovery; one transient status must not fail the whole command."""
+    fake = _FakeModalSandbox(error=modal.exception.InternalError("PU7M8MBO"), fail_times=1, tags={"host_id": "h-1"})
+    sandbox = DirectSandbox.model_construct(sandbox=fake)
+
+    assert sandbox.get_tags() == {"host_id": "h-1"}
+    assert fake.call_count == 2, "expected one transient failure followed by a successful retry"
+
+
+def test_get_tags_does_not_retry_a_semantic_modal_failure() -> None:
+    """Modal answering "no" is a verdict, not a blip: surface it on the first attempt."""
+    fake = _FakeModalSandbox(error=modal.exception.InvalidError("bad sandbox"))
+    sandbox = DirectSandbox.model_construct(sandbox=fake)
+
+    with pytest.raises(ModalProxyInvalidError):
+        sandbox.get_tags()
+
+    assert fake.call_count == 1, "a semantic failure must not be retried"
+
+
+def test_transient_retry_gives_up_on_elapsed_time_not_attempt_count() -> None:
+    """However many attempts fit in the budget, what ends the retry is spending its seconds."""
+
+    def is_stopped_after(elapsed_seconds: float, attempt_number: int) -> bool:
+        retry_state = _make_retry_state(modal.exception.InternalError("PU7M8MBO"), attempt_number)
+        retry_state.start_time = retry_state.start_time - elapsed_seconds
+        return _TRANSIENT_STOP(retry_state)
+
+    assert is_stopped_after(_TRANSIENT_RETRY_BUDGET_SECONDS - 1.0, attempt_number=99) is False
+    assert is_stopped_after(_TRANSIENT_RETRY_BUDGET_SECONDS + 1.0, attempt_number=2) is True
+
+
+# Every Modal call this boundary makes, and whether a transient failure makes
+# us re-issue it. Retrying is safe exactly when issuing the call twice is
+# indistinguishable from issuing it once, which is a property of the operation,
+# so every call has to answer for itself.
+_IS_RETRIED_BY_BOUNDARY_CALL: Final[Mapping[FunctionType, bool]] = {
+    # Reads, made on every discovery.
+    DirectModalInterface.app_lookup: True,
+    DirectModalInterface.sandbox_list: True,
+    DirectModalInterface.sandbox_from_id: True,
+    DirectModalInterface.volume_list: True,
+    DirectModalInterface.is_function_deployed: True,
+    DirectSandbox.get_tags: True,
+    DirectSandbox.poll: True,
+    DirectSandbox.tunnels: True,
+    DirectVolume.get_object_id: True,
+    DirectVolume.listdir: True,
+    DirectVolume.read_file: True,
+    # Writes that land the same result however many times they run.
+    DirectVolume.remove_file: True,
+    DirectVolume.write_files: True,
+    # Mutations: Modal may have applied one of these before failing to say so.
+    DirectModalInterface.sandbox_create: False,
+    DirectModalInterface.volume_delete: False,
+    DirectModalInterface.environment_create: False,
+    DirectSandbox.exec: False,
+    DirectSandbox.set_tags: False,
+    DirectSandbox.snapshot_filesystem: False,
+    DirectSandbox.terminate: False,
+    DirectImage.build: False,
+    DirectApp.run: False,
+    # Local construction or SDK-lazy handles -- no control-plane call to retry.
+    DirectModalInterface.app_create: False,
+    DirectModalInterface.image_debian_slim: False,
+    DirectModalInterface.image_from_registry: False,
+    DirectModalInterface.image_from_id: False,
+    DirectModalInterface.volume_from_name: False,
+    DirectModalInterface.secret_from_dict: False,
+    DirectModalInterface.function_from_name: False,
+    DirectModalInterface.enable_output_capture: False,
+    DirectSandbox.get_object_id: False,
+    DirectVolume.get_name: False,
+    DirectVolume.reload: False,
+    DirectVolume.commit: False,
+    DirectImage.get_object_id: False,
+    DirectImage.apt_install: False,
+    DirectImage.dockerfile_commands: False,
+    DirectApp.get_app_id: False,
+    DirectApp.get_name: False,
+    # These carry retries of their own, sized for a different failure.
+    DirectModalInterface.deploy: False,
+    DirectFunction.get_web_url: False,
+    DirectImage.fetch_build_logs: False,
+}
+
+_BOUNDARY_CLASSES: Final[Sequence[type]] = (
+    DirectModalInterface,
+    DirectApp,
+    DirectImage,
+    DirectSandbox,
+    DirectVolume,
+    DirectFunction,
+)
+
+
+def _public_methods(cls: type) -> set[FunctionType]:
+    """The Modal calls a boundary class defines, excluding pydantic's own model hooks."""
+    return {
+        member
+        for name, member in vars(cls).items()
+        if not name.startswith("_") and isinstance(member, FunctionType) and name not in dir(BaseModel)
+    }
+
+
+@pytest.mark.parametrize(
+    ("boundary_call", "is_retried"),
+    [
+        pytest.param(boundary_call, is_retried, id=boundary_call.__qualname__)
+        for boundary_call, is_retried in _IS_RETRIED_BY_BOUNDARY_CALL.items()
+    ],
+)
+def test_boundary_call_retries_transient_failures_iff_it_is_safe_to_reissue(
+    boundary_call: FunctionType, is_retried: bool
+) -> None:
+    # tenacity records its policy on the function it wraps, and functools.wraps
+    # carries that through _translate_exceptions.
+    retrying = vars(boundary_call).get("retry")
+    if not is_retried:
+        assert retrying is None or retrying.retry is not _TRANSIENT_RETRY
+        return
+    assert retrying is not None, f"{boundary_call.__qualname__} carries no retry"
+    assert retrying.retry is _TRANSIENT_RETRY, f"{boundary_call.__qualname__} does not use the shared policy"
+    assert retrying.stop is _TRANSIENT_STOP, f"{boundary_call.__qualname__} does not use the shared budget"
+
+
+def test_every_boundary_call_declares_whether_it_is_safe_to_reissue() -> None:
+    """A method added to the boundary has to state whether it is safe to re-issue."""
+    declared = set(_IS_RETRIED_BY_BOUNDARY_CALL)
+    defined = {method for cls in _BOUNDARY_CLASSES for method in _public_methods(cls)}
+
+    assert sorted(method.__qualname__ for method in defined - declared) == []
+    assert sorted(method.__qualname__ for method in declared - defined) == []
