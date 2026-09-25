@@ -158,6 +158,11 @@ class DiscoveredProvider(FrozenModel):
     config: PersistedProviderInstanceConfig = Field(description="The provider's base configuration data")
 
 
+# The type name a provider's snapshot carries when its discovery ran past its
+# timeout rather than failing.
+PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME: Final[str] = "ProviderDiscoveryTimeoutError"
+
+
 class DiscoveryError(FrozenModel):
     """An error encountered during discovery, attributed to a provider."""
 

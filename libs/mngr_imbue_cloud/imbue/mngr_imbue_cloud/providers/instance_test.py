@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Event
 from threading import Lock
 from typing import Any
+from typing import Final
 from typing import cast
 
 import gevent
@@ -24,7 +25,6 @@ from pydantic import Field
 from pydantic import PrivateAttr
 from pydantic import SecretStr
 
-from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.config.data_types import MngrContext
@@ -705,24 +705,36 @@ def test_list_workspaces_cached_preserves_auth_error() -> None:
         provider._list_workspaces_cached()
 
 
-class _HostSshInfoProvider(_NoWorkspacesMixin, ImbueCloudProvider):
-    """Provider stub that returns a fixed discovered host, isolating the ``host_ssh_infos``
-    attachment in ``discover_hosts_and_agents_within_timeouts`` from the outer-SSH machinery."""
+# Longest a hanging host listing in these tests blocks before giving up on its release,
+# so a discovery that waits for every host still finishes (and fails its assertions).
+_HANGING_LISTING_MAX_SECONDS: Final[float] = 7.3
 
-    _lease: LeasedHostInfo | None = None
-    _discovered_host: DiscoveredHost | None = None
+
+class _LeasedHostListingProvider(_NoWorkspacesMixin, ImbueCloudProvider):
+    """Provider stub whose per-host outer listing reports each lease as a RUNNING host with no agents,
+    isolating streaming discovery from the outer-SSH machinery. A host in
+    ``_hanging_listing_release_by_host_id`` blocks its listing until that event is set."""
+
+    _leases: list[LeasedHostInfo] = []
+    _hanging_listing_release_by_host_id: dict[str, Event] = {}
 
     def _list_leased_hosts_cached(self) -> list[LeasedHostInfo]:
-        return [self._lease] if self._lease is not None else []
+        return list(self._leases)
 
     def _host_keypair_paths(self, host_id: HostId) -> tuple[Path, Path]:
         return Path("/tmp/imbue-cloud-test-keys/ssh_key"), Path("/tmp/imbue-cloud-test-keys/ssh_key.pub")
 
-    def discover_hosts_and_agents(
-        self, cg: ConcurrencyGroup, include_destroyed: bool = False
-    ) -> dict[DiscoveredHost, list[DiscoveredAgent]]:
-        assert self._discovered_host is not None
-        return {self._discovered_host: []}
+    def _discover_one_leased_host(self, entry: LeasedHostInfo) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
+        release = self._hanging_listing_release_by_host_id.get(entry.host_id)
+        if release is not None:
+            release.wait(timeout=_HANGING_LISTING_MAX_SECONDS)
+        discovered_host = DiscoveredHost(
+            host_id=HostId(entry.host_id),
+            host_name=HostName(entry.host_name),
+            provider_name=self.name,
+            host_state=HostState.RUNNING,
+        )
+        return discovered_host, []
 
 
 def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrContext) -> None:
@@ -730,17 +742,10 @@ def test_discover_within_timeouts_attaches_lease_ssh_info(temp_mngr_ctx: MngrCon
     its lease, pointing at the container's inner sshd), so the poller can emit HOST_SSH_INFO."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    discovered_host = DiscoveredHost(
-        host_id=host_id,
-        host_name=HostName(lease.host_name),
-        provider_name=ProviderInstanceName("imbue-cloud-test"),
-        host_state=HostState.RUNNING,
-    )
-    provider = _HostSshInfoProvider.model_construct(
+    provider = _LeasedHostListingProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
         mngr_ctx=temp_mngr_ctx,
-        _lease=lease,
-        _discovered_host=discovered_host,
+        _leases=[lease],
     )
 
     result = provider.discover_hosts_and_agents_within_timeouts(
@@ -767,17 +772,10 @@ def test_discover_within_timeouts_pins_container_host_key(temp_mngr_ctx: MngrCon
     lease = base_lease.model_copy_update(
         to_update(base_lease.field_ref().container_host_public_key, "ssh-ed25519 AAAAcontainerkey"),
     )
-    discovered_host = DiscoveredHost(
-        host_id=host_id,
-        host_name=HostName(lease.host_name),
-        provider_name=ProviderInstanceName("imbue-cloud-test"),
-        host_state=HostState.RUNNING,
-    )
-    provider = _HostSshInfoProvider.model_construct(
+    provider = _LeasedHostListingProvider.model_construct(
         name=ProviderInstanceName("imbue-cloud-test"),
         mngr_ctx=temp_mngr_ctx,
-        _lease=lease,
-        _discovered_host=discovered_host,
+        _leases=[lease],
     )
 
     provider.discover_hosts_and_agents_within_timeouts(
@@ -792,6 +790,39 @@ def test_discover_within_timeouts_pins_container_host_key(temp_mngr_ctx: MngrCon
     container_entry_prefix = format_as_known_hosts_address(lease.vps_address, lease.container_ssh_port)
     assert any(line.startswith(f"{container_entry_prefix} ") for line in contents.splitlines())
     assert "AAAAcontainerkey" in contents
+
+
+def test_discover_within_timeouts_reports_a_host_whose_listing_hangs_as_unknown(temp_mngr_ctx: MngrContext) -> None:
+    """One leased host whose outer listing hangs is reported unknown, and the poll completes without it.
+
+    A host too loaded to answer its outer SSH must not hold the whole account's poll open
+    until the provider-level timeout, which would read as the provider failing.
+    """
+    answering_host_id = HostId.generate()
+    hanging_host_id = HostId.generate()
+    release_hanging_listing = Event()
+    provider = _LeasedHostListingProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=temp_mngr_ctx,
+        _leases=[_make_lease(answering_host_id), _make_lease(hanging_host_id)],
+        _hanging_listing_release_by_host_id={str(hanging_host_id): release_hanging_listing},
+    )
+
+    started_at = time.monotonic()
+    try:
+        result = provider.discover_hosts_and_agents_within_timeouts(
+            cg=temp_mngr_ctx.concurrency_group,
+            host_discovery_timeout_seconds=0.5,
+            agent_discovery_timeout_seconds=0.5,
+        )
+        elapsed_seconds = time.monotonic() - started_at
+    finally:
+        release_hanging_listing.set()
+
+    assert [host.host_id for host in result.hosts] == [answering_host_id]
+    assert result.unknown_host_ids == (hanging_host_id,)
+    assert [host_id for host_id, _ in result.host_ssh_infos] == [answering_host_id]
+    assert elapsed_seconds < _HANGING_LISTING_MAX_SECONDS
 
 
 class _CannedListingProvider(_NoWorkspacesMixin, ImbueCloudProvider):
@@ -2263,6 +2294,35 @@ def test_pinned_read_of_a_stopped_workspace_returns_its_last_known_agents_withou
     assert stopped._listed_host_ids == []
     assert host_ref.host_state == HostState.STOPPED
     assert [str(agent.agent_id) for agent in agents] == [primary["id"]]
+
+
+def test_streaming_discovery_reports_stopped_workspaces_alongside_leased_hosts(temp_mngr_ctx: MngrContext) -> None:
+    """The per-host-bounded streaming poll lists each lease over SSH and takes stopped workspaces from the lifecycle listing."""
+    running_host_id = HostId.generate()
+    stopped_host_id = HostId.generate()
+    stopped_workspace = _stopped_workspace(stopped_host_id)
+    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    provider = _make_pinned_read_provider(
+        temp_mngr_ctx,
+        [_make_lease(running_host_id)],
+        [stopped_workspace],
+        {running_host_id: (_raw_with_agents([primary]), None, False)},
+    )
+
+    result = provider.discover_hosts_and_agents_within_timeouts(
+        cg=temp_mngr_ctx.concurrency_group,
+        host_discovery_timeout_seconds=5.0,
+        agent_discovery_timeout_seconds=5.0,
+    )
+
+    assert provider._listed_host_ids == [running_host_id]
+    assert {(host.host_id, host.host_state) for host in result.hosts} == {
+        (running_host_id, HostState.RUNNING),
+        (stopped_host_id, HostState.STOPPED),
+    }
+    assert {str(agent.agent_id) for agent in result.agents} == {primary["id"], stopped_workspace.agent_id}
+    assert result.unknown_host_ids == ()
+    assert [host_id for host_id, _ in result.host_ssh_infos] == [running_host_id]
 
 
 def test_pinned_read_of_a_host_the_account_does_not_have_is_not_found(temp_mngr_ctx: MngrContext) -> None:

@@ -25,6 +25,7 @@ from imbue.minds.desktop_client.workspace_color import normalize_workspace_color
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -898,6 +899,13 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # last full discovery event" counter, while a workspace's recovery redirect
     # gates on its own provider's entry.
     _last_snapshot_at_by_provider: dict[ProviderInstanceName, datetime] = PrivateAttr(default_factory=dict)
+    # Per-provider time of the latest state-current snapshot whose poll ran to
+    # completion (clean, or failed at the provider). A poll that only timed out
+    # did not complete, so it does not advance this.
+    _last_completed_poll_at_by_provider: dict[ProviderInstanceName, datetime] = PrivateAttr(default_factory=dict)
+    # Per-provider host ids that the poll behind ``_last_completed_poll_at_by_provider``
+    # could not read within its per-host timeout, so their state predates it.
+    _unread_host_ids_by_provider: dict[ProviderInstanceName, frozenset[str]] = PrivateAttr(default_factory=dict)
     # Host-id set of each provider's latest CLEAN (error-free, state-current)
     # snapshot this session. Positive evidence for ``is_host_positively_absent``:
     # only a clean snapshot enumerates everything its provider manages, so only
@@ -1161,13 +1169,18 @@ class MngrCliBackendResolver(BackendResolverInterface):
         # replay and the errored poll that straddled a sleep pass False -- see the
         # caller in ``forward_cli`` for why.
         is_snapshot_state_current: bool = True,
+        # The hosts this poll could not read within its per-host timeout (the
+        # snapshot's ``unknown_host_ids``): their state is an earlier poll's.
+        unread_host_ids: tuple[str, ...] = (),
     ) -> None:
         """Merge one provider's discovery snapshot into provider state. Thread-safe.
 
         Per-provider MERGE, not a wholesale replace: a ``ProviderDiscoverySnapshotEvent``
         is authoritative only for ``provider_name``, so this touches just that
-        provider's entry in the providers list, its error state, and its
-        last-snapshot time, leaving every other provider untouched (a snapshot for
+        provider's entry in the providers list, its error state, its
+        last-snapshot time and (unless the poll only timed out) its
+        last-completed-poll time and the hosts that poll could not read,
+        leaving every other provider untouched (a snapshot for
         one provider must never erase another provider's error). A provider that
         errored this poll (``provider`` is None, ``error`` set) keeps any prior
         ``DiscoveredProvider`` entry -- the panel renders it from the error map --
@@ -1203,6 +1216,9 @@ class MngrCliBackendResolver(BackendResolverInterface):
                 self._error_by_provider_name.pop(provider_name, None)
             if is_snapshot_state_current:
                 self._last_snapshot_at_by_provider[provider_name] = last_snapshot_at
+                if error is None or error.type_name != PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME:
+                    self._last_completed_poll_at_by_provider[provider_name] = last_snapshot_at
+                    self._unread_host_ids_by_provider[provider_name] = frozenset(unread_host_ids)
             # Record positive-evidence host sets only from clean, state-current
             # snapshots: an errored snapshot's hosts are unreachable (not
             # absent), and a snapshot whose state-current claim the caller
@@ -1290,6 +1306,24 @@ class MngrCliBackendResolver(BackendResolverInterface):
         """Return the most recent snapshot time for ``provider_name``, or None if it has none yet."""
         with self._lock:
             return self._last_snapshot_at_by_provider.get(provider_name)
+
+    def get_last_completed_poll_at_for_provider(self, provider_name: ProviderInstanceName) -> datetime | None:
+        """Return when ``provider_name``'s discovery last ran to completion, or None if it has not yet.
+
+        A completed poll is a clean one or one that failed at the provider; either
+        reports what the provider said. A poll that ran past its timeout did not
+        complete and leaves this where it was.
+        """
+        with self._lock:
+            return self._last_completed_poll_at_by_provider.get(provider_name)
+
+    def is_host_unread_by_last_completed_poll(self, provider_name: ProviderInstanceName, host_id: HostId) -> bool:
+        """Whether ``provider_name``'s last completed poll could not read ``host_id`` within its per-host timeout.
+
+        Such a poll completes, but the host's state it leaves in place was read by an earlier one.
+        """
+        with self._lock:
+            return str(host_id) in self._unread_host_ids_by_provider.get(provider_name, frozenset())
 
     def update_services(
         self,

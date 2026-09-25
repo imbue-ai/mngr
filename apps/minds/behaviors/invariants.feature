@@ -14,3 +14,9 @@ Feature: Mind desktop client invariants
     An unattended restart of a workspace reached over the network is likewise withheld while the device is confirmed unable to reach it, and released when its reach returns. A workspace that runs on this device is exempt from every part of this rule: the network says nothing about it.
     An unmeasured device withholds a verdict but never an action: the absence of a measurement is not evidence that the device is broken. An action whose gate can still measure takes that measurement first, though: a reading a wake voided is taken again rather than acted on, since the network under a wake is the one most likely to be dead, and only a device that stays unmeasurable acts on no evidence.
     Rationale: a laptop with no network cannot reach the provider either, so the provider's own poll fails too; naming the provider then blames a backend that is fine for a condition only the user can fix.
+
+  @slow-poll-names-no-provider
+  Rule: A provider is reported unreachable only on evidence that it could not be reached
+    A provider discovery poll that ran past its time limit is not such evidence: it shows that some part of the poll was slow, not which part, so it names no provider.
+    A workspace whose provider's only error is such a poll is described by its own condition, and the recovery offered for it is not withheld on the provider's account.
+    Rationale: a provider's poll also reads the machines it hosts, and one machine too loaded to answer promptly holds the whole poll open; naming the provider then blames a backend that is answering, and withholds the restart that could help the machine.

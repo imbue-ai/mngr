@@ -84,6 +84,7 @@ from imbue.minds.errors import MngrCommandError
 from imbue.minds.errors import MngrCommandTimeoutError
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
 from imbue.mngr.api.discovery_events import PersistedProviderInstanceConfig
 from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.errors import ProviderUnavailableError
@@ -956,13 +957,30 @@ def _register_workspace_agent(resolver: MngrCliBackendResolver, agent_id: AgentI
     resolver.update_agents(ParsedAgentsResult(agent_ids=(agent_id,), discovered_agents=(agent,)))
 
 
-def _set_provider_snapshot_at(resolver: MngrCliBackendResolver, provider_name: str, snapshot_at: datetime) -> None:
-    """Record ``provider_name``'s last per-provider snapshot time on the resolver."""
+def _set_provider_snapshot_at(
+    resolver: MngrCliBackendResolver,
+    provider_name: str,
+    snapshot_at: datetime,
+    unread_host_ids: tuple[str, ...] = (),
+) -> None:
+    """Record a clean, completed poll of ``provider_name`` at ``snapshot_at`` that could not read ``unread_host_ids``."""
     resolver.update_providers(
         provider_name=ProviderInstanceName(provider_name),
         provider=None,
         error=None,
         last_snapshot_at=snapshot_at,
+        unread_host_ids=unread_host_ids,
+    )
+
+
+def _record_docker_discovery_timeout(resolver: MngrCliBackendResolver, snapshot_at: datetime) -> None:
+    """Surface a docker poll that ran past its time limit, as mngr's discovery stream reports one."""
+    record_provider_discovery_error(
+        resolver,
+        "docker",
+        "Discovery for provider 'docker' did not complete within 120s",
+        last_snapshot_at=snapshot_at,
+        error_type_name=PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME,
     )
 
 
@@ -1628,6 +1646,32 @@ def test_backend_unreachable_verdict_withholds_a_provider_error_from_a_previous_
     assert verdict.reason == reason
 
 
+@pytest.mark.witnesses("slow-poll-names-no-provider", partial="asserts the verdict, not the band or card rendering it")
+def test_backend_unreachable_verdict_does_not_blame_a_provider_whose_poll_only_timed_out() -> None:
+    """A provider poll that ran out of time is not evidence its backend is unreachable.
+
+    A timeout says only that some leg of the poll was slow -- for imbue_cloud,
+    typically one leased host's SSH listing on a machine too loaded to answer --
+    so naming the provider would blame a backend that answered fine, and would
+    withhold the card's restart from the wedged machine it could fix.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, services_agent, host_state=HostState.RUNNING)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _record_docker_discovery_timeout(resolver, onset + timedelta(seconds=1))
+
+    assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
+
+    # The same poll failing outright at the provider is a verdict.
+    reason = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    record_provider_discovery_error(resolver, "docker", reason, last_snapshot_at=onset + timedelta(seconds=2))
+    verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
+    assert verdict is not None
+    assert verdict.reason == reason
+
+
 def test_backend_unreachable_verdict_is_none_while_the_backend_answers() -> None:
     """No provider error and a reachable host is not a verdict this read can make.
 
@@ -1681,6 +1725,58 @@ def test_backend_unreachable_verdict_withholds_an_untrusted_rejected_host() -> N
     _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
 
     assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
+
+
+def test_backend_unreachable_verdict_does_not_trust_a_host_state_only_a_timed_out_poll_followed() -> None:
+    """A poll that timed out after the outage began does not re-observe the host.
+
+    It carries no hosts, so the host state it leaves in place is still the one a
+    completed poll read before the outage -- and a pre-outage rejected-host reading
+    must not become the verdict on the strength of it.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(
+        workspace_agent, services_agent, host_state=HostState.UNAUTHENTICATED
+    )
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
+    _record_docker_discovery_timeout(resolver, onset + timedelta(seconds=1))
+
+    assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
+
+    # A poll that completes after the onset does re-observe the host.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=2))
+    verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
+    assert verdict is not None
+    assert verdict.reason == HOST_ACCESS_REJECTED_REASON
+
+
+def test_backend_unreachable_verdict_does_not_trust_a_host_the_completed_poll_could_not_read() -> None:
+    """A poll that completes after the outage began but could not read the host does not re-observe it.
+
+    The host missed the per-host timeout, so the poll reports it unknown and leaves the
+    state a pre-outage poll read in place -- which must not become the verdict either.
+    """
+    workspace_agent = AgentId.generate()
+    services_agent = AgentId.generate()
+    host_id = HostId.generate()
+    resolver = build_resolver_with_system_services(
+        workspace_agent, services_agent, host_id=host_id, host_state=HostState.UNAUTHENTICATED
+    )
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    onset = _drive_to_stuck_with_onset(tracker, workspace_agent)
+    _set_provider_snapshot_at(resolver, "docker", onset - timedelta(seconds=1))
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=1), unread_host_ids=(str(host_id),))
+
+    assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
+
+    # A later poll that reads the host does re-observe it.
+    _set_provider_snapshot_at(resolver, "docker", onset + timedelta(seconds=2))
+    verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
+    assert verdict is not None
+    assert verdict.reason == HOST_ACCESS_REJECTED_REASON
 
 
 def test_run_host_recovery_sequence_reports_the_backend_when_the_start_is_rejected_there(tmp_path: Path) -> None:
@@ -1795,6 +1891,29 @@ def test_a_rejected_starts_verdict_lasts_until_the_backend_is_next_polled(tmp_pa
 
     # Back up when discovery next looks: nothing left for the rejection to say.
     _set_provider_snapshot_at(resolver, "docker", datetime.now(timezone.utc))
+    assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
+
+
+def test_a_rejected_starts_verdict_outlasts_a_poll_that_only_timed_out(tmp_path: Path) -> None:
+    """A timed-out poll neither confirms the backend is down nor shows it answering, so the rejection stands."""
+    workspace_agent = AgentId.generate()
+    resolver = build_resolver_with_system_services(workspace_agent, AgentId.generate(), host_state=HostState.RUNNING)
+    tracker = SystemInterfaceHealthTracker(stuck_threshold_seconds=0.0)
+    _drive_to_stuck_with_onset(tracker, workspace_agent)
+    reason = _run_recovery_rejected_at_the_backend(tmp_path, workspace_agent, tracker, resolver)
+    polled_at = datetime.now(timezone.utc) + timedelta(seconds=1)
+
+    _record_docker_discovery_timeout(resolver, polled_at)
+    verdict = read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker)
+    assert verdict is not None
+    assert verdict.reason == reason
+
+    # A clean poll at that same moment does retire it.
+    _set_provider_snapshot_at(resolver, "docker", polled_at)
+    assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
+
+    # And a timed-out poll after that clean one does not revive it.
+    _record_docker_discovery_timeout(resolver, polled_at + timedelta(seconds=1))
     assert read_backend_unreachable_verdict(workspace_agent, backend_resolver=resolver, tracker=tracker) is None
 
 

@@ -764,6 +764,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 last_snapshot_at=event.discovery_finished_at,
                 clean_snapshot_host_ids=clean_snapshot_host_ids,
                 is_snapshot_state_current=is_snapshot_state_current,
+                unread_host_ids=tuple(str(host_id) for host_id in event.unknown_host_ids),
             )
         else:
             self._record_incremental_event(event)

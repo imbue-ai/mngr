@@ -765,6 +765,14 @@ class HostLifecycleOptions(FrozenModel):
         )
 
 
+class BoundedHostRead(FrozenModel):
+    """One host's read in a per-host-bounded discovery poll."""
+
+    host: DiscoveredHost = Field(description="The host as this read found it")
+    agents: tuple[DiscoveredAgent, ...] = Field(description="The host's agents")
+    ssh_info: SSHInfo | None = Field(description="The host's SSH endpoint, or None when it has none to offer")
+
+
 class BoundedProviderDiscoveryResult(FrozenModel):
     """Result of a per-host-bounded provider discovery poll.
 

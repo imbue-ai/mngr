@@ -15,6 +15,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
 from imbue.mngr.api.discovery_events import emit_host_ssh_info
 from imbue.mngr.api.discovery_events import get_discovery_events_path
 from imbue.mngr.api.discovery_events import make_discovered_provider
@@ -379,7 +380,7 @@ class _ProviderDiscoveryPoller(MutableModel):
                 started_at,
             )
         error = DiscoveryError(
-            type_name="ProviderDiscoveryTimeoutError",
+            type_name=PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME,
             message=(
                 f"Discovery for provider '{self.provider_name}' did not complete within "
                 f"{self.config.discovery_error_timeout_seconds:.0f}s"

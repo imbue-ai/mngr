@@ -99,6 +99,7 @@ def _provider_snapshot(
     provider_name: str = "local",
     error: DiscoveryError | None = None,
     discovery_finished_at: datetime = _DISCOVERY_FINISHED_AT,
+    unknown_host_ids: tuple[HostId, ...] = (),
 ) -> ProviderDiscoverySnapshotEvent:
     """Build a per-provider discovery snapshot for the ``local`` provider by default."""
     return make_provider_discovery_snapshot_event(
@@ -108,6 +109,7 @@ def _provider_snapshot(
         discovery_started_at=_DISCOVERY_STARTED_AT,
         discovery_finished_at=discovery_finished_at,
         error=error,
+        unknown_host_ids=unknown_host_ids,
     )
 
 
@@ -469,6 +471,28 @@ def test_clean_pre_start_snapshot_still_records_provider_freshness() -> None:
     provider_name = ProviderInstanceName("local")
     _dispatch_replayed_clean_snapshot(consumer, cycle=0)
     assert consumer.resolver.get_last_snapshot_at_for_provider(provider_name) == _DISCOVERY_FINISHED_AT
+
+
+def test_a_host_the_last_completed_poll_could_not_read_is_reported_unread() -> None:
+    """A snapshot's per-host-timeout misses reach the resolver, and the next poll that reads the host clears them."""
+    consumer = EnvelopeStreamConsumer(resolver=MngrCliBackendResolver(), started_at=_DISCOVERY_STARTED_AT)
+    provider_name = ProviderInstanceName("local")
+    agent = _make_agent(_AGENT_ID_1)
+
+    _dispatch(consumer, _observe_envelope(_provider_snapshot((agent,), unknown_host_ids=(_HOST_ID_1,))))
+    assert consumer.resolver.is_host_unread_by_last_completed_poll(provider_name, _HOST_ID_1) is True
+
+    _dispatch(
+        consumer,
+        _observe_envelope(
+            _provider_snapshot(
+                (agent,),
+                hosts=(_make_host(_HOST_ID_1, HostState.RUNNING),),
+                discovery_finished_at=_DISCOVERY_FINISHED_AT + timedelta(seconds=30),
+            )
+        ),
+    )
+    assert consumer.resolver.is_host_unread_by_last_completed_poll(provider_name, _HOST_ID_1) is False
 
 
 def test_repeated_pre_start_error_drops_log_one_counted_line_when_replay_ends() -> None:

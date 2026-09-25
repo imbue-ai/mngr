@@ -651,7 +651,11 @@ def build_resolver_with_provider_backend(
 
 
 def record_provider_discovery_error(
-    resolver: MngrCliBackendResolver, provider_name: str, message: str, last_snapshot_at: datetime | None = None
+    resolver: MngrCliBackendResolver,
+    provider_name: str,
+    message: str,
+    last_snapshot_at: datetime | None = None,
+    error_type_name: str = "ProviderUnavailableError",
 ) -> None:
     """Surface a discovery error for ``provider_name``, as an errored poll would.
 
@@ -665,7 +669,7 @@ def record_provider_discovery_error(
         ProviderInstanceName(provider_name),
         provider=None,
         error=DiscoveryError(
-            type_name="ProviderUnavailableError",
+            type_name=error_type_name,
             message=message,
             provider_name=ProviderInstanceName(provider_name),
         ),

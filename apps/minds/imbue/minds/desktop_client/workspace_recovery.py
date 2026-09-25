@@ -92,6 +92,7 @@ from imbue.minds.errors import MindError
 from imbue.minds.errors import MngrCommandError
 from imbue.mngr.api.discovery_events import DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 from imbue.mngr.api.discovery_events import DiscoveryError
+from imbue.mngr.api.discovery_events import PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME
 from imbue.mngr.errors import HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import parse_provider_unavailable_reason
@@ -489,7 +490,7 @@ def _workspace_provider_poll_interval_seconds(
     real cadence is in hand for exactly the outages this is used to age. The
     baseline answers for a provider discovery has never described -- which is
     also when the caller is aging the *aggregate* snapshot time rather than one
-    provider's (see :func:`_workspace_provider_snapshot_at`).
+    provider's (see :func:`_workspace_provider_completed_poll_at`).
     """
     if provider_name is not None:
         for provider in backend_resolver.list_providers():
@@ -498,24 +499,26 @@ def _workspace_provider_poll_interval_seconds(
     return DISCOVERY_STREAM_POLL_INTERVAL_SECONDS
 
 
-def _workspace_provider_snapshot_at(
+def _workspace_provider_completed_poll_at(
     backend_resolver: MngrCliBackendResolver, provider_name: str | None
 ) -> datetime | None:
-    """Last per-provider snapshot time for ``provider_name``, or the aggregate fallback.
+    """Last completed poll time for ``provider_name``, or the aggregate snapshot fallback.
 
     A recovery verdict's trustworthiness turns on whether discovery has
     re-observed *this workspace's* host since the outage began. Because each
     provider is discovered on its own decoupled loop, a healthy provider keeps
     emitting fresh snapshots even while an unrelated provider is down -- so this
-    uses the workspace's own provider's snapshot time, not a single global one.
-    When the agent's provider is known, its snapshot time is returned even if
-    ``None`` (no snapshot of that provider has completed yet, so freshness cannot
-    be established and the caller treats it as stale). Only when the agent's
-    provider is *unknown* (it has not appeared in discovery at all) do we fall
-    back to the aggregate snapshot time across all providers.
+    uses the workspace's own provider's time, not a single global one. It is the
+    time of that provider's last *completed* poll: a poll that ran past its
+    timeout carries no hosts, so it re-observes nothing. When the agent's
+    provider is known, its time is returned even if ``None`` (no poll of that
+    provider has completed yet, so freshness cannot be established and the
+    caller treats it as stale). Only when the agent's provider is *unknown* (it
+    has not appeared in discovery at all) do we fall back to the aggregate
+    snapshot time across all providers.
     """
     if provider_name is not None:
-        return backend_resolver.get_last_snapshot_at_for_provider(ProviderInstanceName(provider_name))
+        return backend_resolver.get_last_completed_poll_at_for_provider(ProviderInstanceName(provider_name))
     _, aggregate_snapshot_at = backend_resolver.get_freshness_timestamps()
     return aggregate_snapshot_at
 
@@ -529,12 +532,12 @@ def is_recovery_classification_trustworthy(
 
     A negative recovery verdict leans on the host state and the provider error
     the passive discovery resolver reports. Both are properties of a single
-    snapshot, so both are only trustworthy once a snapshot taken at/after the
+    snapshot, so both are only trustworthy once a poll completed at/after the
     outage onset (``get_outage_started_wall_at``) has landed: a snapshot that
     predates the outage still carries the pre-outage host state (a just-stopped
     container still reads RUNNING) and the previous episode's provider error,
     either of which would misclassify the tier. Until then the verdict path
-    treats the classification as untrustworthy and surfaces INDETERMINATE.
+    treats the classification as untrustworthy and returns no verdict.
     Nothing destructive rides on this: the unattended start is dispatched on the
     tracker's stuck edge with no verdict at all, so this gate protects the
     verdict's copy, not an action. It is the *outage* onset rather than the
@@ -542,25 +545,38 @@ def is_recovery_classification_trustworthy(
     within a second of the machine wedging -- and a recovery attempt does not make
     evidence from before the outage current.
 
+    A completed poll that could not read the workspace's host within its per-host
+    timeout re-observes nothing of it either: the host's state it leaves in place
+    is an earlier poll's, so the classification is untrustworthy until a poll
+    reads the host.
+
     When no onset is recorded (only the force-``mark_stuck`` path, used in tests,
     lacks one) fall back to the absolute-age freshness gate. Only the
     passive-discovery resolver tracks snapshot freshness; for any other resolver
     (e.g. static test resolvers) the classification is treated as trustworthy so
     the verdict path is never gated. Freshness is scoped to the workspace's own
-    provider (see ``_workspace_provider_snapshot_at``), and aged against that
+    provider (see ``_workspace_provider_completed_poll_at``), and aged against that
     provider's own cadence.
     """
     if not isinstance(backend_resolver, MngrCliBackendResolver):
         return True
     info = backend_resolver.get_agent_display_info(agent_id)
     provider_name = info.provider_name if info is not None else None
-    last_snapshot_at = _workspace_provider_snapshot_at(backend_resolver, provider_name)
+    if (
+        info is not None
+        and provider_name is not None
+        and backend_resolver.is_host_unread_by_last_completed_poll(
+            ProviderInstanceName(provider_name), HostId(info.host_id)
+        )
+    ):
+        return False
+    last_completed_poll_at = _workspace_provider_completed_poll_at(backend_resolver, provider_name)
     onset = tracker.get_outage_started_wall_at(agent_id) if tracker is not None else None
     if onset is None:
         return _is_discovery_fresh(
-            last_snapshot_at, _workspace_provider_poll_interval_seconds(backend_resolver, provider_name)
+            last_completed_poll_at, _workspace_provider_poll_interval_seconds(backend_resolver, provider_name)
         )
-    return last_snapshot_at is not None and last_snapshot_at >= onset
+    return last_completed_poll_at is not None and last_completed_poll_at >= onset
 
 
 def _in_band_provider_outage_reason(exc: MngrCommandError, provider_name: str | None) -> str | None:
@@ -1655,11 +1671,16 @@ def _provider_error_message_for_workspace(
     bare reason its neighbours surface. The reason is recovered from that shape
     here so the two read alike, rather than repeating the provider's name back at
     the heading and trailing mngr's internal marker sentence.
+
+    A poll that ran past its timeout is not such an error. It says some leg of
+    the poll was slow, not that the provider could not be reached -- for
+    imbue_cloud the slow leg is typically one leased host's SSH listing on a
+    machine too loaded to answer -- so it names nobody.
     """
     if provider_name is None or not is_classification_trustworthy:
         return None
     for name, error in provider_errors.items():
-        if str(name) == provider_name:
+        if str(name) == provider_name and error.type_name != PROVIDER_DISCOVERY_TIMEOUT_ERROR_TYPE_NAME:
             return parse_provider_unavailable_reason(error.message, provider_name) or error.message
     return None
 
@@ -1679,12 +1700,12 @@ def _recorded_backend_outage_reason(
     -- minds starts a machine the moment it wedges, so the rejection lands
     within seconds of the outage while the poll can be half a minute away.
 
-    Its authority ends at that poll. Whatever the poll reports supersedes it:
-    still down, and the resolver's own error takes over (saying the same thing);
-    back up, and there is nothing left to say, so a machine that stays wedged
-    for reasons of its own stops being blamed on a backend that is now
-    answering. This is the same lifetime a surfaced provider error has -- until
-    its provider is next polled -- reached from the other side.
+    Its authority ends at the next poll that runs to completion. Whatever that
+    poll reports supersedes it: still down, and the resolver's own error takes
+    over (saying the same thing); back up, and there is nothing left to say, so
+    a machine that stays wedged for reasons of its own stops being blamed on a
+    backend that is now answering. A poll that only timed out is neither, so it
+    neither retires the record nor revives one a completed poll already retired.
 
     The record is not freshness-gated the way the resolver's error is: it was
     observed rather than remembered from a snapshot, and it is dropped with the
@@ -1699,7 +1720,7 @@ def _recorded_backend_outage_reason(
     if outage is None or outage.provider_name != provider_name:
         return None
     if isinstance(backend_resolver, MngrCliBackendResolver):
-        polled_at = _workspace_provider_snapshot_at(backend_resolver, provider_name)
+        polled_at = backend_resolver.get_last_completed_poll_at_for_provider(ProviderInstanceName(provider_name))
         if polled_at is not None and polled_at > outage.observed_at:
             return None
     return outage.reason

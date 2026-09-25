@@ -73,6 +73,7 @@ from imbue.mngr.hosts.outer_host import OuterHost
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
@@ -88,8 +89,8 @@ from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
-from imbue.mngr.interfaces.provider_instance import bounded_result_from_agents_by_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
+from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_host_timeout
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import CommandString
@@ -898,36 +899,59 @@ class ImbueCloudProvider(BaseProviderInstance):
         include_destroyed: bool = False,
         registry: HostDiscoveryReadRegistry | None = None,
     ) -> BoundedProviderDiscoveryResult:
-        """Delegate to the batch discovery path; bounded only by the provider-level error timeout.
+        """Read each leased host under the per-host timeout, plus the lifecycle listing's non-running hosts.
 
-        Imbue Cloud discovery reads all leased hosts (and their agents) in one batched
-        pass, so individual host reads cannot be bounded; nothing is marked UNKNOWN here.
-        ``registry`` is accepted for interface compatibility but unused: this path spawns
-        no per-host reads to de-duplicate across polls.
+        Each leased host's outer listing runs on its own thread, so a host too slow to
+        answer is reported in ``unknown_host_ids`` instead of holding the whole account's
+        poll open until the provider-level timeout. The listing bounds its own SSH
+        command, so an abandoned read self-terminates. ``agent_discovery_timeout_seconds``
+        is unused: a host's listing reads its agents too.
         """
-        agents_by_host = self.discover_hosts_and_agents(cg=cg, include_destroyed=include_destroyed)
-        # Attach each discovered host's SSH endpoint (built from its lease) so the streaming
-        # discovery poller re-emits it as a HOST_SSH_INFO event. The lightweight streaming path
-        # does not otherwise surface SSH info, so without this a consumer that tunnels to the
-        # host (the minds system_interface forward) is starved of the endpoint and can only get
-        # it from an occasional full ``mngr list``. The leases are already cached from the
-        # discovery pass above, so this is a cheap lookup, not a second connector round-trip.
-        discovered_host_ids = {host.host_id for host in agents_by_host}
-        host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
-        for lease in self._list_leased_hosts_cached():
-            host_id = HostId(lease.host_id)
-            if host_id not in discovered_host_ids:
-                continue
-            # The advertised endpoint is the container's inner sshd
-            # (vps_address:container_ssh_port), so pin that sshd's host key now.
-            # Unlike the full get_host path this streaming pass never opens the
-            # container over SSH, so nothing else pins it; without this a
-            # consumer that opens a strict SSH connection to the advertised
-            # endpoint (the desktop latchkey reverse tunnel) rejects it as
-            # "not found in known_hosts".
-            self._ensure_container_host_key_known(lease)
-            host_ssh_infos.append((host_id, self._build_lease_ssh_info(host_id, lease)))
-        return bounded_result_from_agents_by_host(agents_by_host, host_ssh_infos=host_ssh_infos)
+        lease_by_host_id = {HostId(lease.host_id): lease for lease in self._list_leased_hosts_cached()}
+        leased_result = discover_hosts_within_per_host_timeout(
+            provider_name=self.name,
+            cg=cg,
+            read_host_by_host_id={
+                host_id: lambda lease=lease: self._read_leased_host_for_bounded_discovery(lease)
+                for host_id, lease in lease_by_host_id.items()
+            },
+            host_discovery_timeout_seconds=host_discovery_timeout_seconds,
+            registry=registry,
+        )
+        # The advertised endpoint is the container's inner sshd
+        # (vps_address:container_ssh_port), so pin that sshd's host key now.
+        # Unlike the full get_host path this streaming pass never opens the
+        # container over SSH, so nothing else pins it; without this a
+        # consumer that opens a strict SSH connection to the advertised
+        # endpoint (the desktop latchkey reverse tunnel) rejects it as
+        # "not found in known_hosts".
+        for host_id, _ssh_info in leased_result.host_ssh_infos:
+            self._ensure_container_host_key_known(lease_by_host_id[host_id])
+        # Non-running hosts have no box to SSH: they come from the lifecycle listing alone.
+        lifecycle_reads = [
+            self._discover_non_running_lifecycle_entry(lifecycle_entry)
+            for lifecycle_entry in self._list_workspaces_cached() or ()
+            if lifecycle_entry.status != WorkspaceStatus.RUNNING
+        ]
+        return leased_result.model_copy_update(
+            to_update(
+                leased_result.field_ref().hosts,
+                leased_result.hosts + tuple(host_ref for host_ref, _agent_refs in lifecycle_reads),
+            ),
+            to_update(
+                leased_result.field_ref().agents,
+                leased_result.agents
+                + tuple(agent_ref for _host_ref, agent_refs in lifecycle_reads for agent_ref in agent_refs),
+            ),
+        )
+
+    def _read_leased_host_for_bounded_discovery(self, lease: LeasedHostInfo) -> BoundedHostRead:
+        host_ref, agent_refs = self._discover_one_leased_host(lease)
+        return BoundedHostRead(
+            host=host_ref,
+            agents=tuple(agent_refs),
+            ssh_info=self._build_lease_ssh_info(host_ref.host_id, lease),
+        )
 
     def discover_hosts_and_agents(
         self,

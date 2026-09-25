@@ -15,10 +15,12 @@ from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.test_utils import poll_until
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostDetails
@@ -29,6 +31,7 @@ from imbue.mngr.interfaces.provider_instance import _build_agent_details_from_on
 from imbue.mngr.interfaces.provider_instance import _discover_agents_on_host
 from imbue.mngr.interfaces.provider_instance import build_agent_details_from_offline_ref
 from imbue.mngr.interfaces.provider_instance import collect_cached_host_ssh_infos
+from imbue.mngr.interfaces.provider_instance import discover_hosts_within_per_host_timeout
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
@@ -402,9 +405,7 @@ def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_de
     assert agent_details_list[0].plugin == {"demo": {"kind": "generic"}}
 
 
-# =============================================================================
 # discover_hosts_and_agents disconnect tests
-# =============================================================================
 
 
 def test_discover_agents_on_host_disconnects(host_id: HostId, provider: MockProviderInstance) -> None:
@@ -440,9 +441,7 @@ def test_discover_hosts_and_agents_disconnects_hosts(
     mock_host.disconnect.assert_called_once()
 
 
-# =============================================================================
 # build_agent_details_from_offline_ref offline field generator tests
-# =============================================================================
 
 
 def _make_offline_host_details(host_id: HostId, provider_name: ProviderInstanceName) -> HostDetails:
@@ -607,9 +606,7 @@ def test_discover_hosts_and_agents_falls_back_to_offline_on_connection_error(
     assert provider.connection_errors_cleared == [host_id]
 
 
-# =============================================================================
 # discover_hosts_and_agents_within_timeouts per-host timeout tests
-# =============================================================================
 
 
 class _PerHostGatedProvider(MockProviderInstance):
@@ -967,6 +964,9 @@ def test_discover_within_timeouts_harvests_late_finished_read_on_next_poll(
     provider.release()
     in_flight = registry.future_by_host_id[host.host_id]
     assert poll_until(in_flight.done)
+    # The host's listing changed since the read was started; the harvest reports it as listed now.
+    stopped_host = host.model_copy_update(to_update(host.field_ref().host_state, HostState.STOPPED))
+    provider.mock_discovered_hosts = [stopped_host]
 
     second = provider.discover_hosts_and_agents_within_timeouts(
         cg=temp_mngr_ctx.concurrency_group,
@@ -977,7 +977,7 @@ def test_discover_within_timeouts_harvests_late_finished_read_on_next_poll(
     # The finished-late read is harvested: the host is discovered (not UNKNOWN) and its agent
     # surfaces, without starting a second read.
     assert host.host_id not in second.unknown_host_ids
-    assert {h.host_id for h in second.hosts} == {host.host_id}
+    assert second.hosts == (stopped_host,)
     assert {a.agent_id for a in second.agents} == {agent.agent_id}
     assert provider.read_count_for_host(host.host_id) == 1
     # The harvest cleared the registry entry, so a third poll starts a fresh read.
@@ -991,9 +991,41 @@ def test_discover_within_timeouts_harvests_late_finished_read_on_next_poll(
     assert provider.read_count_for_host(host.host_id) == 2
 
 
-# =============================================================================
+class _UnexpectedHostReadError(Exception):
+    """A host-read failure outside the expected discovery failure modes (neither MngrError nor OSError)."""
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_discover_within_per_host_timeout_rereads_a_host_whose_read_crashed(temp_mngr_ctx: MngrContext) -> None:
+    """A read that crashes with an unexpected exception leaves its host unknown for that poll only.
+
+    The next poll sharing the registry reads the host again, rather than skipping it as
+    a read still in flight.
+    """
+    host_id = HostId.generate()
+    read_attempts: list[HostId] = []
+
+    def read_crashing_host() -> BoundedHostRead:
+        read_attempts.append(host_id)
+        raise _UnexpectedHostReadError("listing output could not be shaped")
+
+    registry = HostDiscoveryReadRegistry()
+    with capture_loguru() as log_output:
+        for _ in range(2):
+            result = discover_hosts_within_per_host_timeout(
+                provider_name=ProviderInstanceName("crashing"),
+                cg=temp_mngr_ctx.concurrency_group,
+                read_host_by_host_id={host_id: read_crashing_host},
+                host_discovery_timeout_seconds=2.0,
+                registry=registry,
+            )
+            assert result.unknown_host_ids == (host_id,)
+
+    assert len(read_attempts) == 2
+    assert "prior read still in flight" not in log_output.getvalue()
+
+
 # Persisted-agent healing (heal_persisted_agent_data)
-# =============================================================================
 
 
 class _HealingStubHost:
@@ -1257,9 +1289,7 @@ def test_discover_agents_on_host_triggers_healing_for_online_hosts(
     assert provider.persisted_agent_data_calls == [(host_id, dict(live_agent.certified_data))]
 
 
-# =============================================================================
 # Detail-collection dedup tests
-# =============================================================================
 
 
 def test_get_host_and_agent_details_populates_boot_time_and_uptime_from_one_probe(

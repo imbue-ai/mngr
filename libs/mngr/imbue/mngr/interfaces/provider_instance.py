@@ -32,6 +32,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import AgentDetails
+from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
@@ -446,27 +447,23 @@ def collect_cached_host_ssh_infos(
     return host_ssh_infos
 
 
-def _set_host_agents_future(
-    provider: "ProviderInstanceInterface",
-    host_ref: DiscoveredHost,
-    future: "Future[tuple[list[DiscoveredAgent], SSHInfo | None]]",
-    timeout_seconds: float,
+def _set_bounded_host_read_future(
+    read_host: Callable[[], BoundedHostRead],
+    future: "Future[BoundedHostRead]",
 ) -> None:
-    """Read one host's agents and SSH endpoint on a daemon thread, recording the outcome on ``future``.
+    """Run one host's read on a daemon thread, recording the outcome on ``future``.
 
     Captures the expected discovery failure modes onto the future so a failed
-    host can be treated as UNKNOWN rather than crashing the poll. ``timeout_seconds``
-    bounds each of the host's reads so an abandoned thread (left running past the
-    per-host timeout) still self-terminates rather than running forever. Always
+    host can be treated as UNKNOWN rather than crashing the poll. Always
     releases thread-local gevent resources, since this thread may be abandoned and
     only resolves its future late.
     """
     try:
-        agents_and_ssh = provider.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
+        host_read = read_host()
     except (MngrError, OSError) as e:
         future.set_exception(e)
     else:
-        future.set_result(agents_and_ssh)
+        future.set_result(host_read)
     finally:
         cleanup_thread_local_resources()
 
@@ -484,8 +481,108 @@ class HostDiscoveryReadRegistry(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    future_by_host_id: dict[HostId, "Future[tuple[list[DiscoveredAgent], SSHInfo | None]]"] = Field(
-        default_factory=dict, description="In-flight per-host (agents, ssh_info) read futures, keyed by host id"
+    future_by_host_id: dict[HostId, "Future[BoundedHostRead]"] = Field(
+        default_factory=dict, description="In-flight per-host read futures, keyed by host id"
+    )
+
+
+def discover_hosts_within_per_host_timeout(
+    provider_name: ProviderInstanceName,
+    cg: ConcurrencyGroup,
+    # Each host's read, which must itself bound its commands so an abandoned read self-terminates.
+    read_host_by_host_id: Mapping[HostId, Callable[[], BoundedHostRead]],
+    host_discovery_timeout_seconds: float,
+    registry: HostDiscoveryReadRegistry | None,
+) -> BoundedProviderDiscoveryResult:
+    """Run each host's read on its own daemon thread, reporting any that miss the per-host timeout as unknown.
+
+    A host whose read does not finish within ``host_discovery_timeout_seconds`` (or
+    fails) is omitted from the result and reported in ``unknown_host_ids`` -- so one
+    slow or wedged host cannot stall the whole provider's snapshot. The abandoned read
+    keeps running (threads cannot be killed).
+
+    ``registry`` carries in-flight per-host reads across polls: a host whose prior read is
+    still running is *not* re-spawned (a warning is logged instead), so at most one abandoned
+    read exists per host at a time. When ``None`` (one-shot discovery), a fresh per-call
+    registry is used, so there is no cross-poll state and every host is read.
+    """
+    active_registry = registry if registry is not None else HostDiscoveryReadRegistry()
+
+    # Decide, per host, whether to spawn a fresh read or reuse an in-flight one from a prior poll.
+    future_by_host_id: dict[HostId, Future[BoundedHostRead]] = {}
+    skipped_unknown_host_ids: list[HostId] = []
+    for host_id, read_host in read_host_by_host_id.items():
+        in_flight = active_registry.future_by_host_id.get(host_id)
+        if in_flight is not None and not in_flight.done():
+            # A prior poll's read for this host is still running. Do not spawn a second
+            # read; with the per-command timeout in place this should essentially never
+            # happen, so warn loudly -- it is a precise "host wedged past its timeout" alarm.
+            # The host is still UNKNOWN this poll (its state is retained by the consumer).
+            logger.warning(
+                "Skipped discovery for host {} on provider {}: prior read still in flight "
+                "(host wedged past its {:.0f}s timeout)",
+                host_id,
+                provider_name,
+                host_discovery_timeout_seconds,
+            )
+            skipped_unknown_host_ids.append(host_id)
+            continue
+        if in_flight is not None:
+            # A prior poll's read finished (possibly late). Harvest it this poll; the
+            # harvest loop below clears it so the next poll starts a fresh read.
+            future_by_host_id[host_id] = in_flight
+            continue
+        host_future: Future[BoundedHostRead] = Future()
+        active_registry.future_by_host_id[host_id] = host_future
+        future_by_host_id[host_id] = host_future
+        cg.start_new_thread(
+            target=_set_bounded_host_read_future,
+            args=(read_host, host_future),
+            daemon=True,
+            is_checked=False,
+            name=f"discover_host_{host_id}",
+            # A read that crashes with an unexpected exception (the thread logs it) still
+            # resolves its future, so the next poll reads the host again rather than
+            # skipping it as still in flight.
+            on_failure=host_future.set_exception,
+        )
+
+    # Wait once, up to the per-host budget, for every host's read to finish.
+    wait(list(future_by_host_id.values()), timeout=host_discovery_timeout_seconds)
+
+    discovered_hosts: list[DiscoveredHost] = []
+    discovered_agents: list[DiscoveredAgent] = []
+    host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
+    unknown_host_ids: list[HostId] = []
+    for host_id, host_future in future_by_host_id.items():
+        # A host that did not finish in time, or whose read failed, is unknown
+        # (not gone): the consumer retains its previously-known state.
+        if not host_future.done() or host_future.exception() is not None:
+            unknown_host_ids.append(host_id)
+            # A read that finished (with an exception) is cleared so the next poll retries
+            # it fresh; a still-running read is kept so the next poll does not re-spawn it.
+            if host_future.done():
+                active_registry.future_by_host_id.pop(host_id, None)
+            continue
+        host_read = host_future.result()
+        discovered_hosts.append(host_read.host)
+        discovered_agents.extend(host_read.agents)
+        # Carry the host's SSH endpoint so the streaming poller re-emits it as HOST_SSH_INFO.
+        if host_read.ssh_info is not None:
+            host_ssh_infos.append((host_id, host_read.ssh_info))
+        active_registry.future_by_host_id.pop(host_id, None)
+
+    # Drop registry entries for hosts no longer discovered (e.g. destroyed while wedged)
+    # so the registry stays bounded to currently-known hosts.
+    stale_host_ids = [host_id for host_id in active_registry.future_by_host_id if host_id not in read_host_by_host_id]
+    for host_id in stale_host_ids:
+        active_registry.future_by_host_id.pop(host_id, None)
+
+    return BoundedProviderDiscoveryResult(
+        hosts=tuple(discovered_hosts),
+        agents=tuple(discovered_agents),
+        host_ssh_infos=tuple(host_ssh_infos),
+        unknown_host_ids=tuple(skipped_unknown_host_ids) + tuple(unknown_host_ids),
     )
 
 
@@ -849,90 +946,33 @@ class ProviderInstanceInterface(MutableModel, ABC):
         The default per-host implementation bounds at host granularity, which already
         encompasses that host's agent enumeration, so ``agent_discovery_timeout_seconds`` is
         unused here (it exists for providers that read agents individually). Providers that
-        batch host+agent discovery override this to delegate to their batch
+        read hosts and agents together override this: either to hand their own per-host reads
+        to ``discover_hosts_within_per_host_timeout``, or to delegate to their batch
         ``discover_hosts_and_agents`` (bounded only by the provider-level error timeout).
         """
-        host_refs = self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
-        active_registry = registry if registry is not None else HostDiscoveryReadRegistry()
-        host_ref_by_id = {host_ref.host_id: host_ref for host_ref in host_refs}
-
-        # Decide, per host, whether to spawn a fresh read or reuse an in-flight one from a
-        # prior poll. Each fresh read runs on its own daemon thread via _set_host_agents_future,
-        # which calls read_host_agents_for_bounded_discovery (overridable for testing).
-        future_by_host_ref: dict[DiscoveredHost, Future[tuple[list[DiscoveredAgent], SSHInfo | None]]] = {}
-        skipped_unknown_host_ids: list[HostId] = []
-        for host_ref in host_refs:
-            in_flight = active_registry.future_by_host_id.get(host_ref.host_id)
-            if in_flight is not None and not in_flight.done():
-                # A prior poll's read for this host is still running. Do not spawn a second
-                # read; with the per-command timeout in place this should essentially never
-                # happen, so warn loudly -- it is a precise "host wedged past its timeout" alarm.
-                # The host is still UNKNOWN this poll (its state is retained by the consumer).
-                logger.warning(
-                    "Skipped discovery for host {} on provider {}: prior read still in flight "
-                    "(host wedged past its {:.0f}s timeout)",
-                    host_ref.host_id,
-                    self.name,
-                    host_discovery_timeout_seconds,
+        host_ref_by_id = {
+            host_ref.host_id: host_ref for host_ref in self.discover_hosts(cg=cg, include_destroyed=include_destroyed)
+        }
+        result = discover_hosts_within_per_host_timeout(
+            provider_name=self.name,
+            cg=cg,
+            read_host_by_host_id={
+                host_id: lambda host_ref=host_ref: self._read_host_for_bounded_discovery(
+                    host_ref, host_discovery_timeout_seconds
                 )
-                skipped_unknown_host_ids.append(host_ref.host_id)
-                continue
-            if in_flight is not None:
-                # A prior poll's read finished (possibly late). Harvest it this poll; the
-                # harvest loop below clears it so the next poll starts a fresh read.
-                future_by_host_ref[host_ref] = in_flight
-                continue
-            host_future: Future[tuple[list[DiscoveredAgent], SSHInfo | None]] = Future()
-            active_registry.future_by_host_id[host_ref.host_id] = host_future
-            future_by_host_ref[host_ref] = host_future
-            cg.start_new_thread(
-                target=_set_host_agents_future,
-                args=(self, host_ref, host_future, host_discovery_timeout_seconds),
-                daemon=True,
-                is_checked=False,
-                name=f"discover_host_{host_ref.host_id}",
-                on_failure=lambda exc, ref=host_ref: logger.opt(exception=exc).debug(
-                    "Host {} discovery thread crashed; treating as unknown", ref.host_id
-                ),
-            )
-
-        # Wait once, up to the per-host budget, for every host's read to finish.
-        wait(list(future_by_host_ref.values()), timeout=host_discovery_timeout_seconds)
-
-        discovered_hosts: list[DiscoveredHost] = []
-        discovered_agents: list[DiscoveredAgent] = []
-        host_ssh_infos: list[tuple[HostId, SSHInfo]] = []
-        unknown_host_ids: list[HostId] = []
-        for host_ref, host_future in future_by_host_ref.items():
-            # A host that did not finish in time, or whose read failed, is unknown
-            # (not gone): the consumer retains its previously-known state.
-            if not host_future.done() or host_future.exception() is not None:
-                unknown_host_ids.append(host_ref.host_id)
-                # A read that finished (with an exception) is cleared so the next poll retries
-                # it fresh; a still-running read is kept so the next poll does not re-spawn it.
-                if host_future.done():
-                    active_registry.future_by_host_id.pop(host_ref.host_id, None)
-                continue
-            agents, ssh_info = host_future.result()
-            discovered_hosts.append(host_ref)
-            discovered_agents.extend(agents)
-            # Carry the host's SSH endpoint so the streaming poller re-emits it as HOST_SSH_INFO.
-            if ssh_info is not None:
-                host_ssh_infos.append((host_ref.host_id, ssh_info))
-            active_registry.future_by_host_id.pop(host_ref.host_id, None)
-
-        # Drop registry entries for hosts no longer discovered (e.g. destroyed while wedged)
-        # so the registry stays bounded to currently-known hosts.
-        stale_host_ids = [host_id for host_id in active_registry.future_by_host_id if host_id not in host_ref_by_id]
-        for host_id in stale_host_ids:
-            active_registry.future_by_host_id.pop(host_id, None)
-
-        return BoundedProviderDiscoveryResult(
-            hosts=tuple(discovered_hosts),
-            agents=tuple(discovered_agents),
-            host_ssh_infos=tuple(host_ssh_infos),
-            unknown_host_ids=tuple(skipped_unknown_host_ids) + tuple(unknown_host_ids),
+                for host_id, host_ref in host_ref_by_id.items()
+            },
+            host_discovery_timeout_seconds=host_discovery_timeout_seconds,
+            registry=registry,
         )
+        # A read harvested from an earlier poll carries that poll's listing of the host.
+        return result.model_copy_update(
+            to_update(result.field_ref().hosts, tuple(host_ref_by_id[host.host_id] for host in result.hosts))
+        )
+
+    def _read_host_for_bounded_discovery(self, host_ref: DiscoveredHost, timeout_seconds: float) -> BoundedHostRead:
+        agents, ssh_info = self.read_host_agents_for_bounded_discovery(host_ref, timeout_seconds)
+        return BoundedHostRead(host=host_ref, agents=tuple(agents), ssh_info=ssh_info)
 
     @abstractmethod
     def get_host_resources(self, host: HostInterface) -> HostResources:
