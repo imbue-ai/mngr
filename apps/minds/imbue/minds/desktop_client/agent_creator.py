@@ -1104,8 +1104,6 @@ def _build_mngr_create_command(
     )
     address = f"{_DEFAULT_AGENT_NAME}@{host_name}.{provider_instance}"
 
-    # The `/welcome` initial message is now baked into the default workspace template's
-    # [create_templates.main] section, so we no longer pass `--message` here.
     # ``--format jsonl`` makes mngr emit ``{"event": "created", "agent_id": ..., "host_id": ...}``
     # as the final stdout line; ``run_mngr_create`` parses that to recover
     # the canonical agent id (and the canonical host id, used to swing

@@ -762,8 +762,6 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--update" not in command
     assert "--template" in command
     assert "main" in command
-    # The /welcome message now lives in default-workspace-template's
-    # [create_templates.main] section, so the explicit --message arg is gone.
     assert "--message" not in command
     # minds no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
