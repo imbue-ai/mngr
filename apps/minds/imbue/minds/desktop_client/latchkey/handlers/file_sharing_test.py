@@ -19,8 +19,14 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
+from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingSyncRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_FILE_SHARING
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.file_sharing import FileSharingGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
 from imbue.minds.desktop_client.latchkey.handlers.messaging import format_resolution_notice
@@ -31,6 +37,7 @@ from imbue.minds.desktop_client.latchkey.testing import leave_permissions_on_thi
 from imbue.minds.desktop_client.request_handler import UiFileSharingPermissionDetail
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_file_sharing_permission_request
+from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
@@ -103,6 +110,7 @@ def _build_authenticated_client(
     inbox: StaticPendingRequests,
     known_agent: AgentId | None = None,
     backend_resolver: BackendResolverInterface | None = None,
+    folder_sync_manager: FolderSyncManager | None = None,
 ) -> FlaskClient:
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
@@ -120,11 +128,88 @@ def _build_authenticated_client(
         paths=paths,
         pending_requests=inbox,
         request_event_handlers=(handler,),
+        folder_sync_manager=folder_sync_manager,
     )
     client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
     client.set_cookie(SESSION_COOKIE_NAME, cookie_value)
     return client
+
+
+_DEVICE_ID: Final[str] = "host-0f0e0d0c0b0a09080706050403020100"
+_START_TIMEOUT_SECONDS: Final[float] = 30.0
+
+
+class _ChatWorkspaceResolver(StaticBackendResolver):
+    """A workspace whose primary agent and chat agent share one name and host.
+
+    The shape a real request arrives in: filed by the chat, while everything
+    the desktop keeps per workspace is keyed by the primary agent.
+    """
+
+    primary_agent_id: AgentId = Field(description="The user-facing agent the Permissions tab is keyed by.")
+    chat_agent_id: AgentId = Field(description="The chat agent that files the request.")
+
+    def list_known_agent_ids(self) -> tuple[AgentId, ...]:
+        return (self.primary_agent_id, self.chat_agent_id)
+
+    def list_known_workspace_ids(self) -> tuple[AgentId, ...]:
+        return (self.primary_agent_id,)
+
+    def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
+        if agent_id not in self.list_known_agent_ids():
+            return None
+        return AgentDisplayInfo(agent_name=str(agent_id), host_id="localhost")
+
+    def get_workspace_name(self, agent_id: AgentId) -> str | None:
+        return "alpha" if agent_id in self.list_known_agent_ids() else None
+
+
+def _folder_sync_manager(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    agent_id: AgentId,
+    backend_resolver: BackendResolverInterface | None = None,
+) -> FolderSyncManager:
+    """A manager whose ``mngr`` is the test stand-in, rooted at ``tmp_path``."""
+    return FolderSyncManager(
+        concurrency_group=root_concurrency_group,
+        mngr_binary=str(write_fake_mngr_pair_script(tmp_path, tmp_path / "argv.json")),
+        mngr_host_dir=tmp_path / ".mngr",
+        home_dir=tmp_path,
+        device_id=_DEVICE_ID,
+        backend_resolver=(
+            _NamedWorkspaceResolver(url_by_agent_and_service={str(agent_id): {}})
+            if backend_resolver is None
+            else backend_resolver
+        ),
+        store=FolderSyncStore(records_dir=tmp_path / "folder_syncs"),
+    )
+
+
+def _syncable_setup(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    gateway_handler: _HttpxHandler,
+    path: Path,
+    access: str = "WRITE",
+    sync: FileSharingSyncRequest | None = None,
+) -> tuple[FlaskClient, FolderSyncManager, StreamedPermissionRequest, _RecordingMessageSender]:
+    """A client whose build can sync, with one file-sharing request pending for ``path``."""
+    agent_id = AgentId()
+    handler, sender = _make_file_sharing_handler(tmp_path, gateway_handler, share_roots=(tmp_path,), home_dir=tmp_path)
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, agent_id)
+    event = create_file_sharing_permission_request(
+        agent_id=str(agent_id), path=str(path), access=access, rationale="keep it close", sync=sync
+    )
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        known_agent=agent_id,
+        folder_sync_manager=manager,
+    )
+    return client, manager, event, sender
 
 
 # handler.handles_request_type
@@ -604,3 +689,240 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
 
     assert response.status_code == 200, response.text
     assert carried == [str(agent_id)]
+
+
+# The sync the dialog can ask for alongside the grant
+
+
+def test_grant_with_sync_starts_one_and_tells_the_agent_where_the_copy_lands(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    client, manager, event, sender = _syncable_setup(
+        tmp_path,
+        root_concurrency_group,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        folder,
+        sync=FileSharingSyncRequest(),
+    )
+
+    response = client.post(
+        f"/requests/{event.request_id}/grant",
+        data={"file_path": str(folder), "sync": "true", "sync_conflict": "WORKSPACE"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.get_json()
+    assert body["outcome"] == "GRANTED"
+    # The agent is told where its copy lives, since that is the path it will read.
+    assert f"~/synced_folders/{_DEVICE_ID}{folder}" in body["message"]
+    assert sender.sent_messages == [
+        (event.agent_id, format_resolution_notice(body["message"], event.request_id, RequestStatus.GRANTED))
+    ]
+    status = manager.wait_until_started(event.agent_id, str(folder), _START_TIMEOUT_SECONDS)
+    assert status is not None
+    assert status.spec.conflict == FolderSyncConflict.WORKSPACE
+    assert manager.desired_activity_for(event.agent_id, str(folder)) == FolderSyncActivity.ACTIVE
+    manager.stop_all()
+
+
+def test_grant_refuses_a_sync_it_cannot_start_before_granting_anything(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A file cannot be synced; the request stays pending so the user can untick the option."""
+    gateway_called = False
+
+    def _gateway_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal gateway_called
+        gateway_called = True
+        return httpx.Response(200, json={"request_id": "evt-abc", "applied": {}})
+
+    shared_file = tmp_path / "notes.txt"
+    shared_file.write_text("hello")
+    client, manager, event, sender = _syncable_setup(
+        tmp_path, root_concurrency_group, _gateway_handler, shared_file, access="READ", sync=FileSharingSyncRequest()
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(shared_file), "sync": "true"})
+
+    assert response.status_code == 400, response.text
+    assert "Only folders can be synced" in response.get_json()["error"]
+    assert gateway_called is False
+    assert load_response_events(tmp_path) == []
+    assert sender.sent_messages == []
+    assert manager.desired_activity_for(event.agent_id, str(shared_file)) is None
+
+
+def test_grant_tells_the_agent_when_the_sync_it_asked_for_was_declined(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    client, manager, event, _sender = _syncable_setup(
+        tmp_path,
+        root_concurrency_group,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        folder,
+        sync=FileSharingSyncRequest(),
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(folder), "sync": "false"})
+
+    assert response.status_code == 200, response.text
+    body = response.get_json()
+    assert body["outcome"] == "GRANTED"
+    assert "was not enabled" in body["message"]
+    assert manager.desired_activity_for(event.agent_id, str(folder)) is None
+
+
+def test_grant_says_nothing_about_syncing_when_nobody_asked(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    client, _manager, event, _sender = _syncable_setup(
+        tmp_path,
+        root_concurrency_group,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        folder,
+    )
+
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(folder), "sync": "false"})
+
+    assert response.status_code == 200, response.text
+    assert (
+        response.get_json()["message"]
+        == f"Your read & write file-sharing permission request for '{folder}' was granted."
+    )
+
+
+def test_grant_rejects_a_sync_choice_it_cannot_read(tmp_path: Path, root_concurrency_group: ConcurrencyGroup) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    client, _manager, event, _sender = _syncable_setup(
+        tmp_path,
+        root_concurrency_group,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        folder,
+    )
+
+    response = client.post(
+        f"/requests/{event.request_id}/grant",
+        data={"file_path": str(folder), "sync": "true", "sync_conflict": "BOTH"},
+    )
+
+    assert response.status_code == 400, response.text
+    assert load_response_events(tmp_path) == []
+
+
+def test_grant_refuses_a_sync_when_this_build_cannot_run_one(tmp_path: Path) -> None:
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        share_roots=(tmp_path,),
+        home_dir=tmp_path,
+    )
+    folder = tmp_path / "project"
+    folder.mkdir()
+    event = create_file_sharing_permission_request(
+        agent_id=str(AgentId()), path=str(folder), access="READ", rationale="keep it close"
+    )
+    client = _build_authenticated_client(tmp_path, handler, StaticPendingRequests(pending=(event,)))
+
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(folder), "sync": "true"})
+
+    assert response.status_code == 400, response.text
+    assert "unavailable in this build" in response.get_json()["error"]
+
+
+def test_detail_carries_the_sync_ask_and_whether_the_path_can_be_synced(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    client, _manager, event, _sender = _syncable_setup(
+        tmp_path,
+        root_concurrency_group,
+        lambda _req: httpx.Response(200),
+        folder,
+        sync=FileSharingSyncRequest(conflict=FolderSyncConflict.THIS_COMPUTER),
+    )
+
+    detail = client.get(f"/ui/api/inbox/{event.request_id}/detail").get_json()["detail"]
+
+    assert detail["kind"] == "file_sharing"
+    assert detail["is_sync_supported"] is True
+    assert detail["is_sync_requested"] is True
+    assert detail["sync_conflict"] == "THIS_COMPUTER"
+    assert detail["sync_unavailable_reason"] == ""
+
+
+def test_detail_says_why_a_requested_file_cannot_be_synced(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    shared_file = tmp_path / "notes.txt"
+    shared_file.write_text("hello")
+    client, _manager, event, _sender = _syncable_setup(
+        tmp_path, root_concurrency_group, lambda _req: httpx.Response(200), shared_file, access="READ"
+    )
+
+    detail = client.get(f"/ui/api/inbox/{event.request_id}/detail").get_json()["detail"]
+
+    assert detail["is_sync_requested"] is False
+    assert detail["sync_conflict"] == "NEWER"
+    assert "Only folders can be synced" in detail["sync_unavailable_reason"]
+
+
+def test_detail_offers_no_sync_when_this_build_cannot_run_one(tmp_path: Path) -> None:
+    handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
+    event = create_file_sharing_permission_request(
+        agent_id=str(AgentId()), path="/home/user/notes", access="WRITE", rationale="edit the notes"
+    )
+
+    payload = handler.build_request_detail_payload(
+        permission_request=event,
+        backend_resolver=StaticBackendResolver(url_by_agent_and_service={}),
+    )
+
+    if not isinstance(payload, UiFileSharingPermissionDetail):
+        pytest.fail(f"expected a file_sharing detail payload, got {payload!r}")
+    assert payload.is_sync_supported is False
+    assert payload.sync_unavailable_reason == ""
+
+
+def test_a_sync_asked_for_by_a_chat_is_keyed_by_its_workspace(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """The Permissions tab draws syncs by the workspace's primary agent, so that is where a grant's sync must land."""
+    primary, chat = AgentId(), AgentId()
+    resolver = _ChatWorkspaceResolver(url_by_agent_and_service={}, primary_agent_id=primary, chat_agent_id=chat)
+    folder = tmp_path / "project"
+    folder.mkdir()
+    handler, _sender = _make_file_sharing_handler(
+        tmp_path,
+        lambda _req: httpx.Response(200, json={"request_id": "evt-abc", "applied": {}}),
+        share_roots=(tmp_path,),
+        home_dir=tmp_path,
+    )
+    manager = _folder_sync_manager(tmp_path, root_concurrency_group, primary, backend_resolver=resolver)
+    event = create_file_sharing_permission_request(
+        agent_id=str(chat), path=str(folder), access="READ", rationale="keep it close", sync=FileSharingSyncRequest()
+    )
+    client = _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=(event,)),
+        backend_resolver=resolver,
+        folder_sync_manager=manager,
+    )
+
+    detail = client.get(f"/ui/api/inbox/{event.request_id}/detail").get_json()["detail"]
+    response = client.post(f"/requests/{event.request_id}/grant", data={"file_path": str(folder), "sync": "true"})
+
+    assert detail["sync_unavailable_reason"] == ""
+    assert response.status_code == 200, response.text
+    assert manager.desired_activity_for(str(primary), str(folder)) == FolderSyncActivity.ACTIVE
+    assert manager.desired_activity_for(str(chat), str(folder)) is None
+    assert manager.wait_until_started(str(primary), str(folder), _START_TIMEOUT_SECONDS) is not None
+    manager.stop_all()

@@ -18,6 +18,14 @@ does, however, let the user *edit the shared path* before approving
 native file picker in the desktop app can fill it in). The access mode
 is fixed at request-creation time and is not user-editable.
 
+The request may also ask for a *synchronized copy* of the folder on the
+workspace's machine. That is not a permission -- the gateway carries the
+ask and never acts on it -- so the dialog offers it as the same checkbox
+the Local files pane draws, ticked the way the agent asked, and this
+handler starts the sync once the grant has landed. A sync that cannot be
+started is refused before the grant, so the request stays pending with
+the reason and the user can untick it or pick another folder.
+
 Approval calls ``POST /permission-requests/approve/<id>`` on the
 gateway's ``permission-requests`` extension; the extension owns the
 actual write to the agent's ``latchkey_permissions.json``. When the
@@ -31,6 +39,7 @@ the gateway forgets the pending entry.
 
 import json
 from collections.abc import Callable
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
@@ -39,9 +48,13 @@ from flask import Request
 from flask import Response
 from loguru import logger
 from pydantic import Field
+from pydantic import ValidationError
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import resolve_workspace_display_name
+from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
@@ -60,7 +73,11 @@ from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_api_inbox import workspace_agent_id_for_request
+from imbue.minds.desktop_client.ui_api_permissions import start_shared_path_sync
+from imbue.minds.desktop_client.ui_api_permissions import workspace_sync_path_label
 from imbue.minds.desktop_client.webdav import get_file_sharing_roots
+from imbue.minds.errors import FolderSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import Latchkey
 
@@ -71,6 +88,21 @@ _KIND_LABEL: Final[str] = "file sharing"
 # The dialog pre-fills it with the agent-requested path; the user may
 # paste a different one or pick it from a native file dialog.
 _FILE_PATH_FIELD: Final[str] = "file_path"
+
+# Form fields carrying the dialog's sync choice: whether to also keep the
+# granted folder synced, and which side wins a clash. Absent from an older
+# client's post, which then grants without a sync.
+_SYNC_FIELD: Final[str] = "sync"
+_SYNC_CONFLICT_FIELD: Final[str] = "sync_conflict"
+
+
+class _SyncChoice(FrozenModel):
+    """What the dialog said about syncing, parsed from the grant form."""
+
+    enabled: bool = Field(default=False, description="Whether the granted folder should also be kept synced")
+    conflict: FolderSyncConflict = Field(
+        default=FolderSyncConflict.NEWER, description="Which side wins a clash in a two-way sync"
+    )
 
 
 class InvalidSharePathError(Exception):
@@ -160,6 +192,29 @@ def _format_granted_message(file_path: str, access: str) -> str:
     return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was granted."
 
 
+def _format_sync_started_note(workspace_path: str) -> str:
+    return f" A synchronized copy of it is being kept on your machine at {workspace_path}."
+
+
+def _format_sync_declined_note() -> str:
+    return " The synchronized copy you asked for was not enabled."
+
+
+def _parse_sync_choice(form: Mapping[str, str]) -> _SyncChoice:
+    """The dialog's sync choice, or the no-sync default when the form carries none.
+
+    Raises :class:`ValidationError` for a value the enums do not know: the
+    dialog only ever sends values it was given, so anything else is a client
+    the server does not understand rather than a choice to guess at.
+    """
+    raw: dict[str, str] = {}
+    if _SYNC_FIELD in form:
+        raw["enabled"] = form[_SYNC_FIELD]
+    if _SYNC_CONFLICT_FIELD in form:
+        raw["conflict"] = form[_SYNC_CONFLICT_FIELD]
+    return _SyncChoice.model_validate(raw)
+
+
 def _format_denied_message(file_path: str, access: str) -> str:
     return f"Your {_access_human_label(access)} file-sharing permission request for '{file_path}' was denied."
 
@@ -216,8 +271,6 @@ class FileSharingGrantHandler(RequestEventHandler):
         ),
     )
 
-    # -- RequestEventHandler interface ---------------------------------------
-
     def handles_request_type(self) -> str:
         return REQUEST_TYPE_FILE_SHARING
 
@@ -242,6 +295,12 @@ class FileSharingGrantHandler(RequestEventHandler):
         ws_name = resolve_workspace_display_name(
             backend_resolver, parsed_agent_id, fallback=permission_request.agent_id
         )
+        # The sync option is drawn from the same answers the Local files pane
+        # gets, so the dialog greys out exactly the paths the pane would. A sync
+        # belongs to the workspace, not to the chat that asked, so it is keyed
+        # by the workspace's primary agent like the pane's own.
+        manager = get_state().folder_sync_manager
+        workspace_agent_id = workspace_agent_id_for_request(permission_request, backend_resolver)
         return UiFileSharingPermissionDetail(
             request_id=permission_request.request_id,
             agent_id=permission_request.agent_id,
@@ -252,6 +311,12 @@ class FileSharingGrantHandler(RequestEventHandler):
             access_human_label=_access_human_label(str(payload.access)),
             allowed_roots=tuple(str(root) for root in self.share_roots),
             home_dir=str(self.home_dir),
+            is_sync_supported=manager is not None,
+            is_sync_requested=payload.sync is not None,
+            sync_conflict=FolderSyncConflict.NEWER if payload.sync is None else payload.sync.conflict,
+            sync_unavailable_reason=(
+                "" if manager is None else manager.reason_sync_is_unavailable(workspace_agent_id, payload.path)
+            ),
         )
 
     def apply_grant_request(
@@ -284,6 +349,28 @@ class FileSharingGrantHandler(RequestEventHandler):
             )
         except InvalidSharePathError as e:
             return make_json_error_response(str(e), status_code=400)
+        try:
+            sync_choice = _parse_sync_choice(form)
+        except ValidationError as e:
+            logger.debug("Rejected a malformed sync choice on a file-sharing grant: {}", e)
+            return make_json_error_response("sync must be a boolean and sync_conflict a known value.", status_code=400)
+        # A sync that cannot be started is refused before anything is granted:
+        # the request stays pending with the reason, and the user can untick the
+        # option or point at another folder and approve again. Refusing after
+        # the grant would leave a permission the dialog never reported.
+        manager: FolderSyncManager | None = None
+        # The sync is the workspace's, keyed by its primary agent as the Local
+        # files pane keys it; the grant itself stays with the agent that asked.
+        workspace_agent_id = workspace_agent_id_for_request(permission_request, get_state().backend_resolver)
+        if sync_choice.enabled:
+            manager = get_state().folder_sync_manager
+            if manager is None:
+                return make_json_error_response(
+                    "Keeping a shared path in sync is unavailable in this build.", status_code=400
+                )
+            unavailable_reason = manager.reason_sync_is_unavailable(workspace_agent_id, effective_path)
+            if unavailable_reason:
+                return make_json_error_response(unavailable_reason, status_code=400)
 
         # Only send an override to the gateway when the user actually
         # changed the path; otherwise the gateway applies the precomputed
@@ -318,7 +405,9 @@ class FileSharingGrantHandler(RequestEventHandler):
             )
             return make_json_error_response(str(e), status_code=502)
 
-        message = _format_granted_message(effective_path, str(payload.access))
+        message = _format_granted_message(effective_path, str(payload.access)) + self._start_sync_if_asked(
+            manager, permission_request, workspace_agent_id, effective_path, sync_choice
+        )
         resolve_request(
             self.mngr_message_sender,
             self.data_dir,
@@ -367,4 +456,33 @@ class FileSharingGrantHandler(RequestEventHandler):
             media_type="application/json",
         )
 
-    # -- Internals -----------------------------------------------------------
+    def _start_sync_if_asked(
+        self,
+        manager: FolderSyncManager | None,
+        permission_request: StreamedPermissionRequest,
+        workspace_agent_id: str,
+        file_path: str,
+        sync_choice: _SyncChoice,
+    ) -> str:
+        """Start the sync the dialog asked for, and say what became of the ask.
+
+        Returns a sentence for the agent's notice: where the copy lands when a
+        sync was started, that none was enabled when the agent asked for one
+        and the user unticked it, and nothing at all otherwise. Starting is
+        asynchronous, so the outcome is not known here; the Local files pane
+        is where it shows up. Never raises: the grant has landed by now, and a
+        sync that will not start must not undo it. The availability check
+        before the grant makes that a race rather than the expected path.
+        """
+        payload = permission_request.payload
+        is_requested = isinstance(payload, FileSharingRequestPayload) and payload.sync is not None
+        if not sync_choice.enabled:
+            return _format_sync_declined_note() if is_requested else ""
+        if manager is None:
+            return " Keeping it in sync was asked for but is unavailable in this build."
+        try:
+            status = start_shared_path_sync(manager, workspace_agent_id, file_path, sync_choice.conflict)
+        except FolderSyncError as e:
+            logger.warning("Granted file sharing for {} but could not start its sync: {}", file_path, e)
+            return f" It is not being kept in sync: {e}"
+        return _format_sync_started_note(workspace_sync_path_label(status.spec))

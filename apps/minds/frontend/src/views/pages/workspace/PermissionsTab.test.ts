@@ -1066,7 +1066,7 @@ describe("PermissionsTab shared paths", () => {
     const { root, remove } = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
     const text = allText(root);
     expect(text).toContain("Keep a synchronized copy on the machine");
-    expect(text).toContain("when Minds is not running or your computer is offline");
+    expect(text).toContain("when Mind is not running or your computer is offline");
     remove();
   });
 

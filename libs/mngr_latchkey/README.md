@@ -751,9 +751,15 @@ consume the stream and approve/delete on resolution.
     can only be resolved by a client that names the chosen account in the
     approve override body (see below), which is what the minds dialog
     does after the user picks or signs one in.
-  * `"file-sharing"` -- single-file access through the `minds-api-proxy`
-    extension, with payload `{"path": "<absolute-path>"}`. The path
-    must be absolute and free of `..` segments.
+  * `"file-sharing"` -- access to one path through the `minds-api-proxy`
+    extension, with payload `{"path": "<absolute-path>", "access":
+    "READ"|"WRITE"}`. The path must be absolute (or start with `~`, which is
+    expanded) and free of `..` segments. An optional `"sync": {"conflict":
+    "NEWER"|"THIS_COMPUTER"|"WORKSPACE"}` (`conflict` itself optional,
+    defaulting to `NEWER`) asks Minds to also keep a synchronized copy of
+    the folder on the workspace's machine once the grant is approved. The
+    extension validates and stores it but never acts on it: a sync is not
+    a permission, so it does not enter the `effect`.
 
   The extension generates a `request_id` server-side, stores the
   caller-supplied fields plus the `target` permissions.json (taken

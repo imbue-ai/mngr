@@ -24,6 +24,7 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
@@ -114,6 +115,21 @@ class UiFileSharingPermissionDetail(FrozenModel):
     access_human_label: str = Field(description="Human rendering of the access mode ('read-only' / 'read & write')")
     allowed_roots: tuple[str, ...] = Field(description="Absolute WebDAV mount roots a shareable path must be under")
     home_dir: str = Field(description="Absolute home directory used to expand a leading '~'")
+    is_sync_supported: bool = Field(
+        default=False,
+        description="Whether this build can keep a shared folder synced at all; false hides the option",
+    )
+    is_sync_requested: bool = Field(
+        default=False, description="Whether the agent asked for a synchronized copy alongside the access"
+    )
+    sync_conflict: FolderSyncConflict = Field(
+        default=FolderSyncConflict.NEWER,
+        description="The clash rule the agent asked for (or the default), which the dialog's dropdown starts on",
+    )
+    sync_unavailable_reason: str = Field(
+        default="",
+        description="Why the requested path cannot be synced; empty when it can. Greys the option out",
+    )
 
 
 class UiWorkspacePermissionDetail(FrozenModel):

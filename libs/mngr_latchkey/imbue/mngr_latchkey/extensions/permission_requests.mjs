@@ -28,13 +28,19 @@
  *       the chosen account in the approve override body, never by a
  *       bare ``/approve`` call.
  *       For ``type=="file-sharing"`` the payload is
- *         ``{path: <absolute_or_tilde_path>}``;
+ *         ``{path: <absolute_or_tilde_path>, access: "READ"|"WRITE",
+ *           sync?: {conflict?: "NEWER"|"THIS_COMPUTER"|"WORKSPACE"}}``;
  *       the path must be absolute (start with ``/``) or use ``~`` /
  *       ``~/...`` to denote the current user's home directory (which is
  *       expanded to an absolute path before storage), and must not
  *       contain any ``..`` segments (rejected as a path-traversal
  *       attempt). ``~user`` notation for another user's home is
- *       rejected.
+ *       rejected. ``sync`` asks Minds to also keep a synchronized copy
+ *       of the folder on the workspace's machine once the grant is
+ *       approved; ``conflict`` (default ``NEWER``) says which side wins
+ *       when a two-way sync finds the same file changed on both. The
+ *       sync is not a permission: it is carried on the request for the
+ *       desktop to act on, and never enters the ``effect``.
  *       For ``type=="custom-service"`` the payload is
  *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null}``,
  *       a request to reach an origin the asking workspace's latchkey has no
@@ -431,6 +437,16 @@ const FILE_SHARING_ACCESS_WRITE = 'WRITE';
 const VALID_FILE_SHARING_ACCESS_MODES = new Set([
   FILE_SHARING_ACCESS_READ,
   FILE_SHARING_ACCESS_WRITE,
+]);
+
+// The clash rules a ``file-sharing`` request's optional ``sync`` may name.
+// They mirror minds' ``FolderSyncConflict``; the gateway only carries the
+// choice, it never acts on it.
+const FILE_SHARING_SYNC_CONFLICT_DEFAULT = 'NEWER';
+const VALID_FILE_SHARING_SYNC_CONFLICTS = new Set([
+  FILE_SHARING_SYNC_CONFLICT_DEFAULT,
+  'THIS_COMPUTER',
+  'WORKSPACE',
 ]);
 
 // WebDAV verbs that do not mutate the resource. ``GET``/``HEAD`` read
@@ -1120,8 +1136,38 @@ function validateFileSharingPayload(payload) {
         .join(', ')}; got '${payload.access}'.`,
     );
   }
-  ensureNoExtraneousFields('payload ', ['path', 'access'], payload);
-  return { path, access: payload.access };
+  ensureNoExtraneousFields('payload ', ['path', 'access', 'sync'], payload);
+  const canonical = { path, access: payload.access };
+  if (payload.sync !== undefined && payload.sync !== null) {
+    canonical.sync = validateFileSharingSync(payload.sync);
+  }
+  return canonical;
+}
+
+/**
+ * Validate the optional ``sync`` object of a ``file-sharing`` payload and
+ * return its canonical shape, ``{conflict}``, with the default filled in.
+ *
+ * ``conflict`` is accepted whatever the access mode. It only matters to a
+ * two-way sync, which only a ``WRITE`` grant produces, but the user can widen
+ * the access later and the choice is then already recorded; refusing it on a
+ * ``READ`` request would fail an agent for naming a setting the desktop
+ * simply ignores.
+ */
+function validateFileSharingSync(sync) {
+  if (typeof sync !== 'object' || Array.isArray(sync)) {
+    throw new InvalidRequestBodyError("payload.'sync' must be a JSON object when present.");
+  }
+  ensureNoExtraneousFields('payload.sync ', ['conflict'], sync);
+  const conflict = sync.conflict === undefined ? FILE_SHARING_SYNC_CONFLICT_DEFAULT : sync.conflict;
+  if (!VALID_FILE_SHARING_SYNC_CONFLICTS.has(conflict)) {
+    throw new InvalidRequestBodyError(
+      `payload.sync.'conflict' must be one of ${[...VALID_FILE_SHARING_SYNC_CONFLICTS]
+        .map((name) => `'${name}'`)
+        .join(', ')}; got '${conflict}'.`,
+    );
+  }
+  return { conflict };
 }
 
 /**

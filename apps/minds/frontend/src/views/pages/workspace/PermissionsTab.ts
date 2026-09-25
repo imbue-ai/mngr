@@ -25,7 +25,6 @@ import type { StatusBadgeVariant } from "../../components/StatusBadge";
 import { StatusBadge } from "../../components/StatusBadge";
 import type {
   FileSharingAccess,
-  FolderSyncConflict,
   FolderSyncState,
   UiAvailableConnection,
   UiSharedPath,
@@ -38,7 +37,6 @@ import type { PermissionsModel } from "../../../models/workspacePermissions";
 import {
   ADD_CONNECTION_SECTION,
   FILE_SHARING_ACCESSES,
-  FOLDER_SYNC_CONFLICTS,
   LOCAL_FILES_SECTION,
   OTHER_MACHINES_SECTION,
   WAITING_SECTION,
@@ -48,7 +46,6 @@ import {
   connectorToggleRowKey,
   desktopEgressRowKey,
   fileSharingAccessLabel,
-  folderSyncConflictLabel,
   folderSyncStateLabel,
   hasCopyOnMachine,
   hasInactiveCopy,
@@ -67,6 +64,7 @@ import {
   selfToggleRowKey,
 } from "../../../models/workspacePermissions";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
+import { SETTING_SELECT_CLASS, renderFolderSyncSetting, renderSettingRow } from "../../components/FolderSyncSetting";
 import { warmRequestDetail } from "../../../models/requestDetailPrefetch";
 
 /** How long a "Revoke all" stays armed after its first click. */
@@ -79,17 +77,6 @@ const ADD_CONNECTION_CLASS =
   "transition-colors text-secondary hover:text-primary hover:bg-fill-hover";
 
 const TOGGLE_ROW_CLASS = "perm-row flex items-center justify-between gap-4 py-2";
-
-/** The right-aligned control on a shared path's setting row.
- *
- * Carries its own disabled look, which a bare ``<select disabled>`` does not:
- * the element stops responding but goes on looking exactly as it did, so a
- * setting that is waiting on the workspace's machine reads as one you simply
- * failed to click. Same pair the buttons use (``BTN_BASE``), so every control
- * in the pane that is unavailable says so the same way. */
-const SETTING_SELECT_CLASS =
-  "type-body text-primary bg-transparent border border-subtle rounded-md px-2 py-1 " +
-  "disabled:opacity-40 disabled:cursor-not-allowed";
 
 const CATALOG_HEADING_CLASS = "type-section text-tertiary mt-6 mb-1";
 
@@ -953,11 +940,6 @@ function renderLocalFilesPanel(model: PermissionsModel): m.Children {
  * full-width hairline, so a row of any height still reads as one list. */
 const SETTING_BAND_CLASS = "px-4 py-3 border-t border-subtle";
 
-/** Everything the sync checkbox has to say, hung off a short rule under it.
- * The rule is what says "this belongs to the checkbox" -- no indent to keep
- * in step with the checkbox's own width. */
-const SYNC_RAIL_CLASS = "ml-[7px] mt-2 pl-3.5 border-l-2 border-subtle flex flex-col gap-2";
-
 /** One shared path: what it is, and what agents may do with it.
  *
  * Drawn as bands -- the path, then one per setting -- rather than as a stack
@@ -1033,62 +1015,26 @@ function renderAccessChoice(model: PermissionsModel, row: UiSharedPath): m.Child
   );
 }
 
-/** Keeping a copy on the machine: an extra thing a shared folder can have,
- * not an alternative to sharing it.
- *
- * A checkbox rather than the other arm of a radio, because it is additive --
- * the on-demand grant above stays exactly as it was, and the copy is one more
- * way the same agents reach the same folder. Which way changes travel is not
- * asked: it says the same thing as the access above, so it is stated instead.
- *
- * A folder that cannot be synced keeps the checkbox, greyed, with the reason
- * where the explanation would be. Hiding the option would leave the user
- * wondering whether this row is different or they misremembered; letting them
- * tick it and be refused says the same thing, later and in a banner. */
+/** The card's sync band: the shared setting, wired to the model's writes and
+ * carrying what only the card has to say -- the live status, the set-aside
+ * copy, and a failed sync's reason and retry. */
 function renderSyncChoice(model: PermissionsModel, row: UiSharedPath, isSynced: boolean): m.Children {
   const sync = row.sync ?? null;
-  const isBusy = model.isRowBusy(folderSyncToggleRowKey(row.path));
-  const unavailableReason = row.sync_unavailable_reason ?? "";
-  const isUnavailable = unavailableReason !== "";
-  return [
-    m("div", { class: "flex items-center justify-between gap-4" }, [
-      m(
-        "label",
-        {
-          class:
-            "flex items-center gap-2 min-w-0 " + (isUnavailable ? "cursor-not-allowed opacity-60" : "cursor-pointer"),
-        },
-        [
-          m("input", {
-            type: "checkbox",
-            class: "shrink-0",
-            checked: isSynced,
-            disabled: isBusy || isUnavailable,
-            "data-sync-path": row.path,
-            "aria-label": `Keep a synchronized copy of ${row.path} on the machine`,
-            onchange: (event: Event) => void model.toggleSync(row, (event.target as HTMLInputElement).checked),
-          }),
-          m("span", { class: "type-body text-primary truncate" }, "Keep a synchronized copy on the machine"),
-        ],
-      ),
-      sync === null ? null : renderSyncStatus(sync.state, syncProgressLabel(sync)),
-    ]),
-    m("div", { class: SYNC_RAIL_CLASS, "data-sync-detail": row.path }, [
-      isUnavailable
-        ? m("p", { class: "type-helper text-secondary m-0", "data-sync-unavailable": row.path }, unavailableReason)
-        : m(
-            "p",
-            { class: "type-helper text-secondary m-0" },
-            "Minds will synchronize the folder when it's running, and agents can continue to access the " +
-              "synchronized folder when Minds is not running or your computer is offline.",
-          ),
-      isSynced ? renderSyncDirectionSentence(row.access) : null,
-      // Only while syncing: it describes what the two running syncs do to each
-      // other, which is not yet true of a folder whose copy is not being kept.
-      !isSynced || row.sync_overlap_warning === "" || row.sync_overlap_warning === undefined
-        ? null
-        : m("p", { class: "type-helper text-warning m-0", "data-sync-overlap": row.path }, row.sync_overlap_warning),
-      isSynced ? renderSyncChoices(model, row) : renderInactiveCopy(model, row),
+  const rowKey = folderSyncToggleRowKey(row.path);
+  return renderFolderSyncSetting({
+    path: row.path,
+    access: row.access,
+    isOn: isSynced,
+    isBusy: model.isRowBusy(rowKey),
+    lockedTitle: isLockedByAnotherWrite(model, rowKey) ? PANE_BUSY_TITLE : null,
+    unavailableReason: row.sync_unavailable_reason ?? "",
+    conflict: model.syncConflictFor(row),
+    onToggle: (enabled) => void model.toggleSync(row, enabled),
+    onConflictChange: (conflict) => void model.setSyncConflict(row, conflict),
+    status: sync === null ? null : renderSyncStatus(sync.state, syncProgressLabel(sync)),
+    overlapWarning: row.sync_overlap_warning,
+    trailing: [
+      isSynced ? null : renderInactiveCopy(model, row),
       sync === null || sync.message === ""
         ? null
         : m("div", { class: "flex items-start justify-between gap-3" }, [
@@ -1106,28 +1052,8 @@ function renderSyncChoice(model: PermissionsModel, row: UiSharedPath, isSynced: 
                   model.isRowBusy(folderSyncRetryRowKey(row.path)) ? "Trying..." : "Try again",
                 ),
           ]),
-    ]),
-  ];
-}
-
-/** What syncing will actually do, said in terms of the access just granted
- * rather than as a second choice that could contradict it. The words the
- * dropdown above uses are the bold ones, so the two can be read as one
- * sentence. */
-function renderSyncDirectionSentence(access: FileSharingAccess): m.Children {
-  const clause: m.Children =
-    access === "WRITE"
-      ? [
-          "Since agents on this machine may both ",
-          m("strong", { class: "font-semibold" }, "read and write"),
-          " the folder, Minds synchronizes changes between your computer and this machine in both directions.",
-        ]
-      : [
-          "Since agents on this machine may only ",
-          m("strong", { class: "font-semibold" }, "read"),
-          " the folder, Minds synchronizes changes from your computer to this machine in one direction.",
-        ];
-  return m("p", { class: "type-helper text-secondary m-0" }, clause);
+    ],
+  });
 }
 
 function syncStateVariant(state: FolderSyncState): StatusBadgeVariant {
@@ -1148,14 +1074,6 @@ function syncStateVariant(state: FolderSyncState): StatusBadgeVariant {
   // the neutral grey of a folder the user turned off either.
   if (state === "UNKNOWN") return "warn";
   return "neutral";
-}
-
-/** A label on the left, its control right-aligned on the right. */
-function renderSettingRow(label: string, control: m.Children): m.Children {
-  return m("div", { class: "flex items-center justify-between gap-4" }, [
-    m("span", { class: "type-body text-primary min-w-0" }, label),
-    m("div", { class: "shrink-0" }, control),
-  ]);
 }
 
 /** What became of the machine's copy once syncing is off.
@@ -1191,30 +1109,6 @@ function renderInactiveCopy(model: PermissionsModel, row: UiSharedPath): m.Child
       isDiscarding ? "Removing..." : "Remove copy",
     ),
   ]);
-}
-
-function renderSyncChoices(model: PermissionsModel, row: UiSharedPath): m.Children {
-  // Only a two-way sync can have a clash to settle, and only read-and-write
-  // access makes it two-way -- so this question appears exactly when the
-  // access above makes it a real one.
-  if (row.access !== "WRITE") return null;
-  const conflict = model.syncConflictFor(row);
-  return renderSettingRow(
-    "On a clash, keep",
-    m(
-      "select",
-      {
-        class: SETTING_SELECT_CLASS,
-        "data-conflict-path": row.path,
-        value: conflict,
-        onchange: (event: Event) =>
-          void model.setSyncConflict(row, (event.target as HTMLSelectElement).value as FolderSyncConflict),
-      },
-      FOLDER_SYNC_CONFLICTS.map((option) =>
-        m("option", { value: option, selected: option === conflict }, folderSyncConflictLabel(option)),
-      ),
-    ),
-  );
 }
 
 /** The legend: a turning pair of arrows while bytes move, a check once they

@@ -37,7 +37,7 @@ from imbue.minds.desktop_client.responses import make_json_error_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_api_permissions import build_permissions_payload
 from imbue.minds.desktop_client.ui_api_permissions import json_response
-from imbue.minds.desktop_client.ui_api_permissions import sync_direction_for
+from imbue.minds.desktop_client.ui_api_permissions import start_shared_path_sync
 from imbue.minds.desktop_client.ui_api_permissions import sync_overlap_warning
 from imbue.minds.desktop_client.ui_api_permissions import ui_path_sync
 from imbue.minds.desktop_client.ui_api_permissions import ui_remembered_sync
@@ -98,12 +98,7 @@ def _handle_path_sync(agent_id: str) -> Response:
         return manager
     try:
         if sync_request.enabled:
-            manager.start(
-                agent_id=agent_id,
-                raw_local_path=sync_request.path,
-                direction=sync_direction_for(agent_id, sync_request.path),
-                conflict=sync_request.conflict,
-            )
+            start_shared_path_sync(manager, agent_id, sync_request.path, sync_request.conflict)
         else:
             # Stopping sets the machine's copy aside and leaves the row saying
             # so, which is what the Delete-copy button acts on; only the

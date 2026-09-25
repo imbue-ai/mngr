@@ -202,6 +202,21 @@ def primary_agent_ids_by_workspace_name(backend_resolver: BackendResolverInterfa
     return primary_agent_id_by_ws_name
 
 
+def workspace_agent_id_for_request(req: StreamedPermissionRequest, backend_resolver: BackendResolverInterface) -> str:
+    """The primary agent id of the workspace a request belongs to.
+
+    Requests are filed by a chat or the system-services sibling, but everything
+    the desktop keeps per workspace -- the Permissions tab, the folder syncs
+    drawn in it -- is keyed by the user-facing primary agent, so a request has
+    to be resolved to that agent before it can touch any of it. Falls back to
+    the requesting agent's own id when nothing shares its workspace name.
+    """
+    ws_name = backend_resolver.get_workspace_name(AgentId(req.agent_id))
+    if not ws_name:
+        return req.agent_id
+    return primary_agent_ids_by_workspace_name(backend_resolver).get(ws_name, req.agent_id)
+
+
 def _request_service_name(req: StreamedPermissionRequest, handler: RequestEventHandler | None) -> str:
     """The catalog service name for the brand mark; '' for kinds that have none.
 

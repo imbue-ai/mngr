@@ -56,6 +56,7 @@ from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceLogi
 from imbue.minds.desktop_client.latchkey.gateway_client import CustomServiceRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingRequestPayload
+from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingSyncRequest
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import PredefinedRequestPayload
 from imbue.minds.desktop_client.latchkey.gateway_client import REQUEST_TYPE_ACCOUNTS
@@ -1229,13 +1230,14 @@ def create_file_sharing_permission_request(
     access: str,
     rationale: str,
     target: str = "/tmp/permissions.json",
+    sync: FileSharingSyncRequest | None = None,
 ) -> StreamedPermissionRequest:
     """Build a file-sharing permission request as the gateway would stream it."""
     return _streamed_request(
         agent_id=agent_id,
         rationale=rationale,
         request_type=REQUEST_TYPE_FILE_SHARING,
-        payload=FileSharingRequestPayload(path=path, access=FileSharingAccess(access)),
+        payload=FileSharingRequestPayload(path=path, access=FileSharingAccess(access), sync=sync),
         target=target,
     )
 

@@ -1072,6 +1072,44 @@ The sync half touches no latchkey state, so it works and its status shows even
 when the gateway is unreachable. A build with no root concurrency group offers
 no sync option at all rather than one that cannot work.
 
+### An agent asking for a synchronized copy
+
+An agent can ask for the copy as part of its file-sharing request: the
+payload's optional `sync` object (`{"sync": {"conflict": "NEWER"}}`, with
+`conflict` one of `NEWER`, `THIS_COMPUTER` or `WORKSPACE` and defaulting to
+`NEWER`) says the agent would like the folder kept synced as well as shared.
+The gateway validates and stores it and does nothing else with it: a sync is
+not a permission, so it never enters the request's `effect`, and the grant the
+gateway writes is the same with or without it.
+
+The approval dialog draws the same sync band the Local files card does -- the
+same switch, explanation, direction sentence and clash dropdown, from one
+shared component, so the two cannot drift -- under the path input. The switch
+starts on when the agent asked and the path can be synced, and off otherwise; a
+line under it says the agent asked, so the user knows whose idea it was. The
+clash dropdown starts on the rule the agent named. A path that cannot be
+synced (a file, a folder inside one this workspace already syncs) greys the
+switch out with the reason, exactly as the card would, and the switch starts
+off however the agent asked. The user can flip it either way: a sync the agent
+did not ask for can be turned on, and one it did ask for turned off.
+
+Approve carries the choice (`sync`, `sync_conflict`) with the path. A sync
+that cannot be started is refused **before** anything is granted -- the
+request stays pending with the reason, so the user can turn the switch off or
+pick another folder and approve again; refusing afterwards would leave a grant
+the dialog never reported. Otherwise the grant is made as usual and the sync
+is started on it, travelling the way the granted access dictates (read-only
+means this computer to the machine, read and write means both ways), by the
+same code the card's switch runs. The sync is keyed by the workspace's
+primary agent, as the card keys its own, and not by the chat that filed the
+request: the two share a workspace name, which is how the request is resolved
+to it. The notice the agent receives says where the
+copy lands (`~/synced_folders/<device id>/<path>`), since that is the path it
+will read; when the agent asked for a sync and the user turned it off, the
+notice says the copy was not enabled, so the agent does not go looking for it.
+Starting is asynchronous, so the notice reports what was set in motion; the
+Local files card is where its progress shows.
+
 ## Agent-side responsibilities
 
 Agents are expected to:
@@ -1081,7 +1119,11 @@ Agents are expected to:
   extension (`POST /permission-requests` with `scope`, `permissions`,
   and `rationale`) -- or, for a domain the catalog has no service for, a
   `custom-service` request naming the domain (see [Creating a connection an
-  agent asks for](#creating-a-connection-an-agent-asks-for)).
+  agent asks for](#creating-a-connection-an-agent-asks-for)), or, for a path
+  on the user's computer, a `file-sharing` request naming the path and access
+  and, if it wants a copy it can reach while the user's computer is offline,
+  a `sync` (see [An agent asking for a synchronized
+  copy](#an-agent-asking-for-a-synchronized-copy)).
 * Stop the turn and wait. The agent will receive a message from the
   desktop (through the workspace's chat app) with the decision and can
   decide whether to retry.

@@ -51,6 +51,7 @@ from pydantic import model_validator
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.custom_services import LoginFlow
 from imbue.mngr_latchkey.custom_services import Scheme
@@ -143,6 +144,20 @@ class FileSharingAccess(UpperCaseStrEnum):
     WRITE = auto()
 
 
+class FileSharingSyncRequest(FrozenModel):
+    """The sync an agent asks for alongside a file-sharing grant.
+
+    Its presence on the payload is the ask; the one setting inside it is the
+    clash rule, which only a two-way sync ever consults. Which way changes
+    travel is not a setting: it follows the access the grant ends up with.
+    """
+
+    conflict: FolderSyncConflict = Field(
+        default=FolderSyncConflict.NEWER,
+        description="Which side wins when a two-way sync finds the same file changed on both.",
+    )
+
+
 class FileSharingRequestPayload(FrozenModel):
     """Payload for ``type == "file-sharing"`` permission requests."""
 
@@ -151,6 +166,13 @@ class FileSharingRequestPayload(FrozenModel):
         description=(
             "Access mode the agent is requesting for ``path``. ``READ`` grants the non-mutating "
             "WebDAV verbs; ``WRITE`` is a superset that also grants the mutating ones."
+        ),
+    )
+    sync: FileSharingSyncRequest | None = Field(
+        default=None,
+        description=(
+            "Present when the agent also asks for a synchronized copy of the folder on its machine. "
+            "Not a permission: the gateway carries it and the desktop starts the sync after the grant."
         ),
     )
 

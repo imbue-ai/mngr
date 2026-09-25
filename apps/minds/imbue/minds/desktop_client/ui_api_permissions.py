@@ -65,11 +65,13 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.model_update import to_update
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync import FolderSyncSpec
 from imbue.minds.desktop_client.folder_sync import FolderSyncState
 from imbue.minds.desktop_client.folder_sync import FolderSyncStatus
 from imbue.minds.desktop_client.folder_sync import WORKSPACE_INACTIVE_SYNC_DIRECTORY
 from imbue.minds.desktop_client.folder_sync import WORKSPACE_SYNC_DIRECTORY
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
+from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncDirection
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPayload
@@ -936,6 +938,11 @@ def _stored_accounts(machine_latchkey: Latchkey, service_name: str) -> frozenset
 # leaves the dependency between the two modules pointing one way.
 
 
+def workspace_sync_path_label(spec: FolderSyncSpec) -> str:
+    """Where a sync's copy lives on the machine, written from its home directory."""
+    return f"~/{WORKSPACE_SYNC_DIRECTORY}/{spec.workspace_path}"
+
+
 def ui_path_sync(status: FolderSyncStatus, activity: FolderSyncActivity) -> UiPathSync:
     """The sync half of a row for a folder whose sync process still exists.
 
@@ -950,7 +957,7 @@ def ui_path_sync(status: FolderSyncStatus, activity: FolderSyncActivity) -> UiPa
         message=status.message,
         direction=status.spec.direction,
         conflict=status.spec.conflict,
-        workspace_path=f"~/{WORKSPACE_SYNC_DIRECTORY}/{status.spec.workspace_path}",
+        workspace_path=workspace_sync_path_label(status.spec),
         bytes_done=status.bytes_done,
         bytes_total=status.bytes_total,
     )
@@ -1036,6 +1043,24 @@ def sync_direction_for(agent_id: str, path: str) -> FolderSyncDirection:
     return FolderSyncDirection.TO_WORKSPACE
 
 
+def start_shared_path_sync(
+    manager: FolderSyncManager, agent_id: str, path: str, conflict: FolderSyncConflict
+) -> FolderSyncStatus:
+    """Start keeping a shared folder synced, travelling the way its grant dictates.
+
+    The one entry point for turning a sync on, whether from the pane's checkbox
+    or from approving an agent's request, so both derive the direction from
+    the access the same way. Raises :class:`FolderSyncError` for what
+    :meth:`FolderSyncManager.start` refuses.
+    """
+    return manager.start(
+        agent_id=agent_id,
+        raw_local_path=path,
+        direction=sync_direction_for(agent_id, path),
+        conflict=conflict,
+    )
+
+
 def _carry_access_to_any_sync(agent_id: str, path: str) -> None:
     """Re-assert a running sync's direction after its access changed.
 
@@ -1047,12 +1072,7 @@ def _carry_access_to_any_sync(agent_id: str, path: str) -> None:
     if manager is None or manager.desired_activity_for(agent_id, path) != FolderSyncActivity.ACTIVE:
         return
     try:
-        manager.start(
-            agent_id=agent_id,
-            raw_local_path=path,
-            direction=sync_direction_for(agent_id, path),
-            conflict=manager.desired_conflict_for(agent_id, path),
-        )
+        start_shared_path_sync(manager, agent_id, path, manager.desired_conflict_for(agent_id, path))
     except FolderSyncError as e:
         logger.warning("Changed the access on {} but could not carry it to its sync: {}", path, e)
 

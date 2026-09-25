@@ -744,6 +744,97 @@ def test_post_rejects_missing_or_invalid_access_in_file_sharing(
     assert expected_message_fragment in json.loads(body)["error"].lower()
 
 
+@pytest.mark.parametrize(
+    ("sync", "expected_sync"),
+    [
+        ({}, {"conflict": "NEWER"}),
+        ({"conflict": "WORKSPACE"}, {"conflict": "WORKSPACE"}),
+    ],
+)
+def test_post_carries_a_file_sharing_sync_request_without_touching_the_effect(
+    node_extension: tuple[str, Path, Path],
+    sync: dict[str, object],
+    expected_sync: dict[str, object],
+) -> None:
+    """A sync is carried on the request for the desktop, not granted by the gateway.
+
+    The stored payload names it, with the clash rule defaulted, and the effect
+    is exactly the one an otherwise identical request without a sync has.
+    """
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    target_path = "/home/example/project"
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "keep the project available offline",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "WRITE", "sync": sync},
+        },
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["payload"] == {"path": target_path, "access": "WRITE", "sync": expected_sync}
+    status, plain_body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "keep the project available offline",
+            "type": "file-sharing",
+            "payload": {"path": target_path, "access": "WRITE"},
+        },
+    )
+    assert status == 201, plain_body
+    assert parsed["effect"] == json.loads(plain_body)["effect"]
+
+
+def test_post_omits_sync_from_a_file_sharing_payload_that_asked_for_none(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """An absent or null ``sync`` reads as not asked for, and is not stored as anything."""
+    base_url, _latchkey_directory, _permissions_config_path = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/home/example/project", "access": "READ", "sync": None},
+        },
+    )
+    assert status == 201, body
+    assert "sync" not in json.loads(body)["payload"]
+
+
+@pytest.mark.parametrize(
+    ("sync", "expected_message_fragment"),
+    [
+        (True, "sync"),
+        ([], "sync"),
+        ({"conflict": "newer"}, "conflict"),
+        ({"conflict": "BOTH"}, "conflict"),
+        ({"direction": "BOTH"}, "direction"),
+    ],
+)
+def test_post_rejects_a_malformed_file_sharing_sync(
+    node_extension: tuple[str, Path, Path],
+    sync: object,
+    expected_message_fragment: str,
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "file-sharing",
+            "payload": {"path": "/tmp/ok", "access": "READ", "sync": sync},
+        },
+    )
+    assert status == 400, body
+    assert expected_message_fragment in json.loads(body)["error"].lower()
+
+
 def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     status, body = _post_json(

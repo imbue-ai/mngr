@@ -15,7 +15,7 @@
 // answer a question nobody had asked yet. The list they picked from is where
 // closing takes them (see returnToPanelAfterRequest).
 
-import type { UiPermissionGrantGroup } from "../generated/ui";
+import type { FolderSyncConflict, UiPermissionGrantGroup } from "../generated/ui";
 import { forgetWarmedRequestDetails, readWarmedRequestDetail, requestDetailUrl } from "./requestDetailPrefetch";
 
 export interface InboxCard {
@@ -92,6 +92,15 @@ export interface FileSharingPermissionDetail {
   access_human_label: string;
   allowed_roots: string[];
   home_dir: string;
+  /** Whether this build can keep a shared folder synced at all; the dialog
+   * offers no sync option otherwise. */
+  is_sync_supported: boolean;
+  /** Whether the agent asked for a synchronized copy alongside the access. */
+  is_sync_requested: boolean;
+  /** The clash rule the agent asked for (or the default). */
+  sync_conflict: FolderSyncConflict;
+  /** Why the requested path cannot be synced; empty when it can. */
+  sync_unavailable_reason: string;
 }
 
 export interface WorkspacePermissionDetail {
@@ -291,6 +300,9 @@ export class InboxModel {
   checkedPermissions = new Set<string>();
   selectedAccount = "";
   filePathValue = "";
+  /** Whether the file-sharing dialog will also keep the granted folder synced. */
+  isSharePathSynced = false;
+  sharePathSyncConflict: FolderSyncConflict = "NEWER";
   targetScope: "selected" | "all" = "selected";
   /** Whether the predefined dialog shows its full editor instead of the summary. */
   isPermissionEditorShown = false;
@@ -467,6 +479,8 @@ export class InboxModel {
     this.checkedPermissions = new Set();
     this.selectedAccount = "";
     this.filePathValue = "";
+    this.isSharePathSynced = false;
+    this.sharePathSyncConflict = "NEWER";
     this.targetScope = "selected";
     // Each request is reviewed from its summary; only this user's Adjust
     // click opens the editor, and never for the request that follows.
@@ -480,6 +494,12 @@ export class InboxModel {
     } else if (detail.kind === "file_sharing") {
       this.filePathValue = detail.file_path;
       this.checkedPermissions = new Set(["file-sharing"]);
+      // The switch starts where the agent asked, unless the folder cannot be
+      // synced at all -- a switch that is on and greyed out would promise a
+      // copy Approve then refuses to make.
+      this.isSharePathSynced =
+        detail.is_sync_supported && detail.is_sync_requested && detail.sync_unavailable_reason === "";
+      this.sharePathSyncConflict = detail.sync_conflict;
     } else if (detail.kind === "accounts") {
       this.checkedPermissions = new Set(["accounts"]);
     } else {
@@ -627,6 +647,8 @@ export class InboxModel {
         "file_path",
         expandSharePathHome(this.filePathValue.trim(), detail.home_dir),
       );
+      form.append("sync", this.isSharePathSynced ? "true" : "false");
+      form.append("sync_conflict", this.sharePathSyncConflict);
     } else if (detail.kind === "custom_service") {
       // The domain is fixed at request time, so the only thing a custom-service
       // approval can carry is the credentials the server asked for (a service

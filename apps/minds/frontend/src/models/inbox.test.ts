@@ -134,6 +134,10 @@ const FILE_DETAIL: FileSharingPermissionDetail = {
   access_human_label: "read-only",
   allowed_roots: ["/home/user", "/tmp/shared"],
   home_dir: "/home/user",
+  is_sync_supported: true,
+  is_sync_requested: false,
+  sync_conflict: "NEWER",
+  sync_unavailable_reason: "",
 };
 
 describe("share path helpers", () => {
@@ -382,6 +386,49 @@ describe("InboxModel", () => {
     model.filePathValue = "~/ok.txt";
     expect(model.isApproveAllowed()).toBe(true);
     expect(model.isSharePathHintShown()).toBe(false);
+  });
+
+  it("starts the sync switch where the agent asked, and submits the choice with the path", async () => {
+    let grantBody: FormData | null = null;
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({ detail: { ...FILE_DETAIL, is_sync_requested: true, sync_conflict: "WORKSPACE" } }),
+      "POST /requests/evt-a/grant": () => {
+        grantBody = calls[calls.length - 1].init?.body as FormData;
+        return jsonResponse({ outcome: "GRANTED", message: "done" });
+      },
+    });
+    await model.select("evt-a");
+
+    expect(model.isSharePathSynced).toBe(true);
+    expect(model.sharePathSyncConflict).toBe("WORKSPACE");
+    model.sharePathSyncConflict = "THIS_COMPUTER";
+    await model.approve();
+
+    const form = grantBody as FormData | null;
+    expect(form).not.toBeNull();
+    expect(form?.get("file_path")).toBe("/home/user/doc.txt");
+    expect(form?.get("sync")).toBe("true");
+    expect(form?.get("sync_conflict")).toBe("THIS_COMPUTER");
+  });
+
+  it("leaves the sync switch off when the agent did not ask, or the folder cannot be synced", async () => {
+    const notAsked = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: FILE_DETAIL }),
+    });
+    await notAsked.select("evt-a");
+    expect(notAsked.isSharePathSynced).toBe(false);
+
+    // A switch that is on and greyed out would promise a copy Approve then
+    // refuses to make.
+    const unsyncable = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () =>
+        jsonResponse({
+          detail: { ...FILE_DETAIL, is_sync_requested: true, sync_unavailable_reason: "Only folders can be synced." },
+        }),
+    });
+    await unsyncable.select("evt-a");
+    expect(unsyncable.isSharePathSynced).toBe(false);
   });
 
   it("submits the predefined grant form and closes, leaving the rest alone", async () => {
