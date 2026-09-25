@@ -41,7 +41,10 @@ dependencies = [
     "playwright>=1.40.0",
     "psycopg2-binary>=2.9",
     "pydantic>=2.0",
-    "spectree>=1.4",
+    # <3: spectree 3.0.0 added a fifth positional argument to the `before`
+    # hook, which it calls on every validated request, so a resolve that picks
+    # it up turns every /api/v1 endpoint into a 500.
+    "spectree>=1.4,<3",
     "tenacity",
     "tomlkit>=0.12.0",
     "tzlocal>=5",
