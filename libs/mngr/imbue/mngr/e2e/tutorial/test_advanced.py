@@ -28,7 +28,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 # invoked" check.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_advanced_fan_out_create(e2e: E2eSession) -> None:
     """Tutorial block:
         # fan-out pattern: create many agents from a list of tasks
@@ -114,7 +113,6 @@ def test_advanced_watch_dashboard_running(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(120)
 def test_advanced_observe_stream(e2e: E2eSession) -> None:
     """Tutorial block:
         # or get a JSONL stream of host/agent discovery events for programmatic consumers
@@ -176,7 +174,6 @@ def test_advanced_observe_stream(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_advanced_collect_results_loop(e2e: E2eSession) -> None:
     """Tutorial block:
         # collect results from all agents
@@ -229,7 +226,6 @@ def test_advanced_collect_results_loop(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
     """Tutorial block:
         # use --reuse to make create idempotent. This is handy, esp with remote scripts, so that you can detach, then hit up and enter
@@ -296,7 +292,6 @@ def test_advanced_create_reuse_modal(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
     """Tutorial block:
         # use watch with list to keep a live dashboard in a terminal (on macOS: brew install watch)
@@ -328,7 +323,6 @@ def test_advanced_watch_list_live_dashboard(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
     """Tutorial block:
         # use exec to quickly inspect an agent's environment
@@ -369,7 +363,6 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_tips_exec_filtered_hosts(e2e: E2eSession) -> None:
     """Tutorial block:
         # or use exec to see something across a bunch of hosts by combining with mngr list:
@@ -501,7 +494,6 @@ def _seed_claude_transcript(host_dir: Path, events: list[dict[str, Any]]) -> Non
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_tips_transcript_tail_agent(e2e: E2eSession, temp_host_dir: Path) -> None:
     """Tutorial block:
         # check the transcript to see what an agent has been up to

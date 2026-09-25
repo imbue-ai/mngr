@@ -71,7 +71,6 @@ def _exec_until_reachable(
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
 def test_create_provider_modal(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also launch your default agent remotely in Modal:
@@ -173,7 +172,6 @@ def test_create_modal_no_connect_message(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
 def test_create_modal_edit_message(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also edit the message *while the agent is starting up*, which is very handy for making it "feel" instant:
@@ -223,7 +221,6 @@ def test_create_modal_edit_message(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 # Bumped past the usual 120 because this test also does a `mngr exec` round-trip
 # (on top of remote host creation) to verify the rsync transfer actually landed.
-@pytest.mark.timeout(180)
 def test_create_modal_rsync(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can use rsync to transfer extra data as well, beyond just the git data:
@@ -271,7 +268,6 @@ def test_create_modal_rsync(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
     """Tutorial block:
         # one of the coolest features of mngr is the ability to create agents on remote hosts just as easily as you can create them locally:
@@ -312,7 +308,6 @@ def test_create_modal_passthrough_agent_args(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
     """Tutorial block:
         # running agents remotely is really cool because you can create an unlimited number of them, but it comes with some downsides
@@ -351,7 +346,6 @@ def test_create_modal_idle_timeout(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
 def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
     """Tutorial block:
         # You can customize what "inactivity" means by using the --idle-mode flag:
@@ -404,7 +398,6 @@ def test_create_modal_idle_mode_ssh(e2e: E2eSession) -> None:
 # host (no .PROVIDER suffix) fails during host lookup before any Modal API call,
 # so the modal resource guard would fire ("marked modal but never invoked modal").
 @pytest.mark.release
-@pytest.mark.timeout(120)
 def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can specify which existing host to run on using the address syntax (eg, if you have multiple Modal hosts or SSH servers):
@@ -437,7 +430,6 @@ def test_create_address_syntax_existing_host(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_create_modal_build_args(e2e: E2eSession) -> None:
     """Tutorial block:
         # generally though, you'll want to construct a new Modal host for each agent.
@@ -493,7 +485,6 @@ def test_create_modal_build_args(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
     """Tutorial block:
         # the most important build args for Modal are probably "--file" and "--context-dir",
@@ -549,7 +540,6 @@ def test_create_modal_dockerfile_and_context(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_named_host_new_host(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can name the host using the address syntax:
@@ -589,7 +579,6 @@ def test_create_named_host_new_host(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_volume(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can mount persistent Modal volumes in order to share data between hosts, or have it be available even when they are offline (or after they are destroyed):
@@ -628,7 +617,6 @@ def test_create_modal_volume(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 # Bumped past the usual 120 because, on top of remote host creation, this test
 # also does a `mngr list` and a `mngr exec` round-trip to verify the work dir.
-@pytest.mark.timeout(180)
 def test_create_modal_target_path(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can specify the target path where the agent's work directory will be mounted:
@@ -679,7 +667,6 @@ def test_create_modal_target_path(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can upload files and run custom commands during host provisioning:
@@ -746,7 +733,6 @@ def test_create_modal_upload_and_extra_provision_command(e2e: E2eSession) -> Non
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_no_start_on_boot(e2e: E2eSession) -> None:
     """Tutorial block:
         # by default, agents are started when a host is booted. This can be disabled:
@@ -905,7 +891,6 @@ def test_create_modal_reuse(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_basic_recap(e2e: E2eSession) -> None:
     """Tutorial block:
         # basic Modal agent (also covered in the CREATING AGENTS REMOTELY section above)
@@ -957,7 +942,6 @@ def test_create_modal_basic_recap(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
     """Tutorial block:
         # specify CPU, memory, and GPU resources
@@ -1004,7 +988,6 @@ def test_create_modal_cpu_memory_gpu(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
     """Tutorial block:
         # use a custom Docker image as the base
@@ -1035,7 +1018,6 @@ def test_create_modal_custom_image_base(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
     """Tutorial block:
         # use a custom Dockerfile
@@ -1081,7 +1063,6 @@ def test_create_modal_custom_dockerfile_only(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_volume_simple(e2e: E2eSession) -> None:
     """Tutorial block:
         # mount a persistent volume for data that survives host destruction
@@ -1122,7 +1103,6 @@ def test_create_modal_volume_simple(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
     """Tutorial block:
         # set an idle timeout to avoid runaway costs
@@ -1154,7 +1134,6 @@ def test_create_modal_idle_timeout_120(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
     """Tutorial block:
         # create a snapshot for checkpointing (useful before risky changes)
@@ -1197,7 +1176,6 @@ def test_snapshot_create_checkpoint(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_list_provider_modal(e2e: E2eSession) -> None:
     """Tutorial block:
         # list all Modal agents
@@ -1239,7 +1217,6 @@ def test_list_provider_modal(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_destroy_all_modal_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy all Modal agents (be careful!)  Useful for cleaning up while prototyping
@@ -1338,7 +1315,6 @@ def test_create_modal_idle_timeout_60(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
     """Tutorial block:
         # control what counts as "activity" with --idle-mode:
@@ -1399,7 +1375,6 @@ def test_create_modal_idle_mode_ssh_timeout_300(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_idle_mode_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # for long-running scripts, "run" mode stops the host when the script finishes
@@ -1532,10 +1507,6 @@ def test_create_modal_multiple_agents_one_host(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-# Bumped past the usual 120: on top of remote host creation, the verification
-# exec is retried until the freshly-created host becomes reachable (see
-# _exec_until_reachable), which can add a few round-trips in a slow environment.
-@pytest.mark.timeout(300)
 def test_create_modal_upload_only(e2e: E2eSession) -> None:
     """Tutorial block:
         # upload a file to the agent's host during creation
@@ -1584,7 +1555,6 @@ def test_create_modal_upload_only(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a setup command during host provisioning
@@ -1626,7 +1596,6 @@ def test_create_modal_provision_pip_install(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command as root during provisioning (if your default user is not root, assumes passwordless sudo for that user)
@@ -1673,7 +1642,6 @@ def test_create_modal_provision_sudo_apt(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
     r"""Tutorial block:
         # append content to a file on the host using a provision command
@@ -1715,7 +1683,6 @@ def test_create_modal_provision_append_file(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_create_modal_combined_setup_steps(e2e: E2eSession) -> None:
     """Tutorial block:
         # combine multiple setup steps (--extra-provision-command is repeatable and runs in order)

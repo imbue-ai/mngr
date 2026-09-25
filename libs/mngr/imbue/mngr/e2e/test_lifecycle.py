@@ -8,7 +8,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_full_lifecycle(e2e: E2eSession) -> None:
     """Verify the full agent lifecycle: create, exec, stop, start, exec-after-restart, destroy.
 

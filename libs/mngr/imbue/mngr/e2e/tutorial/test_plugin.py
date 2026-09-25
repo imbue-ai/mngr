@@ -27,10 +27,6 @@ def _list_plugins(e2e: E2eSession, command: str) -> list[dict[str, str]]:
 
 
 @pytest.mark.release
-# Every mngr invocation pays a ~10s cold-start cost (importing and registering
-# all plugins), which alone exceeds the 10s default per-test timeout, so this
-# e2e test needs a higher budget like the other subprocess-driven e2e tests.
-@pytest.mark.timeout(60)
 def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
     """Tutorial block:
         # list all available plugins
@@ -53,12 +49,6 @@ def test_plugin_list_shows_installed(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# This test issues five separate mngr subprocess invocations (two --active
-# listings, a disable, and two more listings), and every invocation pays a
-# ~20s cold-start cost (importing and registering all plugins). That is well
-# over the 60s budget the other single-invocation plugin tests use, so give
-# this multi-invocation test a larger timeout.
-@pytest.mark.timeout(180)
 def test_plugin_list_active(e2e: E2eSession) -> None:
     """Tutorial block:
         # list only active plugins
@@ -93,10 +83,6 @@ def test_plugin_list_active(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Every mngr invocation pays a ~10s cold-start cost (importing and registering
-# all plugins), which alone exceeds the 10s default per-test timeout, so this
-# e2e test needs a higher budget like the other subprocess-driven e2e tests.
-@pytest.mark.timeout(60)
 def test_plugin_add_by_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # add a plugin by name (from the registry)
@@ -119,10 +105,6 @@ def test_plugin_add_by_name(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Every mngr invocation pays a ~10s cold-start cost (importing and registering
-# all plugins), which alone exceeds the 10s default per-test timeout, so this
-# e2e test needs a higher budget like the other subprocess-driven e2e tests.
-@pytest.mark.timeout(60)
 def test_plugin_add_by_path(e2e: E2eSession) -> None:
     """Tutorial block:
         # add a plugin from a local path
@@ -145,11 +127,6 @@ def test_plugin_add_by_path(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Every mngr invocation pays a ~10s cold-start cost (importing and registering
-# all plugins), and this command additionally attempts a git clone, so it
-# needs a higher budget than the 10s default per-test timeout, like the other
-# subprocess-driven e2e tests.
-@pytest.mark.timeout(60)
 def test_plugin_add_by_git(e2e: E2eSession) -> None:
     """Tutorial block:
         # add a plugin from a git repository
@@ -183,10 +160,6 @@ def test_plugin_add_by_git(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Every mngr invocation pays a ~10s cold-start cost (importing and registering
-# all plugins), which alone exceeds the 10s default per-test timeout, so this
-# e2e test needs a higher budget like the other subprocess-driven e2e tests.
-@pytest.mark.timeout(60)
 def test_plugin_remove(e2e: E2eSession) -> None:
     """Tutorial block:
         # remove a plugin
@@ -259,7 +232,6 @@ def test_plugin_enable_project_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_plugin_disable_user_scope(e2e: E2eSession) -> None:
     """Tutorial block:
         # disable a plugin at the user scope
@@ -291,10 +263,6 @@ def test_plugin_disable_user_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Every mngr invocation pays a ~10s cold-start cost (importing and registering
-# all plugins), which alone exceeds the 10s default per-test timeout, so this
-# e2e test needs a higher budget like the other subprocess-driven e2e tests.
-@pytest.mark.timeout(60)
 def test_plugin_list_fields(e2e: E2eSession) -> None:
     """Tutorial block:
         # list plugins with specific fields

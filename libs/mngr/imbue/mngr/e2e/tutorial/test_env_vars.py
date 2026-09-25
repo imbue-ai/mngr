@@ -10,9 +10,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-# The create plus the follow-up `mngr exec` exceed the default 10s per-test
-# timeout, so override it (mirrors test_create_with_pass_env).
-@pytest.mark.timeout(180)
 def test_create_with_env_vars(e2e: E2eSession) -> None:
     """Tutorial block:
         # set environment variables for the agent at creation time
@@ -44,11 +41,6 @@ def test_create_with_env_vars(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# Creating a (local) command agent -- agent-state setup, git worktree, tmux
-# and command-agent startup -- takes longer than the default 10s per-test
-# timeout, so override it (mirrors test_control_mngr_via_env, another
-# local-provider create).
-@pytest.mark.timeout(120)
 def test_create_with_env_file(e2e: E2eSession) -> None:
     """Tutorial block:
         # load environment variables from a file (recommended for sensitive values, eg, secrets/api keys/tokens/etc)
@@ -85,10 +77,6 @@ def test_create_with_env_file(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# The rejected create plus the follow-up `mngr list` each pay mngr's startup
-# cost and together exceed the default 10s per-test timeout, so override it
-# (mirrors test_control_mngr_via_env, which also does create + list).
-@pytest.mark.timeout(120)
 def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
     """Tutorial block:
         # load environment variables from a file (recommended for sensitive values, eg, secrets/api keys/tokens/etc)
@@ -119,7 +107,6 @@ def test_create_with_missing_env_file_is_rejected(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_create_with_pass_env(e2e: E2eSession) -> None:
     """Tutorial block:
         # forward an environment variable from your current shell
@@ -154,7 +141,6 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_create_with_pass_env_skips_unset_var(e2e: E2eSession) -> None:
     """Tutorial block:
         # forward an environment variable from your current shell
@@ -194,7 +180,6 @@ def test_create_with_pass_env_skips_unset_var(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_create_with_pass_host_env(e2e: E2eSession) -> None:
     """Tutorial block:
         # set host-level environment variables (for all agents on the host, not just that particular agent process)
@@ -255,9 +240,6 @@ def test_create_with_pass_host_env(e2e: E2eSession) -> None:
 # superfluous.
 @pytest.mark.release
 @pytest.mark.tmux
-# The create plus the follow-up `mngr list` exceed the default 10s per-test
-# timeout, so override it (mirrors test_create_with_pass_host_env).
-@pytest.mark.timeout(120)
 def test_control_mngr_via_env(e2e: E2eSession) -> None:
     """Tutorial block:
         # control mngr itself via environment variables. All config options can be set this way, use double-underscore ("__")

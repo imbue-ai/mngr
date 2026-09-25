@@ -39,9 +39,11 @@ pytest testing flags shared between discovery and individual test runs. For exam
 mngr tmr tests/e2e -- -m release
 
 This discovers tests with `pytest --collect-only tests/e2e -m release` and runs
-each test with `pytest --timeout=120 tests/e2e/test_foo.py::test_bar -m release`.
-The explicit timeout is the same budget the reducer verifies at, so agents do
-not have to add per-test timeout markers (a test needing longer is escalated).
+each test with `pytest --timeout=300 --no-cov tests/e2e/test_foo.py::test_bar -m release`.
+The explicit timeout is the release class budget and the same budget the reducer
+verifies at, so agents do not have to add per-test timeout markers (a test
+needing longer is escalated); --no-cov keeps the suite-wide coverage gate from
+failing a single passing test.
 
 Use --name to give a run its own variant prefix (agent/branch/host names), so
 distinct suites stay separable and reviewable on their own. For example, run the

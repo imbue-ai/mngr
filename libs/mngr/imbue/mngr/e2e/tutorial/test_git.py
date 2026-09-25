@@ -59,7 +59,6 @@ def test_list_fields_original_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_list_fields_original_branch_with_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can see the branch mngr created for each agent as part of the details in "mngr list" as well (field name: "initial_branch")
@@ -137,7 +136,6 @@ def test_exec_git_log(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_message_commit_request(e2e: E2eSession) -> None:
     """Tutorial block:
         # ask the agent to commit its work
@@ -207,7 +205,6 @@ def test_exec_force_commit(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_all_git_status(e2e: E2eSession) -> None:
     """Tutorial block:
         # check all agents' git status at once
@@ -238,7 +235,6 @@ def test_exec_all_git_status(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_git_merge_agent_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # merge the agent's work like normal if the agent is local:
@@ -271,7 +267,6 @@ def test_git_merge_agent_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_git_push_then_merge(e2e: E2eSession) -> None:
     """Tutorial block:
         # and if remote, force the agent to push, then fetch and merge:

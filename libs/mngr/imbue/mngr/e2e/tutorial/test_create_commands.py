@@ -15,10 +15,6 @@ from imbue.skitwright.expect import expect
 # out to rsync (rsync is only used for non-git projects; see TransferMode in
 # primitives.py). The resource guard flags a declared-but-never-invoked rsync
 # mark, so the mark would fail the test even though the body passes.
-# Override the default 10s function timeout: a real create (tmux session +
-# asciinema connect, plus a one-time ttyd install on hosts that lack it)
-# followed by `mngr exec` and `mngr list` routinely exceeds 10s.
-@pytest.mark.timeout(120)
 def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # to run an arbitrary shell command, use the built-in `command` agent type
@@ -64,7 +60,6 @@ def test_create_command_agent_runs_post_dash_command_in_agent(e2e: E2eSession) -
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
 def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
     """Tutorial block:
         # this enables some pretty interesting use cases, like running servers or other programs (besides AI agents)
@@ -129,10 +124,6 @@ def test_create_with_idle_mode_and_timeout(e2e: E2eSession) -> None:
 # are no uncommitted/untracked files to copy, `_transfer_extra_files` finds
 # nothing to transfer, and rsync is never invoked -- the guard would flag the
 # mark as never-invoked.
-# Override the default 10s function timeout: a real create (tmux session +
-# asciinema connect, plus a one-time ttyd install on hosts that lack it)
-# followed by `mngr list` routinely exceeds 10s.
-@pytest.mark.timeout(120)
 # Flaky: collateral damage from a leaked `mngr observe` process that the
 # system_interface's AgentManager spawns and doesn't always clean up (lives
 # in default-workspace-template/system/apps/system_interface). session_cleanup
@@ -201,10 +192,6 @@ def test_create_with_extra_tmux_windows(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# Override the default 10s function timeout: a real create (tmux session +
-# asciinema connect, plus a one-time ttyd install on hosts that lack it)
-# followed by `mngr list` routinely exceeds 10s.
-@pytest.mark.timeout(120)
 def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
     """Tutorial block:
         # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
@@ -240,7 +227,6 @@ def test_create_with_no_ensure_clean(e2e: E2eSession) -> None:
 # @pytest.mark.tmux nor @pytest.mark.rsync (the resource guard would flag them as
 # never-invoked).
 @pytest.mark.release
-@pytest.mark.timeout(120)
 def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
     """Tutorial block:
         # by default, mngr aborts the create command if the working tree has uncommitted changes. You can avoid this by doing:
@@ -291,7 +277,6 @@ def test_create_aborts_on_dirty_tree_by_default(e2e: E2eSession) -> None:
 # rsync mark would fail the resource guard's never-invoked check.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_connect_command(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can use a custom connect command instead of the default (eg, useful for, say, connecting in a new iterm window instead of the current one)
@@ -332,11 +317,6 @@ def test_create_with_connect_command(e2e: E2eSession) -> None:
 # fail the resource guard's NEVER_INVOKED check.
 # No @pytest.mark.modal either: the agent is local and the listing below is scoped
 # to `--provider local`, so nothing in the test body ever contacts Modal.
-# The --message path starts the agent, waits for its ready signal, and only
-# then sends the message (see api/create.py). That ready-signal dance makes
-# create slower than the sibling tests, so the default 10s function timeout is
-# too tight; give it the same headroom as test_create_with_idle_mode_and_timeout.
-@pytest.mark.timeout(120)
 def test_create_with_message(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can send a message when starting the agent (great for scripting):

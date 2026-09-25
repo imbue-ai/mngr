@@ -10,12 +10,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-# Creating a command agent plus the subsequent `mngr exec` call (which enumerates
-# configured providers to locate the agent) and agent startup can exceed the
-# default 10s per-test timeout when a remote provider is unreachable and the
-# client waits on a connection. Allow extra headroom so the verification below is
-# robust across environments.
-@pytest.mark.timeout(120)
 def test_create_command_python_http(e2e: E2eSession) -> None:
     """Tutorial block:
         # mngr supports multiple agent types out of the box (claude, codex, etc.)
@@ -65,11 +59,6 @@ def test_create_command_python_http(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# `mngr list` enumerates every configured provider; that discovery can exceed
-# the default 10s per-test timeout when a remote provider (e.g. Docker) is
-# unreachable and the client waits on a connection. Allow extra headroom so the
-# verification below is robust across environments.
-@pytest.mark.timeout(120)
 def test_create_command_custom_script(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a custom script as an agent
@@ -121,12 +110,6 @@ def test_create_command_custom_script(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Each `mngr plugin list` invocation performs full plugin discovery (importing
-# every installed plugin module), which takes several seconds on its own. This
-# test runs the command twice (human table + JSON), so the combined work exceeds
-# the default 10s per-test timeout. Allow extra headroom so the verification
-# below is robust across environments.
-@pytest.mark.timeout(120)
 def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
     """Tutorial block:
         # agent types are provided by plugins -- see MANAGING PLUGINS above
@@ -167,13 +150,10 @@ def test_plugin_list_active_to_see_types(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, worktree checkout, ttyd install attempt) can
-# exceed the default 10s per-test timeout, so allow extra headroom. Verification
-# scopes `mngr list` to the local provider (`--provider local`), so this never
-# queries Modal. The local provider sets up the agent workspace via a git
-# worktree rather than rsync, so this test is intentionally not marked
+# Verification scopes `mngr list` to the local provider (`--provider local`), so
+# this never queries Modal. The local provider sets up the agent workspace via a
+# git worktree rather than rsync, so this test is intentionally not marked
 # @pytest.mark.rsync.
-@pytest.mark.timeout(120)
 # Flaky: `mngr create` always launches the agent (there is no create flag to
 # create-without-starting; --no-auto-start only governs starting offline hosts),
 # so the codex agent's command runs even though no codex binary is present. It
@@ -211,7 +191,7 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
     # created agent must actually be of type codex, not merely exit 0.
     # Longer timeout than the default: computing the just-replaced codex agent's
     # live state is occasionally slow (see the @pytest.mark.flaky note above). The
-    # test-level @pytest.mark.timeout(120) remains the backstop against a true hang.
+    # release class budget remains the backstop against a true hang.
     list_result = e2e.run(
         "mngr list --provider local --format json",
         comment="verify the agent was created with the codex type",
@@ -226,10 +206,8 @@ def test_create_codex_positional(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, ttyd install attempt) can exceed the default 10s
-# per-test timeout, so allow extra headroom. Verification scopes `mngr list` to
-# the local provider (`--provider local`), so this never queries Modal.
-@pytest.mark.timeout(120)
+# Verification scopes `mngr list` to the local provider (`--provider local`), so
+# this never queries Modal.
 def test_create_codex_explicit_type(e2e: E2eSession) -> None:
     """Tutorial block:
         # or by specifying it explicitly
@@ -283,12 +261,9 @@ def test_create_codex_explicit_type(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, ttyd install attempt, etc.) can exceed the
-# default 10s per-test timeout, so allow extra headroom. This test stays on the
-# local provider throughout (the create defaults to local and the verification
-# below scopes `mngr list` to --provider local), so it is intentionally not
-# marked @pytest.mark.modal.
-@pytest.mark.timeout(120)
+# This test stays on the local provider throughout (the create defaults to local
+# and the verification below scopes `mngr list` to --provider local), so it is
+# intentionally not marked @pytest.mark.modal.
 def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also create your own custom agent types by defining them in a config:

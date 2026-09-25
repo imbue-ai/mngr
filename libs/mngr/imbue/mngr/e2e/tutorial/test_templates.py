@@ -33,7 +33,6 @@ def _write_with_tests_template(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
     """Tutorial block:
         # templates are defined in your config (user, project, or local scope).
@@ -90,7 +89,6 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_template_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -129,7 +127,6 @@ def test_create_template_short_form(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_stack_templates(e2e: E2eSession) -> None:
     """Tutorial block:
         # stack multiple templates (later templates override earlier ones)
@@ -170,7 +167,6 @@ def test_create_stack_templates(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_create_stack_templates_with_unknown_template_fails(e2e: E2eSession) -> None:
     """Tutorial block:
         # stack multiple templates (later templates override earlier ones)

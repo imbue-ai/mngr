@@ -84,7 +84,6 @@ def test_multiple_agents_coexist(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_list_filter_by_state(e2e: E2eSession) -> None:
     """Verify that `mngr list` state filtering selects agents by actual state.
 

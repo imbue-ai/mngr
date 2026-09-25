@@ -38,10 +38,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 # mark was a leftover from when this test connected to a remote modal agent.
 @pytest.mark.release
 @pytest.mark.tmux
-# Creating the agent, attaching a real tmux client, and detaching it takes
-# longer than the default 10s per-test timeout, so give the interactive flow
-# room. The helper itself caps each wait at 30s.
-@pytest.mark.timeout(120)
 def test_connect_by_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # connect to a running agent by name
@@ -70,9 +66,6 @@ def test_connect_by_name(e2e: E2eSession) -> None:
 # the test for carrying a mark it never satisfies.
 @pytest.mark.release
 @pytest.mark.tmux
-# See test_connect_by_name: the interactive attach/detach flow exceeds the
-# default 10s per-test timeout.
-@pytest.mark.timeout(120)
 def test_connect_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -88,12 +81,6 @@ def test_connect_short_form(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# An agent id carries no host hint, so it cannot use the discovery event-stream
-# optimization: resolution falls back to a full scan across every configured
-# provider (Modal app-context setup, the imbue_cloud VPS provider, etc.), which
-# takes longer than the default 10s per-test timeout even though the lookup
-# ultimately fails fast with "not found".
-@pytest.mark.timeout(120)
 def test_connect_by_agent_id_fictional(e2e: E2eSession) -> None:
     """Tutorial block:
         # sometimes names can be ambiguous (e.g. if you made two agents with the same name on different hosts), so you can always
@@ -128,10 +115,6 @@ def test_connect_by_agent_id_fictional(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# The full-scan discovery this command triggers (no provider in the spec) plus
-# mngr's subprocess startup cost exceed the default 10s per-test timeout, so give
-# the command room -- matching the other connect tests in this file.
-@pytest.mark.timeout(120)
 def test_connect_explicit_host(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can use the explicit host and agent:
@@ -199,9 +182,6 @@ def test_connect_explicit_host_and_provider(e2e: E2eSession) -> None:
 # invoked -- and the resource guard fails a declared-but-unused rsync mark.
 @pytest.mark.release
 @pytest.mark.tmux
-# See test_connect_by_name: the interactive attach/detach flow exceeds the
-# default 10s per-test timeout.
-@pytest.mark.timeout(120)
 def test_connect_with_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # the default behavior is to start the agent if it's stopped (you can be explicit about that too):
@@ -229,9 +209,6 @@ def test_connect_with_start(e2e: E2eSession) -> None:
 # guard would flag an rsync mark as superfluous ("marked but never invoked").
 @pytest.mark.release
 @pytest.mark.tmux
-# See test_connect_by_name: the interactive attach/detach flow exceeds the
-# default 10s per-test timeout.
-@pytest.mark.timeout(120)
 def test_connect_with_start_restarts_stopped_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # the default behavior is to start the agent if it's stopped (you can be explicit about that too):
@@ -274,7 +251,6 @@ def test_connect_with_start_restarts_stopped_agent(e2e: E2eSession) -> None:
 # resource guard rejects a carried-but-unused mark, so it must not be declared.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_connect_no_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can disable auto-starting (fails if agent is stopped)
@@ -301,7 +277,6 @@ def test_connect_no_start(e2e: E2eSession) -> None:
 # rsync is never invoked and the resource guard would fail a stale mark.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_connect_no_start_fails_when_stopped(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can disable auto-starting (fails if agent is stopped)

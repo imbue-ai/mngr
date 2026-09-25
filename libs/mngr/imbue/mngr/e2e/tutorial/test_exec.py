@@ -22,7 +22,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_basic(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command on a specific agent's host
@@ -53,7 +52,6 @@ def test_exec_basic(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -83,7 +81,6 @@ def test_exec_short_form(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_all_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command on all agents
@@ -105,7 +102,6 @@ def test_exec_all_agents(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_as_other_user(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command as a specific user as you normally would on that host (ex: sudo -u other-user)
@@ -133,7 +129,6 @@ def test_exec_as_other_user(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_exec_cwd(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command in a specific working directory
@@ -160,7 +155,6 @@ def test_exec_cwd(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a command in a specific working directory
@@ -188,7 +182,6 @@ def test_exec_cwd_nonexistent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_timeout(e2e: E2eSession) -> None:
     """Tutorial block:
         # set a timeout (in seconds) for the command
@@ -214,7 +207,6 @@ def test_exec_timeout(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_timeout_enforced(e2e: E2eSession) -> None:
     """Tutorial block:
         # set a timeout (in seconds) for the command
@@ -243,7 +235,6 @@ def test_exec_timeout_enforced(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_exec_with_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # by default, start the agent's host if it's stopped, run the command, then leave it running
@@ -269,7 +260,6 @@ def test_exec_with_start(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_exec_no_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # and you can disable auto-starting as well (fails if agent is stopped):

@@ -19,7 +19,6 @@ _REMOTE_TIMEOUT = 120.0
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_gc_default(e2e: E2eSession) -> None:
     """Tutorial block:
         # garbage collect all unused resources
@@ -67,7 +66,6 @@ def test_gc_default(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_gc_dry_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # if you want to see what would be cleaned before actually running garbage collection
@@ -113,7 +111,6 @@ def test_gc_dry_run(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_gc_provider_modal(e2e: E2eSession) -> None:
     """Tutorial block:
         # garbage collect for a specific provider only (repeatable if you want multiple providers)
@@ -163,7 +160,6 @@ def test_gc_provider_modal(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_gc_background_watch(e2e: E2eSession) -> None:
     """Tutorial block:
         # if you wanted, you could disable automatic garbage collection on destroy by setting the appropriate setting:

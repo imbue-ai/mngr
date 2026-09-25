@@ -24,7 +24,6 @@ def _create_sleep_agents(e2e: E2eSession, names_and_sleeps: list[tuple[str, int]
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_message_one_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to a specific agent
@@ -48,11 +47,6 @@ def test_message_one_agent(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# A single `mngr message` invocation still pays the full CLI startup cost, which
-# can exceed the default 10s func-only timeout on slower filesystems. Give it
-# headroom (the no-op path does no network/tmux/rsync work, so it is otherwise
-# fast).
-@pytest.mark.timeout(60)
 def test_message_nonexistent_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to a specific agent
@@ -74,7 +68,6 @@ def test_message_nonexistent_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_message_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -99,7 +92,6 @@ def test_message_short_form(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_message_multiple_agents_by_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # send the same message to multiple agents by name
@@ -128,7 +120,6 @@ def test_message_multiple_agents_by_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_message_all(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to every agent by piping their ids from `mngr list`
@@ -156,12 +147,6 @@ def test_message_all(e2e: E2eSession) -> None:
 # pure no-op: it never attaches a tmux session, contacts Modal, or rsyncs. The
 # rsync/tmux/modal resource marks would therefore trip the resource guard
 # (mark present but resource never invoked), so they are intentionally omitted.
-#
-# The command chains two mngr CLI invocations (`mngr list` piped into `mngr
-# msg`). Each invocation pays the full CLI startup cost, so the combined
-# wall-clock time can exceed the default 10s func-only timeout on slower
-# filesystems. Give the pipeline generous headroom.
-@pytest.mark.timeout(90)
 def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to agents matching a filter
@@ -208,7 +193,6 @@ def test_message_filtered_via_stdin(e2e: E2eSession) -> None:
 # to their sessions) but NOT rsync: messaging local agents never syncs files to
 # a remote host, so rsync is never invoked and the resource guard would flag a
 # superfluous rsync mark.
-@pytest.mark.timeout(180)
 def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # send a message to agents matching a filter
@@ -261,7 +245,6 @@ def test_message_filtered_via_stdin_delivers_to_matching_agents(e2e: E2eSession)
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_message_on_error_continue(e2e: E2eSession) -> None:
     """Tutorial block:
         # control error handling when messaging multiple agents

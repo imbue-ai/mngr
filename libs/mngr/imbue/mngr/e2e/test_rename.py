@@ -14,7 +14,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_create_and_rename_agent(e2e: E2eSession) -> None:
     """``mngr rename`` relabels an agent in place without disrupting it.
 
@@ -63,7 +62,6 @@ def test_create_and_rename_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_rename_dry_run_does_not_rename(e2e: E2eSession) -> None:
     """``mngr rename --dry-run`` previews the rename without applying it."""
     expect(

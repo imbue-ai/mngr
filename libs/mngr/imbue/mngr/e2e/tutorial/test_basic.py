@@ -36,12 +36,6 @@ def test_help_succeeds(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# No host/agent work happens (the unknown command is rejected at Click's
-# argument-parsing stage), but starting the `mngr` subprocess still loads every
-# plugin/backend/provider at import time, which routinely exceeds the global 10s
-# pytest timeout on slower hosts. Raise it above the `run` subprocess timeout
-# below so the command's own timeout governs (mirrors the other e2e tests here).
-@pytest.mark.timeout(90)
 def test_unknown_command_fails(e2e: E2eSession) -> None:
     """Tutorial block:
         # or see the other commands--list, destroy, message, connect, git, clone, and more!  These other commands are covered in their own sections below.
@@ -69,11 +63,6 @@ def test_unknown_command_fails(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Rendering `mngr create --help` imports every provider backend (to build the
-# per-provider build/start argument section), so the mngr subprocess startup
-# alone routinely exceeds the global 10s pytest timeout. Raise it, mirroring the
-# other e2e create tests.
-@pytest.mark.timeout(60)
 def test_create_help_succeeds(e2e: E2eSession) -> None:
     """Tutorial block:
         # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -103,11 +92,6 @@ def test_create_help_succeeds(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# The unknown option is rejected at argument-parsing time, so no host/agent work
-# happens (hence no tmux/rsync markers) -- but the `mngr create` subprocess's cold
-# startup alone routinely exceeds the global 10s pytest timeout, so raise it like
-# the other create tests above.
-@pytest.mark.timeout(120)
 def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
     """Tutorial block:
         # tons more arguments for anything you could want! As always, you can learn more via --help
@@ -133,7 +117,6 @@ def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can control output format for scripting:
@@ -174,7 +157,6 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can control output format for scripting:
@@ -217,7 +199,6 @@ def test_create_quiet_suppresses_output(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
     """Tutorial block:
         # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.
@@ -266,9 +247,6 @@ def test_create_headless(e2e: E2eSession) -> None:
 # a local create provisions its workspace with a git worktree, not rsync (rsync
 # is only used to sync files to remote hosts). Marking it @modal or @rsync would
 # fail the NEVER_INVOKED resource-guard check once the test passes.
-# The local `mngr create` routinely exceeds the global 10s pytest timeout, so
-# raise it (mirrors the other e2e create tests, e.g. test_create_commands.py).
-@pytest.mark.timeout(180)
 def test_create_with_label(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can add labels to organize your agents and tags for host metadata:
@@ -298,10 +276,7 @@ def test_create_with_label(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 # No host work happens (create fails at label parsing, and `mngr list` creates
-# nothing), so no tmux/rsync markers -- but `mngr list`'s remote discovery still
-# routinely exceeds the global 10s pytest timeout, so raise it like the other
-# create tests above.
-@pytest.mark.timeout(120)
+# nothing), so no tmux/rsync markers.
 def test_create_rejects_malformed_label(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can add labels to organize your agents and tags for host metadata:

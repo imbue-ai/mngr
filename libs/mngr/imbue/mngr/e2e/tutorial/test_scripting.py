@@ -12,7 +12,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_create_headless_no_connect_message(e2e: E2eSession) -> None:
     """Tutorial block:
         # run in headless mode (no interactive prompts)
@@ -43,7 +42,6 @@ def test_create_headless_no_connect_message(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_config_set_headless_globally(e2e: E2eSession) -> None:
     """Tutorial block:
         # or set headless globally
@@ -60,9 +58,7 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
     # is_allowed_in_pytest opt-in guard (which would reject the freshly-written
     # file on any later `mngr` invocation in this repo).
     #
-    # The `mngr` subprocess cold-start can exceed the 10s global pytest timeout,
-    # so this test overrides that marker (@pytest.mark.timeout above) and gives
-    # each subprocess matching headroom past the 30s default.
+    # Each subprocess gets headroom past the 30s default for the `mngr` cold start.
     path_result = e2e.run("mngr config path --scope project", comment="locate the project config file", timeout=120.0)
     expect(path_result).to_succeed()
     project_config_path = Path(path_result.stdout.strip())
@@ -79,7 +75,6 @@ def test_config_set_headless_globally(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
     """Tutorial block:
         # or set headless globally
@@ -125,7 +120,6 @@ def test_config_set_rejects_unknown_key(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_create_reuse_and_message(e2e: E2eSession) -> None:
     """Tutorial block:
         # idempotent creation: reuse an existing agent if it already exists
@@ -146,7 +140,6 @@ def test_create_reuse_and_message(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_get_json_into_var(e2e: E2eSession) -> None:
     """Tutorial block:
         # get JSON output for parsing in scripts
@@ -156,9 +149,8 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
     shell variable yields a non-empty JSON document (the agents/errors object),
     so a script can parse the output -- the captured character count is non-zero.
     """
-    # `mngr list` queries enabled remote providers (Modal), so it can take well
-    # over the 10s global pytest timeout; override that marker and give the
-    # subprocess matching headroom.
+    # `mngr list` queries enabled remote providers (Modal), so give the
+    # subprocess headroom past the 30s default.
     #
     # No @pytest.mark.modal: `mngr list` discovers Modal via the Python SDK
     # in-process *inside the mngr subprocess*, but the modal resource guard's
@@ -191,7 +183,6 @@ def test_get_json_into_var(e2e: E2eSession) -> None:
 # Marking this @pytest.mark.modal would therefore always fail the "marked but
 # never invoked modal" guard check.
 @pytest.mark.release
-@pytest.mark.timeout(120)
 def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
     """Tutorial block:
         # use discovery stream for streaming results into other tools
@@ -237,7 +228,6 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_usage_wait_and_create(e2e: E2eSession) -> None:
     r"""Tutorial block:
         # `mngr usage wait` blocks until a CEL predicate over the current usage snapshot

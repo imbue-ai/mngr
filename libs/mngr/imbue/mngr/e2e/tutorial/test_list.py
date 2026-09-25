@@ -172,10 +172,6 @@ def test_list_archived_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# `mngr list` runs the provider-discovery path (including an authenticated Modal
-# environment lookup), which routinely takes ~10s -- past the default 10s
-# per-test timeout. The release CI lane already overrides this globally to 90s.
-@pytest.mark.timeout(60)
 def test_list_active_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only active agents (anything not archived/destroyed/crashed/failed)
@@ -241,10 +237,6 @@ def test_config_set_list_active_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
-# `mngr list` runs the full provider-discovery path (an authenticated Modal lookup
-# plus Docker/Vultr probes), which routinely takes ~10s -- past the default 10s
-# per-test timeout. The release CI lane already overrides this globally to 90s.
-@pytest.mark.timeout(60)
 def test_list_local_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only agents running locally
@@ -263,7 +255,6 @@ def test_list_local_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_list_remote_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only agents running remotely
@@ -307,13 +298,6 @@ def test_list_remote_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# `mngr list --provider modal` runs the full provider-discovery path (an
-# authenticated Modal lookup plus Docker/Vultr probes), which routinely takes
-# ~10s -- past the default 10s per-test timeout. The release CI lane already
-# overrides this globally to 90s; match the sibling filter tests
-# (test_list_local_filter/test_list_remote_filter) so the test also passes
-# locally under the default timeout.
-@pytest.mark.timeout(60)
 def test_list_provider_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by provider
@@ -387,12 +371,6 @@ def test_list_label_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# The malformed --label is rejected before any provider discovery runs, but
-# invoking `mngr` at all still pays the ~12s Python import/startup cost, which
-# exceeds the default 10s per-test timeout. The release CI lane overrides the
-# timeout globally to 90s; set an explicit per-test timeout so this fast-fail
-# path is robust even without that override.
-@pytest.mark.timeout(60)
 def test_list_label_filter_invalid_format(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by agent label
@@ -426,12 +404,6 @@ def test_list_host_label_filter(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# The malformed `--host-label` is rejected before any discovery, so the command
-# itself does no provider work. But mngr's CLI cold-start (imports plus context
-# setup) alone routinely takes ~10s -- right at the default 10s per-test timeout,
-# which makes this test flaky. The release CI lane already overrides the timeout
-# to 90s globally; set it explicitly here so the test is robust locally too.
-@pytest.mark.timeout(60)
 def test_list_host_label_filter_invalid_format(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter by host label
@@ -502,7 +474,6 @@ def test_list_fields_and_sort(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_list_limit(e2e: E2eSession) -> None:
     """Tutorial block:
         # limit the number of results
@@ -542,7 +513,6 @@ def test_list_limit(e2e: E2eSession) -> None:
 # @pytest.mark.modal as a NEVER_INVOKED violation. The watch-mode behavior
 # under test (wrapping `mngr list` in watch(1)) is provider-agnostic.
 @pytest.mark.release
-@pytest.mark.timeout(90)
 def test_list_watch_mode(e2e: E2eSession) -> None:
     """Tutorial block:
         # watch mode: refresh the list every 5 seconds (on macOS: brew install watch)
@@ -660,7 +630,6 @@ def test_observe_discovery_only(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(240)
 def test_list_pipe_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can pass the ids of agents and/or hosts to only list details for specific ids:

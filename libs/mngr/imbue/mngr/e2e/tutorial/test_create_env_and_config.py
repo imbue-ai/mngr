@@ -13,7 +13,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_env(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can set environment variables for the agent:
@@ -70,7 +69,6 @@ def test_create_with_env(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_pass_env(e2e: E2eSession) -> None:
     """Tutorial block:
         # it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
@@ -114,7 +112,6 @@ def test_create_with_pass_env(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_pass_env_unset(e2e: E2eSession) -> None:
     """Tutorial block:
         # it is *strongly encouraged* to either use --env-file or --pass-env, especially for any sensitive environment variables (like API keys) rather than --env, because that way they won't end up in your shell history or in your config files by accident. For example:
@@ -155,7 +152,6 @@ def test_create_with_pass_env_unset(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(120)
 def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can use templates to quickly apply a set of preconfigured options:
@@ -208,7 +204,6 @@ def test_create_with_template_modal_disabled(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(120)
 def test_create_with_plugin_flags(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can enable or disable specific plugins:
@@ -241,7 +236,6 @@ def test_create_with_plugin_flags(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_real_plugin_flags(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can enable or disable specific plugins:
@@ -273,7 +267,6 @@ def test_create_with_real_plugin_flags(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_in_place_alias_target(e2e: E2eSession) -> None:
     """Tutorial block:
         # you should probably use aliases for making little shortcuts for yourself, because many of the commands can get a bit long:
@@ -305,7 +298,6 @@ def test_create_in_place_alias_target(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_set_headless(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can set that option in your config so that it always applies:
@@ -355,7 +347,6 @@ def test_config_set_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_env_var_mngr_headless(e2e: E2eSession) -> None:
     """Tutorial block:
         # or you can set it as an environment variable:
@@ -385,7 +376,6 @@ def test_env_var_mngr_headless(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_set_default_provider(e2e: E2eSession, project_config_dir: Path) -> None:
     """Tutorial block:
         # *all* mngr options work like that. For example, if you want to always run agents in Modal by default, you can set that in your config:
@@ -425,7 +415,6 @@ def test_config_set_default_provider(e2e: E2eSession, project_config_dir: Path) 
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 # No @pytest.mark.rsync: this creates a local agent, which never shells out to
 # rsync (only the remote providers' transfer path does).
 def test_create_with_label(e2e: E2eSession) -> None:
@@ -476,7 +465,6 @@ def test_create_with_label(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_create_with_invalid_label_format(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can add labels to organize your agents and tags for host metadata:

@@ -59,7 +59,6 @@ def test_list_current_project_only(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_explicit_project(e2e: E2eSession) -> None:
     """Tutorial block:
         # create an agent explicitly tagged with a different project
@@ -96,7 +95,6 @@ def test_create_with_explicit_project(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_list_filter_project_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter agents by project using CEL expressions
@@ -117,7 +115,6 @@ def test_list_filter_project_cel(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # filter agents by project using CEL expressions
@@ -137,7 +134,6 @@ def test_list_filter_invalid_cel(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_list_project_dot(e2e: E2eSession) -> None:
     """Tutorial block:
         # the literal "." is expanded to the current project (derived from your git worktree
@@ -162,7 +158,6 @@ def test_list_project_dot(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_list_project_field(e2e: E2eSession) -> None:
     """Tutorial block:
         # see which projects have agents by looking at the project field

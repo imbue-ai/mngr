@@ -9,7 +9,6 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
-@pytest.mark.timeout(300)
 def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
     """``mngr plugin disable``/``enable`` flips a plugin's enabled flag and the
     full roundtrip restores the plugin list exactly.
@@ -78,10 +77,6 @@ def test_plugin_disable_enable_roundtrip(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Five sequential mngr invocations (disable, create, list, enable, list), each
-# paying full CLI startup (~20s via the dev shim's `uv run`), so this needs the
-# same headroom as test_plugin_disable_enable_roundtrip rather than a 60s cap.
-@pytest.mark.timeout(300)
 def test_plugin_disable_affects_create(e2e: E2eSession) -> None:
     """Disabling a plugin removes its agent type and gates ``mngr create``.
 

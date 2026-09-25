@@ -21,7 +21,6 @@ from imbue.skitwright.expect import expect
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
 def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
     """Tutorial block:
         # by default, the agent uses the data from its current git repo (if any) or folder, but you can specify a different source:
@@ -58,7 +57,6 @@ def test_create_with_source_path(e2e: E2eSession, tmp_path: Path) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_project_label(e2e: E2eSession) -> None:
     """Tutorial block:
         # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
@@ -86,7 +84,6 @@ def test_create_with_project_label(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_default_project_label(e2e: E2eSession) -> None:
     """Tutorial block:
         # similarly, by default the agent is tagged with a "project" label that matches the name of the current git repo (or folder), but you can specify a different project:
@@ -122,7 +119,6 @@ def test_create_default_project_label(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.tmux
 @pytest.mark.rsync
-@pytest.mark.timeout(120)
 def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None:
     """Tutorial block:
         # mngr doesn't require git at all--if there's no git repo, it will just use the files from the folder as the source data
@@ -179,7 +175,6 @@ def test_create_with_source_path_no_git(e2e: E2eSession, tmp_path: Path) -> None
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_default_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # however, if you do use git, mngr makes that convenient
@@ -226,7 +221,6 @@ def test_create_default_branch(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_default_branch_distinct_per_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # however, if you do use git, mngr makes that convenient
@@ -339,7 +333,6 @@ def test_create_with_custom_branch_pattern(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_base_branch(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also specify a different base branch (instead of the current branch):
@@ -600,7 +593,6 @@ def test_create_with_transfer_none(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_from_another_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can clone from an existing agent's work directory:
@@ -665,7 +657,6 @@ def test_create_from_another_agent(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_from_another_agent_source_alias(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can clone from an existing agent's work directory:

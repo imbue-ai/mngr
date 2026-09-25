@@ -14,7 +14,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
     """Tutorial block:
         # Recipe: launch an agent on a task, check on it later, and clean up
@@ -101,7 +100,6 @@ def test_recipe_launch_check_cleanup(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_recipe_multi_agent_parallel_workflow(e2e: E2eSession) -> None:
     """Tutorial block:
         # launch multiple agents in parallel, each working on a different task

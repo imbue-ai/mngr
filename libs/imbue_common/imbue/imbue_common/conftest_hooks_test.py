@@ -262,6 +262,14 @@ def test_marker_class_timeout_is_offered_to_a_test_in_that_class() -> None:
     assert _resolve_marker_class_timeout(["tmux"], has_explicit_timeout=False, global_timeout=10.0) == 60
 
 
+def test_marker_class_timeout_gives_a_release_test_the_release_budget() -> None:
+    assert _resolve_marker_class_timeout(["release"], has_explicit_timeout=False, global_timeout=10.0) == 300
+
+
+def test_marker_class_timeout_takes_the_most_generous_class_for_a_release_tmux_test() -> None:
+    assert _resolve_marker_class_timeout(["release", "tmux"], has_explicit_timeout=False, global_timeout=10.0) == 300
+
+
 def test_marker_class_timeout_is_declined_for_a_test_in_no_such_class() -> None:
     assert _resolve_marker_class_timeout(["flaky"], has_explicit_timeout=False, global_timeout=10.0) is None
 

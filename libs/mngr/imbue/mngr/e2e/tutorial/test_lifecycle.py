@@ -37,7 +37,6 @@ def _create_named_agents(e2e: E2eSession, names_and_sleeps: list[tuple[str, int]
 # passing test that carries a mark for a resource it never used).
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_start_idempotent(e2e: E2eSession) -> None:
     """Tutorial block:
         # start a stopped agent. Is idempotent, so is safe to call even if already running.
@@ -63,7 +62,6 @@ def test_start_idempotent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_start_stopped_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # start a stopped agent. Is idempotent, so is safe to call even if already running.
@@ -85,11 +83,9 @@ def test_start_stopped_agent(e2e: E2eSession) -> None:
 # Local command agents create + start via tmux (the work_dir is a same-host git
 # worktree, so no rsync is involved); starting a named agent resolves it locally
 # and never enumerates Modal, so this test carries neither @pytest.mark.rsync nor
-# @pytest.mark.modal. The default 10s pytest timeout is too tight for the full
-# create + start round-trip (~15s), so bump it.
+# @pytest.mark.modal.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_start_connect(e2e: E2eSession) -> None:
     """Tutorial block:
         # start a stopped agent and immediately connect to it
@@ -125,10 +121,6 @@ def test_start_connect(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# Creating three command agents and then starting all of them in a single
-# invocation is well over the default 10s pytest timeout (each create + start
-# round-trip is ~15s), so bump it to match the other multi-step lifecycle tests.
-@pytest.mark.timeout(180)
 def test_start_multiple_agents(e2e: E2eSession) -> None:
     """Tutorial block:
         # start multiple agents at once
@@ -150,7 +142,6 @@ def test_start_multiple_agents(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_start_all_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # start all stopped agents by simply passing their ids from "mngr list" and reading the ids from stdin (that's what the "-" means)
@@ -188,7 +179,6 @@ def test_start_all_via_stdin(e2e: E2eSession) -> None:
     expect(after.stdout).not_to_contain("my-task")
 
 
-@pytest.mark.timeout(120)
 @pytest.mark.release
 @pytest.mark.tmux
 def test_start_dry_run(e2e: E2eSession) -> None:
@@ -231,7 +221,6 @@ def test_start_dry_run(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_stop_basic(e2e: E2eSession) -> None:
     """Tutorial block:
         # stop a running agent
@@ -257,7 +246,6 @@ def test_stop_basic(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_stop_archive(e2e: E2eSession) -> None:
     """Tutorial block:
         # stop and archive the agent (marks it archived so it can be filtered out of listings; its state is preserved).
@@ -292,7 +280,6 @@ def test_stop_archive(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_archive_command(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
@@ -323,7 +310,6 @@ def test_archive_command(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_archive_running_agent_is_skipped(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also archive an agent via the "archive" command, which is basically just a shortcut for "stop --archive"
@@ -352,7 +338,6 @@ def test_archive_running_agent_is_skipped(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_stop_all_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # stop all running agents
@@ -382,7 +367,6 @@ def test_stop_all_via_stdin(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_archive_stopped_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # archive all stopped agents (handy for cleaning up "mngr list" after a batch of finished work).
@@ -423,7 +407,6 @@ def test_archive_stopped_via_stdin(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_stop_dry_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # dry-run to see what would be stopped
@@ -460,7 +443,6 @@ def test_stop_dry_run(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_stop_by_session_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # stop has a special variant for finding an agent by its tmux session name:

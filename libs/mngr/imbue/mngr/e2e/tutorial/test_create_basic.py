@@ -13,9 +13,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-# This test runs three sequential mngr operations (create, list, exec), each of
-# which performs full provider discovery, so it needs more than the default 10s.
-@pytest.mark.timeout(120)
 def test_create_default(e2e: E2eSession) -> None:
     """Tutorial block:
         # running mngr create is strictly better than running claude!
@@ -73,7 +70,6 @@ def test_create_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_in_place(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can run the agent in-place (directly in your source directory) without any transfer:
@@ -130,9 +126,6 @@ def test_create_in_place(e2e: E2eSession) -> None:
     )
 
 
-# This test runs two `mngr create` commands (most sibling tests run one), so the
-# function body exceeds the global 10s pytest-timeout default. Bump it explicitly.
-#
 # No @pytest.mark.modal here: this test only creates local (`--type command`)
 # agents and runs `mngr list`. `mngr list` reaches Modal solely through the
 # in-process gRPC SDK inside the spawned `mngr` subprocess, which the resource
@@ -146,7 +139,6 @@ def test_create_in_place(e2e: E2eSession) -> None:
 # copy and skips the extra-file rsync entirely ("no files to transfer"). The
 # rsync resource guard fails a test that carries the mark but never invokes
 # rsync, so marking this test rsync would be a superfluous-mark violation.
-@pytest.mark.timeout(120)
 @pytest.mark.release
 @pytest.mark.tmux
 def test_create_short_forms(e2e: E2eSession) -> None:
@@ -204,10 +196,6 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.tmux
-# Agent creation (provisioning, rsync, ttyd install attempt) plus the follow-up
-# `mngr list` can exceed the default 10s per-test timeout, so allow extra
-# headroom.
-#
 # No @pytest.mark.modal here: the codex agent is created locally (and not even
 # launched -- see --no-auto-start below), and `mngr list` reaches Modal solely
 # through the in-process gRPC SDK inside the spawned `mngr` subprocess, which the
@@ -215,7 +203,6 @@ def test_create_short_forms(e2e: E2eSession) -> None:
 # and the `modal` CLI binary -- the only cross-process-tracked path -- is never
 # invoked for local agents). With the mark, the guard's NEVER_INVOKED check fails
 # the test; without it there is no tracked Modal usage, so no BLOCKED violation.
-@pytest.mark.timeout(120)
 def test_create_codex_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also specify a different agent (ex: codex)
@@ -258,9 +245,6 @@ def test_create_codex_agent(e2e: E2eSession) -> None:
 # untracked/modified/gitignored files to copy and never shells out to rsync. The
 # test's scope is purely `--` argument forwarding, which is unrelated to file
 # transfer, so the mark would be a spurious NEVER_INVOKED resource-guard failure.
-# This test runs two sequential mngr operations (create, list), each performing
-# full provider discovery, so the default 10s pytest-timeout is too tight.
-@pytest.mark.timeout(120)
 def test_create_with_agent_args(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can specify the arguments to the *agent* (ie, send args to the agent rather than mngr)
@@ -336,7 +320,6 @@ def test_create_agent_args_require_dash_separator(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_named_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
@@ -381,7 +364,6 @@ def test_create_named_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_unnamed_agent_gets_random_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # when creating agents to accomplish tasks, it's recommended that you give them a name to make it easier to manage them:
@@ -437,7 +419,6 @@ def test_create_unnamed_agent_gets_random_name(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_json_output(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can control output format for scripting:
@@ -488,7 +469,6 @@ def test_create_with_json_output(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_quiet_output(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can control output format for scripting:
@@ -605,13 +585,8 @@ def test_create_copy(e2e: E2eSession) -> None:
 # inside the `mngr` subprocess, which the resource guard's in-process SDK
 # monkeypatch cannot observe -- so a @pytest.mark.modal here would always fail
 # the guard's "marked modal but never invoked modal" NEVER_INVOKED check.
-#
-# This test also runs four sequential operations (pwd, create, list, and a
-# .git check), each performing full provider discovery, so it needs more than
-# the default 10s timeout.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_clone(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can create a full git "clone" instead of a worktree or copy: this transfers the repo via git, giving the agent its own independent copy with a separate working directory and git history (this is also the default when the source and target are on different hosts):
@@ -690,7 +665,6 @@ def test_create_clone(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.modal
-@pytest.mark.timeout(120)
 def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can use an existing snapshot instead of building a new host from scratch:
@@ -731,9 +705,6 @@ def test_create_with_snapshot_fictional(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# This test runs three sequential mngr operations (create, list, exec), each of
-# which performs full provider discovery, so it needs more than the default 10s.
-@pytest.mark.timeout(120)
 def test_create_headless(e2e: E2eSession) -> None:
     """Tutorial block:
         # mngr is very much meant to be used for scripting and automation, so nothing requires interactivity.

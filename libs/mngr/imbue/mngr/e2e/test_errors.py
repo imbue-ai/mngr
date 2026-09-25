@@ -9,12 +9,6 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
-# This test runs two full `mngr` subprocesses (`create` then `list`). Each
-# invocation pays a fixed ~10s+ interpreter startup cost (importing the provider
-# backend SDKs registered at import time), which alone can exceed the default
-# 10s per-test timeout even though the command logic itself fails fast. Allow
-# extra headroom so the timeout reflects real misbehavior, not startup overhead.
-@pytest.mark.timeout(120)
 def test_invalid_provider_fails(e2e: E2eSession) -> None:
     """`mngr create` with an unknown --provider fails, names the offending provider in
     stderr, and registers no agent (a failed create leaves nothing half-created behind).
@@ -38,11 +32,6 @@ def test_invalid_provider_fails(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-# This test creates a live local agent and then runs `mngr list`, which
-# enumerates every configured provider; that discovery can exceed the default
-# 10s per-test timeout when a remote provider (e.g. Docker) is unreachable and
-# the client waits on a connection. Allow extra headroom for the verification.
-@pytest.mark.timeout(120)
 def test_create_duplicate_name_fails(e2e: E2eSession) -> None:
     """Creating a second agent with an already-used name fails with an "already exists"
     error, and the duplicate leaves the original untouched: exactly one agent of that name

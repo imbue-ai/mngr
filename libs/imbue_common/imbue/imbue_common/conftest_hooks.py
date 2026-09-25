@@ -142,7 +142,15 @@ _registered_markers: list[str] = []
 # slowest member near 7s. The remaining headroom is for the parallel contention CI runs
 # under. Revise an entry by re-measuring its class on CI, never by adding a per-test
 # decorator -- decorating them one at a time is exactly what this table replaces.
-_MARKER_TIMEOUT_SECONDS: Final[dict[str, int]] = {"tmux": 60}
+#
+# release=300: a release test drives real `mngr` subprocesses, each of which pays a 10-20s
+# CLI cold start, on hosts it may have to create first. Sized from the 2026-09-21 TMR run's
+# per-test durations on Modal hosts (140 e2e tests: median 29s, p99 188s, slowest 194s),
+# which left the e2e suite carrying 291 hand-written timeout markers to escape the 10s
+# default. A release test that genuinely needs more still declares its own marker.
+RELEASE_TEST_TIMEOUT_SECONDS: Final[int] = 300
+
+_MARKER_TIMEOUT_SECONDS: Final[dict[str, int]] = {"tmux": 60, "release": RELEASE_TEST_TIMEOUT_SECONDS}
 
 
 def register_marker(marker_line: str) -> None:

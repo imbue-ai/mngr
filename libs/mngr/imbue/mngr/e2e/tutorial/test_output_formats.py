@@ -11,11 +11,8 @@ from imbue.skitwright.expect import expect
 
 
 @pytest.mark.release
-# `mngr ls` runs a full provider discovery (including in-process Modal gRPC),
-# which is slow when Modal credentials are present and exceeds the 10s default
-# per-test cap. See test_list_format_jsonl_recap for the same reasoning about
-# why this read-only path is intentionally NOT marked @pytest.mark.modal.
-@pytest.mark.timeout(180)
+# See test_list_format_jsonl_recap for why this read-only path is intentionally
+# NOT marked @pytest.mark.modal.
 def test_default_output_human_readable(e2e: E2eSession) -> None:
     """Tutorial block:
         # default output is human-readable
@@ -38,7 +35,6 @@ def test_default_output_human_readable(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(300)
 def test_list_custom_human_format(e2e: E2eSession) -> None:
     """Tutorial block:
         # use custom format templates to customize human-readable output for yourself
@@ -86,11 +82,8 @@ def test_list_custom_human_format(e2e: E2eSession) -> None:
 # it cannot observe the subprocess's gRPC traffic, and the modal CLI binary guard
 # (cross-process) is never tripped, so @pytest.mark.modal would fail the guard's
 # NEVER_INVOKED check. The command does not require Modal to succeed (Modal
-# discovery failures are non-fatal warnings). A longer timeout is still needed
-# because Modal discovery is slow when credentials are present and exceeds the
-# 10s default.
+# discovery failures are non-fatal warnings).
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_list_format_json_recap(e2e: E2eSession) -> None:
     """Tutorial block:
         # JSON output (full array, good for programmatic use)
@@ -119,10 +112,8 @@ def test_list_format_json_recap(e2e: E2eSession) -> None:
 # traffic, and the modal CLI binary guard (which is cross-process) is never tripped.
 # Marking the test @pytest.mark.modal would therefore fail the guard's NEVER_INVOKED
 # check deterministically. The command does not require Modal to succeed (Modal
-# discovery failures are non-fatal warnings). A longer timeout is still needed because
-# Modal discovery is slow when credentials are present and exceeds the 10s default.
+# discovery failures are non-fatal warnings).
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_list_format_jsonl_recap(e2e: E2eSession) -> None:
     """Tutorial block:
         # JSONL output (one object per line, good for streaming/piping)
@@ -147,10 +138,6 @@ def test_list_format_jsonl_recap(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# The stream runs a full provider scan before emitting its first snapshot and the
-# pipeline then lingers until mngr notices the closed pipe, so this needs longer
-# than the default 10s per-test cap.
-@pytest.mark.timeout(60)
 def test_observe_discovery_recap(e2e: E2eSession) -> None:
     """Tutorial block:
         # stream discovery events as JSONL (hosts and agents discovered/destroyed)

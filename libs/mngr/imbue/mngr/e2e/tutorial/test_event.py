@@ -48,7 +48,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_default(e2e: E2eSession) -> None:
     """Tutorial block:
         # view all events for an agent
@@ -78,7 +77,6 @@ def test_event_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_follow(e2e: E2eSession) -> None:
     """Tutorial block:
         # follow events in real time (like tail -f). Extremely useful for scripting.
@@ -101,7 +99,6 @@ def test_event_follow(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_follow_filter_source(e2e: E2eSession) -> None:
     """Tutorial block:
         # restrict the event stream to a specific type of event (source)
@@ -131,7 +128,6 @@ def test_event_follow_filter_source(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_tail(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only the last 20 events
@@ -154,13 +150,10 @@ def test_event_tail(e2e: E2eSession) -> None:
             assert field in event, f"Event missing guaranteed field {field!r}: {event!r}"
 
 
-# Creating a local command agent (git worktree + tmux) plus reading its events
-# takes well over the default 10s pytest-timeout; give it ample headroom. The
-# agent is created locally, so this test never invokes modal (no
+# The agent is created locally, so this test never invokes modal (no
 # @pytest.mark.modal).
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_head(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only the first 10 events
@@ -203,7 +196,6 @@ def test_event_head(e2e: E2eSession) -> None:
 # therefore never invoked, so declaring the mark would trip the resource guard.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
     """Tutorial block:
         # show only the first 10 events
@@ -228,7 +220,6 @@ def test_event_head_conflicts_with_tail(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_include_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # include only events matching a CEL expression
@@ -267,7 +258,6 @@ def test_event_include_filter(e2e: E2eSession) -> None:
 # other event tests, this one deliberately does NOT carry the `rsync` mark.
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_event_include_filter_rejects_invalid_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # include only events matching a CEL expression

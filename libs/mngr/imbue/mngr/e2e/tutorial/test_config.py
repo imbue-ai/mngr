@@ -14,9 +14,6 @@ from imbue.mngr.e2e.conftest import E2eSession
 from imbue.skitwright.expect import expect
 
 
-# Two mngr subprocess invocations (set + list) exceed the default 10s
-# func-only timeout, so allow more headroom.
-@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_list(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -47,7 +44,6 @@ def test_config_list(e2e: E2eSession) -> None:
     expect(result.stdout).to_match(r"headless\s*=\s*true")
 
 
-@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_list_json(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -73,10 +69,7 @@ def test_config_list_json(e2e: E2eSession) -> None:
     assert payload["config"]["headless"] is True, payload
 
 
-# Runs three sequential `mngr` subprocesses; each cold-start costs several seconds,
-# so the cumulative runtime exceeds the default 10s per-test pytest-timeout.
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_list_scope(e2e: E2eSession) -> None:
     """Tutorial block:
         # list configuration at a specific scope (user, project, or local)
@@ -115,9 +108,6 @@ def test_config_list_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Two mngr subprocesses (set + get) exceed the default 10s per-test timeout, so
-# raise it as other multi-command e2e tests do.
-@pytest.mark.timeout(60)
 def test_config_get(e2e: E2eSession) -> None:
     """Tutorial block:
         # get a specific config value
@@ -162,7 +152,6 @@ def test_config_get_missing_key(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_set(e2e: E2eSession) -> None:
     """Tutorial block:
         # set a config value (at the default scope)
@@ -190,7 +179,6 @@ def test_config_set(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
     """Tutorial block:
         # set a config value (at the default scope)
@@ -215,9 +203,6 @@ def test_config_set_unknown_key_fails(e2e: E2eSession) -> None:
     expect(settings.stdout).not_to_contain("totally_unknown_key")
 
 
-# Runs several mngr subprocesses (set plus read-backs), so it needs more than the
-# default 10s per-test timeout (each mngr invocation costs a few seconds to start up).
-@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_set_scope(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -246,9 +231,6 @@ def test_config_set_scope(e2e: E2eSession) -> None:
     expect(project_get).to_fail()
 
 
-# Runs two mngr subprocesses (the rejected set plus a read-back), so it needs more than
-# the default 10s per-test timeout.
-@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_set_invalid_scope(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -281,7 +263,6 @@ def test_config_set_invalid_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
     """Tutorial block:
         # unset a config value
@@ -326,7 +307,6 @@ def test_config_unset(e2e: E2eSession, project_config_dir: Path) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> None:
     """Tutorial block:
         # unset a config value
@@ -347,9 +327,6 @@ def test_config_unset_missing_key(e2e: E2eSession, project_config_dir: Path) -> 
 
 
 @pytest.mark.release
-# Runs two mngr subprocesses (config path + config edit); each cold start costs
-# several seconds, so the cumulative runtime exceeds the default 10s func-only timeout.
-@pytest.mark.timeout(60)
 def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
     """Tutorial block:
         # open the config file in your editor
@@ -400,9 +377,6 @@ def test_config_edit(e2e: E2eSession, temp_git_repo: Path) -> None:
 
 
 @pytest.mark.release
-# A single mngr subprocess cold start costs ~10s, which exceeds the default 10s
-# func-only timeout, so allow more headroom (matching the sibling config edit tests).
-@pytest.mark.timeout(60)
 def test_config_edit_editor_failure(e2e: E2eSession) -> None:
     """Tutorial block:
         # open the config file in your editor
@@ -422,10 +396,6 @@ def test_config_edit_editor_failure(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Runs two mngr subprocesses (config path + config edit) plus a cat; each cold
-# start costs several seconds, so the cumulative runtime exceeds the default 10s
-# func-only timeout.
-@pytest.mark.timeout(60)
 def test_config_edit_scope(e2e: E2eSession) -> None:
     """Tutorial block:
         # open a specific scope's config file
@@ -464,7 +434,6 @@ def test_config_edit_scope(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
     """Tutorial block:
         # open a specific scope's config file
@@ -494,10 +463,6 @@ def test_config_edit_scope_missing_editor(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-# Runs several mngr/shell subprocesses (config path plus a `test -e` per scope);
-# each cold start costs several seconds, so the cumulative runtime exceeds the
-# default 10s per-test pytest-timeout.
-@pytest.mark.timeout(60)
 def test_config_path(e2e: E2eSession) -> None:
     """Tutorial block:
         # show the path to the config file
@@ -540,9 +505,6 @@ def test_config_path(e2e: E2eSession) -> None:
     )
 
 
-# Runs several mngr subprocesses (path, set, cat), so it needs more than the
-# default 10s per-test budget.
-@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_path_scope(e2e: E2eSession) -> None:
     """Tutorial block:
@@ -569,9 +531,6 @@ def test_config_path_scope(e2e: E2eSession) -> None:
     expect(written.stdout).to_contain("headless")
 
 
-# Even a single mngr subprocess invocation exceeds the default 10s func-only
-# timeout (cold-start import cost), so allow more headroom.
-@pytest.mark.timeout(60)
 @pytest.mark.release
 def test_config_path_invalid_scope(e2e: E2eSession) -> None:
     """Tutorial block:

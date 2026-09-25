@@ -48,7 +48,6 @@ def test_create_and_destroy_agent(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_destroy_all_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy all agents (be careful!)
@@ -100,7 +99,6 @@ def _create_my_task(e2e: E2eSession, sleep_value: int) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_destroy_specific(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy a specific agent
@@ -133,7 +131,6 @@ def test_destroy_specific(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_destroy_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -163,7 +160,6 @@ def test_destroy_short_form(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_destroy_short_form_running_requires_force(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -278,7 +274,6 @@ def test_destroy_keeps_branch_by_default(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_destroy_multiple_at_once(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy multiple agents at once
@@ -358,7 +353,6 @@ def test_destroy_dry_run(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 # No @pytest.mark.rsync: the agent here is local and in-place, so neither create
 # nor destroy shells out to rsync.
 def test_destroy_with_gc(e2e: E2eSession) -> None:
@@ -391,7 +385,6 @@ def test_destroy_with_gc(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_destroy_no_gc(e2e: E2eSession) -> None:
     """Tutorial block:
         # by default, gc (garbage collection) runs after destroying any agent
@@ -423,7 +416,6 @@ def test_destroy_no_gc(e2e: E2eSession) -> None:
 
 
 @pytest.mark.release
-@pytest.mark.timeout(60)
 def test_destroy_by_session_name(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy has a special variant for finding an agent by its tmux session name:

@@ -11,13 +11,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-# This test issues three sequential mngr invocations (create, exec, list). Each
-# pays the full mngr CLI startup cost, and `mngr exec` additionally waits for the
-# agent's activity tracker. Under the contended sandboxes the release suite runs
-# in, a single invocation can take ~20-25s, so the per-test budget must comfortably
-# cover the whole sequence (the sibling Modal command-agent tests use 300s for the
-# same reason).
-@pytest.mark.timeout(300)
 def test_command_agent_python_http(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a Python script as a managed process
@@ -74,7 +67,6 @@ def test_command_agent_python_http(e2e: E2eSession) -> None:
 @pytest.mark.rsync
 @pytest.mark.release
 @pytest.mark.modal
-@pytest.mark.timeout(300)
 def test_command_agent_data_pipeline(e2e: E2eSession) -> None:
     """Tutorial block:
         # run a long-running data pipeline

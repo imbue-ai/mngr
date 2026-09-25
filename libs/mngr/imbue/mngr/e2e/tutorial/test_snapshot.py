@@ -30,7 +30,6 @@ def _create_modal_my_task(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_snapshot_create(e2e: E2eSession) -> None:
     """Tutorial block:
         # create a snapshot of an agent's host
@@ -57,7 +56,6 @@ def test_snapshot_create(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_snapshot_create_short_form(e2e: E2eSession) -> None:
     """Tutorial block:
         # short form
@@ -86,7 +84,6 @@ def test_snapshot_create_short_form(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_snapshot_create_named(e2e: E2eSession) -> None:
     """Tutorial block:
         # create a snapshot with a descriptive name
@@ -118,7 +115,6 @@ def test_snapshot_create_named(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_snapshot_create_all_via_stdin(e2e: E2eSession) -> None:
     """Tutorial block:
         # snapshot all agents' hosts
@@ -152,7 +148,6 @@ def test_snapshot_create_all_via_stdin(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_snapshot_list(e2e: E2eSession) -> None:
     """Tutorial block:
         # list snapshots for all running agents
@@ -183,7 +178,6 @@ def test_snapshot_list(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(180)
 def test_snapshot_list_for_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # list snapshots for a specific agent's host
@@ -207,7 +201,6 @@ def test_snapshot_list_for_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(240)
 def test_snapshot_list_limit(e2e: E2eSession) -> None:
     """Tutorial block:
         # limit the number of snapshots shown
@@ -287,7 +280,6 @@ def test_snapshot_destroy_by_id_fictional(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_snapshot_destroy_all_for_agent(e2e: E2eSession) -> None:
     """Tutorial block:
         # destroy all snapshots for an agent's host
@@ -323,7 +315,6 @@ def test_snapshot_destroy_all_for_agent(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-@pytest.mark.timeout(300)
 def test_snapshot_destroy_dry_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # dry-run to see what would be destroyed

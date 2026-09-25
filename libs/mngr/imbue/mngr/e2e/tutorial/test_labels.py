@@ -10,7 +10,6 @@ from imbue.skitwright.expect import expect
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_create_with_multiple_labels(e2e: E2eSession) -> None:
     """Tutorial block:
         # create agents with labels for organization
@@ -40,7 +39,6 @@ def test_create_with_multiple_labels(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # list agents filtered by label using CEL expressions
@@ -79,7 +77,6 @@ def test_list_filter_by_label_cel(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_list_combine_include_filters(e2e: E2eSession) -> None:
     """Tutorial block:
         # combine multiple filters (AND logic for --include, all must match)
@@ -202,7 +199,6 @@ def test_list_exclude_filter(e2e: E2eSession) -> None:
     assert names == {"backend-agent"}, f"expected only backend-agent to remain, got {names}"
 
 
-@pytest.mark.timeout(180)
 @pytest.mark.release
 @pytest.mark.tmux
 def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
@@ -239,7 +235,6 @@ def test_list_combine_exclude_filters(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(120)
 def test_list_compound_cel(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also just do combined filters directly in the CEL expression:
@@ -310,7 +305,6 @@ def test_list_compound_cel(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_message_filtered_backend(e2e: E2eSession) -> None:
     """Tutorial block:
         # use filters with other commands: message only backend agents by passing "-" to have the list of matching agents piped in via stdin
@@ -346,9 +340,6 @@ def test_message_filtered_backend(e2e: E2eSession) -> None:
 @pytest.mark.release
 @pytest.mark.modal
 @pytest.mark.rsync
-# Generous overall budget: a remote Modal create plus a list+exec SSH round trip
-# can each take up to the 120s remote timeout, so allow headroom above their sum.
-@pytest.mark.timeout(300)
 def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
     """Tutorial block:
         # use filters with exec: check disk usage on remote agents only
@@ -393,7 +384,6 @@ def test_exec_filtered_remote_disk(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
     """Tutorial block:
         # use filters with destroy: clean up all stopped agents for a team
@@ -444,10 +434,7 @@ def test_destroy_filtered_dry_run(e2e: E2eSession) -> None:
 # mngr subprocess, which the SDK monkeypatch (installed in the pytest process)
 # never sees, so no modal tracking file is touched. Carrying @pytest.mark.modal
 # would therefore trip the resource guard's "marked but never invoked" check.
-# The generous timeout accommodates the slow Modal gRPC round-trip that
-# discovery still performs.
 @pytest.mark.release
-@pytest.mark.timeout(180)
 def test_list_jq_filter(e2e: E2eSession) -> None:
     """Tutorial block:
         # you can also just list agents by filtering using jq:
@@ -469,7 +456,6 @@ def test_list_jq_filter(e2e: E2eSession) -> None:
 
 @pytest.mark.release
 @pytest.mark.tmux
-@pytest.mark.timeout(180)
 def test_list_jsonl_jq_stream(e2e: E2eSession) -> None:
     """Tutorial block:
         # or even stream the filters with jq by using jsonl:
