@@ -39,17 +39,8 @@ def _emit_custom_validation_error(
     resp: Any,
     req_validation_error: Any,
     instance: Any,
-    *_: Any,
 ) -> None:
-    """spectree ``before`` hook: turn a request-validation failure into the stable 422 body.
-
-    spectree owns this signature and has grown it before -- 3.0.0 appended a
-    ``model_adapter`` argument -- and it calls the hook on every validated
-    request, not only on a failure, so an arity it did not have when this was
-    written turns every ``/api/v1`` endpoint into a 500. ``*_`` absorbs whatever
-    it appends; the constraint in pyproject.toml is what keeps the version
-    itself known-good.
-    """
+    """spectree ``before`` hook: turn a request-validation failure into the stable 422 body."""
     if req_validation_error:
         errors = [
             {
