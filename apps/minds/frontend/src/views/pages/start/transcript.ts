@@ -136,7 +136,7 @@ export function agentTurn(attrs: {
  * explanation. The labels stream in one after another as the agent's own
  * words would; what opens is simply there, since the reader asked for it.
  */
-export function disclosureList<P extends DisclosurePoint>(attrs: {
+export function disclosureList(attrs: {
   key: string;
   /** When the first label starts streaming; the rest follow as if one text. */
   startAtMs: number;
@@ -144,11 +144,11 @@ export function disclosureList<P extends DisclosurePoint>(attrs: {
   isInstant?: boolean;
   /** Fade the whole list in at this moment instead of streaming its labels. */
   arriveAtMs?: number;
-  points: P[];
+  points: DisclosurePoint[];
   openIds: ReadonlySet<string>;
   onToggle: (id: string) => void;
   /** What opens under a point, in place of its plain detail text. */
-  detailFor?: (point: P) => m.Children;
+  detailFor?: (point: DisclosurePoint) => m.Children;
 }): m.Children {
   let labelAt = attrs.startAtMs;
   const arrival: ArrivalAttrs = { key: attrs.key, delayMs: attrs.arriveAtMs ?? 0, isInstant: attrs.arriveAtMs === undefined };

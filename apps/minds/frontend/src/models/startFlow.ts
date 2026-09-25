@@ -13,7 +13,7 @@ export const MANIFESTO_HEADING = "Honest Software:";
 
 /**
  * A line behind a chevron toggle, and what opens under it: the manifesto's
- * points, and the base of the creation page's reading material.
+ * points, and the creation page's reading material.
  */
 export interface DisclosurePoint {
   id: string;

@@ -12,16 +12,7 @@ export const SETUP_LINE =
   "Setting up your workspace. This takes a minute or two. While you wait, here is what is going on, " +
   "and what you will be able to do once it is up.";
 
-/** Where every "read more" link points until the docs it belongs to exist. */
-export const PRODUCT_HOME_URL = "https://imbue.com/product/mind";
-
-/** A section of the reading material on the creation page: the line, what opens under it, and its link. */
-export interface SetupSection extends DisclosurePoint {
-  linkLabel: string;
-  href: string;
-}
-
-export const SETUP_SECTIONS: SetupSection[] = [
+export const SETUP_SECTIONS: DisclosurePoint[] = [
   {
     id: "what",
     label: "What a workspace is",
@@ -30,8 +21,6 @@ export const SETUP_SECTIONS: SetupSection[] = [
       "tools, and the memory you build together. It keeps your work in one place from one conversation to the " +
       "next, so you don’t have to start over.\n\n" +
       "When you hand off a task or set a routine, your Mind can keep working while you’re away.",
-    linkLabel: "How workspaces work",
-    href: PRODUCT_HOME_URL,
   },
   {
     id: "now",
@@ -41,8 +30,6 @@ export const SETUP_SECTIONS: SetupSection[] = [
       "apps, work with your files and accounts, and keep tasks running while you’re away.\n\n" +
       "The last step connects your workspace to this app so you can start using it.\n\n" +
       "Want more detail? The setup log shows each part as it happens.",
-    linkLabel: "How setup works",
-    href: PRODUCT_HOME_URL,
   },
   {
     id: "do",
@@ -54,8 +41,6 @@ export const SETUP_SECTIONS: SetupSection[] = [
       "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
       "works in the same place. Sharing a copy gives someone the app without giving them your data.\n\n" +
       "When Mind needs an account, it’ll ask you to connect it. You can see and remove that access later.",
-    linkLabel: "See what you can make with Mind",
-    href: PRODUCT_HOME_URL,
   },
   {
     id: "data",
@@ -69,8 +54,6 @@ export const SETUP_SECTIONS: SetupSection[] = [
       "Your workspace is backed up as you use it, much like version history in a document. It’s built to move " +
       "with you, too. You can download it to your computer or move it to another service without starting " +
       "over. The work you’ve built stays yours.",
-    linkLabel: "Read our data promises",
-    href: PRODUCT_HOME_URL,
   },
   {
     id: "later",
@@ -78,8 +61,6 @@ export const SETUP_SECTIONS: SetupSection[] = [
     detail:
       "You can rename your workspace, change its color, connect or disconnect accounts, and change the computer " +
       "it runs on later in Settings.",
-    linkLabel: "Workspace settings",
-    href: PRODUCT_HOME_URL,
   },
 ];
 export const READY_LINE = "Your workspace is ready! What would you like to do first?";

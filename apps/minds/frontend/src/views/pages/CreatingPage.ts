@@ -38,7 +38,6 @@ import {
 import { wash } from "../../models/wash";
 import { postWelcomeChat, welcomeChatBody } from "../../models/welcomeChat";
 import { Button } from "../components/Button";
-import { Link } from "../components/Link";
 import { Notice } from "../components/Notice";
 import { PageContainer } from "../components/Layout";
 import { Spinner } from "../components/Spinner";
@@ -438,7 +437,7 @@ export const CreatingPage: m.ClosureComponent = () => {
     ];
   }
 
-  /** The reading material under the setup line: each section opens on a chevron and ends in a link out. */
+  /** The reading material under the setup line: each section opens on a chevron. */
   function setupGuide(arriveAtMs: number, isInstant: boolean): m.Children {
     return disclosureList({
       key: "creation-guide",
@@ -451,10 +450,8 @@ export const CreatingPage: m.ClosureComponent = () => {
         if (state.openSectionIds.has(id)) state.openSectionIds.delete(id);
         else state.openSectionIds.add(id);
       },
-      detailFor: (section) => [
-        ...section.detail.split("\n\n").map((paragraph, index) => m("p", { class: index === 0 ? "" : "mt-2" }, paragraph)),
-        m("p", { class: "mt-2" }, m(Link, { href: section.href, target: "_blank", rel: "noopener" }, section.linkLabel)),
-      ],
+      detailFor: (section) =>
+        section.detail.split("\n\n").map((paragraph, index) => m("p", { class: index === 0 ? "" : "mt-2" }, paragraph)),
     });
   }
 

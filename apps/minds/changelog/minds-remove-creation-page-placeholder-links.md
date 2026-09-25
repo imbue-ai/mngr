@@ -1,0 +1,1 @@
+Removed the placeholder "read more" links from the reading material on the workspace creation page. All five pointed at the same product page instead of anything about their section. They are also gone from the Welcome chat seeded into the new workspace.

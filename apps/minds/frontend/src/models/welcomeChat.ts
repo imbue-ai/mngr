@@ -47,13 +47,8 @@ function assistant(text: string): WelcomeChatTurn {
 }
 
 /** A point behind a chevron, as a toggle the chat app opens the same way. */
-export function disclosureMarkdown(
-  point: DisclosurePoint,
-  extraDetail = "",
-): string {
-  const detail =
-    extraDetail === "" ? point.detail : `${point.detail}\n\n${extraDetail}`;
-  return `<details><summary>${point.label}</summary>\n\n${detail}\n\n</details>`;
+export function disclosureMarkdown(point: DisclosurePoint): string {
+  return `<details><summary>${point.label}</summary>\n\n${point.detail}\n\n</details>`;
 }
 
 /** A comparison column as a titled bullet list. */
@@ -109,9 +104,7 @@ export function creationTurns(
   request: CreateAttemptRequestSummary,
   isCloudPreset: boolean,
 ): WelcomeChatTurn[] {
-  const guide = SETUP_SECTIONS.map((section) =>
-    disclosureMarkdown(section, `[${section.linkLabel}](${section.href})`),
-  );
+  const guide = SETUP_SECTIONS.map((section) => disclosureMarkdown(section));
   return [
     user(summaryLines(request, isCloudPreset).join("\n")),
     assistant([SETUP_LINE, "", ...guide].join("\n")),

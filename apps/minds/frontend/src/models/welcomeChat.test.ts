@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
-import { SETUP_LINE, readyTurnMarkdown } from "./creationTranscript";
+import { SETUP_LINE, SETUP_SECTIONS, readyTurnMarkdown } from "./creationTranscript";
 import {
   CONTINUE_LABEL,
   MANIFESTO_POINTS,
@@ -63,9 +63,9 @@ describe("welcomeChatBody", () => {
     expect(body.turns[6].text).toContain("Name — workspace-1");
     expect(body.turns[6].text).toContain("Branch — latest");
     expect(body.turns[7].text.startsWith(SETUP_LINE)).toBe(true);
-    expect(body.turns[7].text).toContain(
-      "[How workspaces work](https://imbue.com/product/mind)",
-    );
+    for (const section of SETUP_SECTIONS) {
+      expect(body.turns[7].text).toContain(disclosureMarkdown(section));
+    }
     expect(body.turns[8].text).toBe(readyTurnMarkdown());
   });
 });
