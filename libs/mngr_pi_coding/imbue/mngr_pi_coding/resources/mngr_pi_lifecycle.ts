@@ -60,9 +60,9 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 
-// --- Minimal structural types for the bits of pi we read. -------------------
-// These mirror pi's public AgentMessage / event shapes (see pi docs/session.md)
-// but are declared locally to avoid a build-time dependency on the pi package.
+// Minimal structural types for the bits of pi we read. These mirror pi's public
+// AgentMessage / event shapes (see pi docs/session.md) but are declared locally
+// to avoid a build-time dependency on the pi package.
 
 interface TextBlock {
   type: "text";
@@ -187,7 +187,7 @@ interface PiApi {
   setThinkingLevel?: (level: string) => void;
 }
 
-// --- Constants kept in sync with plugin.py / base_agent.py. -----------------
+// Constants kept in sync with plugin.py / base_agent.py.
 
 const ACTIVE_MARKER_NAME = "active";
 const SESSION_STARTED_SENTINEL_NAME = "pi_session_started";
@@ -246,8 +246,6 @@ const CONTROL_POLL_MS = 200;
 const ATIF_SCHEMA_VERSION = "ATIF-v1.7";
 
 const IMAGE_PLACEHOLDER = "[image omitted]";
-
-// --- Helpers. ---------------------------------------------------------------
 
 // Best-effort log to stderr only; pi treats extension stderr as diagnostic, not
 // as agent input. Wrapped so logging itself can never throw.
@@ -411,88 +409,6 @@ function metricsFromUsage(usage: PiUsage | undefined): Record<string, unknown> |
   }
   return metrics;
 }
-
-// --- Shell-command safety guards (see system/scripts/POLICY_HOOKS.md). -------
-//
-// Rules that hold for every pi agent, applied in the `tool_call` handler: return
-// `{block, reason}` to refuse a command, or mutate `event.input.command` to
-// rewrite it. A rule that belongs to the repo an agent runs in goes in that
-// repo's own `.pi/extensions/`, which pi loads alongside this one.
-
-// Block: a command that pipes into tail/head.
-const PIPE_TAIL_HEAD_RE = /\|\s*(tail|head)(\s|$)/;
-// Block: git history-rewriting commands.
-const GIT_REBASE_RE = /^git\s+rebase/;
-const GIT_COMMIT_RE = /^git\s+commit\b/;
-const GIT_COMMIT_REWRITE_RE = /--(amend|fixup)/;
-const GIT_PULL_RE = /^git\s+pull\b/;
-const GIT_PULL_REBASE_RE = /(--rebase|\s-r(\s|$))/;
-// The OOM self-tag band for agent subprocesses (kept in sync with
-// oom_priority.bands.AGENT_SUBPROCESS == 900).
-const OOM_SUBPROCESS_BAND = 900;
-
-/** Single-quote a value for safe interpolation into a shell command. */
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-/** The reason to block a command, or null if it is allowed. Cannot throw. */
-function commandBlockReason(command: string): string | null {
-  if (PIPE_TAIL_HEAD_RE.test(command)) {
-    return "Do not pipe commands through tail or head. Redirect to a temp file (e.g. cmd > /tmp/out.txt) and read that instead.";
-  }
-  if (GIT_REBASE_RE.test(command)) return "git rebase is not allowed.";
-  if (GIT_COMMIT_RE.test(command) && GIT_COMMIT_REWRITE_RE.test(command)) {
-    return "git commit with --amend or --fixup is not allowed.";
-  }
-  if (GIT_PULL_RE.test(command) && GIT_PULL_REBASE_RE.test(command)) {
-    return "git pull --rebase is not allowed (use git pull --merge instead).";
-  }
-  return null;
-}
-
-/** Read a string field from a mngr data.json, or null. */
-function readDataField(path: string, field: string): string | null {
-  try {
-    const value = (JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>)[field];
-    return typeof value === "string" && value ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-/** The `export GIT_AUTHOR_.../GIT_COMMITTER_...; ` prefix, or "" when unresolved.
- * Name from <state_dir>/data.json (fallback MNGR_AGENT_NAME), email
- * <agent_id>@<host_id>. */
-function gitIdentityPrefix(): string {
-  const agentId = process.env.MNGR_AGENT_ID;
-  const stateDir = process.env.MNGR_AGENT_STATE_DIR;
-  const hostDir = process.env.MNGR_HOST_DIR;
-  const name =
-    (stateDir ? readDataField(join(stateDir, "data.json"), "name") : null) ??
-    process.env.MNGR_AGENT_NAME ??
-    null;
-  const hostId = hostDir ? readDataField(join(hostDir, "data.json"), "host_id") : null;
-  if (!name || !agentId || !hostId) return "";
-  const email = `${agentId}@${hostId}`;
-  const q = shellQuote;
-  return (
-    `export GIT_AUTHOR_NAME=${q(name)} GIT_COMMITTER_NAME=${q(name)} ` +
-    `GIT_AUTHOR_EMAIL=${q(email)} GIT_COMMITTER_EMAIL=${q(email)}; `
-  );
-}
-
-/** The guarded oom self-tag prefix (mirrors build_oom_tag_prefix). */
-function oomTagPrefix(): string {
-  return `test -w /proc/self/oom_score_adj && echo ${OOM_SUBPROCESS_BAND} > /proc/self/oom_score_adj 2>/dev/null; `;
-}
-
-/** Prepend the git-identity (if resolvable) + oom-tag prefixes to a command. */
-function rewriteBashCommand(command: string): string {
-  return gitIdentityPrefix() + oomTagPrefix() + command;
-}
-
-// --- Extension. -------------------------------------------------------------
 
 export default function mngrPiLifecycle(pi: PiApi): void {
   const stateDir = process.env.MNGR_AGENT_STATE_DIR;
@@ -946,36 +862,6 @@ export default function mngrPiLifecycle(pi: PiApi): void {
     safe("agent_start", () => {
       writeFileSync(markerPath, "1");
     });
-  });
-
-  // Policy guard: block disallowed bash commands and rewrite the rest with the
-  // oom self-tag + git identity (see the "Policy guards" section above and
-  // system/scripts/POLICY_HOOKS.md). NOT wrapped in safe() -- a guard that
-  // swallowed its error would fail OPEN. The block check is a pure regex over a
-  // string and cannot throw; the best-effort rewrite is isolated so a failure
-  // leaves the command unchanged rather than blocking a legitimate command.
-  // `event`/return are loosely typed here to match PiApi.on's shim signature; at
-  // runtime pi passes a BashToolCallEvent with a mutable `input` and honors a
-  // returned `{block, reason}` (see the SDK's ToolCallEvent/ToolCallEventResult).
-  pi.on("tool_call", (event: any) => {
-    if (event?.toolName !== "bash") return;
-    const input = event.input as { command?: string };
-    const command = input?.command;
-    if (typeof command !== "string" || !command) return;
-    const reason = commandBlockReason(command);
-    if (reason !== null) return { block: true, reason };
-    try {
-      input.command = rewriteBashCommand(command);
-      // The rewrite prepends `export ...; test -w ...; `, and pi calls every extension's
-      // tool_call handler on this same event: a guard in another extension that reads
-      // `input.command` after us would see the prefix as a command chained ahead of the
-      // agent's, and refuse it. On claude/codex the rewriter runs LAST for exactly this
-      // reason; pi offers no ordering control, so carry the agent's own command instead.
-      // Recorded after the rewrite so a frozen event cannot cost the rewrite itself.
-      event.mngrOriginalCommand = command;
-    } catch {
-      // Rewrite is best-effort (matches claude's pass-through-on-failure); never block on it.
-    }
   });
 
   pi.on("agent_end", (_event, _ctx) => {

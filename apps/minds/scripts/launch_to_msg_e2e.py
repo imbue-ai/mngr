@@ -92,7 +92,6 @@ from playwright.sync_api import ConsoleMessage
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import WebError
 from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
@@ -101,6 +100,7 @@ from pydantic import Field
 from pydantic import SecretStr
 
 from imbue.minds.desktop_client.e2e_workspace_runner import descendant_frames
+from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
 
 
@@ -1079,67 +1079,6 @@ class _WorkspaceResult(BaseModel):
     total_create_s: float = 0.0
 
 
-# The welcome chat's window in the desktop shell: the chat app's pinned window, the one
-# its auto-open restores. Every other window a fresh workspace opens is unpinned.
-_CHAT_WINDOW = '[data-window-id][data-pinned="true"]'
-
-
-def _raise_chat_window(workspace: Frame, *, label: str) -> None:
-    """Focus the welcome chat's window so pointer clicks reach its page.
-
-    The shell shields every window but the focused one and makes the pages under the
-    shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
-    intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
-    that would raise it. A fresh workspace opens two windows -- the welcome chat and the
-    Getting Started app -- and which lands on top is a race, so take the shell's own
-    two-step: press the shield, then act on the page.
-    """
-    shield = workspace.query_selector(f"{_CHAT_WINDOW} [data-window-shield]")
-    if shield is None:
-        return
-    logger.info("[{}] the welcome chat's window is shielded; pressing the shield to raise it", label)
-    shield.click()
-    workspace.wait_for_selector(f'{_CHAT_WINDOW}[data-focused="true"]', timeout=10_000)
-
-
-def _click_in_chat(workspace: Frame, chat: Frame, selector: str, *, label: str) -> None:
-    """Click ``selector`` in the chat's page, raising its window first if a shield takes the press."""
-    try:
-        chat.click(selector, timeout=10_000)
-    except PlaywrightTimeoutError:
-        _raise_chat_window(workspace, label=label)
-        chat.click(selector, timeout=20_000)
-
-
-def _sign_in_via_provider_chooser(workspace: Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
-    """Drive the provider chooser in the welcome chat's own frame through the Anthropic API-key path.
-
-    A freshly created workspace has no provider accounts, so the first message sent in
-    its welcome chat (the conversation the creation page seeded) opens the chooser in
-    that chat's page -- the designed first-boot step. Signing in mints a provider account
-    holding the key rather than writing a shared settings block, and launches the chat on
-    it with the message that was sent, so nothing is restarted and the success state is
-    the harness's own probe answering (which is why the success wait is generous).
-    Selectors mirror ``test_snapshot_resume._sign_in_with_api_key_via_modal``.
-    """
-    logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
-    chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
-    _raise_chat_window(workspace, label=label)
-    # Anthropic's lane, then its API-key method under "Other ways to sign in" --
-    # the lane's primary method is the browser sign-in, which needs a human.
-    _click_in_chat(workspace, chat, "[data-e2e=lane-anthropic]", label=label)
-    chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
-    _click_in_chat(workspace, chat, "[data-e2e=method-api_key]", label=label)
-    chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
-    chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
-    logger.info("[{}] submitting the API key through the chooser", label)
-    _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
-    chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
-    _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
-    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
-    logger.info("[{}] signed in via the chooser", label)
-
-
 def _create_workspace_and_first_message(
     ctx: BrowserContext,
     chrome: Page,
@@ -1317,7 +1256,7 @@ def _create_workspace_and_first_message(
     inp.fill(FIRST_PROMPT)
     inp.press("Enter")
     if ai_provider == "API_KEY":
-        _sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
+        sign_in_via_provider_chooser(workspace, chat, api_key=anthropic_key, label=label)
     with contextlib.suppress(Exception):
         chat.wait_for_function(
             _wait_for_chat_text_js(f"document.body.innerText.includes({FIRST_PROMPT!r})"),

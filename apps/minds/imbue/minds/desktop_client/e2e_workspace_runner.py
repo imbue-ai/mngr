@@ -45,6 +45,7 @@ from playwright.sync_api import Page
 from playwright.sync_api import Playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from pydantic import SecretStr
 
 from imbue.minds.config.loader import repo_tier_client_config_path
 from imbue.minds.desktop_client.default_workspace_template_worktree import DEFAULT_WORKSPACE_TEMPLATE_EXTERNAL_WORKTREE
@@ -1234,6 +1235,70 @@ def _start_new_chat(page: Page | Frame) -> None:
     chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
     logger.info("The chat started from the launcher shows its composer at {}", chat.url)
     _flow_screenshot(page, "04b-new-chat-from-launcher")
+
+
+# The welcome chat's window in the desktop shell: the chat app's pinned window, the one
+# its auto-open restores. Every other window a fresh workspace opens is unpinned.
+_CHAT_WINDOW: Final[str] = '[data-window-id][data-pinned="true"]'
+
+
+def _raise_chat_window(workspace: Page | Frame, *, label: str) -> None:
+    """Focus the welcome chat's window so pointer clicks reach its page.
+
+    The shell shields every window but the focused one and makes the pages under the
+    shield ``pointer-events: none``, so a click aimed into an unfocused window's page is
+    intercepted by ``[data-window-shield]`` and Playwright never dispatches the press
+    that would raise it. A fresh workspace opens two windows -- the welcome chat and the
+    Getting Started app -- and which lands on top is a race, so take the shell's own
+    two-step: press the shield, then act on the page.
+    """
+    shield = workspace.query_selector(f"{_CHAT_WINDOW} [data-window-shield]")
+    if shield is None:
+        return
+    logger.info("[{}] the welcome chat's window is shielded; pressing the shield to raise it", label)
+    shield.click()
+    workspace.wait_for_selector(f'{_CHAT_WINDOW}[data-focused="true"]', timeout=10_000)
+
+
+def _click_in_chat(workspace: Page | Frame, chat: Frame, selector: str, *, label: str) -> None:
+    """Click ``selector`` in the chat's page, raising its window first if a shield takes the press."""
+    try:
+        chat.click(selector, timeout=10_000)
+    except PlaywrightTimeoutError:
+        _raise_chat_window(workspace, label=label)
+        chat.click(selector, timeout=20_000)
+
+
+def sign_in_via_provider_chooser(workspace: Page | Frame, chat: Frame, *, api_key: SecretStr, label: str) -> None:
+    """Drive the provider chooser in the welcome chat's own frame through the Anthropic API-key path.
+
+    A freshly created workspace has no provider accounts, so the first message sent in
+    its welcome chat (the conversation the creation page seeded) opens the chooser in
+    that chat's page -- the designed first-boot step. Signing in mints a provider account
+    holding the key rather than writing a shared settings block, and launches the chat on
+    it with the message that was sent, so nothing is restarted and the success state is
+    the harness's own probe answering (which is why the success wait is generous).
+
+    Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
+    tailwind class: this drives the template's dialog from the other repo, so it has to
+    survive a wording change or a re-port of the UI.
+    """
+    logger.info("[{}] waiting for the provider chooser to appear in the welcome chat's frame", label)
+    chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
+    _raise_chat_window(workspace, label=label)
+    # Anthropic's lane, then its API-key method under "Other ways to sign in" --
+    # the lane's primary method is the browser sign-in, which needs a human.
+    _click_in_chat(workspace, chat, "[data-e2e=lane-anthropic]", label=label)
+    chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
+    _click_in_chat(workspace, chat, "[data-e2e=method-api_key]", label=label)
+    chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
+    chat.fill("[data-e2e=api-key-input]", api_key.get_secret_value())
+    logger.info("[{}] submitting the API key through the chooser", label)
+    _click_in_chat(workspace, chat, "[data-e2e=save-key]", label=label)
+    chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
+    _click_in_chat(workspace, chat, "[data-e2e=done]", label=label)
+    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
+    logger.info("[{}] signed in via the chooser", label)
 
 
 def wait_for_chat_input(page: Page | Frame) -> Frame:

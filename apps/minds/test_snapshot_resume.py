@@ -41,6 +41,7 @@ import tomlkit
 from loguru import logger
 from playwright.sync_api import Frame
 from playwright.sync_api import Page
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -77,6 +78,7 @@ from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_def
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
 from imbue.minds.desktop_client.e2e_workspace_runner import send_chat_message
+from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.minds.desktop_client.e2e_workspace_runner import wait_for_chat_input
 from imbue.minds.desktop_client.restic_cli import ResticNotInstalledError
 from imbue.minds.desktop_client.workspace_diagnostics import STAGED_ZIP_FILENAME
@@ -660,44 +662,11 @@ def _prepare_electron_workspace_inputs(tmp_path: Path, monkeypatch: pytest.Monke
     return default_workspace_template_path, host_config_root
 
 
-def _sign_in_with_api_key_via_modal(chat: Frame, api_key: str) -> None:
-    """Drive the provider chooser in the chat's own frame through the API-key path.
-
-    A freshly created workspace has no providers, so the first send in its welcome chat (the
-    conversation the creation page seeded) opens the chooser in that chat's page -- the designed
-    first-boot step. The sign-in launches that same chat, on the account it minted, with the
-    message that was sent.
-
-    Signing in MINTS AN ACCOUNT (a folder under ``~/.minds/accounts`` plus an index row) rather
-    than writing into a shared settings block, so nothing is restarted here and the verdict is
-    the harness's own probe answering -- which is why the success wait is still generous.
-
-    Every control this clicks is targeted by a ``data-e2e`` attribute rather than copy or a
-    tailwind class: this drives the template's dialog from the other repo, so it has to survive
-    a wording change or a re-port of the UI.
-    """
-    logger.info("Waiting for the provider chooser to appear in the new chat's frame")
-    chat.wait_for_selector("[data-e2e=provider-chooser]", timeout=120_000)
-    # Anthropic's lane, then its API-key method under "Other ways to sign in" -- the lane's
-    # PRIMARY method is the browser sign-in, which needs a human.
-    chat.click("[data-e2e=lane-anthropic]")
-    chat.wait_for_selector("[data-e2e=method-api_key]", timeout=30_000)
-    chat.click("[data-e2e=method-api_key]")
-    chat.wait_for_selector("[data-e2e=api-key-input]", timeout=30_000)
-    chat.fill("[data-e2e=api-key-input]", api_key)
-    logger.info("Submitting the API key through the chooser")
-    chat.click("[data-e2e=save-key]")
-    chat.wait_for_selector("[data-e2e=status-success]", timeout=300_000)
-    chat.click("[data-e2e=done]")
-    chat.wait_for_selector("[data-e2e=provider-chooser]", state="detached", timeout=10_000)
-    logger.info("Signed in via the chooser")
-
-
 def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
     """Message the welcome chat the creation page opened; its first send is what asks for the account."""
     chat = wait_for_chat_input(page)
     send_chat_message(chat, page, token)
-    _sign_in_with_api_key_via_modal(chat, api_key)
+    sign_in_via_provider_chooser(page, chat, api_key=SecretStr(api_key), label="sign-in")
     await_chat_reply(chat, page, token)
 
 
@@ -706,10 +675,10 @@ def _sign_in_and_chat(page: Page | Frame, api_key: str, token: str) -> None:
 @pytest.mark.rsync
 @pytest.mark.timeout(900)
 # Drives a real Electron app end-to-end (launch, CDP attach, create flow, chooser
-# sign-in, chat), and individual steps have intermittently timed out under CI load
-# (the sign-in Frame.click, and the 240s wait for the agent's reply); the marker
-# routes the test into the retrying offload group. A genuine break still surfaces
-# by failing every retry, as MIND-285's New Tab regression did.
+# sign-in, chat), and the 240s wait for the agent's reply has intermittently timed
+# out under CI load; the marker routes the test into the retrying offload group. A
+# genuine break still surfaces by failing every retry, as MIND-285's New Tab
+# regression did.
 @pytest.mark.flaky
 def test_create_workspace_and_sign_in_via_modal_then_chat_via_electron(
     tmp_path: Path,
