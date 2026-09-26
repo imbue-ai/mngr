@@ -20,7 +20,8 @@
 #          code-review-json Modal volume and remove the marker.
 #        - Invoke notify_user (best-effort; silently skipped if the command
 #          is not defined).
-#   3. Mark the agent inactive and exit.
+#   3. Mark the agent inactive, unless a queued prompt is about to start the
+#      next turn, and exit.
 #
 # Identification strategy:
 #   All stop hooks and bash tool tasks are direct children of the Claude
@@ -31,10 +32,14 @@
 
 set -euo pipefail
 
-# --- Configuration (override via environment) ---
+# Configuration (override via environment)
 GRACE_PERIOD="${HOOK_GRACE_PERIOD:-3}"      # seconds before first check
 POLL_INTERVAL="${HOOK_POLL_INTERVAL:-1}"    # seconds between polls
 MAX_WAIT="${HOOK_MAX_WAIT:-120}"            # max seconds to wait for other hooks
+# Seconds between clearing the marker and re-checking for a queued prompt.
+# Claude Code fires UserPromptSubmit before its enqueue record reaches the
+# transcript, so the re-check waits out that lag.
+REQUEUE_RECHECK_DELAY="${HOOK_REQUEUE_RECHECK_DELAY:-0.3}"
 
 # Lock-acquire timeout (seconds) handed to the transcript flush in mark_inactive.
 # The flush's only potentially-slow step is waiting for the converter lock, so
@@ -47,10 +52,13 @@ FLUSH_LOCK_TIMEOUT_SIGNAL="${HOOK_FLUSH_LOCK_TIMEOUT_SIGNAL:-2}"
 # Session guard: exit early if not a managed session
 [ -z "${MAIN_CLAUDE_SESSION_ID:-}" ] && exit 0
 
-# Drain stdin so we don't block Claude
-cat > /dev/null 2>&1 || true
+# Drain stdin so we don't block Claude, keeping the session transcript path the
+# queued-prompt check reads
+HOOK_INPUT=$(cat 2>/dev/null || true)
+TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+HOOK_EVENT_NAME=$(printf '%s' "$HOOK_INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
 
-# --- Find the Claude ancestor process ---
+# Find the Claude ancestor process
 find_claude_pid() {
     local pid=$$
     while [ "$pid" -gt 1 ] 2>/dev/null; do
@@ -70,7 +78,7 @@ find_claude_pid() {
     return 1
 }
 
-# --- Identify our own wrapper (the direct child of Claude in our ancestry) ---
+# Identify our own wrapper (the direct child of Claude in our ancestry)
 find_our_wrapper_pid() {
     local pid=$$
     local claude_pid=$1
@@ -89,7 +97,7 @@ find_our_wrapper_pid() {
     echo "$PPID"
 }
 
-# --- Check if a process is a stop hook (has CLAUDE_PROJECT_DIR, not CLAUDECODE) ---
+# Check if a process is a stop hook (has CLAUDE_PROJECT_DIR, not CLAUDECODE)
 is_stop_hook() {
     local pid=$1
     # Must have CLAUDE_PROJECT_DIR
@@ -103,7 +111,7 @@ is_stop_hook() {
     return 0
 }
 
-# --- Get list of other stop hook PIDs ---
+# Get list of other stop hook PIDs
 get_other_stop_hooks() {
     local claude_pid=$1
     local our_wrapper=$2
@@ -123,7 +131,44 @@ get_other_stop_hooks() {
     echo "${result[*]}"
 }
 
-# --- Mark agent as inactive and emit activity event ---
+# Check whether a queued prompt is about to start the next turn
+# Claude Code fires UserPromptSubmit -- which touches the `active` marker -- when
+# a prompt is ENQUEUED (mid-turn, or while this hook runs), but dequeues it into
+# a new turn only after the Stop hooks finish, and no hook fires then. Clearing
+# the marker would leave that whole turn reporting WAITING. A prompt is still
+# queued when the latest queue-operation or stop_hook_summary record in the
+# session transcript is an enqueue: a prompt injected into the running turn is
+# followed by a remove, and one stranded by an earlier turn by its summary.
+# A background task's completion notification is enqueued the same way, so
+# its turn keeps the marker too.
+# A queued slash command is skipped: it fires no UserPromptSubmit when queued,
+# and either runs locally (/clear, /compact) or fires one when it is dequeued.
+# StopFailure hooks do not hold the queue back -- Claude Code dequeues the next
+# prompt as soon as they start -- so there the queue is read as it stood when
+# the turn failed: up to the timestamp of the API-error record that ended it.
+# The cutoff is by timestamp, not file position, because that dequeue is
+# written ahead of the older API-error record.
+has_queued_prompt() {
+    if [ -z "$TRANSCRIPT_PATH" ] || [ ! -r "$TRANSCRIPT_PATH" ]; then
+        return 1
+    fi
+    local latest_record
+    latest_record=$(grep -E '"(queue-operation|stop_hook_summary)"|"isApiErrorMessage": *true' "$TRANSCRIPT_PATH" 2>/dev/null \
+        | jq -R -s -r --arg event "$HOOK_EVENT_NAME" '
+            [split("\n")[] | fromjson? | select(type == "object")] as $records
+            | (if $event == "StopFailure" then [$records[] | select(.isApiErrorMessage == true) | .timestamp // empty] | last else null end) as $cutoff
+            | [$records[]
+                | select($cutoff == null or (.timestamp // "") <= $cutoff)
+                | if .type == "queue-operation" then
+                    if .operation == "enqueue" and ((.content // "") | tostring | startswith("/")) then empty else .operation end
+                  elif .subtype == "stop_hook_summary" then "turn-end"
+                  else empty end]
+            | last // ""' 2>/dev/null) || true
+    [ "$latest_record" = "enqueue" ]
+}
+
+# Mark agent as inactive and emit activity event, or leave it active when a
+# queued prompt is about to start the next turn
 # $1 (optional): reason for marking inactive (e.g. "signal:SIGTERM")
 # $2 (optional): lock-acquire timeout (seconds) for the transcript flush
 #                (default FLUSH_LOCK_TIMEOUT_NORMAL)
@@ -141,7 +186,20 @@ mark_inactive() {
     if command -v mngr_common_transcript_flush >/dev/null 2>&1; then
         mngr_common_transcript_flush "$flush_lock_timeout"
     fi
-    rm -f "$MNGR_AGENT_STATE_DIR/active" "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+    rm -f "$MNGR_AGENT_STATE_DIR/permissions_waiting"
+    if has_queued_prompt; then
+        echo "wait_for_stop_hook: a queued prompt starts the next turn, leaving the agent active"
+        return 0
+    fi
+    rm -f "$MNGR_AGENT_STATE_DIR/active"
+    # A prompt submitted just before the clear had its marker removed by it, and
+    # its enqueue record may not have reached the transcript yet, so re-check
+    # once that lag has passed and restore the marker
+    sleep "$REQUEUE_RECHECK_DELAY"
+    if has_queued_prompt; then
+        touch "$MNGR_AGENT_STATE_DIR/active"
+        return 0
+    fi
     date -u +"%Y-%m-%dT%H:%M:%S.000000000Z" > "$MNGR_AGENT_STATE_DIR/idle_since"
     mkdir -p "$MNGR_HOST_DIR/events/mngr/activity"
     local extra=""
@@ -152,7 +210,7 @@ mark_inactive() {
         >> "$MNGR_HOST_DIR/events/mngr/activity/events.jsonl"
 }
 
-# --- Post-completion: upload autofix issues to Modal volume (best-effort) ---
+# Post-completion: upload autofix issues to Modal volume (best-effort)
 # Uploads only the current commit's issue file (autofix writes one file per
 # commit at .reviewer/outputs/autofix/issues/{hash}.jsonl). Files from prior
 # commits are ignored so that each commit's upload contains exactly its own
@@ -181,7 +239,7 @@ upload_autofix_issues() {
     uv run modal volume put "${volume_name}" "$issues_file" "/${nested_path}/autofix.json" --force 2>/dev/null || true
 }
 
-# --- Source the shared common-transcript helpers (provides the flush) ---
+# Source the shared common-transcript helpers (provides the flush)
 # The raw streamer (1s poll) and common-transcript converter (5s poll) lag
 # behind Claude's session JSONL. mark_inactive clears the `active` marker, which
 # is the turn-end signal `mngr wait --state WAITING` reads -- and consumers that
@@ -198,7 +256,7 @@ if [ -n "${MNGR_AGENT_STATE_DIR:-}" ] && [ -r "$MNGR_AGENT_STATE_DIR/commands/mn
     source "$MNGR_AGENT_STATE_DIR/commands/mngr_common_transcript_lib.sh"
 fi
 
-# --- Post-completion actions (run after all other stop hooks finish) ---
+# Post-completion actions (run after all other stop hooks finish)
 run_post_completion() {
     # Only run post-completion if the orchestrator succeeded.
     # The code-guardian orchestrator writes .reviewer/outputs/orchestrator_success
@@ -212,7 +270,7 @@ run_post_completion() {
     notify_user 2>/dev/null || true
 }
 
-# --- Signal handler: mark inactive and exit on SIGTERM/SIGINT ---
+# Signal handler: mark inactive and exit on SIGTERM/SIGINT
 on_signal() {
     local sig="$1"
     echo "wait_for_stop_hook: received SIG${sig}, marking inactive" >&2
@@ -223,9 +281,7 @@ on_signal() {
 trap 'on_signal TERM' TERM
 trap 'on_signal INT' INT
 
-# =====================================================================
 # Main
-# =====================================================================
 
 CLAUDE_PID=$(find_claude_pid) || {
     echo "wait_for_stop_hook: could not find Claude ancestor process (no /proc?), marking inactive immediately" >&2

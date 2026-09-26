@@ -189,9 +189,7 @@ def find_user_config_in_isolated_mode() -> Path:
     return candidates[0]
 
 
-# =============================================================================
 # Shared helpers for reading/writing claude config JSON
-# =============================================================================
 
 
 @contextmanager
@@ -238,9 +236,7 @@ def _write_claude_config_atomic(config_path: Path, config: dict[str, Any]) -> No
     atomic_write(config_path, json.dumps(config, indent=2) + "\n")
 
 
-# =============================================================================
 # Trust operations
-# =============================================================================
 
 
 def is_source_directory_trusted(config_path: Path, source_path: Path) -> bool:
@@ -489,9 +485,7 @@ def find_project_config(projects: Mapping[str, Any], path: Path) -> dict[str, An
     return None
 
 
-# =============================================================================
 # Shoulder-tap keybinding (native queue flush via chat:cancel)
-# =============================================================================
 
 # Filename of Claude Code's user-scope keybindings file (beside settings.json in
 # the config dir). mngr syncs it into per-agent config dirs and, for the native
@@ -637,9 +631,7 @@ def is_tap_binding_active(keybindings_path: Path, process_started_marker_path: P
     return keybindings_mtime <= marker_mtime
 
 
-# =============================================================================
 # Project Directory Encoding
-# =============================================================================
 
 # Matches every character that Claude Code's project-dir encoder maps to '-'
 # (i.e. everything that is not an ASCII alphanumeric or literal '-').
@@ -665,9 +657,7 @@ def encode_claude_project_dir_name(path: Path) -> str:
     return _NON_DASH_ALNUM_ASCII.sub("-", str(path))
 
 
-# =============================================================================
 # Per-agent Claude artifact directory ($MNGR_AGENT_STATE_DIR/plugin/claude/)
-# =============================================================================
 
 # Single source of truth for the per-agent ``plugin/claude/`` layout (relative to
 # $MNGR_AGENT_STATE_DIR). It holds the isolated config dir (``anthropic/``), the
@@ -736,9 +726,7 @@ def get_agent_hook_settings_path(agent_state_dir: Path, *, use_env_config_dir: b
     return get_agent_claude_config_dir(agent_state_dir) / "settings.json"
 
 
-# =============================================================================
 # Readiness Hooks Configuration
-# =============================================================================
 
 # Guard prefix for readiness hook commands: exit gracefully if this is not the
 # main Claude session (e.g. a reviewer sub-agent that resumed a session).
@@ -872,7 +860,9 @@ def build_readiness_hooks_config() -> dict[str, Any]:
       autofix issue file to the Modal code-review-json volume when the
       code-guardian orchestrator wrote .reviewer/outputs/orchestrator_success,
       and invokes notify_user best-effort), and finally removes 'active' and
-      'permissions_waiting' and emits an activity event
+      'permissions_waiting' and emits an activity event -- except that it leaves
+      'active' in place while the session transcript shows a queued prompt
+      (not a slash command) about to start the next turn
     - StopFailure: the same script as Stop. Claude Code ends a turn that died on
       an API error -- a usage limit, a rate limit, a prompt too long, a tool call
       it could not parse -- through StopFailure, returning before it reaches the

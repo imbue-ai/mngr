@@ -383,9 +383,7 @@ def test_claude_model_picker_does_not_leave_agent_stuck(tmp_path: Path) -> None:
         profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=_MODEL_PICKER_DESTROY_TIMEOUT_SECONDS)
 
 
-# =============================================================================
 # Transcript record contract
-# =============================================================================
 
 _CONTRACT_SEND_TIMEOUT_SECONDS = 180.0
 _CONTRACT_RECORD_TIMEOUT_SECONDS = 90.0
@@ -522,6 +520,15 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
             "consumers: common-transcript converter, transcript readers",
         )
 
+        # Contract 7: a turn's Stop hook pass lands as
+        # {"type":"system","subtype":"stop_hook_summary"} (mngr always installs Stop hooks).
+        _contract_wait_for_record(
+            session_file,
+            lambda r: r.get("type") == "system" and r.get("subtype") == "stop_hook_summary",
+            failure=f"no system/stop_hook_summary record after a completed turn {drift}; "
+            "consumer: wait_for_stop_hook.sh queued-prompt check",
+        )
+
         # Contract 2: a message sent while a turn runs lands as
         # {"type":"queue-operation","operation":"enqueue","content":...}.
         # Retried: the race is real (the running turn can finish first), and a
@@ -578,13 +585,14 @@ def test_claude_transcript_record_contract(tmp_path: Path) -> None:
 
         # Contract 2c: the queue-operation vocabulary itself. A new operation
         # value means delivery-evidence semantics changed under mngr.
-        known_operations = {"enqueue", "dequeue", "remove"}
+        known_operations = {"enqueue", "dequeue", "remove", "popAll"}
         seen_operations = {
             str(r.get("operation")) for r in _contract_read_records(session_file) if r.get("type") == "queue-operation"
         }
         assert seen_operations <= known_operations, (
             f"unknown queue-operation values {sorted(seen_operations - known_operations)} {drift}; "
-            "consumers: accept-evidence probes, release-test delivery counting"
+            "consumers: accept-evidence probes, release-test delivery counting, "
+            "wait_for_stop_hook.sh queued-prompt check"
         )
 
         # Contract 3: an unknown slash command lands as
