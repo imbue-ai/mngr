@@ -73,8 +73,12 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.skill_chat import USER_CREATED_LABEL
 from imbue.minds.desktop_client.system_interface_health import ProbeGracePurpose
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.template_mngr_pin import InternalMngrCredentialError
+from imbue.minds.desktop_client.template_mngr_pin import TemplateMngrPinError
+from imbue.minds.desktop_client.template_mngr_pin import internal_mngr_credential
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_git_url
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
+from imbue.minds.desktop_client.workspace_defaults import is_local_workspace_defaults_opt_in
 from imbue.minds.errors import BackupProvisioningError
 from imbue.minds.errors import GitCloneError
 from imbue.minds.errors import GitOperationError
@@ -1541,6 +1545,12 @@ def run_mngr_create(
     auth lives in the env block of the workspace's shared ~/.claude/settings.json,
     written by the in-workspace sign-in modal after the workspace boots.
 
+    A template that pins mngr from the private mngr-internal repo (a branch
+    iterating on a paired mngr change) needs a credential for its build; it rides
+    the subprocess env, plus an uploaded file for the SSH-provisioned modes. Read
+    off the pin in ``workspace_dir`` (see ``template_mngr_pin``), so a create that
+    could not fetch its mngr fails here rather than minutes into the build.
+
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
     ``mngr create`` emits as its final stdout record; the host id is
@@ -1570,28 +1580,41 @@ def run_mngr_create(
         create_attempt_id_label=create_attempt_id_label,
     )
 
-    # The command carries the latchkey gateway password + permissions-override
-    # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
-    # so the persistent logs (uploaded with bug reports) never carry the raw
-    # secrets. The subprocess below still receives the unredacted command.
-    loggable_command = redact_secret_env_assignments(mngr_command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
-    loggable_command_str = " ".join(loggable_command)
-    logger.info("Running: {}", loggable_command_str)
-
     capture = _CreateEventCapture(inner_on_output=on_output)
     cg = _make_child_cg("mngr-create", parent_cg)
-    with cg:
-        result = cg.run_process_to_completion(
-            command=mngr_command,
-            cwd=workspace_dir,
-            is_checked_after=False,
-            on_output=capture,
-            env=None,
-            # Name the reader thread with the redacted command so the gateway
-            # password + JWT never reach the JSONL log's ``thread_name`` (nor any
-            # ProcessError message); the real command is still what executes.
-            name=loggable_command_str,
-        )
+    # The Vault fallback for the private-pin credential is an operator convenience:
+    # the same opt-in that routes the create form at a local template worktree.
+    # Entered around the create's group, not inside it, so a missing credential
+    # raises as itself rather than wrapped in a ConcurrencyExceptionGroup.
+    with internal_mngr_credential(
+        launch_mode,
+        workspace_dir,
+        os.environ,
+        is_vault_fallback_allowed=is_local_workspace_defaults_opt_in(),
+        parent_concurrency_group=parent_cg,
+    ) as credential:
+        command = [*mngr_command, *credential.create_args]
+        # The command carries the latchkey gateway password + permissions-override
+        # JWT as ``--host-env NAME=VALUE`` flags; mask their values before logging
+        # so the persistent logs (uploaded with bug reports) never carry the raw
+        # secrets. The subprocess below still receives the unredacted command.
+        loggable_command = redact_secret_env_assignments(command, secret_env_var_names=SECRET_LATCHKEY_ENV_VAR_NAMES)
+        loggable_command_str = " ".join(loggable_command)
+        logger.info("Running: {}", loggable_command_str)
+
+        credential_env = credential.subprocess_env()
+        with cg:
+            result = cg.run_process_to_completion(
+                command=command,
+                cwd=workspace_dir,
+                is_checked_after=False,
+                on_output=capture,
+                env={**os.environ, **credential_env} if credential_env else None,
+                # Name the reader thread with the redacted command so the gateway
+                # password + JWT never reach the JSONL log's ``thread_name`` (nor any
+                # ProcessError message); the real command is still what executes.
+                name=loggable_command_str,
+            )
 
     if result.returncode != 0:
         raise MngrCommandError(
@@ -2814,7 +2837,16 @@ class AgentCreator(MutableModel):
                         is_checked=False,
                     )
 
-        except (GitCloneError, GitOperationError, MngrCommandError, ImbueCloudCliError, ValueError, OSError) as e:
+        except (
+            GitCloneError,
+            GitOperationError,
+            MngrCommandError,
+            ImbueCloudCliError,
+            InternalMngrCredentialError,
+            TemplateMngrPinError,
+            ValueError,
+            OSError,
+        ) as e:
             logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
             log_sink.put("[minds] ERROR: {}".format(e))
             error_kind = classify_create_attempt_error(repo_source, e)

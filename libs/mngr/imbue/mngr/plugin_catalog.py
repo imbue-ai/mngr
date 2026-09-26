@@ -169,41 +169,6 @@ class RequiredPackagesGate(FrozenModel):
 Gate = SignalGate | RequiredPackagesGate
 
 
-class SignalGate(FrozenModel):
-    """A gate keyed on a detectable tool.
-
-    On an INDEPENDENT entry the signal is probed to decide phase-1 preselection,
-    and once the entry is selected the signal becomes "accepted" for dependents.
-    A DEPENDENT entry carrying this gate is offered in phase 2 when its signal was
-    accepted in phase 1.
-    """
-
-    signal: SignalCheck
-
-    def detection_signal(self) -> SignalCheck | None:
-        return self.signal
-
-    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
-        return self.signal in accepted_signals
-
-
-class RequiredPackagesGate(FrozenModel):
-    """A gate for a DEPENDENT entry, offered in phase 2 only when every named
-    package is present -- already installed, or selected earlier in the wizard.
-    """
-
-    packages: tuple[str, ...]
-
-    def detection_signal(self) -> SignalCheck | None:
-        return None
-
-    def is_unlocked(self, *, accepted_signals: set[SignalCheck], present_packages: frozenset[str]) -> bool:
-        return all(package in present_packages for package in self.packages)
-
-
-Gate = SignalGate | RequiredPackagesGate
-
-
 class CatalogEntry(FrozenModel):
     """Metadata for a plugin entry point in the catalog."""
 
@@ -227,7 +192,7 @@ class CatalogEntry(FrozenModel):
 
 # Descriptions sourced from each plugin's pyproject.toml.
 PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
-    # --- INDEPENDENT with signal (binary/credential detection) ---
+    # INDEPENDENT with signal (binary/credential detection)
     CatalogEntry(
         entry_point_name="claude",
         package_name="imbue-mngr-claude",
@@ -327,7 +292,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         tier=PluginTier.INDEPENDENT,
         is_recommended=True,
     ),
-    # --- DEPENDENT (require another plugin's signal) ---
+    # DEPENDENT (require another plugin's signal)
     CatalogEntry(
         entry_point_name="code_guardian",
         package_name="imbue-mngr-claude",
@@ -384,7 +349,7 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         is_recommended=True,
         gate=RequiredPackagesGate(packages=("imbue-mngr-pi-coding", "imbue-mngr-usage")),
     ),
-    # --- INDEPENDENT, no signal ---
+    # INDEPENDENT, no signal
     CatalogEntry(
         entry_point_name="usage",
         package_name="imbue-mngr-usage",

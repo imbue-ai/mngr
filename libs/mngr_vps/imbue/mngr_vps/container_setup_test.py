@@ -11,13 +11,16 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import run_git_command
 from imbue.mngr_vps.container_setup import _clone_build_context_for_self_contained_git
 from imbue.mngr_vps.container_setup import _raise_if_cwd_deleted_for_relative_context
 from imbue.mngr_vps.container_setup import build_home_volume_symlink_command
+from imbue.mngr_vps.container_setup import build_image_on_outer
 from imbue.mngr_vps.container_setup import build_image_on_outer_from_build_args
 from imbue.mngr_vps.container_setup import build_write_container_file_command
+from imbue.mngr_vps.container_setup import env_sourced_build_secrets
 from imbue.mngr_vps.container_setup import image_exists
 from imbue.mngr_vps.data_types import ContainerFile
 
@@ -199,3 +202,79 @@ def test_build_write_container_file_command_creates_the_directory_and_quotes_the
         ContainerFile(path="/etc/ssh/sshd_config.d/61-mngr-user-ca.conf", content="it's %u\n", mode="0644")
     )
     assert """'it'"'"'s %u\n'""" in quoted
+
+
+def test_env_sourced_build_secrets_reads_both_flag_spellings_and_skips_unset_names() -> None:
+    args = (
+        "--file=Dockerfile",
+        "--secret",
+        "id=a,env=TOKEN_A",
+        "--secret=id=b,env=TOKEN_B",
+        "--secret=id=c,src=/tmp/c",
+    )
+
+    forwarded = env_sourced_build_secrets(args, {"TOKEN_A": "aaa", "UNRELATED": "x"})
+
+    assert forwarded == {"TOKEN_A": "aaa"}
+
+
+def test_env_sourced_build_secrets_is_empty_without_secret_args() -> None:
+    assert env_sourced_build_secrets(("--file=Dockerfile", "."), {"TOKEN_A": "aaa"}) == {}
+
+
+class _StreamingOuter(MutableModel):
+    """Outer host that records the command and env of the one streaming command it runs."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    command: str = ""
+    env: dict[str, str] | None = None
+
+    def execute_streaming_command(
+        self,
+        command: str,
+        on_line: Any,
+        *,
+        env: Any = None,
+        timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        self.command = command
+        self.env = dict(env) if env is not None else None
+        return CommandResult(stdout="", stderr="", success=True)
+
+
+def test_build_image_on_outer_forwards_an_env_sourced_secret_through_the_env_not_the_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BUILD_TOKEN", "s3cret")
+    outer = _StreamingOuter()
+
+    build_image_on_outer(
+        cast(OuterHostInterface, outer),
+        tag="mngr-build-x",
+        build_context_path="/tmp/ctx",
+        docker_build_args=("--file=/tmp/ctx/Dockerfile", "--secret=id=tok,env=BUILD_TOKEN"),
+        timeout_seconds=5.0,
+        on_output=None,
+        builder=DockerBuilder.DOCKER,
+    )
+
+    assert outer.env == {"BUILD_TOKEN": "s3cret"}
+    assert "s3cret" not in outer.command
+    assert "--secret=id=tok,env=BUILD_TOKEN" in outer.command
+
+
+def test_build_image_on_outer_passes_no_env_when_no_secret_is_env_sourced() -> None:
+    outer = _StreamingOuter()
+
+    build_image_on_outer(
+        cast(OuterHostInterface, outer),
+        tag="mngr-build-x",
+        build_context_path="/tmp/ctx",
+        docker_build_args=("--file=/tmp/ctx/Dockerfile",),
+        timeout_seconds=5.0,
+        on_output=None,
+        builder=DockerBuilder.DOCKER,
+    )
+
+    assert outer.env is None

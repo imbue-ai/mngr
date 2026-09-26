@@ -687,17 +687,24 @@ def write_stub_mngr(tmp_path: Path, name: str, body: str) -> str:
     return str(script)
 
 
-def install_stub_mngr_on_path(bin_dir: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> str:
-    """Install an executable ``mngr`` stub in ``bin_dir``, first on ``PATH``, and return its path.
+def install_stub_on_path(bin_dir: Path, monkeypatch: pytest.MonkeyPatch, name: str, body: str) -> str:
+    """Install an executable stub ``name`` in ``bin_dir``, first on ``PATH``, and return its path.
 
-    For the desktop-client paths that resolve ``mngr`` the way production does
+    For the desktop-client paths that resolve a binary the way production does
     -- via ``PATH`` -- so a test can shape what the real subprocess invocation
-    sees without threading a binary path through the code under test.
+    sees without threading a binary path through the code under test. A second
+    stub in the same ``bin_dir`` reuses the PATH entry the first one put there.
     """
     bin_dir.mkdir(parents=True, exist_ok=True)
-    script = write_stub_mngr(bin_dir, MNGR_BINARY, body)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    script = write_stub_mngr(bin_dir, name, body)
+    if os.environ["PATH"].split(os.pathsep)[0] != str(bin_dir):
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return script
+
+
+def install_stub_mngr_on_path(bin_dir: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> str:
+    """Install an executable ``mngr`` stub in ``bin_dir``, first on ``PATH``, and return its path."""
+    return install_stub_on_path(bin_dir, monkeypatch, MNGR_BINARY, body)
 
 
 # Iterations of the blocking stub's 0.05s poll before it gives up on its release
@@ -1394,3 +1401,18 @@ def read_injected_share_env_text(cli: ImbueCloudCli) -> str:
                 encoded = clause.split("printf '%s' ", 1)[1].split(" | base64 -d", 1)[0].strip()
                 return base64.b64decode(encoded).decode("utf-8")
     raise AssertionError("no share.env write was recorded")
+
+
+TEMPLATE_MNGR_PIN_REV_FOR_TEST: Final[str] = "0123456789abcdef0123456789abcdef01234567"
+
+
+def template_pyproject_pinning_mngr(repo_url: str, rev: str = TEMPLATE_MNGR_PIN_REV_FOR_TEST) -> str:
+    """A default-workspace-template-shaped ``pyproject.toml`` whose ``imbue-mngr`` source pins ``repo_url`` at ``rev``."""
+    return f'[tool.uv.sources]\nimbue-mngr = {{ git = "{repo_url}", rev = "{rev}", subdirectory = "libs/mngr" }}\n'
+
+
+def write_template_pyproject_pinning_mngr(
+    template_dir: Path, repo_url: str, rev: str = TEMPLATE_MNGR_PIN_REV_FOR_TEST
+) -> None:
+    """Give the tree at ``template_dir`` a template-shaped ``pyproject.toml`` pinning mngr from ``repo_url`` at ``rev``."""
+    (template_dir / "pyproject.toml").write_text(template_pyproject_pinning_mngr(repo_url, rev=rev))
