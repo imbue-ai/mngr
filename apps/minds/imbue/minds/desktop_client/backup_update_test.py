@@ -79,8 +79,8 @@ def _write_env_for_local_repo(paths: InstallationPaths, agent_id: AgentId, repos
     write_canonical_env(paths, agent_id, f"RESTIC_REPOSITORY={repository}\nRESTIC_PASSWORD=workspace-key\n")
 
 
-def _backup_tree(repository: Path, source: Path) -> None:
-    restic_backup_a_file(str(repository), "workspace-key", source)
+def _backup_tree(repository: Path, source: Path, *, is_tree_at_snapshot_root: bool = False) -> None:
+    restic_backup_a_file(str(repository), "workspace-key", source, is_tree_at_snapshot_root=is_tree_at_snapshot_root)
 
 
 @pytest.mark.timeout(60)
@@ -104,6 +104,30 @@ def test_resolve_restore_subpath_uses_the_snapshot_root_for_current_layout_snaps
     subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
 
     assert subpath == snapshot.paths[0]
+
+
+@pytest.mark.timeout(60)
+def test_resolve_restore_subpath_uses_the_tree_root_for_snapshots_stored_at_the_root(tmp_path: Path) -> None:
+    # host_backup backs up `.` from inside the backup root, so the snapshot
+    # holds workspace/ at its tree root while its recorded path is still the
+    # absolute directory it ran in -- which, in the snapshot, is empty.
+    paths = InstallationPaths(data_dir=tmp_path)
+    agent_id = AgentId.generate()
+    repository = tmp_path / "repo"
+    restic_cli.init_repo(repository=str(repository), backend_env={}, password="workspace-key")
+    _write_env_for_local_repo(paths, agent_id, repository)
+    home = (tmp_path / "snapshots" / "2026-09-24T10:00:00.000000Z" / "home").resolve()
+    (home / "workspace").mkdir(parents=True)
+    (home / "workspace" / "file.txt").write_text("content\n")
+    _backup_tree(repository, home, is_tree_at_snapshot_root=True)
+
+    snapshot = _resolve_restore_snapshot(
+        agent_id=agent_id, paths=paths, snapshot_id=_only_snapshot_id(paths, agent_id), parent_cg=None
+    )
+    subpath = _resolve_restore_subpath(agent_id=agent_id, paths=paths, snapshot=snapshot, parent_cg=None)
+
+    assert snapshot.paths[0] == str(home)
+    assert subpath == "/"
 
 
 @pytest.mark.timeout(60)

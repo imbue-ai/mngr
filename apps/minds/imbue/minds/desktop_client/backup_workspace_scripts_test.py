@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MA
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.restic_cli import _get_restic_binary
+from imbue.minds.desktop_client.testing import restic_backup_a_file
 from imbue.minds.testing import run_git_for_backup_test
 from imbue.minds.testing import tag_cross_layout_release_content
 from imbue.minds.testing import tag_newer_release_content
@@ -157,9 +158,6 @@ def _running_chat_agents_json(repo: Path) -> str:
     return json.dumps({"agents": agents, "errors": []})
 
 
-# --- marker/command plumbing ---
-
-
 def test_the_module_official_remote_constants_match_the_script_defaults() -> None:
     # The module-level constants (used for display / docs, and by the desktop
     # client's version read) and the values baked into the script preamble must
@@ -201,9 +199,6 @@ def test_build_workspace_script_command_round_trips_through_bash(tmp_path: Path)
         ["bash", "-c", command], capture_output=True, text=True, check=True, timeout=60, cwd=tmp_path
     )
     assert "OUT:--flag value with spaces" in result.stdout
-
-
-# --- check script against real git repos ---
 
 
 # The tests below marked flaky time out at the 10s per-test budget while shelling out
@@ -425,9 +420,6 @@ def test_check_script_reports_env_sha_and_content(tmp_path: Path) -> None:
     assert "content_b64" in env_map
 
 
-# --- gate probe script ---
-
-
 def test_gate_probe_reports_running_chats_excluding_main_and_worktrees(tmp_path: Path) -> None:
     repo = _make_workspace_repo(tmp_path)
     stub_bin = _make_stub_bin(tmp_path, agents_json=_running_chat_agents_json(repo))
@@ -573,9 +565,6 @@ def test_gate_probe_treats_a_tick_as_dead_when_the_backup_service_is_not_running
     payload = extract_marker_json(run["stdout"], GATE_RESULT_MARKER)
     assert payload is not None, run
     assert payload["backup_tick_in_flight"] is False
-
-
-# --- apply update script ---
 
 
 # Flaky for the reason noted above test_check_script_reports_matches_when_tag_equals_worktree.
@@ -781,8 +770,6 @@ def test_apply_update_skips_commit_when_content_already_matches(tmp_path: Path) 
     assert payload["committed"] is False
     assert run_git_for_backup_test(repo, "log", "-1", "--format=%s").strip() == "initial"
 
-
-# --- restore script against a real local restic repo ---
 
 _RESTIC_TEST_PASSWORD = "restore-test-password"
 
@@ -1001,6 +988,33 @@ def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(
     # ...and the volume-level entries were not restored.
     assert not (host / "host_state.json").exists()
     assert not (host / "host_dir").exists()
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_restores_a_snapshot_stored_at_the_tree_root(tmp_path: Path) -> None:
+    # host_backup backs up `.` from inside the backup root, so the snapshot
+    # holds the host dir's tree at its root and minds passes `/` as the subpath.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    restic_backup_a_file(str(restic_repo), _RESTIC_TEST_PASSWORD, host, is_tree_at_snapshot_root=True)
+    entry = _snapshot_entries(restic_repo)[0]
+
+    (code / "file.txt").write_text("changed after the snapshot\n")
+    (code / "extra.txt").write_text("added after the snapshot\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, entry["id"], subpath="/"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert payload["restored"] is True
+    assert (code / "file.txt").read_text() == "version 1\n"
+    assert not (code / "extra.txt").exists()
 
 
 @pytest.mark.timeout(120)
@@ -1232,8 +1246,6 @@ def test_restore_script_uses_a_preseeded_fallback_restic_when_path_restic_is_too
     assert (code / "file.txt").read_text() == "version 1\n"
 
 
-# --- restore script: service lifecycle + failure injection ---
-#
 # Stopping the workspace's services is a side effect that creates a cleanup
 # obligation: every exit path afterwards must bring them back. These tests
 # force a failure at chosen points (a restic subcommand, uv sync) and assert
@@ -1369,8 +1381,7 @@ def test_restore_script_fails_cleanly_without_a_snapshot_subpath(tmp_path: Path)
     assert (code / "file.txt").read_text() == "version 2\n"
 
 
-# --- post-restore verdict: the restore-critical tiered contract ---
-# (behaviors/backup-restore/restore-verdict.feature)
+# The post-restore verdict contract: behaviors/backup-restore/restore-verdict.feature
 
 
 @pytest.mark.timeout(120)

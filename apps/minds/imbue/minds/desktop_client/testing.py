@@ -804,16 +804,25 @@ class SuppressionAnnouncingTracker(SystemInterfaceHealthTracker):
         return self._suppression_event.wait(timeout=timeout_seconds)
 
 
-def restic_backup_a_file(repository: str, password: str, source: Path) -> None:
+def restic_backup_a_file(
+    repository: str,
+    password: str,
+    source: Path,
+    *,
+    # Back up `.` from inside ``source`` (as host_backup does), so the snapshot
+    # holds the tree at its root rather than under ``source``'s absolute path.
+    is_tree_at_snapshot_root: bool = False,
+) -> None:
     """Create one snapshot in ``repository`` from ``source`` using plain restic."""
     env = dict(os.environ)
     env.update({"RESTIC_REPOSITORY": repository, "RESTIC_PASSWORD": password})
     result = subprocess.run(
-        [_get_restic_binary(), "backup", str(source)],
+        [_get_restic_binary(), "backup", "." if is_tree_at_snapshot_root else str(source)],
         capture_output=True,
         text=True,
         check=False,
         env=env,
+        cwd=source if is_tree_at_snapshot_root else None,
         timeout=120.0,
     )
     assert result.returncode == 0, result.stderr

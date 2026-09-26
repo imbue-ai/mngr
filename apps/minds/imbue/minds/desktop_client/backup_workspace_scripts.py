@@ -1186,9 +1186,8 @@ def _main():
     # The in-place sync restore: only files that differ from the snapshot are
     # rewritten, files the snapshot lacks are deleted, and nothing is staged
     # -- so no double disk, and a restore that fails midway converges when
-    # simply re-run. The subpath maps the snapshot's recorded layout (volume-
-    # level on btrfs providers, the host dir itself on plain docker) onto the
-    # backup root; minds resolved and validated it before dispatch.
+    # simply re-run. The subpath maps the snapshot's layout onto the backup
+    # root; minds resolved and validated it before dispatch.
     _progress("Restoring the selected backup into place...")
     # The restore may rewrite or delete this process's original cwd entries.
     _os.chdir("/")

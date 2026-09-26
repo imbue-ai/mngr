@@ -479,10 +479,13 @@ def _resolve_restore_subpath(
     checkout is a ``workspace/`` child; legacy snapshots (pre-layout-move)
     carry a ``code/`` checkout instead, either at the root (plain docker) or
     one level down in a ``host_dir/`` child (btrfs providers, which
-    snapshotted the whole unified host volume). Resolved here, from minds'
-    own view of the repository, so the in-workspace script only ever
-    consumes a validated ``<snapshot>:<subpath>`` -- restoring the wrong
-    level would wreck the workspace.
+    snapshotted the whole unified host volume). All of those sit under the
+    snapshot's recorded path, except in snapshots host_backup takes by backing
+    up ``.`` from inside the tree: those hold ``workspace/`` at the snapshot's
+    own root, so the subpath is ``/``. Resolved here, from minds' own view of
+    the repository, so the in-workspace script only ever consumes a validated
+    ``<snapshot>:<subpath>`` -- restoring the wrong level would wreck the
+    workspace.
     """
     root = snapshot.paths[0]
     root_entries = backup_status.list_workspace_snapshot_directory(
@@ -507,6 +510,16 @@ def _resolve_restore_subpath(
         )
         if f"{nested_root}/workspace" in nested_entries or f"{nested_root}/code" in nested_entries:
             return nested_root
+    tree_root_entries = backup_status.list_workspace_snapshot_directory(
+        paths,
+        agent_id,
+        snapshot_id=snapshot.snapshot_id,
+        directory="/",
+        parent_cg=parent_cg,
+        timeout_seconds=_SNAPSHOT_RESOLVE_TIMEOUT_SECONDS,
+    )
+    if "/workspace" in tree_root_entries:
+        return "/"
     raise BackupProvisioningError(
         f"Snapshot {snapshot.short_id} does not contain a machine (no workspace/ or code/ checkout); "
         "it cannot be restored"
