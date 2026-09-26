@@ -45,6 +45,8 @@ from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -705,6 +707,46 @@ def test_grant_runs_the_filled_in_credential_command_and_then_grants(tmp_path: P
     # ... and the grant landed for that account.
     on_disk = json.loads(permissions_path_for_host(latchkey_directory / "mngr_latchkey", host_id).read_text())
     assert on_disk["rules"] == [{account_scope_key("slack-api", ""): ["slack-read-all"]}]
+
+
+def test_a_custom_services_registered_header_is_what_the_typed_token_is_stored_under(tmp_path: Path) -> None:
+    """latchkey reports a bearer command for every generic registered service, so a custom
+    service's re-auth through this dialog has to take the header off the registration or
+    the token lands under Authorization instead of the header the service reads."""
+    service_name = custom_service_name("api.example.com", "https")
+    latchkey = _make_latchkey_with_status(
+        tmp_path,
+        credential_status="missing",
+        auth_options_json=json.dumps(["set"]),
+        set_credentials_example=f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"',
+    )
+    latchkey.register_custom_service(
+        service_name,
+        build_custom_service_registration("api.example.com", "https", credential_header="X-Api-Key: {token}"),
+    )
+    catalog = ServicesCatalog(latchkey_directory=tmp_path)
+    handler = LatchkeyPermissionGrantHandler(
+        data_dir=tmp_path,
+        latchkey=latchkey,
+        services_catalog=catalog,
+        mngr_message_sender=_message_sender(),
+        gateway_client=build_fake_gateway_client(),
+        carry_grant_to_machine=leave_grant_on_this_computer,
+    )
+    (service_info,) = catalog.as_mapping()[service_name]
+
+    result = handler.grant(
+        request_event_id="evt-abc",
+        agent_id=AgentId(),
+        host_id=HostId(),
+        service_info=service_info,
+        granted_permissions=(WILDCARD_PERMISSION_NAME,),
+        account_choice="",
+        manual_credentials=_submission({"token": "k-1"}),
+    )
+
+    assert result.outcome == GrantOutcome.GRANTED
+    assert _read_set_recording(tmp_path)[0]["argv"][-2:] == ["-H", "X-Api-Key: k-1"]
 
 
 def test_grant_stores_manual_credentials_under_the_selected_account(tmp_path: Path) -> None:

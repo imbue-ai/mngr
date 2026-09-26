@@ -40,6 +40,10 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_scope_schema
 from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
+from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_HEADERS
+from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_INSTRUCTIONS
+from imbue.mngr_latchkey.testing import REJECTED_CREDENTIAL_HEADERS
+from imbue.mngr_latchkey.testing import REJECTED_CREDENTIAL_INSTRUCTIONS
 from imbue.mngr_latchkey.workspace_permissions import WORKSPACE_VERBS
 
 _NODE_BINARY: Final[str | None] = shutil.which("node")
@@ -343,9 +347,6 @@ def _post_json(url: str, payload: object) -> tuple[int, bytes]:
         body=json.dumps(payload).encode("utf-8"),
     )
     return status, body
-
-
-# -- POST /permission-requests: body validation --
 
 
 def test_post_creates_predefined_request_with_target_and_effect(
@@ -850,9 +851,6 @@ def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> No
     assert "type" in json.loads(body)["error"]
 
 
-# -- POST /permission-requests: accounts type --
-
-
 def test_post_creates_accounts_request_with_fixed_permission_under_latchkey_self(
     node_extension: tuple[str, Path, Path],
 ) -> None:
@@ -891,9 +889,6 @@ def test_post_rejects_accounts_payload_with_fields(node_extension: tuple[str, Pa
         },
     )
     assert status == 400
-
-
-# -- POST /permission-requests: workspace type --
 
 
 def test_post_creates_workspace_request_with_target_and_effect(
@@ -1700,9 +1695,6 @@ def test_post_rejects_extraneous_payload_field(node_extension: tuple[str, Path, 
     assert "extra" in json.loads(body)["error"]
 
 
-# -- GET /permission-requests --
-
-
 def test_get_returns_all_pending_requests(node_extension: tuple[str, Path, Path]) -> None:
     base_url, *_ = node_extension
     payloads = [
@@ -1757,9 +1749,6 @@ def test_get_relists_a_request_with_the_time_it_was_filed(node_extension: tuple[
     # The gateway stamps milliseconds, so truncate the lower bound to match.
     truncated_filed_after = filed_after.replace(microsecond=filed_after.microsecond // 1000 * 1000)
     assert truncated_filed_after <= datetime.fromisoformat(listed_created_at) <= filed_before
-
-
-# -- POST /permission-requests/approve/<id> --
 
 
 def test_approve_writes_target_permissions_for_file_sharing(
@@ -2098,9 +2087,6 @@ def test_delete_removes_pending_request(node_extension: tuple[str, Path, Path]) 
     assert list(pending_dir.iterdir()) == []
 
 
-# -- POST /permission-requests: custom-service --
-
-
 def _custom_service_body(payload: object, rationale: str = "needs the widget API") -> dict[str, object]:
     # A well-formed payload names a scheme; tests about the rest of the payload
     # get https unless they say otherwise.
@@ -2144,6 +2130,8 @@ def test_post_creates_custom_service_request_with_empty_effect(
             "flow": "cookie-capture",
             "flow_params": {"cookieKeys": ["session"], "cookieUrl": "https://api.example.com/"},
         },
+        "header": None,
+        "credential_instructions": None,
     }
     assert parsed["target"] == str(permissions_config_path)
     # A service being created has no accounts to pick from, so there is nothing
@@ -2166,6 +2154,8 @@ def test_post_creates_custom_service_request_without_login(
         "domain": "example.com",
         "scheme": "https",
         "login": None,
+        "header": None,
+        "credential_instructions": None,
     }
 
 
@@ -2222,6 +2212,114 @@ def test_post_accepts_a_custom_service_that_already_exists(tmp_path: Path) -> No
         )
         assert status == 201, body
         assert json.loads(body)["effect"] == {}
+
+
+@pytest.mark.parametrize("header", ACCEPTED_CREDENTIAL_HEADERS)
+def test_post_accepts_custom_service_header(node_extension: tuple[str, Path, Path], header: str) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "header": header})
+    )
+    assert status == 201, body
+    # Stored as sent: the desktop registers it verbatim as the header the token goes in.
+    assert json.loads(body)["payload"] == {
+        "domain": "example.com",
+        "scheme": "https",
+        "login": None,
+        "header": header,
+        "credential_instructions": None,
+    }
+
+
+@pytest.mark.parametrize("header", REJECTED_CREDENTIAL_HEADERS)
+def test_post_rejects_custom_service_header(node_extension: tuple[str, Path, Path], header: str) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com", "header": header})
+    )
+    assert status == 400, body
+    assert b"header" in body
+
+
+def test_post_rejects_a_header_alongside_a_login_flow(node_extension: tuple[str, Path, Path]) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "example.com",
+                "header": "X-Api-Key: {token}",
+                "login": {
+                    "url": "https://example.com/l",
+                    "flow": "cookie-capture",
+                    "flow_params": {"cookieKeys": ["s"]},
+                },
+            }
+        ),
+    )
+    assert status == 400, body
+    assert b"cannot be combined" in body
+
+
+def test_a_request_without_a_header_stores_null_so_the_desktop_takes_the_bearer_default(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(f"{base_url}/permission-requests", _custom_service_body({"domain": "example.com"}))
+    assert status == 201
+    assert json.loads(body)["payload"]["header"] is None
+
+
+@pytest.mark.parametrize("instructions", ACCEPTED_CREDENTIAL_INSTRUCTIONS)
+def test_post_stores_credential_instructions_as_sent(
+    node_extension: tuple[str, Path, Path], instructions: str
+) -> None:
+    # Where to find the key, shown beside the token input; kept verbatim so the
+    # dialog renders exactly what the agent wrote, line breaks included.
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body({"domain": "api.clickup.com", "credential_instructions": instructions}),
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"]["credential_instructions"] == instructions
+
+
+@pytest.mark.parametrize(
+    "instructions,expected_fragment",
+    [*REJECTED_CREDENTIAL_INSTRUCTIONS, pytest.param(["Settings", "Apps"], "must be a non-empty string", id="list")],
+)
+def test_post_rejects_bad_credential_instructions(
+    node_extension: tuple[str, Path, Path], instructions: object, expected_fragment: str
+) -> None:
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body({"domain": "example.com", "credential_instructions": instructions}),
+    )
+    assert status == 400, body
+    assert expected_fragment.encode() in body
+
+
+def test_post_rejects_credential_instructions_alongside_a_login_flow(node_extension: tuple[str, Path, Path]) -> None:
+    # A sign-in has nothing for the user to paste, so there is nothing to explain.
+    base_url, _, _ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        _custom_service_body(
+            {
+                "domain": "example.com",
+                "credential_instructions": "Copy the key from Settings.",
+                "login": {
+                    "url": "https://example.com/l",
+                    "flow": "cookie-capture",
+                    "flow_params": {"cookieKeys": ["s"]},
+                },
+            }
+        ),
+    )
+    assert status == 400, body
+    assert b"cannot be combined" in body
 
 
 def test_post_rejects_agent_supplied_display_text(node_extension: tuple[str, Path, Path]) -> None:

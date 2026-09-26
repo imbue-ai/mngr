@@ -32,6 +32,8 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.custom_services import DEFAULT_CREDENTIAL_HEADER
+from imbue.mngr_latchkey.custom_services import TOKEN_PLACEHOLDER
 
 # Name of the binary every ``setCredentialsExample`` is expected to invoke. An
 # example that starts with anything else is not something we are willing to run.
@@ -99,14 +101,40 @@ def _distinct_placeholder_names(argv_template: tuple[str, ...]) -> tuple[str, ..
 
 
 @pure
-def fallback_set_credentials_example(service_name: str) -> str:
+def fallback_set_credentials_example(service_name: str, header: str | None) -> str:
     """Return a generic ``latchkey auth set`` invocation for a service that suggested none.
 
-    ``latchkey auth set`` stores raw request headers for any service, so a
-    bearer token is the one credential that can always be asked for. Callers
-    use it so a service latchkey cannot sign in to still gets a form.
+    ``latchkey auth set`` stores raw request headers for any service, so a token
+    in a header is the one credential that can always be asked for. ``header`` is
+    the line the token is sent as, with ``{token}`` where the value goes (a custom
+    service's own, see ``custom_services.validate_credential_header``); None means
+    the bearer default. The placeholder becomes ``<token>``, which is what the
+    form builder turns into one labelled input. The line is shell-quoted, since
+    the example is split with ``shlex`` before it is run and a header may carry
+    quotes of its own.
     """
-    return f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
+    line = DEFAULT_CREDENTIAL_HEADER if header is None else header
+    return f"latchkey auth set {service_name} -H {shlex.quote(line.replace(TOKEN_PLACEHOLDER, '<token>'))}"
+
+
+@pure
+def set_credentials_example_for(service_name: str, reported_example: str | None, credential_header: str | None) -> str:
+    """Return the ``latchkey auth set`` line a service's credential form is built from.
+
+    ``reported_example`` is the service's own ``setCredentialsExample`` as latchkey
+    reports it, or ``None`` when the probe said nothing. ``credential_header`` is the
+    header a custom service's registration sends a pasted token as
+    (``custom_services.registration_credential_header``), or ``None`` for a service
+    that named none.
+
+    A registration with a header of its own wins: latchkey reports every generic
+    registered service as a bearer command, so its example would send the token under
+    the wrong header. Every other service keeps what it reported, and falls back to
+    the bearer default only when it reported nothing.
+    """
+    if credential_header is not None and credential_header != DEFAULT_CREDENTIAL_HEADER:
+        return fallback_set_credentials_example(service_name, credential_header)
+    return reported_example or fallback_set_credentials_example(service_name, credential_header)
 
 
 @pure

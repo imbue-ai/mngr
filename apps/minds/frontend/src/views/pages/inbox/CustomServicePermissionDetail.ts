@@ -10,9 +10,15 @@
 
 import m from "mithril";
 import type { CustomServicePermissionDetail as Detail, InboxModel } from "../../../models/inbox";
+import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
 import { PermissionsShell } from "./PermissionsShell";
+
+/** The header line as the user reads it: the placeholder becomes the thing they paste. */
+function describeCredentialHeader(header: string): string {
+  return header.replaceAll("{token}", "<the token you paste>");
+}
 
 /** The one line each kind of doubtful domain gets. Written as "make sure
  * you know what this is", not "this is dangerous": a private network calls
@@ -38,12 +44,33 @@ export interface CustomServicePermissionDetailAttrs {
   detail: Detail;
 }
 
+/** The one technical detail worth a look before pasting a key: which header
+ * carries it. Collapsed by default so the ordinary case stays two sentences;
+ * a service that named its own header is exactly the one whose user should
+ * be able to check it against the provider's docs. */
+function renderHeaderDisclosure(detail: Detail, isOpen: boolean, onToggle: () => void): m.Children {
+  if (detail.credential_header === null) return null;
+  return m(
+    Disclosure,
+    { isOpen, onToggle, summary: "How this will be sent" },
+    m("p", { class: "type-body text-secondary" }, [
+      `Every request to ${detail.base_api_url} will carry the header `,
+      m(
+        "code",
+        { class: "custom-service-header font-mono text-primary" },
+        describeCredentialHeader(detail.credential_header),
+      ),
+      ".",
+    ]),
+  );
+}
+
 /** What is being asked and what approving does, said plainly. Framed as
  * storing credentials rather than "connecting", because that is what actually
  * happens: nothing is reached until an agent later sends a request. The origin
  * is repeated rather than referred to, so the first sentence stands on its own
  * if it is all that is read. */
-function summary(detail: Detail): m.Children {
+function summary(detail: Detail, isHeaderOpen: boolean, onToggleHeader: () => void): m.Children {
   const lines: m.Children[] = [
     m("p", { class: "type-body text-primary" }, `The agent wants to store credentials for ${detail.base_api_url}.`),
   ];
@@ -94,13 +121,19 @@ function summary(detail: Detail): m.Children {
       ]),
     );
   }
+  lines.push(renderHeaderDisclosure(detail, isHeaderOpen, onToggleHeader));
   return m("div", { class: "flex flex-col gap-2" }, lines);
 }
 
 export function CustomServicePermissionDetailView(): m.Component<CustomServicePermissionDetailAttrs> {
+  // The request the disclosure was opened on. RequestDetail mounts this view
+  // unkeyed, so one instance serves every custom-service request the user moves
+  // between; a disclosure opened on one must not render open on the next.
+  let openHeaderRequestId: string | null = null;
   return {
     view(vnode) {
       const { model, detail } = vnode.attrs;
+      const isHeaderOpen = openHeaderRequestId === detail.request_id;
       return m(PermissionsShell, {
         model,
         // The origin is the label here: the domain everywhere else, and the
@@ -115,7 +148,9 @@ export function CustomServicePermissionDetailView(): m.Component<CustomServicePe
           detail.login_url === null
             ? `Storing the credentials for ${detail.domain}…`
             : `Opening a browser window for you to sign in to ${detail.domain}…`,
-        body: summary(detail),
+        body: summary(detail, isHeaderOpen, () => {
+          openHeaderRequestId = isHeaderOpen ? null : detail.request_id;
+        }),
       });
     },
   };

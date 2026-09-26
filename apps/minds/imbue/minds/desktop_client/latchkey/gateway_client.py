@@ -53,8 +53,11 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.custom_services import CustomServiceError
 from imbue.mngr_latchkey.custom_services import LoginFlow
 from imbue.mngr_latchkey.custom_services import Scheme
+from imbue.mngr_latchkey.custom_services import validate_credential_header
+from imbue.mngr_latchkey.custom_services import validate_credential_instructions
 from imbue.mngr_latchkey.custom_services import validate_login_flow
 from imbue.mngr_latchkey.forward_supervisor import live_forward_owner
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
@@ -251,13 +254,35 @@ class CustomServiceRequestPayload(FrozenModel):
             "token through the dialog's credential form, not that the service needs no credentials."
         ),
     )
+    header: str | None = Field(
+        default=None,
+        description=(
+            "The header line the pasted token is sent as, with {token} where the value goes; None means the "
+            "bearer default. Only without a login flow, which supplies its own credential shape."
+        ),
+    )
+    credential_instructions: str | None = Field(
+        default=None,
+        description=(
+            "The agent's note on where the user finds the credential, shown beside the input it is pasted "
+            "into. Only without a login flow, which has nothing to paste."
+        ),
+    )
 
     @model_validator(mode="after")
-    def _login_describes_one_flow(self) -> Self:
+    def _credential_shape_is_valid(self) -> Self:
         # CustomServiceError is a ValueError, which is what pydantic turns into
         # a validation error, so it propagates as-is.
         if self.login is not None:
             validate_login_flow(self.domain, self.login.url, self.login.flow, self.login.flow_params)
+            if self.header is not None:
+                raise CustomServiceError("header cannot be combined with login: a login flow supplies its own shape.")
+        if self.header is not None:
+            validate_credential_header(self.header, "header")
+        if self.credential_instructions is not None:
+            if self.login is not None:
+                raise CustomServiceError("credential_instructions cannot be combined with login.")
+            validate_credential_instructions(self.credential_instructions)
         return self
 
 

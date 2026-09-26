@@ -24,13 +24,20 @@ from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.custom_services import domain_from_base_api_url
 from imbue.mngr_latchkey.custom_services import domain_warning
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
+from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.custom_services import scheme_from_base_api_url
+from imbue.mngr_latchkey.custom_services import validate_credential_header
+from imbue.mngr_latchkey.custom_services import validate_credential_instructions
 from imbue.mngr_latchkey.custom_services import validate_domain
 from imbue.mngr_latchkey.custom_services import validate_login_flow
 from imbue.mngr_latchkey.custom_services import validate_scheme
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_HEADERS
+from imbue.mngr_latchkey.testing import ACCEPTED_CREDENTIAL_INSTRUCTIONS
+from imbue.mngr_latchkey.testing import REJECTED_CREDENTIAL_HEADERS
+from imbue.mngr_latchkey.testing import REJECTED_CREDENTIAL_INSTRUCTIONS
 
 # Latchkey's own service-name rule (``serviceRegistry.ts``). Every name we
 # derive has to satisfy it, or the registration loads and is unreachable.
@@ -636,3 +643,51 @@ def test_overlay_the_shipped_half_is_read_once_per_process(tmp_path: Path) -> No
     catalog = ServicesCatalog(latchkey_directory=tmp_path)
 
     assert catalog.as_mapping()["claude-ai"] is catalog.as_mapping()["claude-ai"]
+
+
+@pytest.mark.parametrize("header", ACCEPTED_CREDENTIAL_HEADERS)
+def test_credential_header_accepts(header: str) -> None:
+    assert validate_credential_header(header, "header") == header
+
+
+@pytest.mark.parametrize("header", REJECTED_CREDENTIAL_HEADERS)
+def test_credential_header_rejects(header: str) -> None:
+    with pytest.raises(CustomServiceError, match="header"):
+        validate_credential_header(header, "header")
+
+
+@pytest.mark.parametrize("instructions", ACCEPTED_CREDENTIAL_INSTRUCTIONS)
+def test_credential_instructions_accepts(instructions: str) -> None:
+    assert validate_credential_instructions(instructions) == instructions
+
+
+@pytest.mark.parametrize("instructions,expected_fragment", REJECTED_CREDENTIAL_INSTRUCTIONS)
+def test_credential_instructions_rejects(instructions: str, expected_fragment: str) -> None:
+    with pytest.raises(CustomServiceError, match=expected_fragment):
+        validate_credential_instructions(instructions)
+
+
+def test_token_capture_header_is_held_to_the_same_rule() -> None:
+    with pytest.raises(CustomServiceError, match="Host"):
+        validate_login_flow(
+            "example.com",
+            "https://example.com/login",
+            LoginFlow.TOKEN_CAPTURE,
+            {"tokenUrl": "https://example.com/s", "tokenField": "t", "header": "Host: {token}"},
+        )
+
+
+def test_registration_carries_the_header_under_minds_own_key_and_reads_it_back() -> None:
+    registration = build_custom_service_registration("example.com", "https", credential_header="X-Api-Key: {token}")
+    assert registration == {"baseApiUrl": "https://example.com/", "mindsCredentialHeader": "X-Api-Key: {token}"}
+    assert registration_credential_header(registration) == "X-Api-Key: {token}"
+    assert registration_credential_header(build_custom_service_registration("example.com", "https")) is None
+    with pytest.raises(CustomServiceError, match="not both"):
+        build_custom_service_registration(
+            "example.com",
+            "https",
+            login_url="https://example.com/login",
+            login_flow=LoginFlow.COOKIE_CAPTURE,
+            login_flow_params={"cookieKeys": ["s"]},
+            credential_header="X-Api-Key: {token}",
+        )

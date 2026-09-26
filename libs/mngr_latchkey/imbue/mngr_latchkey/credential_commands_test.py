@@ -4,6 +4,7 @@ from imbue.mngr_latchkey.credential_commands import CredentialCommandError
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 from imbue.mngr_latchkey.credential_commands import build_credential_command_argv
 from imbue.mngr_latchkey.credential_commands import describe_credential_command_failure
+from imbue.mngr_latchkey.credential_commands import fallback_set_credentials_example
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
 
 
@@ -173,3 +174,29 @@ def test_describe_credential_command_failure_truncates_a_crash_dump() -> None:
 
 def test_describe_credential_command_failure_is_empty_when_only_usage_lines_remain() -> None:
     assert describe_credential_command_failure("Usage: latchkey auth set <service>\n\n") == ""
+
+
+def test_fallback_set_credentials_example_renders_the_service_header_as_one_token_input() -> None:
+    bearer = fallback_set_credentials_example("custom_https_api_example_com", None)
+    assert bearer == "latchkey auth set custom_https_api_example_com -H 'Authorization: Bearer <token>'"
+    keyed = fallback_set_credentials_example("custom_https_api_example_com", "X-Api-Key: {token}")
+    assert keyed == "latchkey auth set custom_https_api_example_com -H 'X-Api-Key: <token>'"
+    # The existing form builder turns either into the same single labelled input, and
+    # the filled command carries the header the service actually takes.
+    parsed = parse_credential_command_example(keyed)
+    assert [parameter.name for parameter in parsed.parameters] == ["token"]
+    argv = build_credential_command_argv(parsed, {"token": "k-1"}, "")
+    assert argv == ("--account", "", "auth", "set", "custom_https_api_example_com", "-H", "X-Api-Key: k-1")
+
+
+@pytest.mark.parametrize(
+    "header",
+    ['Cookie: session="{token}"; theme=dark', "X-Sig: {token}\\v1", "X-Note: it's {token}"],
+)
+def test_a_header_with_shell_characters_survives_the_round_trip_into_argv(header: str) -> None:
+    # The example is shlex-split before it runs, so a quote or backslash the header
+    # carries must come back exactly, or the gateway would send a different header
+    # than the dialog showed.
+    parsed = parse_credential_command_example(fallback_set_credentials_example("custom_x", header))
+    argv = build_credential_command_argv(parsed, {"token": "k-1"}, "")
+    assert argv[-1] == header.replace("{token}", "k-1")

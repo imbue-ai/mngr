@@ -89,12 +89,14 @@ from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.core import read_registered_services
 from imbue.mngr_latchkey.credential_commands import CredentialCommandError
 from imbue.mngr_latchkey.credential_commands import ParsedCredentialCommand
 from imbue.mngr_latchkey.credential_commands import build_credential_command_argv
 from imbue.mngr_latchkey.credential_commands import describe_credential_command_failure
-from imbue.mngr_latchkey.credential_commands import fallback_set_credentials_example
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
+from imbue.mngr_latchkey.credential_commands import set_credentials_example_for
+from imbue.mngr_latchkey.custom_services import custom_service_credential_header
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -209,15 +211,18 @@ def _build_manual_credentials_form(
     service_name: str,
     service_display_name: str,
     set_credentials_example: str | None,
+    credential_header: str | None,
 ) -> ManualCredentialsForm:
     """Turn a service's suggested credential command into the dialog's input form.
 
     The command itself is an implementation detail the user never sees: only
     its ``<placeholder>`` parameters become inputs. A command that cannot be
     turned into inputs yields a parameter-less prompt, which the dialog renders
-    as an error with no Approve.
+    as an error with no Approve. ``credential_header`` is the header a custom
+    service's registration sends a pasted token as (``None`` for any other
+    service); it beats the bearer command latchkey reports for such a service.
     """
-    command_example = set_credentials_example or fallback_set_credentials_example(service_name)
+    command_example = set_credentials_example_for(service_name, set_credentials_example, credential_header)
     try:
         parsed_command = parse_credential_command_example(command_example)
     except CredentialCommandError as e:
@@ -551,8 +556,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ),
     )
 
-    # -- Pure logic (unit-testable) ------------------------------------------
-
     def grant(
         self,
         request_event_id: str,
@@ -777,6 +780,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             service_name=service_info.name,
             service_display_name=service_info.display_name,
             set_credentials_example=latchkey_service_info.set_credentials_example,
+            credential_header=self._custom_service_credential_header(service_info.name),
         )
         prompt = form.prompt
         if form.parsed_command is None:
@@ -937,8 +941,6 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         )
         return message
 
-    # -- RequestEventHandler interface ---------------------------------------
-
     def handles_request_type(self) -> str:
         return REQUEST_TYPE_PREDEFINED
 
@@ -1025,6 +1027,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                     service_name=service_info.name,
                     service_display_name=service_info.display_name,
                     set_credentials_example=latchkey_service_info.set_credentials_example,
+                    credential_header=self._custom_service_credential_header(service_info.name),
                 ).prompt
             ),
         )
@@ -1142,7 +1145,15 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             media_type="application/json",
         )
 
-    # -- Internals -----------------------------------------------------------
+    def _custom_service_credential_header(self, service_name: str) -> str | None:
+        """The header a custom service's desktop registration sends a pasted token as, or ``None``.
+
+        Read from this computer's registration even for a remote machine, whose
+        registrations are a snapshot of these.
+        """
+        return custom_service_credential_header(
+            read_registered_services(self.latchkey.latchkey_directory), service_name
+        )
 
     def _initial_checked_permissions(
         self,

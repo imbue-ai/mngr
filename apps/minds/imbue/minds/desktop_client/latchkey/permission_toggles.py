@@ -85,13 +85,15 @@ from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.account_scopes import list_account_grants
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.core import read_registered_services
 from imbue.mngr_latchkey.credential_commands import CredentialCommandError
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 from imbue.mngr_latchkey.credential_commands import ParsedCredentialCommand
 from imbue.mngr_latchkey.credential_commands import build_credential_command_argv
 from imbue.mngr_latchkey.credential_commands import describe_credential_command_failure
-from imbue.mngr_latchkey.credential_commands import fallback_set_credentials_example
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
+from imbue.mngr_latchkey.credential_commands import set_credentials_example_for
+from imbue.mngr_latchkey.custom_services import custom_service_credential_header
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressGrant
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
@@ -424,22 +426,28 @@ def _granted_by_scope_account(
     return granted
 
 
-def _parse_service_credential_command(service_name: str, set_credentials_example: str) -> ParsedCredentialCommand:
+def _parse_service_credential_command(
+    service_name: str, set_credentials_example: str, credential_header: str | None
+) -> ParsedCredentialCommand:
     """The command a service's credentials are collected and stored with.
 
-    Falls back to the generic bearer-token invocation for a service that
-    suggested none. Raises :class:`CredentialCommandError` when what is left
-    carries no ``<placeholder>`` to fill in (or is not a latchkey command at
-    all), which is the one case where there is nothing to collect.
+    A custom service registered with a header of its own is collected and stored
+    under that header; every other service uses its reported example, falling back
+    to the generic bearer-token invocation when it suggested none. Raises
+    :class:`CredentialCommandError` when what is left carries no ``<placeholder>``
+    to fill in (or is not a latchkey command at all), which is the one case where
+    there is nothing to collect.
     """
-    example = set_credentials_example or fallback_set_credentials_example(service_name)
-    return parse_credential_command_example(example)
+    return parse_credential_command_example(
+        set_credentials_example_for(service_name, set_credentials_example or None, credential_header)
+    )
 
 
 def _build_service_sign_in(
     service_name: str,
     service_info: ServiceSignInOptions | None,
     is_account_stored: bool,
+    credential_header: str | None,
 ) -> ServiceSignIn:
     """Work out how a service's next account gets connected.
 
@@ -451,7 +459,9 @@ def _build_service_sign_in(
     if service_info is None or service_info.is_browser_auth_supported:
         return ServiceSignIn(is_browser_supported=True, credential_parameters=(), is_account_name_required=False)
     try:
-        parameters = _parse_service_credential_command(service_name, service_info.set_credentials_example).parameters
+        parameters = _parse_service_credential_command(
+            service_name, service_info.set_credentials_example, credential_header
+        ).parameters
     except CredentialCommandError as e:
         # No form can be offered for this one; the pane says so on the row.
         logger.warning("Cannot offer a credential form for {}: {}", service_name, e)
@@ -617,6 +627,9 @@ def build_workspace_permissions_view(
         latchkey,
         tuple(service_name for service_name, infos in services_catalog.as_mapping().items() if infos),
     )
+    # Read once for the whole pane: a custom service's credential header lives on the
+    # desktop's registration, not in the probe, and the loop below asks for every service.
+    registered_services = read_registered_services(latchkey.latchkey_directory)
 
     # Each panel carries its position within its own service, so the nav's
     # final sort orders services alphabetically without flattening the account
@@ -633,7 +646,12 @@ def build_workspace_permissions_view(
         )
         panel_accounts = _sorted_panel_accounts(stored, granted_accounts)
         service_info = service_info_by_name.get(service_name)
-        sign_in = _build_service_sign_in(service_name, service_info, is_account_stored=bool(stored))
+        sign_in = _build_service_sign_in(
+            service_name,
+            service_info,
+            is_account_stored=bool(stored),
+            credential_header=custom_service_credential_header(registered_services, service_name),
+        )
         if not panel_accounts:
             available.append(
                 AvailableConnection(service_name=service_name, display_name=display_name, sign_in=sign_in)
@@ -963,7 +981,11 @@ def connect_service_with_credentials(
     if service_info.is_browser_auth_supported:
         raise PermissionToggleError(f"{display_name} is connected by signing in, not by entering credentials.")
     try:
-        parsed_command = _parse_service_credential_command(service_name, service_info.set_credentials_example or "")
+        parsed_command = _parse_service_credential_command(
+            service_name,
+            service_info.set_credentials_example or "",
+            custom_service_credential_header(read_registered_services(latchkey.latchkey_directory), service_name),
+        )
     except CredentialCommandError as e:
         raise PermissionToggleError(f"Minds cannot work out which credentials {display_name} needs: {e}.") from e
 

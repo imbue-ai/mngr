@@ -215,7 +215,10 @@ describe("PermissionsShell manual credentials", () => {
 
   it("turns the form's message into an error notice once an attempt has failed", () => {
     const model = modelWithDetail(MANUAL_DETAIL);
-    model.manualCredentialsFeedback = { ...AWS_PROMPT, message: "AWS did not accept those credentials." };
+    model.manualCredentialsFeedback = {
+      prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
+      isRejection: true,
+    };
 
     const nodes = renderShell(model);
 
@@ -226,12 +229,49 @@ describe("PermissionsShell manual credentials", () => {
     expect(hasApproveButton(nodes)).toBe(true);
   });
 
+  it("shows the agent's instructions as its own words, as plain text, between the message and the inputs", () => {
+    const instructions = "Open <b>Settings</b> -> [Apps](https://evil.example) and copy the API token.";
+    const nodes = renderShell(
+      modelWithDetail({ ...MANUAL_DETAIL, manual_credentials: { ...AWS_PROMPT, instructions } }),
+    );
+
+    const block = findById(nodes, "permissions-manual-credentials-instructions");
+    expect(JSON.stringify(block)).toContain("From the agent");
+    // Rendered as text: markup and links stay inert, never trusted HTML.
+    expect(JSON.stringify(block)).toContain(JSON.stringify(instructions).slice(1, -1));
+    expect(flatten(block).some((node) => node.tag === "<" || node.tag === "a")).toBe(false);
+    const position = indexOfId(nodes, "permissions-manual-credentials-instructions");
+    expect(position).toBeGreaterThan(indexOfId(nodes, "permissions-manual-credentials-message"));
+    expect(position).toBeLessThan(nodes.findIndex((node) => node.tag === "input"));
+  });
+
+  it("keeps the agent's instructions up after a rejected attempt", () => {
+    const model = modelWithDetail(MANUAL_DETAIL);
+    model.manualCredentialsFeedback = {
+      prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials.", instructions: "IAM -> Users" },
+      isRejection: true,
+    };
+
+    expect(JSON.stringify(findById(renderShell(model), "permissions-manual-credentials-instructions"))).toContain(
+      "IAM -> Users",
+    );
+  });
+
+  it("shows no instructions block when the agent gave none", () => {
+    expect(indexOfId(renderShell(modelWithDetail(MANUAL_DETAIL)), "permissions-manual-credentials-instructions")).toBe(
+      -1,
+    );
+  });
+
   it("scrolls a failure into view, and only a failure", () => {
     // The opening instruction is where the user already is: nothing to scroll.
     expect(hasScrollHooks(renderShell(modelWithDetail(MANUAL_DETAIL)))).toBe(false);
 
     const rejectedModel = modelWithDetail(MANUAL_DETAIL);
-    rejectedModel.manualCredentialsFeedback = { ...AWS_PROMPT, message: "AWS did not accept those credentials." };
+    rejectedModel.manualCredentialsFeedback = {
+      prompt: { ...AWS_PROMPT, message: "AWS did not accept those credentials." },
+      isRejection: true,
+    };
     expect(hasScrollHooks(renderShell(rejectedModel))).toBe(true);
 
     // An outright failure has its own notice, below the buttons.

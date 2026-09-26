@@ -1045,6 +1045,7 @@ describe("InboxModel custom-service requests", () => {
     // Still pending, now asking: not an error, and not a denial.
     expect(model.manualCredentialsPrompt()).toEqual(prompt);
     expect(model.errorMessage).toBeNull();
+    expect(model.isManualCredentialsFailureShown()).toBe(false);
     expect(model.isApproveAllowed()).toBe(false);
 
     model.manualCredentialValues.token = "secret-token";
@@ -1073,5 +1074,33 @@ describe("InboxModel custom-service requests", () => {
 
     const body = calls[calls.length - 1].init?.body as FormData;
     expect(JSON.parse(String(body.get("manual_credentials")))).toEqual({ token: "secret-token" });
+  });
+
+  it("reports a rejected token as a failure, unlike the form's first appearance", async () => {
+    const prompt: ManualCredentialsPrompt = {
+      parameters: [{ name: "token", label: "Token" }],
+      message: "needs credentials",
+    };
+    let isFirstGrant = true;
+    const model = await openCustomService({
+      "POST /requests/evt-a/grant": () => {
+        if (isFirstGrant) {
+          isFirstGrant = false;
+          return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: prompt });
+        }
+        const rejected = { ...prompt, message: "The token was rejected." };
+        return jsonResponse({ outcome: "NEEDS_MANUAL_CREDENTIALS", manual_credentials: rejected });
+      },
+    });
+
+    await model.approve();
+    expect(model.isManualCredentialsFailureShown()).toBe(false);
+    expect(model.takePendingFailureScroll()).toBe(false);
+    model.manualCredentialValues.token = "wrong-token";
+    await model.approve();
+
+    expect(model.manualCredentialsPrompt()?.message).toBe("The token was rejected.");
+    expect(model.isManualCredentialsFailureShown()).toBe(true);
+    expect(model.takePendingFailureScroll()).toBe(true);
   });
 });

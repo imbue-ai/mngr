@@ -255,6 +255,30 @@ subdomain of it, so where the browser goes and where the captured credentials
 apply is always what the dialog named. What passes is registered exactly as
 the agent sent it.
 
+A service with no browser sign-in may instead name the header the pasted token
+is sent as: `header`, a header line with `{token}` where the value goes
+(`X-Api-Key: {token}`), which defaults to `Authorization: Bearer {token}` when
+absent. The gateway and the desktop hold it to the same rule as `token-capture`'s
+`header` -- an RFC 7230 header name, a colon, the placeholder after it -- and
+refuse `Host`, any `X-Latchkey-*` header, and a `header` sent alongside `login`,
+since a login flow supplies its own credential shape. It rides the service's
+`registeredServices` entry under a key of Minds' own (`mindsCredentialHeader`),
+so a second workspace asking for the origin sees the registration's header
+rather than its own guess, and the credential form stores the typed token under
+that header rather than as a bearer. The dialog shows the header behind a
+collapsed "How this will be sent" disclosure, so a user handed an `X-Api-Key`
+can check it against the provider's documentation; a browser sign-in shows no
+disclosure.
+
+Such a service may also carry `credential_instructions`: the agent's note on
+where the user finds the credential (the settings page, which scopes to tick),
+at most 500 characters and refused alongside `login`, since a sign-in has
+nothing to paste. The credential form shows it between Mind's own instruction
+and the inputs, under "From the agent", as plain text -- markup and links stay
+inert, because it is the agent's claim inside Mind's own dialog, like the
+rationale -- and keeps it up after a rejected attempt. Unlike `header` it is not
+stored on the registration: it belongs to the request that asked.
+
 Some valid names still get a warning line in the dialog, in place of the old
 hard refusals: a reserved name nothing answers to (`.invalid`, `.test`,
 `.example`, `example.com` and its siblings, `.onion`), a name the workspace
@@ -268,11 +292,12 @@ calls its services what it likes.
 An agent is not supposed to ask for a domain some *other* service already
 covers, and does not need Minds to stop it: Latchkey answers that question
 first. A request to a domain no service covers fails with `No service matches
-URL`, and that is the only error the workspace's latchkey skill treats as
-grounds for asking to create a connection; an error naming a service sends it
-to an ordinary permission request instead. Were one to slip through anyway, the
-duplicate is inert rather than dangerous -- Detent takes the first rule whose
-scope matches, so the second never applies.
+URL`, and that is the only error the workspace's `connect-external-service`
+skill (its latchkey reference) treats as grounds for asking to create a
+connection; an error naming a service sends it to an ordinary permission
+request instead. Were one to slip through anyway, the duplicate is inert
+rather than dangerous -- Detent takes the first rule whose scope matches, so
+the second never applies.
 
 Once created, a custom service is an ordinary connection: it appears in the
 Permissions tab and on the Connectors page with its account, and its access can
@@ -1138,5 +1163,5 @@ Agents are expected to:
   decide whether to retry.
 
 The detection-and-wait logic for Claude Code lives in the
-`default-workspace-template` repository's latchkey skill, not in this
-monorepo.
+`default-workspace-template` repository's `connect-external-service` skill
+(its `references/latchkey.md`), not in this monorepo.

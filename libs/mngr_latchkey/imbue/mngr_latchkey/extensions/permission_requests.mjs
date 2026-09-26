@@ -42,7 +42,8 @@
  *       sync is not a permission: it is carried on the request for the
  *       desktop to act on, and never enters the ``effect``.
  *       For ``type=="custom-service"`` the payload is
- *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null}``,
+ *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null,
+ *           header: <header line with {token}>|null, credential_instructions: <text>|null}``,
  *       a request to reach an origin the asking workspace's latchkey has no
  *       service for: the desktop creates the service unless it already has
  *       it, and grants this workspace access to it, in one decision.
@@ -57,9 +58,17 @@
  *       keys them; unknown keys are refused, and every URL among them must
  *       be on the domain or a subdomain of it, either scheme); absent, the
  *       service is registered with a base URL alone and the user supplies a
- *       token through the dialog's credential form. A service the desktop already
- *       has keeps its own registration, login included. There is
- *       deliberately **no** display-name field -- a custom service is
+ *       token through the dialog's credential form. ``header`` is optional and
+ *       only meaningful without ``login`` (a login flow supplies its own
+ *       credential shape): the header line the pasted token is sent as, with
+ *       ``{token}`` where the value goes (default ``Authorization: Bearer
+ *       {token}``). Its name must be an RFC 7230 token and may not be ``Host``
+ *       or an ``X-Latchkey-*`` header. A service the desktop already
+ *       has keeps its own registration, login and header included.
+ *       ``credential_instructions`` is optional plain text, at most 500
+ *       characters and likewise only without ``login``: the agent's note on where
+ *       the user finds the credential, shown beside the input they paste it into.
+ *       There is deliberately **no** display-name field -- a custom service is
  *       labelled by its origin, which is the one string that cannot
  *       misdescribe what it reaches. The effect is always empty: the desktop
  *       writes the grant through ``/permissions/rules`` once the sign-in has
@@ -1032,19 +1041,71 @@ function validateCookieCaptureParams(params, domain) {
   }
 }
 
+// An RFC 7230 header-name token. Mirrored by ``HEADER_NAME_PATTERN`` in
+// custom_services.py.
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+// Every control character but HTAB, which the field-value grammar allows. A
+// header line is one line: a CR or LF after the checked name would carry a
+// second header behind it.
+const HEADER_CONTROL_CHARACTER_RE = /[\x00-\x08\x0a-\x1f\x7f]/;
+const TOKEN_PLACEHOLDER = '{token}';
+
+/**
+ * Validate a credential header line -- ``<name>: <anything with {token}>`` on
+ * one line -- as latchkey requires it (a header name, a colon, the placeholder
+ * after it, no control character but HTAB),
+ * plus what the gateway must not let a request set: ``Host``, which would
+ * redirect the credential, and the gateway's own ``X-Latchkey-*`` headers.
+ * Shared by ``token-capture``'s ``header`` and the custom-service ``header``;
+ * ``fieldLabel`` names the field in the refusal. Returns the line as given.
+ */
+function validateCredentialHeader(header, fieldLabel) {
+  if (typeof header !== 'string' || header.length === 0) {
+    throw new InvalidRequestBodyError(`${fieldLabel} is required and must be a non-empty string.`);
+  }
+  const colon = header.indexOf(':');
+  const name = colon > 0 ? header.slice(0, colon) : '';
+  const rest = header.slice(colon + 1);
+  if (!HEADER_NAME_RE.test(name) || !rest.includes(TOKEN_PLACEHOLDER) || HEADER_CONTROL_CHARACTER_RE.test(rest)) {
+    throw new InvalidRequestBodyError(
+      `${fieldLabel} must be a header line containing '${TOKEN_PLACEHOLDER}', `
+      + `such as 'Authorization: Bearer ${TOKEN_PLACEHOLDER}'.`,
+    );
+  }
+  const lowered = name.toLowerCase();
+  if (lowered === 'host' || lowered.startsWith('x-latchkey-')) {
+    throw new InvalidRequestBodyError(`${fieldLabel} may not set the Host header or an X-Latchkey-* header.`);
+  }
+  return header;
+}
+
+// Mirrored by ``MAX_CREDENTIAL_INSTRUCTIONS_LENGTH`` in custom_services.py.
+const MAX_CREDENTIAL_INSTRUCTIONS_LENGTH = 500;
+
+/**
+ * Validate the agent's note on where the user finds a custom service's
+ * credential: non-blank text the dialog shows as-is, short enough to sit
+ * beside the input. Returns it as given.
+ */
+function validateCredentialInstructions(instructions) {
+  if (typeof instructions !== 'string' || instructions.trim().length === 0) {
+    throw new InvalidRequestBodyError("payload.'credential_instructions' must be a non-empty string.");
+  }
+  // Counted in code points, as Python counts them.
+  if ([...instructions].length > MAX_CREDENTIAL_INSTRUCTIONS_LENGTH) {
+    throw new InvalidRequestBodyError(
+      `payload.'credential_instructions' must be at most ${MAX_CREDENTIAL_INSTRUCTIONS_LENGTH} characters.`,
+    );
+  }
+  return instructions;
+}
+
 function validateTokenCaptureParams(params, domain) {
   ensureNoExtraneousFields('payload.login.flow_params ', ['tokenUrl', 'tokenField', 'header'], params);
   validateCustomServiceUrl(params.tokenUrl, 'flow_params.tokenUrl', domain);
   ensureNonEmptyString('payload.login.flow_params.', 'tokenField', params.tokenField);
   if (params.header !== undefined) {
-    ensureNonEmptyString('payload.login.flow_params.', 'header', params.header);
-    // Latchkey's own rule: a header name, a colon, and the placeholder after it.
-    if (!params.header.includes('{token}') || !/^[^:\s]+:/.test(params.header)) {
-      throw new InvalidRequestBodyError(
-        "payload.login.'flow_params.header' must be a header line containing '{token}', "
-        + "such as 'Authorization: Bearer {token}'.",
-      );
-    }
+    validateCredentialHeader(params.header, "payload.login.'flow_params.header'");
   }
 }
 
@@ -1091,7 +1152,7 @@ function validateCustomServiceLogin(login, domain) {
 
 /**
  * Validate the payload object for a ``custom-service`` permission request.
- * Returns the canonical payload shape (``{domain, scheme, login}``).
+ * Returns the canonical payload shape (``{domain, scheme, login, header, credential_instructions}``).
  *
  * There is deliberately no display-name field. A custom service is labelled by
  * its origin, because that is the one string that cannot misdescribe what the
@@ -1103,10 +1164,29 @@ function validateCustomServicePayload(payload) {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     throw new InvalidRequestBodyError("'payload' must be a JSON object for type 'custom-service'.");
   }
-  ensureNoExtraneousFields('payload ', ['domain', 'scheme', 'login'], payload);
+  ensureNoExtraneousFields('payload ', ['domain', 'scheme', 'login', 'header', 'credential_instructions'], payload);
   const domain = validateCustomServiceDomain(payload.domain);
   const scheme = validateCustomServiceScheme(payload.scheme);
-  return { domain, scheme, login: validateCustomServiceLogin(payload.login, domain) };
+  const login = validateCustomServiceLogin(payload.login, domain);
+  let header = null;
+  if (payload.header !== undefined && payload.header !== null) {
+    if (login !== null) {
+      throw new InvalidRequestBodyError(
+        "payload.'header' cannot be combined with 'login': a login flow supplies its own credential shape.",
+      );
+    }
+    header = validateCredentialHeader(payload.header, "payload.'header'");
+  }
+  let credentialInstructions = null;
+  if (payload.credential_instructions !== undefined && payload.credential_instructions !== null) {
+    if (login !== null) {
+      throw new InvalidRequestBodyError(
+        "payload.'credential_instructions' cannot be combined with 'login': a sign-in has nothing to paste.",
+      );
+    }
+    credentialInstructions = validateCredentialInstructions(payload.credential_instructions);
+  }
+  return { domain, scheme, login, header, credential_instructions: credentialInstructions };
 }
 
 /**

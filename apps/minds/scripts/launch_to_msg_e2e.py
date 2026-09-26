@@ -1705,7 +1705,8 @@ def run_e2e() -> int:
                 )
 
                 # Phase C: kick the agent to re-request
-                # The latchkey skill (DEFAULT_WORKSPACE_TEMPLATE) says to re-POST /permission-requests
+                # The connect-external-service skill's latchkey reference (DEFAULT_WORKSPACE_TEMPLATE)
+                # says to re-POST /permission-requests
                 # when a previous request was denied. The kick gives Claude
                 # the explicit user-side signal; without a follow-up the
                 # agent's slack tool sits on its polling loop until the
@@ -1714,7 +1715,7 @@ def run_e2e() -> int:
                 target = find_open_chat(ctx) or chat_frame
                 retry_msg = (
                     "I just denied that request by mistake -- please send a fresh "
-                    "Slack permission request via the latchkey skill (POST to "
+                    "Slack permission request via the connect-external-service skill (POST to "
                     "/permission-requests). Then wait for me to approve it."
                 )
                 retry_inp = target.wait_for_selector('textarea, [contenteditable="true"]', timeout=10_000)

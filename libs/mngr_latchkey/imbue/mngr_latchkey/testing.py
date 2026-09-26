@@ -11,6 +11,7 @@ from typing import Final
 from urllib.parse import urlsplit
 
 import psutil
+import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -254,6 +255,50 @@ def make_full_fake_latchkey(latchkey_directory: Path) -> FakeLatchkey:
     )
     return fake
 
+
+# The credential-header corpus, run case for case against both validators
+# (`custom_services_test.py` for the Python one, `permission_requests_test.py` for
+# the gateway extension's), as the domain grammar is, so the two cannot drift.
+ACCEPTED_CREDENTIAL_HEADERS = (
+    "Authorization: Bearer {token}",
+    "X-Api-Key: {token}",
+    "x-api-key:{token}",
+    "Authorization: Token {token}",
+    "Cookie: session={token}; theme=dark",
+    "Authorization: Bearer\t{token}",
+)
+REJECTED_CREDENTIAL_HEADERS = (
+    "",
+    "X-Api-Key",
+    "X-Api-Key: nope",
+    "Bearer {token}",
+    "{token}: X-Api-Key",
+    ": {token}",
+    "X Api Key: {token}",
+    "X-Api-Key\n: {token}",
+    "X-Api-Key: {token}\n",
+    "X-Api-Key: {token}\r\nHost: evil.example",
+    "Host: {token}",
+    "host: {token}",
+    "X-Latchkey-Gateway-Password: {token}",
+    "x-latchkey-anything: {token}",
+)
+
+# The credential-instructions corpus, run against both validators the same way.
+# The 500 astral characters are 1000 UTF-16 units: accepted only if the gateway
+# counts code points, as Python does.
+ACCEPTED_CREDENTIAL_INSTRUCTIONS = (
+    pytest.param(
+        "In ClickUp: avatar (bottom left) -> Settings -> Apps.\nGenerate an API token and copy it.", id="multi-line"
+    ),
+    pytest.param("\U0001f511" * 500, id="500-astral-code-points"),
+)
+# Each with a fragment both validators' messages contain.
+REJECTED_CREDENTIAL_INSTRUCTIONS = (
+    pytest.param("", "must be a non-empty string", id="empty"),
+    pytest.param("  \n ", "must be a non-empty string", id="blank"),
+    pytest.param("x" * 501, "at most 500 characters", id="501-code-points"),
+)
 
 # The ``ar`` container a ``.deb`` is: a magic line, then 60-byte member headers
 # each followed by the member's bytes (padded to an even length).

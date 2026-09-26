@@ -102,15 +102,17 @@ from imbue.mngr_latchkey.credential_commands import CredentialCommandError
 from imbue.mngr_latchkey.credential_commands import ParsedCredentialCommand
 from imbue.mngr_latchkey.credential_commands import build_credential_command_argv
 from imbue.mngr_latchkey.credential_commands import describe_credential_command_failure
-from imbue.mngr_latchkey.credential_commands import fallback_set_credentials_example
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
+from imbue.mngr_latchkey.credential_commands import set_credentials_example_for
 from imbue.mngr_latchkey.custom_services import CustomServiceError
+from imbue.mngr_latchkey.custom_services import DEFAULT_CREDENTIAL_HEADER
 from imbue.mngr_latchkey.custom_services import base_api_url_for_domain
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.custom_services import build_custom_service_scope_schema
 from imbue.mngr_latchkey.custom_services import custom_service_label
 from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.custom_services import domain_warning
+from imbue.mngr_latchkey.custom_services import registration_credential_header
 from imbue.mngr_latchkey.custom_services import registration_login_url
 from imbue.mngr_latchkey.custom_services import validate_domain
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -141,6 +143,20 @@ def _sign_in_url(existing: Mapping[str, JsonValue] | None, payload: CustomServic
     if existing is not None:
         return registration_login_url(existing)
     return None if payload.login is None else payload.login.url
+
+
+def _credential_header(existing: Mapping[str, JsonValue] | None, payload: CustomServiceRequestPayload) -> str | None:
+    """The header a pasted token is sent as, or ``None`` when a browser sign-in applies.
+
+    A service this computer already has keeps its registration, header included;
+    the request's ``header`` counts only for a service being created. A service
+    with neither named sends the bearer default.
+    """
+    if _sign_in_url(existing, payload) is not None:
+        return None
+    if existing is not None:
+        return registration_credential_header(existing) or DEFAULT_CREDENTIAL_HEADER
+    return payload.header or DEFAULT_CREDENTIAL_HEADER
 
 
 def _drop_gateway_record(gateway_client: LatchkeyGatewayClient, request_event_id: str) -> None:
@@ -269,6 +285,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
             domain_warning=domain_warning(payload.domain),
             base_api_url=base_api_url_for_domain(payload.domain, payload.scheme),
             login_url=_sign_in_url(existing, payload),
+            credential_header=_credential_header(existing, payload),
             rationale=permission_request.rationale,
         )
 
@@ -337,12 +354,17 @@ class CustomServiceGrantHandler(RequestEventHandler):
             # gives it a ``setCredentialsExample``), so the first Approve lands
             # here with nothing filled in and comes back with the form.
             typed_values = _parse_typed_credentials(request.form.get("manual_credentials"))
-            prompt = self._credential_prompt(machine_latchkey, service_name, domain)
+            credential_header = _credential_header(self._existing_registration(service_name), payload)
+            prompt = self._credential_prompt(
+                machine_latchkey, service_name, domain, credential_header, payload.credential_instructions
+            )
             if not prompt.parameters:
                 return _needs_credentials(prompt)
             if not typed_values or any(not typed_values.get(p.name, "").strip() for p in prompt.parameters):
                 return _needs_credentials(prompt)
-            failure = self._store_typed_credentials(machine_latchkey, service_name, typed_values, prompt)
+            failure = self._store_typed_credentials(
+                machine_latchkey, service_name, typed_values, prompt, credential_header
+            )
             if failure is not None:
                 # The values were rejected. Keep the form up with the reason in
                 # place of its instruction, exactly as the predefined flow does.
@@ -437,6 +459,7 @@ class CustomServiceGrantHandler(RequestEventHandler):
             login_url=None if login is None else login.url,
             login_flow=None if login is None else login.flow,
             login_flow_params=None if login is None else login.flow_params,
+            credential_header=payload.header,
         )
         self.latchkey.register_custom_service(service_name, registration)
 
@@ -478,22 +501,25 @@ class CustomServiceGrantHandler(RequestEventHandler):
         return None
 
     def _credential_prompt(
-        self, machine_latchkey: Latchkey, service_name: str, domain: str
+        self,
+        machine_latchkey: Latchkey,
+        service_name: str,
+        domain: str,
+        credential_header: str | None,
+        instructions: str | None,
     ) -> UiManualCredentialsPrompt:
         """The form asking for the credentials a service with no browser sign-in needs.
 
-        Built from the service's own ``setCredentialsExample`` now that it is
-        registered, so the inputs are whatever latchkey says this service takes.
-        A generic registered service reports a bearer-token command, which
-        becomes a single labelled input; the command itself is never shown,
-        since it is an implementation detail the user should not have to know.
+        Built from the header the registration sends the token as (a generic
+        registered service is one labelled token input, whatever the header), or,
+        for a service with no header of its own, from its ``setCredentialsExample``
+        now that it is registered. The command itself is never shown, since it is
+        an implementation detail the user should not have to know.
         """
-        info = machine_latchkey.services_info(service_name, is_offline=True)
-        example = (info.set_credentials_example if info is not None else None) or fallback_set_credentials_example(
-            service_name
-        )
         try:
-            parsed = parse_credential_command_example(example)
+            parsed = parse_credential_command_example(
+                self._credential_command_example(machine_latchkey, service_name, credential_header)
+            )
         except CredentialCommandError as e:
             logger.warning("Could not build a credential form for {}: {}", service_name, e)
             return UiManualCredentialsPrompt(
@@ -509,6 +535,16 @@ class CustomServiceGrantHandler(RequestEventHandler):
                 f"{domain} has no browser sign-in, so Mind needs its credentials. Get them from the "
                 "provider and fill them in -- Approve stores them and creates the connection."
             ),
+            instructions=instructions,
+        )
+
+    def _credential_command_example(
+        self, machine_latchkey: Latchkey, service_name: str, credential_header: str | None
+    ) -> str:
+        """The ``latchkey auth set`` line the form is built from and the typed values run through."""
+        info = machine_latchkey.services_info(service_name, is_offline=True)
+        return set_credentials_example_for(
+            service_name, info.set_credentials_example if info is not None else None, credential_header
         )
 
     def _store_typed_credentials(
@@ -517,18 +553,17 @@ class CustomServiceGrantHandler(RequestEventHandler):
         service_name: str,
         values: Mapping[str, str],
         prompt: UiManualCredentialsPrompt,
+        credential_header: str | None,
     ) -> str | None:
         """Run the service's own ``auth set`` with the typed values. Returns the reason it failed, or ``None``.
 
         The filled-in command carries the user's secrets, so it is passed as an
         argv list (never a shell string) and is never logged.
         """
-        info = machine_latchkey.services_info(service_name, is_offline=True)
-        example = (info.set_credentials_example if info is not None else None) or fallback_set_credentials_example(
-            service_name
-        )
         try:
-            parsed: ParsedCredentialCommand = parse_credential_command_example(example)
+            parsed: ParsedCredentialCommand = parse_credential_command_example(
+                self._credential_command_example(machine_latchkey, service_name, credential_header)
+            )
             argv = build_credential_command_argv(parsed, dict(values), DEFAULT_ACCOUNT)
         except CredentialCommandError as e:
             logger.warning("Could not build the credential command for {}: {}", service_name, e)

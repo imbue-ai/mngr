@@ -459,6 +459,7 @@ def test_post_permission_grant_with_manual_credentials_keeps_request_pending(tmp
     assert payload["manual_credentials"] == {
         "parameters": [{"name": "token", "label": "Token"}],
         "message": "Slack does not support browser sign-in",
+        "instructions": None,
     }
     # The request must remain pending so the user can fill the form in and
     # click Approve again.

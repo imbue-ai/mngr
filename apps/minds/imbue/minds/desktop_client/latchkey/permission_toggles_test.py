@@ -39,6 +39,8 @@ from imbue.mngr_latchkey.account_scopes import account_scope_key
 from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import DEFAULT_ACCOUNT
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
+from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.custom_services import custom_service_name
 from imbue.mngr_latchkey.desktop_egress import DesktopEgressGrant
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
@@ -1137,3 +1139,33 @@ def test_connect_service_with_credentials_refuses_an_unusable_command(tmp_path: 
     with pytest.raises(PermissionToggleError, match="cannot work out which credentials"):
         _connect_aws(latchkey)
     assert latchkey.auth_set_calls == []
+
+
+def test_a_custom_services_own_header_is_what_the_pane_collects_and_stores(tmp_path: Path) -> None:
+    """latchkey reports a bearer command for every generic registered service, so the
+    header a custom service was registered with has to come off the registration or the
+    typed token is stored under Authorization instead of the header the service takes."""
+    service_name = custom_service_name("api.example.com", "https")
+    latchkey = FakeAccountsLatchkey(
+        latchkey_directory=tmp_path,
+        latchkey_binary="/nonexistent",
+        credential_example_by_service={
+            service_name: f'latchkey auth set {service_name} -H "Authorization: Bearer <token>"'
+        },
+    )
+    latchkey.register_custom_service(
+        service_name,
+        build_custom_service_registration("api.example.com", "https", credential_header="X-Api-Key: {token}"),
+    )
+    catalog = ServicesCatalog(latchkey_directory=tmp_path)
+
+    stored_account = connect_service_with_credentials(
+        latchkey=latchkey,
+        services_catalog=catalog,
+        service_name=service_name,
+        value_by_parameter_name={"token": "k-42"},
+        account_name="",
+    )
+
+    assert stored_account == DEFAULT_ACCOUNT
+    assert latchkey.auth_set_calls[0][1][-2:] == ("-H", "X-Api-Key: k-42")

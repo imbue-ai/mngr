@@ -13,8 +13,9 @@ That makes this module pure derivation, in two directions that never meet:
 * **Creating one.** :func:`custom_service_name` and
   :func:`build_custom_service_registration` turn a validated domain (plus an
   optional browser sign-in, described as ``latchkey services register`` takes
-  it) into the name and the ``registeredServices`` value the desktop merges
-  into ``config.json``.
+  it, or the header a pasted token is sent as, kept under a key of our own that
+  latchkey preserves) into the name and the ``registeredServices`` value the
+  desktop merges into ``config.json``.
 * **Reading them back.** :func:`custom_service_catalog_payload` projects a
   ``registeredServices`` block into catalog entries in the shape
   ``services.json`` already uses, which is what
@@ -121,9 +122,24 @@ class TokenCaptureParams(FrozenModel):
 
 
 TOKEN_PLACEHOLDER: Final[str] = "{token}"
-# What latchkey requires of ``header``: a header name, a colon, and the
-# placeholder somewhere after it (``Authorization: Bearer {token}``).
-_HEADER_SHAPE_RE: Final[re.Pattern[str]] = re.compile(r"^[^:\s]+:")
+# An RFC 7230 header-name token. Mirrored by ``HEADER_NAME_RE`` in the gateway
+# extension.
+HEADER_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+# The header a custom service sends a pasted token as when the request names none.
+DEFAULT_CREDENTIAL_HEADER: Final[str] = "Authorization: Bearer {token}"
+# Mirrored by ``MAX_CREDENTIAL_INSTRUCTIONS_LENGTH`` in the gateway extension.
+MAX_CREDENTIAL_INSTRUCTIONS_LENGTH: Final[int] = 500
+# Where a custom service's header lives on its ``registeredServices`` entry. A
+# key of our own: latchkey preserves keys it does not know, and the merge that
+# writes the block keeps every entry it does not own, so the header travels with
+# the registration to every gateway that serves it.
+CREDENTIAL_HEADER_REGISTRATION_KEY: Final[str] = "mindsCredentialHeader"
+_HOST_HEADER_NAME: Final[str] = "host"
+_GATEWAY_HEADER_PREFIX: Final[str] = "x-latchkey-"
+# Every control character but HTAB, which the field-value grammar allows. A
+# header line is one line: a CR or LF after the checked name would carry a
+# second header behind it.
+_HEADER_CONTROL_CHARACTER_PATTERN: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 
 class Scheme(LowerCaseStrEnum):
@@ -360,17 +376,56 @@ def _validate_cookie_capture_params(params: CookieCaptureParams, domain: str) ->
         _validate_url_on_domain(params.cookie_url, "login_flow_params.cookieUrl", domain)
 
 
+def validate_credential_header(header: str, field: str) -> str:
+    """Return ``header`` when it is a credential header line, or raise :class:`CustomServiceError`.
+
+    ``<name>: <anything with {token}>`` on one line, as latchkey requires (a
+    header name, a colon, the placeholder after it, no control character but
+    HTAB), plus what the gateway must not let a request set: ``Host``, which
+    would redirect the credential, and the gateway's own ``X-Latchkey-*``
+    headers. Mirrors ``validateCredentialHeader`` in the gateway extension;
+    ``field`` names the field in the refusal.
+    """
+    name, separator, rest = header.partition(":")
+    if (
+        not separator
+        or not HEADER_NAME_PATTERN.fullmatch(name)
+        or TOKEN_PLACEHOLDER not in rest
+        or _HEADER_CONTROL_CHARACTER_PATTERN.search(rest) is not None
+    ):
+        raise CustomServiceError(
+            f"{field} must be a header line containing {TOKEN_PLACEHOLDER!r}, "
+            f"such as 'Authorization: Bearer {TOKEN_PLACEHOLDER}'."
+        )
+    lowered = name.lower()
+    if lowered == _HOST_HEADER_NAME or lowered.startswith(_GATEWAY_HEADER_PREFIX):
+        raise CustomServiceError(f"{field} may not set the Host header or an X-Latchkey-* header.")
+    return header
+
+
+def validate_credential_instructions(instructions: str) -> str:
+    """Return ``instructions`` when it is a usable note, or raise :class:`CustomServiceError`.
+
+    The agent's note on where the user finds a custom service's credential:
+    non-blank text the dialog shows as-is, at most
+    ``MAX_CREDENTIAL_INSTRUCTIONS_LENGTH`` characters. Mirrors
+    ``validateCredentialInstructions`` in the gateway extension.
+    """
+    if not instructions.strip():
+        raise CustomServiceError("credential_instructions must be a non-empty string.")
+    if len(instructions) > MAX_CREDENTIAL_INSTRUCTIONS_LENGTH:
+        raise CustomServiceError(
+            f"credential_instructions must be at most {MAX_CREDENTIAL_INSTRUCTIONS_LENGTH} characters."
+        )
+    return instructions
+
+
 def _validate_token_capture_params(params: TokenCaptureParams, domain: str) -> None:
     _validate_url_on_domain(params.token_url, "login_flow_params.tokenUrl", domain)
     if not params.token_field:
         raise CustomServiceError("login_flow_params.tokenField must be a non-empty string.")
-    if params.header is not None and (
-        TOKEN_PLACEHOLDER not in params.header or not _HEADER_SHAPE_RE.match(params.header)
-    ):
-        raise CustomServiceError(
-            f"login_flow_params.header must be a header line containing {TOKEN_PLACEHOLDER!r}, "
-            f"such as 'Authorization: Bearer {TOKEN_PLACEHOLDER}'."
-        )
+    if params.header is not None:
+        validate_credential_header(params.header, "login_flow_params.header")
 
 
 def validate_login_flow(
@@ -419,6 +474,7 @@ def build_custom_service_registration(
     login_url: str | None = None,
     login_flow: LoginFlow | None = None,
     login_flow_params: Mapping[str, JsonValue] | None = None,
+    credential_header: str | None = None,
 ) -> dict[str, JsonValue]:
     """Return the ``registeredServices`` value for a custom service on ``domain``.
 
@@ -430,9 +486,17 @@ def build_custom_service_registration(
 
     With no login the service is registered with a ``baseApiUrl`` alone, which
     latchkey reports as connectable via ``latchkey auth set`` -- the
-    manual-credential path the permission dialog already renders as a form.
+    manual-credential path the permission dialog already renders as a form. A
+    ``credential_header`` (already checked by :func:`validate_credential_header`)
+    rides the entry under a key of our own, so that form and every re-auth know
+    the header the pasted token is sent as; a login flow carries its own shape
+    and takes none.
     """
     registration: dict[str, JsonValue] = {"baseApiUrl": base_api_url_for_domain(domain, scheme)}
+    if credential_header is not None:
+        if login_flow is not None:
+            raise CustomServiceError("A custom service takes either a login flow or a credential header, not both.")
+        registration[CREDENTIAL_HEADER_REGISTRATION_KEY] = credential_header
     if login_url is None or login_flow is None or login_flow_params is None:
         return registration
     registration["loginUrl"] = login_url
@@ -450,6 +514,32 @@ def registration_login_url(registration: Mapping[str, JsonValue]) -> str | None:
     """
     login_url = registration.get("loginUrl")
     return login_url if isinstance(login_url, str) else None
+
+
+def registration_credential_header(registration: Mapping[str, JsonValue]) -> str | None:
+    """Return the header a registration sends a pasted token as, or ``None`` when it names none.
+
+    The inverse of the key :func:`build_custom_service_registration` writes.
+    ``None`` means the default bearer header, or a login flow that needs no
+    header at all; the caller knows which from :func:`registration_login_url`.
+    """
+    header = registration.get(CREDENTIAL_HEADER_REGISTRATION_KEY)
+    return header if isinstance(header, str) else None
+
+
+def custom_service_credential_header(registered_services: Mapping[str, JsonValue], service_name: str) -> str | None:
+    """Return the header ``service_name``'s registration sends a pasted token as, or ``None``.
+
+    ``registered_services`` is the ``registeredServices`` block of the desktop's
+    ``config.json``, the one place the header is recorded. ``None`` for a builtin
+    service, for a custom service that named no header, and for one that signs in
+    through a browser: in each of those, latchkey's reported credential example
+    stands.
+    """
+    if not is_custom_service_name(service_name):
+        return None
+    registration = registered_services.get(service_name)
+    return registration_credential_header(registration) if isinstance(registration, dict) else None
 
 
 def custom_service_catalog_payload(

@@ -152,10 +152,17 @@ def _make_event(
     domain: str = _DOMAIN,
     has_login: bool = True,
     scheme: Scheme = Scheme.HTTPS,
+    header: str | None = None,
+    credential_instructions: str | None = None,
 ) -> StreamedPermissionRequest:
     if not has_login:
         return create_custom_service_permission_request(
-            agent_id=str(agent_id), domain=domain, rationale="needs the widget API", scheme=scheme
+            agent_id=str(agent_id),
+            domain=domain,
+            rationale="needs the widget API",
+            scheme=scheme,
+            header=header,
+            credential_instructions=credential_instructions,
         )
     return create_custom_service_permission_request(
         agent_id=str(agent_id),
@@ -440,6 +447,31 @@ def test_rejected_credentials_re_ask_rather_than_fail(tmp_path: Path) -> None:
     assert harness.sender.sent_messages == []
 
 
+def test_the_credential_form_carries_the_agents_instructions_on_every_ask(tmp_path: Path) -> None:
+    # Where the key comes from is what the user needs while the form is open, so
+    # it rides on the form: on the first ask and again after a rejected attempt.
+    latchkey = _StubLatchkey(latchkey_directory=tmp_path / "latchkey", is_auth_set_successful=False)
+    harness = _Harness(tmp_path, latchkey=latchkey)
+    instructions = "Settings -> Apps -> API token; copy the token that starts with pk_."
+    event = _make_event(AgentId(), has_login=False, credential_instructions=instructions)
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    first = _grant(client, event.request_id).get_json()
+    rejected = _grant(client, event.request_id, json.dumps({"token": "wrong"})).get_json()
+
+    assert first["manual_credentials"]["instructions"] == instructions
+    assert "valid token" in rejected["message"]
+    assert rejected["manual_credentials"]["instructions"] == instructions
+
+
+def test_the_credential_form_has_no_instructions_when_the_agent_gave_none(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    event = _make_event(AgentId(), has_login=False)
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    assert _grant(client, event.request_id).get_json()["manual_credentials"]["instructions"] is None
+
+
 def test_a_login_flow_never_asks_for_typed_credentials(tmp_path: Path) -> None:
     harness = _Harness(tmp_path)
     event = _make_event(AgentId(), has_login=True)
@@ -524,3 +556,46 @@ def test_an_http_service_is_shown_and_registered_as_http(tmp_path: Path) -> None
         harness.registration("custom_http_intranet_acme-widgets_com")["baseApiUrl"]
         == "http://intranet.acme-widgets.com/"
     )
+
+
+def test_a_named_header_is_registered_shown_and_used_for_the_typed_token(tmp_path: Path) -> None:
+    """A service whose key goes in its own header: the registration remembers it, the
+    dialog shows it, and the typed token is stored under that header rather than as a
+    bearer, whatever latchkey's generic example says."""
+    harness = _Harness(tmp_path)
+    event = _make_event(AgentId(), has_login=False, header="X-Api-Key: {token}")
+    assert _detail(harness, event).credential_header == "X-Api-Key: {token}"
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+
+    first = _grant(client, event.request_id)
+    assert first.get_json()["outcome"] == "NEEDS_MANUAL_CREDENTIALS"
+    assert harness.registration()["mindsCredentialHeader"] == "X-Api-Key: {token}"
+    assert [parameter["name"] for parameter in first.get_json()["manual_credentials"]["parameters"]] == ["token"]
+
+    second = _grant(client, event.request_id, json.dumps({"token": "k-42"}))
+    assert second.get_json()["outcome"] == "GRANTED"
+    _, argv = harness.latchkey.auth_set_calls[0]
+    assert argv[-2:] == ("-H", "X-Api-Key: k-42")
+
+
+def test_a_second_workspace_sees_and_uses_the_existing_services_header(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    harness.latchkey.register_custom_service(
+        _SERVICE_NAME, build_custom_service_registration(_DOMAIN, "https", credential_header="X-Api-Key: {token}")
+    )
+    # The request guesses a bearer header (none named); the registration's wins.
+    event = _make_event(AgentId(), has_login=False)
+    assert _detail(harness, event).credential_header == "X-Api-Key: {token}"
+    client = _build_authenticated_client(tmp_path, harness.handler, StaticPendingRequests(pending=(event,)))
+    _grant(client, event.request_id)
+    response = _grant(client, event.request_id, json.dumps({"token": "k-7"}))
+    assert response.get_json()["outcome"] == "GRANTED"
+    assert harness.latchkey.auth_set_calls[0][1][-1] == "X-Api-Key: k-7"
+
+
+def test_the_bearer_default_is_shown_and_a_login_flow_shows_no_header(tmp_path: Path) -> None:
+    harness = _Harness(tmp_path)
+    assert (
+        _detail(harness, _make_event(AgentId(), has_login=False)).credential_header == "Authorization: Bearer {token}"
+    )
+    assert _detail(harness, _make_event(AgentId(), has_login=True)).credential_header is None

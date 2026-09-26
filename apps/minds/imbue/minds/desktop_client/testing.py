@@ -1278,17 +1278,27 @@ def create_custom_service_permission_request(
     rationale: str,
     scheme: Scheme = Scheme.HTTPS,
     login: CustomServiceLogin | None = None,
+    header: str | None = None,
+    credential_instructions: str | None = None,
 ) -> StreamedPermissionRequest:
     """Build a custom-service permission request as the gateway would stream it.
 
     ``login`` is the browser sign-in when the service has one; ``None`` is the
-    other real case, where the user supplies a token instead.
+    other real case, where the user supplies a token instead, sent as ``header``
+    (or the bearer default), with ``credential_instructions`` saying where it
+    comes from.
     """
     return _streamed_request(
         agent_id=agent_id,
         rationale=rationale,
         request_type=REQUEST_TYPE_CUSTOM_SERVICE,
-        payload=CustomServiceRequestPayload(domain=domain, scheme=scheme, login=login),
+        payload=CustomServiceRequestPayload(
+            domain=domain,
+            scheme=scheme,
+            login=login,
+            header=header,
+            credential_instructions=credential_instructions,
+        ),
         target="/tmp/permissions.json",
     )
 

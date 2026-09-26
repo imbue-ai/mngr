@@ -58,6 +58,8 @@ export interface ManualCredentialParameter {
 export interface ManualCredentialsPrompt {
   parameters: ManualCredentialParameter[];
   message: string;
+  /** The agent's note on where to find the credentials; its words, not Mind's. */
+  instructions?: string | null;
 }
 
 export interface PredefinedPermissionDetail {
@@ -140,6 +142,9 @@ export interface CustomServicePermissionDetail {
    * since the scheme decides whether credentials travel encrypted. */
   base_api_url: string;
   login_url: string | null;
+  /** The header line a pasted token is sent as, `{token}` standing for the value;
+   * null when a browser sign-in applies and no token is pasted. */
+  credential_header: string | null;
   rationale: string;
 }
 
@@ -283,8 +288,11 @@ export class InboxModel {
   isProgressShown = false;
   errorMessage: string | null = null;
   /** Prompt returned by the last Approve; it replaces the detail's own copy so
-   * the form explains what went wrong with the attempt. */
-  manualCredentialsFeedback: ManualCredentialsPrompt | null = null;
+   * the form explains what went wrong with the attempt. ``isRejection`` says
+   * whether that attempt carried credentials: a custom service's form first
+   * arrives the same way, in answer to an Approve that had nothing to send,
+   * and that is no failure. */
+  manualCredentialsFeedback: { prompt: ManualCredentialsPrompt; isRejection: boolean } | null = null;
   /** Set when an approval comes back unresolved, so the view scrolls the notice
    * the user has to read into view -- it can be a scroll away from the buttons
    * they just clicked. Consumed once, by whichever notice rendered. */
@@ -525,12 +533,12 @@ export class InboxModel {
       // registers it, so it has no credential command to build inputs from
       // until then. The server asks on the first Approve, and the answer
       // arrives as feedback.
-      return this.manualCredentialsFeedback;
+      return this.manualCredentialsFeedback?.prompt ?? null;
     }
     if (detail.kind !== "predefined" || detail.manual_credentials === null) return null;
     const choice = this.selectedAccountChoice();
     if (choice === null || !choice.is_credential_setup_needed) return null;
-    return this.manualCredentialsFeedback ?? detail.manual_credentials;
+    return this.manualCredentialsFeedback?.prompt ?? detail.manual_credentials;
   }
 
   /** Whether the visible credential form is reporting a failed attempt rather
@@ -538,7 +546,7 @@ export class InboxModel {
   isManualCredentialsFailureShown(): boolean {
     const prompt = this.manualCredentialsPrompt();
     if (prompt === null) return false;
-    return this.manualCredentialsFeedback !== null || prompt.parameters.length === 0;
+    return (this.manualCredentialsFeedback?.isRejection ?? false) || prompt.parameters.length === 0;
   }
 
   /** Whether the view should scroll its failure notice into view now. True at
@@ -676,6 +684,7 @@ export class InboxModel {
     const resolvedId = this.selectedId;
     if (resolvedId === null || !this.isApproveAllowed()) return;
     const body = this.buildGrantForm();
+    const isSendingCredentials = body.has("manual_credentials");
     this.isApproveBusy = true;
     this.isProgressShown = true;
     this.errorMessage = null;
@@ -702,18 +711,18 @@ export class InboxModel {
         return;
       }
       this.isProgressShown = false;
-      // The request stays pending either way, so the reason has to be read.
-      this.isFailureScrollPending = true;
       if (data.outcome === "NEEDS_MANUAL_CREDENTIALS") {
         // Keep whatever the user already typed: a rejected credential is
         // usually one field away from being right.
-        this.manualCredentialsFeedback = data.manual_credentials ?? {
-          parameters: [],
-          message: data.message ?? "",
+        this.manualCredentialsFeedback = {
+          prompt: data.manual_credentials ?? { parameters: [], message: data.message ?? "" },
+          isRejection: isSendingCredentials,
         };
+        this.isFailureScrollPending = this.isManualCredentialsFailureShown();
       } else {
         // FAILED (and anything unrecognized): request stays pending; show
-        // the reason and let the user retry.
+        // the reason, scrolled into view, and let the user retry.
+        this.isFailureScrollPending = true;
         this.errorMessage =
           data.message ?? "Approval failed; please try again.";
       }

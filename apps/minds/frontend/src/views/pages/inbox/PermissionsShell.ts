@@ -63,6 +63,12 @@ function manualCredentialsForm(model: InboxModel): m.Children {
     },
     [
       manualCredentialsMessage(model, prompt.message),
+      prompt.instructions
+        ? m("div", { id: "permissions-manual-credentials-instructions" }, [
+            m("h3", { class: "type-section text-tertiary" }, "From the agent"),
+            m("p", { class: "mt-1 type-body text-primary whitespace-pre-line" }, prompt.instructions),
+          ])
+        : null,
       ...prompt.parameters.map((parameter) =>
         m("label", { class: "flex flex-col gap-1" }, [
           m("span", { class: "type-label text-secondary" }, parameter.label),

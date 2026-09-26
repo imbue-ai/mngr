@@ -42,6 +42,10 @@ class UiManualCredentialsPrompt(FrozenModel):
         ),
     )
     message: str = Field(description="Instruction (or, after a failed attempt, the reason) shown above the inputs")
+    instructions: str | None = Field(
+        default=None,
+        description="The agent's note on where to find the credentials, shown as its words beside the inputs",
+    )
 
 
 class UiPermissionAccountChoice(FrozenModel):
@@ -193,6 +197,13 @@ class UiCustomServicePermissionDetail(FrozenModel):
     login_url: str | None = Field(
         default=None,
         description="Page the browser will open to sign in, shown so the destination is never a surprise",
+    )
+    credential_header: str | None = Field(
+        default=None,
+        description=(
+            "The header line a pasted token is sent as, with {token} where it goes -- shown behind a disclosure "
+            "so the user can see how the credential travels; None when a browser sign-in applies instead"
+        ),
     )
     rationale: str = Field(description="Agent's stated reason for the request")
 
