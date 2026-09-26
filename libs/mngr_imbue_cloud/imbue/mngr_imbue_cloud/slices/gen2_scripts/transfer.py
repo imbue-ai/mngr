@@ -22,7 +22,7 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_MAX_SLICE_COU
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_NO_UNITS_MARKER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_VM_SSH_PORT_PLACEHOLDER
 
-# The transfer conventions every stop/start box script (gen-1 and gen-2) shares:
+# The transfer conventions every stop/start box script shares:
 # a per-instance transfer dir in the slice service user's home holding the
 # detached script, its env (S3 creds + age material), the flat KEY=VALUE status
 # file the driver polls, the log, and the pid file. The scripts are deliberately
@@ -36,11 +36,6 @@ TRANSFER_DIR_ROOT: Final[str] = ".mngr-transfers"
 # Box-wide lock serializing artifact downloads (one at a time per box, so a
 # restore never competes with another restore for disk/network).
 DOWNLOAD_LOCK_RELPATH: Final[str] = ".mngr-download.lock"
-# How long a restore waits for the download lock before failing. Downloads
-# run at ~1 GB/s against ~30 GB disks, so a legitimate queue clears in well
-# under a minute; anything longer means the lock is stuck, and failing fast
-# with a real error beats parking the machine behind the transfer timeout.
-DOWNLOAD_LOCK_WAIT_SECONDS: Final[int] = 300
 
 # Object names within a generation prefix.
 DISK_OBJECT: Final[str] = "disk.zst.age"
@@ -97,7 +92,7 @@ def render_transfer_env(env: TransferEnv) -> str:
     return "\n".join(lines) + "\n"
 
 
-# Shared bash prelude: PATH (limactl/s5cmd live in /usr/local/bin, age too),
+# Shared bash prelude: PATH (s5cmd and age live in /usr/local/bin),
 # the transfer dir, and the atomic KEY=VALUE status writer. ``status_kv``
 # appends a key to the pending status; ``status_flush`` publishes atomically.
 _SCRIPT_PRELUDE: Final[str] = """\
@@ -127,7 +122,7 @@ trap 'fail "command failed: $BASH_COMMAND"' ERR
 
 @pure
 def script_prelude(instance_name: str) -> str:
-    """The shared bash prelude every transfer script (gen-1 and gen-2) starts with."""
+    """The shared bash prelude every transfer script starts with."""
     return _SCRIPT_PRELUDE.format(transfer_dir_root=TRANSFER_DIR_ROOT, instance=instance_name)
 
 

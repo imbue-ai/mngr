@@ -134,69 +134,25 @@ def test_provision_destroys_the_reserved_slice_when_the_marker_is_garbled() -> N
             memory_mib=8192 - 512,
             disk_gib=10,
             host_dir="/root/.mngr",
-            root_authorized_public_key="ssh-ed25519 AAAAbake",
             host_private_key_pem="pem",
             host_public_key_openssh="ssh-ed25519 AAAAhost",
             boot_disk_gib=8,
-            slot_count=2,
             port_range_start=22000,
             port_range_end=22010,
             units=8,
             box_total_units=120,
             box_disk_budget_gib=400,
+            trusted_user_ca_public_key="ssh-ed25519 AAAAca tier-ca",
         )
     # Exactly the failed reserve and the follow-up destroy, both shipped scripts.
     assert len(client.recorded_commands) == 2
     assert not any("systemctl start" in command for command in client.recorded_commands)
 
 
-def test_provision_refuses_a_carve_with_neither_a_static_root_key_nor_a_ca() -> None:
-    # A VM that authorizes no static root key and trusts no CA would boot
-    # unreachable; the carve must refuse before touching the box (like the lima
-    # client does), not fail minutes later at the sshd wait.
+def test_provision_refuses_a_memory_that_disagrees_with_the_units() -> None:
+    # A carve whose memory_mib is not the guest RAM its units imply must refuse
+    # before touching the box.
     client = _recording_client()
-    with pytest.raises(BareMetalProvisioningError, match="root access path"):
-        client.provision_slice_vm(
-            host_id=HostId.generate(),
-            env_name="dev",
-            vcpus=1,
-            memory_mib=8192 - 512,
-            disk_gib=10,
-            host_dir="/root/.mngr",
-            root_authorized_public_key=None,
-            host_private_key_pem="pem",
-            host_public_key_openssh="ssh-ed25519 AAAAhost",
-            boot_disk_gib=8,
-            slot_count=2,
-            port_range_start=22000,
-            port_range_end=22010,
-            units=8,
-            box_total_units=120,
-            box_disk_budget_gib=400,
-        )
-    assert client.recorded_commands == []
-
-
-def test_provision_requires_the_machine_sizing_knobs() -> None:
-    # A gen-2 carve without the sizing knobs (or with a memory_mib that
-    # disagrees with the units) must refuse before touching the box.
-    client = _recording_client()
-    with pytest.raises(BareMetalProvisioningError):
-        client.provision_slice_vm(
-            host_id=HostId.generate(),
-            env_name="dev",
-            vcpus=1,
-            memory_mib=8192 - 512,
-            disk_gib=10,
-            host_dir="/root/.mngr",
-            root_authorized_public_key="ssh-ed25519 AAAAbake",
-            host_private_key_pem="pem",
-            host_public_key_openssh="ssh-ed25519 AAAAhost",
-            boot_disk_gib=8,
-            slot_count=2,
-            port_range_start=22000,
-            port_range_end=22010,
-        )
     with pytest.raises(BareMetalProvisioningError):
         client.provision_slice_vm(
             host_id=HostId.generate(),
@@ -205,16 +161,15 @@ def test_provision_requires_the_machine_sizing_knobs() -> None:
             memory_mib=1024,
             disk_gib=10,
             host_dir="/root/.mngr",
-            root_authorized_public_key="ssh-ed25519 AAAAbake",
             host_private_key_pem="pem",
             host_public_key_openssh="ssh-ed25519 AAAAhost",
             boot_disk_gib=8,
-            slot_count=2,
             port_range_start=22000,
             port_range_end=22010,
             units=8,
             box_total_units=120,
             box_disk_budget_gib=400,
+            trusted_user_ca_public_key="ssh-ed25519 AAAAca tier-ca",
         )
     assert client.recorded_commands == []
 

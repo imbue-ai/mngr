@@ -2085,7 +2085,7 @@ def test_admin_stop_workspace_posts_the_kind_and_set_stop_kind_hits_its_route(mo
 def test_admin_set_workspace_stop_kind_types_the_missing_route_and_the_running_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The cutover probes the connector for stop-kind support through this
+    # Operator tooling probes the connector for stop-kind support through this
     # route and reads its answers by type: an older connector's fixed 404
     # (no such route), the connector's 409 (a running row has no stop to
     # describe). A modern connector's own 404 is neither.

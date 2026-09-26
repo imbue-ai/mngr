@@ -24,23 +24,19 @@ WORKSPACE_PRIMARY_AGENT_LABEL: Final[str] = "is_primary"
 
 # The minds environment tiers. Every env name maps to exactly one tier, and every
 # bare-metal box belongs to exactly one tier. Tiers are isolated by construction --
-# each has its own pool-management SSH keypair, and there is meant to be zero
-# cross-tier reach. Sharing a box WITHIN a tier is fine and routine (several
-# ``dev-<user>`` envs on one dev box); sharing one ACROSS tiers puts both tiers'
-# pool keys on the box, handing each tier's operators and connector ``limactl`` --
-# and so root -- over the other's workspaces, which is what
-# ``assert_box_is_exclusive_to_tier`` refuses.
+# each has its own SSH CA, and there is meant to be zero cross-tier reach.
+# Sharing a box WITHIN a tier is fine and routine (several ``dev-<user>`` envs
+# on one dev box); sharing one ACROSS tiers makes the box trust both tiers'
+# CAs, handing each tier's operators and connector root over the other's
+# workspaces, which is what ``assert_box_is_exclusive_to_tier`` refuses.
 PRODUCTION_TIER: Final[str] = "production"
 STAGING_TIER: Final[str] = "staging"
 DEV_TIER: Final[str] = "dev"
 CI_TIER: Final[str] = "ci"
 
 # Static keys a correctly prepped box authorizes for its slice service user:
-# the owning tier's one pool key on gen-1, none on gen-2 (management SSH is by
-# certificate from the tier's Vault SSH CA, so any key there was added out of band).
-# CLEANUP: drop the gen-1 count once the gen-1 -> gen-2 cutover has run on
-# every tier (phase 6 of blueprint/slice-fleet-cutover).
-GEN1_EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 1
+# none (management SSH is by certificate from the tier's Vault SSH CA, so any
+# key there was added out of band).
 GEN2_EXPECTED_AUTHORIZED_KEY_COUNT: Final[int] = 0
 
 # The region-label / datacenter-code pairing is defined in the connector-mounted
@@ -102,8 +98,7 @@ def is_box_exclusive_to_tier(
     authorized_key_count: int,
     expected_authorized_key_count: int,
     foreign_tier_slice_count: int,
-    # Whether the box's sshd trusts exactly the owning tier's SSH CA (always
-    # True for a gen-1 box, which has no CA trust to check).
+    # Whether the box's sshd trusts exactly the owning tier's SSH CA.
     is_trusted_ca_correct: bool,
 ) -> bool:
     """Whether a bare-metal box belongs solely to the tier reading it.
@@ -112,9 +107,8 @@ def is_box_exclusive_to_tier(
     (``assert_box_is_exclusive_to_tier``) and the read-only audit
     (``minds-admin server list --verify-occupancy``, which tells operators a bake would
     refuse) can never disagree. A box is exclusive when its service user authorizes
-    exactly the static keys its generation expects (one pool key on gen-1, none on
-    gen-2), its sshd trusts the owning tier's CA and no other, and it carries no
-    slice stamped for an env in another tier.
+    exactly the expected static keys (none), its sshd trusts the owning tier's CA
+    and no other, and it carries no slice stamped for an env in another tier.
     """
     return (
         authorized_key_count == expected_authorized_key_count
@@ -203,7 +197,7 @@ class MachineUnits(PositiveInt):
 
 
 class SliceContainerRuntime(UpperCaseStrEnum):
-    """The Docker runtime a gen-2 slice's workspace container is created under at the bake.
+    """The Docker runtime a slice's workspace container is created under at the bake.
 
     RUNSC (gVisor) is the fleet's runtime; RUNC exists only so an operator can
     bake a plain-runc slice next to a runsc one for a side-by-side comparison.
@@ -305,8 +299,9 @@ def slugify_account(account: str) -> str:
 
 
 # The highest slice-fleet box generation this client release can operate,
-# declared on every pool-host lease so the connector never hands it a row it
-# cannot run (and admits it to rows old clients cannot). Matches
+# declared on every pool-host lease. The fleet is single-generation now, but
+# the connector still uses the field to refuse leases from clients too old to
+# send it (they predate the qemu fleet). Matches
 # ``gen2_scripts.layout.FIRST_QEMU_BOX_GENERATION`` (which cannot be imported
 # from this layer, and gen2_scripts itself is stdlib-only by ratchet).
 MAX_SUPPORTED_BOX_GENERATION: Final[int] = 2

@@ -82,10 +82,9 @@ CI_TEST_USER_PASSWORD_KEY: Final[str] = "CI_TEST_USER_PASSWORD"
 _CI_VAULT_PREFIX: Final[str] = "secrets/minds/ci"
 
 
-# Every lease these tests place is served by this checkout's mngr, which runs
-# gen-2 workspaces; the connector treats a lease without the field as a client
-# from before gen-2 and confines it to gen-1 rows, so a gen-2-only pool would
-# answer every test 503.
+# Every lease these tests place is served by this checkout's mngr; the connector
+# treats a lease without the field as a client from before gen-2 and answers it
+# with the update-required refusal, since no gen-1 rows can be leased.
 LEASE_MAX_BOX_GENERATION: Final[int] = FIRST_QEMU_BOX_GENERATION
 
 

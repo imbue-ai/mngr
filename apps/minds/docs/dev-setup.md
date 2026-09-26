@@ -107,7 +107,7 @@ which lives outside the public mirror:
       `uv run minds-admin wireguard sync-peers --tier dev` (one run puts your
       key on every dev box). Then `uv run minds-admin wireguard install-onetun`
       installs the userspace tunnel the tooling dials through. Runbook:
-      [gen2-management-plane.md](./deploy/gen2-management-plane.md).
+      [management-plane.md](./deploy/reference/management-plane.md).
 
 - [ ] **Membership in the `minds-dev` Modal workspace + a matching
       `~/.modal.toml` profile.** `minds-dev` is a *separate*, workspace-bound

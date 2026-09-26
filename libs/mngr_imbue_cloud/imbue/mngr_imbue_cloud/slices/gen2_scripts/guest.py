@@ -40,22 +40,20 @@ def render_guest_grow_data_fs_script() -> str:
 
     Idempotent (``btrfs filesystem resize max`` is a no-op at full size) and
     tolerant of the very first boot, where the data disk is only mounted later
-    by cloud-init's first-boot script. Covers both mount conventions: the
-    gen-2 carve's fixed mount and a transplanted gen-1 disk's original lima
-    mount point.
+    by cloud-init's first-boot script.
     """
     return f"""\
 #!/bin/bash
 # Managed by mngr (gen-2 slices).
 set -euo pipefail
-for mount_point in {GEN2_GUEST_DATA_MOUNT} /mnt/lima-*; do
+for mount_point in {GEN2_GUEST_DATA_MOUNT}; do
     [ -d "$mount_point" ] || continue
-    # Resize only btrfs mounts: the lima glob is broad, and only the data
-    # filesystem should ever be grown.
+    # Resize only a mounted btrfs data filesystem: before the first boot's
+    # mount the path is an empty directory on the root filesystem.
     if mountpoint -q "$mount_point" && [ "$(findmnt -no FSTYPE "$mount_point")" = "btrfs" ]; then
-        # A transplanted gen-1 data disk carries a partition table, which a
-        # qcow2 grow does not touch -- grow the partition to fill the disk first.
-        # growpart exits 1 (NOCHANGE) when already full-size; tolerated.
+        # A data disk transplanted from the previous fleet carries a partition
+        # table, which a qcow2 grow does not touch -- grow the partition to fill
+        # the disk first. growpart exits 1 (NOCHANGE) when already full-size; tolerated.
         source_device="$(findmnt -no SOURCE "$mount_point")"
         parent_disk="$(lsblk -no PKNAME "$source_device" | head -1)"
         if [ -n "$parent_disk" ] && command -v growpart >/dev/null 2>&1; then
@@ -248,11 +246,10 @@ def _build_firstboot_script(host_dir: str) -> str:
 
     The gen-2 base image pre-installs docker + the package set (via the prep
     stage's virt-customize), so the apt block is a presence-guarded fallback for
-    images staged before a customization existed. The btrfs block mirrors the
-    gen-1 lima provisioning: the data disk (selected by label, else the blank
-    writable non-root disk) is formatted when not already btrfs (so re-runs and
-    restored disks survive), mounted at a fixed path, and ``host_dir`` symlinked
-    to it.
+    images staged before a customization existed. The btrfs block sets up the
+    data disk (selected by label, else the blank writable non-root disk): it is
+    formatted when not already btrfs (so re-runs and restored disks survive),
+    mounted at a fixed path, and ``host_dir`` symlinked to it.
     """
     return f"""\
 #!/bin/bash
@@ -343,15 +340,13 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 def build_qemu_slice_user_data(
     *,
     host_dir: str,
-    root_authorized_public_keys: tuple[str, ...],
     host_private_key_pem: str,
     host_public_key_openssh: str,
-    # The tier's SSH CA public key; when given, VM root trusts certificates
-    # carrying the VM principal (the fleet's management access), and
-    # ``root_authorized_public_keys`` need carry no management key at all.
-    trusted_user_ca_public_key: str | None = None,
+    # The tier's SSH CA public key: VM root trusts certificates carrying the
+    # VM principal (the fleet's management access) and no static key at all.
+    trusted_user_ca_public_key: str,
 ) -> str:
-    """The NoCloud ``user-data``: root keys, the pinned sshd host key, sshd config, CA trust, first boot.
+    """The NoCloud ``user-data``: the pinned sshd host key, sshd config, CA trust, first boot.
 
     ``ssh_keys`` installs exactly the pre-generated ed25519 host key mngr pins
     (strict host-key checking, no first-connect TOFU); ``ssh_genkeytypes:
@@ -360,10 +355,8 @@ def build_qemu_slice_user_data(
     the same but fails the cloud-config schema, leaving the guest "degraded";
     and ``ssh_deletekeys: false`` leaves the installed key alone. Because the instance-id is stable,
     none of this ever replays -- the key persists across every reboot.
-    ``PerSourcePenalties no`` preserves gen-1 management-SSH semantics (all
-    management connections share few source addresses; a boot-time auth timeout
-    must not lock them all out); revisiting it is explicitly deferred by the
-    gen-2 spec.
+    ``PerSourcePenalties no`` because all management connections share few
+    source addresses, so a boot-time auth timeout must not lock them all out.
     """
     sshd_config = "\n".join(
         [
@@ -373,21 +366,13 @@ def build_qemu_slice_user_data(
             "PerSourcePenalties no",
         ]
     )
-    ca_trust_write_files = (
-        [
-            {"path": trust_file.path, "permissions": trust_file.mode, "content": trust_file.content}
-            for trust_file in ssh_ca_trust_files(trusted_user_ca_public_key, {SSH_CA_ROOT_USER: SSH_CA_PRINCIPAL_VM})
-        ]
-        if trusted_user_ca_public_key is not None
-        else []
-    )
-    # cloud-config's schema rejects an empty ssh_authorized_keys list, and a
-    # gen-2 VM (CA trust only) authorizes no static key, so the key is omitted
-    # rather than emitted empty.
-    authorized_keys = [key.strip() for key in root_authorized_public_keys]
+    ca_trust_write_files = [
+        {"path": trust_file.path, "permissions": trust_file.mode, "content": trust_file.content}
+        for trust_file in ssh_ca_trust_files(trusted_user_ca_public_key, {SSH_CA_ROOT_USER: SSH_CA_PRINCIPAL_VM})
+    ]
+    # Root carries no ``ssh_authorized_keys`` (CA trust only); cloud-config's
+    # schema rejects an empty list, so the field is omitted rather than empty.
     root_user: dict[str, object] = {"name": "root"}
-    if authorized_keys:
-        root_user["ssh_authorized_keys"] = authorized_keys
     config = {
         "disable_root": False,
         "ssh_pwauth": False,

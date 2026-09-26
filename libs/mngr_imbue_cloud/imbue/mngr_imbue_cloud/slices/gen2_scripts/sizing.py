@@ -11,8 +11,8 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import InvalidMachineSize
 #    ~3GiB kernel baseline on a busy box; 8 leaves a safety buffer so the box never
 #    runs at the ragged edge with the OOM killer.)
 #  - PER-VM (``PER_VM_RAM_OVERHEAD_MIB``): host-side overhead for EACH slice on top of
-#    its guest RAM -- the QEMU process (control structures + page tables) and, on
-#    gen-1, the per-VM lima supervisor. (Measured ~0.2GiB/VM; 512 is conservative.)
+#    its guest RAM -- the QEMU process (control structures + page tables).
+#    (Measured ~0.2GiB/VM; 512 is conservative.)
 HOST_RAM_RESERVE_GIB: Final[int] = 8
 PER_VM_RAM_OVERHEAD_MIB: Final[int] = 512
 # RAM held back from the guest so a machine's whole footprint fits its budget
@@ -24,16 +24,6 @@ PER_VM_RAM_OVERHEAD_MIB: Final[int] = 512
 # GiB of guest RAM the way any cloud VM's OS takes its cut; the container's cap
 # follows the guest's visible RAM.
 GUEST_RAM_HOLDBACK_MIB: Final[int] = 512
-
-# Gen-1 disk held back on each box before the rest is split among slices, in two
-# parts so a per-slice allocation never exceeds the box's REAL usable filesystem:
-#  - ``DISK_RESERVE_GB``: a fixed floor for the OS + management tooling, and
-#  - ``DISK_RESERVE_FRACTION``: a fraction of the registered ``disk_gb`` that absorbs
-#    the GB-vs-GiB gap (an "N TB" spec is N*10^9 bytes ~= 0.93*N GiB) plus partition +
-#    filesystem metadata, so a nominally-registered disk_gb does not overcommit the
-#    actual disk. The reserve used is the larger of the two.
-DISK_RESERVE_GB: Final[int] = 20
-DISK_RESERVE_FRACTION: Final[float] = 0.10
 
 # Gen-2 disk accounting works on the MEASURED storage partition (the XFS
 # partition prep mounts at the storage root; its GiB is recorded as the box
@@ -64,20 +54,15 @@ GEN2_STORAGE_RESERVE_GIB: Final[int] = (
 GEN2_ROOT_PARTITION_GIB: Final[int] = 20
 GEN2_BOOT_PARTITION_GIB: Final[int] = 1
 
-# Each slice VM has TWO disks whose sizes must sum to the slice's disk budget (no
-# disk overcommit, just like RAM): a boot disk and a btrfs data disk mounted at
-# the host_dir for the agent's per-host volume.
+# Each slice VM has TWO disks that together consume its share of the box's disk
+# budget (no disk overcommit, just like RAM): a boot disk and a btrfs data disk
+# mounted at the host_dir for the agent's per-host volume.
 #
-# Gen-1 (lima) boot disk: it holds the guest OS AND Docker (the agent host image
-# + build cache + container layers, ~11GiB observed), so it needs room; the data
-# disk is the rest of the slot's budget. Every deployed gen-1 slice was carved
-# at this size and migration 039 derives a gen-1 row's data-disk size from it,
-# so it must not change while gen-1 slices exist.
-SLICE_BOOT_DISK_GIB: Final[int] = 32
-# Gen-2 boot disk: only the guest OS, its logs (journald capped at 512 MiB) and
-# whatever we install at the box level -- docker's data-root lives on the data
-# disk (see GEN2_GUEST_DOCKER_DATA_ROOT), so everything an agent host can grow is
-# on the one disk a resize can grow. ~1.5GiB used at bake; the rest is headroom.
+# The boot disk holds only the guest OS, its logs (journald capped at 512 MiB)
+# and whatever we install at the box level -- docker's data-root lives on the
+# data disk (see GEN2_GUEST_DOCKER_DATA_ROOT), so everything an agent host can
+# grow is on the one disk a resize can grow. ~1.5GiB used at bake; the rest is
+# headroom.
 GEN2_BOOT_DISK_GIB: Final[int] = 10
 
 # Fair-share bandwidth shaping runs the box's HTB root class slightly below the
@@ -204,22 +189,6 @@ def compute_machine_data_disk_gib(units: int) -> int:
     if units <= 0:
         raise InvalidMachineSizeError(f"units must be positive, got {units}")
     return DATA_DISK_BASE_GIB + math.ceil(units * DATA_DISK_GIB_PER_UNIT)
-
-
-@pure
-def compute_gen1_migrated_data_disk_gib(gen1_data_disk_gib: int) -> int:
-    """The data-disk GiB a gen-1 machine has once the cutover moves it to gen-2.
-
-    A gen-1 data disk holds only the home volume (docker lives on the gen-1
-    boot disk); the gen-2 data disk also holds the container engines' roots
-    and the system reserve, which is exactly what ``DATA_DISK_BASE_GIB`` was
-    sized for. The cutover therefore grows the transplanted disk by the base,
-    so the machine keeps its home capacity -- and a gen-1 row records this
-    number as its ``disk_gb`` from the start.
-    """
-    if gen1_data_disk_gib <= 0:
-        raise InvalidMachineSizeError(f"gen1_data_disk_gib must be positive, got {gen1_data_disk_gib}")
-    return gen1_data_disk_gib + DATA_DISK_BASE_GIB
 
 
 @pure

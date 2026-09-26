@@ -251,8 +251,8 @@ def test_extra_start_args_cap_container_memory_from_the_slice_size() -> None:
 
 
 def test_extra_start_args_are_empty_when_the_slice_size_is_unknown() -> None:
-    # A rebuild against a legacy lease row without a memory_gb stamp must keep
-    # the previous uncapped behavior rather than guessing a cap.
+    # A config without the sizing knob keeps the container uncapped rather than
+    # guessing a cap.
     provider = SliceVpsDockerProvider.model_construct(slice_config=SliceVpsDockerProviderConfig())
     assert provider._compute_extra_start_args() == ()
 
@@ -286,43 +286,18 @@ def test_guest_cloud_init_wait_blocks_on_first_boot_and_tolerates_a_degraded_sta
 
 
 _CA_PUBLIC_KEY = "ssh-ed25519 AAAACAKEY minds-dev-ssh-ca"
-_POOL_PUBLIC_KEY = "ssh-ed25519 AAAAPOOLKEY pool"
 
 
-def test_resolve_slice_ssh_authority_gen2_without_a_ca_key_raises() -> None:
+def test_resolve_slice_ssh_authority_without_a_ca_key_raises() -> None:
     with pytest.raises(MngrError, match="trusted_user_ca_public_key"):
-        resolve_slice_ssh_authority(is_gen2=True, trusted_user_ca_public_key=None, pool_authorized_public_key=None)
+        resolve_slice_ssh_authority(trusted_user_ca_public_key=None)
 
 
-def test_resolve_slice_ssh_authority_gen2_trusts_the_ca_and_authorizes_no_static_key() -> None:
-    authority = resolve_slice_ssh_authority(
-        is_gen2=True, trusted_user_ca_public_key=_CA_PUBLIC_KEY, pool_authorized_public_key=_POOL_PUBLIC_KEY
-    )
+def test_resolve_slice_ssh_authority_trusts_the_ca_on_both_endpoints() -> None:
+    authority = resolve_slice_ssh_authority(trusted_user_ca_public_key=_CA_PUBLIC_KEY)
     assert authority.vm_trusted_user_ca_public_key == _CA_PUBLIC_KEY
-    assert authority.extra_root_authorized_keys == ()
     assert authority.container_ssh_config_files == container_ca_trust_files(_CA_PUBLIC_KEY)
     assert authority.container_ssh_config_files != ()
-
-
-def test_resolve_slice_ssh_authority_gen1_authorizes_the_pool_key_and_no_ca_trust() -> None:
-    # Even with a CA key also present (the two knobs are meant to be mutually
-    # exclusive per generation, but the caller enforces that, not this
-    # function): a gen-1 box must never get container CA trust files.
-    authority = resolve_slice_ssh_authority(
-        is_gen2=False, trusted_user_ca_public_key=_CA_PUBLIC_KEY, pool_authorized_public_key=_POOL_PUBLIC_KEY
-    )
-    assert authority.vm_trusted_user_ca_public_key is None
-    assert authority.extra_root_authorized_keys == (_POOL_PUBLIC_KEY,)
-    assert authority.container_ssh_config_files == ()
-
-
-def test_resolve_slice_ssh_authority_gen1_with_no_pool_key_authorizes_nothing() -> None:
-    authority = resolve_slice_ssh_authority(
-        is_gen2=False, trusted_user_ca_public_key=None, pool_authorized_public_key=None
-    )
-    assert authority.vm_trusted_user_ca_public_key is None
-    assert authority.extra_root_authorized_keys == ()
-    assert authority.container_ssh_config_files == ()
 
 
 def test_read_container_ca_trust_files_from_vm_returns_empty_when_the_vm_trusts_no_ca() -> None:

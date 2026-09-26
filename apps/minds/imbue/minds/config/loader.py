@@ -191,7 +191,6 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "supertokens",
     "cloudflare",
     "neon",
-    "pool-ssh",
     "sharing",
     "storage",
     "sentry",

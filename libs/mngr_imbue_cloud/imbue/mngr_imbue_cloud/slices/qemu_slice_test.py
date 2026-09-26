@@ -314,9 +314,9 @@ def test_sudoers_scopes_the_service_user_to_exactly_the_slice_units() -> None:
 def _reserve_script_for_test(units: int = 8, unit_budget_mib: int = 120 * 1024, disk_budget_gib: int = 400) -> str:
     user_data = build_qemu_slice_user_data(
         host_dir="/home/user/.mngr",
-        root_authorized_public_keys=("ssh-ed25519 AAAAbake",),
         host_private_key_pem="pem",
         host_public_key_openssh="ssh-ed25519 AAAAhost",
+        trusted_user_ca_public_key="ssh-ed25519 AAAAtierca minds-dev-ca",
     )
     return build_qemu_reserve_script(
         instance_name="mngr-slice-dev-x-abc",

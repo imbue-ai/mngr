@@ -35,16 +35,14 @@ from imbue.mngr.providers.ssh_utils import create_pyinfra_host
 from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.interfaces import SliceVmClientInterface
-from imbue.mngr_imbue_cloud.slices.bare_metal import box_image_cache_dir_for_generation
 from imbue.mngr_imbue_cloud.slices.bare_metal import build_slice_container_memory_start_args
 from imbue.mngr_imbue_cloud.slices.bare_metal import slice_instance_name
 from imbue.mngr_imbue_cloud.slices.box_image_cache import BoxImageCacheInterface
 from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
 from imbue.mngr_imbue_cloud.slices.box_image_cache import WAIT_FOR_TAR_TIMEOUT_SECONDS
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_IMAGE_TAR_CACHE_DIR
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_SLICE_SERVICE_USER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_PRINCIPAL_CONTAINER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_PUBLIC_KEY_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_ROOT_USER
@@ -61,11 +59,11 @@ from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.interfaces import HostRealizer
 from imbue.mngr_vps.primitives import VpsInstanceId
 
-# region/plan are meaningless for a locally-carved lima VM, but the shared
+# region/plan are meaningless for a box-carved slice VM, but the shared
 # VpsProvider finalize path persists them, so use stable placeholders.
 # Region falls back to this only if the owning bare-metal server's region is
 # unknown; the slice bake always passes the real region via ``slice_region``.
-_FALLBACK_SLICE_REGION: str = "lima"
+_FALLBACK_SLICE_REGION: str = "slice"
 _SLICE_PLAN: str = "slice"
 
 # Conservative free-disk requirement (bytes) checked on the box before saving the
@@ -99,7 +97,7 @@ _DEFAULT_WORKSPACE_TEMPLATE_BUILD_CODE_DIR: Final[str] = "/docker_build_code"
 # (``<workspace>/system/scripts/env.d/``).
 _ENV_D_BROWSER_UNIT: Final[str] = "system/scripts/env.d/1000-playwright-fortress.sh"
 
-# How long to wait for a freshly-carved gen-2 guest's first-boot cloud-init to
+# How long to wait for a freshly-carved guest's first-boot cloud-init to
 # finish before touching the VM. Its sshd answers well before the first boot
 # completes (package installs, the data-disk format/mount, docker bring-up),
 # and outer provisioning racing it collides on the dpkg lock and can observe a
@@ -142,46 +140,28 @@ def container_ca_trust_files(trusted_user_ca_public_key: str) -> tuple[Container
 
 
 class SliceSshAuthority(FrozenModel):
-    """What a carve authorizes for management SSH on the VM root and inner container, by box generation."""
+    """What a carve authorizes for management SSH on the VM root and inner container: the tier CA."""
 
-    vm_trusted_user_ca_public_key: str | None = Field(
-        description="Passed to provision_slice_vm: the tier CA on gen-2, None on gen-1 (no CA trust)"
-    )
-    extra_root_authorized_keys: tuple[str, ...] = Field(
-        description="Gen-1 only: the pool management public key, so it is also authorized on the VM root"
-    )
-    container_ssh_config_files: tuple[ContainerFile, ...] = Field(
-        description="Gen-2 only: the container's CA trust files (empty on gen-1, which authorizes a static key)"
-    )
+    vm_trusted_user_ca_public_key: str = Field(description="Passed to provision_slice_vm: the tier CA")
+    container_ssh_config_files: tuple[ContainerFile, ...] = Field(description="The container's CA trust files")
 
 
 @pure
-def resolve_slice_ssh_authority(
-    *,
-    is_gen2: bool,
-    trusted_user_ca_public_key: str | None,
-    pool_authorized_public_key: str | None,
-) -> SliceSshAuthority:
-    """What a carve authorizes for management SSH: the tier CA on gen-2, the static pool key on gen-1.
+def resolve_slice_ssh_authority(*, trusted_user_ca_public_key: str | None) -> SliceSshAuthority:
+    """What a carve authorizes for management SSH: the tier CA on the VM root and in the container.
 
-    Raises :class:`MngrError` when a gen-2 carve has no CA public key set (the
-    tier's Vault SSH CA has not been brought up and committed, and a gen-2 box
-    has no other management-access path).
+    Raises :class:`MngrError` when the carve has no CA public key set (the
+    tier's Vault SSH CA has not been brought up and committed, and a slice has
+    no other management-access path).
     """
-    if is_gen2 and trusted_user_ca_public_key is None:
+    if trusted_user_ca_public_key is None:
         raise MngrError(
-            "trusted_user_ca_public_key must be set to carve a gen-2 slice (the tier's SSH CA public key, "
+            "trusted_user_ca_public_key must be set to carve a slice (the tier's SSH CA public key, "
             "committed in its deploy.toml [ssh_ca] block and passed by the operator pool bake)"
         )
-    pool_key = None if is_gen2 else pool_authorized_public_key
     return SliceSshAuthority(
-        vm_trusted_user_ca_public_key=trusted_user_ca_public_key if is_gen2 else None,
-        extra_root_authorized_keys=(pool_key,) if pool_key else (),
-        container_ssh_config_files=(
-            container_ca_trust_files(trusted_user_ca_public_key)
-            if is_gen2 and trusted_user_ca_public_key is not None
-            else ()
-        ),
+        vm_trusted_user_ca_public_key=trusted_user_ca_public_key,
+        container_ssh_config_files=container_ca_trust_files(trusted_user_ca_public_key),
     )
 
 
@@ -208,7 +188,7 @@ def read_container_ca_trust_files_from_vm(outer: OuterHostInterface) -> tuple[Co
 
 
 class SliceVpsDockerProviderConfig(VpsProviderConfig):
-    """Config for the slice provider: a VpsProvider whose 'VPS' is a local lima VM."""
+    """Config for the slice provider: a VpsProvider whose 'VPS' is a slice VM carved on a bare-metal box."""
 
     backend: ProviderBackendName = Field(default=ProviderBackendName("imbue_cloud_slice"))
     box_public_address: str = Field(
@@ -231,50 +211,29 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
         default=GEN2_SLICE_SERVICE_USER,
         description=(
             "Dedicated non-root service user on the box; the bake SSHes in as this user to carve the slice. The "
-            "operator pool bake passes the box row's recorded user; the default is the gen-2 fleet's."
+            "operator pool bake passes the box row's recorded user; the default is the fleet's."
         ),
     )
     pool_private_key_path: str | None = Field(
         default=None,
         description=(
-            "Path (on the machine running the bake) to the private key that opens the box's service user and, "
-            "on gen-2, the slice VM's root: the operator's certificate-bearing management identity (its "
-            "``-cert.pub`` sibling is presented) on gen-2, the pool management private key on gen-1. Set by "
-            "the operator pool bake (``pool create``)."
-        ),
-    )
-    slice_base_image_url: str | None = Field(
-        default=None,
-        description=(
-            "Guest OS image the slice VM boots from. Defaults to the box-staged image "
-            "(``file://`` under the lima user's home, placed there once at ``server prep``) so bakes never "
-            "depend on the Debian mirror. Set to None only to fall back to mngr_lima's default (mirror) image."
-        ),
-    )
-    # CLEANUP: drop this knob (and the gen-1 branches that read it) once the
-    # gen-1 -> gen-2 cutover has run on every tier (phase 6 of
-    # blueprint/slice-fleet-cutover); gen-2 slices carry no static management key.
-    pool_authorized_public_key: str | None = Field(
-        default=None,
-        description=(
-            "Gen-1 only: the pool management public key to authorize for the slice's VM root and inner "
-            "container, so the connector can inject the leasing user's key at lease time and reach the VM at "
-            "release time. Set by the operator pool bake (``pool create``) for gen-1 boxes."
+            "Path (on the machine running the bake) to the private key that opens the box's service user and "
+            "the slice VM's root: the operator's certificate-bearing management identity (its ``-cert.pub`` "
+            "sibling is presented). Set by the operator pool bake (``pool create``)."
         ),
     )
     trusted_user_ca_public_key: str | None = Field(
         default=None,
         description=(
-            "Gen-2: the tier's SSH CA public key the slice's VM root and inner container trust for "
-            "certificate logins (the connector, analytics, and operators present short-lived certificates "
-            "instead of a static key). Set by the operator pool bake (``pool create``) for gen-2 boxes; a "
-            "gen-2 carve refuses without it."
+            "The tier's SSH CA public key the slice's VM root and inner container trust for certificate "
+            "logins (the connector, analytics, and operators present short-lived certificates instead of a "
+            "static key). Set by the operator pool bake (``pool create``); a carve refuses without it."
         ),
     )
     box_host_public_key: str | None = Field(
         default=None,
         description=(
-            "The bare-metal box's sshd host public key, pinned by the lima slice client for strict "
+            "The bare-metal box's sshd host public key, pinned by the slice client for strict "
             "host-key checking (no trust-on-first-use). Set by the bake from the box's bare_metal_servers row."
         ),
     )
@@ -285,63 +244,48 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
     slice_env_name: str | None = Field(
         default=None,
         description=(
-            "Owning environment name stamped into the slice's lima instance + disk names "
+            "Owning environment name stamped into the slice's instance + disk names "
             "(mngr-slice-<env>-<host-hex>), so a shared box can attribute the slice to an env and "
             "reconciliation scopes itself to one env. None produces legacy un-stamped names."
         ),
     )
     # Carving knobs: deliberately have NO defaults (None). They vary per box (a
-    # function of its RAM/cores/disk + the chosen per-slice RAM and overcommit) and
+    # function of its RAM/cores/disk, the machine's units and the overcommit) and
     # are computed by the operator pool bake and passed in per bake via
-    # ``-S`` overrides. ``provision_slice_vm`` raises if any is unset when carving.
+    # ``-S`` overrides. ``create_host`` raises if any is unset when carving.
     slice_vcpus: int | None = Field(default=None, description="vCPUs per slice VM (no default; set per box)")
     slice_memory_mib: int | None = Field(default=None, description="RAM per slice VM in MiB (no default; set per box)")
     slice_disk_gib: int | None = Field(
         default=None, description="btrfs data-disk size per slice VM in GiB (no default; set per box)"
     )
-    slice_slot_count: int | None = Field(
-        default=None,
-        description=(
-            "The box's total slice slot count (no default; set per box). The on-box reservation refuses to "
-            "carve once the box already holds this many slices -- the cross-env over-allocation guard."
-        ),
-    )
     slice_port_range_start: int | None = Field(default=None, description="Box host-port range start (no default)")
     slice_port_range_end: int | None = Field(default=None, description="Box host-port range end (no default)")
-    box_generation: int = Field(
-        default=1,
-        description=(
-            "The target box's slice-fleet generation (specs/slice-fleet-gen2): 1 selects the lima backend, "
-            "2 the raw-qemu backend with routed-tap networking. Set by the operator pool bake from the box's "
-            "bare_metal_servers row."
-        ),
-    )
     slice_units: int | None = Field(
         default=None,
         description=(
             "The machine's size in units (1 unit = 1GiB guest RAM; specs/slice-fleet). Required to carve a "
-            "gen-2 machine; set by the operator pool bake (dev bakes may override the default via --units)."
+            "machine; set by the operator pool bake (dev bakes may override the default via --units)."
         ),
     )
     slice_box_total_units: int | None = Field(
         default=None,
         description=(
             "The target box's sellable unit budget (specs/slice-fleet), the fair-share denominator and the "
-            "reserve's memory-budget input. Required for gen-2 carves; computed per box by the pool bake."
+            "reserve's memory-budget input. Required to carve; computed per box by the pool bake."
         ),
     )
     slice_box_disk_budget_gib: int | None = Field(
         default=None,
         description=(
             "The target box's disk budget in GiB (usable disk minus the reserve; specs/slice-fleet), the "
-            "reserve's disk-budget input. Required for gen-2 carves; computed per box by the pool bake."
+            "reserve's disk-budget input. Required to carve; computed per box by the pool bake."
         ),
     )
     slice_uplink_mbps: int | None = Field(
         default=None,
         description=(
-            "The box's declared uplink rate in Mbit/s, sizing gen-2 per-slice fair-share bandwidth classes. "
-            "None (or gen 1) disables traffic shaping. Set by the operator pool bake from the box's row."
+            "The box's declared uplink rate in Mbit/s, sizing per-slice fair-share bandwidth classes. "
+            "None disables traffic shaping. Set by the operator pool bake from the box's row."
         ),
     )
     slice_host_id: str | None = Field(
@@ -367,8 +311,8 @@ class SliceVpsDockerProviderConfig(VpsProviderConfig):
 def render_remove_authorized_key_command(public_key: str, authorized_keys_path: str) -> str:
     """Shell that drops one key line from an authorized_keys file, emptying it when that was its only line.
 
-    ``grep -v`` exits 1 when nothing is left to print, which is the gen-2 norm
-    (VM root authorizes nothing but the bake's transfer key), so that status is
+    ``grep -v`` exits 1 when nothing is left to print, which is the norm (VM
+    root authorizes nothing but the bake's transfer key), so that status is
     accepted; any other grep failure still aborts before the file is replaced.
     """
     quoted_path = shlex.quote(authorized_keys_path)
@@ -383,9 +327,9 @@ class SliceVpsDockerProvider(VpsProvider):
     """A VpsProvider whose 'VPS' is a slice VM we run on a bare-metal box.
 
     The bake runs from wherever ``mngr create`` is invoked (the operator's laptop,
-    like an OVH bake): ``create_host`` carves the VM by driving the box's
-    generation-specific slice client over SSH on the box (lima for gen 1, raw qemu
-    for gen 2), then reaches the VM's box-forwarded ports to build the container.
+    like an OVH bake): ``create_host`` carves the VM by driving the qemu slice
+    client over SSH on the box, then reaches the VM's box-forwarded ports to
+    build the container.
     Reuses the shared container bake unchanged; the only differences from a real
     VPS are confined to overridable seams: the outer/inner SSH reach a forwarded
     port on the box (not :22 / :container_ssh_port on a unique IP), and the btrfs
@@ -404,9 +348,7 @@ class SliceVpsDockerProvider(VpsProvider):
     # knobs and the slice client without re-declaring the base fields (which would
     # be an invariant-override type error -- the pattern OvhProvider uses too).
     slice_config: SliceVpsDockerProviderConfig = Field(frozen=True, description="Slice provider configuration")
-    slice_client: SliceVmClientInterface = Field(
-        frozen=True, description="Generation-specific slice VM client (lima for gen 1, raw qemu for gen 2)"
-    )
+    slice_client: SliceVmClientInterface = Field(frozen=True, description="The slice VM client (raw qemu on the box)")
 
     _current_outer_port: int | None = PrivateAttr(default=None)
     _current_container_port: int | None = PrivateAttr(default=None)
@@ -426,7 +368,7 @@ class SliceVpsDockerProvider(VpsProvider):
         """Point the per-host-port seams at known box-forwarded ports.
 
         Used when rebuilding the container on an *already-leased* slice (the
-        imbue_cloud slow path): the VM + its lima port-forwards already exist, so
+        imbue_cloud slow path): the VM + its box port-forwards already exist, so
         instead of allocating ports the provider must reach the lease's recorded
         VM-root (outer) and inner-container forwarded ports.
         """
@@ -439,12 +381,10 @@ class SliceVpsDockerProvider(VpsProvider):
 
     def _compute_extra_start_args(self) -> tuple[str, ...]:
         # Hard-cap the workspace container's memory so it can never starve the
-        # slice VM's own daemons (sshd, dockerd, lima-guestagent) -- an uncapped
-        # workspace at capacity collapses the VM-wide page cache and wedges the
-        # VM unrecoverably. Known on both container-creation paths: the bake sets
-        # slice_memory_mib per box, and the slow-path rebuild derives it from the
-        # lease's memory_gb attribute (None only against a legacy row without it,
-        # which keeps the previous uncapped behavior).
+        # slice VM's own daemons (sshd, dockerd) -- an uncapped workspace at
+        # capacity collapses the VM-wide page cache and wedges the VM
+        # unrecoverably. Both container-creation paths set it: the bake per box,
+        # the slow-path rebuild from the lease's sizing column.
         memory_mib = self.slice_config.slice_memory_mib
         if memory_mib is None:
             return ()
@@ -495,66 +435,49 @@ class SliceVpsDockerProvider(VpsProvider):
         logger.info("Creating slice host {} ({}) on box {} (env={})", name, host_id, box, env_name)
 
         # This host's unique VPS host keypair is pre-injected as the VM's sshd host
-        # key (no first-connect TOFU). On gen-1 the provider's VPS keypair
-        # authorizes root on the VM; a gen-2 VM authorizes no static root key and
+        # key (no first-connect TOFU). The VM authorizes no static root key and
         # trusts the tier's SSH CA instead (the bake reaches it with a certificate).
-        is_gen2 = self.slice_config.box_generation >= FIRST_QEMU_BOX_GENERATION
-        vps_public_key: str | None
-        if is_gen2:
-            vps_public_key = None
-        else:
-            _vps_key_path, vps_public_key = self._get_vps_ssh_keypair()
         vps_host_key_path, vps_host_public_key = self._get_vps_host_keypair(host_id)
 
         instance_id = VpsInstanceId(slice_instance_name(host_id, env_name))
         # Carving knobs have no defaults; they must have been set (per box) via -S.
+        # The machine's units and the box's two budgets are what the reserve's
+        # two-budget accounting enforces on the box (specs/slice-fleet).
         vcpus = self.slice_config.slice_vcpus
         memory_mib = self.slice_config.slice_memory_mib
         disk_gib = self.slice_config.slice_disk_gib
-        slot_count = self.slice_config.slice_slot_count
         port_range_start = self.slice_config.slice_port_range_start
         port_range_end = self.slice_config.slice_port_range_end
+        units = self.slice_config.slice_units
+        box_total_units = self.slice_config.slice_box_total_units
+        box_disk_budget_gib = self.slice_config.slice_box_disk_budget_gib
         if (
             vcpus is None
             or memory_mib is None
             or disk_gib is None
-            or slot_count is None
             or port_range_start is None
             or port_range_end is None
+            or units is None
+            or box_total_units is None
+            or box_disk_budget_gib is None
         ):
             raise MngrError(
-                "slice_vcpus / slice_memory_mib / slice_disk_gib / slice_slot_count / slice_port_range_* must all "
-                "be set to carve a slice (they are computed per box by the operator pool bake, `pool create`)"
-            )
-        # Gen-2 carves additionally need the machine-sizing knobs (specs/slice-fleet):
-        # the machine's units and the box's two budgets, which the reserve's
-        # two-budget accounting enforces on the box.
-        if self.slice_config.box_generation >= FIRST_QEMU_BOX_GENERATION and (
-            self.slice_config.slice_units is None
-            or self.slice_config.slice_box_total_units is None
-            or self.slice_config.slice_box_disk_budget_gib is None
-        ):
-            raise MngrError(
-                "slice_units / slice_box_total_units / slice_box_disk_budget_gib must all be set to carve a "
-                "gen-2 machine (they are computed per box by the operator pool bake)"
+                "slice_vcpus / slice_memory_mib / slice_disk_gib / slice_port_range_* / slice_units / "
+                "slice_box_total_units / slice_box_disk_budget_gib must all be set to carve a slice (they are "
+                "computed per box by the operator pool bake, `pool create`)"
             )
         region = self._resolved_region()
-        # Gen-2: VM root and the inner container trust the tier's SSH CA, and no
-        # management key is authorized anywhere. Gen-1: the pool management key is
-        # authorized on both so the connector can inject the leasing user's key at
-        # lease time and reach the VM at release time.
+        # VM root and the inner container trust the tier's SSH CA, and no
+        # management key is authorized anywhere.
         ssh_authority = resolve_slice_ssh_authority(
-            is_gen2=is_gen2,
-            trusted_user_ca_public_key=self.slice_config.trusted_user_ca_public_key,
-            pool_authorized_public_key=self.slice_config.pool_authorized_public_key,
+            trusted_user_ca_public_key=self.slice_config.trusted_user_ca_public_key
         )
-        extra_root_keys = ssh_authority.extra_root_authorized_keys
-        effective_authorized_keys = [*extra_root_keys, *(authorized_keys or ())]
+        effective_authorized_keys = list(authorized_keys or ())
         # Destroy the VM on ANY failure after provisioning (a try/finally + success
         # flag, so we clean up unconditionally without a broad ``except``).
         is_baked = False
         try:
-            # Reserve the box slot + host ports (under the box lock) and boot the
+            # Reserve the box's budgets + host ports (under the box lock) and boot the
             # env-stamped VM. The ports are chosen on the box, so they come back here.
             provision_result = self.slice_client.provision_slice_vm(
                 host_id=host_id,
@@ -563,23 +486,16 @@ class SliceVpsDockerProvider(VpsProvider):
                 memory_mib=memory_mib,
                 disk_gib=disk_gib,
                 host_dir=str(self.config.btrfs_mount_path),
-                root_authorized_public_key=vps_public_key,
                 host_private_key_pem=vps_host_key_path.read_text(),
                 host_public_key_openssh=vps_host_public_key,
-                boot_disk_gib=(
-                    GEN2_BOOT_DISK_GIB
-                    if self.slice_config.box_generation >= FIRST_QEMU_BOX_GENERATION
-                    else SLICE_BOOT_DISK_GIB
-                ),
-                slot_count=slot_count,
+                boot_disk_gib=GEN2_BOOT_DISK_GIB,
                 port_range_start=port_range_start,
                 port_range_end=port_range_end,
-                extra_root_authorized_keys=extra_root_keys,
                 trusted_user_ca_public_key=ssh_authority.vm_trusted_user_ca_public_key,
+                units=units,
+                box_total_units=box_total_units,
+                box_disk_budget_gib=box_disk_budget_gib,
                 uplink_mbps=self.slice_config.slice_uplink_mbps,
-                units=self.slice_config.slice_units,
-                box_total_units=self.slice_config.slice_box_total_units,
-                box_disk_budget_gib=self.slice_config.slice_box_disk_budget_gib,
             )
             vm_ssh_port = provision_result.vm_ssh_host_port
             container_ssh_port = provision_result.container_ssh_host_port
@@ -597,14 +513,11 @@ class SliceVpsDockerProvider(VpsProvider):
             wait_for_sshd(hostname=box, port=vm_ssh_port, timeout_seconds=self.config.ssh_connect_timeout)
 
             with self._make_outer_for_vps_ip(box) as outer:
-                # A gen-2 guest's sshd answers while its one-time first boot is
+                # The guest's sshd answers while its one-time first boot is
                 # still running; wait it out before any outer provisioning
                 # (which would otherwise race cloud-init's apt for the dpkg
                 # lock and can observe the data disk before its format/mount).
-                # Gen-1 needs no wait: ``limactl start`` already blocks until
-                # the guest's provision scripts complete.
-                if self.slice_config.box_generation >= FIRST_QEMU_BOX_GENERATION:
-                    wait_for_guest_cloud_init_to_finish(outer)
+                wait_for_guest_cloud_init_to_finish(outer)
                 # Production (--from-tag) bakes use the per-box DEFAULT_WORKSPACE_TEMPLATE image cache: ensure the
                 # tagged image is present in the slice's dockerd (build + seed it as the first
                 # slice on the box, or docker-load the box tar), then run it as-is instead of
@@ -656,17 +569,10 @@ class SliceVpsDockerProvider(VpsProvider):
                 except MngrError as cleanup_err:
                     logger.warning("Failed to clean up slice VM {}: {}", instance_id, cleanup_err)
 
-    # ------------------------------------------------------------------
     # Per-box DEFAULT_WORKSPACE_TEMPLATE image cache (build once per box, docker-load per slice)
-    # ------------------------------------------------------------------
 
     def _make_box_image_cache(self) -> BoxImageCacheInterface:
-        return SshBoxImageCache(
-            slice_client=self.slice_client,
-            cache_dir=box_image_cache_dir_for_generation(
-                self.slice_config.box_generation, self.slice_config.box_ssh_user
-            ),
-        )
+        return SshBoxImageCache(slice_client=self.slice_client, cache_dir=GEN2_IMAGE_TAR_CACHE_DIR)
 
     def _ensure_cached_image_present(
         self,
@@ -856,25 +762,18 @@ class SliceVpsDockerProvider(VpsProvider):
                 "Failed to remove the transfer key from the slice authorized_keys: {}", result.stderr.strip()
             )
 
-    # ------------------------------------------------------------------
     # Per-host-port seam overrides (the bake reaches the VM via box:port)
-    # ------------------------------------------------------------------
 
     def _vm_root_private_key_path(self) -> Path:
-        """The key that opens a slice's VM root: the certificate-bearing management identity on gen-2, the VPS keypair on gen-1.
+        """The key that opens a slice's VM root: the certificate-bearing management identity.
 
-        The gen-2 identity is the same key + ``-cert.pub`` the bake dials the box
-        with (the operator's Vault-signed certificate carries the VM principal), so
-        no static key of ours is ever authorized on a gen-2 VM.
+        The identity is the same key + ``-cert.pub`` the bake dials the box with
+        (the operator's Vault-signed certificate carries the VM principal), so no
+        static key of ours is ever authorized on a slice VM.
         """
-        if self.slice_config.box_generation >= FIRST_QEMU_BOX_GENERATION:
-            if self.slice_config.pool_private_key_path is None:
-                raise MngrError(
-                    "pool_private_key_path must be set to reach a gen-2 slice VM (the management identity)"
-                )
-            return Path(self.slice_config.pool_private_key_path)
-        vps_key_path, _pub = self._get_vps_ssh_keypair()
-        return vps_key_path
+        if self.slice_config.pool_private_key_path is None:
+            raise MngrError("pool_private_key_path must be set to reach a slice VM (the management identity)")
+        return Path(self.slice_config.pool_private_key_path)
 
     @contextmanager
     def _make_outer_for_vps_ip(self, vps_ip: str) -> Iterator[OuterHostInterface]:

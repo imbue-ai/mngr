@@ -22,10 +22,10 @@ from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_ORDERED
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_READY
 from imbue.mngr_imbue_cloud.slices.bare_metal import CI_SLICE_MAX_AGE_SECONDS
 from imbue.mngr_imbue_cloud.slices.bare_metal import DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO
-from imbue.mngr_imbue_cloud.slices.bare_metal import GEN1_SLICE_SERVICE_USER
 from imbue.mngr_imbue_cloud.slices.bare_metal import MAX_SLICE_ENV_NAME_LENGTH
 from imbue.mngr_imbue_cloud.slices.bare_metal import MAX_SLICE_INSTANCE_NAME_LENGTH
 from imbue.mngr_imbue_cloud.slices.bare_metal import ORPHAN_SLICE_MIN_AGE_SECONDS
+from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_DISK_SUFFIX
 from imbue.mngr_imbue_cloud.slices.bare_metal import SLICE_HOST_ID_HEX_LENGTH
 from imbue.mngr_imbue_cloud.slices.bare_metal import assert_env_name_fits_slice_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import assert_region_label_matches_box_datacenter
@@ -39,17 +39,10 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import compute_gen2_box_default_ma
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_orphan_slice_instance_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_container_memory_cap_mib
-from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_budget_gib
-from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_disk_gib
-from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_memory_mib
-from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slice_vcpus
-from imbue.mngr_imbue_cloud.slices.bare_metal import compute_slot_count
 from imbue.mngr_imbue_cloud.slices.bare_metal import compute_tier_orphan_disk_names
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_authorized_key_lines
 from imbue.mngr_imbue_cloud.slices.bare_metal import count_slice_resource_names
-from imbue.mngr_imbue_cloud.slices.bare_metal import default_slice_service_user
 from imbue.mngr_imbue_cloud.slices.bare_metal import describe_gen2_box_disk_shortfall
-from imbue.mngr_imbue_cloud.slices.bare_metal import expected_static_authorized_key_count
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_first_ready_server_in_datacenter
 from imbue.mngr_imbue_cloud.slices.bare_metal import find_server_capacity_by_id
 from imbue.mngr_imbue_cloud.slices.bare_metal import foreign_tier_slice_names
@@ -68,118 +61,31 @@ from imbue.mngr_imbue_cloud.slices.bare_metal import slice_name_env_owner
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import SliceInstanceObservation
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_SLICE_SERVICE_USER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DEFAULT_MACHINE_UNITS
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DISK_RESERVE_GB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_CONTAINER_MEMORY_RESERVE_MIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_box_total_units
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_default_machine_capacity
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_machine_vcpus
 
 
 def _server(
     status: str = SERVER_STATUS_READY,
-    slot_count: int = 8,
+    ram_gb: int | None = 128,
     server_id: str = "11111111-1111-1111-1111-111111111111",
     region: str = "vin",
     slice_service_user: str | None = None,
-    box_generation: int = 1,
 ) -> BareMetalServer:
     now = datetime.now(timezone.utc)
     return BareMetalServer(
         id=BareMetalServerDbId(server_id),
         plan_code="24rise02-v1-us",
         region=region,
-        slot_count=slot_count,
+        ram_gb=ram_gb,
         slice_service_user=slice_service_user,
         status=BareMetalServerStatus(status),
         created_at=now,
         updated_at=now,
-        box_generation=box_generation,
+        box_generation=2,
         uplink_mbps=1000,
     )
-
-
-def test_compute_slot_count_reserves_host_and_per_vm_overhead() -> None:
-    # slots = floor((ram - 8 host reserve) GiB / (slice + 0.5 per-VM overhead) GiB).
-    # e.g. 256GB box, 8GB slices: (256-8)*1024 // (8*1024 + 512) = 253952 // 8704 = 29.
-    assert compute_slot_count(256, 8) == 29
-    assert compute_slot_count(64, 8) == 6
-    assert compute_slot_count(128, 8) == 14
-    # Too small to fit even one slice after the host reserve -> 0.
-    assert compute_slot_count(4, 8) == 0
-    # A larger per-slice RAM yields fewer slots.
-    assert compute_slot_count(64, 16) == 3
-
-
-def test_compute_slot_count_rejects_negative_ram_and_nonpositive_per_slice() -> None:
-    with pytest.raises(BareMetalConfigError):
-        compute_slot_count(-1, 8)
-    with pytest.raises(BareMetalConfigError):
-        compute_slot_count(64, 0)
-
-
-def test_compute_slice_memory_mib_is_full_advertised() -> None:
-    # The guest gets the full advertised RAM; per-VM overhead is accounted in slot_count.
-    assert compute_slice_memory_mib(8) == 8 * 1024
-    assert compute_slice_memory_mib(16) == 16 * 1024
-
-
-def test_compute_slice_memory_mib_rejects_too_small() -> None:
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_memory_mib(0)
-
-
-def test_compute_slice_disk_budget_splits_usable_disk() -> None:
-    # reserve = max(20, ceil(500 * 0.10)) = 50; (500 - 50) // 8 = 56 GiB budget each.
-    assert compute_slice_disk_budget_gib(500, 8) == 56
-    # Small disk: the fixed 20GiB floor wins over the fraction.
-    assert compute_slice_disk_budget_gib(150, 8) == (150 - 20) // 8
-
-
-def test_compute_slice_disk_budget_does_not_overcommit_nominal_disk() -> None:
-    # A disk_gb registered from the nominal spec (e.g. "8 TB" -> 8000) must leave the
-    # per-slice allocations within the real usable GiB (~0.93 * 8000 = 7440) thanks to
-    # the fraction reserve, so slots * budget never exceeds usable.
-    disk_gb = 8000
-    slot_count = 29
-    budget = compute_slice_disk_budget_gib(disk_gb, slot_count)
-    usable_gib = int(disk_gb * 0.93)
-    assert slot_count * budget <= usable_gib
-
-
-def test_compute_slice_disk_gib_is_budget_minus_boot_disk() -> None:
-    # Data disk = total budget minus the fixed boot disk, so boot + data == budget.
-    assert compute_slice_disk_gib(500, 8) == compute_slice_disk_budget_gib(500, 8) - SLICE_BOOT_DISK_GIB
-    assert compute_slice_disk_gib(500, 8) + SLICE_BOOT_DISK_GIB == compute_slice_disk_budget_gib(500, 8)
-
-
-def test_compute_slice_disk_gib_rejects_when_budget_too_small_for_boot() -> None:
-    # Budget below the boot-disk size leaves no room for a data disk.
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_disk_gib(20, 8)
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_disk_gib(500, 0)
-    # Budget that fits but is smaller than the boot disk also fails.
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_disk_gib(disk_gb=DISK_RESERVE_GB + SLICE_BOOT_DISK_GIB, slot_count=1)
-
-
-def test_compute_slice_vcpus_applies_mild_overcommit() -> None:
-    # RISE-2: 16 threads over 8 slots at 1.5x -> 3 vCPU/slice.
-    assert compute_slice_vcpus(cpu_threads=16, slot_count=8, overcommit_ratio=1.5) == 3
-    # No overcommit: 16 threads / 8 slots -> 2.
-    assert compute_slice_vcpus(cpu_threads=16, slot_count=8, overcommit_ratio=1.0) == 2
-    # Always at least one vCPU even when heavily oversubscribed.
-    assert compute_slice_vcpus(cpu_threads=4, slot_count=16, overcommit_ratio=1.0) == 1
-
-
-def test_compute_slice_vcpus_rejects_bad_inputs() -> None:
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_vcpus(cpu_threads=0, slot_count=8, overcommit_ratio=1.5)
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_vcpus(cpu_threads=16, slot_count=0, overcommit_ratio=1.5)
-    with pytest.raises(BareMetalConfigError):
-        compute_slice_vcpus(cpu_threads=16, slot_count=8, overcommit_ratio=0.0)
 
 
 def test_choose_raid_level_prefers_mirroring() -> None:
@@ -291,33 +197,41 @@ def test_is_valid_status_transition_allows_forward_and_failure_only() -> None:
     assert is_valid_status_transition(failed, ordered) is False
 
 
-def test_compute_capacity_reports_free_slots() -> None:
-    capacity = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=3)
-    assert capacity.free_slots == 5
-    assert capacity.used_slots == 3
+def test_compute_capacity_reports_free_default_machines_from_the_ram_budget() -> None:
+    # A 128GB box's unit budget holds 14 default machines.
+    capacity = compute_capacity(_server(SERVER_STATUS_READY, ram_gb=128), used_machines=3)
+    assert capacity.machine_capacity == 14
+    assert capacity.free_machines == 11
+    assert capacity.used_machines == 3
 
 
 def test_compute_capacity_clamps_overfull_to_zero() -> None:
-    capacity = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=10)
-    assert capacity.free_slots == 0
+    capacity = compute_capacity(_server(SERVER_STATUS_READY, ram_gb=128), used_machines=20)
+    assert capacity.free_machines == 0
+
+
+def test_compute_capacity_of_an_undetected_box_is_zero() -> None:
+    capacity = compute_capacity(_server(SERVER_STATUS_READY, ram_gb=None), used_machines=0)
+    assert capacity.machine_capacity == 0
+    assert capacity.free_machines == 0
 
 
 def test_compute_capacity_rejects_negative_used() -> None:
     with pytest.raises(BareMetalConfigError):
-        compute_capacity(_server(SERVER_STATUS_READY), used_slots=-1)
+        compute_capacity(_server(SERVER_STATUS_READY), used_machines=-1)
 
 
 def test_find_server_capacity_by_id_returns_the_matching_server() -> None:
     target_id = BareMetalServerDbId("22222222-2222-2222-2222-222222222222")
-    other = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=1)
-    target = compute_capacity(_server(SERVER_STATUS_READY, slot_count=16, server_id=str(target_id)), used_slots=2)
+    other = compute_capacity(_server(SERVER_STATUS_READY, ram_gb=128), used_machines=1)
+    target = compute_capacity(_server(SERVER_STATUS_READY, ram_gb=256, server_id=str(target_id)), used_machines=2)
     chosen = find_server_capacity_by_id([other, target], target_id)
     assert chosen.server.id == target_id
-    assert chosen.free_slots == 14
+    assert chosen.free_machines == 27
 
 
 def test_find_server_capacity_by_id_raises_when_absent() -> None:
-    only = compute_capacity(_server(SERVER_STATUS_READY, slot_count=8), used_slots=0)
+    only = compute_capacity(_server(SERVER_STATUS_READY, ram_gb=128), used_machines=0)
     with pytest.raises(SliceCapacityError):
         find_server_capacity_by_id([only], BareMetalServerDbId("99999999-9999-9999-9999-999999999999"))
 
@@ -465,7 +379,7 @@ def test_foreign_tier_slice_names_separates_production_from_staging() -> None:
 def test_foreign_tier_slice_names_ignores_legacy_unstamped_and_non_slice_names() -> None:
     # A legacy name carries no env, so its tier is unknowable -- it counts toward
     # occupancy but must never be reported as a cross-tier violation. Non-slice
-    # lima resources are not ours to judge at all.
+    # box resources are not ours to judge at all.
     legacy = slice_disk_name(HostId.generate())
     assert foreign_tier_slice_names({legacy, "some-unrelated-disk"}, "staging") == set()
 
@@ -475,8 +389,8 @@ def test_foreign_tier_slice_names_is_empty_for_an_empty_box() -> None:
 
 
 def test_count_authorized_key_lines_counts_only_key_bearing_lines() -> None:
-    # A correctly prepped box holds exactly this: one pool key, nothing else.
-    assert count_authorized_key_lines("ssh-ed25519 AAAApool pool-management\n") == 1
+    # Prep writes no static key, so any key-bearing line is one added out of band.
+    assert count_authorized_key_lines("ssh-ed25519 AAAAextra operator-added\n") == 1
     # Blank lines, whitespace-only lines, and comments carry no key.
     assert count_authorized_key_lines("") == 0
     assert count_authorized_key_lines("\n\n   \n") == 0
@@ -546,14 +460,14 @@ def test_parse_raw_swap_devices_ignores_md_backed_swap_and_empty_input() -> None
 
 
 def test_env_names_at_the_slice_name_cap_pass_and_longer_ones_fail() -> None:
-    # The binding constraint is limactl's instance-name budget (its ssh socket
-    # path must fit UNIX_PATH_MAX); an env at the cap must land exactly on it.
+    # An env at the cap must land exactly on the instance-name budget (the
+    # guest hostname's HOST_NAME_MAX bound; see MAX_SLICE_INSTANCE_NAME_LENGTH).
     host_id = HostId.generate()
     at_cap = "c" * MAX_SLICE_ENV_NAME_LENGTH
     assert_env_name_fits_slice_names(at_cap)
     assert len(slice_instance_name(host_id, at_cap)) == MAX_SLICE_INSTANCE_NAME_LENGTH
-    # The secondary 76-char identifier cap must also hold for the disk name.
-    assert len(slice_disk_name(host_id, at_cap)) <= 76
+    # The derived disk name only adds the fixed suffix.
+    assert len(slice_disk_name(host_id, at_cap)) == MAX_SLICE_INSTANCE_NAME_LENGTH + len(SLICE_DISK_SUFFIX)
 
     with pytest.raises(SliceCapacityError, match="instance name"):
         assert_env_name_fits_slice_names("c" * (MAX_SLICE_ENV_NAME_LENGTH + 1))
@@ -565,12 +479,6 @@ def test_orchestrator_style_ci_env_names_fit_the_slice_name_cap() -> None:
     # identifier and the UNIX_PATH_MAX ssh.sock overflow -- must stay fixed for
     # that shape.
     assert_env_name_fits_slice_names("ci-20260820t171706z-b0c869d1")
-
-
-def test_gen1_slot_count_matches_the_gen2_default_machine_capacity() -> None:
-    # The uniform model is the special case: on a 128GB box the gen-1 slot math
-    # lands on exactly the 14 default-size machines the gen-2 unit budget holds.
-    assert compute_slot_count(128, 8) == compute_default_machine_capacity(128) == 14
 
 
 def test_default_overcommit_gives_a_default_machine_four_vcpus_on_the_standard_box() -> None:
@@ -652,27 +560,11 @@ def test_region_label_check_refuses_unknown_labels_and_datacenters() -> None:
         assert_region_label_matches_box_datacenter(region_label="US-EAST-VA", box_datacenter="gra")
 
 
-def test_default_slice_service_user_follows_the_box_generation() -> None:
-    # Gen-1 boxes keep their lima user; every gen-2 box runs the generic one
-    # the prep artifacts and sudoers grants are rendered for.
-    assert default_slice_service_user(1) == GEN1_SLICE_SERVICE_USER
-    assert default_slice_service_user(2) == GEN2_SLICE_SERVICE_USER
-    assert default_slice_service_user(3) == GEN2_SLICE_SERVICE_USER
-    assert GEN1_SLICE_SERVICE_USER != GEN2_SLICE_SERVICE_USER
-
-
-def test_box_service_user_prefers_the_recorded_user_and_falls_back_per_generation() -> None:
-    recorded = _server(slice_service_user="custom-user", box_generation=2)
+def test_box_service_user_prefers_the_recorded_user_and_falls_back_to_the_fleets() -> None:
+    recorded = _server(slice_service_user="custom-user")
     assert box_service_user(recorded) == "custom-user"
-    unrecorded_gen1 = _server(slice_service_user=None, box_generation=1)
-    assert box_service_user(unrecorded_gen1) == GEN1_SLICE_SERVICE_USER
-    unrecorded_gen2 = _server(slice_service_user=None, box_generation=2)
-    assert box_service_user(unrecorded_gen2) == GEN2_SLICE_SERVICE_USER
-
-
-def test_expected_static_authorized_key_count_is_one_pool_key_on_gen1_and_none_on_gen2() -> None:
-    assert expected_static_authorized_key_count(1) == 1
-    assert expected_static_authorized_key_count(2) == 0
+    unrecorded = _server(slice_service_user=None)
+    assert box_service_user(unrecorded) == GEN2_SLICE_SERVICE_USER
 
 
 def test_parse_management_trust_output_splits_keys_from_the_trusted_ca() -> None:
@@ -712,17 +604,15 @@ def test_read_storage_volume_command_reports_an_unmounted_root_without_failing()
     assert parse_storage_volume_output(result.stdout) == StorageVolumeState(mounted_source=None, is_encrypted=False)
 
 
-def test_is_trusted_ca_correct_for_tier_requires_the_committed_ca_on_gen2_only() -> None:
+def test_is_trusted_ca_correct_for_tier_requires_the_committed_ca() -> None:
     ca = "ssh-ed25519 AAAAca tier-ca"
     trusting = BoxManagementTrust(authorized_key_count=0, trusted_ca_public_key=ca)
     bare = BoxManagementTrust(authorized_key_count=1, trusted_ca_public_key=None)
-    # Gen-1 has no CA trust to check.
-    assert is_trusted_ca_correct_for_tier(bare, 1, None)
-    assert is_trusted_ca_correct_for_tier(trusting, 2, ca + " different-comment")
-    assert not is_trusted_ca_correct_for_tier(bare, 2, ca)
-    assert not is_trusted_ca_correct_for_tier(trusting, 2, "ssh-ed25519 AAAAother other-tier")
-    # No committed CA means a gen-2 box can never be correctly trusted.
-    assert not is_trusted_ca_correct_for_tier(trusting, 2, None)
+    assert is_trusted_ca_correct_for_tier(trusting, ca + " different-comment")
+    assert not is_trusted_ca_correct_for_tier(bare, ca)
+    assert not is_trusted_ca_correct_for_tier(trusting, "ssh-ed25519 AAAAother other-tier")
+    # No committed CA means a box can never be correctly trusted.
+    assert not is_trusted_ca_correct_for_tier(trusting, None)
 
 
 def _run_management_trust_read(home: Path) -> subprocess.CompletedProcess[str]:

@@ -126,8 +126,8 @@ def _audit(
     return BoxTierAudit(
         server_id="11111111-1111-1111-1111-111111111111",
         public_address="203.0.113.10",
-        slot_count=6,
-        box_used_slots=2,
+        machine_capacity=6,
+        box_used_machines=2,
         authorized_key_count=authorized_key_count,
         expected_authorized_key_count=expected_authorized_key_count,
         trusted_ca_public_key=None,

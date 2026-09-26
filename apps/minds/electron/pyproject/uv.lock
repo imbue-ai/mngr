@@ -983,7 +983,6 @@ dependencies = [
     { name = "httpx" },
     { name = "imbue-common" },
     { name = "imbue-mngr" },
-    { name = "imbue-mngr-lima" },
     { name = "imbue-mngr-vps" },
     { name = "loguru" },
     { name = "paramiko" },
@@ -991,6 +990,7 @@ dependencies = [
     { name = "psutil" },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
+    { name = "pyyaml" },
     { name = "tenacity" },
 ]
 
@@ -1004,7 +1004,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "imbue-common", editable = "../../../../libs/imbue_common" },
     { name = "imbue-mngr", editable = "../../../../libs/mngr" },
-    { name = "imbue-mngr-lima", editable = "../../../../libs/mngr_lima" },
     { name = "imbue-mngr-vps", editable = "../../../../libs/mngr_vps" },
     { name = "loguru" },
     { name = "paramiko", specifier = ">=3.0" },
@@ -1012,6 +1011,7 @@ requires-dist = [
     { name = "psutil" },
     { name = "psycopg2-binary" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyyaml" },
     { name = "tenacity", specifier = ">=8.0" },
 ]
 

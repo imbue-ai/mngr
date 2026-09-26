@@ -17,8 +17,7 @@ from imbue.mngr_imbue_cloud.primitives import IMBUE_CLOUD_BACKEND_NAME
 from imbue.mngr_imbue_cloud.providers.instance import ImbueCloudProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvider
 from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProviderConfig
-from imbue.mngr_imbue_cloud.slices.bare_metal import slice_base_image_file_url
-from imbue.mngr_imbue_cloud.slices.slice_client import build_slice_vm_client
+from imbue.mngr_imbue_cloud.slices.qemu_slice_client import QemuSliceVpsClient
 
 IMBUE_CLOUD_BACKEND: Final[ProviderBackendName] = ProviderBackendName(IMBUE_CLOUD_BACKEND_NAME)
 
@@ -78,8 +77,7 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
     """Backend for the slice provider (a VM "VPS" on a bare-metal box).
 
     Used by the admin bake (``mngr create ...@<host>.imbue_cloud_slice``), run from
-    the operator's machine; the box's generation-specific slice client drives the
-    VM over SSH on the box.
+    the operator's machine; the qemu slice client drives the VM over SSH on the box.
     """
 
     @staticmethod
@@ -112,18 +110,12 @@ class SliceVpsDockerProviderBackend(ProviderBackendInterface):
     ) -> ProviderInstanceInterface:
         if not isinstance(config, SliceVpsDockerProviderConfig):
             raise MngrError(f"Expected SliceVpsDockerProviderConfig, got {type(config).__name__}")
-        # The box's generation (threaded here by the operator pool bake) selects
-        # the backend. Gen-1 slices boot from the box-staged guest image (file://)
-        # by default so a bake never hits the Debian mirror; slice_base_image_url
-        # overrides it.
-        slice_client = build_slice_vm_client(
-            box_generation=config.box_generation,
+        slice_client = QemuSliceVpsClient(
             box_address=config.box_management_address or config.box_public_address,
             box_ssh_port=config.box_management_ssh_port or 22,
             box_ssh_user=config.box_ssh_user,
             private_key_path=config.pool_private_key_path,
             box_host_public_key=config.box_host_public_key,
-            gen1_vm_image_url=config.slice_base_image_url or slice_base_image_file_url(config.box_ssh_user),
         )
         return SliceVpsDockerProvider(
             name=name,

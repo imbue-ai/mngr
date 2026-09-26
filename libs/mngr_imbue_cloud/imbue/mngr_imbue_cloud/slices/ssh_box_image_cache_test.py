@@ -6,7 +6,7 @@ from pydantic import Field
 
 from imbue.mngr_imbue_cloud.errors import BoxImageCacheError
 from imbue.mngr_imbue_cloud.slices.box_image_cache import TransferKey
-from imbue.mngr_imbue_cloud.slices.lima_slice_client import LimaSliceVpsClient
+from imbue.mngr_imbue_cloud.slices.qemu_slice_client import QemuSliceVpsClient
 from imbue.mngr_imbue_cloud.slices.ssh_box_image_cache import SshBoxImageCache
 
 _CACHE_DIR = "/home/slicehost/.cache/mngr-slice-default-workspace-template"
@@ -14,8 +14,8 @@ _TAG = "default-workspace-template:minds-v0.3.2"
 _KEY = TransferKey(private_key_path_on_box=f"{_CACHE_DIR}/.transfer-abc", public_key="ssh-ed25519 AAA")
 
 
-class _ScriptedBoxClient(LimaSliceVpsClient):
-    """LimaSliceVpsClient whose box SSH is replaced by a scripted, recording responder."""
+class _ScriptedBoxClient(QemuSliceVpsClient):
+    """QemuSliceVpsClient whose box SSH is replaced by a scripted, recording responder."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

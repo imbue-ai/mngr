@@ -2,7 +2,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-import yaml
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr_lima.constants import lima_host_data_disk_label
@@ -10,7 +9,6 @@ from imbue.mngr_lima.lima_yaml import generate_default_lima_yaml
 from imbue.mngr_lima.lima_yaml import load_user_lima_yaml
 from imbue.mngr_lima.lima_yaml import merge_lima_yaml
 from imbue.mngr_lima.lima_yaml import parse_build_args_for_yaml_path
-from imbue.mngr_lima.lima_yaml import patch_root_authorized_keys_block_in_lima_yaml
 from imbue.mngr_lima.lima_yaml import write_lima_yaml
 
 # Independently spelled out (rather than imported from production) so the
@@ -431,51 +429,6 @@ def test_root_key_block_does_not_corrupt_a_file_lacking_a_trailing_newline(tmp_p
     _run_root_key_block(_root_key_block(_ROOT_KEY), ssh_dir)
 
     assert authorized_keys.read_text().splitlines() == [_FOREIGN_KEY, _ROOT_KEY]
-
-
-def _revert_root_key_block_to_truncating_form(script: str, key: str) -> str:
-    """Swap the generated appending root-key step back to the historical truncating one."""
-    truncating_block = f"""\
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-cat > /root/.ssh/authorized_keys <<'MNGR_LIMA_ROOT_KEY'
-{key}
-MNGR_LIMA_ROOT_KEY
-chmod 600 /root/.ssh/authorized_keys
-chown -R root:root /root/.ssh"""
-    start = script.index("mkdir -p /root/.ssh")
-    end = script.index("chown -R root:root /root/.ssh") + len("chown -R root:root /root/.ssh")
-    return script[:start] + truncating_block + script[end:]
-
-
-def test_patch_root_authorized_keys_block_fixes_a_pre_fix_config_idempotently() -> None:
-    """A stored lima.yaml carrying the historical truncating root-key step is rewritten
-    to the appending form with the same key; a config already in that form is left alone."""
-    config = generate_default_lima_yaml(
-        volume_host_path=None,
-        host_dir="/mngr",
-        host_data_disk_name="mngr-abc-data",
-        host_data_disk_size="100GiB",
-        root_authorized_public_key=_ROOT_KEY,
-    )
-    pre_fix_provision = [
-        {"mode": "system", "script": _revert_root_key_block_to_truncating_form(entry["script"], _ROOT_KEY)}
-        for entry in config["provision"]
-    ]
-    pre_fix_text = yaml.dump({**config, "provision": pre_fix_provision}, default_flow_style=False, sort_keys=False)
-
-    patched_text = patch_root_authorized_keys_block_in_lima_yaml(pre_fix_text)
-
-    assert patched_text is not None
-    patched_script = yaml.safe_load(patched_text)["provision"][0]["script"]
-    assert "cat > /root/.ssh/authorized_keys" not in patched_script
-    assert f"grep -qxF '{_ROOT_KEY}'" in patched_script
-    assert patch_root_authorized_keys_block_in_lima_yaml(patched_text) is None
-
-
-def test_patch_root_authorized_keys_block_ignores_unrelated_yaml() -> None:
-    assert patch_root_authorized_keys_block_in_lima_yaml("- just\n- a\n- list\n") is None
-    assert patch_root_authorized_keys_block_in_lima_yaml("images: []\n") is None
 
 
 def test_generate_default_lima_yaml_volume_home_path_symlinks_home_not_host_dir() -> None:

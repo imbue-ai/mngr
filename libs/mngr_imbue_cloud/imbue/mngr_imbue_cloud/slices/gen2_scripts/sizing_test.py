@@ -1,8 +1,6 @@
 import pytest
 
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import InvalidMachineSizeError
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DATA_DISK_BASE_GIB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DEFAULT_MACHINE_UNITS
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BASE_IMAGE_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BOOT_PARTITION_GIB
@@ -14,11 +12,9 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_SWAPFILE_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_UPLINK_SHAPING_PERCENT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GUEST_RAM_HOLDBACK_MIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import PER_VM_RAM_OVERHEAD_MIB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_box_total_units
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_box_unit_budget_mib
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_default_machine_capacity
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_gen1_migrated_data_disk_gib
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_gen2_disk_budget_gib
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_gen2_storage_partition_estimate_gib
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_machine_data_disk_gib
@@ -87,16 +83,6 @@ def test_machine_data_disk_is_the_base_plus_the_per_unit_factor_rounded_up() -> 
         compute_machine_data_disk_gib(0)
 
 
-def test_gen1_migrated_data_disk_is_the_gen1_disk_plus_the_gen2_base() -> None:
-    # The cutover grows a transplanted gen-1 data disk by the gen-2 base (the
-    # engines' roots + the system reserve), so the machine keeps its home
-    # capacity; a 28 GiB gen-1 disk lands exactly on the gen-2 default size.
-    assert compute_gen1_migrated_data_disk_gib(28) == 28 + DATA_DISK_BASE_GIB
-    assert compute_gen1_migrated_data_disk_gib(28) == compute_machine_data_disk_gib(DEFAULT_MACHINE_UNITS)
-    with pytest.raises(InvalidMachineSizeError):
-        compute_gen1_migrated_data_disk_gib(0)
-
-
 def test_gen2_storage_reserve_is_the_sum_of_its_named_parts() -> None:
     # 32 GiB swapfile + 16 GiB image tar cache + 4 GiB base image + 12 GiB margin.
     assert GEN2_STORAGE_RESERVE_GIB == 64
@@ -134,11 +120,9 @@ def test_compute_machine_guest_memory_mib_holds_back_the_per_machine_reserve() -
         compute_machine_guest_memory_mib(0)
 
 
-def test_boot_disk_constants_match_the_deployed_fleet() -> None:
-    # Every deployed gen-1 slice was carved with a 32 GiB boot disk and migration
-    # 039 derives gen-1 data-disk sizes from that figure; gen-2 keeps the OS-only
-    # 10 GiB disk because docker lives on its data disk.
-    assert SLICE_BOOT_DISK_GIB == 32
+def test_boot_disk_constant_matches_the_deployed_fleet() -> None:
+    # Every deployed slice was carved with the OS-only 10 GiB boot disk (docker
+    # lives on the data disk), and the two-budget accounting charges that size.
     assert GEN2_BOOT_DISK_GIB == 10
 
 

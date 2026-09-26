@@ -45,7 +45,7 @@ const DESYNC_VERSION = '1.0.3';
 // "half-close dance" leaking goroutines in io.Copy; lima a2b52885
 // (gvisor-tap-vsock 0.8.7 -> 0.8.8) is the regression boundary.
 // Tracked upstream as lima-vm/lima#4558 + #5042, no fix in flight yet.
-// Unaffected by mngr_lima's PINNED_DOCKER_APT_VERSION: the bug sits in
+// Unaffected by mngr_vps's PINNED_DOCKER_APT_VERSION_CORE: the bug sits in
 // lima's host-side TCP forwarder, below the guest docker daemon.
 const LIMA_VERSION = '2.0.3';
 

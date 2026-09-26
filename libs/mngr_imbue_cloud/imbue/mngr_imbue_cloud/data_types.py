@@ -15,6 +15,7 @@ from imbue.mngr_imbue_cloud.primitives import DEFAULT_FAST_MODE
 from imbue.mngr_imbue_cloud.primitives import FastMode
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.primitives import KNOWN_OVH_US_REGIONS
+from imbue.mngr_imbue_cloud.primitives import MAX_SUPPORTED_BOX_GENERATION
 from imbue.mngr_imbue_cloud.primitives import PoolHostDestroyOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SliceBakeOutcomeStatus
 from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
@@ -51,13 +52,7 @@ class SliceProvisionResult(FrozenModel):
     disk_name: str = Field(description="Identifier of the slice's btrfs data disk on the box")
     vm_ssh_host_port: int = Field(description="Box host port forwarded to the VM's root sshd")
     container_ssh_host_port: int = Field(description="Box host port forwarded to the inner container sshd")
-    slice_ordinal: int | None = Field(
-        default=None,
-        description=(
-            "The gen-2 slice's box-local slot ordinal (drives its tap/user/subnet names); "
-            "None for gen-1 (lima) slices, which have no ordinal"
-        ),
-    )
+    slice_ordinal: int = Field(description="The slice's box-local ordinal (drives its tap/user/subnet names)")
 
 
 class PoolHostDestroyTarget(FrozenModel):
@@ -81,10 +76,6 @@ class PoolHostDestroyTarget(FrozenModel):
         description="The box's non-root service user that owns the slice VMs, if recorded"
     )
     box_host_public_key: str | None = Field(description="The box's sshd host public key, pinned for the teardown SSH")
-    box_generation: int = Field(
-        default=1,
-        description="The row's stamped slice-fleet generation, selecting the teardown client (lima vs raw qemu)",
-    )
 
 
 class PoolHostDestroyOutcome(FrozenModel):
@@ -169,7 +160,7 @@ class WarmCacheReport(FrozenModel):
 class BoxTierAudit(FrozenModel):
     """What one bare-metal box actually carries, read over SSH rather than from the DB.
 
-    The slot accounting in the operator ``server list`` counts only the querying env's own
+    The machine accounting in the operator ``server list`` counts only the querying env's own
     ``pool_hosts`` rows, so another env's slices -- and in particular another
     *tier's* -- are invisible to it. This is the on-box truth: every env's slices,
     plus the two ways a box drifts across tiers.
@@ -177,18 +168,14 @@ class BoxTierAudit(FrozenModel):
 
     server_id: str = Field(description="The bare_metal_servers row id of the audited box")
     public_address: str = Field(description="SSH-reachable public address the audit reached the box at")
-    slot_count: int = Field(description="Slices the box holds when full")
-    box_used_slots: int = Field(description="Slice resources actually on the box, across every env (plus legacy)")
+    machine_capacity: int = Field(description="Default-size machines the box's RAM budget holds")
+    box_used_machines: int = Field(description="Slice resources actually on the box, across every env (plus legacy)")
     authorized_key_count: int = Field(description="Static public keys authorized for the box's slice service user")
-    expected_authorized_key_count: int = Field(
-        description="Static keys the box's generation should authorize (one pool key on gen-1, none on gen-2)"
-    )
+    expected_authorized_key_count: int = Field(description="Static keys the box should authorize (none)")
     trusted_ca_public_key: str | None = Field(
         description="The SSH CA public key the box's sshd trusts, when it trusts one"
     )
-    is_trusted_ca_correct: bool = Field(
-        description="Whether the box trusts exactly the owning tier's SSH CA (always true for a gen-1 box)"
-    )
+    is_trusted_ca_correct: bool = Field(description="Whether the box trusts exactly the owning tier's SSH CA")
     foreign_tier_slices: tuple[str, ...] = Field(
         description="Slice resources on the box stamped for an env belonging to another tier, sorted"
     )
@@ -203,10 +190,9 @@ class BoxTierAudit(FrozenModel):
     )
     is_storage_encrypted: bool = Field(
         description=(
-            "Whether the gen-2 storage root is mounted from its opened LUKS mapper, so every slice disk on "
-            "the box is ciphertext at rest (always false for a gen-1 box, which has no storage volume; a "
-            "gen-2 box reading false is either locked -- its TPM unlock failed at boot -- or was prepped "
-            "before storage encryption existed and must be drained and repaved)"
+            "Whether the storage root is mounted from its opened LUKS mapper, so every slice disk on "
+            "the box is ciphertext at rest (a box reading false is either locked -- its TPM unlock failed "
+            "at boot -- or was prepped before storage encryption existed and must be drained and repaved)"
         )
     )
 
@@ -435,14 +421,13 @@ class BareMetalServer(FrozenModel):
     cpu_cores: int | None = Field(default=None, description="Physical CPU cores (detected during install)")
     cpu_threads: int | None = Field(default=None, description="CPU threads (detected during install)")
     ram_gb: int | None = Field(default=None, description="Total RAM in GB (detected during install)")
-    disk_gb: int | None = Field(default=None, description="Usable disk in GB for slice data (detected/provided)")
-    memory_per_slice_gb: int | None = Field(
-        default=None, description="RAM (GB) each slice on this box advertises; sets slot_count and per-slice sizing"
+    disk_gb: int | None = Field(
+        default=None,
+        description="The box's measured storage partition in GiB (the disk budget's input; recorded at prep)",
     )
     cpu_overcommit_ratio: float | None = Field(
-        default=None, description="CPU overcommit factor used to size each slice's vCPUs on this box"
+        default=None, description="CPU overcommit factor used to size each machine's vCPUs on this box"
     )
-    slot_count: int = Field(description="Number of slices this box holds (floor(ram_gb / memory_per_slice_gb))")
     raid_level: str | None = Field(default=None, description="RAID level set at OS-install time (e.g. 'RAID1')")
     slice_service_user: str | None = Field(
         default=None, description="Non-root OS user that owns the box's slice VMs (set once the box is prepped)"
@@ -452,7 +437,7 @@ class BareMetalServer(FrozenModel):
         description=(
             "The box's sshd host public key (port 22), injected by us at OS reinstall so it is "
             "deterministically known. Pinned by admin tooling, the slice clients, and the connector's "
-            "slice teardown. None until set at provision (or by the one-time keyscan backfill)."
+            "slice teardown. None until set at provision."
         ),
     )
     status: BareMetalServerStatus = Field(
@@ -461,35 +446,34 @@ class BareMetalServer(FrozenModel):
     created_at: datetime = Field(description="When the row was created")
     updated_at: datetime = Field(description="When the row was last updated")
     box_generation: int = Field(
-        default=1,
+        default=MAX_SUPPORTED_BOX_GENERATION,
         description=(
-            "Which slice-fleet generation this box runs (specs/slice-fleet-gen2): 1 = bookworm + lima/slirp, "
-            "2 = trixie + raw qemu with routed-tap networking. Determines the slice backend every bake and "
-            "teardown against this box uses."
+            "Which slice-fleet generation this box runs (specs/slice-fleet). Every box in the fleet is "
+            "generation 2 (trixie + raw qemu with routed-tap networking); the column is retained."
         ),
     )
     uplink_mbps: int = Field(
         description=(
             "The box's declared uplink rate in Mbit/s (from its plan's bandwidth option, not measured), the "
-            "source of truth for gen-2 per-slice fair-share bandwidth classes, the egress signal, and the "
+            "source of truth for per-slice fair-share bandwidth classes, the egress signal, and the "
             "link-speed audit."
         ),
     )
     wireguard_address: str | None = Field(
         default=None,
-        description="The box's WireGuard overlay IP for operator management access (gen-2; assigned at prep).",
+        description="The box's WireGuard overlay IP for operator management access (assigned at prep).",
     )
     wireguard_public_key: str | None = Field(
         default=None,
         description=(
-            "The box's WireGuard public key (gen-2; the private key is generated on the box at prep and "
+            "The box's WireGuard public key (the private key is generated on the box at prep and "
             "never leaves it). The rendered operator client configs pin each box peer by it."
         ),
     )
 
 
 class Gen2BoxDefaultMachineFit(FrozenModel):
-    """How a gen-2 box's estimated disk budget compares with the full complement of default machines its RAM sells."""
+    """How a box's estimated disk budget compares with the full complement of default machines its RAM sells."""
 
     machine_capacity: int = Field(description="Default-size machines the box's RAM budget holds")
     required_disk_budget_gib: int = Field(description="Disk budget (GiB) that full complement needs")
@@ -510,11 +494,12 @@ class Gen2BoxDefaultMachineFit(FrozenModel):
 
 
 class BareMetalServerCapacity(FrozenModel):
-    """A bare-metal server plus its slice-slot accounting, for the admin list view."""
+    """A bare-metal server plus its default-machine accounting, for the admin list view."""
 
     server: BareMetalServer = Field(description="The bare-metal server")
-    used_slots: int = Field(description="Number of baked slices currently on this server")
-    free_slots: int = Field(description="Slots still available to bake (slot_count - used_slots)")
+    machine_capacity: int = Field(description="Default-size machines the box's RAM budget holds")
+    used_machines: int = Field(description="Pool rows currently placed on this server")
+    free_machines: int = Field(description="Default-size machines still available to bake (capacity - used)")
 
 
 class PriceLineItem(FrozenModel):
@@ -546,7 +531,7 @@ class OrderPricing(FrozenModel):
 
 
 class SliceStorageOption(FrozenModel):
-    """One orderable storage config for a server, expressed as a per-slice disk upgrade over the base."""
+    """One orderable storage config for a server, expressed as a disk-budget upgrade over the base."""
 
     storage_plan_code: str = Field(description="OVH storage add-on planCode (full, plan-suffixed)")
     label: str = Field(description="Short storage label parsed from the planCode (e.g. '2x1920nvme')")
@@ -554,19 +539,23 @@ class SliceStorageOption(FrozenModel):
         description="Mirror-based RAID level assumed for usable capacity (RAID1/RAID10/RAID5/MIXED)"
     )
     usable_disk_gb: int = Field(description="Usable disk in GB after RAID, for the whole server")
-    extra_disk_gb_per_slice: int = Field(description="Additional usable disk per slice vs the row's base storage")
+    extra_disk_budget_gib: int = Field(
+        description="Additional estimated disk budget (GiB) for the whole box vs the row's base storage"
+    )
     extra_monthly_usd: Decimal = Field(description="Additional month-to-month cost in USD vs the row's base storage")
-    dollars_per_extra_gb: Decimal = Field(
-        description="Marginal USD per added usable GB vs base (same per-slice or whole-server, since slots cancel)"
+    dollars_per_extra_gb: Decimal = Field(description="Marginal USD per added usable GB vs base")
+    is_units_valid: bool = Field(
+        description="Whether this storage config holds the RAM's full complement of default-size machines"
     )
 
 
 class SlicePricingRow(FrozenModel):
-    """Pricing + effective slice sizing for one (server x RAM config), for the operator pricing table.
+    """Pricing + default-machine capacity for one (server x RAM config), for the operator pricing table.
 
     Each row is the product of a bare-metal plan and one of its memory configs, priced
-    month-to-month with the setup fee amortized over a year, divided across the slices the
-    config yields. Storage stays a per-row list of upgrade options rather than its own product axis.
+    month-to-month with the setup fee amortized over a year, divided across the default-size
+    machines the config's RAM budget holds. Storage stays a per-row list of upgrade options
+    rather than its own product axis.
     """
 
     plan_code: str = Field(description="OVH planCode of the bare-metal server")
@@ -581,11 +570,11 @@ class SlicePricingRow(FrozenModel):
     server_ram_gb: int = Field(description="Total server RAM in GB for this row's memory config")
     cpu_cores: int = Field(description="Physical CPU cores")
     cpu_threads: int = Field(description="CPU threads")
-    memory_per_slice_gb: int = Field(description="RAM (GB) each slice advertises (the requested slice size)")
-    slot_count: int = Field(description="Slices this server holds = floor(server_ram_gb / memory_per_slice_gb)")
-    cpus_per_slice: int = Field(description="vCPUs per slice after CPU overcommit")
-    disk_gb_per_slice: int = Field(
-        description="Total usable disk per slice with the base (cheapest in-region) storage"
+    box_total_units: int = Field(description="Sellable unit budget of the box (RAM minus the host reserve)")
+    machine_capacity: int = Field(description="Default-size machines the RAM budget holds")
+    vcpus_per_machine: int = Field(description="vCPUs a default-size machine gets after CPU overcommit")
+    disk_budget_gib: int = Field(
+        description="Estimated disk budget (GiB) of the box with the base (cheapest in-region) storage"
     )
     base_storage_label: str = Field(description="The cheapest in-region storage backing the base price/disk columns")
     recurring_monthly_usd: Decimal = Field(
@@ -593,15 +582,14 @@ class SlicePricingRow(FrozenModel):
     )
     one_time_setup_usd: Decimal = Field(description="One-time setup fee in USD")
     amortized_monthly_usd: Decimal = Field(description="recurring_monthly + setup/12 (setup amortized over one year)")
-    price_per_slice_usd: Decimal = Field(description="amortized_monthly / slot_count -- the primary sort key")
+    price_per_machine_usd: Decimal = Field(description="amortized_monthly / machine_capacity -- the primary sort key")
     storage_options: tuple[SliceStorageOption, ...] = Field(
-        description="Other in-region storage configs as per-slice disk upgrades (not splatted into their own rows)"
+        description="Other in-region storage configs as disk-budget upgrades (not splatted into their own rows)"
     )
     is_units_valid: bool = Field(
         default=False,
         description=(
-            "Whether the base storage passes the gen-2 units-valid guard (specs/slice-fleet): its disk "
-            "budget holds the RAM's full complement of default-size machines, so the config is orderable "
-            "as a gen-2 box."
+            "Whether the base storage passes the units-valid guard (specs/slice-fleet): its disk "
+            "budget holds the RAM's full complement of default-size machines, so the config is orderable."
         ),
     )

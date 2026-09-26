@@ -27,8 +27,7 @@ _SHORT_TIMEOUT_SECONDS: Final[float] = 60.0
 class SshBoxImageCache(BoxImageCacheInterface):
     """BoxImageCache backed by files + box-local docker save/load on a bare-metal box.
 
-    Every operation runs on the box over SSH via the slice client's ``run_on_box``,
-    so it serves both box generations unchanged.
+    Every operation runs on the box over SSH via the slice client's ``run_on_box``.
     The box has no Docker daemon; it only stores the ``docker save`` tar and pipes
     it to/from the slice's VM-root dockerd over the box's own loopback to the
     box-forwarded VM ssh port.

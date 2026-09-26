@@ -26,9 +26,9 @@ def _parse_user_data(user_data: str) -> dict[str, Any]:
 def test_user_data_installs_the_pinned_host_key_and_never_regenerates() -> None:
     user_data = build_qemu_slice_user_data(
         host_dir="/home/user/.mngr",
-        root_authorized_public_keys=("ssh-ed25519 AAAAbake", "ssh-ed25519 AAAApool"),
         host_private_key_pem="-----BEGIN OPENSSH PRIVATE KEY-----\nkey\n-----END OPENSSH PRIVATE KEY-----\n",
         host_public_key_openssh="ssh-ed25519 AAAAhost",
+        trusted_user_ca_public_key="ssh-ed25519 AAAAtierca minds-dev-ca",
     )
     assert user_data.startswith("#cloud-config\n")
     parsed = _parse_user_data(user_data)
@@ -37,8 +37,7 @@ def test_user_data_installs_the_pinned_host_key_and_never_regenerates() -> None:
     assert parsed["ssh_keys"]["ed25519_public"] == "ssh-ed25519 AAAAhost"
     assert parsed["ssh_genkeytypes"] == ["ed25519"]
     assert parsed["ssh_deletekeys"] is False
-    assert parsed["users"][0]["ssh_authorized_keys"] == ["ssh-ed25519 AAAAbake", "ssh-ed25519 AAAApool"]
-    # Management-SSH semantics preserved from gen 1 (see the renderer docstring).
+    # Management connections share few source addresses (see the renderer docstring).
     sshd_config = parsed["write_files"][0]["content"]
     assert "PerSourcePenalties no" in sshd_config
     assert "MaxStartups 100:30:200" in sshd_config
@@ -47,7 +46,6 @@ def test_user_data_installs_the_pinned_host_key_and_never_regenerates() -> None:
 def test_user_data_trusts_the_tier_ca_for_the_vm_principal_and_needs_no_static_root_key() -> None:
     user_data = build_qemu_slice_user_data(
         host_dir="/home/user/.mngr",
-        root_authorized_public_keys=(),
         host_private_key_pem="pem",
         host_public_key_openssh="ssh-ed25519 AAAAhost",
         trusted_user_ca_public_key="ssh-ed25519 AAAAtierca minds-dev-ca",
@@ -67,23 +65,12 @@ def test_user_data_trusts_the_tier_ca_for_the_vm_principal_and_needs_no_static_r
     assert content_by_path["/etc/ssh/principals/root"] == "mngr-vm\n"
 
 
-def test_user_data_without_a_ca_writes_no_trust_files() -> None:
-    user_data = build_qemu_slice_user_data(
-        host_dir="/home/user/.mngr",
-        root_authorized_public_keys=("ssh-ed25519 AAAAbake",),
-        host_private_key_pem="pem",
-        host_public_key_openssh="ssh-ed25519 AAAAhost",
-    )
-    parsed = _parse_user_data(user_data)
-    assert "/etc/ssh/mngr_user_ca.pub" not in {entry["path"] for entry in parsed["write_files"]}
-
-
 def test_user_data_installs_the_every_boot_sizing_oneshots() -> None:
     user_data = build_qemu_slice_user_data(
         host_dir="/home/user/.mngr",
-        root_authorized_public_keys=("ssh-ed25519 AAAAbake",),
         host_private_key_pem="pem",
         host_public_key_openssh="ssh-ed25519 AAAAhost",
+        trusted_user_ca_public_key="ssh-ed25519 AAAAtierca minds-dev-ca",
     )
     parsed = _parse_user_data(user_data)
     content_by_path = {entry["path"]: entry["content"] for entry in parsed["write_files"]}
@@ -116,10 +103,8 @@ def test_user_data_installs_the_every_boot_sizing_oneshots() -> None:
     assert firstboot.index("rm -rf /mnt/mngr-data/docker /mnt/mngr-data/containerd") < firstboot.index(
         "mkfs.btrfs -f -L"
     )
-    # Both the gen-2 carve's fixed mount and a transplanted gen-1 disk's lima
-    # mount point are covered by the same script.
-    assert "for mount_point in /mnt/mngr-data /mnt/lima-*" in grow_script
-    # A transplanted gen-1 data disk carries a partition table, which the qcow2
+    assert "for mount_point in /mnt/mngr-data; do" in grow_script
+    # A transplanted data disk carries a partition table, which the qcow2
     # grow leaves untouched -- the partition must grow before the filesystem.
     assert 'growpart "/dev/$parent_disk" "$partition_number"' in grow_script
     # The container-memory reconciler follows the VM's own visible RAM (minus

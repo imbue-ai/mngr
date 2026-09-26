@@ -19,7 +19,6 @@ services = [
     "cloudflare",
     "litellm",
     "neon",
-    "pool-ssh",
     "supertokens",
     "sharing",
     "storage",
@@ -40,7 +39,7 @@ public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO1I1Y1NYn86jMrvCxLkIoMq7nXCNi
 
 # The tier's gen-2 management plane (operator WireGuard peers + the Modal Proxy
 # whose static IPs the box `:22` lockdown allowlists; runbook:
-# apps/minds/docs/deploy/gen2-management-plane.md). Absent until the tier's
+# apps/minds/docs/deploy/reference/management-plane.md). Absent until the tier's
 # management-plane bring-up; see the dev tier's deploy.toml for the schema.
 # [management_plane.wireguard]
 # [[management_plane.wireguard.operators]]

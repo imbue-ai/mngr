@@ -111,20 +111,13 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # The slice path builds a Lima VM config, and Lima's native config format is
-    # YAML only -- so lima_slice.py / lima_slice_client.py reference mngr_lima's
-    # *_lima_yaml helpers, and the repair-keys sweep (key_repair.py + its test)
-    # reads and patches existing slices' stored lima.yaml files. This is
-    # necessary lima usage, not a config-file anti-pattern (mngr_lima itself
-    # allows YAML for the same reason); most matches are the literal substring
-    # in "lima.yaml" strings and comments. The gen-2 path (slices/gen2_scripts,
-    # shipped into the connector container) adds the same class of usage:
-    # cloud-init's NoCloud user-data / network-config are YAML by external
-    # contract, rendered with yaml.safe_dump (and parsed back with yaml.safe_load
-    # by the guest tests that check what cloud-init will see) -- and the
-    # subpackage's import ratchet in test_project_ratchets.py names that library
-    # as an allowed root.
-    rc.check_yaml_usage(_DIR, snapshot(47))
+    # The slice path (slices/gen2_scripts, shipped into the connector container)
+    # renders cloud-init's NoCloud user-data / network-config, which are YAML by
+    # external contract, with yaml.safe_dump (and parses them back with
+    # yaml.safe_load in the guest tests that check what cloud-init will see) --
+    # the subpackage's import ratchet in test_project_ratchets.py names that
+    # library as an allowed root. Not a config-file anti-pattern.
+    rc.check_yaml_usage(_DIR, snapshot(7))
 
 
 def test_prevent_functools_partial() -> None:

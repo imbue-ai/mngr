@@ -504,12 +504,11 @@ def provision_snapshot_helper_on_outer(
 
     Assumes ``inotify-tools``, ``jq``, and ``perl`` are already installed. The
     cloud-init and SSH host-setup paths install the first two via the shared
-    ``host_setup`` base-packages step; the slice path installs them in its lima
-    VM provisioning (``mngr_imbue_cloud.slices.lima_slice``: ``jq`` via the base
-    lima script, ``inotify-tools`` via its own provision step). ``perl`` (used by
-    the helper for its no-follow reads and writes of the trigger directory) is
-    ``perl-base``, Essential on every Debian-family image, so nothing installs
-    it explicitly.
+    ``host_setup`` base-packages step; the slice guest image carries
+    ``inotify-tools`` from its bake and its first-boot script installs ``jq``.
+    ``perl`` (used by the helper for its no-follow reads and writes of the
+    trigger directory) is ``perl-base``, Essential on every Debian-family
+    image, so nothing installs it explicitly.
     """
     helper_script = load_resource_text("snapshot_helper.sh")
     helper_service = load_resource_text("snapshot_helper.service")
@@ -668,8 +667,8 @@ def prepare_btrfs_on_outer(
     subvolume_path = btrfs_mount_path / host_id.get_uuid().hex
 
     # Guard the slice case: a symlink at the mount path is the signature of a
-    # pre-mounted data disk (the VM's lima ``additionalDisk``, mounted elsewhere
-    # and symlinked here by guest provisioning). If nothing is mounted at its
+    # pre-mounted data disk (the slice VM's data disk, mounted elsewhere and
+    # symlinked here by guest provisioning). If nothing is mounted at its
     # target yet, the pre-mounted branch below would not match and we would
     # silently fall through to building a loop file on the VM's root disk -- a
     # wrong-but-working state that masks the real volume (and its content) from
@@ -684,8 +683,8 @@ def prepare_btrfs_on_outer(
         )
 
     # Pre-mounted-btrfs case (slices): the btrfs filesystem is already mounted at
-    # ``btrfs_mount_path`` -- it's the VM's lima ``additionalDisk``, not a loop
-    # image we manage -- so there is nothing to allocate/mount/fstab. Detected as
+    # ``btrfs_mount_path`` -- it's the slice VM's data disk, not a loop image we
+    # manage -- so there is nothing to allocate/mount/fstab. Detected as
     # "mount present AND our loop file absent" so a normal loop-backed VPS re-run
     # (loop file present) still takes the full path below. Just ensure btrfs-progs
     # and the per-host subvolume, then return.
@@ -765,11 +764,11 @@ def prepare_btrfs_on_outer(
     return subvolume_path
 
 
-# The btrfs qgroup that holds everything an agent host writes on a gen-2 slice's
+# The btrfs qgroup that holds everything an agent host writes on a slice's
 # data disk (its home subvolume and containerd's image/container layers), limited by the
 # guest's grow oneshot to the disk minus a system reserve. A data filesystem
-# without quotas (gen-1 boxes, plain VPS hosts) has no such group, and
-# subvolumes are then created unassigned.
+# without quotas (plain VPS hosts) has no such group, and subvolumes are then
+# created unassigned.
 HOST_QUOTA_QGROUP: Final[str] = "1/0"
 
 

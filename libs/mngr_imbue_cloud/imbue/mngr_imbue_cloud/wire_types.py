@@ -59,7 +59,7 @@ class WorkspaceStopKind(WireEnum):
 
     ``owner`` is the user's own stop from any of their devices; ``idle`` an
     operator stop to free capacity -- both are the owner's to end. ``maintenance``
-    is an operator hold (the gen-1 -> gen-2 migration) and ``suspension`` the
+    is an operator hold (a fleet migration or repair) and ``suspension`` the
     account suspend fan-out: the connector refuses owner starts of both, and the
     machine comes back through an operator start (or, for a suspension, becomes
     ``idle`` at unsuspend). ``retired`` is a workspace that can never run again
@@ -153,9 +153,9 @@ class LeaseResult(WireModel):
     box_generation: int = Field(
         default=1,
         description=(
-            "Slice-fleet generation of the leased host's box (specs/slice-fleet-gen2); selects "
-            "per-generation client behavior (e.g. the rebuild's slice-client dispatch). Defaults to 1 "
-            "against a connector too old to return it."
+            "Slice-fleet generation of the leased host's box (specs/slice-fleet). The fleet is "
+            "generation 2; the field is retained for the retired generation-1 rows the connector "
+            "still lists, and defaults to 1 against a connector too old to return it."
         ),
     )
     memory_units: int | None = Field(
@@ -215,8 +215,9 @@ class WorkspaceInfo(WireModel):
     box_generation: int = Field(
         default=1,
         description=(
-            "Slice-fleet generation of the workspace's placement (specs/slice-fleet-gen2). Defaults "
-            "to 1 against a connector too old to return it."
+            "Slice-fleet generation of the workspace's placement (specs/slice-fleet). The fleet is "
+            "generation 2; retired generation-1 rows keep their value. Defaults to 1 against a "
+            "connector too old to return it."
         ),
     )
     memory_units: int | None = Field(

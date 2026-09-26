@@ -7,5 +7,5 @@ from imbue.mngr_imbue_cloud.providers.slice_provider import SliceVpsDockerProvid
 
 @hookimpl
 def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
-    """Register the imbue_cloud_slice provider backend (lima-VM slices on bare-metal boxes)."""
+    """Register the imbue_cloud_slice provider backend (qemu-VM slices on bare-metal boxes)."""
     return (SliceVpsDockerProviderBackend, SliceVpsDockerProviderConfig)

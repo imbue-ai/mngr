@@ -8,8 +8,7 @@ Gen-2 slices (specs/slice-fleet-gen2) replace lima with directly-managed qemu:
 - Cloud-init material is generated ONCE at carve time with a stable instance-id
   and carries no placement (the guest gets its address by DHCP from the box), so
   nothing ever replays on later boots or restores -- host keys and
-  authorized_keys simply persist, and the gen-1 reconciler problem class does
-  not exist here.
+  authorized_keys simply persist.
 - Each VM gets its own /30 on its own tap (no shared L2 segment); the box routes
   and NATs, hands out the /30 address over DHCP on the tap, and the public
   contract (box IP + two forwarded ports) is preserved via kernel DNAT.
@@ -77,10 +76,8 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import PER_VM_RAM_OVERHEA
 # Fixed safety margin the df guard requires beyond the slice's own virtual size.
 _DF_GUARD_MARGIN_GIB: Final[int] = 2
 
-# ---------------------------------------------------------------------------
 # Prep-installed artifacts: the template unit, the root helper, sudoers, and the
 # slice DHCP server's config, unit and udp/67 policy
-# ---------------------------------------------------------------------------
 
 
 # Thread ceiling for one VM's unit: qemu itself runs one thread per vCPU plus
@@ -763,9 +760,7 @@ add table inet {GEN2_DHCP_NFT_TABLE} {{
 """
 
 
-# ---------------------------------------------------------------------------
 # Caller-rendered box commands (carve reserve / start / boot wait / status)
-# ---------------------------------------------------------------------------
 
 
 @pure

@@ -57,7 +57,7 @@ from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import VpsInstanceStatus
 
 # Box tooling lives in /usr/local/bin; a non-interactive SSH shell may not source
-# the slice user's profile, so PATH is set explicitly (same as the gen-1 client).
+# the slice user's profile, so PATH is set explicitly.
 _BOX_PATH_PREFIX: Final[str] = "PATH=/usr/local/bin:$HOME/.local/bin:$PATH"
 _BOX_CONNECT_TIMEOUT_SECONDS: Final[int] = 30
 _SHORT_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -68,9 +68,8 @@ _RESERVE_TIMEOUT_SECONDS: Final[float] = 600.0
 # net-setup step; the guest boots on afterwards.
 _START_TIMEOUT_SECONDS: Final[float] = 300.0
 # Generous first-boot budget: base image boot + cloud-init first boot (package
-# fallback, btrfs format) on a possibly-loaded box. Mirrors the gen-1 client's
-# generous lima start deadline (mngr-internal#469: tight deadlines kill starts
-# that were seconds from ready).
+# fallback, btrfs format) on a possibly-loaded box; tight deadlines kill starts
+# that were seconds from ready (mngr-internal#469).
 _BOOT_WAIT_TIMEOUT_SECONDS: Final[int] = 1500
 _BOX_HEALTH_SPLIT_MARKER: Final[str] = "MNGR_BOX_HEALTH_SPLIT"
 
@@ -84,11 +83,11 @@ _STATUS_BY_REPORT: Final[dict[str, VpsInstanceStatus]] = {
 
 
 class QemuSliceVpsClient(SliceVmClientInterface):
-    """SliceVmClientInterface for generation-2 slices: raw qemu VMs under systemd on the box.
+    """SliceVmClientInterface for slices: raw qemu VMs under systemd on the box.
 
-    Drives the caller-rendered gen-2 scripts **over SSH on the box** (as the
-    dedicated slice user, using the pool management key), exactly like the gen-1
-    lima client -- so the whole bake runs from the operator's laptop. The box
+    Drives the caller-rendered box scripts **over SSH on the box** (as the
+    dedicated slice user, with the operator's certificate-bearing management
+    identity), so the whole bake runs from the operator's laptop. The box
     needs only the prep-installed artifacts (template unit, root helper, sudoers,
     the running slice DHCP server, the staged base image); everything else
     arrives rendered per call.
@@ -104,7 +103,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         """
         if not self.box_host_public_key:
             raise SliceCommandError(
-                "ssh", 1, f"no pinned host key configured for box {self.box_address}; run the host-key backfill"
+                "ssh", 1, f"no pinned host key configured for box {self.box_address}; re-provision the box"
             )
         base_dir = Path(self.private_key_path).parent if self.private_key_path else Path(tempfile.gettempdir())
         return write_box_known_hosts_file(base_dir, self.box_address, self.box_ssh_port, self.box_host_public_key)
@@ -112,7 +111,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
     def _box_ssh_command(self, remote_command: str, known_hosts_path: Path) -> list[str]:
         """Build the argv that runs ``remote_command`` on the box as the slice user."""
         if not self.private_key_path:
-            raise SliceCommandError("ssh", 1, "no pool private key configured for the slice box")
+            raise SliceCommandError("ssh", 1, "no management private key configured for the slice box")
         return [
             "ssh",
             "-i",
@@ -184,24 +183,21 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         memory_mib: int,
         disk_gib: int,
         host_dir: str,
-        root_authorized_public_key: str | None,
         host_private_key_pem: str,
         host_public_key_openssh: str,
         boot_disk_gib: int,
-        slot_count: int,
         port_range_start: int,
         port_range_end: int,
-        extra_root_authorized_keys: tuple[str, ...] = (),
-        trusted_user_ca_public_key: str | None = None,
+        trusted_user_ca_public_key: str,
+        units: int,
+        box_total_units: int,
+        box_disk_budget_gib: int,
         uplink_mbps: int | None = None,
-        units: int | None = None,
-        box_total_units: int | None = None,
-        box_disk_budget_gib: int | None = None,
     ) -> SliceProvisionResult:
         """Reserve the box's budgets + ports + an ordinal, boot the slice's unit, and wait for its sshd.
 
-        Two phases, mirroring the gen-1 flow: the reserve script (under the box
-        lock) claims the machine's share of the box's two budgets (memory units
+        Two phases: the reserve script (under the box lock) claims the
+        machine's share of the box's two budgets (memory units
         and disk), the two host ports, and the ordinal, materializes the slice
         dir, and enables the unit WITHOUT starting; then the long boot runs
         unlocked (``systemctl start`` + an sshd-banner wait against the VM's
@@ -213,26 +209,14 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         carve-time df guard refuses; cleans up a half-reserved slice on any
         other failure.
         """
-        if units is None or box_total_units is None or box_disk_budget_gib is None:
-            raise BareMetalProvisioningError(
-                "units / box_total_units / box_disk_budget_gib must all be set to carve a gen-2 machine "
-                "(they are computed per box by the operator pool bake)"
-            )
         if memory_mib != compute_machine_guest_memory_mib(units):
             raise BareMetalProvisioningError(
                 f"memory_mib={memory_mib} disagrees with units={units} (the guest boots with units x 1024 MiB "
                 f"minus the {GUEST_RAM_HOLDBACK_MIB} MiB holdback, {compute_machine_guest_memory_mib(units)})"
             )
         instance_name = slice_instance_name(host_id, env_name)
-        static_root_keys = tuple(key for key in (root_authorized_public_key, *extra_root_authorized_keys) if key)
-        if not static_root_keys and trusted_user_ca_public_key is None:
-            raise BareMetalProvisioningError(
-                "a gen-2 slice carve needs a root access path: the tier's SSH CA public key (the norm) or a static "
-                "root key to authorize; with neither, the VM would boot unreachable"
-            )
         user_data = build_qemu_slice_user_data(
             host_dir=host_dir,
-            root_authorized_public_keys=static_root_keys,
             host_private_key_pem=host_private_key_pem,
             host_public_key_openssh=host_public_key_openssh,
             trusted_user_ca_public_key=trusted_user_ca_public_key,
@@ -318,7 +302,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
             raise
 
         logger.info(
-            "Provisioned gen-2 slice VM {} (ordinal {}, ports vm={}/container={}) on {}",
+            "Provisioned slice VM {} (ordinal {}, ports vm={}/container={}) on {}",
             instance_name,
             ordinal,
             vm_ssh_host_port,
@@ -340,10 +324,10 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         )
         if destroy_rc != 0:
             raise SliceCommandError("destroy", destroy_rc or 1, destroy_err)
-        logger.info("Destroyed gen-2 slice VM {} on {}", instance_id, self.box_address)
+        logger.info("Destroyed slice VM {} on {}", instance_id, self.box_address)
 
     def list_instance_names(self) -> set[str]:
-        """Return the names of all gen-2 slice instances currently on the box."""
+        """Return the names of all slice instances currently on the box."""
         list_rc, list_out, list_err = self.run_on_box(
             build_qemu_list_instances_command(), timeout=_SHORT_TIMEOUT_SECONDS, label="list"
         )
@@ -352,7 +336,7 @@ class QemuSliceVpsClient(SliceVmClientInterface):
         return {line.strip() for line in list_out.splitlines() if line.strip()}
 
     def list_instance_observations(self) -> tuple[SliceInstanceObservation, ...]:
-        """Every gen-2 instance on the box with its unit state and age, from one box round-trip."""
+        """Every slice instance on the box with its unit state and age, from one box round-trip."""
         observe_rc, observe_out, observe_err = self.run_on_box(
             build_qemu_list_instance_observations_command(), timeout=_SHORT_TIMEOUT_SECONDS, label="observe"
         )

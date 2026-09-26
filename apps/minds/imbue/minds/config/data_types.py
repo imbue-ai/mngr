@@ -864,10 +864,10 @@ class DeployEnvConfig(FrozenModel):
     management_plane: ManagementPlaneConfig | None = Field(
         default=None,
         description=(
-            "The tier's gen-2 management plane: operator WireGuard peers and the Modal Proxy whose static "
-            "egress IPs gen-2 box prep allowlists on ``:22``. None means the tier has none yet -- no operator "
+            "The tier's management plane: operator WireGuard peers and the Modal Proxy whose static "
+            "egress IPs box prep allowlists on ``:22``. None means the tier has none yet -- no operator "
             "peers, no proxy, no box lockdown -- exactly like an absent ``ssh_ca`` (see "
-            "apps/minds/docs/deploy/gen2-management-plane.md)."
+            "apps/minds/docs/deploy/reference/management-plane.md)."
         ),
     )
 

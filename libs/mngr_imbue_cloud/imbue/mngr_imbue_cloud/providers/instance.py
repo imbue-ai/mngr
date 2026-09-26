@@ -161,7 +161,6 @@ from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provide
 from imbue.mngr_imbue_cloud.providers.slice_provider import read_container_ca_trust_files_from_vm
 from imbue.mngr_imbue_cloud.providers.wipe import build_pool_host_wipe_script
 from imbue.mngr_imbue_cloud.repo_identity import canonicalize_repo_source
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
@@ -387,15 +386,14 @@ def leased_info_from_workspace(workspace: WorkspaceInfo) -> LeasedHostInfo:
 
 
 @pure
-def should_read_container_ca_trust_from_vm(*, is_slice: bool, box_generation: int) -> bool:
+def should_read_container_ca_trust_from_vm(*, is_slice: bool) -> bool:
     """Whether a leased container rebuild must re-read the tier CA trust from its slice VM.
 
-    Only a gen-2 slice's container trusts a CA (the connector and analytics
-    reach it by certificate, never by a static key); every other rebuild
-    (an OVH host, or a gen-1 slice) authorizes keys the normal way and needs
-    no CA trust files.
+    Only a slice's container trusts a CA (the connector and analytics reach it
+    by certificate, never by a static key); every other rebuild (an OVH host)
+    authorizes keys the normal way and needs no CA trust files.
     """
-    return is_slice and box_generation >= FIRST_QEMU_BOX_GENERATION
+    return is_slice
 
 
 def _workspace_start_failed_error(host_id: HostId, transition_error: str | None) -> WorkspaceStartFailedError:
@@ -1954,13 +1952,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             wait_for_sshd(lease_result.vps_address, lease_result.container_ssh_port, _SSH_WAIT_TIMEOUT_SECONDS)
             # Pin the baked VM-root + container host keys the connector recorded
             # (strict host-key checking, no trust-on-first-use). Fail closed if the
-            # connector did not return them (too old, or the host-key backfill has
-            # not run) rather than silently scanning.
+            # connector did not return them (too old) rather than silently scanning.
             if not lease_result.outer_host_public_key or not lease_result.container_host_public_key:
-                raise MngrError(
-                    f"lease of host {host_id} returned no pinned SSH host keys; upgrade the connector and run the "
-                    "one-time operator host-key backfill (`pool backfill-host-keys`)"
-                )
+                raise MngrError(f"lease of host {host_id} returned no pinned SSH host keys; upgrade the connector")
             self._record_host_key(
                 host_id, lease_result.vps_address, lease_result.ssh_port, lease_result.outer_host_public_key
             )
@@ -2152,15 +2146,13 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
         combined_authorized_keys = tuple(authorized_keys or ()) + (per_host_public_key,)
         with self._outer_for_leased_vps(host_id, lease_result) as outer:
-            # A gen-2 slice's container trusts the tier's SSH CA (the connector and
+            # A slice's container trusts the tier's SSH CA (the connector and
             # analytics reach it by certificate, never by a static key); the
             # rebuilt container must keep that trust, and the VM is where the
             # bake left the CA.
             rebuilt_container_ssh_config_files = (
                 read_container_ca_trust_files_from_vm(outer)
-                if should_read_container_ca_trust_from_vm(
-                    is_slice=is_slice, box_generation=lease_result.box_generation
-                )
+                if should_read_container_ca_trust_from_vm(is_slice=is_slice)
                 else ()
             )
             delegated_provider.teardown_container_on_existing_vps(outer, host_id)
@@ -2175,9 +2167,8 @@ class ImbueCloudProvider(BaseProviderInstance):
             # ``install_gvisor_runtime=true`` into the per-account block), so the
             # rebuilt container can run under ``--runtime runsc``. qemu purge is
             # enabled because the pool is OVH-backed (a no-op when no qemu).
-            # Skipped for slices: the lima VM is already provisioned (Docker +
-            # sshd from the bake's provision script) and uses runc (the VM is the
-            # isolation boundary), so the OVH/runsc/qemu host-setup does not apply.
+            # Skipped for slices: the slice VM's guest image already carries
+            # Docker, runsc and sshd, so the OVH/runsc/qemu host-setup does not apply.
             if not is_slice:
                 apply_host_setup_on_outer(
                     outer,
@@ -2566,9 +2557,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             # unrecoverable.
             start_container_sshd(outer, container_id)
             self._wait_for_container_sshd(leased)
-        # A restart may have rebooted the VM (on gen-1, replaying cidata over
-        # the SSH material); make the host build below run a full adoption
-        # re-verification rather than the durable already-verified path.
+        # A restart may have rebooted the VM; make the host build below run a
+        # full adoption re-verification rather than the durable already-verified
+        # path.
         self._adoption_attempted_host_ids.discard(str(host_id))
         invalidate_adoption_verification(self._host_state_dir(host_id))
         return self._build_host_object(leased)
@@ -2627,9 +2618,9 @@ class ImbueCloudProvider(BaseProviderInstance):
             raise outcome
         # Fresh coordinates: refresh every cache and, before anything that can
         # still fail, force a full adoption re-verification on the next host
-        # build (a gen-1 relocation re-runs cloud-init from the uploaded
-        # cidata; a gen-2 one never does, but the address and ports changed)
-        # and move the host's own pins (unchanged keys, origins intact) to the
+        # build (a relocation never re-runs cloud-init, but the address and
+        # ports changed) and move the host's own pins (unchanged keys, origins
+        # intact) to the
         # new endpoints -- neither needs the VM's sshd up yet.
         self.reset_caches()
         started = leased_info_from_workspace(outcome)

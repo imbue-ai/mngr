@@ -145,11 +145,10 @@ GEN2_MAX_NEW_CONNECTIONS_PER_SECOND: Final[int] = 300
 # of common small marks); mark = base + ordinal.
 GEN2_TC_MARK_BASE: Final[int] = 0x6D0000
 
-# Reserve-script contract (mirrors the gen-1 lima reserve markers)
+# Reserve-script contract
 
 # Box-wide advisory lock serializing the reservation critical section across all
-# bakes on one box (same file the gen-1 reserve uses; a box only ever carries one
-# generation, but sharing the name keeps the contract uniform).
+# bakes on one box.
 GEN2_ALLOC_LOCK_RELPATH: Final[str] = ".mngr-slice-alloc.lock"
 GEN2_RESERVED_MARKER: Final[str] = "MNGR_SLICE_RESERVED"
 GEN2_NO_PORTS_MARKER: Final[str] = "MNGR_SLICE_NO_PORTS"
@@ -164,8 +163,7 @@ GEN2_NO_DISK_MARKER: Final[str] = "MNGR_SLICE_NO_DISK"
 # leaked space).
 GEN2_NO_SPACE_MARKER: Final[str] = "MNGR_SLICE_NO_SPACE"
 
-# Identifier suffix for a gen-2 slice's data disk (parity with the gen-1 naming,
-# so reconcile/reap code treats both generations uniformly).
+# Identifier suffix for a slice's data disk.
 GEN2_DISK_SUFFIX: Final[str] = "-data"
 
 # Placeholder tokens for the two box host ports in the env-file *template*; the

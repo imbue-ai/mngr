@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+import pytest
+
 from imbue.imbue_common.primitives import PositiveFloat
+from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
@@ -88,26 +91,25 @@ def test_delegated_vps_config_carries_every_vps_field_of_the_account_config() ->
     assert vps_config.docker_runtime == "runsc"
 
 
-def test_slice_rebuild_config_carries_every_vps_field_but_the_runtime_knobs_and_layers_the_slice_coordinates() -> None:
+def test_slice_rebuild_config_carries_every_vps_field_but_the_slice_knobs_and_layers_the_slice_coordinates() -> None:
     """The slow-path slice rebuild must carve and run exactly as a provider under the account config would.
 
-    Checked over the whole VpsProviderConfig surface (minus the knobs that
-    follow the slice's generation) so a newly added field cannot be dropped
-    silently.
+    Checked over the whole VpsProviderConfig surface (minus the knobs the slice
+    guest fixes) so a newly added field cannot be dropped silently.
     """
     config = _account_config_with_non_default_knobs()
-    slice_config = build_slice_rebuild_config(config, _lease(box_generation=1))
+    slice_config = build_slice_rebuild_config(config, _lease())
     assert slice_config.backend == "imbue_cloud_slice"
     assert slice_config.model_dump(include=set(_SLICE_DELEGATED_FIELDS)) == config.model_dump(
         include=set(_SLICE_DELEGATED_FIELDS)
     )
     assert slice_config.volume_home_path == Path("/home/user")
-    # The runsc host setup never runs on a slice VM, whatever the generation.
+    # The runsc host setup never runs on a slice VM (the guest image ships runsc).
     assert slice_config.install_gvisor_runtime is False
     assert slice_config.box_public_address == "51.81.208.81"
 
 
-def _lease(box_generation: int, memory_units: int | None = 8) -> LeaseResult:
+def _lease(memory_units: int | None = 8) -> LeaseResult:
     body: dict[str, object] = {
         "host_db_id": "11111111-1111-1111-1111-111111111111",
         "vps_address": "51.81.208.81",
@@ -118,7 +120,7 @@ def _lease(box_generation: int, memory_units: int | None = 8) -> LeaseResult:
         "host_id": "host-" + "b" * 32,
         "host_name": "my-workspace",
         "attributes": {"memory_gb": 8, "cpus": 2},
-        "box_generation": box_generation,
+        "box_generation": 2,
     }
     if memory_units is not None:
         body["memory_units"] = memory_units
@@ -134,9 +136,9 @@ def _runsc_account_config() -> ImbueCloudProviderConfig:
     )
 
 
-def test_slice_rebuild_config_runs_a_gen2_container_under_the_account_runtime_with_tmpfs() -> None:
-    slice_config = build_slice_rebuild_config(_runsc_account_config(), _lease(box_generation=2))
-    # The gen-2 guest image ships runsc; the rebuilt container gets the same
+def test_slice_rebuild_config_runs_the_container_under_the_account_runtime_with_tmpfs() -> None:
+    slice_config = build_slice_rebuild_config(_runsc_account_config(), _lease())
+    # The guest image ships runsc; the rebuilt container gets the same
     # runtime + hardening args + tmpfs mounts the bake creates it with.
     assert slice_config.docker_runtime == "runsc"
     assert slice_config.default_start_args == (
@@ -147,28 +149,16 @@ def test_slice_rebuild_config_runs_a_gen2_container_under_the_account_runtime_wi
         "--tmpfs",
         "/tmp:exec",
     )
-    assert slice_config.box_generation == 2
-    # The cap is sized from the guest's RAM exactly as the bake sizes it: a gen-2
+    # The cap is sized from the guest's RAM exactly as the bake sizes it: the
     # guest boots with its units minus the holdback, so the rebuilt container is
     # capped like the original (and like the guest's own reconcile oneshot caps it).
     assert slice_config.slice_memory_mib == 8 * 1024 - GUEST_RAM_HOLDBACK_MIB
     assert slice_config.box_public_address == "51.81.208.81"
 
 
-def test_slice_rebuild_config_keeps_a_gen1_container_on_plain_runc() -> None:
-    slice_config = build_slice_rebuild_config(_runsc_account_config(), _lease(box_generation=1))
-    # A lima guest has no runsc: forcing the runtime would fail every rebuild
-    # with docker's "unknown runtime".
-    assert slice_config.docker_runtime is None
-    assert slice_config.default_start_args == ()
-    assert slice_config.box_generation == 1
-    # A lima guest gets its full advertised RAM, so its cap is sized from all of it.
-    assert slice_config.slice_memory_mib == 8 * 1024
-
-
-def test_slice_rebuild_config_without_a_machine_size_has_no_memory_cap() -> None:
-    # A connector too old to serve the sizing columns omits memory_units; the
-    # bake-stamped memory_gb attribute is deliberately NOT consulted, so the
-    # rebuilt container gets no cap rather than a guessed one.
-    slice_config = build_slice_rebuild_config(_runsc_account_config(), _lease(box_generation=2, memory_units=None))
-    assert slice_config.slice_memory_mib is None
+def test_slice_rebuild_config_refuses_a_lease_without_a_machine_size() -> None:
+    # The bake-stamped memory_gb attribute is deliberately NOT consulted: a lease
+    # missing the sizing column is a malformed connector response, not a reason
+    # to rebuild an uncapped container.
+    with pytest.raises(MngrError, match="memory_units"):
+        build_slice_rebuild_config(_runsc_account_config(), _lease(memory_units=None))

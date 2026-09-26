@@ -27,7 +27,6 @@ services = [
     "cloudflare",
     "litellm",
     "neon",
-    "pool-ssh",
     "supertokens",
     "sharing",
     "storage",
@@ -57,7 +56,7 @@ litellm_proxy = 600
 public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDn/NBtT5XWAmOSPj2S6kXsvEPAoORm1x3ZSkRIX+XW minds-dev-ssh-ca"
 
 # The tier's gen-2 management plane (specs/slice-fleet-gen2, phase 3; runbook:
-# apps/minds/docs/deploy/gen2-management-plane.md). Every value here is PUBLIC
+# apps/minds/docs/deploy/reference/management-plane.md). Every value here is PUBLIC
 # (operator WireGuard public keys, the tier's Modal Proxy name and static
 # egress IPs), so peer and allowlist changes are ordinary PR-reviewed edits.
 # The matching private halves never leave their machines: each operator

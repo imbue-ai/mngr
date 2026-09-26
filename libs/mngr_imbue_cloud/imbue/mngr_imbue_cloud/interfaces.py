@@ -83,10 +83,10 @@ class SliceVmAccessInterface(MutableModel, ABC):
 class SliceVmClientInterface(VpsClientInterface, ABC):
     """VPS-client contract for slice VMs carved on a bare-metal box, driven over SSH.
 
-    Implemented per box generation: :class:`~imbue.mngr_imbue_cloud.slices.lima_slice_client.LimaSliceVpsClient`
-    (gen 1, lima/slirp) and :class:`~imbue.mngr_imbue_cloud.slices.qemu_slice_client.QemuSliceVpsClient`
-    (gen 2, raw qemu with routed-tap networking). Both reach the box as its dedicated
-    non-root slice user with the pool management key under strict host-key pinning.
+    Implemented by :class:`~imbue.mngr_imbue_cloud.slices.qemu_slice_client.QemuSliceVpsClient`
+    (raw qemu with routed-tap networking), which reaches the box as its dedicated
+    non-root slice user with the operator's management identity under strict
+    host-key pinning.
     """
 
     box_address: str = Field(description="SSH-reachable address of the bare-metal box that hosts the slices")
@@ -100,7 +100,10 @@ class SliceVmClientInterface(VpsClientInterface, ABC):
     box_ssh_user: str = Field(description="Dedicated non-root user on the box that owns the slice VMs")
     private_key_path: str | None = Field(
         default=None,
-        description="Path to the pool management private key used to SSH the box (None only in unit tests).",
+        description=(
+            "Path to the certificate-bearing management private key used to SSH the box (None when no box-side "
+            "command will be run, as on the leased-slice rebuild, and in unit tests)."
+        ),
     )
     box_host_public_key: str | None = Field(
         default=None,
@@ -120,34 +123,24 @@ class SliceVmClientInterface(VpsClientInterface, ABC):
         memory_mib: int,
         disk_gib: int,
         host_dir: str,
-        # A static key to authorize for VM root at carve (the gen-1 bake key);
-        # None authorizes no static key -- the gen-2 norm, where the VM trusts
-        # the tier's SSH CA instead.
-        root_authorized_public_key: str | None,
         host_private_key_pem: str,
         host_public_key_openssh: str,
         boot_disk_gib: int,
-        slot_count: int,
         port_range_start: int,
         port_range_end: int,
-        extra_root_authorized_keys: tuple[str, ...] = (),
-        # The tier's SSH CA public key VM root trusts for certificate logins
-        # (gen-2 only; gen-1 ignores it).
-        trusted_user_ca_public_key: str | None = None,
-        # The box's declared uplink rate for gen-2 fair-share bandwidth shaping;
-        # None disables shaping (and gen-1 ignores it entirely -- lima has no
-        # per-VM traffic classes).
+        # The tier's SSH CA public key VM root trusts for certificate logins.
+        trusted_user_ca_public_key: str,
+        # Machine sizing (specs/slice-fleet): the machine's size in units
+        # (1 unit = 1GiB guest RAM) and the box's two budgets, which the
+        # reserve's two-budget accounting enforces on the box.
+        units: int,
+        box_total_units: int,
+        box_disk_budget_gib: int,
+        # The box's declared uplink rate for fair-share bandwidth shaping; None
+        # disables shaping.
         uplink_mbps: int | None = None,
-        # Gen-2 machine sizing (specs/slice-fleet): the machine's size in units
-        # (1 unit = 1GiB guest RAM) and the box's two budgets. Required by the
-        # gen-2 client (its reserve enforces the two-budget accounting from
-        # them); ignored by gen-1, whose sizing rides memory_mib / disk_gib /
-        # slot_count.
-        units: int | None = None,
-        box_total_units: int | None = None,
-        box_disk_budget_gib: int | None = None,
     ) -> SliceProvisionResult:
-        """Reserve a box slot + host ports, create the env-stamped slice VM, and boot it."""
+        """Reserve the box's budgets + host ports, create the env-stamped slice VM, and boot it."""
 
     @abstractmethod
     def run_on_box(

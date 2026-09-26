@@ -18,11 +18,10 @@ from imbue.mngr_vps.primitives import VpsInstanceStatus
 class MockSliceVmClient(SliceVmClientInterface):
     """An in-memory box: slice instances with their observations and data disks, no SSH.
 
-    ``destroy_instance`` removes the instance and its disk the way both real
-    clients do (a gen-1 ``limactl delete`` drops the lima disk with it, a gen-2
-    destroy removes the whole instance dir); ``destroy_disk`` removes a disk on
-    its own. Names listed in ``failing_resource_names`` raise on destroy so
-    tests can exercise partial-failure handling.
+    ``destroy_instance`` removes the instance and its disk the way the real
+    client does (a destroy removes the whole instance dir); ``destroy_disk``
+    removes a disk on its own. Names listed in ``failing_resource_names`` raise
+    on destroy so tests can exercise partial-failure handling.
     """
 
     observations: list[SliceInstanceObservation] = Field(
@@ -54,19 +53,16 @@ class MockSliceVmClient(SliceVmClientInterface):
         memory_mib: int,
         disk_gib: int,
         host_dir: str,
-        root_authorized_public_key: str | None,
         host_private_key_pem: str,
         host_public_key_openssh: str,
         boot_disk_gib: int,
-        slot_count: int,
         port_range_start: int,
         port_range_end: int,
-        extra_root_authorized_keys: tuple[str, ...] = (),
-        trusted_user_ca_public_key: str | None = None,
+        trusted_user_ca_public_key: str,
+        units: int,
+        box_total_units: int,
+        box_disk_budget_gib: int,
         uplink_mbps: int | None = None,
-        units: int | None = None,
-        box_total_units: int | None = None,
-        box_disk_budget_gib: int | None = None,
     ) -> SliceProvisionResult:
         raise NotImplementedError
 

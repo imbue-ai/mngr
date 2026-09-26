@@ -1,4 +1,3 @@
-import math
 import re
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -16,8 +15,6 @@ from imbue.mngr_imbue_cloud.errors import BareMetalConfigError
 from imbue.mngr_imbue_cloud.errors import SliceCapacityError
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerDbId
 from imbue.mngr_imbue_cloud.primitives import BareMetalServerStatus
-from imbue.mngr_imbue_cloud.primitives import GEN1_EXPECTED_AUTHORIZED_KEY_COUNT
-from imbue.mngr_imbue_cloud.primitives import GEN2_EXPECTED_AUTHORIZED_KEY_COUNT
 from imbue.mngr_imbue_cloud.primitives import OVH_DATACENTER_CODE_BY_US_REGION
 from imbue.mngr_imbue_cloud.primitives import OVH_US_DATACENTER_CODES
 from imbue.mngr_imbue_cloud.primitives import SERVER_STATUS_DELIVERED
@@ -30,18 +27,11 @@ from imbue.mngr_imbue_cloud.primitives import US_REGION_BY_OVH_DATACENTER_CODE
 from imbue.mngr_imbue_cloud.primitives import tier_for_env_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.box_commands import SliceInstanceObservation
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import InvalidMachineSizeError
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import FIRST_QEMU_BOX_GENERATION
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_IMAGE_TAR_CACHE_DIR
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_SLICE_SERVICE_USER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_STORAGE_LUKS_MAPPER_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_STORAGE_ROOT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DEFAULT_MACHINE_UNITS
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DISK_RESERVE_FRACTION
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import DISK_RESERVE_GB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GEN2_BOOT_DISK_GIB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import HOST_RAM_RESERVE_GIB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import PER_VM_RAM_OVERHEAD_MIB
-from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_BOOT_DISK_GIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import SLICE_CONTAINER_MEMORY_RESERVE_MIB
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_default_machine_capacity
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_gen2_disk_budget_gib
@@ -71,12 +61,6 @@ GEN2_CONTAINER_TMPFS_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run", "-
 def docker_runtime_name(runtime: SliceContainerRuntime) -> str:
     """The lowercase name Docker knows the runtime by (``--runtime runsc``)."""
     return runtime.value.lower()
-
-
-# Default RAM (GB) each slice advertises / is sized to. A box's slot count is
-# floor(total_RAM / this), so it also sets how many slices a box yields. Used as the
-# default for the pricing table and the natural slice size for our agent hosts.
-DEFAULT_MEMORY_PER_SLICE_GB: Final[int] = 8
 
 
 @pure
@@ -173,9 +157,8 @@ def assert_gen2_box_disk_fits_default_machines(*, ram_gb: int, disk_gb: int) -> 
         )
 
 
-# Default CPU overcommit factor used to size each slice's vCPUs (vCPUs/slice =
-# floor(threads * ratio / slots); per machine, its proportional unit share of
-# ``threads * ratio``). 4.0 -- every thread sold four times -- gives an 8-unit
+# Default CPU overcommit factor used to size each machine's vCPUs (its
+# proportional unit share of ``threads * ratio``). 4.0 -- every thread sold four times -- gives an 8-unit
 # machine on a 16-thread/120-unit box 4 vCPUs (and stays at 4 on a slightly
 # larger box, where a ratio tuned to the exact boundary would floor to 3): under gVisor's systrap platform every syscall hands off
 # between the application thread and a sentry thread, so a 2-vCPU machine
@@ -188,72 +171,11 @@ def assert_gen2_box_disk_fits_default_machines(*, ram_gb: int, disk_gb: int) -> 
 # overcommitted.
 DEFAULT_SLICE_CPU_OVERCOMMIT_RATIO: Final[float] = 4.0
 
-# The gen-1 box's dedicated non-root service user, which owns the lima VMs and
-# drives limactl. Gen-2 boxes use ``GEN2_SLICE_SERVICE_USER`` instead; a box's
-# row records which user it runs, and this is only the fallback for a gen-1 row
-# without one.
-# CLEANUP: delete with the rest of the gen-1 lima code in phase 6 of
-# blueprint/slice-fleet-cutover.
-GEN1_SLICE_SERVICE_USER: Final[str] = "limahost"
-
-
-@pure
-def default_slice_service_user(box_generation: int) -> str:
-    """The service user a box of ``box_generation`` runs when its row records none."""
-    if box_generation >= FIRST_QEMU_BOX_GENERATION:
-        return GEN2_SLICE_SERVICE_USER
-    return GEN1_SLICE_SERVICE_USER
-
 
 @pure
 def box_service_user(server: BareMetalServer) -> str:
-    """The unix user box commands SSH as: the row's recorded service user, else its generation's default."""
-    return server.slice_service_user or default_slice_service_user(server.box_generation)
-
-
-# The slice guest OS image is staged once on each box (at prep) and referenced by
-# the slice bake via ``file://`` so VM boots never depend on the Debian mirror
-# (lima otherwise does a per-boot last-modified HEAD to cloud.debian.org for a
-# digest-less image, which fatally fails when the mirror is flaky). Stored under
-# the gen-1 service user's home so prep can write it without root, and read by
-# limactl (which runs as that user). Path is shared by the prep script and the
-# slice provider so they always agree.
-_SLICE_BASE_IMAGE_RELPATH: Final[str] = ".cache/mngr-slice-base/debian-base.qcow2"
-
-# Box dir holding the per-box cached DEFAULT_WORKSPACE_TEMPLATE image tar (a ``docker save`` of the built
-# image), so slices on the box ``docker load`` it instead of each rebuilding from
-# the Dockerfile. Under the gen-1 service user's home (the box has no Docker, only a
-# tar file); created once at ``server prep``. Shared by the prep script and the box
-# image cache so they always agree.
-_SLICE_DEFAULT_WORKSPACE_TEMPLATE_CACHE_RELDIR: Final[str] = ".cache/mngr-slice-default-workspace-template"
-
-
-def slice_base_image_path(slice_service_user: str) -> str:
-    """Absolute path of the box-staged slice guest OS image for ``slice_service_user``."""
-    return f"/home/{slice_service_user}/{_SLICE_BASE_IMAGE_RELPATH}"
-
-
-def box_default_workspace_template_cache_dir(slice_service_user: str) -> str:
-    """Absolute path of the gen-1 box dir holding the cached DEFAULT_WORKSPACE_TEMPLATE image tar for ``slice_service_user``."""
-    return f"/home/{slice_service_user}/{_SLICE_DEFAULT_WORKSPACE_TEMPLATE_CACHE_RELDIR}"
-
-
-@pure
-def box_image_cache_dir_for_generation(box_generation: int, slice_service_user: str) -> str:
-    """The box dir holding the cached image tar(s): on the storage partition for gen-2, the service user's home for gen-1.
-
-    Gen-2 boxes keep the multi-GiB tars off their small root partition (the
-    reserve in ``gen2_scripts.sizing`` budgets the cache on the storage
-    partition); gen-1 boxes keep the historical home-dir location.
-    """
-    if box_generation >= FIRST_QEMU_BOX_GENERATION:
-        return GEN2_IMAGE_TAR_CACHE_DIR
-    return box_default_workspace_template_cache_dir(slice_service_user)
-
-
-def slice_base_image_file_url(slice_service_user: str) -> str:
-    """``file://`` URL the slice lima YAML uses for the box-staged guest OS image."""
-    return f"file://{slice_base_image_path(slice_service_user)}"
+    """The unix user box commands SSH as: the row's recorded service user, else the fleet's."""
+    return server.slice_service_user or GEN2_SLICE_SERVICE_USER
 
 
 _RAID_MIRROR: Final[str] = "RAID1"
@@ -266,71 +188,6 @@ _NEXT_STATUS_BY_CURRENT: Final[dict[str, str]] = {
     SERVER_STATUS_INSTALLING: SERVER_STATUS_READY,
 }
 _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({SERVER_STATUS_READY, SERVER_STATUS_FAILED})
-
-
-@pure
-def compute_slot_count(ram_gb: int, memory_per_slice_gb: int) -> int:
-    """Return how many slices of ``memory_per_slice_gb`` a box with ``ram_gb`` total RAM holds.
-
-    Subtracts the per-machine host reserve (``HOST_RAM_RESERVE_GIB``) once, then divides
-    the rest by the per-slice footprint -- the guest's advertised RAM PLUS the per-VM
-    host overhead (``PER_VM_RAM_OVERHEAD_MIB``). So the count is what the box can run
-    without overcommitting RAM, not just ``total / slice`` (which left no host headroom).
-    """
-    if ram_gb < 0:
-        raise BareMetalConfigError(f"ram_gb must be non-negative, got {ram_gb}")
-    if memory_per_slice_gb <= 0:
-        raise BareMetalConfigError(f"memory_per_slice_gb must be positive, got {memory_per_slice_gb}")
-    usable_mib = ram_gb * 1024 - HOST_RAM_RESERVE_GIB * 1024
-    per_slice_footprint_mib = memory_per_slice_gb * 1024 + PER_VM_RAM_OVERHEAD_MIB
-    return max(0, usable_mib // per_slice_footprint_mib)
-
-
-@pure
-def compute_slice_memory_mib(memory_per_slice_gb: int) -> int:
-    """Return the MiB to allocate each slice VM: the full advertised RAM.
-
-    The per-VM host overhead (QEMU + lima supervisor) is accounted on top in
-    ``compute_slot_count``, NOT taken from the guest -- so the guest gets exactly the
-    advertised ``memory_per_slice_gb``.
-    """
-    if memory_per_slice_gb <= 0:
-        raise BareMetalConfigError(f"memory_per_slice_gb must be positive, got {memory_per_slice_gb}")
-    return memory_per_slice_gb * 1024
-
-
-@pure
-def compute_slice_disk_budget_gib(disk_gb: int, slot_count: int) -> int:
-    """Return the TOTAL disk budget for one slice: usable disk (minus reserve) split across slots.
-
-    This budget is the slice VM's whole disk allocation -- boot disk + data disk
-    must sum to it, so the box is never over-provisioned on disk.
-    """
-    if slot_count <= 0:
-        raise BareMetalConfigError(f"slot_count must be positive, got {slot_count}")
-    reserve_gib = max(DISK_RESERVE_GB, math.ceil(disk_gb * DISK_RESERVE_FRACTION))
-    per_slice_budget_gib = (disk_gb - reserve_gib) // slot_count
-    if per_slice_budget_gib <= 0:
-        raise BareMetalConfigError(
-            f"disk_gb={disk_gb} minus {reserve_gib}GiB reserve cannot be split across {slot_count} slot(s)"
-        )
-    return per_slice_budget_gib
-
-
-@pure
-def compute_slice_disk_gib(disk_gb: int, slot_count: int) -> int:
-    """Return the per-slice btrfs DATA-disk size: the disk budget minus the fixed boot disk.
-
-    Boot disk (``SLICE_BOOT_DISK_GIB``) + this data disk = the per-slice budget, so
-    the two disks together never exceed the box's allocated-per-slice disk.
-    """
-    data_disk_gib = compute_slice_disk_budget_gib(disk_gb, slot_count) - SLICE_BOOT_DISK_GIB
-    if data_disk_gib <= 0:
-        raise BareMetalConfigError(
-            f"per-slice disk budget for disk_gb={disk_gb} across {slot_count} slot(s) is too small to fit the "
-            f"{SLICE_BOOT_DISK_GIB}GiB boot disk plus any data disk"
-        )
-    return data_disk_gib
 
 
 @pure
@@ -358,18 +215,6 @@ def build_slice_container_memory_start_args(slice_memory_mib: int) -> tuple[str,
 
 
 @pure
-def compute_slice_vcpus(cpu_threads: int, slot_count: int, overcommit_ratio: float) -> int:
-    """Return the vCPU count to give each slice, applying mild CPU overcommit."""
-    if cpu_threads <= 0:
-        raise BareMetalConfigError(f"cpu_threads must be positive, got {cpu_threads}")
-    if slot_count <= 0:
-        raise BareMetalConfigError(f"slot_count must be positive, got {slot_count}")
-    if overcommit_ratio <= 0:
-        raise BareMetalConfigError(f"overcommit_ratio must be positive, got {overcommit_ratio}")
-    return max(1, math.floor(cpu_threads * overcommit_ratio / slot_count))
-
-
-@pure
 def choose_raid_level(disk_count: int) -> str:
     """Pick a mirror-based RAID level for disk-failure robustness: RAID1 (2 disks) or RAID10 (4+)."""
     if disk_count < 2:
@@ -383,42 +228,29 @@ def choose_raid_level(disk_count: int) -> str:
     )
 
 
-# Instance-name prefix for slices (both generations). Used both to derive a
-# slice's deterministic instance name and to recognize slice VMs on the box, so
-# reconciliation never touches a non-slice VM.
+# Instance-name prefix for slices. Used both to derive a slice's deterministic
+# instance name and to recognize slice VMs on the box, so reconciliation never
+# touches a non-slice VM.
 SLICE_INSTANCE_PREFIX: Final[str] = "mngr-slice-"
 
-# Suffix appended to a slice's instance name to name its data disk (both
-# generations; ``gen2_scripts.layout.GEN2_DISK_SUFFIX`` is the connector-mounted copy).
+# Suffix appended to a slice's instance name to name its data disk
+# (``gen2_scripts.layout.GEN2_DISK_SUFFIX`` is the connector-mounted copy).
 SLICE_DISK_SUFFIX: Final[str] = "-data"
 
-# How much of the host id's 32-char uuid hex is embedded in slice lima names.
+# How much of the host id's 32-char uuid hex is embedded in slice names.
 # Truncated (not the full hex) because the name budget is tight -- see
 # MAX_SLICE_INSTANCE_NAME_LENGTH below -- and 16 hex chars (64 bits) is far
-# beyond collision range for the <=14 slices a box holds. Slices baked before
+# beyond collision range for the slices a box holds. Slices baked before
 # the truncation carry the full 32 hex; the owner parse accepts both.
 SLICE_HOST_ID_HEX_LENGTH: Final[int] = 16
 
-# Two limactl limits bound a slice's lima names; both derivations live here so
-# the fail-fast guard below can never drift from what limactl enforces:
-#
-# 1. The ssh control socket path must fit a unix socket address: limactl
-#    validates ``<lima-home>/<instance>/ssh.sock.<16-digit-suffix>`` against
-#    UNIX_PATH_MAX (108, "must be less than"), reserving 16 digits for the
-#    suffix. With the fleet's standard lima home (``/home/<gen-1 service user>/.lima/``)
-#    that caps the INSTANCE name at 60 chars -- the binding constraint.
-# 2. Any instance/disk identifier must be at most 76 chars (its ``identifier
-#    greater than maximum length`` fatal); the data disk (instance + "-data")
-#    is the longest, and at instance <= 60 it is 65 -- never binding, kept in
-#    the derivation as a min() so a future re-balance cannot silently break it.
-_UNIX_PATH_MAX: Final[int] = 108
-_LIMA_SSH_SOCK_RESERVED_SUFFIX_LENGTH: Final[int] = len("/ssh.sock.") + 16
-_STANDARD_LIMA_HOME_PREFIX: Final[str] = f"/home/{GEN1_SLICE_SERVICE_USER}/.lima/"
-_LIMA_MAX_IDENTIFIER_LENGTH: Final[int] = 76
-MAX_SLICE_INSTANCE_NAME_LENGTH: Final[int] = min(
-    _UNIX_PATH_MAX - 1 - len(_STANDARD_LIMA_HOME_PREFIX) - _LIMA_SSH_SOCK_RESERVED_SUFFIX_LENGTH,
-    _LIMA_MAX_IDENTIFIER_LENGTH - len(SLICE_DISK_SUFFIX),
-)
+# The instance name becomes the guest's hostname (the cidata's
+# ``local-hostname``, bound by Linux's 64-char HOST_NAME_MAX) and a path
+# component under the storage root; the unit, tap and unix-user names derive
+# from the slice's ordinal instead. 60 keeps the hostname inside the kernel cap
+# and is the cap existing slices were named under, so stored names never need
+# re-deriving.
+MAX_SLICE_INSTANCE_NAME_LENGTH: Final[int] = 60
 # The extra 1 is the "-" between the env stamp and the host id hex.
 MAX_SLICE_ENV_NAME_LENGTH: Final[int] = (
     MAX_SLICE_INSTANCE_NAME_LENGTH - len(SLICE_INSTANCE_PREFIX) - 1 - SLICE_HOST_ID_HEX_LENGTH
@@ -427,18 +259,16 @@ MAX_SLICE_ENV_NAME_LENGTH: Final[int] = (
 
 @pure
 def assert_env_name_fits_slice_names(env_name: str) -> None:
-    """Raise ``SliceCapacityError`` when ``env_name`` is too long to stamp into slice lima names.
+    """Raise ``SliceCapacityError`` when ``env_name`` is too long to stamp into slice names.
 
-    Checked before anything is carved: limactl only rejects the over-long name
-    at reserve time, deep inside the bake, with a message that says nothing
-    about the env name being the variable part. CI env names
-    (``ci-<timestamp>-<short>``) sit near the cap, which is how this was found.
+    Checked before anything is carved, so the env name is named as the variable
+    part instead of failing deep inside the bake. CI env names
+    (``ci-<timestamp>-<short>``) sit near the cap.
     """
     if len(env_name) > MAX_SLICE_ENV_NAME_LENGTH:
         raise SliceCapacityError(
             f"env name {env_name!r} is {len(env_name)} chars; at most {MAX_SLICE_ENV_NAME_LENGTH} fit into a "
-            f"slice's lima instance name (limactl caps the instance name at {MAX_SLICE_INSTANCE_NAME_LENGTH} "
-            "chars -- its ssh socket path must fit UNIX_PATH_MAX). Use a shorter env name."
+            f"slice's instance name (capped at {MAX_SLICE_INSTANCE_NAME_LENGTH} chars). Use a shorter env name."
         )
 
 
@@ -454,7 +284,7 @@ _STAMPED_SLICE_CORE_RES: Final[tuple[re.Pattern[str], ...]] = (
 
 @pure
 def slice_instance_name(host_id: HostId, env_name: str | None = None) -> str:
-    """Deterministic VM instance name for a slice (both generations), embedding the mngr host id.
+    """Deterministic VM instance name for a slice, embedding the mngr host id.
 
     When ``env_name`` is given the owning env is stamped in
     (``mngr-slice-<env>-<host-hex>``) so the box can attribute the slice to an
@@ -462,7 +292,7 @@ def slice_instance_name(host_id: HostId, env_name: str | None = None) -> str:
     the legacy un-stamped name (``mngr-slice-<host-hex>``) is produced, for
     backwards compatibility with slices baked before env stamping. The host hex is
     truncated (see :data:`SLICE_HOST_ID_HEX_LENGTH`) so long env names fit
-    limactl's instance-name budget; existing slices keep their stored full-hex
+    the instance-name budget; existing slices keep their stored full-hex
     names (teardown always reads the recorded name, never re-derives it).
     """
     host_hex = host_id.get_uuid().hex[:SLICE_HOST_ID_HEX_LENGTH]
@@ -482,7 +312,7 @@ def _slice_resource_core(name: str) -> str | None:
     """The identity part of a slice instance/disk name: prefix and optional ``-data`` stripped.
 
     Returns None for any name that is not a slice resource (wrong prefix), so a
-    non-slice lima resource is never misclassified.
+    non-slice VM resource is never misclassified.
     """
     if not name.startswith(SLICE_INSTANCE_PREFIX):
         return None
@@ -522,7 +352,7 @@ def is_slice_owned_by_env(name: str, env_name: str) -> bool:
 def count_slice_resource_names(names: AbstractSet[str]) -> int:
     """Count slice resources (``mngr-slice-`` prefix) regardless of env stamp.
 
-    Used to derive a box's TRUE occupancy from its lima resources -- every env's
+    Used to derive a box's TRUE occupancy from its slice resources -- every env's
     slices plus any legacy un-stamped ones -- so independent envs sharing the box
     cannot collectively over-subscribe it.
     """
@@ -608,19 +438,11 @@ def count_authorized_key_lines(authorized_keys_text: str) -> int:
 
     Blank lines and ``#`` comments carry no key, so they do not count;
     everything else is one authorized key. A correctly prepped box yields exactly
-    :func:`expected_static_authorized_key_count` for its generation, so any other
-    count means a key was added out of band, which is how a box ends up reachable
-    by a tier that does not own it.
+    ``GEN2_EXPECTED_AUTHORIZED_KEY_COUNT`` (none), so any other count means a
+    key was added out of band, which is how a box ends up reachable by a tier
+    that does not own it.
     """
     return sum(1 for line in authorized_keys_text.splitlines() if line.strip() and not line.strip().startswith("#"))
-
-
-@pure
-def expected_static_authorized_key_count(box_generation: int) -> int:
-    """Static keys a correctly prepped box authorizes for its service user: the pool key on gen-1, none on gen-2."""
-    if box_generation >= FIRST_QEMU_BOX_GENERATION:
-        return GEN2_EXPECTED_AUTHORIZED_KEY_COUNT
-    return GEN1_EXPECTED_AUTHORIZED_KEY_COUNT
 
 
 @pure
@@ -646,13 +468,14 @@ _MANAGEMENT_TRUST_SPLIT_MARKER: Final[str] = "MNGR_MANAGEMENT_TRUST_SPLIT"
 def build_read_management_trust_command() -> str:
     """Print the service user's ``authorized_keys`` and the box's trusted CA file, each tolerated absent.
 
-    A missing ``authorized_keys`` is the gen-2 steady state (no static keys), and
-    a missing CA file is the gen-1 one, so neither absence fails the command. The
+    A missing ``authorized_keys`` is the steady state (no static keys), and a
+    box whose prep never installed the CA file must still be auditable, so
+    neither absence fails the command. The
     steps are ``&&``-chained so that a real read failure (an existing file ``cat``
     cannot read) short-circuits with ``cat``'s non-zero status and no marker,
     which the caller's exit-status check turns into an error; with ``;`` the
     shell would report the last step's status (always 0) and the unread file
-    would parse as zero keys -- exactly what a gen-2 box is expected to have.
+    would parse as zero keys -- exactly what a correctly prepped box has.
     """
     return (
         "if [ -e ~/.ssh/authorized_keys ]; then cat ~/.ssh/authorized_keys; fi && "
@@ -715,17 +538,12 @@ def parse_storage_volume_output(stdout: str) -> StorageVolumeState:
 
 
 @pure
-def is_trusted_ca_correct_for_tier(
-    trust: BoxManagementTrust, box_generation: int, expected_ca_public_key: str | None
-) -> bool:
-    """Whether the box's CA trust is what its generation and tier call for.
+def is_trusted_ca_correct_for_tier(trust: BoxManagementTrust, expected_ca_public_key: str | None) -> bool:
+    """Whether the box trusts exactly the tier's committed CA.
 
-    A gen-1 box has no CA trust to check. A gen-2 box must trust exactly the
-    tier's committed CA; with no CA committed for the tier there is nothing it
-    could correctly trust, so it is never correct.
+    With no CA committed for the tier there is nothing the box could correctly
+    trust, so it is never correct.
     """
-    if box_generation < FIRST_QEMU_BOX_GENERATION:
-        return True
     if expected_ca_public_key is None or trust.trusted_ca_public_key is None:
         return False
     return is_same_ssh_public_key(trust.trusted_ca_public_key, expected_ca_public_key)
@@ -738,13 +556,14 @@ def foreign_tier_slice_names(box_names: AbstractSet[str], env_name: str) -> set[
     Box sharing is legitimate *within* a tier -- several ``dev-<user>`` envs
     routinely carve slices on one dev box, which is why occupancy is read from the
     box rather than from one env's rows. It is never legitimate *across* tiers,
-    and the reason is the pool keypair, not the database: a box carrying two
-    tiers' slices is a box both tiers' pool keys can SSH, which is precisely the
-    "zero cross-tier reach" boundary (see ``apps/minds/docs/deploy/reference/environments.md``) --
-    each tier's operators and connector gain limactl, and so root, over the
-    other's workspaces. Separate ``host_pool`` databases do not distinguish the
-    two cases: every dev env has its own database too, and the orphan reap is
-    scoped by env rather than by tier either way.
+    and the reason is the tier's SSH CA, not the database: a box carrying two
+    tiers' slices is a box both tiers' management certificates can open, which is
+    precisely the "zero cross-tier reach" boundary (see
+    ``apps/minds/docs/deploy/reference/environments.md``) -- each tier's operators
+    and connector gain root over the other's workspaces. Separate ``host_pool``
+    databases do not distinguish the two cases: every dev env has its own
+    database too, and the orphan reap is scoped by env rather than by tier
+    either way.
 
     Legacy un-stamped slices (``mngr-slice-<host-hex>``, no env) have no knowable
     tier, so they are excluded here: they still count toward occupancy, but a name
@@ -829,8 +648,8 @@ def compute_orphan_slice_disk_names(
 
     The disk analogue of :func:`compute_orphan_slice_instance_names`. Reaped
     separately because a disk can outlive its instance (a failed carve's rollback
-    that could not unlock the disk leaves it behind, permanently holding the box
-    slot). ``held_instance_names`` are the instances still on the box after the
+    that could not unlock the disk leaves it behind, permanently charging the box's
+    disk budget). ``held_instance_names`` are the instances still on the box after the
     instance reap -- tracked, running, or spared as young; a disk whose owning
     instance (its name minus the ``-data`` suffix) is among them is never an orphan:
     unlinking it under a live VM keeps qemu running on the deleted inode and loses
@@ -929,12 +748,23 @@ def is_valid_status_transition(current: BareMetalServerStatus, target: BareMetal
 
 
 @pure
-def compute_capacity(server: BareMetalServer, used_slots: int) -> BareMetalServerCapacity:
-    """Pair a server with its slot accounting (used / free)."""
-    if used_slots < 0:
-        raise BareMetalConfigError(f"used_slots must be non-negative, got {used_slots}")
-    free_slots = max(0, server.slot_count - used_slots)
-    return BareMetalServerCapacity(server=server, used_slots=used_slots, free_slots=free_slots)
+def compute_capacity(server: BareMetalServer, used_machines: int) -> BareMetalServerCapacity:
+    """Pair a server with its default-machine accounting (capacity / used / free).
+
+    Capacity is what the box's RAM budget holds; a prepped box's measured
+    storage partition may hold fewer (see :func:`compute_gen2_box_default_machine_fit`),
+    which the reserve's two-budget accounting enforces at carve time.
+    """
+    if used_machines < 0:
+        raise BareMetalConfigError(f"used_machines must be non-negative, got {used_machines}")
+    machine_capacity = 0 if server.ram_gb is None else compute_default_machine_capacity(server.ram_gb)
+    free_machines = max(0, machine_capacity - used_machines)
+    return BareMetalServerCapacity(
+        server=server,
+        machine_capacity=machine_capacity,
+        used_machines=used_machines,
+        free_machines=free_machines,
+    )
 
 
 @pure
@@ -943,10 +773,9 @@ def find_server_capacity_by_id(
 ) -> BareMetalServerCapacity:
     """Return the capacity row for the explicitly chosen ``server_id``.
 
-    Slice baking targets one operator-named box per invocation (its per-slice sizing is fixed at
-    registration), rather than auto-selecting a server. Raises ``SliceCapacityError`` if no server in
-    ``capacities`` has that id -- the readiness + free-slot checks are the caller's, so the error can
-    name the count it needed.
+    Slice baking targets one operator-named box per invocation rather than auto-selecting a server.
+    Raises ``SliceCapacityError`` if no server in ``capacities`` has that id -- the readiness and
+    free-machine checks are the caller's, so the error can name the count it needed.
     """
     for capacity in capacities:
         if capacity.server.id == server_id:
