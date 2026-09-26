@@ -186,10 +186,6 @@ HOST_LEVEL_ACTIVITY_SOURCES: Final[frozenset[ActivitySource]] = frozenset(
 )
 
 
-# =========================================================================
-# Shared Listing Helpers
-# =========================================================================
-
 # Agent types that use a fixed expected process name instead of computing
 # from the stored command. This handles agents like ClaudeAgent where the
 # assembled command is a complex shell wrapper but the actual running
@@ -309,6 +305,10 @@ def _parse_ps_output(ps_output: str) -> tuple[dict[str, list[str]], dict[str, st
         line_parts = line.split()
         if len(line_parts) >= 3:
             pid, ppid, comm = line_parts[0], line_parts[1], line_parts[2]
+            # gVisor lists a process that exits mid-read with pid 0; taken as real, it would
+            # hang the tree's root (pid 0's children) under that process's parent.
+            if pid == "0":
+                continue
             comm_by_pid[pid] = comm
             if ppid not in children_by_ppid:
                 children_by_ppid[ppid] = []
@@ -323,11 +323,18 @@ def _collect_descendant_names(
     children_by_ppid: dict[str, list[str]],
     comm_by_pid: dict[str, str],
 ) -> list[str]:
-    """Collect comm names of all descendant processes via BFS."""
+    """Collect comm names of all descendant processes via BFS, visiting each process once.
+
+    ps reads each process separately, so its parent links can form a cycle.
+    """
     descendant_names: list[str] = []
+    visited_pids = {root_pid}
     queue = list(children_by_ppid.get(root_pid, []))
     while queue:
         pid = queue.pop(0)
+        if pid in visited_pids:
+            continue
+        visited_pids.add(pid)
         if pid in comm_by_pid:
             descendant_names.append(comm_by_pid[pid])
         queue.extend(children_by_ppid.get(pid, []))
@@ -354,9 +361,13 @@ def _find_process_pid_by_name(
     process (started directly, not under a shell) is still found, in addition to the
     common case where it runs as a descendant of the pane's shell.
     """
+    visited_pids: set[str] = set()
     queue = [root_pid]
     while queue:
         pid = queue.pop(0)
+        if pid in visited_pids:
+            continue
+        visited_pids.add(pid)
         if comm_by_pid.get(pid) == expected_process_name:
             return pid
         queue.extend(children_by_ppid.get(pid, []))

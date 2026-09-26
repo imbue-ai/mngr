@@ -33,10 +33,6 @@ from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import WaitingReason
 
-# =========================================================================
-# timestamp_to_datetime tests
-# =========================================================================
-
 
 def test_timestamp_to_datetime_returns_none_for_none() -> None:
     assert timestamp_to_datetime(None) is None
@@ -52,11 +48,6 @@ def test_timestamp_to_datetime_converts_valid_timestamp() -> None:
 def test_timestamp_to_datetime_returns_none_for_invalid() -> None:
     result = timestamp_to_datetime(-99999999999999)
     assert result is None
-
-
-# =========================================================================
-# compute_idle_seconds tests
-# =========================================================================
 
 
 def test_compute_idle_seconds_returns_none_when_all_none() -> None:
@@ -77,11 +68,6 @@ def test_compute_idle_seconds_with_single_activity() -> None:
     result = compute_idle_seconds(None, recent, None)
     assert result is not None
     assert 4 < result < 10
-
-
-# =========================================================================
-# determine_lifecycle_probe_result state tests
-# =========================================================================
 
 
 def test_lifecycle_stopped_when_no_tmux_info() -> None:
@@ -368,11 +354,6 @@ def test_lifecycle_waiting_when_modified_title_and_expected_in_descendants() -> 
     )
 
 
-# =========================================================================
-# determine_lifecycle_probe_result pid tests
-# =========================================================================
-
-
 def test_pid_is_claude_descendant_when_running() -> None:
     """The returned PID is the descendant whose comm matches the expected process."""
     ps_output = "100 1 init\n200 123 bash\n300 200 claude\n"
@@ -415,6 +396,39 @@ def test_pid_found_when_title_modified_and_claude_is_descendant() -> None:
     assert probe.pid == 456
 
 
+# Under gVisor, ps lists a process that is exiting mid-read with pid 0. Here that is the
+# agent's short-lived `wc`: taken as a real pid it makes pid 1 -- an ancestor of the
+# agent's own pane -- look like a descendant of the pane.
+_PS_OUTPUT_WITH_EXITING_PROCESS_AT_PID_ZERO = (
+    "1 0 sh\n69 1 tmux:\n123 69 bash\n456 123 claude\n789 456 bash\n0 789 wc\n900 0 python3\n"
+)
+
+
+def test_lifecycle_probe_ignores_an_exiting_process_listed_with_pid_zero() -> None:
+    """A process reachable from the pane only through a pid-0 line is not the agent's: the probe is DONE."""
+    probe = determine_lifecycle_probe_result(
+        "0|bash|123",
+        False,
+        is_blocked_on_dialog=False,
+        expected_process_name="python3",
+        ps_output=_PS_OUTPUT_WITH_EXITING_PROCESS_AT_PID_ZERO,
+    )
+    assert probe.state == AgentLifecycleState.DONE
+    assert probe.pid is None
+
+
+def test_lifecycle_probe_terminates_when_the_parent_links_form_a_cycle_through_the_pane() -> None:
+    probe = determine_lifecycle_probe_result(
+        "0|bash|123",
+        False,
+        is_blocked_on_dialog=False,
+        expected_process_name="claude",
+        ps_output="123 300 bash\n200 123 sleep\n300 200 sleep\n",
+    )
+    assert probe.state == AgentLifecycleState.DONE
+    assert probe.pid is None
+
+
 def test_pid_none_when_stopped() -> None:
     probe = determine_lifecycle_probe_result(
         None,
@@ -453,11 +467,6 @@ def test_pid_none_when_replaced() -> None:
     assert probe.pid is None
 
 
-# =========================================================================
-# get_descendant_process_names tests
-# =========================================================================
-
-
 def test_descendant_names_returns_empty_for_no_children() -> None:
     ps_output = "100 1 init\n200 1 sshd\n"
     result = get_descendant_process_names("999", ps_output)
@@ -476,9 +485,15 @@ def test_descendant_names_finds_nested_children() -> None:
     assert result == ["bash", "claude", "node"]
 
 
-# =========================================================================
-# resolve_expected_process_name tests
-# =========================================================================
+def test_descendant_names_ignores_an_exiting_process_listed_with_pid_zero() -> None:
+    result = get_descendant_process_names("123", _PS_OUTPUT_WITH_EXITING_PROCESS_AT_PID_ZERO)
+    assert result == ["claude", "bash"]
+
+
+def test_descendant_names_visits_each_process_once_when_the_parent_links_form_a_cycle() -> None:
+    ps_output = "100 300 init\n200 100 bash\n300 200 sleep\n"
+    result = get_descendant_process_names("100", ps_output)
+    assert result == ["bash", "sleep"]
 
 
 def test_resolve_expected_process_name_for_claude() -> None:
@@ -504,11 +519,6 @@ def test_resolve_expected_process_name_for_bare_command() -> None:
     config = MngrConfig.model_construct(agent_types={})
     result = resolve_expected_process_name("unknown", CommandString("sleep"), config)
     assert result == "sleep"
-
-
-# =========================================================================
-# check_agent_type_known tests
-# =========================================================================
 
 
 def test_check_agent_type_known_for_registered_type() -> None:
@@ -539,11 +549,6 @@ def test_check_agent_type_known_for_custom_type_with_unregistered_parent() -> No
     custom_config = AgentTypeConfig.model_construct(parent_type=AgentTypeName("totally-unknown-parent-xyz"))
     config = MngrConfig.model_construct(agent_types={AgentTypeName("my-custom"): custom_config})
     assert check_agent_type_known("my-custom", config) is False
-
-
-# =========================================================================
-# add_safe_directory_on_remote tests
-# =========================================================================
 
 
 def _get_safe_directories() -> list[str]:
@@ -582,11 +587,6 @@ def test_add_safe_directory_on_remote_is_noop_for_local_host(setup_git_config: N
 
     safe_dirs = _get_safe_directories()
     assert str(target_path) not in safe_dirs
-
-
-# =========================================================================
-# symlink_on_host / copy_on_host tests
-# =========================================================================
 
 
 def test_symlink_on_host_symlinks_even_when_source_absent(local_host: OnlineHostInterface, tmp_path: Path) -> None:
@@ -628,11 +628,6 @@ def test_copy_on_host_skips_when_source_absent(local_host: OnlineHostInterface, 
 
     assert result is False
     assert not dest.exists()
-
-
-# =========================================================================
-# build_ssh_transport_command tests
-# =========================================================================
 
 
 def test_build_ssh_transport_command_with_known_hosts_uses_strict_checking() -> None:
@@ -688,11 +683,6 @@ def test_build_ssh_transport_command_quotes_known_hosts_path_with_spaces() -> No
     assert option == 'UserKnownHostsFile="/path with spaces/known_hosts"', option
 
 
-# =========================================================================
-# get_ssh_known_hosts_file tests
-# =========================================================================
-
-
 def _make_host_with_known_hosts(known_hosts_file: str | None) -> OnlineHostInterface:
     """Create a minimal host-like object with the connector data needed for get_ssh_known_hosts_file."""
     data: dict[str, str] = {}
@@ -740,11 +730,6 @@ def test_classify_waiting_reason(is_active: bool, is_blocked: bool, expected: Wa
     generator: PERMISSIONS is gated on is_active, so a stranded permission marker
     (active absent) never yields PERMISSIONS."""
     assert classify_waiting_reason(is_active, is_blocked) == expected
-
-
-# =========================================================================
-# blocked-on-dialog state tests
-# =========================================================================
 
 
 @pytest.mark.parametrize(
