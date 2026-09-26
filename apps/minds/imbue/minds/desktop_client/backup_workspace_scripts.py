@@ -27,7 +27,9 @@ out of arbitrarily noisy output:
   a ``pre-restore`` safety snapshot (so any restore is undoable), then
   ``restic restore <id>:<subpath> --target <backup_root> --delete`` with
   ``--overwrite if-changed``: no staging copy, only changed files are
-  rewritten, and a failed restore converges when simply re-run. The current
+  rewritten, and a failed restore converges when simply re-run. It excludes
+  ``.ssh/authorized_keys`` and the downloaded fallback restic, so ``--delete``
+  leaves them in place though the snapshot lacks them. The current
   ``restic.env`` is written back afterwards, a ``restored`` snapshot of the
   restored state is appended (tagged with the source snapshot's time, so the
   timeline shows the restored version as a new "Restored from ..." entry),
@@ -739,6 +741,7 @@ _RESTIC_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 # Where the downloaded restic lands when /usr/local/bin is not writable. Kept
 # out of snapshots (excluded below): it is a regenerable 25MB binary.
 _FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
+_FALLBACK_RESTIC_EXCLUDE = "**/" + _FALLBACK_RESTIC_DIR_NAME
 # Forward at most one restic --json status line per interval: restic emits
 # them far faster than a human (or the SSE log stream) needs.
 _PROGRESS_INTERVAL_SECONDS = 2.0
@@ -757,7 +760,19 @@ _DEFAULT_SNAPSHOT_EXCLUDES = (
     "**/build",
     "**/.next",
     "**/.cache",
+    "**/.cargo/registry",
+    "**/.cargo/git",
+    "**/.rustup/toolchains",
+    "**/.rustup/downloads",
+    "**/.ssh/authorized_keys",
+    "**/data/.state/update-apply/snapshots",
 )
+# Paths the in-place restore never touches, whatever the snapshot holds.
+# Snapshots never carry authorized_keys, so a restore would delete it; on
+# remote workspaces it holds minds' key for the container's sshd (root's home
+# is the backup root). Nor do they reliably carry the fallback restic, which
+# this restore is running and still needs for the restored-state snapshot.
+_RESTORE_PRESERVED_PATHS = ("**/.ssh/authorized_keys", _FALLBACK_RESTIC_EXCLUDE)
 
 
 # Service-health model for the post-restore verification. A service is
@@ -960,7 +975,7 @@ def _read_snapshot_excludes(code_dir):
         if isinstance(configured, list) and configured and all(isinstance(p, str) for p in configured):
             excludes = list(configured)
     # The downloaded restic fallback binary is regenerable; never snapshot it.
-    return excludes + ["**/" + _FALLBACK_RESTIC_DIR_NAME]
+    return excludes + [_FALLBACK_RESTIC_EXCLUDE]
 
 
 def _human_bytes(count):
@@ -1200,6 +1215,11 @@ def _main():
         "--overwrite",
         "if-changed",
     ]
+    # restic's --delete only removes paths the restore filter selects, so an
+    # excluded path is left as it is -- provided the snapshot has its parent
+    # directory, since a directory the snapshot lacks is deleted whole.
+    for pattern in _RESTORE_PRESERVED_PATHS:
+        restore_args += ["--exclude", pattern]
     restored, restore_output = _restic_step_with_unlock_retry(restore_args, env_map, restic_binary)
     if restored != 0:
         detail = (

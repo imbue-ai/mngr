@@ -44,6 +44,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
 from imbue.minds.desktop_client import restic_cli
@@ -184,6 +185,35 @@ def run_mngr_exec_on_agent(
         )
 
 
+@pure
+def build_write_file_command(remote_path: str, content: str, *, mode: str | None, rotate_timestamp: str) -> str:
+    """The shell command that writes ``content`` to ``remote_path`` (relative to its cwd).
+
+    The content is base64-encoded so arbitrary bytes (newlines, quotes,
+    secrets) survive the shell round-trip intact. The base64 alphabet
+    contains no shell-significant characters, so single-quoting it is safe.
+
+    An existing file with identical content is left untouched (only its mode
+    is enforced), so re-injecting the same restic.env keeps its mtime --
+    host_backup starts a backup tick whenever that mtime moves. An existing
+    file whose content differs is first moved aside to ``<path>.<timestamp>``
+    so the old configuration stays recoverable.
+    """
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    parent_dir = os.path.dirname(remote_path) or "."
+    quoted_path = shlex.quote(remote_path)
+    rotated_path = shlex.quote(f"{remote_path}.{rotate_timestamp}")
+    new_sha = env_content_sha256(content)
+    chmod = f"chmod {mode} {quoted_path}" if mode is not None else "true"
+    return (
+        f"mkdir -p {shlex.quote(parent_dir)} && "
+        f'if [ -f {quoted_path} ] && [ "$(sha256sum {quoted_path} | cut -d\' \' -f1)" = "{new_sha}" ]; '
+        f"then {chmod}; "
+        f"else {{ [ ! -f {quoted_path} ] || mv {quoted_path} {rotated_path}; }} && "
+        f"printf %s '{encoded}' | base64 -d > {quoted_path} && {chmod}; fi"
+    )
+
+
 def _write_remote_file(
     agent_address: str,
     remote_path: str,
@@ -191,36 +221,13 @@ def _write_remote_file(
     *,
     mode: str | None,
     parent_cg: ConcurrencyGroup | None,
-    rotate_timestamp: str | None = None,
+    rotate_timestamp: str,
 ) -> None:
     """Write ``content`` to ``remote_path`` (relative to the agent work_dir) via mngr exec.
 
-    The content is base64-encoded so arbitrary bytes (newlines, quotes,
-    secrets) survive the shell round-trip intact. The base64 alphabet
-    contains no shell-significant characters, so single-quoting it is safe.
-
-    When ``rotate_timestamp`` is given, an existing file whose content differs
-    from the new content is first moved aside to ``<path>.<timestamp>`` so the
-    old configuration stays recoverable; an identical existing file is left in
-    place unrotated (idempotent re-injection must not accumulate copies).
+    See :func:`build_write_file_command` for what happens to an existing file.
     """
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    parent_dir = os.path.dirname(remote_path) or "."
-    quoted_path = shlex.quote(remote_path)
-    chmod_suffix = f" && chmod {mode} {quoted_path}" if mode is not None else ""
-    rotate_prefix = ""
-    if rotate_timestamp is not None:
-        new_sha = env_content_sha256(content)
-        rotated_path = shlex.quote(f"{remote_path}.{rotate_timestamp}")
-        rotate_prefix = (
-            f'if [ -f {quoted_path} ] && [ "$(sha256sum {quoted_path} | cut -d\' \' -f1)" != "{new_sha}" ]; '
-            f"then mv {quoted_path} {rotated_path}; fi && "
-        )
-    command_str = (
-        f"mkdir -p {shlex.quote(parent_dir)} && "
-        f"{rotate_prefix}"
-        f"printf %s '{encoded}' | base64 -d > {quoted_path}{chmod_suffix}"
-    )
+    command_str = build_write_file_command(remote_path, content, mode=mode, rotate_timestamp=rotate_timestamp)
     result = run_mngr_exec_on_agent(agent_address, command_str, parent_cg=parent_cg)
     if result.returncode != 0:
         raise BackupProvisioningError(

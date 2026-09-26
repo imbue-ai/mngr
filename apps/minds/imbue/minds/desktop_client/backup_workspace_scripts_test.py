@@ -949,6 +949,35 @@ def test_restore_script_rewinds_host_dir_in_place_and_takes_a_safety_snapshot(tm
 
 
 @pytest.mark.timeout(120)
+def test_restore_script_keeps_the_authorized_keys_no_snapshot_carries(tmp_path: Path) -> None:
+    # Backups exclude authorized_keys, and on remote workspaces root's home is
+    # the backup root, so its sshd reads the laptop's key from exactly here.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    (host / ".ssh").mkdir()
+    (host / ".ssh" / "known_hosts").write_text("example.com ssh-ed25519 AAAA\n")
+    restic_backup_a_file(str(restic_repo), _RESTIC_TEST_PASSWORD, host, is_tree_at_snapshot_root=True)
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+
+    authorized_keys = host / ".ssh" / "authorized_keys"
+    authorized_keys.write_text("ssh-ed25519 AAAA laptop-key\n")
+    (code / "extra.txt").write_text("added after the snapshot\n")
+
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id, subpath="/"),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    assert authorized_keys.read_text() == "ssh-ed25519 AAAA laptop-key\n"
+    assert not (code / "extra.txt").exists()
+
+
+@pytest.mark.timeout(120)
 def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(tmp_path: Path) -> None:
     # On btrfs providers the hourly backup snapshots the whole unified host
     # volume: the snapshot root carries volume-level `agents/` +
@@ -1244,6 +1273,10 @@ def test_restore_script_uses_a_preseeded_fallback_restic_when_path_restic_is_too
     assert payload["status"] == "ok", payload
     assert payload["restic_downloaded"] is False
     assert (code / "file.txt").read_text() == "version 1\n"
+    # The snapshot predates the fallback, yet the restore keeps it, so the
+    # restored-state snapshot can still run it.
+    assert (fallback_dir / "restic").exists()
+    assert payload["restored_snapshot_taken"] is True
 
 
 # Stopping the workspace's services is a side effect that creates a cleanup

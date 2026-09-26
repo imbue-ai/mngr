@@ -6,6 +6,10 @@ against a real agent; here we cover the pure helpers, repo/creds resolution,
 and the bucket idempotency branch with a canned cli.
 """
 
+import os
+import subprocess
+from pathlib import Path
+
 import pytest
 from pydantic import AnyUrl
 from pydantic import Field
@@ -19,6 +23,7 @@ from imbue.minds.desktop_client.backup_provisioning import _repository_url_for_b
 from imbue.minds.desktop_client.backup_provisioning import _resolve_repository_and_backend_env
 from imbue.minds.desktop_client.backup_provisioning import build_backup_exec_argv
 from imbue.minds.desktop_client.backup_provisioning import build_canonical_env_content
+from imbue.minds.desktop_client.backup_provisioning import build_write_file_command
 from imbue.minds.desktop_client.backup_provisioning import env_text_defines_restic_password
 from imbue.minds.desktop_client.backup_provisioning import generate_workspace_password
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
@@ -78,9 +83,6 @@ def _make_cli(*, create_error_stderr: str | None = None) -> _FakeImbueCloudCli:
     )
 
 
-# --- env_text_defines_restic_password ---
-
-
 def test_env_text_defines_restic_password_detects_plain_and_export() -> None:
     assert env_text_defines_restic_password("RESTIC_PASSWORD=x\n") is True
     assert env_text_defines_restic_password("export RESTIC_PASSWORD=x\n") is True
@@ -91,17 +93,11 @@ def test_env_text_defines_restic_password_ignores_comment_and_absence() -> None:
     assert env_text_defines_restic_password("AWS_ACCESS_KEY_ID=k\n") is False
 
 
-# --- generate_workspace_password ---
-
-
 def test_generate_workspace_password_is_long_and_unique() -> None:
     first = generate_workspace_password()
     second = generate_workspace_password()
     assert len(first) >= 32
     assert first != second
-
-
-# --- build_canonical_env_content ---
 
 
 def test_build_canonical_env_content_round_trips() -> None:
@@ -117,14 +113,33 @@ def test_build_canonical_env_content_round_trips() -> None:
     assert parsed["RESTIC_PASSWORD"] == "rndpw"
 
 
-# --- _repository_url_for_bucket ---
+def _run_write_file_command(cwd: Path, content: str, rotate_timestamp: str) -> None:
+    command = build_write_file_command(
+        "data/.secrets/restic.env", content, mode="600", rotate_timestamp=rotate_timestamp
+    )
+    subprocess.run(["sh", "-c", command], cwd=cwd, check=True, timeout=30)
+
+
+def test_write_file_command_leaves_an_identical_file_untouched_and_rotates_a_different_one(tmp_path: Path) -> None:
+    env_path = tmp_path / "data" / ".secrets" / "restic.env"
+    _run_write_file_command(tmp_path, "RESTIC_PASSWORD=one\n", "20260925T000000Z")
+    assert env_path.read_text() == "RESTIC_PASSWORD=one\n"
+    assert oct(env_path.stat().st_mode & 0o777) == "0o600"
+    os.utime(env_path, (1_000_000_000, 1_000_000_000))
+    env_path.chmod(0o644)
+
+    _run_write_file_command(tmp_path, "RESTIC_PASSWORD=one\n", "20260925T000001Z")
+    assert env_path.stat().st_mtime == 1_000_000_000
+    assert oct(env_path.stat().st_mode & 0o777) == "0o600"
+    assert sorted(path.name for path in env_path.parent.iterdir()) == ["restic.env"]
+
+    _run_write_file_command(tmp_path, "RESTIC_PASSWORD=two\n", "20260925T000002Z")
+    assert env_path.read_text() == "RESTIC_PASSWORD=two\n"
+    assert (env_path.parent / "restic.env.20260925T000002Z").read_text() == "RESTIC_PASSWORD=one\n"
 
 
 def test_repository_url_strips_trailing_slash_and_points_at_bucket_root() -> None:
     assert _repository_url_for_bucket(_ENDPOINT + "/", "u--host-1") == f"s3:{_ENDPOINT}/u--host-1"
-
-
-# --- _is_bucket_already_exists_error ---
 
 
 def test_is_bucket_already_exists_error_matches_structured_and_prose() -> None:
@@ -136,9 +151,6 @@ def test_is_bucket_already_exists_error_matches_structured_and_prose() -> None:
     other = ImbueCloudCliError("internal error")
     other.stderr = '{"error": "boom"}'
     assert _is_bucket_already_exists_error(other) is False
-
-
-# --- _create_or_reuse_bucket ---
 
 
 def test_create_or_reuse_creates_a_fresh_bucket() -> None:
@@ -163,9 +175,6 @@ def test_create_or_reuse_propagates_non_exists_errors() -> None:
     cli = _make_cli(create_error_stderr='{"error": "internal error"}')
     with pytest.raises(ImbueCloudCliError):
         _create_or_reuse_bucket(cli, "a@b.com", "host-abc", None)
-
-
-# --- _resolve_repository_and_backend_env ---
 
 
 def test_resolve_imbue_cloud_builds_repo_and_creds() -> None:
@@ -225,9 +234,6 @@ def test_backup_exec_argv_never_starts_a_stopped_host() -> None:
     argv = build_backup_exec_argv(AgentId.generate(), "echo hi")
     assert argv[1] == "exec"
     assert "--no-start" in argv
-
-
-# --- quota-pressure eviction ---
 
 
 class _QuotaThenSuccessCli(_FakeImbueCloudCli):
