@@ -5,12 +5,12 @@
 // unit-tested under plain node (see ../test/unit/context-menu.test.js); main.js
 // turns the descriptor list this returns into a real Menu and pops it up.
 //
-// The chat input -- and every other editable field -- lives inside web content
-// main loads: the Mithril SPA, and for the workspace surface a sandboxed
-// iframe. Building the menu here from Chromium's own edit flags, rather than
-// per-framework, is what makes Cut/Copy/Paste/Select All work in the chat box
-// no matter which frame renders it, and Copy work on any selected text (e.g.
-// the chat transcript) even where nothing is editable.
+// The chrome page's own editable fields (the create form, the help page's report
+// form) live in the main frame, and building the menu here from Chromium's edit
+// flags is what gives them Cut/Copy/Paste/Select All without a per-framework menu.
+// The workspace surface is a sandboxed iframe whose pages draw their own
+// element menu (the template's element-reference-menu plan), so an event from
+// any frame but the main one pops nothing here.
 
 /**
  * The context-menu item descriptors for a right-click, from the Chromium
@@ -61,6 +61,22 @@ function buildContextMenuTemplate(params) {
 }
 
 /**
+ * Whether a `context-menu` event came from a frame other than the window's main
+ * frame (the workspace iframe; see the header for why it pops nothing).
+ * Chromium names the frame in `params.frame`; an event that names no frame
+ * counts as the main frame's, so the chrome's own fields keep their menu.
+ *
+ * @param {object} params  Electron 'context-menu' event params.
+ * @param {{mainFrame?: object}} wc  The webContents the event fired on.
+ * @returns {boolean}
+ */
+function isSubframeEvent(params, wc) {
+  const frame = params && params.frame;
+  if (!frame || !wc || !wc.mainFrame) return false;
+  return frame !== wc.mainFrame;
+}
+
+/**
  * Wire the right-click (context) menu onto a window's web contents: on each
  * `context-menu` event, build the item list with {@link buildContextMenuTemplate}
  * and, when it is non-empty, pop a native menu over the window.
@@ -68,9 +84,8 @@ function buildContextMenuTemplate(params) {
  * `Menu` is injected rather than imported so this module stays free of any
  * `electron` import and remains unit-testable under plain node -- main.js passes
  * electron's real `Menu` (see createBundle); the unit test passes a fake that
- * records `buildFromTemplate` / `popup`. Handling this at the Electron level
- * covers the chat input no matter which frame -- the SPA or the sandboxed
- * workspace iframe -- renders it.
+ * records `buildFromTemplate` / `popup`. An event from any frame but the main
+ * one pops nothing (see {@link isSubframeEvent}).
  *
  * @param {{isDestroyed: () => boolean}} win  The BrowserWindow the menu pops over.
  * @param {{on: Function, isDestroyed: () => boolean}} wc  `win`'s webContents.
@@ -79,10 +94,11 @@ function buildContextMenuTemplate(params) {
 function registerContextMenuFor(win, wc, Menu) {
   wc.on('context-menu', (_event, params) => {
     if (win.isDestroyed() || wc.isDestroyed()) return;
+    if (isSubframeEvent(params, wc)) return;
     const template = buildContextMenuTemplate(params);
     if (template.length === 0) return;
     Menu.buildFromTemplate(template).popup({ window: win });
   });
 }
 
-module.exports = { buildContextMenuTemplate, registerContextMenuFor };
+module.exports = { buildContextMenuTemplate, isSubframeEvent, registerContextMenuFor };

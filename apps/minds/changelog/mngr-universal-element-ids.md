@@ -1,0 +1,1 @@
+The desktop app's native right-click menu (Cut, Copy, Paste, Select All over the chrome's own fields) no longer pops for a right-click inside the workspace frame: workspace pages draw their own element context menu (the default-workspace-template's element-reference-menu plan), which the native one would otherwise cover. The chrome page's own fields keep the native menu.

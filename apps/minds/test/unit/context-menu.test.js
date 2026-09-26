@@ -10,7 +10,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildContextMenuTemplate, registerContextMenuFor } = require('../../electron/context-menu');
+const { buildContextMenuTemplate, isSubframeEvent, registerContextMenuFor } = require('../../electron/context-menu');
 
 test('editable + selection + clipboard: Cut/Copy/Paste/Select All all enabled', () => {
   assert.deepEqual(
@@ -109,7 +109,7 @@ test('robustness: missing params and editFlags are handled without throwing', ()
 // Electron. The real Electron round trip (native popup + clipboard) is covered
 // by test/e2e/context-menu.spec.js.
 
-function makeContextMenuHarness({ winDestroyed = false, wcDestroyed = false } = {}) {
+function makeContextMenuHarness({ winDestroyed = false, wcDestroyed = false, mainFrame = undefined } = {}) {
   let handler = null;
   const calls = { built: [], popped: [] };
   const wc = {
@@ -117,6 +117,7 @@ function makeContextMenuHarness({ winDestroyed = false, wcDestroyed = false } = 
       if (event === 'context-menu') handler = fn;
     },
     isDestroyed: () => wcDestroyed,
+    mainFrame,
   };
   const win = { isDestroyed: () => winDestroyed };
   const Menu = {
@@ -168,4 +169,27 @@ test('registerContextMenuFor: a destroyed window or webContents is a no-op', () 
   deadWc.fire(editableParams);
   assert.equal(deadWc.calls.built.length, 0);
   assert.equal(deadWc.calls.popped.length, 0);
+});
+
+test('registerContextMenuFor: an event from the workspace iframe pops nothing, the main frame keeps its menu', () => {
+  const mainFrame = { id: 'main' };
+  const workspaceFrame = { id: 'workspace' };
+  const h = makeContextMenuHarness({ mainFrame });
+  const editableParams = { isEditable: true, editFlags: { canPaste: true } };
+  h.fire({ ...editableParams, frame: workspaceFrame });
+  assert.equal(h.calls.popped.length, 0);
+  h.fire({ ...editableParams, frame: mainFrame });
+  assert.equal(h.calls.popped.length, 1);
+  // Params that name no frame (a fake, an older shape) are the main frame's.
+  h.fire(editableParams);
+  assert.equal(h.calls.popped.length, 2);
+});
+
+test('isSubframeEvent: only a named frame other than the main one counts', () => {
+  const mainFrame = { id: 'main' };
+  assert.equal(isSubframeEvent({ frame: { id: 'other' } }, { mainFrame }), true);
+  assert.equal(isSubframeEvent({ frame: mainFrame }, { mainFrame }), false);
+  assert.equal(isSubframeEvent({}, { mainFrame }), false);
+  assert.equal(isSubframeEvent({ frame: { id: 'other' } }, {}), false);
+  assert.equal(isSubframeEvent(undefined, undefined), false);
 });
