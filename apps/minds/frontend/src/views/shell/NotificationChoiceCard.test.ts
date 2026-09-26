@@ -28,7 +28,7 @@ describe("notification choice card", () => {
       ["Both", "both"],
       ["In-app cards", "cards"],
       ["System notifications", "os"],
-      ["Only the bell", null],
+      ["Disable notifications", null],
     ]) {
       const control = controls.find((vnode) =>
         allText(vnode.children).includes(label!),

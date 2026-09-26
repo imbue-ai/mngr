@@ -9,7 +9,7 @@ const CHOICES: { label: string; style: NotificationStyle | null }[] = [
   { label: "Both", style: "both" },
   { label: "In-app cards", style: "cards" },
   { label: "System notifications", style: "os" },
-  { label: "Only the bell", style: null },
+  { label: "Disable notifications", style: null },
 ];
 
 /** A standing choice after the first notification; leaves the workspace usable. */

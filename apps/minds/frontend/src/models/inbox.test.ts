@@ -107,14 +107,14 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
     {
       value: "bob@x",
       label: "bob@x",
-      hint: "not connected yet -- asks you for credentials",
+      hint: "needs credentials",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
     },
     {
       value: ":new-account",
       label: "+ Add account",
-      hint: "asks you for credentials",
+      hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: true,
     },

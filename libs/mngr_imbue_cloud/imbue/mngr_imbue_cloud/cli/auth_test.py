@@ -94,8 +94,28 @@ def test_callback_handler_ignores_query_params_on_wrong_path(
     assert box.get() is None
 
 
+def _get_body(port: int, path: str) -> str:
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5.0) as resp:
+        return resp.read().decode("utf-8")
+
+
+def test_callback_handler_serves_the_verification_reminder_for_an_unverified_email(
+    running_callback_server: tuple[_CallbackCaptureBox, int],
+) -> None:
+    """A callback flagged verified=0 renders the reminder; the plain page otherwise."""
+    _box, port = running_callback_server
+    reminder = _get_body(port, "/callback?code=abc123&state=xyz&email=alice%40example.com&verified=0")
+    assert "Click the email verification link" in reminder
+    assert "You must verify your address: alice@example.com" in reminder
+    assert "Check your spam folder" in reminder
+
+    plain = _get_body(port, "/callback?code=abc123&state=xyz&email=alice%40example.com&verified=1")
+    assert "Click the email verification link" not in plain
+    assert "You are signed in" in plain
+
+
 def test_success_page_without_redirect_says_return_to_terminal() -> None:
-    page = _login_success_page(None).decode("utf-8")
+    page = _login_success_page(None, None).decode("utf-8")
     assert "return to your terminal" in page
     assert "<script>" not in page
 
@@ -104,17 +124,33 @@ def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> No
     # Deliberately a plain link, not an automatic navigation: the click is the
     # user gesture that triggers the browser's open-external-app prompt. The
     # app-driven variant carries the minds wordmark and copy.
-    page = _login_success_page("minds://").decode("utf-8")
+    page = _login_success_page("minds://", None).decode("utf-8")
     assert '<a href="minds://">Open app</a>' in page
     assert "<svg" in page and 'fill="currentColor"' in page
     assert "Feel free to close this tab." in page
     assert "<script>" not in page
 
 
+def test_success_page_with_unverified_email_leads_with_the_verification_reminder() -> None:
+    page = _login_success_page("minds://", "alice@example.com").decode("utf-8")
+    assert '<h1 class="verify">Click the email verification link</h1>' in page
+    assert "You must verify your address: alice@example.com" in page
+    assert "Check your spam folder" in page
+    assert "Feel free to close this tab." not in page
+    # The app link stays: the reminder replaces the welcome, not the way back.
+    assert '<a href="minds://">Open app</a>' in page
+
+
+def test_success_page_escapes_the_unverified_email() -> None:
+    page = _login_success_page(None, "<b>bold</b>@example.com").decode("utf-8")
+    assert "<b>" not in page
+    assert "&lt;b&gt;bold&lt;/b&gt;@example.com" in page
+
+
 def test_success_page_escapes_redirect_url_markup() -> None:
     """A crafted URL must not be able to inject markup into the page: the
     href is attribute-escaped."""
-    page = _login_success_page('minds://x?a=<b>&q="hi"').decode("utf-8")
+    page = _login_success_page('minds://x?a=<b>&q="hi"', None).decode("utf-8")
     assert "<b>" not in page
     assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;"' in page
 

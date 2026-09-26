@@ -328,11 +328,12 @@ def _build_account_choices(
     Every account currently signed in to the service is offered, plus the
     always-available "new account" choice.
 
-    ``is_browser_auth_supported`` shapes every hint and
-    ``is_account_name_needed``: picking an account with no usable credentials
-    either opens a browser sign-in or fills in the dialog's credential form
-    (see :meth:`LatchkeyPermissionGrantHandler._establish_manual_credentials`),
-    and no hint may promise the wrong one.
+    ``is_browser_auth_supported`` shapes the hint on an account with no usable
+    credentials and ``is_account_name_needed``: picking such an account either
+    opens a browser sign-in or fills in the dialog's credential form (see
+    :meth:`LatchkeyPermissionGrantHandler._establish_manual_credentials`), and
+    the hint may not promise the wrong one. The new-account choice carries no
+    hint: the approve button already says when it will sign in.
 
     An agent may name an account that is *not* signed in -- a typo, an account
     the user has on the service but never connected here, or one whose
@@ -347,10 +348,8 @@ def _build_account_choices(
     The preselection is otherwise the first signed-in account, or the
     new-account choice when nothing is signed in.
     """
-    # What picking an unusable account leads to. A service with no browser flow
-    # asks for credentials in the dialog, so nothing may say "sign in" -- not
-    # for a new account, and not for a stored one whose credentials went bad.
-    connect_hint = "opens a browser sign-in" if is_browser_auth_supported else "asks you for credentials"
+    # What an account with no usable credentials needs. A service with no browser
+    # flow asks for credentials in the dialog, so its hint may not say "sign in".
     needs_setup_hint = "needs sign-in" if is_browser_auth_supported else "needs credentials"
     ordered = _sorted_accounts(accounts)
     choices = [
@@ -369,7 +368,7 @@ def _build_account_choices(
             PermissionAccountChoice(
                 value=requested_account,
                 label=_account_label(requested_account),
-                hint=f"not connected yet — {connect_hint}",
+                hint=needs_setup_hint,
                 is_credential_setup_needed=True,
                 is_account_name_needed=False,
             )
@@ -381,7 +380,7 @@ def _build_account_choices(
             # when signing in is what actually happens. Otherwise this is the
             # trailing "+ Add account" entry of the dialog's account dropdown.
             label=_first_connection_label(is_browser_auth_supported) if len(choices) == 0 else "+ Add account",
-            hint=connect_hint,
+            hint="",
             is_credential_setup_needed=True,
             # Latchkey names an account from the sign-in; a manual connection
             # cannot, so the user names it -- except for a service's first

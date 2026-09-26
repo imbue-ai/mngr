@@ -1504,7 +1504,7 @@ def test_detail_payload_offers_a_requested_account_that_is_not_connected(tmp_pat
     assert "bob@x" in account_values
     assert payload.selected_account_value == "bob@x"
     bob_choice = next(choice for choice in payload.account_choices if choice.value == "bob@x")
-    assert "not connected yet" in bob_choice.hint
+    assert bob_choice.hint == "needs sign-in"
     # Approving will therefore open a browser rather than granting silently.
     assert payload.will_open_browser is True
 
@@ -1559,7 +1559,7 @@ def test_build_account_choices_keeps_a_single_sign_in_option_when_nothing_is_con
     choices, selected = _build_account_choices((), None, is_browser_auth_supported=True)
 
     assert [(choice.value, choice.label) for choice in choices] == [(NEW_ACCOUNT_FORM_VALUE, "Sign in")]
-    assert choices[0].hint == "opens a browser sign-in"
+    assert choices[0].hint == ""
     assert selected == NEW_ACCOUNT_FORM_VALUE
 
 
@@ -1573,8 +1573,8 @@ def test_build_account_choices_promises_a_credential_form_without_browser_auth()
     choices, _ = _build_account_choices((), "alice@x", is_browser_auth_supported=False)
 
     assert [(choice.value, choice.label, choice.hint) for choice in choices] == [
-        ("alice@x", "alice@x", "not connected yet — asks you for credentials"),
-        (NEW_ACCOUNT_FORM_VALUE, "+ Add account", "asks you for credentials"),
+        ("alice@x", "alice@x", "needs credentials"),
+        (NEW_ACCOUNT_FORM_VALUE, "+ Add account", ""),
     ]
 
 

@@ -83,8 +83,7 @@ function hasNoAccount(detail: Detail): boolean {
  * Neither counts for a service latchkey cannot sign in to at all (AWS, Coolify),
  * which connects by the credentials the dialog asks for -- `manual_credentials`
  * is non-null exactly then. Saying "Sign in" there would contradict the form
- * right below the button and the "(asks you for credentials)" hint the server
- * deliberately words the other way. `will_open_browser` cannot stand in: it is
+ * right below the button. `will_open_browser` cannot stand in: it is
  * computed for the account the payload was built with, so it does not move as
  * the user works the dropdown. */
 function willSignIn(model: InboxModel, detail: Detail): boolean {
@@ -111,8 +110,7 @@ function accountPicker(model: InboxModel, detail: Detail): m.Children {
         },
       },
       // Server order, so the new-account sentinel is naturally last. An
-      // <option> carries one text style, so a hint rides in parentheses --
-      // one of them already contains an em dash of its own.
+      // <option> carries one text style, so a hint rides in parentheses.
       detail.account_choices.map((choice) =>
         m(
           "option",

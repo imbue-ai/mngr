@@ -453,8 +453,11 @@ _LOGIN_SUCCESS_PAGE_STYLE = (
     "background:#faf8f2;color:#000}"
     "main{padding:2rem;max-width:26rem}"
     "h1{font-size:1.6rem;font-weight:600;margin:0 0 0.6rem}"
+    "h1.verify{font-size:2.6rem;line-height:1.1;margin:1.5rem 0 1rem}"
     "p{margin:0;font-size:1rem;line-height:1.25}"
     ".message{margin:1.75rem 0 1.25rem}"
+    ".verify-detail{margin:0 0 0.5rem}"
+    ".verify-detail+.verify-detail{margin-bottom:1.5rem}"
     "a{color:inherit}"
     "@media (prefers-color-scheme:dark){body{background:#1a170a;color:#fff}}"
 )
@@ -472,7 +475,23 @@ _MINDS_WORDMARK_SVG = (
 )
 
 
-def _login_success_page(success_redirect_url: str | None) -> bytes:
+def _verification_reminder_html(unverified_email: str) -> str:
+    """The page body for an account whose email is still unverified.
+
+    A password sign-up counts as signed in right away, but the actions that
+    matter (creating a remote workspace, opening a shared one) require the
+    link in the verification email, so this is the one moment to say so
+    loudly. The heading is deliberately oversized.
+    """
+    email_html = html.escape(unverified_email)
+    return (
+        '<h1 class="verify">Click the email verification link</h1>'
+        f'<p class="verify-detail">You must verify your address: {email_html}</p>'
+        '<p class="verify-detail">Check your spam folder</p>'
+    )
+
+
+def _login_success_page(success_redirect_url: str | None, unverified_email: str | None) -> bytes:
     """Build the HTML the callback listener serves to the browser.
 
     With a redirect URL, the page offers a link to it -- the minds desktop
@@ -482,16 +501,23 @@ def _login_success_page(success_redirect_url: str | None) -> bytes:
     automatic navigation: the click is a user gesture, so browsers show
     their open-external-app prompt at a moment the user chose instead of
     unprompted on page load.
+
+    ``unverified_email`` is the signed-in address when the connector reported
+    it as not yet verified; the page then leads with the verification
+    reminder instead of the plain welcome.
     """
     if success_redirect_url is None:
-        body_html = "<h1>You are signed in</h1><p>You can close this tab and return to your terminal.</p>"
+        if unverified_email is None:
+            body_html = "<h1>You are signed in</h1><p>You can close this tab and return to your terminal.</p>"
+        else:
+            body_html = _verification_reminder_html(unverified_email) + "<p>Then return to your terminal.</p>"
     else:
         href = html.escape(success_redirect_url, quote=True)
-        body_html = (
-            _MINDS_WORDMARK_SVG
-            + '<p class="message">You\'re in! Feel free to close this tab.</p>'
-            + f'<p><a href="{href}">Open app</a></p>'
-        )
+        if unverified_email is None:
+            welcome_html = '<p class="message">You\'re in! Feel free to close this tab.</p>'
+        else:
+            welcome_html = _verification_reminder_html(unverified_email)
+        body_html = _MINDS_WORDMARK_SVG + welcome_html + f'<p><a href="{href}">Open app</a></p>'
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -499,6 +525,19 @@ def _login_success_page(success_redirect_url: str | None) -> bytes:
         f"<body><main>{body_html}</main></body></html>"
     )
     return page.encode("utf-8")
+
+
+def _unverified_email_from_callback(params: dict[str, str]) -> str | None:
+    """The signed-in address the connector flagged as unverified, or None.
+
+    The connector appends ``email`` and ``verified`` to the loopback redirect
+    beside ``code`` and ``state``; a connector that predates them sends
+    neither, which reads as nothing to remind about.
+    """
+    email = params.get("email", "")
+    if params.get("verified") == "0" and email:
+        return email
+    return None
 
 
 def _make_callback_handler_class(
@@ -509,7 +548,6 @@ def _make_callback_handler_class(
     Closing over the box lets the handler push state without us touching the
     HTTPServer instance's attributes (which would trip the no-getattr ratchet).
     """
-    body = _login_success_page(success_redirect_url)
 
     class _LoginCallbackHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
@@ -524,6 +562,7 @@ def _make_callback_handler_class(
             # at the same listener; those must not overwrite the captured params.
             if parsed.path == _LOGIN_CALLBACK_PATH and params:
                 box.set(params)
+            body = _login_success_page(success_redirect_url, _unverified_email_from_callback(params))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))

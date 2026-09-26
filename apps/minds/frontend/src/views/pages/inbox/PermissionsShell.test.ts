@@ -39,7 +39,7 @@ const MANUAL_DETAIL: PredefinedPermissionDetail = {
     {
       value: ":new-account",
       label: "Connect",
-      hint: "asks you for credentials",
+      hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
     },

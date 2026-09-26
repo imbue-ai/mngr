@@ -67,7 +67,7 @@ const DETAIL: PredefinedPermissionDetail = {
     {
       value: ":new-account",
       label: "+ Add account",
-      hint: "opens a browser sign-in",
+      hint: "",
       is_credential_setup_needed: true,
       is_account_name_needed: false,
     },
@@ -251,7 +251,7 @@ describe("PredefinedPermissionDetailView account states", () => {
     expect(collectVnodes(account).find((vnode) => vnode.tag === Select)).toBeDefined();
     expect(optionsOf(account)).toEqual([
       { value: "alice@x", label: "alice@x" },
-      { value: ":new-account", label: "+ Add account (opens a browser sign-in)" },
+      { value: ":new-account", label: "+ Add account" },
     ]);
   });
 
@@ -281,8 +281,7 @@ describe("PredefinedPermissionDetailView account states", () => {
   it("never promises a sign-in for a service that has none", () => {
     // AWS and the like connect by the credentials this dialog asks for, which
     // is exactly when the server sends manual_credentials. Saying "Sign in"
-    // would contradict the form under the button and the option's own
-    // "(asks you for credentials)" hint.
+    // would contradict the form under the button.
     const credentialsOnly: PredefinedPermissionDetail = {
       ...DETAIL,
       display_name: "AWS",
@@ -290,7 +289,7 @@ describe("PredefinedPermissionDetailView account states", () => {
       manual_credentials: { parameters: [{ name: "access-key-id", label: "Access key id" }], message: "" },
       account_choices: [
         ALICE,
-        { ...NEW_ACCOUNT, hint: "asks you for credentials", is_account_name_needed: true },
+        { ...NEW_ACCOUNT, is_account_name_needed: true },
       ],
     };
 
@@ -321,7 +320,7 @@ describe("PredefinedPermissionDetailView account picker", () => {
     expect(optionsOf(account)).toEqual([
       { value: "alice@x", label: "alice@x" },
       { value: "bob@x", label: "bob@x (needs sign-in)" },
-      { value: ":new-account", label: "+ Add account (opens a browser sign-in)" },
+      { value: ":new-account", label: "+ Add account" },
     ]);
   });
 
