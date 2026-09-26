@@ -15,8 +15,10 @@ from imbue.minds.desktop_client.share_materials_injection import MachineSharingL
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
+from imbue.minds.desktop_client.share_materials_injection import parse_share_gateway_status
 from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
+from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -251,6 +253,8 @@ def test_clear_share_materials_is_best_effort_and_no_start() -> None:
     assert "rm -f" in joined
     assert "--no-start" in joined
     assert "share_grants.toml" in joined
+    # The gateway's status file is removed alongside the secrets at unshare.
+    assert "data/.state/share_gateway/status.json" in joined
 
 
 def test_writes_use_a_unique_tmp_name_per_write() -> None:
@@ -409,3 +413,66 @@ def test_lock_registry_returns_one_lock_per_host() -> None:
 
     assert lock_a_first is lock_a_second
     assert lock_a_first is not lock_b
+
+
+def test_parse_share_gateway_status_reads_the_runner_document() -> None:
+    status = parse_share_gateway_status(
+        json.dumps(
+            {
+                "state": "retrying",
+                "workspace_domain": "abc.def.us1.example",
+                "failed_attempt_count": 3,
+                "last_error": "no relay assignment available yet",
+                "next_retry_at": "2026-09-13T12:01:00+00:00",
+                "updated_at": "2026-09-13T12:00:00+00:00",
+            }
+        )
+    )
+
+    assert status is not None
+    assert status.state == "retrying"
+    assert status.failed_attempt_count == 3
+    assert status.last_error == "no relay assignment available yet"
+    assert status.next_retry_at == "2026-09-13T12:01:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "   ",
+        "not json",
+        "[1, 2]",
+        '{"state": "up", "failed_attempt_count": "many"}',
+        '{"state": "exploded", "failed_attempt_count": 1}',
+        '{"failed_attempt_count": 1}',
+    ],
+)
+def test_parse_share_gateway_status_tolerates_garbage(raw: str) -> None:
+    assert parse_share_gateway_status(raw) is None
+
+
+def test_read_share_gateway_status_round_trips_through_the_workspace(tmp_path: Path) -> None:
+    caller = _ExecutingMngrCaller(work_dir=tmp_path)
+    assert read_share_gateway_status_from_agent(AgentId(), caller) is None
+
+    status_dir = tmp_path / "data" / ".state" / "share_gateway"
+    status_dir.mkdir(parents=True)
+    (status_dir / "status.json").write_text(
+        json.dumps(
+            {"state": "halted", "failed_attempt_count": 1, "last_error": "refused (400)", "next_retry_at": None}
+        )
+    )
+
+    status = read_share_gateway_status_from_agent(AgentId(), caller)
+
+    assert status is not None
+    assert status.state == "halted"
+    assert status.next_retry_at is None
+
+
+def test_read_share_gateway_status_is_none_on_exec_failure() -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
+
+    assert read_share_gateway_status_from_agent(AgentId(), caller) is None
+    assert caller.calls[0][-3:] == ["--no-start", "--format", "json"]

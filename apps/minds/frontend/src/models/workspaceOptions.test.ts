@@ -728,6 +728,79 @@ describe("ShareModel readiness polling", () => {
     expect(model.isAwaitingLink("system_interface")).toBe(false);
   });
 
+  it("surfaces a retrying gateway and keeps polling, then stops polling once the gateway halts", async () => {
+    const scheduled: (() => void)[] = [];
+    let probeCount = 0;
+    const readinessBodies = [
+      {
+        ready: false,
+        gateway_state: "retrying",
+        gateway_error:
+          "certificate provisioning failed: connector refused the CSR (503)",
+        gateway_failed_attempt_count: 2,
+        gateway_next_retry_at: "2026-09-13T12:01:00+00:00",
+      },
+      {
+        ready: false,
+        gateway_state: "halted",
+        gateway_error:
+          "certificate provisioning failed: connector refused the CSR (400)",
+        gateway_failed_attempt_count: 3,
+        gateway_next_retry_at: null,
+      },
+    ];
+    const { model } = makeShareModel(
+      (url, init) => {
+        if (url.endsWith("/readiness")) {
+          const body =
+            readinessBodies[Math.min(probeCount, readinessBodies.length - 1)];
+          probeCount += 1;
+          return { ok: true, status: 200, body };
+        }
+        if (init?.method === "PUT") {
+          const body = JSON.parse(init.body as string) as SharingGrantsDocument;
+          return {
+            ok: true,
+            status: 200,
+            body: sharingResponse({
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: body,
+            }),
+          };
+        }
+        return { ok: true, status: 200, body: sharingResponse() };
+      },
+      {
+        setTimer: (callback: () => void) => {
+          scheduled.push(callback);
+          return scheduled.length;
+        },
+      },
+    );
+    await model.load();
+    await model.enable("");
+
+    // First probe: retrying -> the error is shown and polling continues.
+    scheduled.shift()?.();
+    await settle();
+    expect(model.gatewayState).toBe("retrying");
+    expect(model.gatewayError).toContain("refused the CSR (503)");
+    expect(model.gatewayFailedAttemptCount).toBe(2);
+    expect(model.isProvisioningHalted).toBe(false);
+    expect(scheduled.length).toBe(1);
+
+    // Second probe: halted -> no further poll is scheduled, the link stays
+    // not-live so the notice keeps explaining why.
+    scheduled.shift()?.();
+    await settle();
+    expect(model.isProvisioningHalted).toBe(true);
+    expect(model.gatewayError).toContain("refused the CSR (400)");
+    expect(model.isLive).toBe(false);
+    expect(model.isAwaitingLink("system_interface")).toBe(true);
+    expect(scheduled.length).toBe(0);
+  });
+
   it("derives provisioning steps from cert issuance and a changed tunnel-login stamp", async () => {
     const scheduled: (() => void)[] = [];
     let probeCount = 0;

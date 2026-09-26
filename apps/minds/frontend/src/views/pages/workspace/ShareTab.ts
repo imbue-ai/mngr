@@ -348,13 +348,22 @@ function renderEditor(
         ? m(
             "div",
             { id: "ws-share-provisioning", class: "mt-3" },
-            m(Notice, { variant: "info" }, [
-              m(
-                "p",
-                "The link is not live yet -- setting it up usually takes under a minute:",
-              ),
-              renderProvisioningChecklist(share),
-            ]),
+            m(
+              Notice,
+              { variant: share.isProvisioningHalted ? "error" : "info" },
+              [
+                m(
+                  "p",
+                  share.isProvisioningHalted
+                    ? "Setting up the link failed."
+                    : "The link is not live yet -- setting it up usually takes under a minute:",
+                ),
+                share.isProvisioningHalted
+                  ? null
+                  : renderProvisioningChecklist(share),
+                renderGatewayTrouble(share),
+              ],
+            ),
           )
         : null,
       share.isAwaitingLabel(target) &&
@@ -424,6 +433,42 @@ function renderProvisioningChecklist(share: ShareModel): m.Children {
         ],
       ),
     ),
+  );
+}
+
+// What the workspace's own gateway reported about a bring-up that is not
+// going smoothly: a retry in progress (with the last error and when the next
+// attempt is due) or a permanent refusal that only a re-share can clear.
+function renderGatewayTrouble(share: ShareModel): m.Children {
+  // Gateway errors often end in their own period; do not add a second one.
+  const gatewayError = share.gatewayError?.replace(/\.\s*$/, "") ?? null;
+  if (share.isProvisioningHalted) {
+    return m("p", { id: "ws-share-gateway-trouble", class: "mt-2 type-body" }, [
+      gatewayError
+        ? `The workspace could not set up its certificate or tunnel: ${gatewayError}. `
+        : "The workspace could not set up its certificate or tunnel. ",
+      "Turn sharing off and on again to retry.",
+    ]);
+  }
+  if (share.gatewayState !== "retrying" || share.gatewayFailedAttemptCount < 1)
+    return null;
+  const nextRetry = share.gatewayNextRetryAt
+    ? new Date(share.gatewayNextRetryAt).toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : null;
+  return m(
+    "p",
+    { id: "ws-share-gateway-trouble", class: "mt-2 type-helper text-warning" },
+    [
+      gatewayError
+        ? `The last attempt failed: ${gatewayError}. `
+        : "The last attempt failed. ",
+      nextRetry
+        ? `The workspace retries at ${nextRetry}.`
+        : "The workspace will retry shortly.",
+    ],
   );
 }
 

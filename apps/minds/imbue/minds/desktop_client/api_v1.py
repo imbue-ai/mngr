@@ -152,6 +152,7 @@ from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
 from imbue.minds.desktop_client.sharing_handler import enable_sharing
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
+from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
@@ -2859,6 +2860,7 @@ def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response
                 # connector create can succeed before the injection fails), so
                 # the readiness poll must not keep serving a stale lookup.
                 state.active_share_cache.invalidate(host_id)
+                state.gateway_status_cache.invalidate(host_id)
     except EmptyGrantsError as exc:
         # A grants document naming nobody is a request-validation failure,
         # not an upstream fault. 400 rather than 422: spectree reserves 422
@@ -2888,6 +2890,7 @@ def _machine_sharing_delete_core(host_id: str) -> MachineSharingResponse | Respo
                 )
             finally:
                 state.active_share_cache.invalidate(host_id)
+                state.gateway_status_cache.invalidate(host_id)
     except SharingError as exc:
         return _json_error(str(exc), 502)
     return MachineSharingResponse(host_id=host_id, enabled=False)
@@ -2933,11 +2936,29 @@ def _machine_sharing_readiness_core(host_id: str) -> SharingReadinessResponse:
     is_ready = probe_host is not None and probe_share_readiness(http_client, probe_host)
     # The labels ride every poll so a Share tab opened before the workspace's
     # registrations reached this client learns them without re-fetching anything.
+    if is_ready:
+        return SharingReadinessResponse(
+            ready=True,
+            cert_not_after=share.cert_not_after,
+            last_tunnel_login_at=share.last_tunnel_login_at,
+            service_labels=service_labels,
+        )
+    # Not live yet: ask the workspace's own gateway how the bring-up is going,
+    # so a failing or halted provisioning is explained instead of spinning.
+    gateway_status = get_share_gateway_status_cached(
+        host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.gateway_status_cache
+    )
     return SharingReadinessResponse(
-        ready=is_ready,
+        ready=False,
         cert_not_after=share.cert_not_after,
         last_tunnel_login_at=share.last_tunnel_login_at,
         service_labels=service_labels,
+        gateway_state=gateway_status.state if gateway_status is not None else None,
+        gateway_error=(gateway_status.last_error or None) if gateway_status is not None else None,
+        gateway_failed_attempt_count=(
+            int(gateway_status.failed_attempt_count) if gateway_status is not None else None
+        ),
+        gateway_next_retry_at=gateway_status.next_retry_at if gateway_status is not None else None,
     )
 
 

@@ -59,7 +59,6 @@ from imbue.modal_proxy.errors import ModalProxyRemoteError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
-from imbue.modal_proxy.errors import is_environment_not_found_error
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
 from imbue.modal_proxy.interface import ExecProcess
@@ -179,18 +178,15 @@ def _is_transient_modal_error(e: BaseException) -> bool:
     Names Modal's own exception classes rather than the ModalProxy* ones: this
     runs inside the retry, which sits under ``_translate_exceptions``.
 
-    Environment-level not-found errors count -- they show up during
-    eventual-consistency races and network trouble. Path-level ones do not;
-    those are expected during normal operations.
+    A not-found answer is a verdict, not a blip: an environment that does not
+    exist stays missing for the whole budget, and the one case where it is
+    about to appear (a host create that just made it) is retried by the
+    caller that created it.
     """
-    if isinstance(
+    return isinstance(
         e,
         (modal.exception.InternalError, StreamTerminatedError, ProtocolError, modal.exception.ResourceExhaustedError),
-    ):
-        return True
-    if isinstance(e, modal.exception.NotFoundError) and is_environment_not_found_error(e):
-        return True
-    return False
+    )
 
 
 # How long Modal is allowed to keep failing a call before we stop waiting it

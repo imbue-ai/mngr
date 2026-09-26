@@ -26,11 +26,16 @@ from typing import Final
 from loguru import logger
 from pydantic import Field
 from pydantic import PrivateAttr
+from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.desktop_client.data_types import ShareGatewayState
+from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
 from imbue.minds.desktop_client.mngr_command import extract_exec_stdout
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.mngr_imbue_cloud.wire import WireModel
 
 _SHARE_ENV_FILE: Final[str] = "data/.secrets/share.env"
 _SHARE_GRANTS_FILE: Final[str] = "data/.secrets/share_grants.toml"
@@ -38,7 +43,16 @@ _SHARE_GRANTS_FILE: Final[str] = "data/.secrets/share_grants.toml"
 # invite upgrade uses fcntl.flock on the same path).
 _SHARE_GRANTS_LOCK_FILE: Final[str] = "data/.secrets/share_grants.toml.lock"
 
+# Where the workspace's share gateway reports how bringing the share stack up
+# is going (see the template's share_gateway/retry_state.py): read by the
+# readiness poll to explain a share that is not live yet.
+_SHARE_GATEWAY_STATUS_FILE: Final[str] = "data/.state/share_gateway/status.json"
+
 _SHARE_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
+
+# How long one gateway-status read is reused by the readiness poll (which
+# fires every ~2 seconds; each read is an exec into the workspace).
+_GATEWAY_STATUS_CACHE_TTL_SECONDS: Final[float] = 15.0
 
 
 class ShareInjectionError(RuntimeError):
@@ -292,10 +306,13 @@ def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> S
 
 
 def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller) -> None:
-    """Remove share.env + the grants file; the share-gateway tears the stack down.
+    """Remove share.env, the grants file, and the gateway's status file.
 
-    Best-effort: a failure leaves stale materials (the connector-side relay
-    token is already deleted, so the tunnel's next reconnect is rejected
+    The share-gateway tears the stack down when share.env disappears and
+    removes its own status file on its next tick; removing it here too keeps
+    a re-share that lands inside that tick from reading the old share's
+    verdict. Best-effort: a failure leaves stale materials (the connector-side
+    relay token is already deleted, so the tunnel's next reconnect is rejected
     anyway), which is logged but not fatal. ``--no-start``: clearing materials
     from a stopped container must not cold-boot anything.
     """
@@ -303,7 +320,7 @@ def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller
         [
             "exec",
             agent_address,
-            f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE}",
+            f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE} {_SHARE_GATEWAY_STATUS_FILE}",
             "--no-start",
         ],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
@@ -339,3 +356,69 @@ def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller) ->
     if grants_text is None:
         raise ShareInjectionError(f"Could not read share grants from agent {agent_address}: unrecognized exec output")
     return grants_text if grants_text.strip() else None
+
+
+class ShareGatewayStatus(WireModel):
+    """The share gateway's own account of bringing the stack up, from its status file.
+
+    A WireModel because the document also carries fields the poll does not
+    need (``workspace_domain``, ``updated_at``).
+    """
+
+    state: ShareGatewayState = Field(description="Up, retrying, or halted (permanent refusal; needs a re-share)")
+    failed_attempt_count: NonNegativeInt = Field(
+        default=NonNegativeInt(0), description="Consecutive failed bring-up attempts so far"
+    )
+    last_error: str = Field(default="", description="The most recent failure's message; '' when up")
+    next_retry_at: str | None = Field(
+        default=None, description="ISO timestamp of the next attempt; None when up or halted"
+    )
+
+
+def parse_share_gateway_status(status_json_text: str) -> ShareGatewayStatus | None:
+    """Parse the gateway's status document; None when it is malformed (logged) or empty."""
+    if not status_json_text.strip():
+        return None
+    try:
+        return ShareGatewayStatus.model_validate_json(status_json_text)
+    except ValidationError as exc:
+        logger.warning("Malformed share gateway status document: {}", exc)
+        return None
+
+
+def read_share_gateway_status_from_agent(agent_address: str, mngr_caller: MngrCaller) -> ShareGatewayStatus | None:
+    """Read the gateway's status file from the agent; None when absent, unreadable, or malformed.
+
+    Best-effort by design: the status only explains a share that is not live
+    yet, so a failed read (a stopped container, an older template with no
+    status file) degrades to "no explanation", never to an error.
+    """
+    result = mngr_caller.call(
+        [
+            "exec",
+            agent_address,
+            f"cat {_SHARE_GATEWAY_STATUS_FILE} 2>/dev/null || true",
+            "--no-start",
+            "--format",
+            "json",
+        ],
+        timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        logger.debug("Share gateway status read failed for agent {}: {}", agent_address, result.stderr.strip())
+        return None
+    status_text = extract_exec_stdout(result.stdout)
+    if status_text is None:
+        return None
+    return parse_share_gateway_status(status_text)
+
+
+class ShareGatewayStatusCache(HostKeyedTtlCache[ShareGatewayStatus | None]):
+    """Short-TTL cache of gateway-status reads for the readiness poll, keyed by host id.
+
+    A cached None is a hit meaning "the workspace reported nothing".
+    """
+
+    ttl_seconds: float = Field(
+        default=_GATEWAY_STATUS_CACHE_TTL_SECONDS, frozen=True, description="How long one read may be reused"
+    )

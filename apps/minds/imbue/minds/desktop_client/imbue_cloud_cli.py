@@ -16,7 +16,6 @@ parses those into typed pydantic objects.
 import json as _json
 import os
 import tempfile
-import threading
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -27,13 +26,13 @@ from typing import Final
 from loguru import logger
 from pydantic import AnyUrl
 from pydantic import Field
-from pydantic import PrivateAttr
 from pydantic import SecretStr
 from pydantic import TypeAdapter
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
@@ -297,20 +296,12 @@ class ShareCliInfo(WireModel):
 _ACTIVE_SHARE_CACHE_TTL_SECONDS: Final[float] = 20.0
 
 
-class CachedShareLookup(FrozenModel):
-    """One cached connector share lookup (``share`` is None for 'not actively shared')."""
-
-    share: ShareCliInfo | None = Field(description="The active share, or None when the host has no active share")
-
-
-class ActiveShareCache(MutableModel):
+class ActiveShareCache(HostKeyedTtlCache[ShareCliInfo | None]):
     """Short-TTL cache of connector share lookups, keyed by host id.
 
-    Serves the readiness poll: the poll needs the share's (immutable) domain
-    plus slow-moving progress stamps every ~2 seconds, and an uncached lookup
-    costs a multi-second CLI subprocess. Enable/disable invalidate their
-    host's entry so state flips are observed immediately rather than at TTL
-    expiry.
+    The readiness poll needs the share's (immutable) domain plus slow-moving
+    progress stamps, and an uncached lookup costs a multi-second CLI
+    subprocess. A cached None is a hit meaning "not actively shared".
     """
 
     ttl_seconds: float = Field(
@@ -318,31 +309,6 @@ class ActiveShareCache(MutableModel):
         frozen=True,
         description="How long one lookup may be reused",
     )
-    _lookup_and_deadline_by_host_id: dict[str, tuple[float, CachedShareLookup]] = PrivateAttr(default_factory=dict)
-    _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-
-    def get(self, host_id: str) -> CachedShareLookup | None:
-        """The unexpired cached lookup for ``host_id``, or None on a miss."""
-        with self._lock:
-            entry = self._lookup_and_deadline_by_host_id.get(host_id)
-            if entry is None:
-                return None
-            deadline, lookup = entry
-            if time.monotonic() >= deadline:
-                del self._lookup_and_deadline_by_host_id[host_id]
-                return None
-            return lookup
-
-    def put(self, host_id: str, share: ShareCliInfo | None) -> None:
-        with self._lock:
-            self._lookup_and_deadline_by_host_id[host_id] = (
-                time.monotonic() + self.ttl_seconds,
-                CachedShareLookup(share=share),
-            )
-
-    def invalidate(self, host_id: str) -> None:
-        with self._lock:
-            self._lookup_and_deadline_by_host_id.pop(host_id, None)
 
 
 class SyncRecordsPullResult(FrozenModel):

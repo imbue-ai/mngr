@@ -53,6 +53,21 @@ class CloudRowKeyState(LowerCaseStrEnum):
     UNAVAILABLE = auto()
 
 
+class ShareGatewayState(LowerCaseStrEnum):
+    """How the workspace's share gateway reports its bring-up (lowercase wire values).
+
+    Written by the template's share gateway to its status file and read by the
+    sharing readiness poll to explain a share that is not live yet.
+    """
+
+    # The share stack is up.
+    UP = auto()
+    # The last attempt failed and the next one is scheduled.
+    RETRYING = auto()
+    # The connector refused permanently; only a re-share tries again.
+    HALTED = auto()
+
+
 class RemoteWorkspaceTile(FrozenModel):
     """A workspace known only from a synced record (not in local discovery), for the landing list."""
 

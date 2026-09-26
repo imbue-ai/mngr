@@ -22,6 +22,7 @@ from pydantic import RootModel
 from pydantic import StrictBool
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.desktop_client.data_types import ShareGatewayState
 from imbue.minds.primitives import BackupProvider
 from imbue.minds.primitives import DockerRuntime
 from imbue.minds.primitives import LaunchMode
@@ -641,6 +642,23 @@ class SharingReadinessResponse(FrozenModel):
             "registrations (the share link of a target is https://<label>.<workspace_domain>/). A target "
             "absent here has no link yet; clients must show a pending state, never a bare-domain URL."
         ),
+    )
+    gateway_state: ShareGatewayState | None = Field(
+        default=None,
+        description=(
+            "The workspace share gateway's own bring-up state while the share is not live: up, "
+            "retrying (a failed attempt, next one scheduled), or halted (a permanent connector "
+            "refusal; disable and re-enable sharing to retry). None when ready or unknown."
+        ),
+    )
+    gateway_error: str | None = Field(
+        default=None, description="The gateway's most recent bring-up failure message, when it reported one"
+    )
+    gateway_failed_attempt_count: int | None = Field(
+        default=None, description="How many bring-up attempts in a row have failed, when the gateway reported it"
+    )
+    gateway_next_retry_at: str | None = Field(
+        default=None, description="ISO timestamp of the gateway's next bring-up attempt, when one is scheduled"
     )
 
 

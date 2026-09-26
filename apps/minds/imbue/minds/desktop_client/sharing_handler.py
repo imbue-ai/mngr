@@ -40,11 +40,14 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
+from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
 from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
+from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_grants_from_agent
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
@@ -769,7 +772,7 @@ def get_active_share_cached(
     """:func:`get_active_share` behind the short-TTL cache (the readiness poll's read path)."""
     cached = cache.get(host_id)
     if cached is not None:
-        return cached.share
+        return cached.value
     share = get_active_share(host_id, backend_resolver, cli, session_store)
     cache.put(host_id, share)
     return share
@@ -802,6 +805,34 @@ def get_active_share(
     if share is None or share.state != "active":
         return None
     return share
+
+
+def get_share_gateway_status_cached(
+    host_id: str,
+    backend_resolver: BackendResolverInterface,
+    cli: ImbueCloudCli | None,
+    session_store: MultiAccountSessionStore | None,
+    cache: ShareGatewayStatusCache,
+) -> ShareGatewayStatus | None:
+    """The workspace gateway's own bring-up status (why the share is not live yet), behind the short-TTL cache.
+
+    None when the machine cannot be resolved, the read fails, or the
+    workspace reports nothing -- the readiness poll then simply carries no
+    explanation.
+    """
+    cached = cache.get(host_id)
+    if cached is not None:
+        return cached.value
+    if cli is None:
+        return None
+    try:
+        agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+    except SharingError as exc:
+        logger.debug("Cannot read the share gateway status for {} yet: {}", host_id, exc)
+        return None
+    status = read_share_gateway_status_from_agent(build_agent_address(agent_id, backend_resolver), cli.mngr_caller)
+    cache.put(host_id, status)
+    return status
 
 
 def disable_sharing(

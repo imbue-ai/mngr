@@ -288,22 +288,16 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
         pytest.param(modal.exception.ResourceExhaustedError("rate limit"), True, id="resource_exhausted"),
         pytest.param(StreamTerminatedError("stream dropped"), True, id="stream_terminated"),
         pytest.param(ProtocolError("protocol error"), True, id="protocol_error"),
+        # A missing environment is a verdict, not a blip.
         pytest.param(
             modal.exception.NotFoundError("Environment 'mngr-abc123' not found"),
-            True,
+            False,
             id="environment_not_found",
         ),
         pytest.param(
             modal.exception.NotFoundError("File '/hosts/foo.json' not found"),
             False,
             id="path_not_found",
-        ),
-        # Regression: a path-level not-found whose path contains the substring "Environment"
-        # must not be misclassified as an environment-not-found error.
-        pytest.param(
-            modal.exception.NotFoundError("File '/Environment/foo.json' not found"),
-            False,
-            id="path_containing_environment_substring",
         ),
         pytest.param(modal.exception.AuthError("bad token"), False, id="auth_error"),
     ],
@@ -571,6 +565,17 @@ def test_get_tags_does_not_retry_a_semantic_modal_failure() -> None:
         sandbox.get_tags()
 
     assert fake.call_count == 1, "a semantic failure must not be retried"
+
+
+def test_get_tags_does_not_retry_a_missing_environment() -> None:
+    """An environment that does not exist stays missing; waiting out the budget only delays the verdict."""
+    fake = _FakeModalSandbox(error=modal.exception.NotFoundError("Environment 'mngr-abc123' not found"))
+    sandbox = DirectSandbox.model_construct(sandbox=fake)
+
+    with pytest.raises(ModalProxyNotFoundError):
+        sandbox.get_tags()
+
+    assert fake.call_count == 1, "a missing environment must not be retried"
 
 
 def test_transient_retry_gives_up_on_elapsed_time_not_attempt_count() -> None:

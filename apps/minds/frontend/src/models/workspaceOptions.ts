@@ -134,6 +134,11 @@ export interface SharingReadinessResponse {
   cert_not_after?: string | null;
   last_tunnel_login_at?: string | null;
   service_labels?: Record<string, string>;
+  /** The workspace gateway's own bring-up report while the link is not live. */
+  gateway_state?: string | null;
+  gateway_error?: string | null;
+  gateway_failed_attempt_count?: number | null;
+  gateway_next_retry_at?: string | null;
 }
 
 /** The options panel's tabs, in the order the tab strip shows them. */
@@ -244,6 +249,13 @@ export class ShareModel {
    * only when a fresh provisioning wait begins, see beginProvisioningWait). */
   isCertIssued = false;
   isTunnelConnected = false;
+  /** The workspace gateway's own account of the bring-up while the link is
+   * not live: "retrying" (a failed attempt, next one scheduled) or "halted"
+   * (a permanent refusal; only a re-share retries). null = nothing reported. */
+  gatewayState: "up" | "retrying" | "halted" | null = null;
+  gatewayError: string | null = null;
+  gatewayFailedAttemptCount = 0;
+  gatewayNextRetryAt: string | null = null;
   currentTarget: string;
   errorMessage: string | null = null;
   isRetryOffered = false;
@@ -746,6 +758,15 @@ export class ShareModel {
     this.isCertIssued = false;
     this.isTunnelConnected = false;
     this.tunnelLoginAtSnapshot = undefined;
+    this.gatewayState = null;
+    this.gatewayError = null;
+    this.gatewayFailedAttemptCount = 0;
+    this.gatewayNextRetryAt = null;
+  }
+
+  /** Whether the gateway gave up on this share (a re-share is the only retry). */
+  get isProvisioningHalted(): boolean {
+    return this.gatewayState === "halted";
   }
 
   /** Keep exactly one readiness poll running while the on-screen target awaits
@@ -795,6 +816,7 @@ export class ShareModel {
     if (body) {
       this.mergeServiceLabels(body.service_labels);
       if (body.cert_not_after != null) this.isCertIssued = true;
+      this.adoptGatewayStatus(body);
       const tunnelStamp = body.last_tunnel_login_at ?? null;
       if (this.tunnelLoginAtSnapshot === undefined) {
         this.tunnelLoginAtSnapshot = tunnelStamp;
@@ -813,8 +835,26 @@ export class ShareModel {
       return;
     }
     if (body?.ready === true) this.isLive = true;
+    if (this.isProvisioningHalted) {
+      // The gateway will not try again until the share is re-enabled, so
+      // polling would only repeat the same answer; the notice shows why.
+      this.stopReadinessPolling();
+      this.redraw();
+      return;
+    }
     this.redraw();
     this.scheduleReadinessProbe(target, this.nowMs() - this.pollStartedAtMs);
+  }
+
+  private adoptGatewayStatus(body: SharingReadinessResponse): void {
+    const state = body.gateway_state ?? null;
+    this.gatewayState =
+      state === "up" || state === "retrying" || state === "halted"
+        ? state
+        : null;
+    this.gatewayError = body.gateway_error ?? null;
+    this.gatewayFailedAttemptCount = body.gateway_failed_attempt_count ?? 0;
+    this.gatewayNextRetryAt = body.gateway_next_retry_at ?? null;
   }
 
   private markLive(): void {

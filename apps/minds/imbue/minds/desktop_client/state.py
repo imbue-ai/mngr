@@ -49,6 +49,7 @@ from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
+from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
@@ -293,6 +294,14 @@ class DesktopClientState(MutableModel):
         description=(
             "Keeps the forward's request-headers file (the X-Imbue-Identity contract) in step with "
             "which workspaces are shared; None when the app runs without a session store"
+        ),
+    )
+    gateway_status_cache: ShareGatewayStatusCache = Field(
+        default_factory=ShareGatewayStatusCache,
+        frozen=True,
+        description=(
+            "Short-TTL cache of in-workspace share gateway status reads for the sharing readiness poll "
+            "(invalidated by the sharing PUT/DELETE handlers)"
         ),
     )
 

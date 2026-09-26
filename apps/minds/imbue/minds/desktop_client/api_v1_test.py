@@ -2126,6 +2126,34 @@ def _recorded_mngr_calls(cli: FakeSharingCli) -> list[list[str]]:
     return caller.calls
 
 
+# The readiness response's gateway fields when the workspace reported nothing.
+_NO_GATEWAY_STATUS: dict[str, object] = {
+    "gateway_state": None,
+    "gateway_error": None,
+    "gateway_failed_attempt_count": None,
+    "gateway_next_retry_at": None,
+}
+
+
+class _GatewayStatusCaller(RecordingMngrCaller):
+    """Recording caller answering the readiness poll's gateway-status read with a canned document."""
+
+    status_json: str = Field(default="", description="The status.json content; '' plays the absent-file case")
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        if any("share_gateway/status.json" in part for part in argv):
+            envelope = {"results": [{"agent": argv[1], "stdout": self.status_json, "stderr": "", "success": True}]}
+            return MngrCallResult(returncode=0, stdout=json.dumps(envelope))
+        return result
+
+
 def _active_share(host_id: str = _TEST_HOST_ID) -> ShareCliInfo:
     return ShareCliInfo(
         host_id=host_id,
@@ -2547,6 +2575,7 @@ def test_machine_sharing_readiness_ready_when_shell_label_origin_answers(tmp_pat
         "cert_not_after": None,
         "last_tunnel_login_at": None,
         "service_labels": {"system_interface": "system_interface-shl1"},
+        **_NO_GATEWAY_STATUS,
     }
     # It probed the shell LABEL origin, never the bare machine domain.
     assert probed_hosts == [f"system_interface-shl1.{_active_share().workspace_domain}"]
@@ -2602,7 +2631,53 @@ def test_machine_sharing_readiness_not_ready_when_shell_label_unknown(tmp_path: 
         "cert_not_after": "2027-01-01 00:00:00+00:00",
         "last_tunnel_login_at": "2026-08-13 12:00:00+00:00",
         "service_labels": {},
+        **_NO_GATEWAY_STATUS,
     }
+
+
+def test_machine_sharing_readiness_reports_the_gateway_status_while_not_live(tmp_path: Path) -> None:
+    # The TLS probe fails (no route to the shared hostname), so the poll asks
+    # the workspace's gateway why -- and reuses that read across polls.
+    agent_id = AgentId()
+    status_json = json.dumps(
+        {
+            "state": "retrying",
+            "workspace_domain": _active_share().workspace_domain,
+            "failed_attempt_count": 2,
+            "last_error": "certificate provisioning failed: connector refused the CSR (503)",
+            "next_retry_at": "2026-09-13T12:01:00+00:00",
+            "updated_at": "2026-09-13T12:00:00+00:00",
+        }
+    )
+    caller = _GatewayStatusCaller(status_json=status_json)
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=caller)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route to host")
+
+    http_client = httpx.Client(transport=httpx.MockTransport(_handler))
+    client = _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        http_client=http_client,
+        service_logs={
+            str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+        },
+    )
+
+    first = json.loads(client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header()).data)
+    second = json.loads(client.get(f"/api/v1/machines/{_TEST_HOST_ID}/sharing/readiness", headers=_auth_header()).data)
+
+    assert first["ready"] is False
+    assert first["gateway_state"] == "retrying"
+    assert first["gateway_error"] == "certificate provisioning failed: connector refused the CSR (503)"
+    assert first["gateway_failed_attempt_count"] == 2
+    assert first["gateway_next_retry_at"] == "2026-09-13T12:01:00+00:00"
+    assert second == first
+    status_reads = [argv for argv in caller.calls if any("share_gateway/status.json" in part for part in argv)]
+    assert len(status_reads) == 1
+    assert status_reads[0][-3:] == ["--no-start", "--format", "json"]
 
 
 def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> None:
@@ -2617,6 +2692,7 @@ def test_machine_sharing_readiness_not_ready_when_disabled(tmp_path: Path) -> No
         "cert_not_after": None,
         "last_tunnel_login_at": None,
         "service_labels": {},
+        **_NO_GATEWAY_STATUS,
     }
 
 
@@ -2632,6 +2708,7 @@ def test_machine_sharing_readiness_not_ready_without_http_client(tmp_path: Path)
         "cert_not_after": None,
         "last_tunnel_login_at": None,
         "service_labels": {},
+        **_NO_GATEWAY_STATUS,
     }
 
 
