@@ -1,5 +1,6 @@
 """Tests for config loader."""
 
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,7 @@ from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.plugin_registry import _plugin_config_registry
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
+from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
@@ -56,6 +58,7 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.utils.logging import LoggingConfig
 from imbue.overlay.markers import ScalarTuple
@@ -86,9 +89,7 @@ def _isolate_load_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
 
 
-# =============================================================================
 # Tests for _parse_mngr_env_overrides / _collect_env_overrides
-# =============================================================================
 
 
 def test_parse_mngr_env_overrides_builds_nested_dict() -> None:
@@ -237,9 +238,7 @@ def test_collect_env_overrides_mngr_headless_falsy_values(value: str) -> None:
     assert raw["headless"] is False
 
 
-# =============================================================================
 # Tests for _parse_providers
-# =============================================================================
 
 
 def test_parse_providers_parses_valid_provider() -> None:
@@ -342,9 +341,7 @@ def test_parse_providers_still_raises_on_unknown_backend_when_is_enabled_unset()
         _parse_providers(raw, disabled_plugins=frozenset())
 
 
-# =============================================================================
 # Tests for _parse_agent_types
-# =============================================================================
 
 
 def test_parse_agent_types_parses_valid_agent() -> None:
@@ -563,9 +560,7 @@ def test_parse_agent_types_explicit_plugin_overrides_name() -> None:
     assert AgentTypeName("disabled-name") in result
 
 
-# =============================================================================
 # Tests for _parse_plugins
-# =============================================================================
 
 
 def test_parse_plugins_parses_valid_plugin() -> None:
@@ -600,9 +595,7 @@ def test_parse_plugins_warns_on_unknown_fields_when_not_strict(log_warnings: lis
     assert any("nonexistent_setting" in msg and "plugins.my-plugin" in msg for msg in log_warnings)
 
 
-# =============================================================================
 # Tests for _apply_plugin_overrides
-# =============================================================================
 
 
 def test_apply_plugin_overrides_enables_plugins() -> None:
@@ -658,9 +651,7 @@ def test_apply_plugin_overrides_creates_disabled_plugin() -> None:
     assert "new-plugin" in disabled
 
 
-# =============================================================================
 # Tests for _parse_logging_config
-# =============================================================================
 
 
 def test_parse_logging_config_parses_valid_config() -> None:
@@ -695,9 +686,7 @@ def test_parse_logging_config_warns_on_unknown_fields_when_not_strict(log_warnin
     assert any("unknown_log_option" in msg for msg in log_warnings)
 
 
-# =============================================================================
 # Tests for _parse_tmux_config
-# =============================================================================
 
 
 def test_parse_tmux_config_marks_string_attach_args_as_scalar_tuple() -> None:
@@ -732,9 +721,7 @@ def test_list_attach_args_replacement_is_flagged_as_narrowing() -> None:
     assert narrowings == ["tmux.attach_args"]
 
 
-# =============================================================================
 # Tests for _parse_commands
-# =============================================================================
 
 
 def test_parse_commands_parses_valid_commands() -> None:
@@ -752,9 +739,7 @@ def test_parse_commands_handles_empty_dict() -> None:
     assert result == {}
 
 
-# =============================================================================
 # Tests for _parse_create_templates
-# =============================================================================
 
 
 def test_parse_create_templates_parses_valid_templates() -> None:
@@ -816,9 +801,7 @@ def test_parse_create_templates_defers_non_option_keys_instead_of_rejecting_them
     }
 
 
-# =============================================================================
 # Tests for parse_config
-# =============================================================================
 
 
 def test_parse_config_parses_full_config() -> None:
@@ -1163,9 +1146,7 @@ def test_parse_providers_accepts_destroyed_host_persisted_seconds() -> None:
     assert provider_config.destroyed_host_persisted_seconds == 172800.0
 
 
-# =============================================================================
 # Tests for on_load_config hook
-# =============================================================================
 
 
 def test_on_load_config_hook_is_called(
@@ -1266,9 +1247,7 @@ def test_on_load_config_hook_can_add_new_fields(
     assert mngr_ctx.config.agent_types[AgentTypeName("custom-agent")].cli_args == ("--custom",)
 
 
-# =============================================================================
 # Tests for get_or_create_profile_dir
-# =============================================================================
 
 
 def test_get_or_create_profile_dir_creates_new_profile_when_no_config(tmp_path: Path) -> None:
@@ -1370,9 +1349,7 @@ def test_get_or_create_profile_dir_returns_same_profile_on_subsequent_calls(tmp_
     assert result1 == result2
 
 
-# =============================================================================
 # Tests for _get_or_create_user_id
-# =============================================================================
 
 
 def test_get_or_create_user_id_creates_new_id_when_file_missing(tmp_path: Path) -> None:
@@ -1433,9 +1410,7 @@ def test_get_or_create_user_id_returns_same_id_on_subsequent_calls(tmp_path: Pat
     assert result1 == result2
 
 
-# =============================================================================
 # Tests for MNGR_ALLOW_UNKNOWN_CONFIG via load_config
-# =============================================================================
 
 
 def test_load_config_rejects_unknown_fields_by_default(
@@ -1488,9 +1463,7 @@ def test_load_config_allows_unknown_fields_with_env_var(
     assert any("future_field" in msg for msg in log_warnings)
 
 
-# =============================================================================
 # Tests for default_destroyed_host_persisted_seconds via load_config
-# =============================================================================
 
 
 def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_toml(
@@ -1518,9 +1491,7 @@ def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_tom
     assert mngr_ctx.config.default_destroyed_host_persisted_seconds == 86400.0
 
 
-# =============================================================================
 # Tests for _parse_commands with default_subcommand
-# =============================================================================
 
 
 def test_parse_commands_extracts_default_subcommand() -> None:
@@ -1548,9 +1519,7 @@ def test_parse_commands_empty_string_default_subcommand() -> None:
     assert result["mngr"].default_subcommand == ""
 
 
-# =============================================================================
 # Tests for block_disabled_plugins
-# =============================================================================
 
 
 def test_block_disabled_plugins_blocks_names_in_plugin_manager() -> None:
@@ -1576,9 +1545,7 @@ def test_block_disabled_plugins_is_idempotent() -> None:
     assert pm.is_blocked("modal")
 
 
-# =============================================================================
 # Tests for _normalize_tuple_fields_for_construct
-# =============================================================================
 
 
 def test_normalize_cli_args_no_cli_args_key() -> None:
@@ -1667,9 +1634,7 @@ def test_normalize_tuple_fields_wraps_string_in_tuple() -> None:
     assert result["env"] == ("FOO=1",)
 
 
-# =============================================================================
 # Tests for _parse_mngr_env_overrides edge cases
-# =============================================================================
 
 
 def test_parse_mngr_env_overrides_skips_bare_prefix() -> None:
@@ -1684,9 +1649,7 @@ def test_parse_mngr_env_overrides_skips_old_command_form() -> None:
     assert _parse_mngr_env_overrides(environ) == {}
 
 
-# =============================================================================
 # Tests for load_config pytest guard
-# =============================================================================
 
 
 def test_load_config_raises_when_in_pytest_and_not_allowed(
@@ -1823,9 +1786,7 @@ def test_load_config_allows_pytest_when_no_config_file_loaded(
     load_config(pm=pm, concurrency_group=cg)
 
 
-# =============================================================================
 # Tests for load_config with env command overrides
-# =============================================================================
 
 
 def test_load_config_applies_mngr_env_overrides(
@@ -1937,9 +1898,7 @@ def test_load_config_mngr_headless_env_overrides_config_file(
     assert mngr_ctx.config.headless is False
 
 
-# =============================================================================
 # Tests for hyphen normalization in config field names
-# =============================================================================
 
 
 def test_parse_commands_normalizes_hyphens_to_underscores() -> None:
@@ -2000,9 +1959,7 @@ def test_parse_plugins_normalizes_hyphens() -> None:
         _plugin_config_registry.pop(PluginName("hyphen-test-plugin"), None)
 
 
-# =============================================================================
 # Tests for silent=True warning suppression (used by `mngr plugin add`)
-# =============================================================================
 
 
 def test_parse_providers_silent_does_not_warn_on_unknown_backend(log_warnings: list[str]) -> None:
@@ -2053,9 +2010,7 @@ def test_parse_config_silent_does_not_warn_on_unknown_top_level_field(log_warnin
     assert not any("future_top_level_field" in msg for msg in log_warnings), log_warnings
 
 
-# =============================================================================
 # Tests for _normalize_field_keys invariants (env-var path safety)
-# =============================================================================
 
 
 def test_parse_config_rejects_field_name_with_double_underscore() -> None:
@@ -2105,9 +2060,7 @@ def test_parse_config_rejects_sibling_lowercase_collision_within_block() -> None
         parse_config(raw, disabled_plugins=frozenset())
 
 
-# =============================================================================
 # Tests for the allow_settings_key_assignment_narrowing safety net
-# =============================================================================
 
 
 def _write_two_layer_narrowing_config(tmp_path: Path, allow_narrowing: bool | None) -> Path:
@@ -2246,7 +2199,7 @@ def test_load_config_local_command_defaults_add_to_the_projects(
     assert defaults["host_env"] == ["A=1"]
 
 
-# === load_config narrowing guard against agent_types / providers / create_templates ===
+# load_config narrowing guard against agent_types / providers / create_templates
 #
 # These layer-level integration tests verify the guard fires uniformly across all
 # of the container-dict mechanisms, not just commands.<cmd>.defaults. Each test
@@ -2426,7 +2379,6 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
     assert mngr_ctx.config.agent_types[AgentTypeName("my_claude")].cli_args == ("--baz",)
 
 
-# =============================================================================
 # Tests for cross-scope settings_overrides narrowing (the SettingsPatchField case).
 #
 # A ``SettingsPatchField`` (claude's ``settings_overrides``) accumulates across
@@ -2434,7 +2386,6 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
 # scope with a *bare* key nested inside the patch can still drop a non-empty aggregate a
 # lower scope set -- that is real narrowing. These tests verify the overlay merge
 # surfaces it through the loader's existing flag-gated aggregation.
-# =============================================================================
 
 
 # The claude agent type (``ClaudeAgentConfig``, with a ``SettingsPatchField``
@@ -2646,10 +2597,8 @@ def test_load_config_narrowing_attributes_dropped_from_for_suffixed_lower_key(
     assert "mngr config set --scope project" in message
 
 
-# =============================================================================
 # Tests for narrowing diagnostics: both-sides attribution (which layer assigns
 # over which layer's dropped value).
-# =============================================================================
 
 
 def test_display_path_contracts_home_dir(tmp_path: Path) -> None:
@@ -2739,3 +2688,36 @@ def test_load_config_narrowing_error_names_env_var_layer(
     # Dropped-from side: the project file (home contracted to ``~``), with its scope flag.
     assert "~/settings.toml" in message
     assert "mngr config set --scope project" in message
+
+
+# Tests for provider config fields merged across settings layers
+
+
+def test_load_config_accepts_docker_bind_address_unreachable_from_a_remote_daemon_host_set_in_another_layer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A docker provider whose merged host and bind address cannot work together still loads.
+
+    The lower layer points docker at a remote daemon; the higher layer (shaped like a project
+    template's) disables docker and pins a loopback bind. Only creating a docker container can
+    fail on that combination, so every other command -- e.g. creating on another provider --
+    must still load its config.
+    """
+    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    register_provider_config("docker", DockerProviderConfig)
+    (project_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n\n"
+        '[providers.docker]\nbackend = "docker"\nhost = "ssh://user@daemon-host"\nisolate_host_volumes = true\n'
+    )
+    (project_dir / "settings.local.toml").write_text(
+        "is_allowed_in_pytest = true\n\n[providers.docker]\nis_enabled = false\n"
+        'isolate_host_volumes = true\nssh_bind_address = "127.0.0.1"\n'
+    )
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+
+    docker_config = mngr_ctx.config.providers[ProviderInstanceName("docker")]
+    assert isinstance(docker_config, DockerProviderConfig)
+    assert docker_config.host == "ssh://user@daemon-host"
+    assert docker_config.ssh_bind_address == IPv4Address("127.0.0.1")
+    assert docker_config.is_enabled is False

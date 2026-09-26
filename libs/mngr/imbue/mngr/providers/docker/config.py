@@ -119,9 +119,9 @@ class DockerProviderConfig(ProviderInstanceConfig):
             "interfaces, since mngr reaches them via the daemon's hostname. Set explicitly "
             "to override either way, e.g. '0.0.0.0' to expose local containers to the LAN. "
             "On a local daemon mngr then connects to that address (a wildcard bind is reached "
-            "via 127.0.0.1), so it must be IPv4; a loopback address is rejected for a remote "
-            "daemon because mngr could not reach the container. Existing containers keep the "
-            "bind they were created with."
+            "via 127.0.0.1), so it must be IPv4; with a remote daemon, creating a container on "
+            "a loopback address is refused because mngr could not reach it. Existing containers "
+            "keep the bind they were created with."
         ),
     )
     docker_runtime: str | None = Field(
@@ -219,34 +219,37 @@ class DockerProviderConfig(ProviderInstanceConfig):
         return self
 
     @model_validator(mode="after")
-    def _validate_ssh_bind_address_reachable(self) -> "DockerProviderConfig":
-        """Reject a bind that mngr's own SSH connection could never reach.
-
-        A local daemon's containers are probed and reached over IPv4, so an IPv6 bind there
-        is unreachable. A remote daemon is reached via its hostname, so a loopback bind on
-        the daemon host is unreachable.
-        """
-        if self.ssh_bind_address is None:
-            return self
-        if is_docker_daemon_local(self.host):
-            if isinstance(self.ssh_bind_address, IPv6Address):
-                raise DockerConfigValidationError(
-                    f"ssh_bind_address={self.ssh_bind_address} is an IPv6 address, but mngr connects to "
-                    f"containers on a local Docker daemon (host={self.host!r}) over IPv4. Use an IPv4 address "
-                    "(e.g. 127.0.0.1, a LAN address, or 0.0.0.0 for all interfaces)."
-                )
-            return self
-        if self.ssh_bind_address.is_loopback:
-            raise DockerConfigValidationError(
-                f"ssh_bind_address={self.ssh_bind_address} is a loopback address, but host={self.host!r} is a "
-                f"remote Docker daemon: mngr connects to containers via {ssh_host_for_docker_daemon(self.host)!r}, "
-                "which cannot reach a port bound to loopback on the daemon host. Leave ssh_bind_address unset "
-                "or bind a non-loopback address."
-            )
-        return self
-
-    @model_validator(mode="after")
     def _maybe_warn_about_isolate_default(self) -> "DockerProviderConfig":
         if self.isolate_host_volumes is None:
             _emit_isolate_default_warning_once()
         return self
+
+
+def verify_ssh_bind_address_reachable(config: DockerProviderConfig) -> None:
+    """Raise if a container created under `config` would publish sshd where mngr cannot reach it.
+
+    A local daemon's containers are probed and reached over IPv4, so an IPv6 bind there
+    is unreachable. A remote daemon is reached via its hostname, so a loopback bind on
+    the daemon host is unreachable.
+
+    Checked when a container is created rather than when config loads: the host and bind
+    address often come from different settings layers, and an unreachable combination must
+    not break commands that never create a docker container.
+    """
+    if config.ssh_bind_address is None:
+        return
+    if is_docker_daemon_local(config.host):
+        if isinstance(config.ssh_bind_address, IPv6Address):
+            raise DockerConfigValidationError(
+                f"ssh_bind_address={config.ssh_bind_address} is an IPv6 address, but mngr connects to "
+                f"containers on a local Docker daemon (host={config.host!r}) over IPv4. Use an IPv4 address "
+                "(e.g. 127.0.0.1, a LAN address, or 0.0.0.0 for all interfaces)."
+            )
+        return
+    if config.ssh_bind_address.is_loopback:
+        raise DockerConfigValidationError(
+            f"ssh_bind_address={config.ssh_bind_address} is a loopback address, but host={config.host!r} is a "
+            f"remote Docker daemon: mngr connects to containers via {ssh_host_for_docker_daemon(config.host)!r}, "
+            "which cannot reach a port bound to loopback on the daemon host. Leave ssh_bind_address unset "
+            "or bind a non-loopback address."
+        )

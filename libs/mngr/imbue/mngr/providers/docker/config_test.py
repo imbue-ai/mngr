@@ -5,11 +5,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.config import _emit_isolate_default_warning_once
 from imbue.mngr.providers.docker.config import is_docker_daemon_local
 from imbue.mngr.providers.docker.config import ssh_host_for_docker_daemon
+from imbue.mngr.providers.docker.config import verify_ssh_bind_address_reachable
 from imbue.mngr.utils.testing import capture_loguru
 
 
@@ -154,7 +156,7 @@ def test_ssh_bind_address_rejects_non_ip_value() -> None:
 )
 def test_ssh_bind_address_is_accepted_when_reachable(host: str, ssh_bind_address: IPv4Address | IPv6Address) -> None:
     config = DockerProviderConfig(isolate_host_volumes=False, host=host, ssh_bind_address=ssh_bind_address)
-    assert config.ssh_bind_address == ssh_bind_address
+    verify_ssh_bind_address_reachable(config)
 
 
 @pytest.mark.parametrize(
@@ -169,8 +171,9 @@ def test_ssh_bind_address_is_accepted_when_reachable(host: str, ssh_bind_address
 def test_ssh_bind_address_is_rejected_when_unreachable(
     host: str, ssh_bind_address: IPv4Address | IPv6Address, expected_error_fragment: str
 ) -> None:
-    with pytest.raises(ValidationError, match=expected_error_fragment):
-        DockerProviderConfig(isolate_host_volumes=False, host=host, ssh_bind_address=ssh_bind_address)
+    config = DockerProviderConfig(isolate_host_volumes=False, host=host, ssh_bind_address=ssh_bind_address)
+    with pytest.raises(DockerConfigValidationError, match=expected_error_fragment):
+        verify_ssh_bind_address_reachable(config)
 
 
 @pytest.mark.parametrize(

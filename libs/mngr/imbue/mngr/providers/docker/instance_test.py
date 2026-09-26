@@ -19,6 +19,7 @@ from imbue.concurrency_group.errors import ProcessTimeoutError
 from imbue.concurrency_group.subprocess_utils import FinishedProcess
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DockerBuildTimeoutError
+from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.errors import DockerRuntimeNotRegisteredError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
@@ -35,6 +36,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
@@ -164,9 +166,7 @@ def test_raise_if_state_container_stopped_raises_for_own_behind_running_sibling(
         provider._raise_if_state_container_stopped(containers)
 
 
-# =========================================================================
 # Capability Properties
-# =========================================================================
 
 
 def test_docker_provider_name(temp_mngr_ctx: MngrContext) -> None:
@@ -194,9 +194,7 @@ def test_docker_provider_does_not_support_mutable_tags(temp_mngr_ctx: MngrContex
     assert provider.supports_mutable_tags is False
 
 
-# =========================================================================
 # Container Label Helpers
-# =========================================================================
 
 
 def test_build_container_labels_with_no_tags() -> None:
@@ -282,9 +280,7 @@ def test_parse_container_labels_handles_invalid_tags_json() -> None:
     assert tags == {}
 
 
-# =========================================================================
 # Docker Context Host Resolution
-# =========================================================================
 
 
 def test_get_docker_context_host_returns_host_for_non_default_context(fake_docker_config: Path) -> None:
@@ -332,9 +328,7 @@ def test_get_docker_context_host_returns_none_when_context_meta_corrupted(
     assert _get_docker_context_host() is None
 
 
-# =========================================================================
 # Docker Run Command Building
-# =========================================================================
 
 
 def test_build_docker_run_command_includes_mandatory_flags(temp_mngr_ctx: MngrContext) -> None:
@@ -459,6 +453,21 @@ def test_get_ssh_host_matches_explicit_local_bind_address(temp_mngr_ctx: MngrCon
     assert provider._get_ssh_host() == "192.168.1.5"
 
 
+def test_container_creation_refuses_loopback_bind_on_remote_daemon_before_contacting_docker(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = _make_docker_provider_with_config(
+        temp_mngr_ctx,
+        DockerProviderConfig(
+            isolate_host_volumes=False, host="ssh://user@myserver", ssh_bind_address=IPv4Address("127.0.0.1")
+        ),
+    )
+    with pytest.raises(DockerConfigValidationError, match="loopback address"):
+        provider.create_host(HostName("unreachable-bind"))
+    with pytest.raises(DockerConfigValidationError, match="loopback address"):
+        provider._start_from_snapshot(HostId(HOST_ID_A), SnapshotId("snap-test"), host_record=None)
+
+
 def _make_docker_provider_with_runtime(mngr_ctx: MngrContext, docker_runtime: str | None) -> DockerProviderInstance:
     return _make_docker_provider_with_config(
         mngr_ctx, DockerProviderConfig(isolate_host_volumes=False, docker_runtime=docker_runtime)
@@ -541,9 +550,7 @@ def test_build_docker_run_command_passes_through_volume_mount_args(temp_mngr_ctx
     assert cmd[mount_idx + 1] == "type=volume,source=foo,target=/bar,volume-subpath=baz"
 
 
-# =========================================================================
 # Volume Mount Argument Building
-# =========================================================================
 
 
 def test_build_volume_mount_args_legacy_shared_mode(temp_mngr_ctx: MngrContext) -> None:
@@ -635,9 +642,7 @@ def test_host_volume_symlink_target_points_into_state_mount_when_shared(temp_mng
     assert target.startswith("/mngr-state/volumes/vol-")
 
 
-# =========================================================================
 # Engine Version Preflight
-# =========================================================================
 
 
 @pytest.mark.parametrize("version", ["25.0.0", "25.0.3", "25.1.0", "26.0.0", "100.0.0"])
@@ -668,9 +673,7 @@ def test_engine_version_supports_volume_subpath_accepts_prerelease_suffix(versio
     verify_engine_version_supports_volume_subpath(version)
 
 
-# =========================================================================
 # Tag Methods (no Docker required)
-# =========================================================================
 
 
 def test_set_host_tags_raises_mngr_error(temp_mngr_ctx: MngrContext) -> None:
@@ -691,9 +694,7 @@ def test_remove_tags_from_host_raises_mngr_error(temp_mngr_ctx: MngrContext) -> 
         provider.remove_tags_from_host(HostId(HOST_ID_A), ["key"])
 
 
-# =========================================================================
 # Volume Methods
-# =========================================================================
 
 
 def test_list_volumes_returns_empty_when_no_volumes_dir(
@@ -899,9 +900,7 @@ def test_volume_id_for_host_differs_for_different_hosts() -> None:
     assert id1 != id2
 
 
-# =========================================================================
 # Host Resources
-# =========================================================================
 
 
 def test_get_host_resources_returns_defaults(temp_mngr_ctx: MngrContext) -> None:
@@ -924,9 +923,7 @@ def test_get_host_resources_returns_defaults(temp_mngr_ctx: MngrContext) -> None
     assert resources.memory_gb == 1.0
 
 
-# =========================================================================
 # Docker Daemon Offline Behavior
-# =========================================================================
 
 
 @pytest.mark.docker_sdk
@@ -1029,9 +1026,7 @@ def test_discover_hosts_propagates_api_error_without_marking_unavailable(
         provider.discover_hosts(cg=temp_mngr_ctx.concurrency_group)
 
 
-# =========================================================================
 # Connection-Error Fallback State (running container, dead inner sshd)
-# =========================================================================
 
 
 class _FakeStatusContainer:
@@ -1139,9 +1134,7 @@ def test_connection_error_fallback_state_daemon_transport_drop_returns_none(
     assert provider.get_connection_error_fallback_state(HostId(HOST_ID_A)) is None
 
 
-# =========================================================================
 # Build Timeout
-# =========================================================================
 
 
 class _BuildTimingOutDockerProvider(DockerProviderInstance):
@@ -1194,9 +1187,7 @@ def test_docker_build_timeout_error_help_text_mentions_config_setting() -> None:
     assert "my-docker" in error.user_help_text
 
 
-# =========================================================================
 # Build-image removal during destroy / GC
-# =========================================================================
 
 
 class _BuildRemovalImages:
@@ -1457,9 +1448,7 @@ def test_unregistered_runtime_is_not_treated_as_ephemeral() -> None:
     assert _is_gvisor_runtime_rootfs_ephemeral("runsc", {}) is False
 
 
-# =========================================================================
 # Recorded SSH Port Reconciliation (stale after Docker daemon restart)
-# =========================================================================
 
 # Ports from the real-world reproduction: a host reboot left the record at
 # 52918 while docker reported 49315.

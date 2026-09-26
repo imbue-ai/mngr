@@ -82,6 +82,7 @@ from imbue.mngr.providers.docker.config import LOCAL_DOCKER_SSH_HOST
 from imbue.mngr.providers.docker.config import format_docker_publish_address
 from imbue.mngr.providers.docker.config import is_docker_daemon_local
 from imbue.mngr.providers.docker.config import ssh_host_for_docker_daemon
+from imbue.mngr.providers.docker.config import verify_ssh_bind_address_reachable
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -625,9 +626,7 @@ class DockerProviderInstance(BaseProviderInstance):
         """Get the SSH-reachable hostname for containers."""
         return ssh_host_for_docker_config(self.config)
 
-    # =========================================================================
     # Docker Exec Helpers
-    # =========================================================================
 
     def _exec_in_container(
         self,
@@ -745,9 +744,7 @@ class DockerProviderInstance(BaseProviderInstance):
         """Create a pyinfra host with SSH connector."""
         return create_pyinfra_host(hostname, port, private_key_path, self._known_hosts_path)
 
-    # =========================================================================
     # Container Setup and Host Creation Helpers
-    # =========================================================================
 
     def _setup_container_ssh_and_create_host(
         self,
@@ -923,9 +920,7 @@ kill -TERM 1
         with log_span("Saving failed host record for host_id={}", host_id):
             self._host_store.write_host_record(host_record)
 
-    # =========================================================================
     # Docker CLI Subprocess Helpers
-    # =========================================================================
 
     def _docker_env(self) -> dict[str, str]:
         """Build environment variables for docker subprocess calls."""
@@ -1130,9 +1125,7 @@ kill -TERM 1
         if _is_gvisor_runtime_rootfs_ephemeral(runtime, _read_local_docker_runtime_spec_by_name()):
             raise DockerGvisorEphemeralRootfsError(self.name, runtime)
 
-    # =========================================================================
     # Container Discovery Helpers
-    # =========================================================================
 
     def _find_container_by_host_id(self, host_id: HostId) -> docker.models.containers.Container | None:
         """Find a Docker container by host_id label."""
@@ -1412,9 +1405,7 @@ kill -TERM 1
             )
         )
 
-    # =========================================================================
     # Core Lifecycle Methods
-    # =========================================================================
 
     def create_host(
         self,
@@ -1441,6 +1432,7 @@ kill -TERM 1
         # configured gVisor runtime would give it an ephemeral root filesystem, which
         # would lose SSH provisioning on the first restart.
         self._verify_gvisor_overlay_persistent_or_raise()
+        verify_ssh_bind_address_reachable(self.config)
 
         # Fail fast if a container with this name already exists, before the
         # expensive image build step.
@@ -1742,6 +1734,7 @@ kill -TERM 1
         host_record: HostRecord | None,
     ) -> Host:
         """Start a host from a snapshot image."""
+        verify_ssh_bind_address_reachable(self.config)
         if host_record is None:
             host_record = self._host_store.read_host_record(host_id, use_cache=False)
         if host_record is None:
@@ -1995,9 +1988,7 @@ kill -TERM 1
         self._evict_cached_host(host_id)
         self._host_store.clear_cache()
 
-    # =========================================================================
     # Discovery Methods
-    # =========================================================================
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         """Return an offline representation of the given host for use when it is unreachable."""
@@ -2233,9 +2224,7 @@ kill -TERM 1
             gpu=None,
         )
 
-    # =========================================================================
     # Snapshot Methods
-    # =========================================================================
 
     def create_snapshot(
         self,
@@ -2357,9 +2346,7 @@ kill -TERM 1
 
         logger.info("Deleted snapshot", snapshot_id=str(snapshot_id))
 
-    # =========================================================================
     # Volume Methods
-    # =========================================================================
 
     @staticmethod
     def _volume_id_for_host(host_id: HostId) -> VolumeId:
@@ -2428,9 +2415,7 @@ kill -TERM 1
         volume_id = self._volume_id_for_host(host_id)
         self._state_volume.write_files({f"volumes/{volume_id}/.volume": b""})
 
-    # =========================================================================
     # Tag Methods (immutable)
-    # =========================================================================
 
     def get_host_tags(
         self,
@@ -2493,9 +2478,7 @@ kill -TERM 1
 
         return host_obj
 
-    # =========================================================================
     # Connector Method
-    # =========================================================================
 
     def get_connector(
         self,
@@ -2530,9 +2513,7 @@ kill -TERM 1
             private_key_path,
         )
 
-    # =========================================================================
     # Agent Data Persistence
-    # =========================================================================
 
     @property
     def is_agent_data_persistence_supported(self) -> bool:
@@ -2550,9 +2531,7 @@ kill -TERM 1
         """Remove persisted agent data."""
         self._host_store.remove_persisted_agent_data(host_id, agent_id)
 
-    # =========================================================================
     # Outer Host Access
-    # =========================================================================
 
     def _outer_machine_id(self) -> str | None:
         """Stable id for the actual outer machine (the docker daemon's host).
@@ -2631,9 +2610,7 @@ kill -TERM 1
         # tcp://, http://, https://, or anything else: no SSH-accessible outer.
         return None
 
-    # =========================================================================
     # Lifecycle Methods
-    # =========================================================================
 
     def close(self) -> None:
         """Clean up the Docker client connection."""
