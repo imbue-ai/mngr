@@ -250,7 +250,8 @@ def build_outer_listing_collection_script(
 
     Looks up the container by ``<host_id_label>=<host_id>`` label, then:
     - if the container is missing: emits ``CONTAINER_MISSING=true``.
-    - if the container is running: ``docker exec``s the inner listing script.
+    - if the container is running: ``docker exec``s the inner listing script
+      and exits with its status.
     - otherwise: ``docker cp``s the host_dir tree to a temp path on the outer
       host and runs the stopped-variant listing script against it.
 
@@ -285,7 +286,10 @@ if [ "$STATE" = "running" ]; then
     docker exec -i -w / "$CID" bash <<'{_INNER_RUNNING_EOF}'
 {inner_running}
 {_INNER_RUNNING_EOF}
-    exit 0
+    # A container killed mid-listing (e.g. one being stopped) leaves truncated
+    # output that still parses as a shorter agent list; only the exit code
+    # says it is incomplete.
+    exit $?
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

@@ -8,11 +8,14 @@ from typing import Any
 
 import pytest
 
+from imbue.mngr.providers.listing_utils import SEP_AGENT_END
 from imbue.mngr.providers.listing_utils import build_listing_collection_script
+from imbue.mngr.providers.listing_utils import build_outer_listing_collection_script
 from imbue.mngr.providers.listing_utils import extract_agent_data_from_parsed_listing
 from imbue.mngr.providers.listing_utils import parse_listing_collection_output
 from imbue.mngr.providers.listing_utils import parse_optional_float
 from imbue.mngr.providers.listing_utils import parse_optional_int
+from imbue.mngr.utils.testing import write_executable_script
 
 
 def test_parse_optional_int_valid() -> None:
@@ -313,6 +316,73 @@ def test_parse_listing_collection_output_reads_no_tmux_info_from_a_listing_witho
 def test_parse_listing_collection_output_empty() -> None:
     result = parse_listing_collection_output("")
     assert result.get("agents", []) == []
+
+
+def _run_outer_listing_against_fake_docker(
+    tmp_path: Path, *, is_exec_killed_after_first_agent: bool
+) -> tuple[int, dict[str, Any]]:
+    """Run the outer listing script with a fake ``docker`` that reports a running container.
+
+    The fake ``docker exec`` runs the real inner listing against a real host_dir
+    holding three agents. When ``is_exec_killed_after_first_agent`` is set, it
+    relays only the output up to the end of the first agent and then exits 137,
+    as ``docker exec`` does when the container is killed mid-listing (a
+    workspace being stopped). Returns the outer script's exit code and its parsed
+    output.
+    """
+    host_dir = tmp_path / "home" / "user" / ".mngr"
+    host_dir.mkdir(parents=True)
+    (host_dir / "data.json").write_text(json.dumps({"host_id": "host-abc"}))
+    for agent_id in ("agent-a", "agent-b", "agent-c"):
+        (host_dir / "agents" / agent_id).mkdir(parents=True)
+        (host_dir / "agents" / agent_id / "data.json").write_text(json.dumps({"id": agent_id, "name": agent_id}))
+    exec_body = (
+        f'bash > "$0.out"; awk \'{{print}} /{SEP_AGENT_END}/{{exit}}\' "$0.out"; exit 137'
+        if is_exec_killed_after_first_agent
+        else "exec bash"
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable_script(
+        bin_dir / "docker",
+        "#!/bin/bash\n"
+        'case "$1" in\n'
+        "  ps) echo fake-cid ;;\n"
+        '  inspect) case "$3" in *Status*) echo running ;; *) echo 0 ;; esac ;;\n'
+        f"  exec) {exec_body} ;;\n"
+        "esac\n",
+    )
+    script = build_outer_listing_collection_script("host-abc", str(host_dir), "mngr-", window_name="agent")
+    finished = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
+    return finished.returncode, parse_listing_collection_output(finished.stdout)
+
+
+@pytest.mark.tmux
+def test_outer_listing_of_a_running_container_reports_every_agent(tmp_path: Path) -> None:
+    returncode, result = _run_outer_listing_against_fake_docker(tmp_path, is_exec_killed_after_first_agent=False)
+
+    assert returncode == 0
+    assert [agent["data"]["id"] for agent in result["agents"]] == ["agent-a", "agent-b", "agent-c"]
+
+
+@pytest.mark.tmux
+def test_outer_listing_fails_when_the_container_dies_mid_listing(tmp_path: Path) -> None:
+    """A listing cut short by the container dying must fail, not pass as a shorter agent list.
+
+    The truncated output still parses (here, as just the first agent), so the exit
+    code is the only signal. A caller that took it as a successful listing would
+    record the survivors as the host's complete agent set.
+    """
+    returncode, result = _run_outer_listing_against_fake_docker(tmp_path, is_exec_killed_after_first_agent=True)
+
+    assert [agent["data"]["id"] for agent in result["agents"]] == ["agent-a"]
+    assert returncode != 0
 
 
 @pytest.mark.allow_warnings(match=r"missing or non-object 'data'")

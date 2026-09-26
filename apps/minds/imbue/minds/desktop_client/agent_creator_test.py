@@ -1223,10 +1223,8 @@ def test_wait_for_workspace_ready_short_circuits_when_disabled(tmp_path) -> None
     creator = _make_test_creator(tmp_path, mngr_forward_port=0, preauth_cookie="anything")
     log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
-    started = time.monotonic()
     creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
-    # Returns immediately -- no network calls, no log lines.
-    assert time.monotonic() - started < 0.1
+    # The probing path logs "Waiting for system interface" before its first probe.
     assert log_sink.appended_line_count == 0
 
 
@@ -1235,9 +1233,7 @@ def test_wait_for_workspace_ready_short_circuits_when_no_preauth(tmp_path) -> No
     creator = _make_test_creator(tmp_path, mngr_forward_port=8421, preauth_cookie="")
     log_sink = CreateAttemptLogSink()
     aid = AgentId.generate()
-    started = time.monotonic()
     creator._wait_for_workspace_ready(aid, log_sink, creator.workspace_ready_timeout_seconds)
-    assert time.monotonic() - started < 0.1
     assert log_sink.appended_line_count == 0
 
 

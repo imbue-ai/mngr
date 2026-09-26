@@ -339,17 +339,23 @@ WORKSPACE_HOST_STATE_BY_STATUS: Final[dict[WorkspaceStatus, HostState]] = {
 
 
 @pure
+def _includes_services_agent(agent_refs: Sequence[DiscoveredAgent]) -> bool:
+    return any(str(ref.agent_name) == POOL_HOST_SERVICES_AGENT_NAME for ref in agent_refs)
+
+
+@pure
 def _synthesize_services_agent_for_lifecycle_entry(
     entry: WorkspaceInfo, host_id: HostId, provider_name: ProviderInstanceName
 ) -> DiscoveredAgent:
-    """The services-agent stub for a non-running host this install has never listed.
+    """The services-agent stub for a non-running host with no cached record of that agent.
 
     The pool row's ``agent_id`` is the host's pre-baked ``system-services`` agent
     by construction, so the stub can honestly carry that agent's name and its
     ``is_primary`` label. Without the label, consumers that recognize a host's
     primary agent by it (e.g. a ``has(agent.labels.is_primary)`` agent filter)
-    would drop a stopped host that was never seen running from this install,
-    even though the lifecycle listing reports it.
+    would drop a stopped host that was never seen running from this install, or
+    whose cached agents lack the services agent, even though the lifecycle
+    listing reports it.
     """
     return DiscoveredAgent(
         agent_id=AgentId(entry.agent_id),
@@ -619,9 +625,11 @@ class ImbueCloudProvider(BaseProviderInstance):
     # Sticky agent identity
     #
     # Discovery persists the identity (name + certified_data) of the agents
-    # seen in the last successful outer-listing pass, and re-attaches it in the
-    # fallback paths (outer SSH unreachable, or a successful pass with zero
-    # agents). Without this, a transiently-unreachable host emits a single
+    # seen in the last complete outer-listing pass (one that includes the
+    # services agent), and re-attaches it in the fallback paths (outer SSH
+    # unreachable, a successful pass with zero agents, a pass that lacks the
+    # services agent, or a stopped host).
+    # Without this, a transiently-unreachable host emits a single
     # label-less "husk" agent named by its lease id, and every consumer that
     # filters on labels -- most importantly the minds forward's
     # ``has(agent.labels.is_primary)`` -- silently drops the workspace, so it
@@ -630,13 +638,12 @@ class ImbueCloudProvider(BaseProviderInstance):
     # flaky-network window, which is the production failure mode this fixes.
 
     def _persist_last_known_agents(self, host_id: HostId, agent_refs: Sequence[DiscoveredAgent]) -> None:
-        """Persist the identity of the agents seen in a successful listing pass.
+        """Persist the identity of the agents seen in a complete listing pass (one that includes the services agent).
 
         Stored as ``agent_id -> {name, certified_data}`` under the per-host
         state dir. Best-effort: a write failure is logged, not raised --
         discovery must not fail just because the sticky-identity cache could not
-        be refreshed. Only called with a non-empty ``agent_refs`` (a pass that
-        found real agents), so the cache is never clobbered by an empty result.
+        be refreshed.
         """
         payload = {
             str(ref.agent_id): {"name": str(ref.agent_name), "certified_data": dict(ref.certified_data)}
@@ -1022,9 +1029,12 @@ class ImbueCloudProvider(BaseProviderInstance):
             provider_name=self.name,
             host_state=WORKSPACE_HOST_STATE_BY_STATUS[lifecycle_entry.status],
         )
-        agent_refs = self._load_last_known_agents(host_id) or [
-            _synthesize_services_agent_for_lifecycle_entry(lifecycle_entry, host_id, self.name)
-        ]
+        agent_refs = self._load_last_known_agents(host_id)
+        # A stopped host is never re-listed, so nothing else corrects a cache
+        # missing the services agent, and consumers need that agent to offer
+        # the Start that leads to a re-listing.
+        if not _includes_services_agent(agent_refs):
+            agent_refs.append(_synthesize_services_agent_for_lifecycle_entry(lifecycle_entry, host_id, self.name))
         return host_ref, agent_refs
 
     def _discover_one_leased_host(self, entry: LeasedHostInfo) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
@@ -1133,11 +1143,7 @@ class ImbueCloudProvider(BaseProviderInstance):
                     certified_data=data,
                 )
             )
-        if agent_refs:
-            # A real listing: refresh the sticky-identity cache so a later
-            # unreachable pass can re-attach exactly these agents.
-            self._persist_last_known_agents(host_id, agent_refs)
-        else:
+        if not agent_refs:
             # The outer-SSH discovery returned no agents (e.g. container
             # gone, or data.json is empty). Re-attach the last-known agents
             # (marked stale) if we have them, so the host keeps its labels;
@@ -1151,6 +1157,28 @@ class ImbueCloudProvider(BaseProviderInstance):
                     provider_name=self.name,
                 )
             ]
+        elif _includes_services_agent(agent_refs):
+            # A complete listing: refresh the sticky-identity cache so a later
+            # unreachable or stopped pass can re-attach exactly these agents.
+            self._persist_last_known_agents(host_id, agent_refs)
+        else:
+            # Every pool host has a services agent, so a listing without it is
+            # partial. Answer it like a failed listing, with the last complete
+            # record, so consumers keep the host's primary agent and its controls.
+            # A cache that lacks the services agent as well is no better than the
+            # live answer, and older.
+            cached_agent_refs = self._load_last_known_agents(host_id)
+            is_cache_complete = _includes_services_agent(cached_agent_refs)
+            logger.warning(
+                "imbue_cloud[{}] listing of host {} returned {} agent(s) but no {} agent; {}",
+                self.name,
+                host_id,
+                len(agent_refs),
+                POOL_HOST_SERVICES_AGENT_NAME,
+                "using its last complete listing" if is_cache_complete else "no complete listing is cached",
+            )
+            if is_cache_complete:
+                agent_refs = cached_agent_refs
         return host_ref, agent_refs
 
     def _collect_listing_raw_via_outer(
@@ -1266,15 +1294,16 @@ class ImbueCloudProvider(BaseProviderInstance):
             )
             if agent_details is not None:
                 agent_details_list.append(agent_details)
-        # If the raw produced no agent details (stopped container with
-        # empty agents dir, or a hung docker exec), synthesize one from
-        # any agent_ref the caller passed in so the host still shows up
-        # in the agent-driven listing table.
-        if not agent_details_list and agent_refs:
-            agent_details_list = [
-                build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
-                for agent_ref in agent_refs
-            ]
+        # Discovery answers an empty or partial listing with cached refs (or a
+        # lease stub), so render the refs the raw did not cover; otherwise the
+        # host, or its services agent and is_primary label, would drop out of
+        # the agent-driven listing.
+        listed_agent_ids = {agent_details.id for agent_details in agent_details_list}
+        agent_details_list.extend(
+            build_agent_details_from_offline_ref(agent_ref, host_details, resolved_offline_field_generators)
+            for agent_ref in agent_refs
+            if agent_ref.agent_id not in listed_agent_ids
+        )
         return host_details, agent_details_list
 
     def _rebind_host_key_pins(self, lease: LeasedHostInfo) -> None:

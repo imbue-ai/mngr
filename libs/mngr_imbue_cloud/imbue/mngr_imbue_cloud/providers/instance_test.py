@@ -1328,9 +1328,11 @@ def test_fast_path_rejects_image_swap_and_names_only_the_image(temp_mngr_ctx: Mn
 
 
 # Sticky agent labels (husk fix): discovery persists the identity (name +
-# certified_data) of the agents seen in the last successful outer-listing pass,
-# and re-attaches that full set -- each marked ``"stale": true`` -- in the two
-# fallback paths (outer SSH unreachable, or a successful pass with zero agents).
+# certified_data) of the agents seen in the last complete outer-listing pass
+# (one that includes the services agent), and re-attaches that full set -- each
+# marked ``"stale": true`` -- in the fallback paths (outer SSH unreachable, a
+# successful pass with zero agents, a pass that lacks the services agent, or a
+# stopped host).
 # This keeps a transiently-unreachable workspace's labels (most importantly
 # ``is_primary``), so it never collapses to a single label-less "husk" agent and
 # vanishes from consumers that filter on labels. Persisting to disk lets the
@@ -1362,6 +1364,27 @@ class _SequencedListingProvider(_NoWorkspacesMixin, ImbueCloudProvider):
 
 def _agent_data(name: str, labels: Mapping[str, str], agent_type: str) -> dict[str, Any]:
     return {"id": str(AgentId.generate()), "name": name, "labels": dict(labels), "type": agent_type}
+
+
+def _services_agent_data() -> dict[str, Any]:
+    """A pool host's services agent, which carries the workspace's ``is_primary`` label."""
+    return _agent_data("system-services", {"is_primary": "true"}, "system-services")
+
+
+def _persist_cache_without_services_agent(provider: ImbueCloudProvider, host_id: HostId, agent_name: str) -> None:
+    """Seed the host's sticky-identity cache with a single non-services agent, as a partial listing once left it."""
+    provider._persist_last_known_agents(
+        host_id,
+        [
+            DiscoveredAgent(
+                agent_id=AgentId.generate(),
+                agent_name=AgentName(agent_name),
+                host_id=host_id,
+                provider_name=provider.name,
+                certified_data={"labels": {}},
+            )
+        ],
+    )
 
 
 def _raw_with_agents(agent_datas: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1431,7 +1454,7 @@ def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrC
     relaunch case) re-attaches it on an unreachable pass -- the production failure mode."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
 
     first_provider = _make_sequenced_provider(lease, [(_raw_with_agents([primary]), None, False)], temp_mngr_ctx)
     first_provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
@@ -1441,7 +1464,7 @@ def test_cached_identity_survives_a_fresh_provider_instance(temp_mngr_ctx: MngrC
     second_provider = _make_sequenced_provider(lease, [(None, "outer SSH unreachable", False)], temp_mngr_ctx)
     host_ref, agents = _only_entry(second_provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
 
-    assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
+    assert [str(agent.agent_name) for agent in agents] == ["system-services"]
     assert agents[0].labels["is_primary"] == "true"
     assert agents[0].certified_data.get("stale") is True
 
@@ -1453,7 +1476,7 @@ def test_outer_auth_rejection_mints_unauthenticated_and_reattaches_cached_agents
     identity just like the UNKNOWN fallback does."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
     provider = _make_sequenced_provider(
         lease,
         [
@@ -1467,7 +1490,7 @@ def test_outer_auth_rejection_mints_unauthenticated_and_reattaches_cached_agents
     host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
 
     assert host_ref.host_state == HostState.UNAUTHENTICATED
-    assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
+    assert [str(agent.agent_name) for agent in agents] == ["system-services"]
     assert agents[0].certified_data.get("stale") is True
 
 
@@ -1476,7 +1499,7 @@ def test_empty_agents_successful_pass_reattaches_cached_agents(temp_mngr_ctx: Mn
     the cached identity rather than synthesizing a bare lease stub."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
     provider = _make_sequenced_provider(
         lease,
         [
@@ -1489,8 +1512,75 @@ def test_empty_agents_successful_pass_reattaches_cached_agents(temp_mngr_ctx: Mn
     provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
     _, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
 
-    assert [str(agent.agent_name) for agent in agents] == ["primary-agent"]
+    assert [str(agent.agent_name) for agent in agents] == ["system-services"]
     assert agents[0].certified_data.get("stale") is True
+
+
+def test_a_listing_without_the_services_agent_reports_the_last_complete_agents(temp_mngr_ctx: MngrContext) -> None:
+    """A listing that lacks the services agent is partial (e.g. cut off by a container stop), so it is
+    answered with the last complete set, marked stale, and does not replace it in the cache."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    services = _services_agent_data()
+    worker = _agent_data("worker", {}, "claude")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([worker, services]), None, False),
+            (_raw_with_agents([worker]), None, False),
+            (None, "outer SSH unreachable", False),
+        ],
+        temp_mngr_ctx,
+    )
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+
+    _, partial_agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+    _, cached_agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert [str(agent.agent_name) for agent in partial_agents] == ["worker", "system-services"]
+    assert all(agent.certified_data.get("stale") is True for agent in partial_agents)
+    assert [str(agent.agent_name) for agent in cached_agents] == ["worker", "system-services"]
+
+
+def test_a_partial_listing_is_kept_when_the_cached_agents_lack_the_services_agent_too(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A cache that is itself partial is no substitute for the live listing: the live agents are reported as-is."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    new_worker = _agent_data("new-worker", {}, "claude")
+    provider = _make_sequenced_provider(lease, [(_raw_with_agents([new_worker]), None, False)], temp_mngr_ctx)
+    _persist_cache_without_services_agent(provider, host_id, "old-worker")
+
+    _, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert [str(agent.agent_name) for agent in agents] == ["new-worker"]
+    assert "stale" not in agents[0].certified_data
+
+
+def test_agent_details_of_a_partial_listing_keep_the_cached_services_agent(temp_mngr_ctx: MngrContext) -> None:
+    """``get_host_and_agent_details`` (what ``mngr list`` and ``mngr observe`` read) renders the cached
+    services agent a partial listing lacks, alongside the agents that listing did report."""
+    host_id = HostId.generate()
+    lease = _make_lease(host_id)
+    worker = _agent_data("worker", {}, "claude")
+    provider = _make_sequenced_provider(
+        lease,
+        [
+            (_raw_with_agents([worker, _services_agent_data()]), None, False),
+            (_raw_with_agents([worker]), None, False),
+        ],
+        temp_mngr_ctx,
+    )
+    provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group)
+    host_ref, agent_refs = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    _, agent_details_list = provider.get_host_and_agent_details(host_ref, agent_refs)
+
+    assert [(str(details.name), details.labels.get("is_primary")) for details in agent_details_list] == [
+        ("worker", None),
+        ("system-services", "true"),
+    ]
 
 
 def test_first_discovery_with_no_cache_falls_back_to_bare_lease_stub(temp_mngr_ctx: MngrContext) -> None:
@@ -1521,7 +1611,7 @@ def test_leased_host_whose_container_is_missing_is_listed_as_failed_with_cached_
     """
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
     provider = _make_sequenced_provider(
         lease,
         [(_raw_with_agents([primary]), None, False), ({"container_missing": True}, None, False)],
@@ -1543,7 +1633,7 @@ def test_reattached_identity_flows_through_to_agent_details(temp_mngr_ctx: MngrC
     unreachable workspace in the sidebar instead of collapsing it to a husk."""
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
     provider = _make_sequenced_provider(
         lease,
         [
@@ -1565,7 +1655,7 @@ def test_reattached_identity_flows_through_to_agent_details(temp_mngr_ctx: MngrC
     assert host_details.failure_reason is not None
     assert len(agent_details_list) == 1
     agent_details = agent_details_list[0]
-    assert str(agent_details.name) == "primary-agent"
+    assert str(agent_details.name) == "system-services"
     assert agent_details.labels["is_primary"] == "true"
 
 
@@ -2098,6 +2188,16 @@ def _stopped_workspace(host_id: HostId) -> WorkspaceInfo:
     )
 
 
+def _make_canned_lifecycle_provider(
+    mngr_ctx: MngrContext, workspaces: list[WorkspaceInfo]
+) -> _CannedLifecycleProvider:
+    return _CannedLifecycleProvider.model_construct(
+        name=ProviderInstanceName("imbue-cloud-test"),
+        mngr_ctx=mngr_ctx,
+        _workspaces=workspaces,
+    )
+
+
 def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_services_agent(
     temp_mngr_ctx: MngrContext,
 ) -> None:
@@ -2109,11 +2209,7 @@ def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_service
     making a stopped workspace vanish from the workspace list.
     """
     stopped_workspace = _stopped_workspace(HostId.generate())
-    provider = _CannedLifecycleProvider.model_construct(
-        name=ProviderInstanceName("imbue-cloud-test"),
-        mngr_ctx=temp_mngr_ctx,
-        _workspaces=[stopped_workspace],
-    )
+    provider = _make_canned_lifecycle_provider(temp_mngr_ctx, [stopped_workspace])
 
     host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
 
@@ -2123,6 +2219,26 @@ def test_stopped_workspace_never_listed_here_is_discovered_as_a_labelled_service
     assert agents[0].labels == {"is_primary": "true"}
     # A stub is a live statement about the row, not a replayed cache entry.
     assert "stale" not in agents[0].certified_data
+
+
+def test_stopped_workspace_whose_cached_agents_lack_the_services_agent_still_surfaces_it(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A stopped workspace is never re-listed, so a cache missing its services agent would hide that
+    agent for good; the lifecycle row fills it in."""
+    stopped_workspace = _stopped_workspace(HostId.generate())
+    host_id = HostId(stopped_workspace.host_id)
+    provider = _make_canned_lifecycle_provider(temp_mngr_ctx, [stopped_workspace])
+    _persist_cache_without_services_agent(provider, host_id, "worker")
+
+    host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
+
+    assert host_ref.host_state == HostState.STOPPED
+    assert [(str(agent.agent_name), agent.labels.get("is_primary")) for agent in agents] == [
+        ("worker", None),
+        ("system-services", "true"),
+    ]
+    assert str(agents[1].agent_id) == stopped_workspace.agent_id
 
 
 # destroy_host on a workspace with no lease entry: a stopped workspace holds its
@@ -2276,7 +2392,7 @@ def test_pinned_read_of_a_stopped_workspace_returns_its_last_known_agents_withou
 ) -> None:
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
     running = _make_pinned_read_provider(
         temp_mngr_ctx, [lease], [], {host_id: (_raw_with_agents([primary]), None, False)}
     )
@@ -2334,7 +2450,7 @@ def test_pinned_read_of_a_host_the_account_does_not_have_is_not_found(temp_mngr_
 def test_pinned_read_of_an_unreachable_host_falls_back_to_its_last_known_agents(temp_mngr_ctx: MngrContext) -> None:
     host_id = HostId.generate()
     lease = _make_lease(host_id)
-    primary = _agent_data("primary-agent", {"is_primary": "true"}, "codex")
+    primary = _services_agent_data()
     reachable = _make_pinned_read_provider(
         temp_mngr_ctx, [lease], [], {host_id: (_raw_with_agents([primary]), None, False)}
     )

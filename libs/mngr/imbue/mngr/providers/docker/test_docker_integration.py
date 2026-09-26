@@ -8,6 +8,7 @@ Marked with @pytest.mark.docker_sdk and @pytest.mark.acceptance so they only
 run in CI acceptance test shards (not in the default local test suite).
 """
 
+import signal
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ from imbue.mngr.providers.docker.instance import LABEL_PROVIDER
 from imbue.mngr.providers.docker.instance import LABEL_TAGS
 from imbue.mngr.providers.docker.instance import build_container_labels
 from imbue.mngr.providers.docker.volume import host_container_name
+from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.testing import get_short_random_string
 
 pytestmark = [pytest.mark.acceptance]
@@ -40,7 +42,7 @@ DOCKER_TEST_TIMEOUT = 120
 
 # Use busybox for test containers -- much smaller than debian:bookworm-slim (~5MB vs ~80MB),
 # which matters a lot when using the VFS storage driver (full copy per container).
-# All commands used in tests (echo, cat, tr, false, sleep, tail) are busybox builtins.
+# Every command a test runs inside the container must therefore be a busybox applet.
 TEST_IMAGE = "busybox:latest"
 
 
@@ -81,9 +83,7 @@ def _create_test_container(
     return container, host_id
 
 
-# =========================================================================
 # Container Creation and Labels
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -112,9 +112,7 @@ def test_container_is_running_after_creation(docker_provider: DockerProviderInst
     assert docker_provider._is_container_running(container) is True
 
 
-# =========================================================================
 # Container Discovery
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -175,9 +173,7 @@ def test_list_containers_returns_managed_containers(docker_provider: DockerProvi
     assert len(containers) >= 2
 
 
-# =========================================================================
 # Docker Exec
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -206,9 +202,7 @@ def test_exec_detach_returns_immediately(docker_provider: DockerProviderInstance
     assert output == ""
 
 
-# =========================================================================
 # Image Pull
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -254,9 +248,7 @@ def test_build_image_from_dockerfile(docker_provider: DockerProviderInstance, tm
     assert inspect.stdout.strip(), f"image {tag} not found in local daemon after build"
 
 
-# =========================================================================
 # Container Lifecycle (Stop / Start / Remove)
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -283,9 +275,7 @@ def test_container_remove(docker_provider: DockerProviderInstance) -> None:
     assert found is None
 
 
-# =========================================================================
 # Snapshots (docker commit)
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -341,9 +331,7 @@ def test_snapshot_roundtrip_preserves_filesystem(docker_provider: DockerProvider
             pass
 
 
-# =========================================================================
 # Host Store Integration with Real Containers
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -406,9 +394,7 @@ def test_save_failed_host_record(docker_provider: DockerProviderInstance) -> Non
     assert record.last_discovered_ssh_port is None
 
 
-# =========================================================================
 # Tag Reading from Real Containers
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -435,14 +421,7 @@ def test_get_host_tags_from_running_container(docker_provider: DockerProviderIns
     assert tags == {"env": "staging", "version": "1.0"}
 
 
-# =========================================================================
-# Host Resources
-# =========================================================================
-
-
-# =========================================================================
 # Entrypoint and Container Behavior
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -462,12 +441,28 @@ def test_container_entrypoint_keeps_running(docker_provider: DockerProviderInsta
     assert "sh" in output
 
 
+def _has_pid1_installed_sigterm_handler(
+    provider: DockerProviderInstance, container: docker.models.containers.Container
+) -> bool:
+    exit_code, output = provider._exec_in_container(container, "grep '^SigCgt:' /proc/1/status")
+    if exit_code != 0:
+        return False
+    caught_signal_mask = int(output.split()[1], 16)
+    return bool(caught_signal_mask & (1 << (signal.SIGTERM - 1)))
+
+
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
 @pytest.mark.docker_sdk
 def test_container_responds_to_sigterm(docker_provider: DockerProviderInstance) -> None:
     """Verify the container exits cleanly on SIGTERM (docker stop)."""
     container, _ = _create_test_container(docker_provider)
     assert docker_provider._is_container_running(container) is True
+    # Docker reports the container running before its shell has run the trap,
+    # and a PID 1 with no handler ignores SIGTERM, so a stop sent in that gap
+    # would wait out the timeout and SIGKILL.
+    assert poll_until(lambda: _has_pid1_installed_sigterm_handler(docker_provider, container)), (
+        "the entrypoint never installed its SIGTERM trap"
+    )
 
     container.stop(timeout=5)
     container.reload()
@@ -477,9 +472,7 @@ def test_container_responds_to_sigterm(docker_provider: DockerProviderInstance) 
     assert container.attrs["State"]["ExitCode"] == 0
 
 
-# =========================================================================
 # Filesystem Persistence Across Stop/Start
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
@@ -498,9 +491,7 @@ def test_filesystem_persists_across_stop_start(docker_provider: DockerProviderIn
     assert "survive-stop" in output
 
 
-# =========================================================================
 # DockerVolume Tests
-# =========================================================================
 
 
 @pytest.mark.timeout(DOCKER_TEST_TIMEOUT)
