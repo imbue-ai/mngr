@@ -56,6 +56,7 @@ from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plu
 from imbue.minds.desktop_client.agent_creator import provider_instance_name_for_launch
 from imbue.minds.desktop_client.agent_creator import resolve_template_version
 from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
+from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
@@ -66,7 +67,16 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptStore
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_ENV_VAR
+from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_REMOTE_PATH
+from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_GIT_TOKEN_VAULT_KEY
+from imbue.minds.desktop_client.template_mngr_pin import INTERNAL_MNGR_REPO_URL
+from imbue.minds.desktop_client.template_mngr_pin import PUBLIC_MNGR_REPO_URL
+from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
+from imbue.minds.desktop_client.testing import install_stub_on_path
 from imbue.minds.desktop_client.testing import scripted_workspace_probe_server
+from imbue.minds.desktop_client.testing import vault_kv_stub_body
+from imbue.minds.desktop_client.testing import write_template_pyproject_pinning_mngr
 from imbue.minds.desktop_client.workspace_defaults import DEFAULT_WORKSPACE_TEMPLATE_GIT_URL
 from imbue.minds.desktop_client.workspace_defaults import default_workspace_template_ref
 from imbue.minds.errors import GitCloneError
@@ -1803,6 +1813,91 @@ def test_failed_create_attempt_marks_pending_record_failed_with_log_tail(tmp_pat
     assert record.state is PendingCreateAttemptState.FAILED
     assert record.error
     assert record.log_tail, "the FAILED record must carry the create attempt log tail"
+
+
+@pytest.mark.timeout(30)
+def test_a_private_pin_without_a_credential_fails_the_create_attempt_with_the_remedy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The credential check runs before any build; its error must terminate the attempt like any other."""
+    monkeypatch.delenv(INTERNAL_GIT_TOKEN_ENV_VAR, raising=False)
+    monkeypatch.delenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", raising=False)
+    template = tmp_path / "template-61483"
+    template.mkdir()
+    write_template_pyproject_pinning_mngr(template, INTERNAL_MNGR_REPO_URL)
+    store = PendingCreateAttemptStore(records_dir=tmp_path / "pending")
+    creator = _make_test_creator(tmp_path, pending_create_attempt_store=store)
+
+    create_attempt_id = creator.start_create_attempt(
+        str(template), host_name="private-pin-61483", launch_mode=LaunchMode.DOCKER
+    )
+    _wait_until_finished(creator, create_attempt_id)
+
+    info = creator.get_create_attempt_info(create_attempt_id)
+    assert info is not None and info.status is AgentCreateAttemptStatus.FAILED
+    assert info.error is not None and f"export {INTERNAL_GIT_TOKEN_ENV_VAR}" in info.error
+    creator.wait_for_all()
+    record = store.read_record(str(create_attempt_id))
+    assert record is not None
+    assert record.state is PendingCreateAttemptState.FAILED
+
+
+_FAKE_VAULT_TOKEN = "tok-from-vault-40217"
+
+
+def _install_fake_vault_and_recording_mngr(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put a ``vault`` whose shared credential leaf holds ``_FAKE_VAULT_TOKEN`` and an ``mngr`` that
+    records its create on PATH.
+
+    The ``mngr`` writes three things to the returned file: the token it sees under the
+    credential env var (``<unset>`` when none), its argv, and the content of the local
+    file named by any ``--upload-file`` arg, read at call time since that file lives only
+    as long as the create.
+    """
+    fake_bin_dir = tmp_path / "fake-bin"
+    record = tmp_path / "recorded-create.txt"
+    install_stub_on_path(
+        fake_bin_dir, monkeypatch, "vault", vault_kv_stub_body([INTERNAL_GIT_TOKEN_VAULT_KEY], _FAKE_VAULT_TOKEN)
+    )
+    install_stub_mngr_on_path(
+        fake_bin_dir,
+        monkeypatch,
+        f'printf \'%s\\n\' "${{{INTERNAL_GIT_TOKEN_ENV_VAR}:-<unset>}}" > "{record}"\n'
+        f'printf \'%s\\n\' "$*" >> "{record}"\n'
+        "while [ $# -gt 0 ]; do\n"
+        f'  if [ "$1" = "--upload-file" ]; then cat "${{2%%:*}}" >> "{record}"; echo >> "{record}"; fi\n'
+        "  shift\n"
+        "done\n"
+        f'echo \'{{"event": "created", "agent_id": "{AgentId.generate()}", "host_id": "{HostId.generate()}"}}\'',
+    )
+    return record
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize("repo_url", [INTERNAL_MNGR_REPO_URL, PUBLIC_MNGR_REPO_URL])
+def test_run_mngr_create_hands_a_private_pin_credential_to_the_subprocess_and_a_public_pin_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repo_url: str
+) -> None:
+    """With no token in the ambient env, only the Vault fallback merged in by ``run_mngr_create``
+    can put one in front of ``mngr``; an inherited env var would prove nothing."""
+    monkeypatch.delenv(INTERNAL_GIT_TOKEN_ENV_VAR, raising=False)
+    monkeypatch.setenv("MINDS_USE_LOCAL_WORKSPACE_DEFAULTS", "1")
+    record = _install_fake_vault_and_recording_mngr(tmp_path, monkeypatch)
+    template = tmp_path / "template-40217"
+    template.mkdir()
+    write_template_pyproject_pinning_mngr(template, repo_url)
+
+    run_mngr_create(LaunchMode.LIMA, template, HostName("pin-40217"))
+
+    token_seen, argv, *uploaded = record.read_text().splitlines()
+    if repo_url == INTERNAL_MNGR_REPO_URL:
+        assert token_seen == _FAKE_VAULT_TOKEN
+        assert f":{INTERNAL_GIT_TOKEN_REMOTE_PATH}" in argv
+        assert uploaded == [_FAKE_VAULT_TOKEN]
+    else:
+        assert token_seen == "<unset>"
+        assert "--upload-file" not in argv
+        assert uploaded == []
 
 
 class _TerminalWriteFailingPendingCreateAttemptStore(PendingCreateAttemptStore):

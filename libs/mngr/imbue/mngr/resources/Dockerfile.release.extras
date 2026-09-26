@@ -13,6 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
     | tar xz -C /usr/local/bin --strip-components=1
 
+# The static tarball ships no buildx plugin; without it `docker build` runs the legacy
+# builder, which rejects the `--secret` / `RUN --mount` the workspace template uses.
+RUN mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL https://github.com/docker/buildx/releases/download/v0.37.1/buildx-v0.37.1.linux-amd64 \
+        -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx
+
 # Modern runc for reliable networking under gVisor
 RUN rm -f /usr/local/bin/runc \
     && wget -q https://github.com/opencontainers/runc/releases/download/v1.3.0/runc.amd64 \

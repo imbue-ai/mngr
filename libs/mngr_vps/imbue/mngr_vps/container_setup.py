@@ -1186,6 +1186,30 @@ def resolve_dockerfile_paths(
     return tuple(resolved)
 
 
+@pure
+def env_sourced_build_secrets(docker_build_args: Sequence[str], environ: Mapping[str, str]) -> dict[str, str]:
+    """The env vars that ``--secret ...,env=NAME`` build args name, with the values ``environ`` has for them.
+
+    Both spellings (``--secret id=x,env=NAME`` and ``--secret=id=x,env=NAME``) are read. A
+    name ``environ`` lacks is skipped: BuildKit then mounts an empty secret, which is what a
+    local build with the variable unset gets too.
+    """
+    forwarded: dict[str, str] = {}
+    args = list(docker_build_args)
+    for index, arg in enumerate(args):
+        if arg == "--secret" and index + 1 < len(args):
+            spec = args[index + 1]
+        elif arg.startswith("--secret="):
+            spec = arg.removeprefix("--secret=")
+        else:
+            continue
+        for field in spec.split(","):
+            key, separator, name = field.partition("=")
+            if separator and key == "env" and name in environ:
+                forwarded[name] = environ[name]
+    return forwarded
+
+
 def build_image_on_outer(
     outer: OuterHostInterface,
     *,
@@ -1202,13 +1226,17 @@ def build_image_on_outer(
     forwards DEPOT_TOKEN (required) from the agent's environment, optionally
     forwards DEPOT_PROJECT_ID when set, and runs ``depot build --load``.
     """
+    # A BuildKit secret sourced from an env var (``--secret id=...,env=NAME``) reads NAME
+    # where ``docker build`` runs, which is the outer, not the caller; forward the values
+    # the caller has so such a secret works on an outer build exactly as it does locally.
+    forwarded_secret_env = env_sourced_build_secrets(docker_build_args, os.environ)
     if builder is DockerBuilder.DEPOT:
         ensure_depot_token_available(builder)
         depot_token = os.environ["DEPOT_TOKEN"]
         depot_project_id = os.environ.get("DEPOT_PROJECT_ID", "")
         args = ["build", "--load", "-t", tag] + list(docker_build_args) + [build_context_path]
         quoted = " ".join(shlex.quote(a) for a in args)
-        env: dict[str, str] = {"DEPOT_TOKEN": depot_token}
+        env: dict[str, str] = {**forwarded_secret_env, "DEPOT_TOKEN": depot_token}
         if depot_project_id:
             env["DEPOT_PROJECT_ID"] = depot_project_id
         remote_cmd = f"{_DEPOT_RESOLVE_AND_INSTALL} && {_DEPOT_BIN} {quoted}"
@@ -1216,7 +1244,7 @@ def build_image_on_outer(
     else:
         args = ["build", "-t", tag] + list(docker_build_args) + [build_context_path]
         remote_cmd = "docker " + " ".join(shlex.quote(a) for a in args)
-        run_env = None
+        run_env = forwarded_secret_env if forwarded_secret_env else None
 
     safe_remote_cmd = redact_secret_env(remote_cmd)
     logger.trace("docker build remote command: {}", safe_remote_cmd)
