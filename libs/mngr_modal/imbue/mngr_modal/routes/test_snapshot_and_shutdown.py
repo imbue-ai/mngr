@@ -28,7 +28,6 @@ from tenacity import wait_exponential
 
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import UserId
-from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import register_modal_test_app
 from imbue.mngr.utils.testing import register_modal_test_volume
@@ -337,14 +336,11 @@ def test_snapshot_and_shutdown_success(
         # Verify stop_reason was set (defaults to PAUSED for idle shutdown)
         assert certified_data["stop_reason"] == HostState.PAUSED.value
 
-        # Verify the sandbox was terminated by polling for termination.
-        # Modal can lag in reflecting termination in `poll()`, so poll generously.
-        def sandbox_terminated() -> bool:
-            refreshed_sandbox = modal.Sandbox.from_id(sandbox_id)
-            poll_result = refreshed_sandbox.poll()
-            return poll_result is not None
-
-        wait_for(sandbox_terminated, timeout=30.0, poll_interval=0.5, error_message="Sandbox should be terminated")
+        # Success means the route watched the sandbox finish before answering, so both
+        # checks hold the instant the response arrives. Do not let either wait: a check
+        # that waits cannot tell a completed shutdown from one that was only requested.
+        assert result["sandbox_exit_code"] is not None, f"Shutdown was reported without observing it: {result}"
+        assert modal.Sandbox.from_id(sandbox_id).poll() is not None, "Sandbox should be terminated"
 
     finally:
         # Clean up sandbox if still running

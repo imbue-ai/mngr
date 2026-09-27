@@ -140,6 +140,10 @@ def snapshot_and_shutdown(request_body: dict[str, Any]) -> dict[str, Any]:
     (list of agent data to persist to the volume), and stop_reason
     ('PAUSED' for idle shutdown, 'STOPPED' for user-requested stop).
 
+    A success response means the sandbox was observed to stop, not merely asked to, and
+    carries the exit code Modal reported for it. A caller is never told a still-running
+    sandbox is gone: without that observation the request fails instead.
+
     Must put all imports here, not at the top level--otherwise this fails remotely when deploying
     """
     from fastapi import HTTPException
@@ -213,8 +217,9 @@ def snapshot_and_shutdown(request_body: dict[str, Any]) -> dict[str, Any]:
             # and *make sure* we commit all of it:
             volume.commit()
 
-            # Terminate the sandbox
-            sandbox.terminate()
+            # Modal's terminate is fire-and-forget, so watch the sandbox finish before
+            # answering: only asking for a shutdown leaves a sandbox running and billing.
+            sandbox_exit_code = sandbox.terminate(wait=True)
 
             if were_snapshots_missing:
                 raise HTTPException(
@@ -228,6 +233,7 @@ def snapshot_and_shutdown(request_body: dict[str, Any]) -> dict[str, Any]:
                 "success": True,
                 "snapshot_id": snapshot_id,
                 "snapshot_name": snapshot_name,
+                "sandbox_exit_code": sandbox_exit_code,
             }
 
         # note: do NOT change this--this is just here temporarily while we are debugging intermittent failures during snapshotting
