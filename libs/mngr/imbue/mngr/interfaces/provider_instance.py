@@ -109,21 +109,6 @@ def _ssh_info_from_host(host: HostInterface) -> SSHInfo | None:
     )
 
 
-def _read_offline_provider_resources(host: HostInterface) -> HostResources | None:
-    """The size a provider recorded for a host that is not online, or None when that read itself fails.
-
-    This runs for every host the listing sees offline: an ordinarily stopped
-    host, and the fallback for one that could not be reached. Either way the
-    listing must degrade to "size unknown" rather than fail because a
-    provider's record could not be read (e.g. a store that is itself remote).
-    """
-    try:
-        return host.get_provider_resources()
-    except (MngrError, OSError) as e:
-        logger.warning("Could not read the recorded size of offline host {}: {}", host.id, e)
-        return None
-
-
 def _build_host_details_from_host(
     host: HostInterface,
     host_ref: DiscoveredHost,
@@ -150,7 +135,7 @@ def _build_host_details_from_host(
     else:
         boot_time = None
         uptime_seconds = None
-        resource = _read_offline_provider_resources(host)
+        resource = None
 
     certified_data = host.get_certified_data()
     host_plugin_data = certified_data.plugin

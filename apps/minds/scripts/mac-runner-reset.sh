@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reset the mac-runner to a clean state for a verification run.
-# Wipes the app's state and the installed .app; preserves Lima's base-image cache.
+# Wipes Minds state and the installed .app; preserves Lima's base-image cache.
 # Optional arg: a .zip URL to download and install as the fresh app.
 #
 # Deliberately NOT `set -e`: this is a best-effort cleanup of a non-ephemeral
@@ -8,7 +8,7 @@
 # Under `set -e` a single unguarded failure (e.g. a `df`/`find` pipe, a
 # `defaults read`) aborts the script and SKIPS the remaining cleanup, leaking
 # Lima VMs / disk. So instead: run every step best-effort, then VERIFY the end
-# state (no surviving minds-host VMs / data disks, no data roots, app removed) and exit
+# state (no surviving minds-host VMs / data disks, no ~/.minds, app removed) and exit
 # non-zero if the runner is not actually clean -- otherwise a leaked VM rots
 # the runner silently. Callers surface that exit code (the post-test cleanup
 # step no longer swallows it with `|| true`). The install block fails loud too.
@@ -16,28 +16,20 @@ set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
-# Old bundles are quit and removed too, so an install from before the rename
-# cannot survive a reset and claim the deeplink scheme beside the new one.
-# CLEANUP: drop ImbueStudio, Mind and Minds once every runner has been reset
-# past them; "Imbue Studio" is the current name and stays
-# (specs/imbue-studio-rename/05_cleanup.md).
-log "asking Imbue Studio to quit"
-for bundle_name in "Imbue Studio" ImbueStudio Mind Minds; do
-  [[ -d "/Applications/$bundle_name.app" ]] || continue
-  osascript -e "tell application \"$bundle_name\" to quit" 2>/dev/null || true
-done
+log "asking Mind to quit"
+osascript -e 'tell application "Mind" to quit' 2>/dev/null || true
 for _ in 1 2 3 4 5; do
-  pids=$(pgrep -f '/Applications/(Imbue Studio|ImbueStudio|Minds?)\.app/Contents/' || true)
+  pids=$(pgrep -f '/Applications/Minds?\.app/Contents/' || true)
   [[ -z "$pids" ]] && break
   sleep 1
 done
-pids=$(pgrep -f '/Applications/(Imbue Studio|ImbueStudio|Minds?)\.app/Contents/' || true)
+pids=$(pgrep -f '/Applications/Minds?\.app/Contents/' || true)
 for pid in $pids; do
   log "force-kill straggler $pid"
   kill -9 "$pid" 2>/dev/null || true
 done
 
-BUNDLED_LIMACTL="/Applications/Imbue Studio.app/Contents/Resources/lima/bin/limactl"
+BUNDLED_LIMACTL="/Applications/Mind.app/Contents/Resources/lima/bin/limactl"
 LIMACTL=""
 if [[ -x "$BUNDLED_LIMACTL" ]]; then
   LIMACTL="$BUNDLED_LIMACTL"
@@ -111,43 +103,22 @@ log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # scripts that no longer exist.
 rm -f /tmp/minds-electron.log 2>/dev/null || true
 
-# Every root an install writes to: the canonical three, plus the legacy
-# dotfolder older builds used and the current one migrates off. A runner that
-# has run both needs all of them gone to be reproducible. The pre-rename names
-# are here for the same reason the old bundles are: crash reporting can write
-# under the product name before the app narrows its own userData path.
-# CLEANUP: drop the ImbueStudio, Mind and Minds roots once every runner has
-# been reset past them; "Imbue Studio" is the current name and stays
-# (specs/imbue-studio-rename/05_cleanup.md).
-DATA_ROOTS=()
-for app_name in "Imbue Studio" ImbueStudio Mind Minds; do
-  DATA_ROOTS+=(
-    "$HOME/Library/Application Support/$app_name"
-    "$HOME/Library/Caches/$app_name"
-    "$HOME/Library/Logs/$app_name"
-  )
+log "removing ~/.minds and /Applications/Mind.app"
+# `rm -rf` can race against a not-yet-fully-dead Minds backend process that
+# is still writing to ~/.minds/Cache or ~/.minds/Code Cache. Retry a few
+# times with a short backoff before giving up.
+for attempt in 1 2 3 4 5; do
+  if rm -rf "$HOME/.minds" 2>/dev/null; then
+    break
+  fi
+  log "  rm ~/.minds attempt $attempt failed (likely still being written); waiting 2s"
+  sleep 2
+  if [[ $attempt -eq 5 ]]; then
+    log "  forcing one more pass with verbose errors"
+    rm -rf "$HOME/.minds" || true
+  fi
 done
-DATA_ROOTS+=("$HOME/.minds")
-
-log "removing the data roots and the installed app bundles"
-# `rm -rf` can race against a not-yet-fully-dead backend process that is still
-# writing to the state root's Chromium cache. Retry a few times with a short
-# backoff before giving up.
-for root in "${DATA_ROOTS[@]}"; do
-  [[ -e "$root" ]] || continue
-  for attempt in 1 2 3 4 5; do
-    if rm -rf "$root" 2>/dev/null; then
-      break
-    fi
-    log "  rm '$root' attempt $attempt failed (likely still being written); waiting 2s"
-    sleep 2
-    if [[ $attempt -eq 5 ]]; then
-      log "  forcing one more pass with verbose errors"
-      rm -rf "$root" || true
-    fi
-  done
-done
-sudo rm -rf "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"
+sudo rm -rf /Applications/Mind.app /Applications/Minds.app
 
 URL="${1:-}"
 
@@ -168,18 +139,14 @@ if [[ "$surviving_disks" -gt 0 ]]; then
   log "ERROR: $surviving_disks mngr-*-data disk(s) survived cleanup under ~/.lima/_disks"
   cleanup_failed=1
 fi
-for root in "${DATA_ROOTS[@]}"; do
-  if [[ -e "$root" ]]; then
-    log "ERROR: '$root' survived cleanup"
-    cleanup_failed=1
-  fi
-done
-for bundle in "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"; do
-  if [[ -z "$URL" && -e "$bundle" ]]; then
-    log "ERROR: $bundle survived cleanup"
-    cleanup_failed=1
-  fi
-done
+if [[ -e "$HOME/.minds" ]]; then
+  log "ERROR: ~/.minds survived cleanup"
+  cleanup_failed=1
+fi
+if [[ -z "$URL" && -e /Applications/Mind.app ]]; then
+  log "ERROR: /Applications/Mind.app survived cleanup"
+  cleanup_failed=1
+fi
 if [[ "$cleanup_failed" -ne 0 ]]; then
   log "cleanup did not reach a clean state; failing so the dirty runner is visible"
   exit 1
@@ -192,15 +159,15 @@ if [[ -n "$URL" ]]; then
   # Install must fail loud: a run must never proceed against a stale app.
   curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
   unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
-  sudo mv "$TMP/Imbue Studio.app" "/Applications/Imbue Studio.app" || { log "ERROR: app install (mv) failed"; exit 1; }
+  sudo mv "$TMP/Mind.app" /Applications/Mind.app || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
   # delete with "Operation not permitted"; we only care about the top-level
   # quarantine bit so Gatekeeper lets the app launch. Per-file failures
   # inside signed frameworks are harmless.
-  sudo xattr -dr com.apple.quarantine "/Applications/Imbue Studio.app" 2>/dev/null || true
-  sudo xattr -d com.apple.quarantine "/Applications/Imbue Studio.app" 2>/dev/null || true
-  version=$(defaults read "/Applications/Imbue Studio.app/Contents/Info.plist" CFBundleShortVersionString)
-  build=$(defaults read "/Applications/Imbue Studio.app/Contents/Info.plist" CFBundleVersion)
+  sudo xattr -dr com.apple.quarantine /Applications/Mind.app 2>/dev/null || true
+  sudo xattr -d com.apple.quarantine /Applications/Mind.app 2>/dev/null || true
+  version=$(defaults read /Applications/Mind.app/Contents/Info.plist CFBundleShortVersionString)
+  build=$(defaults read /Applications/Mind.app/Contents/Info.plist CFBundleVersion)
   log "installed $version ($build)"
 fi
 

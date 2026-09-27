@@ -73,20 +73,6 @@ _EXPIRED_SESSION_SIGNALS: Final[tuple[str, ...]] = (
 )
 _UNVERIFIED_EMAIL_SIGNAL: Final[str] = "Email not verified"
 
-# Workspaces created from a pre-share-gateway template (minds-v0.3.11 and
-# older) have no service watching share.env, so a share enabled for them
-# would go active on the connector and never become reachable. The fix is to
-# update the workspace (update-self), then re-share -- which self-heals,
-# since the gateway picks the materials up on its own.
-# CLEANUP: drop this refusal (and the probe's has_gateway signal) once no
-# supported workspaces predate the share gateway -- i.e. after the first
-# post-v0.3.11 release is deployed and old workspaces have run update-self.
-_PRE_GATEWAY_WORKSPACE_MESSAGE: Final[str] = (
-    "This machine's workspace template is too old to support sharing. "
-    'Ask the machine to update itself (send it "update yourself", which runs '
-    "the update-self skill), then enable sharing again."
-)
-
 
 def describe_connector_failure(exc: Exception) -> str:
     """Turn a connector failure into a sentence the user can act on.
@@ -110,14 +96,6 @@ class SharingError(RuntimeError):
 
 class EmptyGrantsError(SharingError):
     """Raised when a grants document names no grantee at all: a request-validation failure, not an upstream fault."""
-
-
-class ShareMaterialsWriteError(SharingError):
-    """Raised when the connector share was registered but the workspace did not receive its materials.
-
-    The connector side has already moved on (domain minted, relay token
-    rotated) while the workspace still holds whatever it had before.
-    """
 
 
 def resolve_account_email_for_workspace(
@@ -474,8 +452,20 @@ def _enable_sharing_with_cli(
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
 
+    # Workspaces created from a pre-share-gateway template (minds-v0.3.11 and
+    # older) have no service watching share.env, so a share enabled for them
+    # would go active on the connector and never become reachable. Refuse up
+    # front with the fix: update the workspace (update-self), then re-share --
+    # which self-heals, since the gateway picks the materials up on its own.
+    # CLEANUP: drop this guard (and the probe's has_gateway signal) once no
+    # supported workspaces predate the share gateway -- i.e. after the first
+    # post-v0.3.11 release is deployed and old workspaces have run update-self.
     if not probe.has_gateway:
-        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+        raise SharingError(
+            "This machine's workspace template is too old to support sharing. "
+            'Ask the machine to update itself (send it "update yourself", which runs '
+            "the update-self skill), then enable sharing again."
+        )
 
     if probe.has_share_env:
         # Materials are present, so this is either a grants-only update (share
@@ -520,40 +510,6 @@ def _enable_sharing_with_cli(
     # region record of, so an existing share always keeps its region.
     is_relay_region_measured = not is_cloud_row and not probe.has_share_env
     preferred_region = _pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None
-    share = _create_share_and_write_materials(
-        host_id,
-        agent_id,
-        agent_address,
-        cli,
-        account_email,
-        client_env_config,
-        preferred_region=preferred_region,
-        service_labels=service_labels,
-        grants_toml_text=grants_toml,
-    )
-    _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
-    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
-
-
-def _create_share_and_write_materials(
-    host_id: str,
-    agent_id: AgentId,
-    agent_address: str,
-    cli: ImbueCloudCli,
-    account_email: str,
-    client_env_config: ClientEnvConfig,
-    preferred_region: str | None,
-    service_labels: Mapping[str, str],
-    # None leaves the grants document the workspace already holds untouched
-    # (a stale-domain repair); otherwise it lands before share.env.
-    grants_toml_text: str | None,
-) -> ShareCliInfo:
-    """Register (or re-register) the share with the connector and inject its materials in one exec.
-
-    The share create is where the connector mints the domain -- a fresh one
-    for a first share, the stored one for a re-share, or a new one when the
-    stored domain sits on a content domain the tier moved away from.
-    """
     try:
         share = cli.create_share(
             account=account_email,
@@ -586,77 +542,11 @@ def _create_share_and_write_materials(
     # Everything lands in one exec, share.env last -- the gateway brings the
     # stack up the moment it appears, so the grants must already be in place.
     try:
-        provision_share_files_in_agent(agent_address, grants_toml_text, share_env_text, cli.mngr_caller)
-    except ShareInjectionError as exc:
-        raise ShareMaterialsWriteError(str(exc)) from exc
-    return share
-
-
-def migrate_stale_share(
-    host_id: str,
-    agent_id: AgentId,
-    agent_address: str,
-    # The active share as the connector reports it, still on the retired domain.
-    stale_share: ShareCliInfo,
-    cli: ImbueCloudCli,
-    account_email: str,
-    client_env_config: ClientEnvConfig,
-    service_labels: Mapping[str, str],
-    identity_cache: IdentityCache | None,
-    forward_identity: ForwardIdentityPublisher | None,
-    owner_account: AccountSession | None,
-) -> dict[str, Any]:
-    """Move a share the tier left on a previous content domain onto the current one.
-
-    A re-share that rewrites only ``share.env``: the connector mints the new
-    domain, the workspace's gateway restarts on the new materials, and the
-    grants document is left exactly as the workspace holds it, so nobody's
-    access changes with the address. Raises :class:`SharingError` when the
-    workspace cannot take the move; the panel then shows it with a retry.
-    """
-    try:
-        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
+        provision_share_files_in_agent(agent_address, grants_toml, share_env_text, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
-    if not probe.has_gateway:
-        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
-    # The grants are only read here (for the grantee bookkeeping below), but a
-    # document that cannot be read means the share's policy is unknown, and a
-    # move that keeps an unknown policy live at a new address is refused the
-    # same way an edit against it is.
-    parsed_grants = _parse_grants_toml(probe.grants_toml_text) if probe.grants_toml_text else (_empty_grant_list(), {})
-    if parsed_grants is None:
-        raise SharingError(
-            "The machine's current sharing permissions file is unreadable, so sharing was not moved to "
-            "its new address. To reset it, disable sharing for this machine and enable it again."
-        )
-    workspace_grants, service_grants = parsed_grants
-    try:
-        share = _create_share_and_write_materials(
-            host_id,
-            agent_id,
-            agent_address,
-            cli,
-            account_email,
-            client_env_config,
-            preferred_region=None,
-            service_labels=service_labels,
-            grants_toml_text=None,
-        )
-    except ShareMaterialsWriteError as exc:
-        # The connector no longer flags the share, so the panel's retry (a
-        # plain read) will not inject again: only a re-enable does.
-        raise SharingError(
-            "Sharing was moved to a new address, but this machine did not receive the new share materials, so "
-            f"its shared links stay down until sharing is disabled and enabled again for it: {exc}"
-        ) from exc
-    logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
-    user_ids = _granted_user_ids(workspace_grants, service_grants)
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
-    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    document = _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
-    document["migrated_domain_from"] = stale_share.workspace_domain
-    return document
+    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
 
 
 def enable_web_access_for_workspace(
@@ -779,20 +669,11 @@ def get_sharing(
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
     identity_cache: IdentityCache | None,
-    # Needed only to repair a share left on a retired content domain (the
-    # connector and broker URLs stamped into the new share.env); None makes
-    # such a repair fail with the config error the enable path reports.
-    client_env_config: ClientEnvConfig | None,
-    forward_identity: ForwardIdentityPublisher | None,
 ) -> dict[str, Any]:
     """Return the machine's sharing document: enabled/domain/status + the grants read from the workspace.
 
     The document also carries the current origin label per share target, from
     which the Share tab builds every link (a target absent from it has no link yet).
-    A share the connector flags ``needs_reshare`` (active on a content domain
-    the tier moved away from) is repaired here, on the read, so opening the
-    share panel is what moves it; that read raises :class:`SharingError` when
-    the move fails.
     """
     empty_grants = _empty_grant_list()
     disabled: dict[str, Any] = {
@@ -823,22 +704,6 @@ def get_sharing(
         logger.debug("Sharing grants read: {}", exc)
         return _unknown_grants_document(host_id, share, {})
     service_labels = resolve_share_target_labels(backend_resolver, agent_id)
-    if share.needs_reshare:
-        if client_env_config is None:
-            raise SharingError("Client environment config is unavailable; cannot move sharing to its new address.")
-        return migrate_stale_share(
-            host_id,
-            agent_id,
-            build_agent_address(agent_id, backend_resolver),
-            share,
-            cli,
-            resolve_account_email_for_workspace(session_store, agent_id),
-            client_env_config,
-            service_labels,
-            identity_cache,
-            forward_identity,
-            _owner_account_for(session_store, agent_id),
-        )
     try:
         grants_toml_text = read_share_grants_from_agent(
             build_agent_address(agent_id, backend_resolver), cli.mngr_caller

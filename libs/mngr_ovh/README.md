@@ -66,7 +66,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `project_id` | `None` | OVH cloud project ID. Reserved for future Public Cloud support; unused for classic VPS. |
 | `default_region` | `US-EAST-VA` | Default VPS datacenter (e.g. US-WEST-OR for US accounts). |
 | `default_plan` | `vps-2025-model1` | Default VPS plan code (1 vCPU / 8 GB RAM / 80 GB SSD, ~$7.99/mo). |
-| `default_image_name` | `Debian 13` | Default OS image name, as listed in OVH's catalog (Docker is installed by the shared host setup). |
+| `default_image_name` | `Debian 12 - Docker` | Default OS image name (Docker pre-installed). |
 | `bootstrap_ssh_user` | `debian` | Non-root user the OVH image installs the rebuild key for. Override only if you change default_image_name to a non-Debian image (e.g. ubuntu, almalinux). |
 | `pricing_mode` | `DEFAULT` | OVH pricing mode. UPFRONT6 / UPFRONT12 get a discount in exchange for prepayment. |
 | `duration` | `P1M` | ISO-8601 commitment duration. OVH classic VPS only supports monthly billing. |

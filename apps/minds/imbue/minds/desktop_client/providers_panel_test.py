@@ -78,7 +78,7 @@ def test_build_providers_state_payload_hides_local_provider() -> None:
 
 
 def test_build_providers_state_payload_hides_default_imbue_cloud_provider() -> None:
-    """The default ``imbue_cloud`` singleton is hidden -- Imbue Studio uses per-account variants."""
+    """The default ``imbue_cloud`` singleton is hidden -- minds uses per-account variants."""
     resolver = MngrCliBackendResolver()
     now = datetime.now(timezone.utc)
     seed_provider_snapshots(

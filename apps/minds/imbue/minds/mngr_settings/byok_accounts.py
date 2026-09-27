@@ -11,8 +11,9 @@ from imbue.minds.mngr_settings.data_types import CloudAccountRecord
 from imbue.minds.mngr_settings.errors import MindsSettingsError
 from imbue.minds.mngr_settings.file_store import settings_store_for
 from imbue.minds.mngr_settings.provider_blocks import AWS_DEFAULT_INSTANCE_TYPE
-from imbue.minds.mngr_settings.provider_blocks import BYOK_DOCKER_RUNTIME
-from imbue.minds.mngr_settings.provider_blocks import BYOK_INSTALL_GVISOR_RUNTIME
+from imbue.minds.mngr_settings.provider_blocks import AWS_DEFAULT_START_ARGS
+from imbue.minds.mngr_settings.provider_blocks import AWS_DOCKER_RUNTIME
+from imbue.minds.mngr_settings.provider_blocks import AWS_INSTALL_GVISOR_RUNTIME
 from imbue.minds.mngr_settings.provider_blocks import BYOK_PROVIDER_NAME_PREFIX
 from imbue.minds.mngr_settings.provider_blocks import BYOK_SUPPORTED_BACKENDS
 from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_DIR
@@ -45,7 +46,7 @@ def set_cloud_account_provider(
     """Register a bring-your-own-key cloud account as ``[providers.byok-<backend>-<slug>]``.
 
     ``credentials`` are the backend's pasted-credential config fields verbatim; they land as plaintext TOML the same way the imbue_cloud session store persists its secrets (0600-class local files).
-    The block also pins the Imbue Studio workspace shape (instance type + gVisor hardening).
+    The block also pins the minds workspace shape (instance type + gVisor hardening).
     Returns the block name (the mngr provider-instance name that creates will target).
 
     Raises ``MindsSettingsError`` for an unsupported backend, an unusable alias, a duplicate account name, or an uninitialized mngr profile.
@@ -130,7 +131,7 @@ def _cloud_account_identifier(block: Mapping[str, object]) -> str:
 
 
 def delete_cloud_account_provider(provider_name: str, *, root: MindsRoot) -> bool:
-    """Remove a cloud account block from Imbue Studio's settings.
+    """Remove a cloud account block from minds' settings.
 
     Only deletes ``byok-*`` blocks -- never the ambient/reconciled providers.
     Cloud-side resources (security group, state bucket) are deliberately left in place; ``mngr <backend> cleanup`` is the explicit teardown for those.
@@ -166,13 +167,15 @@ def _register_cloud_account_block(
     block["host_dir"] = WORKSPACE_HOST_DIR
     block["volume_home_path"] = WORKSPACE_VOLUME_HOME_PATH
     block["host_log_dir"] = WORKSPACE_HOST_LOG_DIR
-    # Every cloud runs the agent in a gVisor (runsc) container: the VM's host setup installs the runtime, and mngr_vps adds the tmpfs mounts runsc needs.
-    block["install_gvisor_runtime"] = BYOK_INSTALL_GVISOR_RUNTIME
-    block["docker_runtime"] = BYOK_DOCKER_RUNTIME
-    # Per-backend placement + shape. GCE is zonal, so the GCP "region" value is a zone.
+    # Per-backend placement + shape.
+    # AWS keeps the gVisor hardening knobs; GCP / Azure run the providers' default docker runtime (their templates' hardening args are runtime-agnostic).
+    # GCE is zonal, so the GCP "region" value is a zone.
     if backend == "aws":
         block["default_region"] = region
         block["default_instance_type"] = AWS_DEFAULT_INSTANCE_TYPE
+        block["install_gvisor_runtime"] = AWS_INSTALL_GVISOR_RUNTIME
+        block["docker_runtime"] = AWS_DOCKER_RUNTIME
+        block["default_start_args"] = list(AWS_DEFAULT_START_ARGS)
     elif backend == "gcp":
         block["default_zone"] = region
         block["default_machine_type"] = DEFAULT_GCP_MACHINE_TYPE

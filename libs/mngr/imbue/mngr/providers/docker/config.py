@@ -14,8 +14,6 @@ from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
-from imbue.mngr.primitives import DockerCpuCount
-from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderBackendName
 
@@ -108,24 +106,7 @@ class DockerProviderConfig(ProviderInstanceConfig):
     )
     default_start_args: tuple[str, ...] = Field(
         default=(),
-        description="Default docker run arguments applied to all containers (e.g., '--tmpfs', '/run')",
-    )
-    default_cpus: DockerCpuCount | None = Field(
-        default=None,
-        description=(
-            "CPU cap for new containers, rendered as `docker run --cpus`. Clamped to the daemon's CPU "
-            "count (which docker refuses to exceed) with a warning. A `--cpus` in default_start_args or "
-            "a caller's `-s --cpus` wins over it. None leaves new containers uncapped."
-        ),
-    )
-    default_memory: DockerMemorySize | None = Field(
-        default=None,
-        description=(
-            "Memory cap for new containers in docker's spelling (e.g. '8g'), rendered as `docker run "
-            "--memory` with `--memory-swap` set to the same value so the container cannot swap. A "
-            "`--memory` in default_start_args or a caller's `-s --memory` wins over it. None leaves new "
-            "containers uncapped."
-        ),
+        description="Default docker run arguments applied to all containers (e.g., '--cpus=2', '--memory=4g')",
     )
     ssh_bind_address: IPv4Address | IPv6Address | None = Field(
         default=None,

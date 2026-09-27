@@ -27,7 +27,6 @@ from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
-from imbue.mngr_lima.sizing import format_gib
 
 # Lima rejects a VM whose SSH control-socket path would reach UNIX_PATH_MAX. In
 # pkg/instance/create.go it forms that path as
@@ -421,70 +420,21 @@ def limactl_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, 
     """
     cmd = ["limactl", "list", "--json"]
     result = _run_limactl(cg, "list", cmd, timeout=timeout)
-    return _parse_json_lines(result.stdout, "instance")
 
+    output = result.stdout.strip()
+    if not output:
+        return []
 
-def _parse_json_lines(output: str, entry_kind: str) -> list[dict[str, Any]]:
-    """The objects in limactl's ``--json`` listings, which print one JSON object per line."""
-    entries: list[dict[str, Any]] = []
-    for line in output.strip().splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            entries.append(json.loads(stripped))
-        except json.JSONDecodeError as e:
-            logger.warning("Failed to parse Lima {} JSON: {}", entry_kind, e)
-    return entries
-
-
-def limactl_disk_list(cg: ConcurrencyGroup, timeout: float = 30.0) -> list[dict[str, Any]]:
-    """List all Lima-managed disks as parsed JSON (``size`` is in bytes).
-
-    Runs: limactl disk list --json
-    """
-    cmd = ["limactl", "disk", "list", "--json"]
-    result = _run_limactl(cg, "disk list", cmd, timeout=timeout)
-    return _parse_json_lines(result.stdout, "disk")
-
-
-def limactl_disk_resize(
-    cg: ConcurrencyGroup,
-    disk_name: str,
-    size: str,
-    timeout: float = 60.0,
-) -> None:
-    """Grow a Lima-managed disk to ``size`` (a lima size string such as ``200GiB``).
-
-    Runs: limactl disk resize <disk_name> --size <size>
-
-    Lima refuses while an instance holds the disk (the VM must be stopped) and
-    refuses a shrink; both surface as LimaCommandError. The guest filesystem is
-    grown separately, by the VM's every-boot provisioning.
-    """
-    cmd = ["limactl", "disk", "resize", disk_name, "--size", size]
-    with log_span("Running limactl disk resize: {} (size {})", disk_name, size):
-        _run_limactl(cg, "disk resize", cmd, timeout=timeout)
-
-
-def limactl_edit_size(
-    cg: ConcurrencyGroup,
-    instance_name: str,
-    cpus: int,
-    memory_gib: float,
-    timeout: float = 60.0,
-) -> None:
-    """Rewrite a stopped instance's CPU count and memory in its lima config.
-
-    Runs: limactl edit --tty=false --cpus=<cpus> --memory=<gib> <instance_name>
-
-    ``--tty=false`` applies the flags without opening an editor. Lima refuses
-    to edit a running instance, which surfaces as LimaCommandError.
-    """
-    memory_text = format_gib(memory_gib)
-    cmd = ["limactl", "edit", "--tty=false", f"--cpus={cpus}", f"--memory={memory_text}", instance_name]
-    with log_span("Running limactl edit for {}: {} CPUs, {} GiB", instance_name, cpus, memory_text):
-        _run_limactl(cg, "edit", cmd, timeout=timeout)
+    # limactl list --json outputs one JSON object per line (JSONL format)
+    instances: list[dict[str, Any]] = []
+    for line in output.splitlines():
+        line = line.strip()
+        if line:
+            try:
+                instances.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                logger.warning("Failed to parse Lima instance JSON: {}", e)
+    return instances
 
 
 class LimaSshConfig(FrozenModel):

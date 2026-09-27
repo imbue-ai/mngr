@@ -37,5 +37,5 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `api_key` | `None` | Vultr API key. Falls back to VULTR_API_KEY env var. |
 | `default_region` | `ewr` | Default Vultr region |
 | `default_plan` | `vc2-2c-4gb` | Default Vultr plan |
-| `default_os_id` | `2625` | Default Vultr OS ID (Debian 13 x64 'trixie'; list ids with `GET https://api.vultr.com/v2/os`) |
+| `default_os_id` | `2136` | Default Vultr OS ID (Debian 12 x64) |
 <!-- END GENERATED CONFIG TABLE -->

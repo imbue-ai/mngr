@@ -134,7 +134,7 @@ function submitAccount(state: CloudAccountsModalState, onAccountAdded: (account:
     .catch(() => {
       state.isPrepareInFlight = false;
       state.resultHeading = "Account setup failed";
-      state.resultMessage = "Network error talking to Imbue Studio. Nothing was saved; try again.";
+      state.resultMessage = "Network error talking to minds. Nothing was saved; try again.";
       state.isBackShownOnResult = true;
       state.view = "result";
       m.redraw();

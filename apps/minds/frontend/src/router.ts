@@ -159,7 +159,7 @@ export function navigateExternalUrl(shell: ShellState, url: string): void {
     if (webLoginMessage !== null) {
       void webLogin.start(webLoginMessage);
     }
-    // A template deeplink (imbue-studio://create?git_url= -> /create/template?
+    // A template deeplink (minds://create?git_url= -> /create/template?
     // git_url=) that lands while a machine is displayed floats the stepper as a
     // modal over that machine (create new OR add to it), the SPA heir of the
     // legacy /create/template/modal; with no machine it passes through to the

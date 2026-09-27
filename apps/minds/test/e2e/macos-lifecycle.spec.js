@@ -5,8 +5,8 @@
 // paths still assumed a window always exists, and each one dead-ended the app:
 // a startup failure left it unable to open any window ever again, a window
 // closed mid-startup stranded it unauthenticated, a backend crash with nothing
-// open went unreported and unrecoverable, and an imbue-studio:// deeplink
-// was silently dropped.
+// open went unreported and unrecoverable, and a minds:// deeplink was silently
+// dropped.
 //
 // The shared invariant under test: with the app alive and no windows open,
 // every "give me a window" request resolves to a window showing the app's
@@ -99,18 +99,18 @@ test.describe('startup failure', () => {
 });
 
 test.describe('healthy app', () => {
-  test('#483 an imbue-studio:// deeplink with no window open opens one', async ({ mindsApp }) => {
+  test('#483 a minds:// deeplink with no window open opens one', async ({ mindsApp }) => {
     const { app, pickContentWindow } = mindsApp;
 
     await pickContentWindow(app, { timeoutMs: 5 * 60 * 1000 });
     await closeAllWindows(app);
 
-    // Bare imbue-studio:// is the browser sign-in flow's "Open app" link
-    // (--success-redirect-url imbue-studio://). docs/desktop-app.md promises it
+    // Bare minds:// is the browser sign-in flow's "Open app" link
+    // (--success-redirect-url minds://). docs/desktop-app.md promises it
     // "opens/focuses the app"; with no window it was received and dropped,
     // and 'activate' does not cover it (application:openURLs: need not fire
     // applicationShouldHandleReopen:).
-    const opened = await windowOpenedBy(app, () => emitOpenUrl(app, 'imbue-studio://'));
+    const opened = await windowOpenedBy(app, () => emitOpenUrl(app, 'minds://'));
     await expect
       .poll(() => liveUrl(opened), { timeout: 60 * 1000 })
       .toMatch(/^http:\/\/localhost:\d+\//);

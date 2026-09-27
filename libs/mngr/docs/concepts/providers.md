@@ -62,7 +62,6 @@ Provider instances must handle:
 - **Snapshot** — Capture filesystem state for backup/restore (optional, not supported by all providers)
 - **List** — Discover all mngr-managed hosts
 - **CLI args** — Register provider-specific flags (e.g., `--gpu`, `--memory`)
-- **Sizing** — Record the CPU, memory, and disk allocated to a host and report it via `get_host_resources`. There is no generic resize; a provider that can change a host's size after creation offers its own command for it (see [hosts](./hosts.md#sizing))
 
 `mngr` handles higher-level concerns: agent lifecycle, idle detection, port forwarding, and file sync.
 

@@ -150,27 +150,6 @@ def test_provision_writes_all_share_files_in_one_exec() -> None:
     assert "owner_email" not in command
 
 
-def test_provision_omits_the_grants_document_on_a_share_env_only_write() -> None:
-    # A stale-domain repair rewrites share.env and must leave the grants the
-    # workspace holds untouched.
-    caller = RecordingMngrCaller()
-
-    provision_share_files_in_agent(AgentId(), None, "export A=b\n", caller)
-
-    command = caller.calls[0][2]
-    assert "data/.secrets/share.env" in command
-    assert "share_grants.toml" not in command
-
-
-def test_provision_refuses_a_write_with_nothing_to_write() -> None:
-    caller = RecordingMngrCaller()
-
-    with pytest.raises(ShareInjectionError):
-        provision_share_files_in_agent(AgentId(), None, None, caller)
-
-    assert caller.calls == []
-
-
 def test_provision_omits_share_env_on_a_grants_only_update() -> None:
     caller = RecordingMngrCaller()
 

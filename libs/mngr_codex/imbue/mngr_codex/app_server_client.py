@@ -47,7 +47,6 @@ from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import PrivateAttr
-from pydantic import ValidationError
 from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import unix_connect
 
@@ -319,6 +318,8 @@ class CodexAppServerClient(MutableModel):
     # still excluding every other one.
     _frame_lock: threading.RLock = PrivateAttr(default_factory=threading.RLock)
 
+    # -- lifecycle ---------------------------------------------------------
+
     def close(self) -> None:
         """Close the underlying transport."""
         self.transport.close()
@@ -356,6 +357,8 @@ class CodexAppServerClient(MutableModel):
                 # "immediate" bar (contract A5). Draining only the buffered burst then releasing lets a
                 # waiting sender interleave; the reader re-acquires on its next poll.
                 raw = self._next_raw_frame(0.0)
+
+    # -- request/notification plumbing ------------------------------------
 
     def _next_request_id(self) -> int:
         request_id = self.next_request_id
@@ -450,6 +453,8 @@ class CodexAppServerClient(MutableModel):
         payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": dict(params)})
         with self._frame_lock:
             self.transport.send(payload)
+
+    # -- protocol methods --------------------------------------------------
 
     def initialize(self, client_name: str, client_version: str) -> InitializeResult:
         """Handshake: ``initialize`` (experimentalApi) then the ``initialized`` notification.
@@ -591,19 +596,12 @@ class CodexAppServerClient(MutableModel):
             return self.thread_read(include_turns=False)
 
     def model_list(self, include_hidden: bool = False) -> tuple[CodexModel, ...]:
-        """Return the account's models from ``model/list`` (envelope key ``data``).
-
-        Raises :class:`CodexAppServerError` for a result without a ``data`` array or with an entry
-        that is not a valid model.
-        """
+        """Return the account's models from ``model/list`` (envelope key ``data``)."""
         result = self._request("model/list", {"includeHidden": include_hidden})
         data = result.get("data")
         if not isinstance(data, list):
             raise CodexAppServerError(f"model/list result missing a 'data' array: {result!r}")
-        try:
-            return tuple(CodexModel.model_validate(entry) for entry in data)
-        except ValidationError as exc:
-            raise CodexAppServerError(f"model/list result has a malformed model entry: {exc}") from exc
+        return tuple(CodexModel.model_validate(entry) for entry in data)
 
     def settings_update(
         self,

@@ -16,7 +16,6 @@ from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
-from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
 from imbue.mngr_codex.codex_config import get_codex_home
@@ -32,7 +31,9 @@ from imbue.mngr_codex.codex_config import rewrite_rollout_record_cwd
 from imbue.mngr_codex.codex_config import serialize_codex_config
 from imbue.mngr_codex.codex_config import serialize_codex_hooks
 
+# =============================================================================
 # Path helpers
+# =============================================================================
 
 
 def test_codex_home_is_under_the_agent_state_dir() -> None:
@@ -51,19 +52,9 @@ def test_path_helpers_address_the_codex_home_tree() -> None:
     assert get_codex_version_cache_path(home) == home / "version.json"
 
 
+# =============================================================================
 # Update-check helpers (codex's version.json)
-
-
-def test_app_server_socket_sits_in_its_own_directory_under_tmp() -> None:
-    """codex refuses a socket whose parent other users can write to, which a bare /tmp can be."""
-    deep_home = Path("/tmp") / ("nested" * 20) / "agent" / "plugin" / "codex" / ".codex"
-    socket_path = get_codex_app_server_socket_path(deep_home)
-
-    assert socket_path.parent != Path("/tmp")
-    assert socket_path.parent.parent == Path("/tmp")
-    assert len(str(socket_path)) < 104
-    assert get_codex_app_server_socket_path(deep_home) == socket_path
-    assert get_codex_app_server_socket_path(deep_home / "other").parent != socket_path.parent
+# =============================================================================
 
 
 def test_parse_codex_cli_version_extracts_the_bare_semver() -> None:
@@ -108,7 +99,9 @@ def test_is_codex_update_available_is_false_for_unparseable_input() -> None:
     assert is_codex_update_available("0.138.0", "") is False
 
 
+# =============================================================================
 # build_codex_config
+# =============================================================================
 
 
 def test_build_codex_config_always_pins_the_file_credential_store() -> None:
@@ -185,7 +178,9 @@ def test_build_codex_config_seeds_each_trusted_project() -> None:
     }
 
 
+# =============================================================================
 # serialize_codex_config
+# =============================================================================
 
 
 def test_serialize_codex_config_round_trips_via_toml() -> None:
@@ -208,7 +203,9 @@ def test_serialize_codex_config_round_trips_via_toml() -> None:
     assert parsed["projects"]["/private/tmp/work dir"] == {"trust_level": "trusted"}
 
 
+# =============================================================================
 # merge_project_trust / is_project_trusted
+# =============================================================================
 
 
 def test_merge_project_trust_adds_to_empty_config() -> None:
@@ -260,7 +257,9 @@ def test_is_project_trusted() -> None:
     assert not is_project_trusted({}, "/work/a")
 
 
+# =============================================================================
 # hooks builders
+# =============================================================================
 
 
 def test_build_codex_hooks_config_carries_only_the_session_pointer_recorder() -> None:
@@ -282,7 +281,9 @@ def test_serialize_codex_hooks_round_trips_to_json() -> None:
     assert "  " in serialized
 
 
+# =============================================================================
 # read_codex_config (host-backed)
+# =============================================================================
 
 
 def test_read_codex_config_returns_empty_for_missing_file(
@@ -324,7 +325,9 @@ def test_read_codex_config_raises_on_malformed_toml(local_provider: LocalProvide
         read_codex_config(host, config_path)
 
 
+# =============================================================================
 # Rollout cwd rebind (session adoption)
+# =============================================================================
 
 _SESSION_ID = "019ae614-d626-70f1-a87d-31e6966231f5"
 _OLD_CWD = "/private/tmp/old/workdir"

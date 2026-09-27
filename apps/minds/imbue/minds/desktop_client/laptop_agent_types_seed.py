@@ -2,7 +2,7 @@
 
 mngr's project-config discovery is cwd-based: from any cwd that isn't
 inside a git worktree containing `.mngr/settings.toml`, the workspace's
-`[agent_types.X]` definitions are invisible. The desktop app spawns `mngr forward`,
+`[agent_types.X]` definitions are invisible. Mind.app spawns `mngr forward`,
 `mngr list` and `mngr message` with cwd=$HOME, so the DEFAULT_WORKSPACE_TEMPLATE
 workspace's `[agent_types.X]` blocks (which live at
 `/home/user/workspace/.mngr/settings.toml` inside the workspace container, with the
@@ -13,7 +13,7 @@ The cwd-independent layer is user-scope settings.toml at
 ``<host_dir>/profiles/<profile_id>/settings.toml``. Seeding the minimum
 mapping there lets every laptop-side mngr resolve the workspace's types
 (`chat` and `worker` to ClaudeAgent, `main` to the plain CommandAgent)
-without affecting the system-wide ``~/.mngr/`` install used outside Imbue Studio.
+without affecting the system-wide ``~/.mngr/`` install used outside minds.
 
 The seeded parent MUST match the workspace template's own declaration: the
 user-scope entry cross-scope-merges with the workspace repo's
@@ -61,7 +61,7 @@ _WORKSPACE_AGENT_TYPE_SEEDS: Final[tuple[tuple[str, str, str], ...]] = (
 _PYTEST_OPT_IN_LINE = "is_allowed_in_pytest = true\n"
 
 _SEED_HEADER = """
-# Seeded by the desktop app at startup so laptop-side mngr (cwd=$HOME) can resolve the
+# Seeded by Mind.app at startup so laptop-side mngr (cwd=$HOME) can resolve the
 # DEFAULT_WORKSPACE_TEMPLATE workspace's own agent types without needing to load
 # the workspace's `.mngr/settings.toml` (which lives inside the workspace container
 # at /home/user/workspace/.mngr/ and on the laptop only in ephemeral mngr-create
@@ -87,7 +87,7 @@ def _render_seed_block(type_name: str, parent_type: str, purpose: str) -> str:
     return f'\n# `{type_name}` is {purpose}.\n{_get_section_header(type_name)}\nparent_type = "{parent_type}"\n'
 
 
-# The exact `main` block every pre-cutover Imbue Studio build seeded. Files carrying it
+# The exact `main` block every pre-cutover minds build seeded. Files carrying it
 # must be migrated in place: the laptop profile outlives workspace re-creation,
 # and a claude-parented user-scope `main` cross-scope-merges against the new
 # workspace repo's command-parented `main` at create time, which mngr rejects
@@ -128,11 +128,11 @@ def seed_laptop_agent_types_for_minds(host_dir: Path) -> None:
     """Idempotent. Appends a `[agent_types.X]` block for every workspace type
     missing from the user-scope settings.toml under ``host_dir``.
 
-    Safe to call on every Imbue Studio startup -- a literal substring check for each
+    Safe to call on every minds startup -- a literal substring check for each
     section header avoids re-appending on subsequent launches and is robust
     against the TOML being hand-edited (we only care that *some*
     `[agent_types.X]` exists, regardless of which fields it sets). Types are
-    checked individually, so a settings.toml seeded by an older Imbue Studio build
+    checked individually, so a settings.toml seeded by an older minds build
     (which only knew about `main`) gains the newer types on the next launch.
     """
     profile_dir = get_or_create_profile_dir(host_dir)

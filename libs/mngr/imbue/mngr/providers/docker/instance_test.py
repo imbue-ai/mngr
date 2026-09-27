@@ -21,7 +21,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import DockerBuildTimeoutError
 from imbue.mngr.errors import DockerConfigValidationError
 from imbue.mngr.errors import DockerRuntimeNotRegisteredError
-from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import ProviderUnavailableError
 from imbue.mngr.hosts.host import Host
@@ -33,16 +32,12 @@ from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.host import HostFileReadInterface
 from imbue.mngr.interfaces.host import HostFileWriteInterface
 from imbue.mngr.primitives import DockerBuilder
-from imbue.mngr.primitives import DockerCpuCount
-from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.providers.docker.config import DockerProviderConfig
-from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
-from imbue.mngr.providers.docker.data_types import DockerDaemonTotals
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
@@ -908,128 +903,24 @@ def test_volume_id_for_host_differs_for_different_hosts() -> None:
 # Host Resources
 
 
-_DAEMON_TOTALS = DockerDaemonTotals(cpu_count=4, memory_bytes=16 * 1024**3)
-
-
-def _write_host_record_with_start_args(provider: DockerProviderInstance, start_args: tuple[str, ...]) -> HostRecord:
+def test_get_host_resources_returns_defaults(temp_mngr_ctx: MngrContext) -> None:
+    """get_host_resources returns default values without needing a Docker daemon."""
+    provider = make_docker_provider(temp_mngr_ctx, "test-resources")
+    host_id = HostId.generate()
     now = datetime.now(timezone.utc)
-    record = HostRecord(
-        certified_host_data=CertifiedHostData(host_id=HOST_ID_A, host_name="h", created_at=now, updated_at=now),
-        config=ContainerConfig(start_args=start_args),
+    host_data = CertifiedHostData(host_id=str(host_id), host_name="resources-test", created_at=now, updated_at=now)
+
+    offline_host = OfflineHost(
+        id=host_id,
+        certified_host_data=host_data,
+        provider_instance=provider,
+        mngr_ctx=temp_mngr_ctx,
+        on_updated_host_data=lambda host_id, data: None,
     )
-    provider._host_store.write_host_record(record)
-    return record
 
-
-def test_get_host_resources_reports_the_caps_recorded_in_the_start_args(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path, daemon_totals=_DAEMON_TOTALS)
-    record = _write_host_record_with_start_args(provider, ("--tmpfs", "/run", "--cpus=2", "--memory=512m"))
-
-    resources = provider.get_host_resources(provider._create_host_from_host_record(record))
-    assert resources.cpu.count == 2
-    assert resources.memory_gb == 0.5
-    assert resources.disk_gb is None
-
-
-def test_get_host_resources_falls_back_to_the_daemon_totals_for_an_uncapped_host(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path, daemon_totals=_DAEMON_TOTALS)
-    record = _write_host_record_with_start_args(provider, ("--tmpfs", "/run"))
-
-    resources = provider.get_host_resources(provider._create_host_from_host_record(record))
-    assert resources.cpu.count == 4
-    assert resources.memory_gb == 16.0
-
-
-def test_offline_host_reports_its_provider_resources_without_a_container(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    """A stopped docker host answers get_provider_resources from its record alone."""
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path, daemon_totals=_DAEMON_TOTALS)
-    record = _write_host_record_with_start_args(provider, ("--cpus=1", "--memory=2g"))
-
-    offline_host = provider._create_host_from_host_record(record)
-    assert isinstance(offline_host, OfflineHost)
-    resources = offline_host.get_provider_resources()
+    resources = provider.get_host_resources(offline_host)
     assert resources.cpu.count == 1
-    assert resources.memory_gb == 2.0
-
-
-def test_default_size_start_args_render_the_configured_caps_with_swap_disabled(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    config = DockerProviderConfig(
-        isolate_host_volumes=False, default_cpus=DockerCpuCount(2), default_memory=DockerMemorySize("8g")
-    )
-    provider = make_docker_provider_with_local_volume(
-        temp_mngr_ctx, tmp_path, config=config, daemon_totals=_DAEMON_TOTALS
-    )
-    assert provider._default_size_start_args() == ("--cpus=2", "--memory=8g", "--memory-swap=8g")
-
-
-def test_default_size_start_args_are_empty_when_no_cap_is_configured(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path, daemon_totals=_DAEMON_TOTALS)
-    assert provider._default_size_start_args() == ()
-
-
-def test_default_size_start_args_clamp_the_cpu_cap_to_the_daemon_with_a_warning(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    config = DockerProviderConfig(isolate_host_volumes=False, default_cpus=DockerCpuCount(64))
-    provider = make_docker_provider_with_local_volume(
-        temp_mngr_ctx, tmp_path, config=config, daemon_totals=_DAEMON_TOTALS
-    )
-    with capture_loguru() as log_output:
-        assert provider._default_size_start_args() == ("--cpus=4",)
-    assert "Clamped the default CPU cap from 64 to 4" in log_output.getvalue()
-
-
-class _DockerProviderWithoutContainers(DockerProviderInstance):
-    """A docker provider whose hosts have no container, so a resize only rewrites the record."""
-
-    def _find_container_by_host_id(self, host_id: HostId) -> docker.models.containers.Container | None:
-        return None
-
-
-def _make_provider_without_containers(mngr_ctx: MngrContext, volume_root: Path) -> DockerProviderInstance:
-    return make_docker_provider_with_local_volume(
-        mngr_ctx, volume_root, daemon_totals=_DAEMON_TOTALS, provider_class=_DockerProviderWithoutContainers
-    )
-
-
-def test_resize_host_rewrites_the_recorded_start_args_and_reports_the_new_size(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
-    provider = _make_provider_without_containers(temp_mngr_ctx, tmp_path)
-    _write_host_record_with_start_args(provider, ("--cpus=1", "--memory=1g", "--memory-swap=1g", "--workdir=/"))
-
-    resources = provider.resize_host(HostId(HOST_ID_A), ContainerSizeRequest(memory=DockerMemorySize("4g")))
-
-    assert resources.cpu.count == 1
-    assert resources.memory_gb == 4.0
-    rewritten = provider._host_store.read_host_record(HostId(HOST_ID_A), use_cache=False)
-    assert rewritten is not None and rewritten.config is not None
-    assert rewritten.config.start_args == ("--cpus=1", "--workdir=/", "--memory=4g", "--memory-swap=4g")
-
-
-def test_resize_host_refuses_a_host_without_a_container_config(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    provider = _make_provider_without_containers(temp_mngr_ctx, tmp_path)
-    now = datetime.now(timezone.utc)
-    provider._host_store.write_host_record(
-        HostRecord(
-            certified_host_data=CertifiedHostData(host_id=HOST_ID_A, host_name="h", created_at=now, updated_at=now)
-        )
-    )
-
-    with pytest.raises(MngrError, match="cannot be resized"):
-        provider.resize_host(HostId(HOST_ID_A), ContainerSizeRequest(cpus=DockerCpuCount(2)))
-    with pytest.raises(HostNotFoundError):
-        provider.resize_host(HostId(HOST_ID_B), ContainerSizeRequest(cpus=DockerCpuCount(2)))
+    assert resources.memory_gb == 1.0
 
 
 # Docker Daemon Offline Behavior

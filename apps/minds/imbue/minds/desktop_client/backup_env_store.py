@@ -1,7 +1,7 @@
-"""Canonical per-workspace restic env files, owned by the Imbue Studio app.
+"""Canonical per-workspace restic env files, owned by the minds app.
 
-Imbue Studio is the source of truth for how to reach each workspace's restic
-repository. For every workspace with backups configured, Imbue Studio keeps the
+minds is the source of truth for how to reach each workspace's restic
+repository. For every workspace with backups configured, minds keeps the
 definitive ``restic.env`` (repository URL + backend credentials + the
 workspace's random ``RESTIC_PASSWORD``) here, 0600, under the minds env's
 data dir. The copy inside the workspace at ``data/.secrets/restic.env``
@@ -109,7 +109,7 @@ def split_backup_bucket_name_from_env(env_content: str) -> tuple[str, str] | Non
     imbue_cloud repositories look like
     ``s3:https://<acct>.r2.cloudflarestorage.com/<owner-prefix>--<short-name>``;
     anything without the R2 endpoint marker (or the owner-prefix separator) is
-    a bring-your-own backend, which has no bucket Imbue Studio manages.
+    a bring-your-own backend, which has no minds-managed bucket.
     """
     repository = parse_restic_env(env_content).get("RESTIC_REPOSITORY", "")
     if _R2_ENDPOINT_MARKER not in repository:

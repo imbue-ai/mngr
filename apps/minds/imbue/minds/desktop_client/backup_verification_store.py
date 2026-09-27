@@ -1,12 +1,12 @@
-"""Per-workspace "backup verification enabled" flag, owned by the Imbue Studio app.
+"""Per-workspace "backup verification enabled" flag, owned by the minds app.
 
 Verification (the exec-based check that a workspace's backup service matches
-what Imbue Studio would install today) is on by default for every workspace. A user
+what minds would install today) is on by default for every workspace. A user
 who genuinely doesn't want backups can disable it per workspace; while
 disabled, no checks run against that workspace and no warning badge is shown
 (the laptop-side snapshot status keeps working regardless).
 
-The flag is stored as a marker file per disabled workspace under the Imbue Studio
+The flag is stored as a marker file per disabled workspace under the minds
 env's data dir -- absence of a marker means enabled. Marker files are tiny
 and never auto-deleted on destroy (consistent with the canonical env store).
 """

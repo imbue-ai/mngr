@@ -8,7 +8,7 @@ association, destroy, and the machine-sharing document all ride the existing
 cookie-authed ``/api/v1`` routes, which already carry the concurrency story
 those records support (sharing writes are whole-document replaces serialized
 client-side; name/color/account are pass-throughs to mngr labels guarded by
-mngr's own host/agent locks, so there is no version owned by Imbue Studio to If-Match).
+mngr's own host/agent locks, so there is no minds-owned version to If-Match).
 
 The small context helpers here are the successors of ``app.py``'s private
 ``_build_workspace_context`` family, deleted with the legacy pages. The
@@ -19,7 +19,6 @@ label map.
 
 import json
 import re
-from collections.abc import Sequence
 from typing import Final
 
 from flask import Blueprint
@@ -41,7 +40,6 @@ from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.minds.desktop_client.workspace_record_store import RECORD_STATE_ACTIVE
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.primitives import AgentId
 
 # App icons are SVG markup authored inside the workspace -- untrusted content
@@ -94,9 +92,6 @@ class WorkspaceOptionsData(FrozenModel):
     palette: dict[str, str] = Field(description="Pickable palette swatches, name -> hex")
     is_stale: bool = Field(description="Whether the owning provider's last discovery poll errored")
     is_leased_imbue_cloud: bool = Field(description="Whether the host lease fixes the account link")
-    leased_owner_email: str = Field(
-        default="", description="The account a leased machine belongs to, '' when not leased or not known"
-    )
     has_account: bool = Field(description="Whether the workspace is associated with an account")
     account_email: str = Field(description="The associated account's email, '' when unassociated")
     account_display_name: str | None = Field(
@@ -189,19 +184,6 @@ def _json_error_response(status_code: int, message: str) -> Response:
     )
 
 
-def _leased_owner_email(
-    current_account: AccountSession | None, provider_name: str | None, accounts: Sequence[AccountSession]
-) -> str:
-    """The email of the account a leased machine belongs to: its linked account, else the signed-in
-    account whose Imbue Cloud provider instance hosts it. '' when neither names one."""
-    if current_account is not None:
-        return str(current_account.email)
-    for account in accounts:
-        if imbue_cloud_provider_name_for_account(str(account.email)) == provider_name:
-            return str(account.email)
-    return ""
-
-
 def _handle_workspace_options_data(agent_id: str) -> Response:
     if not is_ui_request_authenticated():
         return _json_error_response(401, "Not authenticated")
@@ -244,9 +226,6 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         palette=dict(WORKSPACE_PALETTE),
         is_stale=is_stale,
         is_leased_imbue_cloud=is_leased,
-        leased_owner_email=_leased_owner_email(current_account, info.provider_name, accounts)
-        if is_leased and info is not None
-        else "",
         has_account=current_account is not None,
         account_email=current_account.email if current_account else "",
         account_display_name=current_account.display_name if current_account else None,

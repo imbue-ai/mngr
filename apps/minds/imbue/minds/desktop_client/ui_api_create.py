@@ -54,7 +54,7 @@ from imbue.minds.desktop_client.local_prerequisites import LocalBackendPrerequis
 from imbue.minds.desktop_client.local_prerequisites import host_platform_from_system
 from imbue.minds.desktop_client.local_prerequisites import local_launch_mode_for
 from imbue.minds.desktop_client.local_prerequisites import probe_local_prerequisites
-from imbue.minds.desktop_client.minds_config import settle_default_account_id
+from imbue.minds.desktop_client.minds_config import resolve_default_account_id
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -333,7 +333,14 @@ def _handle_create_form_defaults() -> Response:
         CreateAccountOption(user_id=str(account.user_id), email=str(account.email))
         for account in (session_store.list_accounts() if session_store is not None else [])
     )
-    default_account_id = settle_default_account_id(state.minds_config, [account.user_id for account in accounts]) or ""
+    minds_config = state.minds_config
+    default_account_id = (
+        resolve_default_account_id(
+            stored_default_account_id=minds_config.get_default_account_id() if minds_config is not None else None,
+            signed_in_user_ids=[account.user_id for account in accounts],
+        )
+        or ""
+    )
     region_options, region_selected = _region_form_context()
     cloud_accounts = tuple(
         CloudAccountOption(name=account.name, alias=account.alias, backend=account.backend, region=account.region)

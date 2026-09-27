@@ -356,19 +356,6 @@ _ROOT_KEY = "ssh-ed25519 AAAAROOTKEY mngr-lima-root"
 _FOREIGN_KEY = "ssh-rsa AAAALEASEDKEY someone-elses-lease"
 
 
-def _generated_provision_script(volume_host_path: Path | None, root_authorized_public_key: str | None) -> str:
-    """The provisioning script for the exposed layout (a host volume path) or, given None, the btrfs disk layout."""
-    is_btrfs_layout = volume_host_path is None
-    config = generate_default_lima_yaml(
-        volume_host_path=volume_host_path,
-        host_dir="/mngr",
-        host_data_disk_name="mngr-abc-data" if is_btrfs_layout else None,
-        host_data_disk_size="100GiB" if is_btrfs_layout else None,
-        root_authorized_public_key=root_authorized_public_key,
-    )
-    return config["provision"][0]["script"]
-
-
 def _root_key_block(root_authorized_public_key: str) -> str:
     """Slice the root-authorized-keys step out of the generated provisioning script.
 
@@ -376,7 +363,13 @@ def _root_key_block(root_authorized_public_key: str) -> str:
     this step can, so the assertions below exercise the real generated bash rather
     than matching substrings of it.
     """
-    script = _generated_provision_script(None, root_authorized_public_key)
+    script = generate_default_lima_yaml(
+        volume_host_path=None,
+        host_dir="/mngr",
+        host_data_disk_name="mngr-abc-data",
+        host_data_disk_size="100GiB",
+        root_authorized_public_key=root_authorized_public_key,
+    )["provision"][0]["script"]
     end_marker = "chown -R root:root /root/.ssh"
     start = script.index("mkdir -p /root/.ssh")
     return script[start : script.index(end_marker) + len(end_marker)]
@@ -500,32 +493,3 @@ def test_provision_script_disables_per_source_penalties_only_when_supported() ->
     script = config["provision"][0]["script"]
     assert "PerSourcePenalties no" in script
     assert "sshd -T 2>/dev/null | grep -qi '^persourcepenalties'" in script
-
-
-def test_provision_script_caps_the_journal_in_every_layout(tmp_path: Path) -> None:
-    volume_path = tmp_path / "volume"
-    volume_path.mkdir()
-    for script in (_generated_provision_script(volume_path, None), _generated_provision_script(None, None)):
-        assert "SystemMaxUse=512M" in script
-        assert "/etc/systemd/journald.conf.d/60-mngr.conf" in script
-        # Capped before the apt round-trip, so a mirror failure cannot skip it.
-        assert script.index("SystemMaxUse") < script.index("apt_get_retry update")
-
-
-def test_provision_script_grows_the_data_filesystem_on_every_boot() -> None:
-    script = _generated_provision_script(None, None)
-    assert "cloud-guest-utils" in script
-    assert "btrfs filesystem resize max /mnt/lima-mngr-abc-data" in script
-    # growpart exits 1 for "already full-size" and 2 for a real failure; only the former is tolerated.
-    assert 'growpart "/dev/$DATA_GROW_DISK" "${DATA_GROW_SRC##*[!0-9]}" || [ $? -eq 1 ]' in script
-    # The grow runs after the mount block (which is skipped once mounted) and before the symlink.
-    assert script.index("mountpoint -q /mnt/lima-mngr-abc-data") < script.index("btrfs filesystem resize max")
-    assert script.index("btrfs filesystem resize max") < script.index("ln -sfn /mnt/lima-mngr-abc-data /mngr")
-
-
-def test_exposed_layout_provision_script_has_no_grow_step(tmp_path: Path) -> None:
-    volume_path = tmp_path / "volume"
-    volume_path.mkdir()
-    script = _generated_provision_script(volume_path, None)
-    assert "btrfs filesystem resize" not in script
-    assert "cloud-guest-utils" not in script

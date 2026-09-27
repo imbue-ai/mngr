@@ -12,7 +12,6 @@ from imbue.mngr_lima.constants import DEFAULT_HOST_DATA_DISK_SIZE
 from imbue.mngr_lima.constants import LIMA_BACKEND_NAME
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
 from imbue.mngr_lima.errors import LimaConfigError
-from imbue.mngr_lima.primitives import LimaDiskSize
 
 
 class LimaProviderConfig(ProviderInstanceConfig):
@@ -53,14 +52,13 @@ class LimaProviderConfig(ProviderInstanceConfig):
             "symlinked to the disk exactly as before."
         ),
     )
-    host_data_disk_size: LimaDiskSize = Field(
+    host_data_disk_size: str = Field(
         default=DEFAULT_HOST_DATA_DISK_SIZE,
         description=(
-            "Logical size of the btrfs additional disk new hosts get when "
+            "Logical size of the btrfs additional disk used when "
             "is_host_data_volume_exposed=False. qcow2 is sparse, so this is "
             "a logical cap visible to the guest, not upfront host disk usage. "
-            "Format follows Lima's size string (e.g. '100GiB'). Recorded per host at "
-            "create; `mngr lima resize --disk` grows an existing host's disk."
+            "Format follows Lima's size string (e.g. '100GiB')."
         ),
     )
     is_run_as_root: bool = Field(

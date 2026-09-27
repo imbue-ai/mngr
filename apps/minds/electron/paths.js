@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { app } = require('electron');
-const { MINDS_APP_NAME, tierForRootName, platformRootsFor, legacyDataDirFor } = require('./platform-roots');
 
 /**
  * Resolve paths to bundled resources, accounting for asar packaging,
@@ -78,7 +77,7 @@ function getDesyncBinDir() {
  * scripts/download-binaries.js. In dev, ``pnpm start`` runs the
  * ``prestart`` hook (``node scripts/download-binaries.js``) so the
  * binary is present before Electron boots, mirroring the bundled-app
- * UX -- an Imbue Studio end user (or dev) should never have to install restic
+ * UX -- a Minds end user (or dev) should never have to install restic
  * separately.
  */
 function getResticPath() {
@@ -134,13 +133,13 @@ function getLatchkeyPath() {
 }
 
 /**
- * Directory where all Latchkey gateways Imbue Studio manages keep their shared
+ * Directory where all minds-managed Latchkey gateways keep their shared
  * credential/config state (``LATCHKEY_DIRECTORY``). Sharing one directory
  * across gateways lets the user authenticate with each third-party service
  * once for all their agents, instead of once per agent.
  */
 function getLatchkeyDirectory() {
-  return path.join(getStateDir(), 'latchkey');
+  return path.join(getDataDir(), 'latchkey');
 }
 
 /**
@@ -237,76 +236,32 @@ function getMindsRootName() {
   return 'minds';
 }
 
-function getTier() {
-  return tierForRootName(getMindsRootName());
-}
-
-/**
- * The `{ state, cache, logs }` roots this tier stores state under, resolved
- * against the live platform and environment.
- */
-function getPlatformRoots() {
-  return platformRootsFor({
-    rootName: getMindsRootName(),
-    platform: process.platform,
-    homeDir: os.homedir(),
-    dataHome: process.env.MINDS_DATA_HOME,
-  });
-}
-
-/**
- * The `~/.<MINDS_ROOT_NAME>` root this tier used before the move.
- *
- * On macOS the migration (migrate-data-dir.js) reads it and nothing else does.
- * Off macOS it is still the live root, and every role below resolves back into
- * it.
- */
-// CLEANUP: delete alongside electron/migrate-data-dir.js, its only caller
-// (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration"). legacyDataDirFor stays: off macOS it resolves the live root.
-function getLegacyDataDir() {
-  return legacyDataDirFor({ rootName: getMindsRootName(), homeDir: os.homedir() });
-}
-
-/**
- * The state root: secrets, sessions, agent records, the virtualenv, and
- * Electron's own `userData`. Backed up by Time Machine, which is correct for
- * everything filed here.
- */
-function getStateDir() {
-  return getPlatformRoots().state;
+function getDataDir() {
+  return path.join(os.homedir(), '.' + getMindsRootName());
 }
 
 function getMngrHostDir() {
-  return path.join(getStateDir(), 'mngr');
+  return path.join(getDataDir(), 'mngr');
 }
 
 function getMngrPrefix() {
   return getMindsRootName() + '-';
 }
 
-/**
- * Regenerable, and filed where macOS may delete it. uv treats a missing cache
- * as a cold cache rather than an error.
- */
 function getUvCacheDir() {
-  return path.join(getPlatformRoots().cache, '.uv-cache');
+  return path.join(getDataDir(), '.uv-cache');
 }
 
-/**
- * The downloaded interpreter. Regenerable, but under state rather than cache:
- * the backend cannot boot without it, so a low-disk purge would brick the app.
- */
 function getUvPythonDir() {
-  return path.join(getStateDir(), '.uv-python');
+  return path.join(getDataDir(), '.uv-python');
 }
 
 function getLogDir() {
-  return getPlatformRoots().logs;
+  return path.join(getDataDir(), 'logs');
 }
 
-/** The virtualenv. Under state for the same reason as getUvPythonDir(). */
 function getVenvDir() {
-  return path.join(getStateDir(), '.venv');
+  return path.join(getDataDir(), '.venv');
 }
 
 function getPyprojectDir() {
@@ -322,7 +277,6 @@ function getMonorepoRoot() {
 }
 
 module.exports = {
-  MINDS_APP_NAME,
   isDev,
   getResourcesDir,
   getUvPath,
@@ -340,10 +294,7 @@ module.exports = {
   getResticPath,
   getLatchkeyCurlRouterPath,
   getMindsRootName,
-  getTier,
-  getPlatformRoots,
-  getLegacyDataDir,
-  getStateDir,
+  getDataDir,
   getMngrHostDir,
   getMngrPrefix,
   getUvCacheDir,

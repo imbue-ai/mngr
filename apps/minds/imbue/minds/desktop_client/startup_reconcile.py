@@ -197,7 +197,7 @@ class StartupHostReconciler(MutableModel):
         has_system_services = any(agent.name == SYSTEM_SERVICES_AGENT_NAME for agent in host.agents)
 
         if create_attempt_id is None:
-            # Never touch a host Imbue Studio didn't stamp. Pre-existing orphans (from
+            # Never touch a host minds didn't stamp. Pre-existing orphans (from
             # before the label existed) stay until cleaned up manually.
             if not host.agents:
                 logger.warning(

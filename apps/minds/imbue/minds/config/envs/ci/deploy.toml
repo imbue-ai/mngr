@@ -10,14 +10,7 @@
 
 modal_workspace = "minds-dev"
 vault_path_prefix = "secrets/minds/ci"
-# The ops zone (telemetry, errors, the R2 setup scripts), not where user
-# content lives; that is content_domain below.
 cloudflare_domain = "minds-dev.com"
-# The user-content apex shared workspaces are served under, stamped over the
-# Vault sharing entry's SHARE_CONTENT_DOMAIN at deploy time. The connector
-# looks this zone up by name, so the tier's Cloudflare token needs zone read
-# and DNS edit on it.
-content_domain = "personal-imbue-dev.com"
 
 # Vault-backed per-env Modal Secrets. Same shape as dev: each name
 # corresponds to a Vault entry at ``<vault_path_prefix>/<name>``.
@@ -87,7 +80,6 @@ monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
 max_active_machine_units = 8
 max_total_machine_disk_gb = 140
-max_shared_workspaces = 50
 
 [plans.explorer]
 max_remote_workspaces = 2
@@ -98,7 +90,6 @@ monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
 max_active_machine_units = 16
 max_total_machine_disk_gb = 280
-max_shared_workspaces = 50
 
 [plans.ally]
 max_remote_workspaces = 10
@@ -109,27 +100,6 @@ monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
 max_active_machine_units = 80
 max_total_machine_disk_gb = 1400
-max_shared_workspaces = 50
-
-# The waitlist plan (specs/minds-waitlist-signup-codes/spec.md): every quota at
-# zero. Accounts created without a signup code land here while [waitlist] is on;
-# a redeemed code promotes them to the plan they chose.
-[plans.guest]
-max_remote_workspaces = 0
-max_total_workspaces = 0
-max_buckets = 0
-max_total_bucket_gb = 0
-monthly_llm_spend_usd = 0
-max_active_synced_workspaces = 0
-max_active_machine_units = 0
-max_total_machine_disk_gb = 0
-max_shared_workspaces = 0
-
-# Whether accounts created without a signup code land on the guest plan (and
-# the download page requires a signed-in, invited account). Pushed to the
-# connector as MINDS_WAITLIST_ENABLED; off leaves signup and downloads open.
-[waitlist]
-is_enabled = false
 
 # Whether this tier deploys the analytics app (analytics-<tier>): the
 # gold-table aggregation + lake maintenance crons. Off until the tier's

@@ -15,7 +15,7 @@ account = "alice@imbue.com"
 
 There is no baked-in default connector URL: it comes from the per-instance `connector_url` field, or, when that is unset, the `MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL` environment variable. If neither is set, the provider raises.
 
-On tiers with a dedicated browser accounts origin (e.g. production's accounts.imbue.com), `auth login` opens the hosted login page there instead of on the connector host: pass `--accounts-url` or set the `MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL` environment variable (the Imbue Studio desktop client sets it automatically from its `client.toml`). When neither is set, the login page opens on the connector host itself, which is correct on dev/CI tiers.
+On tiers with a dedicated browser accounts origin (e.g. production's accounts.imbue.com), `auth login` opens the hosted login page there instead of on the connector host: pass `--accounts-url` or set the `MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL` environment variable (the minds desktop client sets it automatically from its `client.toml`). When neither is set, the login page opens on the connector host itself, which is correct on dev/CI tiers.
 
 ## Sign in
 
@@ -39,7 +39,7 @@ Email verification is non-blocking: a fresh signup counts as signed in immediate
 
 ## Account plans and quotas
 
-Every account has a plan whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, synced workspaces, and shared workspaces. New accounts pick "free" (one remote workspace) or "explorer" (two remote workspaces, in exchange for sharing product data from those workspaces with Imbue) at signup; an account with no recorded choice defaults to "free". "Ally" grants higher limits and requires a paid-listed email. While Imbue Cloud is waitlisted, an account created without an invite code lands on "guest", which holds zero of everything until the invite link from its invitation email is opened (the connector answers such accounts' create, share, and plan-switch requests with a waitlist message). The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit.
+Every account has a plan whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, and synced workspaces. New accounts pick "free" (one remote workspace) or "explorer" (two remote workspaces, in exchange for sharing product data from those workspaces with Imbue) at signup; an account with no recorded choice defaults to "free". "Ally" grants higher limits and requires a paid-listed email. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit. Workspace sharing (`mngr imbue_cloud shares`, self-hosted relays with workspace-terminated TLS) is capped separately at 50 shared workspaces per account rather than through a plan entitlement.
 
 ```bash
 # Show the plan, entitlement values, and live usage.
@@ -75,7 +75,7 @@ The slow path needs a usable build context: run `mngr create` from (or `--projec
 
 If a step fails after a successful lease, the lease is released back to the pool before the error propagates. When the pool is empty, even the slow-path lease returns `ImbueCloudLeaseUnavailableError`.
 
-Imbue Studio drives this automatically: it tries `fast_mode=require` first and, on `FastPathUnavailableError`, retries with `fast_mode=prevent`.
+minds drives this automatically: it tries `fast_mode=require` first and, on `FastPathUnavailableError`, retries with `fast_mode=prevent`.
 
 ## Destroy / delete / stop
 
@@ -112,11 +112,6 @@ mngr imbue_cloud machines show my-workspace
 mngr imbue_cloud machines resize my-workspace --units 16
 mngr imbue_cloud machines resize my-workspace --disk-gb 56
 ```
-
-The current recorded size is also what `mngr list` reports for the machine's host, running
-or stopped: `host.resource.memory_gb` (units) and `host.resource.disk_gb`. The vCPU count in
-`host.resource.cpu.count` is the one recorded when the machine was created and does not follow
-a resize (the connector does not re-report it). A pending target only shows in `machines show`.
 
 Units and disk are metered by two plan quotas: `max_active_machine_units` caps the units
 summed across your running machines, and `max_total_machine_disk_gb` caps data-disk GB
@@ -215,7 +210,7 @@ Two rules protect workspace backups (buckets whose short name is their workspace
 
 - `bucket create` reserves the `host-` short-name prefix: creating such a name is refused unless a workspace record with that host id exists for your account, so a generic bucket can never collide with a backup bucket.
 
-- `bucket destroy` (with or without `--force`) refuses to destroy a workspace-backup bucket whose workspace record is still ACTIVE -- destroy the workspace first. Destroyed workspaces' backups are retained for 30 days and then reaped automatically by the connector (see the Imbue Studio backup-retention docs).
+- `bucket destroy` (with or without `--force`) refuses to destroy a workspace-backup bucket whose workspace record is still ACTIVE -- destroy the workspace first. Destroyed workspaces' backups are retained for 30 days and then reaped automatically by the connector (see the minds backup-retention docs).
 
 **Note:** total storage across all your buckets is capped by your plan's quota. While over the cap, an hourly server-side sweep turns your bucket keys read-only (the same credentials keep working for reads); they are restored automatically once you are back under quota, and an account over its storage quota cannot create new buckets.
 

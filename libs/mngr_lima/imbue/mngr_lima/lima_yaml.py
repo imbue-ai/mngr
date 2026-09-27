@@ -8,7 +8,6 @@ import yaml
 from loguru import logger
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr.providers.ssh_host_setup import build_cap_journald_command
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_AARCH64
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.constants import lima_host_data_disk_label
@@ -189,11 +188,8 @@ def _build_provisioning_script(
     permit_root_login_line = "\nPermitRootLogin prohibit-password" if root_authorized_public_key is not None else ""
     # The btrfs data disk is formatted in-guest (see _build_format_and_mount_data_disk_block),
     # so mkfs.btrfs must be present; minimal images (e.g. Debian genericcloud) don't ship it.
-    # growpart (cloud-guest-utils) grows the data disk's partition on every boot
-    # after a `limactl disk resize`; minimal images may lack it too.
     btrfs_pkg_line = (
         '\ncommand -v mkfs.btrfs >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL btrfs-progs"'
-        '\ncommand -v growpart >/dev/null 2>&1 || PKGS_TO_INSTALL="$PKGS_TO_INSTALL cloud-guest-utils"'
         if host_data_disk_name is not None
         else ""
     )
@@ -255,10 +251,6 @@ fi
 if [ "$SSH_KEY_CHANGED" = "1" ] || [ "$SSHD_CONFIG_CHANGED" = "1" ]; then
     systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
 fi
-
-# Cap the journal so it cannot fill the boot disk (restarts journald only when
-# the drop-in changed, i.e. on the first boot).
-{build_cap_journald_command()}
 
 # Install required packages if missing. Retry to ride out transient apt mirror
 # failures (deb.debian.org intermittently drops index fetches). This runs
@@ -356,14 +348,9 @@ def _build_host_data_disk_block(
     format_and_mount_block = _build_format_and_mount_data_disk_block(host_data_disk_name)
     symlinked_path = volume_home_path if volume_home_path is not None else host_dir
     host_dir_mkdir_line = f"\nmkdir -p {host_dir}" if volume_home_path is not None else ""
-    grow_block = _build_grow_data_disk_block(host_data_disk_name)
     return f"""\
 # Format + mount the additional btrfs disk ourselves (Lima can't on minimal images).
 {format_and_mount_block}
-
-# Grow the data filesystem to fill its disk on every boot (a no-op at full
-# size), so a `limactl disk resize` made while the VM was stopped takes effect.
-{grow_block}
 
 # Open up the btrfs root so the Lima default (non-root) user can write to
 # host_dir without sudo (a fresh mkfs.btrfs leaves the root dir owned by
@@ -379,25 +366,6 @@ else
     rm -rf {symlinked_path}
     ln -sfn {lima_mount} {symlinked_path}
 fi{host_dir_mkdir_line}"""
-
-
-def _build_grow_data_disk_block(host_data_disk_name: str) -> str:
-    """Return a bash block that grows the mounted btrfs data filesystem to fill its (possibly resized) disk.
-
-    Lima partitions the disk when it first formats it, so the partition is
-    grown first (``growpart`` exits 1 when it is already full-size, which is
-    tolerated; any other failure aborts provisioning like the rest of the
-    script); a disk mngr formatted whole has no parent partition and skips
-    that step. ``btrfs filesystem resize max`` is a no-op at full size.
-    """
-    lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
-    return f"""\
-DATA_GROW_SRC="$(findmnt -no SOURCE {lima_mount})"
-DATA_GROW_DISK="$(lsblk -no PKNAME "$DATA_GROW_SRC" | head -1)"
-if [ -n "$DATA_GROW_DISK" ] && command -v growpart >/dev/null 2>&1; then
-    growpart "/dev/$DATA_GROW_DISK" "${{DATA_GROW_SRC##*[!0-9]}}" || [ $? -eq 1 ]
-fi
-btrfs filesystem resize max {lima_mount}"""
 
 
 def _build_format_and_mount_data_disk_block(host_data_disk_name: str) -> str:

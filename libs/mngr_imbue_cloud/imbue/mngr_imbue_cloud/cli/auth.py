@@ -6,22 +6,16 @@ import hashlib
 import html
 import http.server
 import secrets
-import signal
-import sys
 import threading
+import time
 import urllib.parse
 import webbrowser
-from collections.abc import Iterator
-from contextlib import contextmanager
-from enum import auto
 from pathlib import Path
 from typing import Any
-from typing import Final
 
 import click
 from loguru import logger
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.cli.output_helpers import write_stderr_line
 from imbue.mngr_imbue_cloud.cli._common import emit_json
 from imbue.mngr_imbue_cloud.cli._common import fail_with_json
@@ -44,18 +38,11 @@ from imbue.mngr_imbue_cloud.primitives import SuperTokensUserId
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 
 # The browser leg can legitimately take minutes, and the account is created
-# partway through it. Embedders that can wait longer pass --listen-timeout.
-_DEFAULT_LOGIN_LISTEN_TIMEOUT_SECONDS: Final[float] = 600.0
+# partway through it. Kept below the desktop's subprocess kill deadline and
+# flow-status TTL (imbue_cloud_cli._WEB_LOGIN_TIMEOUT_SECONDS,
+# supertokens_routes._WEB_LOGIN_FLOW_TTL_SECONDS).
+_LOGIN_LISTEN_TIMEOUT_SECONDS = 600.0
 _LOGIN_CALLBACK_PATH = "/callback"
-
-# The connector's listener lease lasts about 30 seconds; renewing this often
-# survives a missed renewal or two.
-_LISTENER_LEASE_RENEW_INTERVAL_SECONDS: Final[float] = 10.0
-
-# How long the callback page holds its response for the code exchange to
-# finish, so the browser reports the real outcome. Past it the page tells the
-# user to return to the app, which shows the result.
-_LOGIN_OUTCOME_WAIT_SECONDS: Final[float] = 30.0
 
 
 @click.group(name="auth")
@@ -437,58 +424,29 @@ def refresh(account: str | None, connector_url: str | None) -> None:
 # Browser-based login (the hosted accounts surface + loopback handoff)
 
 
-class _LoginPageOutcome(UpperCaseStrEnum):
-    """What the loopback callback page tells the browser about the sign-in."""
-
-    SIGNED_IN = auto()
-    FAILED = auto()
-    PENDING = auto()
-
-
 class _CallbackCaptureBox:
-    """Thread-safe handoff between the loopback callback handler and the login command.
+    """Thread-safe box that holds the loopback callback query params.
 
-    The handler records the callback's query params, then waits for the
-    command to publish how the sign-in ended, so the page it serves reports
-    the real outcome instead of claiming success before the code exchange.
+    The HTTP handler writes here once it receives a callback; the main thread
+    polls the box to know when to stop the listener.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._params: dict[str, str] | None = None
-        self._outcome: _LoginPageOutcome | None = None
-        self._callback_received = threading.Event()
-        self._outcome_published = threading.Event()
 
     def set(self, params: dict[str, str]) -> None:
         with self._lock:
             self._params = dict(params)
-        self._callback_received.set()
 
     def get(self) -> dict[str, str] | None:
         with self._lock:
             return None if self._params is None else dict(self._params)
 
-    def wait_for_callback(self, timeout_seconds: float) -> dict[str, str] | None:
-        self._callback_received.wait(timeout_seconds)
-        return self.get()
 
-    def publish_outcome(self, outcome: _LoginPageOutcome) -> None:
-        """Record how the sign-in ended; only the first published outcome counts."""
-        with self._lock:
-            if self._outcome is None:
-                self._outcome = outcome
-        self._outcome_published.set()
-
-    def wait_for_outcome(self, timeout_seconds: float) -> _LoginPageOutcome:
-        self._outcome_published.wait(timeout_seconds)
-        with self._lock:
-            return self._outcome or _LoginPageOutcome.PENDING
-
-
-# Inline styles for the login result page: it is served from a localhost
+# Inline styles for the login success page: it is served from a localhost
 # listener with no other assets, so everything must be self-contained.
-_LOGIN_RESULT_PAGE_STYLE = (
+_LOGIN_SUCCESS_PAGE_STYLE = (
     "html,body{height:100%;margin:0}"
     "body{display:flex;align-items:center;justify-content:center;text-align:center;"
     'font-family:system-ui,-apple-system,"Segoe UI",sans-serif;'
@@ -517,19 +475,6 @@ _MINDS_WORDMARK_SVG = (
 )
 
 
-_TERMINAL_PAGE_BODY_BY_OUTCOME: Final[dict[_LoginPageOutcome, str]] = {
-    _LoginPageOutcome.SIGNED_IN: "<h1>You are signed in</h1><p>You can close this tab and return to your terminal.</p>",
-    _LoginPageOutcome.FAILED: "<h1>Sign-in did not finish</h1><p>Return to your terminal for details.</p>",
-    _LoginPageOutcome.PENDING: "<h1>Almost done</h1><p>Return to your terminal to finish signing in.</p>",
-}
-
-_APP_PAGE_MESSAGE_BY_OUTCOME: Final[dict[_LoginPageOutcome, str]] = {
-    _LoginPageOutcome.SIGNED_IN: "You're in! Feel free to close this tab.",
-    _LoginPageOutcome.FAILED: "Sign-in didn't finish. Go back to the app and click Try again.",
-    _LoginPageOutcome.PENDING: "Almost done. Go back to the app to finish signing in.",
-}
-
-
 def _verification_reminder_html(unverified_email: str) -> str:
     """The page body for an account whose email is still unverified.
 
@@ -546,15 +491,11 @@ def _verification_reminder_html(unverified_email: str) -> str:
     )
 
 
-def _login_result_page(
-    success_redirect_url: str | None,
-    outcome: _LoginPageOutcome,
-    unverified_email: str | None,
-) -> bytes:
-    """Build the HTML the callback listener serves to the browser for a sign-in outcome.
+def _login_success_page(success_redirect_url: str | None, unverified_email: str | None) -> bytes:
+    """Build the HTML the callback listener serves to the browser.
 
     With a redirect URL, the page offers a link to it -- the minds desktop
-    app passes its imbue-studio:// deeplink so a click hands focus back to the app;
+    app passes its minds:// deeplink so a click hands focus back to the app;
     since that flow is minds-driven (nothing else passes the option today),
     the page carries the minds wordmark. Deliberately a link rather than an
     automatic navigation: the click is a user gesture, so browsers show
@@ -562,26 +503,25 @@ def _login_result_page(
     unprompted on page load.
 
     ``unverified_email`` is the signed-in address when the connector reported
-    it as not yet verified; a completed sign-in then leads with the
-    verification reminder instead of the plain welcome. A failed or pending
-    sign-in shows only its own message.
+    it as not yet verified; the page then leads with the verification
+    reminder instead of the plain welcome.
     """
     if success_redirect_url is None:
-        if outcome != _LoginPageOutcome.SIGNED_IN or unverified_email is None:
-            body_html = _TERMINAL_PAGE_BODY_BY_OUTCOME[outcome]
+        if unverified_email is None:
+            body_html = "<h1>You are signed in</h1><p>You can close this tab and return to your terminal.</p>"
         else:
             body_html = _verification_reminder_html(unverified_email) + "<p>Then return to your terminal.</p>"
     else:
         href = html.escape(success_redirect_url, quote=True)
-        if outcome != _LoginPageOutcome.SIGNED_IN or unverified_email is None:
-            welcome_html = f'<p class="message">{html.escape(_APP_PAGE_MESSAGE_BY_OUTCOME[outcome])}</p>'
+        if unverified_email is None:
+            welcome_html = '<p class="message">You\'re in! Feel free to close this tab.</p>'
         else:
             welcome_html = _verification_reminder_html(unverified_email)
         body_html = _MINDS_WORDMARK_SVG + welcome_html + f'<p><a href="{href}">Open app</a></p>'
     page = (
         "<!DOCTYPE html><html><head><title>Imbue Cloud sign-in</title>"
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<style>{_LOGIN_RESULT_PAGE_STYLE}</style></head>"
+        f"<style>{_LOGIN_SUCCESS_PAGE_STYLE}</style></head>"
         f"<body><main>{body_html}</main></body></html>"
     )
     return page.encode("utf-8")
@@ -601,9 +541,7 @@ def _unverified_email_from_callback(params: dict[str, str]) -> str | None:
 
 
 def _make_callback_handler_class(
-    box: _CallbackCaptureBox,
-    success_redirect_url: str | None,
-    outcome_wait_seconds: float,
+    box: _CallbackCaptureBox, success_redirect_url: str | None
 ) -> type[http.server.BaseHTTPRequestHandler]:
     """Build a handler class closed over a specific capture box.
 
@@ -624,10 +562,7 @@ def _make_callback_handler_class(
             # at the same listener; those must not overwrite the captured params.
             if parsed.path == _LOGIN_CALLBACK_PATH and params:
                 box.set(params)
-                outcome = box.wait_for_outcome(outcome_wait_seconds)
-            else:
-                outcome = box.wait_for_outcome(0.0)
-            body = _login_result_page(success_redirect_url, outcome, _unverified_email_from_callback(params))
+            body = _login_success_page(success_redirect_url, _unverified_email_from_callback(params))
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -701,90 +636,6 @@ def _write_login_url_file(url_file: str, login_url: str) -> None:
         fail_with_json(f"Could not write the sign-in URL to {url_file}: {exc}", error_class="LoginFailed")
 
 
-@contextmanager
-def _serve_login_callback(server: http.server.HTTPServer, capture_box: _CallbackCaptureBox) -> Iterator[None]:
-    """Serve the loopback callback listener for the duration of the block.
-
-    However the block ends, a callback page still waiting for the outcome is
-    released with a failure (a success is published inside the block) before
-    the listener shuts down.
-    """
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-login-cb")
-    server_thread.start()
-    try:
-        yield
-    finally:
-        capture_box.publish_outcome(_LoginPageOutcome.FAILED)
-        server.shutdown()
-        server.server_close()
-
-
-def _renew_listener_lease_best_effort(client: ImbueCloudConnectorClient, code_challenge: str) -> None:
-    try:
-        client.renew_device_login_attempt(code_challenge)
-    except ImbueCloudAuthError as exc:
-        logger.debug("Could not renew the sign-in listener lease: {}", exc)
-
-
-def _release_listener_lease_best_effort(client: ImbueCloudConnectorClient, code_challenge: str) -> None:
-    try:
-        client.release_device_login_attempt(code_challenge)
-    except ImbueCloudAuthError as exc:
-        logger.debug("Could not release the sign-in listener lease: {}", exc)
-
-
-def _renew_listener_lease_until_stopped(
-    client: ImbueCloudConnectorClient, code_challenge: str, stop_event: threading.Event
-) -> None:
-    while not stop_event.wait(_LISTENER_LEASE_RENEW_INTERVAL_SECONDS):
-        _renew_listener_lease_best_effort(client, code_challenge)
-
-
-@contextmanager
-def _exit_cleanly_on_sigterm() -> Iterator[None]:
-    """Turn SIGTERM into a normal exit for the block, so its cleanup runs.
-
-    Only the main thread can install a signal handler; elsewhere (an embedder
-    running the command on a worker thread) the default handling stays.
-    """
-    if threading.current_thread() is not threading.main_thread():
-        yield
-        return
-    previous_handler = signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGTERM, previous_handler)
-
-
-@contextmanager
-def _hold_listener_lease(client: ImbueCloudConnectorClient, code_challenge: str) -> Iterator[None]:
-    """Keep the connector's lease on this sign-in's listener alive for the block, then release it.
-
-    Before handing the browser to the loopback port, the connector checks
-    this lease: once it has lapsed or been released, the browser gets a
-    "reopen the app" page instead of a connection error. The first renewal
-    happens before the block starts, so the lease exists before the browser
-    opens. Lease calls are best effort; a failure only means the connector
-    redirects as it always has.
-    """
-    _renew_listener_lease_best_effort(client, code_challenge)
-    stop_event = threading.Event()
-    renew_thread = threading.Thread(
-        target=_renew_listener_lease_until_stopped,
-        args=(client, code_challenge, stop_event),
-        daemon=True,
-        name="imbue-cloud-login-lease",
-    )
-    renew_thread.start()
-    try:
-        with _exit_cleanly_on_sigterm():
-            yield
-    finally:
-        stop_event.set()
-        _release_listener_lease_best_effort(client, code_challenge)
-
-
 def build_login_url(login_base_url: str, callback_url: str, code_challenge: str, state: str) -> str:
     """The hosted login page URL that authorizes a device handoff back to ``callback_url``.
 
@@ -830,7 +681,7 @@ def build_login_url(login_base_url: str, callback_url: str, code_challenge: str,
     "--success-redirect-url",
     default=None,
     help=(
-        "URL the success page links to once the callback lands (e.g. an imbue-studio:// "
+        "URL the success page links to once the callback lands (e.g. a minds:// "
         "deeplink so a click returns the user to the desktop app). Default: no link; "
         "the page just says to close the tab."
     ),
@@ -841,19 +692,8 @@ def build_login_url(login_base_url: str, callback_url: str, code_challenge: str,
     type=click.Path(dir_okay=False),
     help=(
         "Write the sign-in URL to this file once the callback listener is up. Lets an "
-        "embedder (the Imbue Studio desktop client) offer a copy-the-link fallback without "
+        "embedder (the minds desktop client) offer a copy-the-link fallback without "
         "parsing stderr."
-    ),
-)
-@click.option(
-    "--listen-timeout",
-    default=_DEFAULT_LOGIN_LISTEN_TIMEOUT_SECONDS,
-    type=click.FloatRange(min=1.0),
-    show_default=True,
-    help=(
-        "Seconds to keep waiting for the browser to finish signing in. A browser that finishes "
-        "after this lands on a closed local port, so embedders that stay open (the Imbue Studio desktop "
-        "app) pass a long window."
     ),
 )
 @click.option("--connector-url", default=None, help="Override connector URL")
@@ -874,7 +714,6 @@ def login(
     no_browser: bool,
     success_redirect_url: str | None,
     url_file: str | None,
-    listen_timeout: float,
     connector_url: str | None,
     accounts_url: str | None,
 ) -> None:
@@ -894,23 +733,23 @@ def login(
     _ensure_connector_supports_browser_login(client)
 
     code_verifier = make_pkce_verifier()
-    code_challenge = compute_pkce_challenge(code_verifier)
     state = secrets.token_urlsafe(16)
 
     capture_box = _CallbackCaptureBox()
-    handler_class = _make_callback_handler_class(capture_box, success_redirect_url, _LOGIN_OUTCOME_WAIT_SECONDS)
+    handler_class = _make_callback_handler_class(capture_box, success_redirect_url)
     server = _bind_callback_listener(callback_port, handler_class)
     port = server.server_address[1]
     callback_url = f"http://127.0.0.1:{port}{_LOGIN_CALLBACK_PATH}"
     # Tiers without a dedicated accounts origin serve the page on the connector host.
     login_base_url = resolve_accounts_url(accounts_url) or str(client.base_url)
-    login_url = build_login_url(login_base_url, callback_url, code_challenge, state)
+    login_url = build_login_url(login_base_url, callback_url, compute_pkce_challenge(code_verifier), state)
 
-    # The browser tab is still waiting on the callback page while the code is
-    # exchanged, so the listener stays up until the outcome is known. The
-    # listener sits inside the lease so the page gets its outcome before the
-    # lease-release round trip.
-    with _hold_listener_lease(client, code_challenge), _serve_login_callback(server, capture_box):
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True, name="imbue-cloud-login-cb")
+    server_thread.start()
+
+    deadline = time.monotonic() + _LOGIN_LISTEN_TIMEOUT_SECONDS
+    captured: dict[str, str] | None = None
+    try:
         if url_file is not None:
             # The listener is live, so the URL is usable the moment this appears.
             _write_login_url_file(url_file, login_url)
@@ -927,18 +766,25 @@ def login(
                     err=True,
                 )
 
-        captured = capture_box.wait_for_callback(listen_timeout)
-        if not captured:
-            fail_with_json("Timed out waiting for the browser sign-in", error_class="LoginTimeout")
-        if captured.get("state") != state:
-            fail_with_json("Login callback state mismatch; refusing the response", error_class="LoginStateMismatch")
-        code = captured.get("code", "")
-        if not code:
-            fail_with_json("Login callback carried no code", error_class="LoginCallbackMissingCode")
+        while time.monotonic() < deadline:
+            captured = capture_box.get()
+            if captured:
+                break
+            time.sleep(0.5)
+    finally:
+        server.shutdown()
+        server.server_close()
 
-        token_response = client.auth_device_token(code=code, code_verifier=code_verifier, redirect_uri=callback_url)
-        payload = _persist_auth_response(token_response, parsed_account, store)
-        capture_box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
+    if not captured:
+        fail_with_json("Timed out waiting for the browser sign-in", error_class="LoginTimeout")
+    if captured.get("state") != state:
+        fail_with_json("Login callback state mismatch; refusing the response", error_class="LoginStateMismatch")
+    code = captured.get("code", "")
+    if not code:
+        fail_with_json("Login callback carried no code", error_class="LoginFailed")
+
+    token_response = client.auth_device_token(code=code, code_verifier=code_verifier, redirect_uri=callback_url)
+    payload = _persist_auth_response(token_response, parsed_account, store)
     emit_json(payload)
 
 

@@ -10,7 +10,6 @@ import pytest
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.hosts.offline_host import OfflineHost
-from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import validate_and_create_discovered_agent
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
@@ -25,7 +24,6 @@ from imbue.mngr.primitives import IdleMode
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
-from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.providers.mock_provider_test import make_offline_host
 
@@ -236,18 +234,6 @@ def test_get_state_returns_crashed_when_no_stop_reason(offline_host: OfflineHost
     assert state == HostState.CRASHED
 
 
-def test_get_state_prefers_the_state_the_provider_observed(offline_host: OfflineHost) -> None:
-    """A provider that saw the host (a reachable VPS with an exited container) overrides the record-derived CRASHED."""
-    observed = offline_host.model_copy_update(to_update(offline_host.field_ref().observed_state, HostState.STOPPED))
-    assert observed.get_state() == HostState.STOPPED
-
-
-def test_readable_offline_host_keeps_the_observed_state(offline_host: OfflineHost, tmp_path: Path) -> None:
-    observed = offline_host.model_copy_update(to_update(offline_host.field_ref().observed_state, HostState.STOPPED))
-    readable = OfflineHostWithVolume.from_offline_host(observed, LocalVolume(root_path=tmp_path))
-    assert readable.get_state() == HostState.STOPPED
-
-
 def test_get_state_returns_crashed_when_provider_does_not_support_snapshots_and_no_stop_reason(
     offline_host: OfflineHost, fake_provider: MockProviderInstance
 ) -> None:
@@ -401,7 +387,9 @@ def test_get_state_based_on_stop_reason(
     assert state == expected_state
 
 
+# =============================================================================
 # Tests for validate_and_create_discovered_agent standalone function
+# =============================================================================
 
 
 def test_validate_and_create_discovered_agent_creates_valid_ref() -> None:
@@ -450,7 +438,9 @@ def test_validate_and_create_discovered_agent_returns_none_for_missing_name() ->
     assert ref is None
 
 
+# =============================================================================
 # Tests for default discover_hosts_and_agents on the provider
+# =============================================================================
 
 
 def test_discover_hosts_and_agents_default_returns_agents_grouped_by_host(
@@ -497,7 +487,9 @@ def test_discover_hosts_and_agents_default_returns_empty_for_no_hosts(
     assert result == {}
 
 
+# =============================================================================
 # Tests for OfflineHost.is_local
+# =============================================================================
 
 
 def test_offline_host_is_not_local(offline_host: OfflineHost) -> None:
@@ -505,7 +497,9 @@ def test_offline_host_is_not_local(offline_host: OfflineHost) -> None:
     assert offline_host.is_local is False
 
 
+# =============================================================================
 # Tests for OfflineHost.set_certified_data
+# =============================================================================
 
 
 def test_set_certified_data_calls_callback(fake_provider: MockProviderInstance, temp_mngr_ctx: MngrContext) -> None:
@@ -571,7 +565,9 @@ def test_set_certified_data_asserts_callback_is_set(
         host.set_certified_data(certified_data)
 
 
+# =============================================================================
 # Tests for get_state with non-shutdown providers
+# =============================================================================
 
 
 def test_get_state_returns_destroyed_when_no_shutdown_no_snapshots_but_stop_reason_set(

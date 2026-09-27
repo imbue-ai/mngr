@@ -107,8 +107,8 @@ def test_get_gcloud_compute_zone_honors_contract(temp_mngr_ctx: MngrContext) -> 
 
 
 def test_default_source_image_is_global_debian_family() -> None:
-    # GCE image families are global (no per-region map), unlike AWS AMIs. Debian 13
+    # GCE image families are global (no per-region map), unlike AWS AMIs. Debian 12
     # matches the rest of the fleet; GCP bootstraps via the GCE startup-script, so
     # it does not need the image to ship cloud-init.
     config = GcpProviderConfig(project_id="p")
-    assert "global/images/family/debian-13" in config.default_source_image
+    assert "global/images/family/debian-12" in config.default_source_image

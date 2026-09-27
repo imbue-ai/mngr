@@ -1,4 +1,4 @@
-"""Characterization tests for the Imbue Studio side of mngr settings reconciliation.
+"""Characterization tests for the minds-side mngr settings reconciliation.
 
 These pin the exact settings.toml structure the bootstrap produces from
 representative starting states, so the refactor of the reconciliation
@@ -42,7 +42,7 @@ _BASE_RECONCILED_SHAPE = snapshot(
         },
         "plugins": {"recursive": {"enabled": False}},
         # Destroyed mngr host records age out with the 30-day backup retention
-        # window in profiles Imbue Studio manages (mngr's own default is 7 days).
+        # window in minds-managed profiles (mngr's own default is 7 days).
         "default_destroyed_host_persisted_seconds": 60 * 60 * 24 * 30,
     }
 )
@@ -97,8 +97,7 @@ def test_ensure_cleans_legacy_state(monkeypatch: pytest.MonkeyPatch, tmp_path: P
             ]
         )
     )
-    # The state root, which is where the reconciler now looks for this residue.
-    data_dir = _ROOT.state_dir
+    data_dir = tmp_path / f".{_ROOT_NAME}"
     dynamic_hosts_path = data_dir / "ssh" / "dynamic_hosts.toml"
     dynamic_hosts_path.parent.mkdir(parents=True, exist_ok=True)
     dynamic_hosts_path.write_text("[hosts]\n")
@@ -238,6 +237,7 @@ def test_byok_cloud_account_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "default_instance_type": "t3.large",
                 "install_gvisor_runtime": True,
                 "docker_runtime": "runsc",
+                "default_start_args": ["--tmpfs", "/run"],
                 "aws_access_key_id": "AKIA1234EXAMPLE9",
                 "aws_secret_access_key": "secret",
             },
@@ -246,8 +246,6 @@ def test_byok_cloud_account_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "host_dir": "/home/user/.mngr",
                 "volume_home_path": "/home/user",
                 "host_log_dir": "/var/log/mngr",
-                "install_gvisor_runtime": True,
-                "docker_runtime": "runsc",
                 "default_zone": "us-west1-a",
                 "default_machine_type": "e2-standard-2",
                 "service_account_key_json": '{"client_email": "svc@proj.iam.gserviceaccount.com"}',
@@ -257,10 +255,8 @@ def test_byok_cloud_account_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_path:
                 "host_dir": "/home/user/.mngr",
                 "volume_home_path": "/home/user",
                 "host_log_dir": "/var/log/mngr",
-                "install_gvisor_runtime": True,
-                "docker_runtime": "runsc",
                 "default_region": "eastus2",
-                "default_vm_size": "Standard_D2s_v6",
+                "default_vm_size": "Standard_B2ms",
                 "resource_group": "byok-azure-azure-lab-eastus2",
                 "client_id": "11111111-2222-3333-4444-555555555555",
                 "tenant_id": "tenant",

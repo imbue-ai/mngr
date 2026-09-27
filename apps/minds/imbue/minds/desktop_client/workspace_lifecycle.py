@@ -1,4 +1,4 @@
-"""Shared workspace host lifecycle (start / stop) for the Imbue Studio desktop client.
+"""Shared workspace host lifecycle (start / stop) for the minds desktop client.
 
 Extracted from ``app.py`` so both the browser-facing landing controls (in
 ``app.py``) and the agent-facing ``/api/v1/workspaces/<id>/start|stop`` routes
@@ -53,7 +53,7 @@ HOST_START_TIMEOUT_SECONDS: Final[float] = 1260.0
 
 
 class MindHostAction(UpperCaseStrEnum):
-    """Which lifecycle action a Start/Stop runs on a machine's host."""
+    """Which lifecycle action a Start/Stop runs on a mind's host."""
 
     STOP = auto()
     START = auto()
@@ -125,7 +125,7 @@ def perform_mind_host_action(
     # the unattended-recovery suppression by omission.
     health_tracker: SystemInterfaceHealthTracker | None,
 ) -> MindHostActionOutcome:
-    """Stop or start one machine's host, running ``mngr`` to completion.
+    """Stop or start one mind's host, running ``mngr`` to completion.
 
     Resolves the workspace to its system-services (primary) agent -- the host's
     stop/start target -- and runs ``mngr stop --stop-host`` / ``mngr start``

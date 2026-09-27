@@ -10,7 +10,6 @@ from typing import Final
 from typing import assert_never
 
 import boto3
-from botocore.exceptions import BotoCoreError
 from botocore.exceptions import ClientError
 from loguru import logger
 from pydantic import ConfigDict
@@ -22,12 +21,8 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
-from imbue.mngr_aws.config import DEBIAN_AMI_NAME_PATTERN_BY_ARCHITECTURE
-from imbue.mngr_aws.config import DEBIAN_AMI_OWNER_ID
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.config import SecurityGroupSpec
-from imbue.mngr_aws.config import pick_ami_architecture
-from imbue.mngr_aws.config import pick_newest_ami_id
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.primitives import VpsInstanceId
@@ -48,10 +43,6 @@ _STATE_MAP: Final[dict[str, VpsInstanceStatus]] = {
     "shutting-down": VpsInstanceStatus.DESTROYING,
     "terminated": VpsInstanceStatus.DESTROYING,
 }
-
-
-class AwsAmiResolutionError(MngrError):
-    """The default Debian AMI for a region and instance type could not be resolved from EC2."""
 
 
 class SecurityGroupPrepareResult(FrozenModel):
@@ -84,12 +75,11 @@ class AwsVpsClient(VpsClientInterface):
         description=(
             "Fallback AMI ID used when ``create_instance`` is invoked without an "
             "``ami_id_override``. The production code path always supplies an override "
-            "(``AwsProvider._create_vps_instance`` takes the per-host ``--aws-ami=``, then "
-            "the config's ``default_ami_id``, then ``resolve_default_ami_id`` for the instance "
-            "type's architecture), so this "
-            "defaults to empty and ``create_instance`` raises if neither source supplies "
-            "one. Kept as a field so tests can pin a known AMI without going through the "
-            "resolution path."
+            "(``AwsProvider._create_vps_instance`` resolves the AMI just-in-time from "
+            "``AwsProviderConfig.get_ami_id_for_region``), so this defaults to empty "
+            "and ``create_instance`` raises if neither source supplies one. Kept as a "
+            "field so tests can pin a known AMI without going through the resolution "
+            "path."
         ),
     )
     security_group: SecurityGroupSpec = Field(
@@ -126,81 +116,12 @@ class AwsVpsClient(VpsClientInterface):
         default=2222, description="Port the container's sshd is exposed on (added to the SG)"
     )
     _cached_ec2_client: Any = PrivateAttr(default=None)
-    _cached_architecture_by_instance_type: dict[str, str] = PrivateAttr(default_factory=dict)
-    _cached_default_ami_id_by_architecture: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def _ec2(self) -> Any:
         """Return the EC2 client, building and caching it from the session on first use."""
         if self._cached_ec2_client is None:
             self._cached_ec2_client = self.session.client("ec2", region_name=self.region, config=AWS_BOTO_CONFIG)
         return self._cached_ec2_client
-
-    def resolve_default_ami_id(self, instance_type: str) -> str:
-        """The newest Debian 13 AMI Debian publishes in this client's region for ``instance_type``'s architecture.
-
-        ``DescribeInstanceTypes`` decides between the amd64 and arm64 (Graviton)
-        images. Both lookups are cached per client (a provider instance's
-        lifetime), so repeated creates in one process make one call per instance
-        type and one per architecture. Raises ``AwsAmiResolutionError`` when a
-        lookup fails, the instance type's architecture has no Debian image, or
-        nothing matches: a create must never silently fall back to another
-        release or architecture.
-        """
-        architecture = self._resolve_instance_type_architecture(instance_type)
-        cached_ami_id = self._cached_default_ami_id_by_architecture.get(architecture)
-        if cached_ami_id is not None:
-            return cached_ami_id
-        name_pattern = DEBIAN_AMI_NAME_PATTERN_BY_ARCHITECTURE[architecture]
-        filters = [
-            {"Name": "name", "Values": [name_pattern]},
-            {"Name": "architecture", "Values": [architecture]},
-            {"Name": "state", "Values": ["available"]},
-        ]
-        try:
-            response = self._ec2().describe_images(Owners=[DEBIAN_AMI_OWNER_ID], Filters=filters)
-        except (ClientError, BotoCoreError) as e:
-            raise AwsAmiResolutionError(
-                f"Could not list Debian AMIs in region {self.region!r} to pick the default image "
-                f"(ec2:DescribeImages, owner {DEBIAN_AMI_OWNER_ID}, name {name_pattern}): {e}. "
-                "Set default_ami_id on the provider config or pass --aws-ami=<ami-id> to skip the lookup."
-            ) from e
-        ami_id = pick_newest_ami_id(response.get("Images", []))
-        if ami_id is None:
-            raise AwsAmiResolutionError(
-                f"Debian publishes no available {name_pattern} ({architecture}) AMI in region {self.region!r} "
-                f"(owner {DEBIAN_AMI_OWNER_ID}). Set default_ami_id on the provider config or pass "
-                "--aws-ami=<ami-id>; see https://wiki.debian.org/Cloud/AmazonEC2Image."
-            )
-        logger.debug("Resolved the default Debian 13 {} AMI for region {} to {}", architecture, self.region, ami_id)
-        self._cached_default_ami_id_by_architecture[architecture] = ami_id
-        return ami_id
-
-    def _resolve_instance_type_architecture(self, instance_type: str) -> str:
-        """The EC2 architecture (``x86_64`` or ``arm64``) Debian images exist for that ``instance_type`` runs."""
-        cached_architecture = self._cached_architecture_by_instance_type.get(instance_type)
-        if cached_architecture is not None:
-            return cached_architecture
-        try:
-            response = self._ec2().describe_instance_types(InstanceTypes=[instance_type])
-        except (ClientError, BotoCoreError) as e:
-            raise AwsAmiResolutionError(
-                f"Could not look up the architecture of instance type {instance_type!r} in region {self.region!r} "
-                f"to pick the default image (ec2:DescribeInstanceTypes): {e}. Set default_ami_id on the provider "
-                "config or pass --aws-ami=<ami-id> to skip the lookup."
-            ) from e
-        supported_architectures: list[str] = []
-        for described_type in response.get("InstanceTypes", []):
-            supported_architectures.extend(described_type.get("ProcessorInfo", {}).get("SupportedArchitectures", []))
-        architecture = pick_ami_architecture(supported_architectures)
-        if architecture is None:
-            raise AwsAmiResolutionError(
-                f"Instance type {instance_type!r} in region {self.region!r} supports architectures "
-                f"{supported_architectures!r}, none of which Debian publishes a Debian 13 AMI for "
-                f"({', '.join(DEBIAN_AMI_NAME_PATTERN_BY_ARCHITECTURE)}). Pass --aws-ami=<ami-id> with an image "
-                "for that architecture."
-            )
-        self._cached_architecture_by_instance_type[instance_type] = architecture
-        return architecture
 
     @contextmanager
     def _translate_aws_errors(self) -> Iterator[None]:
@@ -214,7 +135,9 @@ class AwsVpsClient(VpsClientInterface):
             http_status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode", 0)
             raise VpsApiError(http_status, f"{code}: {message}") from e
 
+    # =========================================================================
     # Security group management (idempotent)
+    # =========================================================================
 
     def ensure_security_group(self) -> SecurityGroupPrepareResult:
         """Return the SG to attach to new instances, creating it if needed.
@@ -475,7 +398,9 @@ class AwsVpsClient(VpsClientInterface):
                     permission["FromPort"],
                 )
 
+    # =========================================================================
     # Instance Operations
+    # =========================================================================
 
     def create_instance(
         self,
@@ -807,7 +732,9 @@ class AwsVpsClient(VpsClientInterface):
                         )
         return instances
 
+    # =========================================================================
     # SSH Key Operations (EC2 KeyPairs)
+    # =========================================================================
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         """Import an SSH public key as an EC2 KeyPair. Returns the KeyName as the ID."""

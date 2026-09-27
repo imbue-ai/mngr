@@ -73,7 +73,7 @@ def _is_cookie_authenticated() -> bool:
 
 
 def _is_bearer_authenticated() -> bool:
-    """Whether the request carries the central Imbue Studio API bearer key."""
+    """Whether the request carries the central minds API bearer key."""
     expected_key = get_state().minds_api_key
     return expected_key is not None and is_request_authenticated(request.headers.get("authorization"), expected_key)
 

@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Imbue Studio</title>
+  <title>Mind</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     /* Loading / quitting / error takeover screen: a white page carrying the
@@ -304,11 +304,11 @@
 <body>
   <div id="intro" aria-hidden="true">
     <div class="lockup-travel" id="lockup-travel">
-      <img class="lockup" id="lockup" src="assets/mind-wordmark.svg" alt="Imbue Studio" draggable="false">
+      <img class="lockup" id="lockup" src="assets/mind-wordmark.svg" alt="mind" draggable="false">
     </div>
     <div class="lines" id="lines"></div>
   </div>
-  <img id="parked-mark" src="assets/mind-wordmark.svg" alt="Imbue Studio" draggable="false">
+  <img id="parked-mark" src="assets/mind-wordmark.svg" alt="mind" draggable="false">
   <div id="status-block">
     <div class="progress" aria-hidden="true"></div>
     <div class="status" id="status-line"></div>
@@ -317,7 +317,7 @@
   </div>
   <div id="error-view">
     <h1>Something went wrong</h1>
-    <p class="message" id="error-message">Imbue Studio stopped unexpectedly.</p>
+    <p class="message" id="error-message">Mind stopped unexpectedly.</p>
     <div class="actions">
       <button class="btn-primary" id="retry-btn">Retry</button>
       <button class="btn-secondary" id="report-btn">Report a bug</button>
@@ -528,7 +528,7 @@
 
     if (window.mindsNative) {
       // Drives the status line under the bar: environment setup progress and
-      // "Starting Imbue Studio..." while loading, "Stopping N workspaces…" while quitting.
+      // "Starting Mind..." while loading, "Stopping N workspaces…" while quitting.
       window.mindsNative.onStatusUpdate(function(message) {
         if (message) statusLine.textContent = message;
       });
@@ -549,7 +549,7 @@
         if (data.message) document.getElementById('error-message').textContent = data.message;
         if (data.details) document.getElementById('error-details').textContent = data.details;
         // Optional per-takeover label for the primary action (e.g. "Restart
-        // Imbue Studio" for the discovery-pipeline takeover). Falls back to the static
+        // Minds" for the discovery-pipeline takeover). Falls back to the static
         // "Retry" label for the generic backend-crash case. Always reassigned so
         // a label set by a prior takeover (this page is reused, not reloaded,
         // when the chrome view is already on shell.html) does not linger.

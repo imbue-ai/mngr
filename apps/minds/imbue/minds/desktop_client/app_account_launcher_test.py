@@ -66,27 +66,6 @@ def test_accounts_frame_marks_the_only_signed_in_account_default_over_a_departed
     assert [(entry.user_id, entry.is_default) for entry in message.accounts] == [("user-current", True)]
 
 
-def test_accounts_frame_always_marks_a_default_while_accounts_are_signed_in(tmp_path: Path) -> None:
-    """Several accounts signed in and the stored default gone: the first one becomes the default, and is stored."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-first", email="first@example.com")
-    cli.add_account(user_id="user-second", email="second@example.com")
-    app = _make_app(tmp_path, cli)
-    minds_config = get_state(app).minds_config
-    assert minds_config is not None
-    minds_config.set_default_account_id("user-departed")
-
-    with app.app_context():
-        message = _build_ui_accounts_message(_session_store(app))
-
-    assert message.account_email == "first@example.com"
-    assert [(entry.user_id, entry.is_default) for entry in message.accounts] == [
-        ("user-first", True),
-        ("user-second", False),
-    ]
-    assert minds_config.get_default_account_id() == "user-first"
-
-
 def test_accounts_frame_names_the_default_account_and_lists_them_all(tmp_path: Path) -> None:
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-first", email="first@example.com")

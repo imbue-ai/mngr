@@ -28,6 +28,7 @@ from imbue.mngr_latchkey.forward_supervisor import live_forward_owner
 from imbue.mngr_latchkey.forward_supervisor import owning_forward_process
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
+from imbue.mngr_latchkey.store import forward_info_path
 from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import forward_owner_path
@@ -112,6 +113,20 @@ def _make_fake_mngr_binary(tmp_path: Path) -> Path:
 
 _FORWARD_RECORD_POLL_TIMEOUT: Final[float] = 5.0
 _FORWARD_RECORD_POLL_INTERVAL: Final[float] = 0.05
+
+
+def _wait_for_legacy_forward_record(plugin_dir: Path) -> None:
+    """Block until a pre-lock fake publishes its ``latchkey_forward.json``.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+    """
+    deadline = time.monotonic() + _FORWARD_RECORD_POLL_TIMEOUT
+    waiter = threading.Event()
+    while time.monotonic() < deadline:
+        if forward_info_path(plugin_dir).is_file():
+            return
+        waiter.wait(timeout=_FORWARD_RECORD_POLL_INTERVAL)
+    raise AssertionError(f"legacy forward record never appeared at {plugin_dir}")
 
 
 def _wait_for_forward_record(plugin_dir: Path) -> LatchkeyForwardOwner:
@@ -348,6 +363,33 @@ def test_get_forward_owner_returns_none_when_unstarted(tmp_path: Path) -> None:
         latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
     )
     assert supervisor.get_forward_owner() is None
+
+
+def test_a_malformed_pre_lock_record_does_not_block_the_spawn(tmp_path: Path) -> None:
+    """A pre-lock record too damaged to name a forward is cleared, not left to be re-read.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+
+    Left behind it would be parsed and warned about on every launch, and the
+    migration would never become the no-op that lets the module go.
+    """
+    fake_binary = _make_fake_mngr_binary(tmp_path)
+    supervisor = LatchkeyForwardSupervisor(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="/usr/bin/latchkey-unused",
+        latchkey_directory=tmp_path / f"latchkey-{uuid4().hex}",
+    )
+    plugin_dir = supervisor.plugin_data_dir
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    forward_info_path(plugin_dir).write_text("{not-valid-json")
+
+    info = supervisor.ensure_running()
+    try:
+        assert _wait_for_process_alive(info.pid)
+        assert not forward_info_path(plugin_dir).is_file()
+    finally:
+        supervisor.stop()
+        assert wait_for_process_exit(info.pid)
 
 
 def _make_env_dumping_mngr_binary(tmp_path: Path) -> Path:
@@ -738,6 +780,87 @@ def test_owning_forward_process_names_the_forward_holding_the_directory(tmp_path
     assert owning_forward_process(plugin_data_dir(own_directory)) is None
 
 
+def _make_pre_lock_fake_mngr_binary(tmp_path: Path) -> Path:
+    """Build a fake ``mngr`` that behaves the way one from before the lock did.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+
+    It publishes a forward record and idles, and takes no ownership lock,
+    because the build it stands in for had none to take.
+    """
+    binary_dir = tmp_path / f"pre-lock-{uuid4().hex}"
+    binary_dir.mkdir()
+    script = binary_dir / "mngr"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, signal, sys\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        'if sys.argv[1:3] != ["latchkey", "forward"]:\n'
+        "    sys.exit(99)\n"
+        "args = sys.argv[3:]\n"
+        "latchkey_directory = None\n"
+        "for i, arg in enumerate(args):\n"
+        '    if arg == "--latchkey-directory" and i + 1 < len(args):\n'
+        "        latchkey_directory = Path(args[i + 1])\n"
+        "        break\n"
+        'record_path = latchkey_directory / "mngr_latchkey" / "latchkey_forward.json"\n'
+        "record_path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "record_path.write_text(json.dumps({\n"
+        '    "pid": os.getpid(),\n'
+        '    "started_at": datetime.now(timezone.utc).isoformat(),\n'
+        '    "gateway_port": None,\n'
+        "}))\n"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
+        "signal.pause()\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_restart_replaces_a_forward_that_predates_the_ownership_lock(tmp_path: Path) -> None:
+    """The upgrade path: the first launch after an update replaces the old forward.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+
+    A forward from a build without the lock holds none, so nothing about the
+    lock can see it -- only the record it wrote. If that record stopped being
+    enough, the replacement would take the free lock and run *beside* the old
+    forward, putting two discovery producers on one events file.
+    """
+    pre_lock_binary = _make_pre_lock_fake_mngr_binary(tmp_path)
+    current_binary = _make_fake_mngr_binary(tmp_path)
+    latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"
+    data_dir = plugin_data_dir(latchkey_directory)
+
+    pre_lock = subprocess.Popen(
+        [str(pre_lock_binary), "latchkey", "forward", "--latchkey-directory", str(latchkey_directory)],
+        start_new_session=True,
+    )
+    supervisor: LatchkeyForwardSupervisor | None = None
+    info: LatchkeyForwardOwner | None = None
+    try:
+        _wait_for_legacy_forward_record(data_dir)
+        # It holds no lock, exactly as a pre-lock forward does not.
+        assert owning_forward_process(data_dir) is None
+
+        supervisor = LatchkeyForwardSupervisor(
+            mngr_binary=str(current_binary),
+            latchkey_binary="/usr/bin/latchkey-unused",
+            latchkey_directory=latchkey_directory,
+        )
+        info = supervisor.restart()
+
+        assert wait_for_process_exit(pre_lock.pid), "the pre-lock forward outlived the update"
+        assert info.pid != pre_lock.pid
+        assert _wait_for_forward_owner(latchkey_directory, info.pid), "the replacement never took the lock"
+    finally:
+        if supervisor is not None and info is not None:
+            supervisor.stop()
+            wait_for_process_exit(info.pid)
+        _terminate_orphan(pre_lock)
+
+
 def test_ensure_running_refuses_a_child_that_never_took_the_directory(tmp_path: Path) -> None:
     """A spawn that does not end in ownership is terminated, and raises.
 
@@ -1104,16 +1227,12 @@ def test_bounce_skips_sighup_while_forward_is_still_starting(tmp_path: Path) -> 
         _terminate_orphan(fake)
 
 
-@pytest.mark.flaky
 def test_bounce_sighups_forward_once_gateway_port_is_stamped(tmp_path: Path) -> None:
     """Once the record carries a gateway port, ``bounce()`` delivers the SIGHUP.
 
     The fake forward's SIGHUP handler writes a delivery sentinel -- the
     counterpart to the still-starting skip above, proving the readiness guard
     does not suppress bounces for fully-started supervisors.
-
-    Marked flaky: on a heavily loaded machine the spawned fake forward has been
-    seen not to take the ownership lock within the spawn helper's poll.
     """
     fake_binary = _make_fake_mngr_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"

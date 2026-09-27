@@ -719,7 +719,7 @@ def _pair_snapshot(
 def test_last_good_topology_persists_and_reloads_across_restart(tmp_path: Path) -> None:
     """A complete host enumeration is written to disk and resolves from a fresh resolver.
 
-    Covers the case that spans an Imbue Studio restart: the in-memory topology starts empty
+    Covers the cross-minds-restart case: the in-memory topology starts empty
     on a new process, so the persisted file is the only source.
     """
     topology_path = tmp_path / "last_good_agent_topology.json"
@@ -766,9 +766,9 @@ def test_last_good_topology_falls_back_when_discovery_loses_the_host(tmp_path: P
 
 
 def _primary_system_services_agent(host_id: HostId, agent_id: AgentId) -> DiscoveredAgent:
-    """An Imbue Studio primary machine agent: the system-services agent, which carries the machine labels.
+    """A minds primary machine agent: the system-services agent, which carries the machine labels.
 
-    In Imbue Studio the user-facing machine agent IS the host's system-services
+    In minds the user-facing machine agent IS the host's system-services
     agent -- it has both the ``machine`` + ``is_primary`` labels (the live
     filter) and the constant system-services name (the last-good filter).
     """
@@ -1308,7 +1308,7 @@ def test_last_good_topology_ignores_incomplete_host_enumeration() -> None:
 
 
 def test_last_good_topology_ignores_malformed_persisted_file(tmp_path: Path) -> None:
-    """A garbage topology file is treated as empty rather than crashing Imbue Studio startup."""
+    """A garbage topology file is treated as empty rather than crashing minds startup."""
     topology_path = tmp_path / "last_good_agent_topology.json"
     topology_path.write_text("not json {{{", encoding="utf-8")
 

@@ -1,5 +1,5 @@
 /*
- * Tailwind v4 source entry + design tokens for the Imbue Studio desktop client SPA.
+ * Tailwind v4 source entry + design tokens for the minds desktop client SPA.
  *
  * Ported verbatim from the legacy static/app.css (which compiled to
  * app.min.css for the JinjaX pages); the token layer, semantic utilities and
@@ -315,7 +315,7 @@
  * Both shell modes lock the document to the viewport: the agent surface fills
  * it with the fixed workspace iframe, and local pages scroll inside
  * #local-page-scroll -- a container pinned below the fixed 38px titlebar. So
- * the DOCUMENT never scrolls on any Imbue Studio page, the titlebar never shares an
+ * the DOCUMENT never scrolls on any minds page, the titlebar never shares an
  * edge with a scrollbar, and its buttons never shift with gutter differences
  * between pages. A universal default (a page that genuinely needs document
  * scroll can override on its own html/body); kept here with the rest of the
@@ -1053,13 +1053,4 @@ body {
 #notifications-backdrop,
 #help-backdrop {
   -webkit-app-region: no-drag;
-}
-
-/* While a keystroke edits text, the pointer is hidden until it moves, so it
- * never sits over what is being typed (hide-cursor-while-typing.ts toggles
- * the class). ``*`` with ``!important`` because fields, links, and buttons
- * set their own cursors, which would otherwise win over the hidden one. */
-html.typing-hides-cursor,
-html.typing-hides-cursor * {
-  cursor: none !important;
 }

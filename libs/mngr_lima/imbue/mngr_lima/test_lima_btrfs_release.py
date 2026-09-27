@@ -110,7 +110,7 @@ def _grant_user_repo_access() -> None:
 
 @pytest.mark.timeout(_TEST_TIMEOUT_SECONDS)
 def test_lima_btrfs_host_end_to_end_release() -> None:
-    """Real Lima VM with `is_host_data_volume_exposed=False` boots, `/mngr` is btrfs+writable, data survives stop/start, a resize applies on the next start, destroy reclaims the disk."""
+    """Real Lima VM with `is_host_data_volume_exposed=False` boots, `/mngr` is btrfs+writable, data survives stop/start, destroy reclaims the disk."""
     if os.geteuid() != 0:
         pytest.skip("Release test self-installs lima/qemu/users; requires root.")
 

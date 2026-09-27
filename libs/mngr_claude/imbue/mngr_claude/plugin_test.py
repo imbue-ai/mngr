@@ -135,7 +135,9 @@ from imbue.mngr_claude.plugin import on_before_host_destroy
 from imbue.mngr_claude.plugin import should_trust_work_dir
 from imbue.overlay.markers import StaticList
 
+# =============================================================================
 # Test Helpers
+# =============================================================================
 
 
 def make_claude_agent(
@@ -338,7 +340,9 @@ def _setup_worktree_agent(
     return source_path, worktree_path, agent, host
 
 
+# =============================================================================
 # ClaudeAgentConfig Tests
+# =============================================================================
 
 
 def test_claude_agent_config_has_default_command() -> None:
@@ -377,7 +381,9 @@ def test_claude_agent_config_merge_uses_override_cli_args_when_base_empty() -> N
     assert merged.cli_args == ("--verbose",)
 
 
+# =============================================================================
 # assemble_command Tests
+# =============================================================================
 
 
 class _ParsedAssembleCommand:
@@ -1000,7 +1006,9 @@ def test_claude_agent_assemble_command_clears_stale_main_pid_claim(
     assert not (state_dir / "claude_main_pid").exists()
 
 
+# =============================================================================
 # Activity Updater Tests
+# =============================================================================
 
 
 def test_build_background_tasks_command(
@@ -1036,7 +1044,9 @@ def test_build_background_tasks_command_passes_custom_primary_window_name(
     assert "claude_background_tasks.sh mngr-test-agent primary " in cmd
 
 
+# =============================================================================
 # Provisioning Lifecycle Tests
+# =============================================================================
 
 
 def test_on_before_provisioning_skips_check_when_disabled(
@@ -1169,7 +1179,9 @@ def test_get_provision_file_transfers_with_sync_repo_settings_disabled(
     assert transfers == []
 
 
+# =============================================================================
 # Readiness Hooks Tests
+# =============================================================================
 
 
 def test_build_readiness_hooks_config_has_session_start_hook() -> None:
@@ -1849,7 +1861,9 @@ def test_detect_preexisting_input_text_reads_bottom_prompt_line(
     assert agent._detect_preexisting_input_text("❯ old submitted message\nresponse text\n❯ ") is None
 
 
+# ---------------------------------------------------------------------------
 # Blocking-dialog detection + auto-accept
+# ---------------------------------------------------------------------------
 
 # The live layout of Claude Code's /model switch confirmation (column-0 command echo, a
 # horizontal rule, body text, then the indented highlighted option and the other option).
@@ -2710,7 +2724,9 @@ def test_provision_raises_when_remote_installation_disabled(
         assert "automatic remote installation is disabled" in str(exc_info.value.main_exception)
 
 
+# =============================================================================
 # Trust Extension / Cleanup Tests
+# =============================================================================
 
 
 def test_provision_extends_trust_for_worktree(
@@ -3358,9 +3374,6 @@ def test_preserve_session_files_skips_projects_in_shared_mode(
     assert (dest_dir / "claude_session_id_history").read_text() == "abc123 create\n"
 
 
-# A real local-provider provision (worktree creation plus the dialog round
-# trips) that can overrun its 10-second budget on an overloaded CI sandbox.
-@pytest.mark.flaky
 def test_provision_prompts_for_all_dialogs_when_interactive(
     local_provider: LocalProviderInstance,
     tmp_path: Path,
@@ -3432,7 +3445,9 @@ def test_provision_raises_when_user_declines_trust(
         assert exc_info.value.only_exception_is_instance_of(ClaudeDirectoryNotTrustedError)
 
 
+# =============================================================================
 # API Credential Check Tests
+# =============================================================================
 
 _DEFAULT_CREDENTIAL_CHECK_OPTIONS = CreateAgentOptions(agent_type=AgentTypeName("claude"))
 
@@ -3591,7 +3606,9 @@ def test_has_api_credentials_returns_false_remote_no_sync(credential_check_cg: C
     )
 
 
+# =============================================================================
 # primaryApiKey in ~/.claude.json Tests
+# =============================================================================
 
 
 def _write_claude_json_with_primary_api_key(api_key: str = "sk-ant-test-key") -> None:
@@ -3740,7 +3757,9 @@ def test_on_before_provisioning_succeeds_with_credentials(
     assert _NO_CREDENTIALS_WARNING_SUBSTRING not in log_output.getvalue()
 
 
+# =============================================================================
 # Deprecated use_env_config_dir alias reconciliation Tests
+# =============================================================================
 
 
 def test_resolve_isolate_defaults_to_true_without_either_key() -> None:
@@ -3806,7 +3825,9 @@ def test_on_before_provisioning_warns_when_use_env_config_dir_is_set(
     assert "deprecated" in log_output.getvalue()
 
 
+# =============================================================================
 # Subscription-credential isolation warning Tests
+# =============================================================================
 
 # The actionable part of the warning: the exact command to disable isolation.
 _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING = "isolate_local_config_dir false"
@@ -3912,6 +3933,10 @@ def test_no_subscription_warning_without_oauth_credentials(
         agent._maybe_warn_subscription_credentials(host, temp_mngr_ctx)
 
     assert _SUBSCRIPTION_ISOLATION_WARNING_SUBSTRING not in log_output.getvalue()
+
+
+# =============================================================================
+# =============================================================================
 
 
 def _write_claude_trust_without_dialog_dismissed(source_path: Path) -> None:
@@ -4050,7 +4075,9 @@ def test_provision_raises_when_non_interactive_and_dialogs_not_dismissed(
     assert exc_info.value.only_exception_is_instance_of(ClaudeEffortCalloutNotDismissedError)
 
 
+# =============================================================================
 # Remote Trust Tests
+# =============================================================================
 
 
 # provision() runs the local `claude --version` check via a real subprocess
@@ -4120,7 +4147,9 @@ def test_provision_preserves_existing_remote_project_config(
     assert project_entry["allowedTools"] == []
 
 
+# =============================================================================
 # macOS Keychain Credential Tests
+# =============================================================================
 
 
 def _make_mock_cg_with_result(result: FinishedProcess | Exception) -> ConcurrencyGroup:
@@ -4225,7 +4254,9 @@ def test_has_api_credentials_ignores_credentials_file_on_remote_with_sync_disabl
     )
 
 
+# =============================================================================
 # get_files_for_deploy Tests
+# =============================================================================
 
 
 def test_get_files_for_deploy_returns_generated_defaults_when_no_claude_files(
@@ -4452,7 +4483,9 @@ def test_get_files_for_deploy_includes_keybindings(temp_mngr_ctx: MngrContext, t
     assert result[Path("~/.claude/keybindings.json")] == keybindings
 
 
+# =============================================================================
 # Version Pinning Tests
+# =============================================================================
 
 
 def test_claude_agent_config_version_defaults_to_none() -> None:
@@ -4659,7 +4692,9 @@ def test_install_claude_verifies_binary_exists() -> None:
     assert tokens == ["test", "-x", f"{CLAUDE_INSTALL_PATH}/claude"]
 
 
+# =============================================================================
 # Capability-mixin contract methods (install / unattended / version)
+# =============================================================================
 
 
 def test_get_install_binary_name_is_claude() -> None:
@@ -4718,7 +4753,19 @@ def test_reconcile_installed_version_raises_on_mismatch() -> None:
         )
 
 
+# =============================================================================
+# register_cli_options Tests
+# =============================================================================
+
+
+# The --adopt option declaration + the agent-agnostic gate (type must support
+# session adoption; mutual exclusion with --from) now live in core, tested
+# there; claude only retains its claude-specific fail-fast pre-resolution below.
+
+
+# =============================================================================
 # on_before_create Tests (claude-specific fail-fast pre-resolution)
+# =============================================================================
 
 
 def test_on_before_create_skips_when_no_adopt_session(temp_mngr_ctx: MngrContext) -> None:
@@ -4799,7 +4846,9 @@ def test_on_before_create_rejects_unknown_adopt_session(temp_mngr_ctx: MngrConte
             on_before_create(args=args, mngr_ctx=temp_mngr_ctx)
 
 
+# =============================================================================
 # on_after_provisioning Session Adoption Tests
+# =============================================================================
 
 
 def test_on_after_provisioning_skips_when_no_adopt_session(
@@ -5083,6 +5132,7 @@ def test_on_after_provisioning_multi_adopt_resumes_last(
     assert (dest_project_dir / f"{second_session_id}.jsonl").exists()
 
 
+# =============================================================================
 # Clone session-adoption tests
 #
 # Drive both halves of the clone flow as it runs in production:
@@ -5090,6 +5140,7 @@ def test_on_after_provisioning_multi_adopt_resumes_last(
 # (2) ``_adopt_cloned_session`` (later, from on_after_provisioning) renames
 #     the project subdir, drops the stale sessions-index, writes
 #     claude_session_id.
+# =============================================================================
 
 
 def _run_clone_adoption(agent: ClaudeAgent, host: OnlineHostInterface, source_dir: Path) -> None:
@@ -5396,7 +5447,9 @@ def test_clone_adoption_refuses_per_file_collision(
     assert not (dest_dir / "claude_session_id").exists()
 
 
+# =============================================================================
 # _rewrite_installed_plugins_paths Tests
+# =============================================================================
 
 
 def test_rewrite_installed_plugins_paths_rebases_install_paths() -> None:
@@ -5572,7 +5625,9 @@ def test_rewrite_installed_plugins_paths_best_effort_for_mngr_agent_path() -> No
     )
 
 
+# =============================================================================
 # _generate_installed_plugins_content Tests
+# =============================================================================
 
 
 def test_generate_installed_plugins_content_rewrites_paths(tmp_path: Path) -> None:
@@ -5617,7 +5672,9 @@ def test_generate_installed_plugins_content_returns_none_when_no_file(tmp_path: 
     assert result is None
 
 
+# =============================================================================
 # _rewrite_known_marketplaces_paths / _generate_known_marketplaces_content Tests
+# =============================================================================
 
 
 def test_rewrite_known_marketplaces_paths_rebases_install_location() -> None:
@@ -5736,7 +5793,9 @@ def test_generate_known_marketplaces_content_returns_none_when_no_file(tmp_path:
     assert result is None
 
 
+# =============================================================================
 # get_files_for_deploy sentinel rewrite Tests
+# =============================================================================
 
 
 def test_get_files_for_deploy_rewrites_install_paths_to_sentinel(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
@@ -5809,7 +5868,9 @@ def test_get_files_for_deploy_rewrites_marketplace_paths_to_sentinel(
     )
 
 
+# =============================================================================
 # _build_settings_json tests
+# =============================================================================
 
 
 def test_build_settings_json_unattended_defaults() -> None:
@@ -6237,7 +6298,9 @@ def test_should_trust_work_dir_auto_approve() -> None:
     assert should_trust_work_dir(config, ProvisioningContext(is_unattended=False, is_auto_approve=False)) is False
 
 
+# =============================================================================
 # Volume-based session preservation tests
+# =============================================================================
 
 
 def _make_offline_host_with_volume(
@@ -6527,7 +6590,9 @@ def test_should_preserve_sessions_false_for_non_claude_agent() -> None:
     assert _should_preserve_sessions(ref) is False
 
 
+# =============================================================================
 # _write_generated_files Tests
+# =============================================================================
 
 
 def test_write_generated_files_writes_through_symlink_safely(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -6626,7 +6691,9 @@ def test_sync_user_resources_is_idempotent_without_self_referential_symlinks(
     assert (config_dir / "skills" / "user-skill").resolve() == (home_claude / "skills" / "user-skill").resolve()
 
 
+# =============================================================================
 # modify_env_vars Tests
+# =============================================================================
 
 
 def test_modify_env_vars_sets_claude_config_dirs(
@@ -6776,7 +6843,9 @@ def test_generate_claude_json_autoupdates_follows_disable_flag() -> None:
     assert _generate_claude_json(None, disable_auto_update=False)["autoUpdates"] is True
 
 
+# =============================================================================
 # get_claude_config_dir Tests
+# =============================================================================
 
 
 def test_get_claude_config_dir_returns_per_agent_dir_by_default(
@@ -6831,7 +6900,9 @@ def test_get_claude_config_dir_falls_back_to_home_in_shared_mode_when_env_unset(
     assert agent.get_claude_config_dir() == Path.home() / ".claude"
 
 
+# =============================================================================
 # approve_api_key_for_claude Tests
+# =============================================================================
 
 
 class _EnvVarFakeHost(FakeHost):

@@ -21,11 +21,11 @@ function helperStat({ uid, mode }) {
 const REGULAR_FILE = 0o100000;
 
 test('the profile electron-builder installs for the executable makes the namespace sandbox available', () => {
-  // What /proc/self/attr/current reads for /opt/Imbue Studio/imbue-studio under the
-  // .deb's `profile "imbue-studio" "/opt/Imbue Studio/imbue-studio" flags=(unconfined) { userns, }`.
+  // What /proc/self/attr/current reads for /opt/Mind/minds under the
+  // .deb's `profile "minds" "/opt/Mind/minds" flags=(unconfined) { userns, }`.
   const availability = sandboxAvailability({
-    apparmorLabel: 'imbue-studio (unconfined)\n',
-    profileName: 'imbue-studio',
+    apparmorLabel: 'minds (unconfined)\n',
+    profileName: 'minds',
     sandboxHelperStat: helperStat({ uid: 0, mode: REGULAR_FILE | 0o755 }),
   });
   assert.equal(availability, 'apparmor-profile');
@@ -34,7 +34,7 @@ test('the profile electron-builder installs for the executable makes the namespa
 test('an unconfined process with a non-setuid helper has no sandbox', () => {
   const availability = sandboxAvailability({
     apparmorLabel: 'unconfined\n',
-    profileName: 'imbue-studio',
+    profileName: 'minds',
     sandboxHelperStat: helperStat({ uid: 0, mode: REGULAR_FILE | 0o755 }),
   });
   assert.equal(availability, null);
@@ -45,7 +45,7 @@ test('a stacked profile label does not count as the profile', () => {
   // still restricted; only an exec of the attached path gets the bare label.
   const availability = sandboxAvailability({
     apparmorLabel: 'minds//&unconfined (unconfined)\n',
-    profileName: 'imbue-studio',
+    profileName: 'minds',
     sandboxHelperStat: null,
   });
   assert.equal(availability, null);
@@ -54,7 +54,7 @@ test('a stacked profile label does not count as the profile', () => {
 test("another executable's profile does not count either", () => {
   const availability = sandboxAvailability({
     apparmorLabel: 'chrome (unconfined)\n',
-    profileName: 'imbue-studio',
+    profileName: 'minds',
     sandboxHelperStat: null,
   });
   assert.equal(availability, null);
@@ -63,14 +63,14 @@ test("another executable's profile does not count either", () => {
 test('a root-owned 4755 helper makes the setuid sandbox available without any profile', () => {
   const availability = sandboxAvailability({
     apparmorLabel: 'unconfined\n',
-    profileName: 'imbue-studio',
+    profileName: 'minds',
     sandboxHelperStat: helperStat({ uid: 0, mode: REGULAR_FILE | 0o4755 }),
   });
   assert.equal(availability, 'setuid-helper');
 });
 
 test('a setuid helper Chromium refuses is not a sandbox: not root-owned, or not world-executable', () => {
-  const unconfined = { apparmorLabel: 'unconfined\n', profileName: 'imbue-studio' };
+  const unconfined = { apparmorLabel: 'unconfined\n', profileName: 'minds' };
   assert.equal(
     sandboxAvailability({ ...unconfined, sandboxHelperStat: helperStat({ uid: 1000, mode: REGULAR_FILE | 0o4755 }) }),
     null,
@@ -82,7 +82,7 @@ test('a setuid helper Chromium refuses is not a sandbox: not root-owned, or not 
 });
 
 test('an unreadable label and a missing helper mean no sandbox', () => {
-  assert.equal(sandboxAvailability({ apparmorLabel: null, profileName: 'imbue-studio', sandboxHelperStat: null }), null);
+  assert.equal(sandboxAvailability({ apparmorLabel: null, profileName: 'minds', sandboxHelperStat: null }), null);
 });
 
 const LINUX_PACKAGED = { platform: 'linux', isPackaged: true };

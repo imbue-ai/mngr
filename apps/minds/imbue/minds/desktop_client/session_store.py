@@ -1,4 +1,4 @@
-"""Workspace<->account association store for the Imbue Studio desktop client.
+"""Workspace<->account association store for the minds desktop client.
 
 The mngr_imbue_cloud plugin owns the SuperTokens session state on disk
 (tokens, the email -> user_id index, and the active-account marker).

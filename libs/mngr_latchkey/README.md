@@ -68,7 +68,7 @@ mngr latchkey link-permissions --host-id "$HOST_ID" --opaque-path "$OPAQUE_PATH"
 # Register this agent for the host so it can reach the Minds API proxy.
 # The baseline rule rejects every ``/minds-api-proxy/api/v1/agents/<id>/...``
 # request whose ``<id>`` is not in the host's allowed-agent enum, so
-# every agent that wants to call the Minds API must be registered
+# every minds agent that wants to call the Minds API must be registered
 # here. Idempotent: re-running for an already-registered agent is a no-op.
 # A host with a machine of its own (a remote workspace whose gateway was
 # provisioned from this computer) is also handed the updated file, since
@@ -95,7 +95,7 @@ CLI flag > env var > settings.toml > built-in default.
 (`<latchkey_directory>/mngr_latchkey/`):
 
 - `events.jsonl` -- the supervisor's **structured** log, written via the
-  standard mngr/Imbue Studio JSONL sink: one flat JSON object per line with a
+  standard mngr/minds JSONL sink: one flat JSON object per line with a
   nanosecond `timestamp`, `level`, `message`, and source location,
   size-rotated (rotated copies `events.jsonl.<timestamp>`, oldest
   pruned). Read this when you need to observe timing. The shared
@@ -216,7 +216,7 @@ it on a running daemon without respawning it:
 
 Events are tagged with the `mngr-latchkey-forward` service name so they are
 distinguishable from other Imbue Python processes that report to the same
-projects. When the Imbue Studio desktop client spawns the supervisor it sets all of
+projects. When the minds desktop client spawns the supervisor it sets all of
 these automatically -- resolving the DSN / environment / bucket from its own
 Sentry settings and maintaining the consent file from the user's error-reporting
 settings.
@@ -359,7 +359,7 @@ computer would make every other computer forward the service's requests too.
 The device id reaches the check through detent's custom metadata. An embedder
 starts the desktop gateway with `DETENT_CUSTOM_METADATA={"deviceId": "<id>"}`
 in its environment (`imbue.mngr_latchkey.device_metadata.build_device_metadata_env`
-builds the value; Imbue Studio passes it through the forward supervisor's
+builds the value; minds passes it through the forward supervisor's
 `extra_env`). Detent reads that variable as `customMetadata` whenever latchkey
 supplies none of its own. Latchkey supplies `{"account": ...}` for every
 request it injects credentials into, and supplies nothing for a routed
@@ -585,7 +585,7 @@ and every method costs a single remote command: `connect_service`,
 `set_permissions_and_desktop_egress_rules` push, and `refresh` reads the
 machine's credentials, its policy *and* its [desktop egress
 rules](#the-rules-file) back in one go. Nothing is queued: an exchange either succeeds before its caller
-returns or raises `RemoteGatewayError`, so an embedder (the Imbue Studio desktop app)
+returns or raises `RemoteGatewayError`, so an embedder (the minds desktop app)
 can block a user's click on it and report what the machine said.
 
 Those scripts never reach the logs. Each one embeds what it is moving -- a
@@ -673,7 +673,7 @@ structure: `build_account_grant` composes a grant (key + permissions + backing
 schema) and `list_account_grants` / `resolve_account_scope` /
 `resolved_schema_names` read grants back.
 `ServicesCatalog.list_service_account_grants` layers the catalog on top, which
-is what every consumer (the Imbue Studio connectors page, the permission dialog's
+is what every consumer (the minds connectors page, the permission dialog's
 pre-check, the revoke paths, and VPS credential sync) actually calls. The
 gateway's `permission_requests` extension carries a JavaScript copy of the two
 *generating* helpers (it computes a pending request's effect in-process), guarded
@@ -733,7 +733,7 @@ auth=(-H "X-Latchkey-Gateway-Password: $GATEWAY_PASSWORD" -H "X-Latchkey-Gateway
 ### `permission-requests` extension
 
 A pending-permission queue. Agents submit a request when they hit a
-blocked service; UIs (the Imbue Studio desktop client, your own front-end)
+blocked service; UIs (the minds desktop client, your own front-end)
 consume the stream and approve/delete on resolution.
 
 * `POST /permission-requests` with body
@@ -749,14 +749,14 @@ consume the stream and approve/delete on resolution.
     it is optional, and an agent that does not know which account to use
     omits it. A request with no account has an **empty** `effect` -- it
     can only be resolved by a client that names the chosen account in the
-    approve override body (see below), which is what the Imbue Studio dialog
+    approve override body (see below), which is what the minds dialog
     does after the user picks or signs one in.
   * `"file-sharing"` -- access to one path through the `minds-api-proxy`
     extension, with payload `{"path": "<absolute-path>", "access":
     "READ"|"WRITE"}`. The path must be absolute (or start with `~`, which is
     expanded) and free of `..` segments. An optional `"sync": {"conflict":
     "NEWER"|"THIS_COMPUTER"|"WORKSPACE"}` (`conflict` itself optional,
-    defaulting to `NEWER`) asks Imbue Studio to also keep a synchronized copy of
+    defaulting to `NEWER`) asks Minds to also keep a synchronized copy of
     the folder on the workspace's machine once the grant is approved. The
     extension validates and stores it but never acts on it: a sync is not
     a permission, so it does not enter the `effect`.
@@ -955,7 +955,7 @@ credentials, so an entry for one would only offer grants that can never be
 used. The generator skips them, so the catalog and the gateway's
 `settings.hideBuiltinServices` cannot drift apart.
 
-`services.json` also carries Imbue Studio's own *additional* (custom) services --
+`services.json` also carries minds' own *additional* (custom) services --
 ones detent has no schemas for, currently `claude.ai`. Their definitions are
 hand-maintained in `imbue/mngr_latchkey/additional_services.json` (a
 `display_name`, a `registration`, the single Detent `scope` it exposes with an
@@ -982,8 +982,8 @@ may start on another host. A service registered with only a `baseApiUrl` can
 be authenticated by hand with `latchkey auth set` instead.
 
 Because a custom scope is not a detent builtin, its schemas have to reach the
-gateway's permission check. They are **inlined into every permissions file
-Imbue Studio writes**: the agent baseline (`baseline_permissions.ADDITIONAL_SERVICE_SCHEMAS`)
+gateway's permission check. They are **inlined into every permissions file minds
+writes**: the agent baseline (`baseline_permissions.ADDITIONAL_SERVICE_SCHEMAS`)
 carries them, and `agent_setup.reconcile_baseline_permissions` refreshes them on
 files that already exist, so the bundled definition always wins over a stale
 copy. Granting a custom scope is then a plain rule write against a file that
@@ -1005,12 +1005,12 @@ baseline inlines, and the catalog projection the generator folds into
 `services.json`. No gateway extension reads it -- they only read
 `services.json`.
 
-The registration entries are Imbue Studio's half of latchkey's own `config.json`:
+The registration entries are minds' half of latchkey's own `config.json`:
 `core.merge_minds_latchkey_config` read-merges them into the file's
 `registeredServices` block (alongside `settings.hideBuiltinServices`) rather
 than shelling out to `latchkey services register`, which cannot update a
 registration that already exists. That merge runs for **every** gateway that
-serves Imbue Studio agents -- the desktop one at `initialize()` and each gateway spawn,
+serves minds agents -- the desktop one at `initialize()` and each gateway spawn,
 and a VPS one during remote provisioning. It has to: the registration is what
 lets a gateway resolve a request to a custom service at all, so a VPS holding
 the synchronized credentials but not the registration would silently never
@@ -1044,7 +1044,7 @@ curl -X DELETE "${auth[@]}" "$GATEWAY_URL/permission-requests/$REQUEST_ID"
 
 ## Embedding
 
-Embedders (such as the Imbue Studio desktop client) typically want a single
+Embedders (such as the minds desktop client) typically want a single
 detached ``mngr latchkey forward`` supervisor that survives embedder
 restarts and adopts the existing one instead of double-spawning. The
 :class:`LatchkeyForwardSupervisor` does exactly that:
@@ -1061,14 +1061,14 @@ supervisor.ensure_running()  # idempotent; spawns or adopts as needed
 # ... do whatever the embedder does ...
 # Optional: ``supervisor.stop()`` to terminate the detached process and
 # tear down the gateway. Omitting this leaves the supervisor running
-# detached, which is what Imbue Studio does so the gateway survives a
+# detached, which is what minds does so the gateway survives a
 # desktop-client restart.
 ```
 
 ## Python API
 
 Every CLI subcommand is a thin wrapper around the library; the library
-remains importable for embedders such as the Imbue Studio desktop client.
+remains importable for embedders such as the minds desktop client.
 
 ```python
 from imbue.mngr_latchkey.core import Latchkey

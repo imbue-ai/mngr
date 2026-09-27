@@ -2,7 +2,6 @@
 
 import json
 from pathlib import Path
-from typing import Any
 
 from pydantic import Field
 
@@ -12,15 +11,12 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
-from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
-from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.ui_api_options import _workspace_host_coordinate_for_options
 from imbue.minds.desktop_client.ui_api_options import accepted_service_icon
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
-from imbue.minds.mngr_settings.provider_blocks import imbue_cloud_provider_name_for_account
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
@@ -108,7 +104,6 @@ def test_options_data_returns_workspace_context(tmp_path: Path) -> None:
     assert data["palette"] == dict(WORKSPACE_PALETTE)
     assert data["is_stale"] is False
     assert data["is_leased_imbue_cloud"] is False
-    assert data["leased_owner_email"] == ""
     # No session store in this minimal app: unassociated, no accounts offered.
     assert data["has_account"] is False
     assert data["account_email"] == ""
@@ -189,65 +184,8 @@ def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
     data = json.loads(response.get_data(as_text=True))
     assert data["is_stale"] is True
     assert data["is_leased_imbue_cloud"] is True
-    # No linked account and no signed-in account's provider hosts it: the owner is not known.
-    assert data["leased_owner_email"] == ""
     # No stored color label: the default is reported.
     assert data["color"] == DEFAULT_WORKSPACE_COLOR
-
-
-def _leased_machine_options_data(
-    tmp_path: Path, hosting_email: str, cli: FakeImbueCloudCli, session_store: MultiAccountSessionStore
-) -> dict[str, Any]:
-    """The options data for a machine leased under ``hosting_email``'s Imbue Cloud provider instance."""
-    resolver = _OptionsSeededResolver(
-        url_by_agent_and_service={_AGENT_ID: {}},
-        display_info_by_agent_id={
-            _AGENT_ID: AgentDisplayInfo(
-                agent_name="leased",
-                host_id=_HOST_ID,
-                provider_name=imbue_cloud_provider_name_for_account(hosting_email),
-            )
-        },
-    )
-    client, _app, _auth_store = build_desktop_client_for_test(
-        tmp_path,
-        is_authenticated=True,
-        backend_resolver=resolver,
-        imbue_cloud_cli=cli,
-        session_store=session_store,
-    )
-    return json.loads(client.get(f"/ui/api/workspaces/{_AGENT_ID}/options").get_data(as_text=True))
-
-
-def test_options_data_names_a_leased_machines_owner_from_its_provider_when_it_has_no_link(tmp_path: Path) -> None:
-    """The owner line a leased machine shows needs no association record: the provider instance
-    it runs under is the one Imbue Studio registered for its account."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-bob", email="bob@example.com")
-    cli.add_account(user_id="user-alice", email="alice@example.com")
-    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
-
-    data = _leased_machine_options_data(tmp_path, "alice@example.com", cli, session_store)
-
-    assert data["is_leased_imbue_cloud"] is True
-    assert data["current_account"] is None
-    assert data["leased_owner_email"] == "alice@example.com"
-
-
-def test_options_data_names_a_leased_machines_linked_account_as_its_owner(tmp_path: Path) -> None:
-    """A stored account link names the owner even when another signed-in account's provider matches."""
-    cli = make_fake_imbue_cloud_cli()
-    cli.add_account(user_id="user-owner", email="owner@example.com")
-    cli.add_account(user_id="user-other", email="other@example.com")
-    session_store = make_session_store_for_test(tmp_path / "session-store", cli)
-    session_store.associate_created_workspace(
-        user_id="user-owner", agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=True
-    )
-
-    data = _leased_machine_options_data(tmp_path, "other@example.com", cli, session_store)
-
-    assert data["is_leased_imbue_cloud"] is True
-    assert data["leased_owner_email"] == "owner@example.com"
 
 
 def test_options_data_serves_only_gate_passing_app_icons(tmp_path: Path) -> None:
@@ -293,6 +231,9 @@ def test_accepted_service_icon_refuses_anything_executable() -> None:
     assert accepted_service_icon("<svg><style>svg{}</style></svg>") == ""
     assert accepted_service_icon("<svg><foreignObject/></svg>") == ""
     assert accepted_service_icon("<svg>" + "a" * 16400 + "</svg>") == ""
+
+
+# -- _workspace_host_coordinate_for_options ---------------------------------
 
 
 def test_workspace_host_coordinate_prefers_discovery() -> None:

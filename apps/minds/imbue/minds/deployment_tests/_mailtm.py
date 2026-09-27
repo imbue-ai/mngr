@@ -69,7 +69,7 @@ class MailtmInbox(MutableModel):
         """Poll mail.tm for an email-verification message and return the extracted token.
 
         Looks for the verification-link token in the email body using a
-        regex on the canonical URL shape Imbue Studio emits. Raises
+        regex on the canonical URL shape minds emits. Raises
         :class:`MailtmFetchError` on timeout or if the message lacks a
         recognizable token.
         """

@@ -7,7 +7,6 @@ const Sentry = require('@sentry/electron/main');
 const { parse: parseToml } = require('smol-toml');
 const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
-const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // Error reporting for the Electron MAIN process. This mirrors the Python
 // backend's Sentry setup (imbue/minds/utils/sentry/core.py) and the browser
@@ -17,7 +16,7 @@ const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 //
 // The Electron main process reports to the SAME JavaScript Sentry projects as
 // the browser web UI -- one JS project set (production / staging / dev) for all
-// of Imbue Studio's JavaScript. A "vanilla JS" Sentry project ingests events from both
+// of minds' JavaScript. A "vanilla JS" Sentry project ingests events from both
 // the @sentry/browser SDK and this @sentry/electron SDK fine, so there is no
 // need for a separate Electron project. The three DSNs below are therefore the
 // same values configured in imbue/minds/utils/sentry/frontend.py; the
@@ -39,7 +38,7 @@ const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o45043
  */
 function readUserConfig() {
   try {
-    const configPath = path.join(paths.getStateDir(), 'config.toml');
+    const configPath = path.join(paths.getDataDir(), 'config.toml');
     return parseToml(fs.readFileSync(configPath, 'utf8'));
   } catch {
     return {};
@@ -78,7 +77,7 @@ const ANONYMOUS_USER_ID_PATTERN = /^[0-9a-f]{32}$/;
  * Returns null (rather than throwing) if the id cannot be read or written, so Sentry setup never fails.
  */
 function getOrCreateAnonymousUserId() {
-  const idFilePath = path.join(paths.getStateDir(), ANONYMOUS_USER_ID_FILENAME);
+  const idFilePath = path.join(paths.getDataDir(), ANONYMOUS_USER_ID_FILENAME);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let existing = '';
     try {
@@ -106,7 +105,7 @@ function getOrCreateAnonymousUserId() {
 }
 
 /**
- * Select the Sentry environment from the resolved Imbue Studio root name, mirroring
+ * Select the Sentry environment from the resolved minds root name, mirroring
  * imbue.minds.utils.sentry.core.resolve_sentry_environment: only the exact
  * production / staging roots get their own target; everything else (dev-*,
  * ci-*, or no activated env -> the 'minds' default) maps to development.
@@ -371,7 +370,7 @@ function collectSystemBasics() {
     memory: { total_bytes: os.totalmem(), free_bytes: os.freemem() },
   };
   try {
-    const stat = fs.statfsSync(paths.getStateDir());
+    const stat = fs.statfsSync(paths.getDataDir());
     basics.disk = { total_bytes: stat.blocks * stat.bsize, free_bytes: stat.bavail * stat.bsize };
   } catch (err) {
     console.warn(`[report-error] could not stat data dir for disk usage: ${err && err.message}`);
@@ -418,7 +417,7 @@ function captureManualReport({ message, details }) {
   return (
     Sentry.captureEvent(
       {
-        message: message || `${PRODUCT_DISPLAY_NAME} app error (manual report)`,
+        message: message || 'Mind app error (manual report)',
         level: 'error',
         tags: { manually_submitted: 'true' },
         extra: { details: details || '', basics },

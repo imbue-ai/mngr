@@ -17,11 +17,8 @@ from imbue.mngr.primitives import PluginName
 from imbue.mngr_autocompact.cli import autocompact_group
 from imbue.mngr_autocompact.config import AutoCompactPluginConfig
 from imbue.mngr_autocompact.config import ContextCompactionMode
-from imbue.mngr_autocompact.config import DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS
 from imbue.mngr_autocompact.plugin import on_before_send_message
 from imbue.mngr_autocompact.plugin import register_cli_commands
-
-_INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS = DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS + 50_000
 
 
 class _DummyNonCompactionAgent:
@@ -45,7 +42,7 @@ class _TestAgent(HasCompactionMixin):
         host: FakeHost,
         running: bool = True,
         cache_ttl: int | None = 60,
-        context_tokens: int | None = _INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS,
+        context_tokens: int | None = 250_000,
         idle_since_dt: datetime | None = None,
     ) -> None:
         self.id = id
@@ -108,7 +105,7 @@ def test_on_before_send_message_triggers_compaction_if_stale(tmp_path: Path, tem
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=_INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(hours=2),
     )
 
@@ -137,7 +134,7 @@ def test_on_before_send_message_skips_when_not_stale(tmp_path: Path, temp_mngr_c
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=_INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
 
@@ -165,7 +162,7 @@ def test_on_before_send_message_skips_when_disabled(tmp_path: Path, temp_mngr_ct
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=_INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(hours=2),
     )
 
@@ -193,7 +190,7 @@ def test_on_before_send_message_skips_when_proactive_timer(tmp_path: Path, temp_
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=_INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(hours=2),
     )
 

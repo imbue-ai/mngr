@@ -31,7 +31,7 @@ within milliseconds instead of first finishing a now-useless multi-second
 import. Once a request has been read the warm process stops reading the socket
 to run the (possibly slow or hung) ``mngr`` command, and during that window a
 socket EOF can no longer wake it. To cover that window the warm process also
-runs mngr's parent-death watcher: if the parent (the Imbue Studio backend) dies while
+runs mngr's parent-death watcher: if the parent (the minds backend) dies while
 the warm process is busy, the watcher SIGTERMs it so no orphaned warm process
 lingers.
 
@@ -140,14 +140,14 @@ def _execute_mngr_cli(
 
     All of mngr's global-state mutation (loguru, ``sys.argv``, stdout/stderr,
     ``os.chdir``) is confined to this process, which exits right after, so it
-    never affects the Imbue Studio backend.
+    never affects the minds backend.
     """
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     returncode = 0
     os.environ.update(env_overrides)
     # Change directory in the throwaway process only; callers that must not
-    # resolve project config from the Imbue Studio backend's cwd (e.g. the monorepo
+    # resolve project config from the minds backend's cwd (e.g. the monorepo
     # root in a dev checkout) pass their own cwd, typically ``$HOME``.
     if cwd is not None:
         os.chdir(cwd)
@@ -185,7 +185,7 @@ def _receive_request_or_exit(
     Runs in a dedicated thread started *before* the warm process's expensive
     ``imbue.mngr.main`` warm-up, so a parent disconnect is observed within
     milliseconds rather than only once the warm-up completes and the main
-    thread reaches its own ``recv``. On EOF -- the parent (Imbue Studio backend) went away
+    thread reaches its own ``recv``. On EOF -- the parent (minds backend) went away
     without sending a request, e.g. it was killed without a chance to terminate
     us -- the whole process exits immediately via ``os._exit``: the main thread
     may be mid-import, where running cleanup would be unsafe, and there is
@@ -256,7 +256,7 @@ def _run_warm_mngr_server(connection_fd: int) -> None:
             is_checked=False,
         )
         # This inline import is the whole point of the warm process: it pays mngr's
-        # multi-second import cost here (in a throwaway interpreter), off the Imbue Studio
+        # multi-second import cost here (in a throwaway interpreter), off the minds
         # backend's request path. It is intentionally allow-listed by the
         # inline-imports ratchet.
         from imbue.mngr.main import cli
@@ -431,7 +431,7 @@ class MngrCaller(MutableModel):
         to the warm process's ``os.environ`` before the CLI runs. ``cwd``, when
         given, is the directory the warm process ``chdir``s into before running
         the CLI (used by callers whose config resolution must not depend on the
-        Imbue Studio backend's cwd). On timeout the warm process is terminated and a
+        minds backend's cwd). On timeout the warm process is terminated and a
         result with ``is_timed_out=True`` and a non-zero ``returncode`` is
         returned.
 

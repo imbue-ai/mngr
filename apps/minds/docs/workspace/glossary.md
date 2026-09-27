@@ -1,6 +1,6 @@
 # Glossary
 
-Key concepts in the Imbue Studio system:
+Key concepts in the minds system:
 
 - **workspace**: the logical unit a user works out of: a collection of permissions (what the agent can access, which outside users can access it), apps, data, and customizations.
   A workspace is identified by its primary agent's id (its *workspace id*, which never changes for the life of the workspace) and discovered via that agent's `is_primary` label; the *machine* it currently runs on is a swappable attribute.
@@ -29,9 +29,9 @@ Key concepts in the Imbue Studio system:
   The scheduling primitive is landing separately; until then skills run when invoked.
 
 - **customization**: a user's change to any existing part of the workspace -- a modified app, an edited skill, a tweaked chat behavior.
-  Not a standalone kind of creation; everything in Imbue Studio can be modified.
+  Not a standalone kind of creation; everything in minds can be modified.
 
-- **template**: a publishable, reusable, *bootable* snapshot of the creations an agent has built, pushed to a GitHub repo so another workspace can be created from it or adopt it (one repo can accumulate several templates).
+- **template**: a publishable, reusable, *bootable* snapshot of the creations a mind has built, pushed to a GitHub repo so another mind can be created from it or adopt it (one repo can accumulate several templates).
   A template can include zero or more creations plus customizations to existing things.
   See the workspace's publish-template / use-template skills.
 
@@ -79,72 +79,7 @@ Key concepts in the Imbue Studio system:
   Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
 
 - **app watcher**: a background service that monitors `data/.state/apps.toml` and writes service events to `events/services/events.jsonl` so the desktop client can discover an agent's apps.
-  (Forwarding reconciliation happens on the Imbue Studio side, via the `mngr forward` plumbing -- not in the watcher.)
-
-- **to publish**: to make a workspace reachable in a browser at its share URL through the self-hosted relay, for as long as it stays published.
-  Publishing is workspace-level and is started from the desktop client's Share tab by a signed-in account associated with the workspace: it provisions the relay materials and certificate that the share-gateway runs the share stack from, and unpublishing drops the tunnel, cutting off anyone connected.
-  Who may enter a published workspace is decided by its grants; the URL alone admits nobody.
-  The code and older docs say "share" for this; the verb is "publish" from here on, and "share" survives only inside existing names such as share URL, share panel, and share-gateway.
-
-- **grant**: an entry in a workspace's grants document (`data/.secrets/share_grants.toml`) that admits a party to one app of the workspace while it is published.
-  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole machine. A grant on any other app admits that app alone.
-  The party is named by an account id, an email address, or a domain. The share-gateway re-reads the document on every request, so removing a grant takes effect immediately.
-  A grant names who may enter and nothing more: it does not notify anyone, and it does not make someone a visitor until they visit.
-
-- **visitor**: a person who opens someone else's published workspace in a browser through its share URL.
-  A role toward one workspace, not a kind of account: the same person publishes their own workspaces and is a visitor to anyone else's. A visitor needs an imbue account with a verified email, because that is what the grants are checked against; they need no desktop client and no machine.
-  Someone becomes a visitor of a workspace the first time the connector's share broker (the sign-in step every visit passes through) authorizes their visit, and stops being one the moment their grant is removed, the workspace is unpublished, or their account is suspended. The account that published a workspace is never a visitor of it: the broker and the share-gateway give that account a separate path that ignores the grants.
-  Not the anonymous *visitor id* of download attribution (a browser on imbue.com before any account exists), and not the relay's *visitor connection* (the browser's TCP connection).
-
-- **granter**: the role of whoever authors a grant. Any account with write access to the workspace can: the desktop client lets a signed-in account associated with the workspace edit the grants document, and inside the workspace anyone with a shell can rewrite it.
-  The granter of a grant is who may invite its grantee, and whose invitation allowance the delivery counts against.
-
-- **user grant**: a grant naming an account by its user id; the share-gateway matches these first.
-  What a typed address becomes when it resolves to an account at grant time, and what an email grant becomes on its grantee's first visit.
-
-- **email grant**: a grant naming an email address, normally one with no account yet; it admits the person who signs in with that address, verified.
-  If the address does have an account (the resolution at grant time missed it, or the account came later), the grant still admits them, and the share-gateway upgrades it to a user grant on their first visit. Older docs call this entry an invite; that word now means only an invitation.
-
-- **domain grant**: a grant naming an email domain; it admits everyone who signs in with a verified address at that domain, including people the granter has never met.
-  A domain grant cannot be invited: the granter passes the share URL on themselves.
-
-- **grantee**: the party a grant admits: the account of a user grant, the person at an email grant's address, or everyone at a domain grant's domain.
-
-- **invitee**: a grantee of a user grant or an email grant who has been invited, meaning an invitation exists for their grant.
-
-- **registered address**: an email address that is the verified email of an imbue account; *unregistered* otherwise.
-  Registration is what invitation routing checks, whatever the grant's kind says; it says nothing about whether Imbue Studio is installed.
-
-- **share panel**: the granter's surface for creating grants and inviting: the "Share machine: <name>" panel in the desktop client's workspace options.
-
-- **joined**: a grantee's first authorized visit to the workspace, as recorded by the share broker's visit log. The visitor's own action, not a delivery outcome.
-
-- **invitation** [future]: the message telling a user grant's or an email grant's grantee that they have been granted access, delivered by Imbue over one channel from the single invitation content, carrying the plain share URL.
-  An invitation belongs to exactly one grant. To *invite* is to create a delivery for it.
-
-- **invitation content** [future]: the one content model behind every invitation (who granted access, which workspace, which app, the share URL, and how to stop receiving mail), rendered once per channel. It carries no message written by the granter.
-
-- **channel** [future]: how a delivery reaches an invitee: email, or an in-app notification in the Imbue Studio notification feed.
-  Imbue selects the channel from the invitee's registration and notification preferences; the granter never chooses. In-app is modelled now and implemented later.
-
-- **delivery** [future]: one attempt to deliver an invitation over one channel, with a delivery outcome.
-  An invitation has one or more deliveries; inviting again creates another, subject to the invitation allowance and a per-grant cooldown held in one policy object so that it is easy to change.
-
-- **delivery outcome** [future]: the result of a delivery. At attempt time: `sent`, `suppressed`, `over allowance`, `too soon`, `unroutable`, or `failed`. Later, from the email provider's webhooks: `delivered`, `bounced`, `complained`, or `unsubscribed`.
-
-- **notification preferences** [future]: a registered account's choice of the channels it accepts notifications on, email and in-app, both on by default. Invitations are one kind of notification among others.
-  Unregistered addresses have no preferences. The invitation email's unsubscribe link turns email off for a registered address and adds any address to the suppression list.
-
-- **suppression list** [future]: the addresses Imbue will not email, each with a reason (`bounced`, `complained`, `unsubscribed`, `reported`, or `blocked`) and a source (an email provider webhook, the invitation email's own unsubscribe or report link, or an operator).
-  Checked before every email delivery; a suppressed delivery still counts against the allowance. `reported` means the recipient used the email's link to report the invitation as unwanted, which also counts against the granter.
-
-- **email provider** [future]: the external service (an ESP) that sends invitation email and reports delivery events by webhook. The design does not name one.
-
-- **invitation allowance** [future]: the number of deliveries a granter may attempt per channel in any rolling 24 hours: a constant per channel in one policy object, counted from delivery rows (a per-account override may come later).
-  Every attempted delivery counts, including suppressed ones; refused attempts do not. The granter learns of the allowance only when refused.
-
-- **granter-visible invitation outcome** [future]: what the granter may learn about an invitation: `invited`, `could not invite` (the reason withheld), `over allowance`, `too soon` (the same person was invited within the cooldown), or `joined`.
-  Bounces, complaints, opt-outs, reports, and suppression are never shown to the granter, so that abuse is guesswork rather than a probe.
+  (Forwarding reconciliation happens on the minds side, via the `mngr forward` plumbing -- not in the watcher.)
 
 - **share-gateway**: the background service that watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled.
   Who may access the share is controlled by the grants document (`data/.secrets/share_grants.toml`), which the desktop client rewrites as the user edits grants.
@@ -163,7 +98,7 @@ Key concepts in the Imbue Studio system:
 
 - **machine size**: how big a remote (imbue_cloud) machine is, in two independent factors (specs/slice-fleet). *Units* are the single compute knob -- 1 unit = 1GiB of machine RAM, with vCPUs and fair-share bandwidth scaling proportionally; allowed sizes are multiples of 8 units up to 128. *Disk* is a second, grow-only factor, sized once at creation (3.5GiB per unit) and grown independently afterwards; it never shrinks. Resizing is record-then-restart: `mngr imbue_cloud machines resize` stamps the desired size, and the machine's next restart applies it (in place when its box has room, otherwise via a restore onto a box that does). Every new workspace starts at the default 8-unit size.
 
-- **environment**: an environment is a single deployed instance of the Imbue Studio system.
+- **environment**: an environment is a single deployed instance of the minds system.
   It owns, among other things, a data root, a Modal environment, a Neon project, and a SuperTokens app.
   Every environment belongs to exactly one tier, and takes its account credentials and deploy configuration from it.
   Production and staging are environments whose names are identical to their tier names, while dev-<user> and ci-<timestamp>-<uuid> are dynamic environments that developers and CI create and destroy within their tiers.

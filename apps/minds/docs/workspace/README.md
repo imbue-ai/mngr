@@ -92,12 +92,12 @@ endpoint (authenticated by the relay token) and re-polls it, so relay
 fleet changes never require re-injecting materials.
 
 The grants document lists who may visit, by account id (`users`), by
-email (`emails`, email grants the gateway upgrades to account ids on first
-visit), and by email domain (`email_domains`), per app. Every writer of
+email (`emails`, invites the gateway upgrades to account ids on first
+visit), and by email domain (`email_domains`), per scope. Every writer of
 that file inside the container -- the desktop's injection and the gateway's
-email-grant upgrade -- holds a `flock` on `share_grants.toml.lock` around its
+invite upgrade -- holds a `flock` on `share_grants.toml.lock` around its
 write. Services learn who is asking from the `X-Imbue-Identity` header on
-each request (see the Imbue Studio design doc); nothing about the owner is written
+each request (see the minds design doc); nothing about the owner is written
 into the workspace as a file.
 
 ## Sandboxed runtime on remote workspaces
@@ -105,10 +105,6 @@ into the workspace as a file.
 Remote (imbue_cloud) workspaces run their container under gVisor (`runsc`, a
 user-space kernel between the container and the VM's kernel; `uname -r` inside
 the container reports `4.19.0-gvisor`), with `/run` and `/tmp` on tmpfs.
-`/tmp` is held in memory and capped at an eighth of the VM's RAM (a little
-under 1 GiB on the default machine): a write past the cap fails with "No space
-left on device" rather than taking the workspace down, so large throwaway files
-belong on disk under `/var/tmp` (outside the backup), not in `/tmp`.
 Software that needs ptrace tooling (`strace`, `gdb` attach, `perf`), eBPF,
 FUSE, `io_uring`, nested container runtimes, or unusual `ioctl`s does not work
 inside the sandbox, and filesystem-metadata-heavy operations (`find`, `tar`,
@@ -128,4 +124,4 @@ python3 system/scripts/forward_port.py --url http://localhost:8001 --name web-ad
 python3 system/scripts/forward_port.py --remove --name old-app
 ```
 
-The app watcher service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for the desktop client to discover. (Share registration happens on the Imbue Studio side when the user enables sharing -- not in the watcher.)
+The app watcher service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for the desktop client to discover. (Share registration happens on the minds side when the user enables sharing -- not in the watcher.)

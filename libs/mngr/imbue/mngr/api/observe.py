@@ -5,10 +5,8 @@ import queue
 import select
 import threading
 from collections.abc import Callable
-from collections.abc import Iterator
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
-from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from enum import auto
@@ -64,7 +62,7 @@ from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
 
-# Constants
+# === Constants ===
 
 OBSERVE_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agents")
 AGENT_STATES_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agent_states")
@@ -92,7 +90,7 @@ _FULL_STATE_MARKER: Final[bytes] = b'"AGENTS_FULL_STATE"'
 _FOLLOW_JOIN_TIMEOUT_SECONDS: Final[float] = 5.0
 
 
-# Event Types
+# === Event Types ===
 
 
 class ObserveEventType(UpperCaseStrEnum):
@@ -152,7 +150,7 @@ class AgentRemovedEvent(EventEnvelope):
     )
 
 
-# Path Helpers
+# === Path Helpers ===
 
 
 @pure
@@ -191,7 +189,7 @@ def get_observe_lock_path(events_base_dir: Path) -> Path:
     return events_base_dir / OBSERVE_LOCK_FILENAME
 
 
-# Event Construction
+# === Event Construction ===
 
 
 def _make_envelope_fields() -> tuple[IsoTimestamp, EventId]:
@@ -261,7 +259,7 @@ def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName, host_id: 
     )
 
 
-# Event Parsing
+# === Event Parsing ===
 
 
 def parse_observe_event_line(line: str) -> AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent | None:
@@ -293,7 +291,7 @@ def parse_observe_event_line(line: str) -> AgentStateEvent | FullAgentStateEvent
     return None
 
 
-# File I/O
+# === File I/O ===
 
 
 def _append_event_to_file(events_path: Path, event: EventEnvelope) -> None:
@@ -318,7 +316,7 @@ def append_agent_state_change_event(events_base_dir: Path, event: AgentStateChan
     _append_event_to_file(get_agent_states_events_path(events_base_dir), event)
 
 
-# Tracked State
+# === Tracked State ===
 
 
 class _TrackedState(FrozenModel):
@@ -337,7 +335,7 @@ def _details_instance_key(agent: AgentDetails) -> str:
     return str(AgentInstanceKey.build(agent.id, agent.host.id))
 
 
-# History Loading
+# === History Loading ===
 
 
 def _is_full_state_line(line: str) -> bool:
@@ -460,7 +458,7 @@ def load_base_state_from_history(
     return last_state_by_instance
 
 
-# Locking
+# === Locking ===
 
 
 class ObserveLockError(MngrError):
@@ -561,7 +559,7 @@ def is_observe_writer_running(events_base_dir: Path) -> bool:
     return False
 
 
-# Following
+# === Following ===
 
 
 class ObserveStreamUnavailableError(MngrError, ValueError):
@@ -978,7 +976,7 @@ class ObserveEventFollower(MutableModel):
             )
 
 
-# Observer
+# === Observer ===
 
 
 class _KnownHost(FrozenModel):
@@ -1133,15 +1131,6 @@ class AgentObserver(MutableModel):
     # handler), so the sink's output never interleaves.
     _sink_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
-    # A listing emits seconds after it reads the hosts, so it must leave out any agent the
-    # discovery stream removed in between, or that agent reappears after its AGENT_REMOVED. Held
-    # across a removal's emit-and-untrack and a listing's filter-and-emit, so neither lands inside
-    # the other.
-    _removal_fence_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _removal_count: int = PrivateAttr(default=0)
-    _removal_count_by_instance: dict[str, int] = PrivateAttr(default_factory=dict)
-    # The removal count each open listing began at.
-    _open_listing_starts: list[int] = PrivateAttr(default_factory=list)
     _activity_queue: queue.Queue[str] = PrivateAttr(default_factory=queue.Queue)
     # UNKNOWN-state tracking, keyed by agent instance. Populated only during
     # this process's lifetime (not from history) so that restart cannot
@@ -1307,12 +1296,8 @@ class AgentObserver(MutableModel):
         for instance_key in delta.removed_agent_instances:
             prior = agents_before.get(instance_key)
             agent_name = prior.agent_name if prior is not None else AgentName(str(instance_key.agent_id))
-            with self._removal_fence_lock:
-                if self._open_listing_starts:
-                    self._removal_count += 1
-                    self._removal_count_by_instance[str(instance_key)] = self._removal_count
-                self._emit_agent_removed(instance_key.agent_id, agent_name, instance_key.host_id)
-                self._drop_agent_tracking(str(instance_key))
+            self._emit_agent_removed(instance_key.agent_id, agent_name, instance_key.host_id)
+            self._drop_agent_tracking(str(instance_key))
 
     def _drop_agent_tracking(self, instance_key_str: str) -> None:
         """Forget all per-agent state for a removed agent instance and close its PID watcher."""
@@ -1443,47 +1428,16 @@ class AgentObserver(MutableModel):
         if host is None:
             return
 
-        with self._listing() as listing_start:
-            with log_span("Fetching agent state for host {}", host.host_name):
-                result = list_agents(
-                    mngr_ctx=self.mngr_ctx,
-                    is_streaming=False,
-                    include_filters=(f'host.id == "{host.host_id}"',),
-                    error_behavior=ErrorBehavior.CONTINUE,
-                )
-            self._emit_listed_agent_states(result.agents, listing_start)
+        with log_span("Fetching agent state for host {}", host.host_name):
+            result = list_agents(
+                mngr_ctx=self.mngr_ctx,
+                is_streaming=False,
+                include_filters=(f'host.id == "{host.host_id}"',),
+                error_behavior=ErrorBehavior.CONTINUE,
+            )
 
-    @contextmanager
-    def _listing(self) -> Iterator[int]:
-        """Open a listing against the removal fence, yielding the removal count it began at."""
-        with self._removal_fence_lock:
-            listing_start = self._removal_count
-            self._open_listing_starts.append(listing_start)
-        try:
-            yield listing_start
-        finally:
-            with self._removal_fence_lock:
-                self._open_listing_starts.remove(listing_start)
-                oldest_open_start = min(self._open_listing_starts, default=self._removal_count)
-                self._removal_count_by_instance = {
-                    instance_key_str: removal_count
-                    for instance_key_str, removal_count in self._removal_count_by_instance.items()
-                    if removal_count > oldest_open_start
-                }
-
-    def _drop_removed_since(self, agents: Sequence[AgentDetails], listing_start: int) -> list[AgentDetails]:
-        """The listed agents the discovery stream has not removed since ``listing_start``. Caller holds the fence lock."""
-        return [
-            agent
-            for agent in agents
-            if self._removal_count_by_instance.get(_details_instance_key(agent), 0) <= listing_start
-        ]
-
-    def _emit_listed_agent_states(self, agents: Sequence[AgentDetails], listing_start: int) -> None:
-        """Emit a host listing's agents, less those removed while the listing ran."""
-        with self._removal_fence_lock:
-            for agent in self._drop_removed_since(agents, listing_start):
-                self._emit_agent_state(agent)
+        for agent in result.agents:
+            self._emit_agent_state(agent)
 
     def _do_full_state_snapshot(self) -> None:
         """Perform a full listing, emit a full state event, and check for state changes.
@@ -1494,23 +1448,17 @@ class AgentObserver(MutableModel):
         the user explicitly destroys them). Agents whose provider has been
         removed from the configured set entirely are dropped from tracking.
         """
-        with self._listing() as listing_start:
-            result = list_agents(
-                mngr_ctx=self.mngr_ctx,
-                is_streaming=False,
-                error_behavior=ErrorBehavior.CONTINUE,
-            )
+        result = list_agents(
+            mngr_ctx=self.mngr_ctx,
+            is_streaming=False,
+            error_behavior=ErrorBehavior.CONTINUE,
+        )
 
-            if result.errors:
-                for error in result.errors:
-                    logger.warning("Error during full state snapshot: {} - {}", error.exception_type, error.message)
+        if result.errors:
+            for error in result.errors:
+                logger.warning("Error during full state snapshot: {} - {}", error.exception_type, error.message)
 
-            self._process_listed_snapshot(result.agents, listing_start)
-
-    def _process_listed_snapshot(self, agents: Sequence[AgentDetails], listing_start: int) -> None:
-        """Process a full listing's agents, less those removed while the listing ran."""
-        with self._removal_fence_lock:
-            self._process_snapshot_agents(self._drop_removed_since(agents, listing_start))
+        self._process_snapshot_agents(result.agents)
 
     def _process_snapshot_agents(self, agents: Sequence[AgentDetails]) -> None:
         """Process agents from a full snapshot: detect state changes, emit events, update tracking.
@@ -1606,7 +1554,7 @@ class AgentObserver(MutableModel):
         for instance_key_str in instance_keys_to_drop:
             self._close_watcher(instance_key_str)
 
-    # PID Watchers (local agents only)
+    # === PID Watchers (local agents only) ===
 
     def _reconcile_watcher_for_agent(self, agent: AgentDetails) -> None:
         """Open, replace, or close the PID watcher for one agent from its probed details.

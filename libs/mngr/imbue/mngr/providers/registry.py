@@ -159,21 +159,6 @@ def list_backends() -> list[str]:
     return sorted(str(k) for k in _all_backend_names())
 
 
-@pure
-def resolve_backend_name(provider_name: ProviderInstanceName, mngr_ctx: MngrContext) -> ProviderBackendName:
-    """The backend a provider-instance name runs on.
-
-    A name configured in ``mngr_ctx.config.providers`` declares its backend;
-    any other name is taken as a bare backend name (``--provider docker``
-    without a ``[providers.docker]`` block). Unlike
-    ``resolve_backend_and_config`` this builds no config, so it has no side
-    effects (a backend's default config may warn on construction).
-    """
-    if provider_name in mngr_ctx.config.providers:
-        return mngr_ctx.config.providers[provider_name].backend
-    return ProviderBackendName(str(provider_name))
-
-
 def resolve_backend_and_config(
     provider_name: ProviderInstanceName,
     mngr_ctx: MngrContext,
@@ -191,10 +176,11 @@ def resolve_backend_and_config(
     bootstrap path so the "configured-instance vs. bare-backend-name"
     fallback logic lives in exactly one place.
     """
-    backend_name = resolve_backend_name(provider_name, mngr_ctx)
     if provider_name in mngr_ctx.config.providers:
         provider_config = mngr_ctx.config.providers[provider_name]
+        backend_name = provider_config.backend
     else:
+        backend_name = ProviderBackendName(str(provider_name))
         config_class = get_provider_config_class(str(backend_name))
         provider_config = config_class(backend=backend_name)
     return get_backend(backend_name), provider_config

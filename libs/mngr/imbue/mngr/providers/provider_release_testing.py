@@ -62,8 +62,6 @@ from imbue.mngr.utils.testing import run_mngr_subprocess
 # its own ``@pytest.mark.timeout``; these only bound the individual subprocess calls / polls.
 _CREATE_TIMEOUT_SECONDS: Final[float] = 600.0
 _EXEC_TIMEOUT_SECONDS: Final[float] = 120.0
-# How long Docker's restart policy plus the container's sshd self-heal may take after a kill.
-_CONTAINER_RESTART_TIMEOUT_SECONDS: Final[float] = 120.0
 _LIFECYCLE_TIMEOUT_SECONDS: Final[float] = 180.0
 _DESTROY_TIMEOUT_SECONDS: Final[float] = 180.0
 # Cloud state transitions (stop -> HALTED, force-kill -> CRASHED, gc -> gone) are slow and
@@ -130,12 +128,6 @@ class ProviderReleaseProfile(abc.ABC):
     # tests used to own. The VPS family sets it from its ``IsolationMode`` (NONE -> bare); Modal has
     # no bare shape, so it stays False.
     is_bare_host: bool = False
-    # Whether Trip 1 can stop and kill the agent container out of band on the host itself (the
-    # VPS family's container shape, through ``mngr exec --outer``). When True, Trip 1 asserts
-    # that a container stopped behind mngr's back still lists its agents and recovers through
-    # ``mngr start``, and that a killed container comes back on its own. Bare shapes and Modal
-    # have no such container, so it stays False.
-    supports_out_of_band_container_stop: bool = False
 
     # Capability boolean the harness branches Trip 2 (idle auto-shutdown) on.
     # ``resumes_after_auto_shutdown`` is whether the provider comes back from its idle
@@ -168,14 +160,6 @@ class ProviderReleaseProfile(abc.ABC):
     @abc.abstractmethod
     def make_credentials_unresolvable_env(self) -> Mapping[str, str | None]:
         """Return env overrides that make this provider's credentials unresolvable (None removes a var)."""
-
-    def out_of_band_container_stop_command(self) -> str:
-        """The outer-host shell command that stops the agent container behind mngr's back."""
-        raise NotImplementedError("this profile has no out-of-band container stop")
-
-    def out_of_band_container_kill_command(self) -> str:
-        """The outer-host shell command that kills the agent container the way an OOM kill does (not a manual stop)."""
-        raise NotImplementedError("this profile has no out-of-band container kill")
 
     def write_credentials_unresolvable_settings(self, settings_dir: Path) -> None:
         """Write the Trip 4 missing-credential settings.toml; defaults to the normal settings.
@@ -321,70 +305,6 @@ def _host_state_in_list(settings_dir: Path, project_dir: Path, host_name: str) -
             tokens = line.split()
             return tokens[-1] if tokens else None
     return None
-
-
-def _assert_stopped_container_lists_stopped_and_revives_via_start(
-    profile: ProviderReleaseProfile,
-    settings_dir: Path,
-    project_dir: Path,
-    host_name: str,
-    marker_token: str,
-) -> None:
-    """Trip 1 step 7b: a container stopped behind mngr's back lists STOPPED with its agent and
-    ``mngr start`` revives it with the marker intact.
-    """
-    stopped_out_of_band = _run_mngr(
-        settings_dir,
-        project_dir,
-        "exec",
-        "--outer",
-        host_name,
-        profile.out_of_band_container_stop_command(),
-        timeout=_EXEC_TIMEOUT_SECONDS,
-    )
-    assert stopped_out_of_band.returncode == 0, f"out-of-band container stop failed:\n{stopped_out_of_band.stdout}"
-    assert _host_state_in_list(settings_dir, project_dir, host_name) == "STOPPED", (
-        f"a host whose container was stopped out of band should list as STOPPED with its agent:\n"
-        f"{_run_mngr(settings_dir, project_dir, 'list', timeout=_LIFECYCLE_TIMEOUT_SECONDS).stdout}"
-    )
-    revived = _run_mngr(settings_dir, project_dir, "start", host_name, "--no-connect", timeout=_CREATE_TIMEOUT_SECONDS)
-    assert revived.returncode == 0, f"start after an out-of-band container stop failed:\n{revived.stdout}"
-    revived_marker = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_MARKER_HOST_PATH}")
-    assert marker_token in revived_marker.stdout, (
-        f"marker did not survive the out-of-band stop:\n{revived_marker.stdout}"
-    )
-
-
-def _assert_killed_container_restarts_on_its_own(
-    profile: ProviderReleaseProfile,
-    settings_dir: Path,
-    project_dir: Path,
-    host_name: str,
-    marker_token: str,
-) -> None:
-    """Trip 1 step 7c: a killed container (what the memory cap's OOM kill produces) restarts on
-    its own with sshd, so the host is back to RUNNING and reachable without any mngr command.
-    """
-    killed = _run_mngr(
-        settings_dir,
-        project_dir,
-        "exec",
-        "--outer",
-        host_name,
-        profile.out_of_band_container_kill_command(),
-        timeout=_EXEC_TIMEOUT_SECONDS,
-    )
-    assert killed.returncode == 0, f"out-of-band container kill failed:\n{killed.stdout}"
-    wait_for(
-        lambda: _host_state_in_list(settings_dir, project_dir, host_name) == "RUNNING",
-        timeout=_CONTAINER_RESTART_TIMEOUT_SECONDS,
-        poll_interval=_CLOUD_POLL_INTERVAL_SECONDS,
-        error_message="a killed container did not come back RUNNING on its own",
-    )
-    self_healed = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_MARKER_HOST_PATH}")
-    assert marker_token in self_healed.stdout, (
-        f"the self-restarted container is not reachable or lost the marker:\n{self_healed.stdout}"
-    )
 
 
 def run_provider_release_trip1(
@@ -544,15 +464,6 @@ def run_provider_release_trip1(
         assert started_again.returncode == 0, f"second `mngr start` (idempotency) failed:\n{started_again.stdout}"
         survived = _exec_on_host(settings_dir, project_dir, host_name, f"cat {_MARKER_HOST_PATH}")
         assert marker_token in survived.stdout, f"marker did not survive stop/start:\n{survived.stdout}"
-
-        # 7b/7c. A container stopped behind mngr's back (the shape an OOM kill, a `docker stop`, or
-        #     a VM reboot leaves) still lists its agents so `mngr start` can revive it, and a killed
-        #     one restarts on its own.
-        if profile.supports_out_of_band_container_stop:
-            _assert_stopped_container_lists_stopped_and_revives_via_start(
-                profile, settings_dir, project_dir, host_name, marker_token
-            )
-            _assert_killed_container_restarts_on_its_own(profile, settings_dir, project_dir, host_name, marker_token)
 
         # 8. Snapshot create + list, where this shape supports snapshots (skipped on bare shapes).
         if profile.supports_snapshots:

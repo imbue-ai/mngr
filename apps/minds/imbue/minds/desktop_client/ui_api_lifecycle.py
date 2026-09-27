@@ -243,7 +243,7 @@ def _resolve_workspace_coordinate_to_agent_id(
 ) -> AgentId | None:
     """Map an agent- or host-keyed coordinate to the stable agent id.
 
-    Content URLs and restored windows are host-keyed; Imbue Studio records are
+    Content URLs and restored windows are host-keyed; minds records are
     agent-keyed. Falls back to ``workspace_records`` (pass a lazy iterable so
     records are only listed on a miss) so a stopped host that discovery no
     longer reports still resolves.

@@ -1,4 +1,4 @@
-"""Shared create-orchestration helpers for the Imbue Studio desktop client.
+"""Shared create-orchestration helpers for the minds desktop client.
 
 These were extracted from ``app.py`` so that both the browser-facing create
 routes (in ``app.py``) and the agent-facing ``/api/v1/workspaces`` create
@@ -120,7 +120,7 @@ class OnCreatedCallback(MutableModel):
     """Callable that records the workspace<->account association.
 
     ``__call__`` is the single hook that runs once the inner ``mngr create``
-    has returned the canonical ``AgentId`` -- before this refactor Imbue Studio
+    has returned the canonical ``AgentId`` -- before this refactor minds
     pre-generated an id and associated it with the account synchronously
     in the route handler, but for imbue_cloud agents that pre-generated
     id is fictional (the lease forces it back to the pool host's pre-baked
@@ -409,12 +409,12 @@ def build_backup_request_or_error(
         return None, (
             "imbue_cloud backups require a selected account. Choose an account or pick a different backup provider."
         )
-    # The user never sets the repository password: Imbue Studio initializes the repo
+    # The user never sets the repository password: minds initializes the repo
     # and assigns each workspace its own random RESTIC_PASSWORD, so reject it
     # if a user puts one in the api_key env block.
     if backup_provider is BackupProvider.API_KEY and env_text_defines_restic_password(api_key_env):
         return None, (
-            "Don't set RESTIC_PASSWORD in the backup env -- Imbue Studio assigns each machine its own random "
+            "Don't set RESTIC_PASSWORD in the backup env -- minds assigns each machine its own random "
             "repository password. Provide RESTIC_REPOSITORY and any backend credentials only."
         )
     return (

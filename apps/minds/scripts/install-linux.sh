@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Idempotent bring-up of the Imbue Studio desktop app on Linux, run from source
+# Idempotent bring-up of the minds desktop app on Linux, run from source
 # against production. Covers a plain Debian/Ubuntu machine, an Ubuntu/Debian
 # WSL2 distro (auto-detected; see docs/wsl.md), and a Raspberry Pi 5 turned
 # into an always-on host (--raspberry-pi; see docs/raspberry-pi.md).
@@ -150,14 +150,14 @@ run_privileged_shell() {
     sudo sh -c "$command_text"
 }
 
-# preflight
+# ---------------------------------------------------------------- preflight
 step "Preflight checks"
 
 if [ "$(id -u)" = "0" ]; then
     die "run this as your normal user, not root -- the script uses sudo where needed"
 fi
 if [ "$(uname -s)" != "Linux" ]; then
-    die "this script sets up Imbue Studio on Linux; see apps/minds/docs/dev-setup.md for macOS"
+    die "this script sets up minds on Linux; see apps/minds/docs/dev-setup.md for macOS"
 fi
 if ! command -v apt-get >/dev/null 2>&1; then
     die "this script supports Debian/Ubuntu (apt-get not found)"
@@ -167,7 +167,7 @@ IS_WSL=0
 if grep -qi microsoft /proc/version 2>/dev/null; then
     IS_WSL=1
     if ! uname -r | grep -qi 'WSL2\|microsoft-standard'; then
-        die "this looks like WSL1. Imbue Studio needs WSL2 (Docker and systemd require the real kernel).
+        die "this looks like WSL1. minds needs WSL2 (Docker and systemd require the real kernel).
 Fix from Windows:  wsl --set-version ${WSL_DISTRO_NAME:-<distro>} 2"
     fi
     if [ "$(ps -p 1 -o comm=)" != "systemd" ]; then
@@ -189,7 +189,7 @@ systemd=true"
     esac
     if [ "$IS_SKIP_DOCKER" != 1 ] && command -v docker >/dev/null 2>&1; then
         case "$(readlink -f "$(command -v docker)")" in
-            *docker-desktop*) die "this distro's docker comes from Docker Desktop's WSL integration, which Imbue Studio has not been verified against (and which cannot register alternative runtimes).
+            *docker-desktop*) die "this distro's docker comes from Docker Desktop's WSL integration, which minds has not been verified against (and which cannot register alternative runtimes).
 Either disable Docker Desktop's integration for this distro (Docker Desktop -> Settings -> Resources -> WSL integration) so this script can install Docker CE, or use a separate distro." ;;
             *) : ;;
         esac
@@ -205,7 +205,7 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     fi
 fi
 
-# apt packages
+# ---------------------------------------------------------------- apt packages
 step "System packages (base tools + Electron runtime libraries)"
 
 # Installs the first available candidate for each |-separated group, so Ubuntu
@@ -259,7 +259,7 @@ else
     run_privileged "Installing ${missing_packages[*]}" sh -c "$resolve_script" sh "${missing_packages[@]}"
 fi
 
-# checkout
+# ---------------------------------------------------------------- checkout
 # Run from inside a checkout, use it (BASH_SOURCE is empty when piped in).
 CHECKOUT=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
@@ -289,7 +289,7 @@ if [ "$available_kb" -lt $((min_free_gb * 1024 * 1024)) ]; then
 fi
 
 if [ "$VERSION" = "latest" ]; then
-    step "Resolving the latest Imbue Studio release tag"
+    step "Resolving the latest minds release tag"
     # grep -v exits 1 when there are no tags at all.
     VERSION=$(git ls-remote --tags "$MNGR_REPO_URL" 'minds-v*' | awk -F/ '{print $NF}' | grep -v '\^{}' | sort -V | tail -1 || true)
     [ -n "$VERSION" ] || die "could not resolve the latest minds-v* tag from $MNGR_REPO_URL"
@@ -322,7 +322,7 @@ fi
 
 NODE_VERSION="$(tr -d '[:space:]' < "$CHECKOUT/apps/minds/.nvmrc")"
 
-# docker
+# ---------------------------------------------------------------- docker
 if [ "$IS_SKIP_DOCKER" = 1 ]; then
     step "Skipping Docker (--skip-docker)"
 else
@@ -351,7 +351,7 @@ Remove the distro package and install Docker CE:  curl -fsSL https://get.docker.
     fi
 fi
 
-# raspberry pi
+# ---------------------------------------------------------------- raspberry pi
 IS_REBOOT_NEEDED=0
 if [ "$IS_RASPBERRY_PI" = 1 ]; then
     step "Raspberry Pi: gVisor runsc, registered the way the mngr_vps host setup registers it"
@@ -426,7 +426,7 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     fi
 fi
 
-# lingering (WSL)
+# ---------------------------------------------------------------- lingering (WSL)
 if [ "$IS_WSL" = 1 ]; then
     # WSL tears the distro down shortly after the last session exits; a
     # lingering user session keeps the app's background daemons alive.
@@ -437,7 +437,7 @@ if [ "$IS_WSL" = 1 ]; then
     fi
 fi
 
-# $HOME toolchain
+# ---------------------------------------------------------------- $HOME toolchain
 step "Toolchain under \$HOME: uv, nvm, Node ${NODE_VERSION}, pnpm"
 export PATH="$HOME/.local/bin:$PATH"
 mkdir -p "$HOME/.local/bin"
@@ -497,7 +497,7 @@ else
     npm install -g "pnpm@${PNPM_VERSION}" >/dev/null
 fi
 
-# build the checkout
+# ---------------------------------------------------------------- build the checkout
 step "Python workspace (uv sync --all-packages)"
 (cd "$CHECKOUT" && uv sync -q --all-packages)
 
@@ -508,7 +508,7 @@ step "Electron app dependencies (pnpm install)"
 step "Bundled binaries and the UI bundle (what 'pnpm start' does before every launch)"
 (cd "$CHECKOUT/apps/minds" && node scripts/ensure-binaries.js && pnpm run build:ui)
 
-# launcher
+# ---------------------------------------------------------------- launcher
 step "Launcher: $LAUNCHER"
 build_timeout_export=""
 if [ "$IS_RASPBERRY_PI" = 1 ]; then
@@ -519,8 +519,8 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
 fi
 cat > "$LAUNCHER" <<LAUNCHER_SCRIPT
 #!/usr/bin/env bash
-# Generated by apps/minds/scripts/install-linux.sh -- launches the Imbue
-# Studio desktop app from the source checkout, against production. Re-run the
+# Generated by apps/minds/scripts/install-linux.sh -- launches the minds
+# desktop app from the source checkout, against production. Re-run the
 # installer to update the checkout or change flags.
 set -euo pipefail
 export PATH="\$HOME/.local/bin:\$PATH"
@@ -534,8 +534,8 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     cat > "$HOME/.local/share/applications/minds.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=Imbue Studio
-Comment=Imbue Studio desktop client (from source)
+Name=Mind
+Comment=Mind desktop client (from source)
 Exec="$LAUNCHER"
 Icon=$CHECKOUT/apps/minds/electron/assets/icon.png
 Terminal=false
@@ -546,14 +546,14 @@ fi
 
 if [ "$IS_WSL" = 1 ]; then
     if command -v powershell.exe >/dev/null 2>&1 && [ -n "${WSL_DISTRO_NAME:-}" ]; then
-        step "Creating the 'Imbue Studio (WSL)' shortcut on the Windows desktop"
+        step "Creating the 'Mind (WSL)' shortcut on the Windows desktop"
         powershell.exe -NoProfile -NonInteractive -Command "
             \$desktop = [Environment]::GetFolderPath('Desktop')
             \$ws = New-Object -ComObject WScript.Shell
-            \$sc = \$ws.CreateShortcut(\"\$desktop\\Imbue Studio (WSL).lnk\")
+            \$sc = \$ws.CreateShortcut(\"\$desktop\\Mind (WSL).lnk\")
             \$sc.TargetPath = 'C:\\Windows\\System32\\wsl.exe'
             \$sc.Arguments = '-d $WSL_DISTRO_NAME -- bash -lc \"$LAUNCHER_WORD\"'
-            \$sc.Description = 'Start the Imbue Studio desktop app inside WSL'
+            \$sc.Description = 'Start the minds desktop app inside WSL'
             \$sc.Save()
         " >/dev/null || echo "    (shortcut creation failed; launch with: wsl -d $WSL_DISTRO_NAME -- bash -lc \"$LAUNCHER_WORD\")"
     else
@@ -561,8 +561,8 @@ if [ "$IS_WSL" = 1 ]; then
     fi
 fi
 
-# done
-printf '\n\033[1;32mImbue Studio is installed.\033[0m (checkout: %s)\n' "$CHECKOUT"
+# ---------------------------------------------------------------- done
+printf '\n\033[1;32mminds is installed.\033[0m (checkout: %s)\n' "$CHECKOUT"
 echo "Start it any time with: $LAUNCHER"
 if [ "$IS_REBOOT_NEEDED" = 1 ]; then
     echo "REBOOT REQUIRED: kernel command line / kernel image / boot target changed (sudo reboot)"
@@ -570,7 +570,7 @@ if [ "$IS_REBOOT_NEEDED" = 1 ]; then
 fi
 
 if [ "$IS_LAUNCH" = 1 ]; then
-    step "Starting Imbue Studio"
+    step "Starting the minds desktop app"
     if [ "$IS_SKIP_DOCKER" = 1 ] || id -nG | grep -qw docker; then
         exec "$LAUNCHER"
     else

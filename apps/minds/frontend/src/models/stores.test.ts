@@ -249,7 +249,7 @@ describe("RequestsStore", () => {
 
 describe("HealthStore device environment", () => {
   it("reports the device condition the server sends, with nothing convicted", () => {
-    // The cold-start case: Imbue Studio opened on a dead network. No machine has been
+    // The cold-start case: minds opened on a dead network. No machine has been
     // asked to load, so none is stuck -- and the hub page still has to be able
     // to say what is wrong. Until the server has said anything, nothing has
     // been measured, and a store that read "fine" here would let the surfaces

@@ -3,7 +3,7 @@
 This module is the third sibling handler under
 :mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the flow for
 *workspace* permission requests: an agent in one workspace asking to act on the
-Imbue Studio cross-workspace management API (``/api/v1/workspaces/...``) -- listing,
+minds cross-workspace management API (``/api/v1/workspaces/...``) -- listing,
 reading, creating, destroying, starting/stopping, exporting backups, and
 establishing SSH access against *other* workspaces.
 
@@ -113,7 +113,7 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
     verdict (:mod:`.messaging`). Denial drops the pending record via ``DELETE``.
     """
 
-    data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ``~/.minds``).")
+    data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
     latchkey: Latchkey = Field(
         description="Latchkey wrapper, used to reach the plugin data dir a grant's permissions file lives under."
     )

@@ -244,7 +244,7 @@ describe("buildEmbedHandlers", () => {
   });
 
   it("floats the Share tab over this workspace, focused on the asking app", () => {
-    // No ack: with no Imbue Studio chrome present the Share click is simply a no-op.
+    // No ack: with no minds chrome present the Share click is simply a no-op.
     const { contract, handlers, navigations, acks } = makeHandlers();
     handlers[contract.OPEN_SHARE_SETTINGS]({ serviceName: "web" });
     expect(navigations).toEqual([

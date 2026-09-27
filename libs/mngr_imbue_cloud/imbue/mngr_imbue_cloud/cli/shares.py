@@ -34,9 +34,6 @@ def _share_to_json(info: ShareInfo, include_token: bool) -> dict[str, object]:
         # The tier's hosted web-chrome origin (None on connectors that predate
         # it); the desktop stamps it into share.env as SHARE_CHROME_ORIGIN.
         "chrome_origin": info.chrome_origin,
-        # True while the share sits on a content domain the tier moved away
-        # from; the desktop repairs it by re-sharing.
-        "needs_reshare": info.needs_reshare,
     }
     if include_token:
         payload["relay_token"] = info.relay_token.get_secret_value() if info.relay_token else None

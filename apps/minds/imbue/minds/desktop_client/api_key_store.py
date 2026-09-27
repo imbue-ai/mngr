@@ -12,12 +12,12 @@ memory on every startup and handed to:
   ``app.state.minds_api_key``) so it recognizes the key the proxy just
   injected.
 
-The key is *not* persisted: the supervisor is restarted on every Imbue Studio
+The key is *not* persisted: the supervisor is restarted on every minds
 startup and gets the current value in its env, the bare-origin server
 sees the same in-memory value, and nothing else in the monorepo reads
 the key from disk. Letting it rotate per-startup removes a long-lived
 secret from the filesystem and shrinks the window of a compromised key
-to a single Imbue Studio session.
+to a single minds session.
 
 The agent's identity, when relevant to a route, comes from the URL
 path segment (e.g. ``/api/v1/agents/<agent_id>/...``), which the

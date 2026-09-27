@@ -2,8 +2,6 @@
 
 from collections.abc import Callable
 from collections.abc import Iterator
-from collections.abc import Mapping
-from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
@@ -43,12 +41,9 @@ from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import resolve_dockerfile_paths
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
-from imbue.mngr_vps.errors import VpsProvisioningError
-from imbue.mngr_vps.host_setup import MEM_TOTAL_PROBE_COMMAND
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import MinimalVpsProvider
-from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.instance import _wait_for_cloud_init_marker
 from imbue.mngr_vps.instance import build_vps_tags
 from imbue.mngr_vps.interfaces import HostRealizer
@@ -58,9 +53,10 @@ from imbue.mngr_vps.primitives import IsolationMode
 from imbue.mngr_vps.primitives import VpsInstanceId
 from imbue.mngr_vps.primitives import isolation_from_marker
 from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
-from imbue.mngr_vps.vps_client import VpsClientInterface
 
+# =============================================================================
 # MinimalVpsProvider._parse_build_args (no-provisioning, no-prefix shape)
+# =============================================================================
 
 
 def test_minimal_vps_provider_parse_build_args_empty() -> None:
@@ -151,6 +147,9 @@ def test_remove_host_from_known_hosts_empty_file(tmp_path: Path) -> None:
     known_hosts.write_text("")
     remove_host_from_known_hosts(known_hosts, "192.168.1.100", 22)
     assert known_hosts.read_text() == ""
+
+
+# -- resolve_dockerfile_paths tests --
 
 
 def test_resolve_dockerfile_paths_rewrites_file_equals() -> None:
@@ -351,7 +350,9 @@ def test_emit_docker_build_output_drops_whitespace_only_lines() -> None:
     assert log_output.getvalue() == ""
 
 
+# =============================================================================
 # _wait_for_cloud_init_marker
+# =============================================================================
 
 
 class _ScriptedOuter(MutableModel):
@@ -470,7 +471,9 @@ def test_wait_for_cloud_init_marker_raises_on_persistent_connection_error() -> N
     assert stub.call_count >= 2
 
 
+# =========================================================================
 # create_host runs pre-create validation before any provider write
+# =========================================================================
 
 
 class _ValidateRaisesProvider(MinimalVpsProvider):
@@ -509,95 +512,18 @@ def test_create_host_runs_pre_create_validation_before_any_provider_write(
         provider.create_host(HostName("test-host"))
 
 
-# create_host: an instance whose boot wait fails must not leak
-
-
-class _BootNeverReadyVpsClient(ExternallyManagedVpsClient):
-    """Client whose instance launches but never becomes active; records what create cleans up."""
-
-    destroyed: list[VpsInstanceId] = Field(default_factory=list)
-    deleted_ssh_keys: list[str] = Field(default_factory=list)
-
-    def upload_ssh_key(self, name: str, public_key: str) -> str:
-        return "key-1"
-
-    def delete_ssh_key(self, key_id: str) -> None:
-        self.deleted_ssh_keys.append(key_id)
-
-    def create_instance(
-        self,
-        label: str,
-        region: str,
-        plan: str,
-        user_data: str,
-        ssh_key_ids: Sequence[str],
-        tags: Mapping[str, str],
-    ) -> VpsInstanceId:
-        return VpsInstanceId("vps-never-ready")
-
-    def wait_for_instance_active(self, instance_id: VpsInstanceId, timeout_seconds: float = 300.0) -> str:
-        raise VpsProvisioningError(f"instance {instance_id} did not become active within {timeout_seconds}s")
-
-    def destroy_instance(self, instance_id: VpsInstanceId) -> None:
-        self.destroyed.append(instance_id)
-
-
-def _boot_never_ready_provider(temp_mngr_ctx: MngrContext) -> tuple[MinimalVpsProvider, _BootNeverReadyVpsClient]:
-    client = _BootNeverReadyVpsClient()
-    return _minimal_provider(temp_mngr_ctx, vps_client=client), client
-
-
-def test_create_host_destroys_the_instance_when_its_boot_wait_fails(
-    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The instance exists and bills from the moment it is created, so a boot wait that gives up must destroy it.
-
-    ``create_host`` only learns the instance id from ``_provision_vps``'s return
-    value, which a failed wait never reaches.
-    """
-    monkeypatch.delenv("MNGR_KEEP_FAILED_HOSTS", raising=False)
-    provider, client = _boot_never_ready_provider(temp_mngr_ctx)
-
-    with pytest.raises(VpsProvisioningError, match="did not become active"):
-        provider.create_host(HostName("never-ready"))
-
-    assert client.destroyed == [VpsInstanceId("vps-never-ready")]
-    assert client.deleted_ssh_keys == ["key-1"]
-
-
-def test_create_host_keeps_the_instance_whose_boot_wait_fails_when_asked_to_keep_failed_hosts(
-    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("MNGR_KEEP_FAILED_HOSTS", "1")
-    provider, client = _boot_never_ready_provider(temp_mngr_ctx)
-
-    with pytest.raises(VpsProvisioningError, match="did not become active"):
-        provider.create_host(HostName("never-ready"))
-
-    assert client.destroyed == []
-    assert client.deleted_ssh_keys == []
-
-
+# =========================================================================
 # Realizer selection (isolation axis)
+# =========================================================================
 
 
-def _minimal_provider(
-    temp_mngr_ctx: MngrContext,
-    isolation: IsolationMode = IsolationMode.CONTAINER,
-    vps_client: VpsClientInterface | None = None,
-    config: VpsProviderConfig | None = None,
-) -> MinimalVpsProvider:
-    """A MinimalVpsProvider on the test context; ``config`` replaces the default config built from ``isolation``."""
+def _minimal_provider(temp_mngr_ctx: MngrContext, isolation: IsolationMode) -> MinimalVpsProvider:
     return MinimalVpsProvider(
         name=ProviderInstanceName("test-vps-docker"),
         host_dir=temp_mngr_ctx.config.default_host_dir,
         mngr_ctx=temp_mngr_ctx,
-        config=(
-            VpsProviderConfig(backend=ProviderBackendName("test-vps-docker"), isolation=isolation)
-            if config is None
-            else config
-        ),
-        vps_client=ExternallyManagedVpsClient() if vps_client is None else vps_client,
+        config=VpsProviderConfig(backend=ProviderBackendName("test-vps-docker"), isolation=isolation),
+        vps_client=ExternallyManagedVpsClient(),
     )
 
 
@@ -811,13 +737,12 @@ class _ExtraStartArgsMinimalProvider(MinimalVpsProvider):
     ``_compute_extra_start_args`` injects the per-slice container memory cap.
     """
 
-    def _compute_extra_start_args(self, mem_total_kib: int) -> tuple[str, ...]:
-        cap_mib = mem_total_kib // 1024 - 1024
-        return (f"--memory={cap_mib}m", f"--memory-swap={cap_mib}m")
+    def _compute_extra_start_args(self) -> tuple[str, ...]:
+        return ("--memory=7168m", "--memory-swap=7168m")
 
 
 def test_effective_start_args_compose_in_last_one_wins_order(temp_mngr_ctx: MngrContext) -> None:
-    """Runtime, tmpfs, restart policy, then default_start_args, provider-computed args, and the caller's last.
+    """Runtime, then default_start_args, then provider-computed args, then the caller's last.
 
     Docker's last-one-wins semantics make this ordering the contract: an explicit
     caller flag must be able to override a provider-computed one (e.g. the slice
@@ -835,184 +760,18 @@ def test_effective_start_args_compose_in_last_one_wins_order(temp_mngr_ctx: Mngr
         ),
         vps_client=ExternallyManagedVpsClient(),
     )
-    assert provider._compose_effective_start_args(["--memory=4096m"], _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
+    assert provider._compose_effective_start_args(["--memory=4096m"]) == (
         "--runtime",
         "runsc",
-        "--tmpfs",
-        "/run",
-        "--tmpfs",
-        "/tmp:exec,size=993m",
-        "--restart=unless-stopped",
         "--cap-add=SYS_PTRACE",
-        "--memory=6921m",
-        "--memory-swap=6921m",
+        "--memory=7168m",
+        "--memory-swap=7168m",
         "--memory=4096m",
     )
 
 
-# An 8 GB cloud VM reports about 7945 MiB of MemTotal, so its /tmp cap is 993 MiB.
-_EIGHT_GB_VM_MEM_TOTAL_KIB = 8136000
-
-
-def test_effective_start_args_add_only_the_restart_policy_by_default(temp_mngr_ctx: MngrContext) -> None:
-    """The base provider computes no extra args and configures no runtime; every container gets the restart policy."""
+def test_effective_start_args_are_only_the_callers_by_default(temp_mngr_ctx: MngrContext) -> None:
+    """The base provider computes no extra args and configures no runtime by default."""
     provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
-    assert provider._compose_effective_start_args(["--cpus=2"], _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--restart=unless-stopped",
-        "--cpus=2",
-    )
-    assert provider._compose_effective_start_args(None, _EIGHT_GB_VM_MEM_TOTAL_KIB) == ("--restart=unless-stopped",)
-
-
-def test_effective_start_args_keep_the_callers_restart_policy(temp_mngr_ctx: MngrContext) -> None:
-    """A caller that sets a policy (the gen-2 slice create template) gets no second one, in either position."""
-    provider = _minimal_provider(temp_mngr_ctx, IsolationMode.CONTAINER)
-    assert provider._compose_effective_start_args(
-        ["--workdir=/", "--restart=unless-stopped"], _EIGHT_GB_VM_MEM_TOTAL_KIB
-    ) == (
-        "--workdir=/",
-        "--restart=unless-stopped",
-    )
-    configured = _minimal_provider(
-        temp_mngr_ctx,
-        config=VpsProviderConfig(backend=ProviderBackendName("test-vps"), default_start_args=("--restart=no",)),
-    )
-    assert configured._compose_effective_start_args(None, _EIGHT_GB_VM_MEM_TOTAL_KIB) == ("--restart=no",)
-
-
-def test_effective_start_args_add_no_tmpfs_under_runc(temp_mngr_ctx: MngrContext) -> None:
-    provider = _minimal_provider(
-        temp_mngr_ctx, config=VpsProviderConfig(backend=ProviderBackendName("test-vps"), docker_runtime="runc")
-    )
-    assert provider._compose_effective_start_args(None, _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--runtime",
-        "runc",
-        "--restart=unless-stopped",
-    )
-
-
-def test_effective_start_args_under_runsc_add_only_the_tmpfs_mounts_not_already_configured(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """A caller that already mounts /run (the gen-2 slice bake, the old minds AWS block) gets no duplicate."""
-    provider = _minimal_provider(
-        temp_mngr_ctx,
-        config=VpsProviderConfig(
-            backend=ProviderBackendName("test-vps"),
-            docker_runtime="runsc",
-            default_start_args=("--tmpfs", "/run", "--workdir=/"),
-        ),
-    )
-    assert provider._compose_effective_start_args(None, _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--runtime",
-        "runsc",
-        "--tmpfs",
-        "/tmp:exec,size=993m",
-        "--restart=unless-stopped",
-        "--tmpfs",
-        "/run",
-        "--workdir=/",
-    )
-    assert provider._compose_effective_start_args(["--tmpfs=/tmp:rw,size=1g"], _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--runtime",
-        "runsc",
-        "--restart=unless-stopped",
-        "--tmpfs",
-        "/run",
-        "--workdir=/",
-        "--tmpfs=/tmp:rw,size=1g",
-    )
-
-
-class _CappingMinimalProvider(MinimalVpsProvider):
-    """MinimalVpsProvider that keeps the base provider's create-time memory cap (which Minimal disables)."""
-
-    def _apply_container_memory_cap(self, outer: OuterHostInterface, container_name: str) -> None:
-        VpsProvider._apply_container_memory_cap(self, outer, container_name)
-
-
-def _capping_provider(temp_mngr_ctx: MngrContext) -> _CappingMinimalProvider:
-    return _CappingMinimalProvider(
-        name=ProviderInstanceName("test-vps"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=temp_mngr_ctx,
-        config=VpsProviderConfig(backend=ProviderBackendName("test-vps")),
-        vps_client=ExternallyManagedVpsClient(),
-    )
-
-
-def test_apply_container_memory_cap_starts_the_reconciler_and_accepts_the_expected_cap(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    issued: list[str] = []
-
-    def responder(command: str) -> CommandResult:
-        issued.append(command)
-        # An 8 GB VM: MemTotal 8136000 KiB -> cap 6921 MiB.
-        return CommandResult(stdout="mngr-memory-unit=present\n8136000\n7257194496\n", stderr="", success=True)
-
-    outer, _stub = _scripted_outer(responder)
-    _capping_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
-    assert len(issued) == 1
-    assert "systemctl start mngr-vps-container-memory.service" in issued[0]
-    assert issued[0].endswith("mngr-my-host")
-
-
-def test_apply_container_memory_cap_raises_when_the_cap_did_not_apply(temp_mngr_ctx: MngrContext) -> None:
-    outer, _stub = _scripted_outer(
-        lambda command: CommandResult(stdout="mngr-memory-unit=present\n8136000\n0\n", stderr="", success=True)
-    )
-    with pytest.raises(VpsProvisioningError, match="memory cap is 0 bytes, expected 7257194496 bytes"):
-        _capping_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
-
-
-def test_apply_container_memory_cap_raises_when_the_command_fails(temp_mngr_ctx: MngrContext) -> None:
-    outer, _stub = _scripted_outer(
-        lambda command: CommandResult(stdout="", stderr="Failed to start unit", success=False)
-    )
-    with pytest.raises(VpsProvisioningError, match="Failed to cap the memory"):
-        _capping_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
-
-
-def test_apply_container_memory_cap_leaves_hosts_without_the_reconciler_alone(temp_mngr_ctx: MngrContext) -> None:
-    """A host whose setup never installed the unit (e.g. a slice VM) is not capped and does not fail."""
-    outer, stub = _scripted_outer(
-        lambda command: CommandResult(stdout="mngr-memory-unit=absent\n8136000\n7340032000\n", stderr="", success=True)
-    )
-    _capping_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
-    assert stub.call_count == 1
-
-
-def test_apply_container_memory_cap_tolerates_a_vm_too_small_to_cap(temp_mngr_ctx: MngrContext) -> None:
-    outer, stub = _scripted_outer(
-        lambda command: CommandResult(stdout="mngr-memory-unit=present\n900000\n0\n", stderr="", success=True)
-    )
-    _capping_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
-    assert stub.call_count == 1
-
-
-def test_read_vm_mem_total_kib_issues_the_probe_and_parses_its_value(temp_mngr_ctx: MngrContext) -> None:
-    issued: list[str] = []
-
-    def responder(command: str) -> CommandResult:
-        issued.append(command)
-        return CommandResult(stdout="8136000\n", stderr="", success=True)
-
-    outer, _stub = _scripted_outer(responder)
-    assert _capping_provider(temp_mngr_ctx)._read_vm_mem_total_kib(outer) == 8136000
-    assert issued == [MEM_TOTAL_PROBE_COMMAND]
-
-
-def test_read_vm_mem_total_kib_raises_when_the_probe_fails(temp_mngr_ctx: MngrContext) -> None:
-    outer, _stub = _scripted_outer(
-        lambda command: CommandResult(stdout="", stderr="cannot open /proc/meminfo", success=False)
-    )
-    with pytest.raises(VpsProvisioningError, match="MemTotal"):
-        _capping_provider(temp_mngr_ctx)._read_vm_mem_total_kib(outer)
-
-
-def test_minimal_vps_provider_never_caps_container_memory(temp_mngr_ctx: MngrContext) -> None:
-    """An externally provisioned VPS is sized by its owner; the base cap must not reach it."""
-    outer, stub = _scripted_outer(lambda command: CommandResult(stdout="", stderr="", success=True))
-    _minimal_provider(temp_mngr_ctx)._apply_container_memory_cap(outer, "mngr-my-host")
-    assert stub.call_count == 0
+    assert provider._compose_effective_start_args(["--cpus=2"]) == ("--cpus=2",)
+    assert provider._compose_effective_start_args(None) == ()

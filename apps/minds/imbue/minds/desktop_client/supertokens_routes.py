@@ -1,4 +1,4 @@
-"""Account sign-in plumbing for the Imbue Studio desktop client.
+"""Account sign-in plumbing for the minds desktop client.
 
 Sign-up/sign-in itself happens on the connector's hosted accounts pages in
 the system browser: the desktop client just launches ``mngr imbue_cloud auth
@@ -21,7 +21,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
-from typing import assert_never
 from urllib.parse import urlencode
 
 from flask import Blueprint
@@ -31,15 +30,11 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.pure import pure
 from imbue.minds.bootstrap import MindsRoot
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthFailedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
-from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.responses import make_redirect_response
 from imbue.minds.desktop_client.responses import make_response
@@ -64,42 +59,12 @@ _UNAVAILABLE_AUTH_SERVICE_MESSAGE: Final[str] = (
 )
 
 
-@pure
-def _web_login_incomplete_message(reason: WebLoginIncompleteReason) -> str:
-    # A browser that finished signing in keeps its session, so Try again is one click there.
-    match reason:
-        case WebLoginIncompleteReason.TIMED_OUT:
-            return (
-                "The sign-in timed out before your browser finished. Click Try again. "
-                "If you already signed in there, it will only take a click."
-            )
-        case WebLoginIncompleteReason.CALLBACK_REJECTED:
-            return "The sign-in couldn't be confirmed. Click Try again to start a fresh one."
-        case WebLoginIncompleteReason.CODE_REFUSED:
-            return (
-                "Your browser signed you in, but the app couldn't finish the sign-in. "
-                "Click Try again; it will only take a click."
-            )
-        case _ as unreachable:
-            assert_never(unreachable)
-
-
 def _user_facing_auth_message(exc: ImbueCloudCliError) -> str:
     """Return copy safe to render in the UI for a failed plugin auth call."""
     if isinstance(exc, ImbueCloudAuthFailedCliError):
         return exc.auth_message
-    if isinstance(exc, ImbueCloudWebLoginIncompleteCliError):
-        return _web_login_incomplete_message(exc.reason)
     logger.warning("Auth call failed without a structured connector verdict: {}", exc)
     return _UNAVAILABLE_AUTH_SERVICE_MESSAGE
-
-
-def _log_web_login_failure(exc: ImbueCloudCliError) -> None:
-    if isinstance(exc, ImbueCloudWebLoginIncompleteCliError) and exc.reason != WebLoginIncompleteReason.TIMED_OUT:
-        # The user finished in the browser and the handoff back still failed: a bug, not user behavior.
-        logger.error("Browser sign-in finished but the app could not complete it ({}): {}", exc.reason, exc)
-    else:
-        logger.warning("Plugin web-login subprocess failed: {}", exc)
 
 
 def _json_response(data: dict[str, object], status_code: int = 200) -> Response:
@@ -134,12 +99,12 @@ def _get_connector_url() -> str:
 
 def _bounce_forward_observe() -> None:
     """Bounce the single discovery observer so a freshly-written provider entry
-    takes effect within the same Imbue Studio session.
+    takes effect within the same minds session.
 
     Sends ``SIGHUP`` to the detached ``mngr latchkey forward`` supervisor via
     ``LatchkeyForwardSupervisor.bounce()``, restarting only its ``mngr observe``
     child (the shared gateway, reverse tunnels, and per-agent state stay up). Its
-    next snapshot is written to the shared discovery log that Imbue Studio's ``mngr forward
+    next snapshot is written to the shared discovery log that minds' ``mngr forward
     --observe-via-file`` tails, so no separate ``mngr forward`` bounce is needed.
     """
     bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)
@@ -253,15 +218,16 @@ def wake_ui_state_publisher() -> None:
 # polls so it can render the "waiting for the browser" modal (with the
 # copy-the-link fallback) without blocking on the subprocess.
 
-# Outlives the web-login subprocess, so a slow-but-valid browser sign-in never
-# has its flow status swept out from under the polling frontend as a spurious
-# "sign-in flow expired".
-_WEB_LOGIN_FLOW_TTL_SECONDS: Final[float] = WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS + 30.0
+# Kept above the desktop's web-login subprocess kill deadline
+# (imbue_cloud_cli._WEB_LOGIN_TIMEOUT_SECONDS) so a slow-but-valid browser
+# sign-in never has its flow status swept out from under the polling frontend as
+# a spurious "sign-in flow expired".
+_WEB_LOGIN_FLOW_TTL_SECONDS = 11 * 60
 
 # Passed to the plugin's login subcommand so its browser success page bounces
-# straight back to the desktop app: a bare imbue-studio:// deeplink focuses the
-# app without navigating (see the Electron main process's handleDeeplink).
-_MINDS_FOCUS_DEEPLINK = "imbue-studio://"
+# straight back to the desktop app: a bare minds:// deeplink focuses the app
+# without navigating (see the Electron main process's handleDeeplink).
+_MINDS_FOCUS_DEEPLINK = "minds://"
 
 
 class _WebLoginFlowStatus(FrozenModel):
@@ -306,22 +272,6 @@ def _read_web_login_status(flow_id: str) -> _WebLoginFlowStatus | None:
         return _web_login_flows.get(flow_id)
 
 
-def _find_or_register_web_login_flow(flow_id: str, status: _WebLoginFlowStatus) -> str | None:
-    """Register a new flow unless one is already in flight; return the in-flight flow's id if so.
-
-    Starting a second browser sign-in while one is still listening would race
-    two listeners and two browser tabs; joining the running one keeps a late
-    sign-in in its tab working.
-    """
-    with _web_login_flows_lock:
-        _prune_expired_web_login_flows_locked()
-        for existing_flow_id, existing_status in _web_login_flows.items():
-            if existing_status.state in ("running", "finishing"):
-                return existing_flow_id
-        _web_login_flows[flow_id] = status
-        return None
-
-
 def _prune_expired_web_login_flows_locked() -> None:
     now = time.monotonic()
     expired = [flow_id for flow_id, st in _web_login_flows.items() if st.deadline is not None and st.deadline <= now]
@@ -331,19 +281,6 @@ def _prune_expired_web_login_flows_locked() -> None:
 
 def _flow_deadline() -> float:
     return time.monotonic() + _WEB_LOGIN_FLOW_TTL_SECONDS
-
-
-def _fail_web_login_flow_if_still_running(flow_id: str, login_url: str | None) -> None:
-    with _web_login_flows_lock:
-        status = _web_login_flows.get(flow_id)
-        if status is None or status.state != "running":
-            return
-        _web_login_flows[flow_id] = _WebLoginFlowStatus(
-            state="error",
-            login_url=login_url,
-            error="The sign-in stopped unexpectedly. Click Try again to start a fresh one.",
-            deadline=_flow_deadline(),
-        )
 
 
 def _run_web_login_subprocess(
@@ -370,7 +307,6 @@ def _run_web_login_subprocess(
     forward`` supervisor (the single discovery observer) so the new provider
     config is picked up immediately.
     """
-    login_url: str | None = None
     try:
         try:
             result = imbue_cloud_cli.auth_login(success_redirect_url=_MINDS_FOCUS_DEEPLINK, url_file=url_file)
@@ -379,25 +315,8 @@ def _run_web_login_subprocess(
             # is gone): capture it for the final status records and delete the
             # temp file so login attempts do not accumulate files.
             login_url = _consume_login_url_file(url_file)
-
-        # The signin itself is complete at this point (the plugin subprocess wrote
-        # the session to disk), so mark the flow "finishing": the frontend brings
-        # the app to the front and shows "Finishing up..." while we mirror the
-        # session below, rather than leaving the user on the "waiting for the
-        # browser" state until the provider registration + supervisor bounce finish.
-        _record_web_login_status(
-            flow_id,
-            _WebLoginFlowStatus(
-                state="finishing",
-                login_url=login_url,
-                user_id=str(result.user_id),
-                email=str(result.email),
-                display_name=result.display_name,
-                deadline=_flow_deadline(),
-            ),
-        )
     except ImbueCloudCliError as exc:
-        _log_web_login_failure(exc)
+        logger.warning("Plugin web-login subprocess failed: {}", exc)
         _record_web_login_status(
             flow_id,
             _WebLoginFlowStatus(
@@ -409,10 +328,23 @@ def _run_web_login_subprocess(
             ),
         )
         return
-    finally:
-        # A new sign-in joins a flow that is still "running", so a crash here
-        # must not leave this one running until its TTL. The crash propagates.
-        _fail_web_login_flow_if_still_running(flow_id, login_url)
+
+    # The signin itself is complete at this point (the plugin subprocess wrote
+    # the session to disk), so mark the flow "finishing": the frontend brings
+    # the app to the front and shows "Finishing up..." while we mirror the
+    # session below, rather than leaving the user on the "waiting for the
+    # browser" state until the provider registration + supervisor bounce finish.
+    _record_web_login_status(
+        flow_id,
+        _WebLoginFlowStatus(
+            state="finishing",
+            login_url=login_url,
+            user_id=str(result.user_id),
+            email=str(result.email),
+            display_name=result.display_name,
+            deadline=_flow_deadline(),
+        ),
+    )
 
     # Anything that goes wrong while mirroring the signin into the desktop
     # client must still resolve the flow status -- the frontend polls it, so an
@@ -514,9 +446,7 @@ def _mirror_signin_result(
 def _handle_web_login_start() -> Response:
     """Kick off the plugin's browser login in a background thread (POST).
 
-    Returns immediately with a flow id the frontend polls -- the already
-    running flow's, when one is still in flight, along with its sign-in URL
-    for the frontend to open again. The plugin
+    Returns immediately with a flow id the frontend polls. The plugin
     subprocess opens the system browser, captures the loopback callback, and
     writes the session itself; the background thread then mirrors the account
     identity into ``MultiAccountSessionStore`` once the subprocess finishes.
@@ -536,17 +466,10 @@ def _handle_web_login_start() -> Response:
 
     flow_id = secrets.token_urlsafe(16)
     url_file = Path(tempfile.gettempdir()) / f"minds-web-login-{flow_id}.url"
-    running_flow_id = _find_or_register_web_login_flow(
+    _record_web_login_status(
         flow_id,
         _WebLoginFlowStatus(state="running", login_url_file=str(url_file), deadline=_flow_deadline()),
     )
-    if running_flow_id is not None:
-        # The frontend reopens this sign-in's page, so every click shows the user a sign-in tab.
-        running_status = _read_web_login_status(running_flow_id)
-        running_login_url = None if running_status is None else _read_login_url(running_status)
-        return _json_response(
-            {"status": "OK", "flow_id": running_flow_id, "is_already_running": True, "login_url": running_login_url}
-        )
     root_cg.start_new_thread(
         target=_run_web_login_subprocess,
         kwargs={

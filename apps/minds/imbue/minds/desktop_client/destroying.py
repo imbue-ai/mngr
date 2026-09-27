@@ -2,8 +2,8 @@
 
 Why this file uses raw ``subprocess.Popen`` (with the matching ratchet
 exclusion in ``test_ratchets.py``): we need the destroy command to
-*outlive* the Imbue Studio desktop client. ``mngr destroy`` against a Docker
-host can take ~30-60 seconds; if Imbue Studio shuts down (Electron quit,
+*outlive* the minds desktop client. ``mngr destroy`` against a Docker
+host can take ~30-60 seconds; if minds shuts down (Electron quit,
 laptop close, crash) mid-destroy, we want the destroy to keep going to
 completion rather than leak a half-destroyed agent. ``ConcurrencyGroup``
 guarantees the opposite -- every spawned process is killed on group
@@ -20,7 +20,7 @@ stdout+stderr from the ``mngr destroy`` process). :py:class:`DestroyingStatus`
 is computed from ``pid`` liveness + the exit status + whether the workspace's
 *host* is still up -- the caller answers the last via ``is_host_still_active``
 (see its docstring: agent still active, host not yet positively gone). Keying
-on the host, not just the workspace agent, is deliberate: an Imbue Studio host also
+on the host, not just the workspace agent, is deliberate: a minds host also
 runs a ``system-services`` agent, so a destroy that removed only the workspace
 agent must read as FAILED, not DONE.
 
@@ -256,7 +256,7 @@ def is_pid_alive(pid: int) -> bool:
 
     Three cases to handle:
 
-    - Pid was never our child (we're a fresh Imbue Studio backend after the
+    - Pid was never our child (we're a fresh minds backend after the
       original Popen-parent died). ``os.kill(pid, 0)`` is the right
       check: ``ProcessLookupError`` => dead, ok => alive.
     - Pid IS our child and is still running. Same -- ``os.kill(pid, 0)``
@@ -303,7 +303,7 @@ def _build_destroy_command(
     Destroying only the workspace agent would leave the constant
     ``system-services`` agent -- and therefore the host and its cloud
     instance -- alive, so there is deliberately no single-agent path here: a
-    Imbue Studio workspace teardown is a *host* teardown. Addressing the host
+    minds workspace teardown is a *host* teardown. Addressing the host
     directly (rather than piping an agent listing into ``mngr destroy``)
     keeps the teardown complete even when a discovery snapshot is momentarily
     missing some of the host's agents.
@@ -330,8 +330,8 @@ def _build_destroy_command(
 def _build_detached_command(destroy_command: Sequence[str], exit_code_path: Path) -> list[str]:
     """Wrap the destroy argv in a shell that records the command's exit status to ``exit_code_path``.
 
-    The process records its own status because nothing else can: Imbue Studio reaps
-    the child only while it is still the parent, and after an Imbue Studio restart the
+    The process records its own status because nothing else can: minds reaps
+    the child only while it is still the parent, and after a minds restart the
     detached destroy has been reparented and its status is lost with it.
     """
     return ["sh", "-c", f"{shlex.join(destroy_command)}; echo $? > {shlex.quote(str(exit_code_path))}"]
@@ -398,7 +398,7 @@ def start_destroy(
     fallback (see :func:`_build_destroy_command`).
 
     The subprocess is detached (``start_new_session=True``), so it survives a
-    Imbue Studio backend exit. stdout+stderr go to a single ``output.log`` file; the
+    minds-backend exit. stdout+stderr go to a single ``output.log`` file; the
     detached process's PID is written to ``pid``, the host id to ``host_id``,
     and the owning provider (when known) to ``provider`` (so a later status
     read can confirm the *host* is positively gone, not just the agent). The

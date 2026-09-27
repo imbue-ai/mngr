@@ -1,4 +1,4 @@
-"""Imbue Studio application configuration stored in ``~/.minds/config.toml``.
+"""Minds application configuration stored in ``~/.minds/config.toml``.
 
 Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces
@@ -99,18 +99,12 @@ def resolve_default_account_id(
     stored_default_account_id: str | None,
     signed_in_user_ids: Sequence[str],
 ) -> str | None:
-    """Return the account new workspaces default to: the stored default while it is signed in, else the first signed-in account.
-
-    None only when no account is signed in, so a signed-in account always has a default beside it.
-    """
+    """Return the account new workspaces default to: the stored default while it is signed in, else a sole signed-in account."""
     if stored_default_account_id is not None and stored_default_account_id in signed_in_user_ids:
         return stored_default_account_id
-    return signed_in_user_ids[0] if signed_in_user_ids else None
-
-
-def _stored_default_account_id(data: dict[str, object]) -> str | None:
-    value = data.get("default_account_id")
-    return str(value) if value is not None else None
+    if len(signed_in_user_ids) == 1:
+        return signed_in_user_ids[0]
+    return None
 
 
 class MindsConfig(MutableModel):
@@ -154,22 +148,9 @@ class MindsConfig(MutableModel):
     def get_default_account_id(self) -> str | None:
         """Return the default account user ID for new workspaces, or None."""
         with self._lock:
-            return _stored_default_account_id(self._read_raw())
-
-    def settle_default_account_id(self, signed_in_user_ids: Sequence[str]) -> str | None:
-        """Resolve the default account (see :func:`resolve_default_account_id`) and store it when it changed.
-
-        Storing the fallback keeps it put when the account listing's order changes. An empty
-        listing stores nothing, since a failed listing reads the same and proves nothing.
-        """
-        with self._lock:
             data = self._read_raw()
-            stored_default_account_id = _stored_default_account_id(data)
-            default_account_id = resolve_default_account_id(stored_default_account_id, signed_in_user_ids)
-            if default_account_id is not None and default_account_id != stored_default_account_id:
-                data["default_account_id"] = default_account_id
-                self._write_raw(data)
-        return default_account_id
+            value = data.get("default_account_id")
+            return str(value) if value is not None else None
 
     def set_default_account_id(self, user_id: str | None) -> None:
         """Set or clear the default account for new workspaces."""
@@ -394,10 +375,3 @@ class MindsConfig(MutableModel):
             _write_notification_prefs_into_raw(data, is_enabled, style)
             self._write_raw(data)
             return compute_version(is_enabled, style, True)
-
-
-def settle_default_account_id(minds_config: MindsConfig | None, signed_in_user_ids: Sequence[str]) -> str | None:
-    """The default account every reader of it shows: settled into ``minds_config``, or resolved alone without one."""
-    if minds_config is None:
-        return resolve_default_account_id(None, signed_in_user_ids)
-    return minds_config.settle_default_account_id(signed_in_user_ids)

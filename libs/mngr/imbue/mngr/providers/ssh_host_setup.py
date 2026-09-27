@@ -47,27 +47,6 @@ REQUIRED_HOST_PACKAGES: Final[tuple[RequiredHostPackage, ...]] = (
 )
 
 
-JOURNALD_DROP_IN_PATH: Final[str] = "/etc/systemd/journald.conf.d/60-mngr.conf"
-JOURNALD_SYSTEM_MAX_USE: Final[str] = "512M"
-
-
-@pure
-def build_cap_journald_command() -> str:
-    """A root shell snippet that caps the systemd journal's disk use, restarting journald only when the drop-in changed.
-
-    An uncapped journal eventually fills a small boot disk, so every VM mngr
-    provisions gets the same cap the gen-2 slice guests bake in.
-    """
-    return f"""mkdir -p /etc/systemd/journald.conf.d
-MNGR_JOURNALD_STAGE="$(mktemp)"
-printf '[Journal]\\nSystemMaxUse={JOURNALD_SYSTEM_MAX_USE}\\n' > "$MNGR_JOURNALD_STAGE"
-if ! cmp -s "$MNGR_JOURNALD_STAGE" {JOURNALD_DROP_IN_PATH}; then
-    install -m 0644 "$MNGR_JOURNALD_STAGE" {JOURNALD_DROP_IN_PATH}
-    systemctl restart systemd-journald
-fi
-rm -f "$MNGR_JOURNALD_STAGE\""""
-
-
 @pure
 def resolve_host_log_dir(mngr_host_dir: str, host_log_dir: str | Path | None) -> str:
     """The directory for mngr's plain-text service logs on a host.

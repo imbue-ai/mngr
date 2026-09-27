@@ -30,7 +30,6 @@ from imbue.minds.desktop_client.sharing_handler import _parse_grants_toml
 from imbue.minds.desktop_client.sharing_handler import _resolve_grant_identities
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
 from imbue.minds.desktop_client.sharing_handler import disable_sharing
-from imbue.minds.desktop_client.sharing_handler import migrate_stale_share
 from imbue.minds.desktop_client.sharing_handler import pick_lowest_latency_relay_region
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
@@ -38,7 +37,6 @@ from imbue.minds.desktop_client.sharing_handler import split_relay_endpoint
 from imbue.minds.desktop_client.testing import read_injected_share_env_text
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
-from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 
@@ -346,114 +344,6 @@ def _enable_sharing_for_test(
         forward_identity=None,
         owner_account=None,
     )
-
-
-_STALE_DOMAIN = "host-" + "d" * 32 + ".owner1234.us1.retired.example"
-_MOVED_DOMAIN = "f" * 32 + ".owner1234.us1.shares.example"
-
-
-def _stale_share(host_id: str) -> ShareCliInfo:
-    return ShareCliInfo(
-        host_id=host_id, workspace_domain=_STALE_DOMAIN, region="us1", state="active", needs_reshare=True
-    )
-
-
-def _migrate_for_test(host_id: str, agent_id: AgentId, cli: ImbueCloudCli) -> dict[str, Any]:
-    return migrate_stale_share(
-        host_id,
-        agent_id,
-        str(agent_id),
-        _stale_share(host_id),
-        cli,
-        "owner@example.com",
-        _client_env_config(),
-        {"system_interface": "shell-r4nd"},
-        None,
-        None,
-        None,
-    )
-
-
-def test_migrate_stale_share_reshares_and_rewrites_only_share_env() -> None:
-    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL, created_workspace_domain_to_return=_MOVED_DOMAIN)
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
-    grants_toml = render_grants_toml({"users": ["user-9"], "emails": ["friend@example.com"], "email_domains": []}, {})
-    caller.result = make_share_probe_result(
-        is_gateway_present=True, is_share_env_present=True, grants_toml_text=grants_toml
-    )
-    agent_id = AgentId("agent-" + "c" * 32)
-    host_id = "host-" + "d" * 32
-
-    document = _migrate_for_test(host_id, agent_id, cli)
-
-    # The re-share keys the workspace, names the shell's label, and never
-    # steers the region: the connector keeps the share's own.
-    assert cli.create_share_calls == [("owner@example.com", host_id, "shell-r4nd", None, str(agent_id))]
-    exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
-    assert len(exec_calls) == 2
-    assert "MNGR_SHARE_GATEWAY" in exec_calls[0][2]
-    write_command = exec_calls[1][2]
-    assert "data/.secrets/share.env" in write_command
-    assert "share_grants.toml" not in write_command
-    assert f"SHARE_WORKSPACE_DOMAIN={_MOVED_DOMAIN}" in read_injected_share_env_text(cli)
-    assert document["migrated_domain_from"] == _STALE_DOMAIN
-    assert document["workspace_domain"] == _MOVED_DOMAIN
-    assert document["enabled"] is True
-    # The grants the workspace holds ride the document unchanged.
-    assert document["grants"]["workspace"] == {
-        "users": ["user-9"],
-        "emails": ["friend@example.com"],
-        "email_domains": [],
-    }
-
-
-def test_migrate_stale_share_refuses_an_unreadable_grants_document() -> None:
-    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
-    caller.result = make_share_probe_result(
-        is_gateway_present=True, is_share_env_present=True, grants_toml_text="[workspace\nemails = ["
-    )
-
-    with pytest.raises(SharingError, match="unreadable"):
-        _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
-
-    assert cli.create_share_calls == []
-    assert len(caller.calls) == 1
-
-
-def test_migrate_stale_share_refuses_a_pre_share_gateway_workspace() -> None:
-    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
-    caller = cli.mngr_caller
-    assert isinstance(caller, RecordingMngrCaller)
-    caller.result = make_share_probe_result(is_gateway_present=False, is_share_env_present=True)
-
-    with pytest.raises(SharingError, match="update itself"):
-        _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
-
-    assert cli.create_share_calls == []
-
-
-def test_migrate_stale_share_names_the_recovery_when_the_write_fails_after_the_share_moved() -> None:
-    # The connector create moves the share before the materials write, and
-    # the panel's retry is a read that will not inject again: the failure has
-    # to say that only a re-enable brings the links back.
-    caller = ScriptedMngrCaller(
-        results=(
-            make_share_probe_result(is_gateway_present=True, is_share_env_present=True),
-            MngrCallResult(returncode=1, stderr="exec died"),
-        )
-    )
-    cli = SucceedingCreateShareCli(
-        connector_url=FAKE_CONNECTOR_URL, created_workspace_domain_to_return=_MOVED_DOMAIN, mngr_caller=caller
-    )
-
-    with pytest.raises(SharingError, match="disabled and enabled again") as exc_info:
-        _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
-
-    assert len(cli.create_share_calls) == 1
-    assert "exec died" in str(exc_info.value)
 
 
 def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:

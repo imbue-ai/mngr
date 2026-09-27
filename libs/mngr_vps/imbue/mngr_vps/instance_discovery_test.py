@@ -61,7 +61,6 @@ from imbue.mngr.providers.listing_utils import SEP_PS_START
 from imbue.mngr_vps.build_args import ParsedVpsBuildOptions
 from imbue.mngr_vps.config import VpsProviderConfig
 from imbue.mngr_vps.container_setup import host_volume_name_for
-from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store_test import _LocalFakeOuter
 from imbue.mngr_vps.host_store_test import _make_local_connector
@@ -127,9 +126,6 @@ class _DiscoveryTestProvider(VpsProvider):
     # *whole* real ``_read_records_from_vps`` body (host-id probe -> host
     # record read -> live agent listing) against a canned outer.
     live_outer_by_ip: dict[str, OuterHostInterface] = Field(default_factory=dict)
-    # Maps a vps_ip to the outer ``discover_hosts`` probes the placement on, while
-    # the records themselves still come from the canned ``per_vps_records``.
-    placement_outer_by_ip: dict[str, OuterHostInterface] = Field(default_factory=dict)
     _list_hostnames_calls: int = PrivateAttr(default=0)
 
     def _list_provider_vps_hostnames(self) -> list[str]:
@@ -175,10 +171,6 @@ class _DiscoveryTestProvider(VpsProvider):
         if live_outer is not None:
             yield live_outer
             return
-        placement_outer = self.placement_outer_by_ip.get(vps_ip)
-        if placement_outer is not None:
-            yield placement_outer
-            return
         exc = self.per_vps_outer_errors.get(vps_ip)
         if exc is not None:
             raise exc
@@ -216,20 +208,6 @@ class _DummyOuter:
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"_DummyOuter.{name} must not be accessed in discovery tests")
-
-
-class _ExitedContainerOuter(_DummyOuter):
-    """Outer whose only container reports ``exited`` to the ``docker inspect`` running probe."""
-
-    def execute_idempotent_command(
-        self,
-        command: str,
-        user: str | None = None,
-        cwd: Any = None,
-        env: Any = None,
-        timeout_seconds: float | None = None,
-    ) -> CommandResult:
-        return CommandResult(stdout="exited\n", stderr="", success=True)
 
 
 class _LiveListingOuter(_LocalFakeOuter):
@@ -664,41 +642,6 @@ def test_discover_reports_stopped_and_keeps_visible_when_vps_reachable_but_conta
     assert len(hosts) == 1, "a reachable, cleanly-stopped host must remain visible to conn/start"
     assert hosts[0].host_id == host_id
     assert hosts[0].host_state == HostState.STOPPED
-    # The host object built for it agrees, so `mngr list` shows STOPPED on the agent row too
-    # (the record alone, with no stop reason, would derive CRASHED).
-    assert provider.get_host(host_id).get_state() == HostState.STOPPED
-
-
-def test_discover_hosts_caches_a_reachable_stopped_container_host_as_stopped(
-    provider: _DiscoveryTestProvider,
-) -> None:
-    """``discover_hosts`` (the gc sweep's entry point) leaves the same STOPPED host object behind.
-
-    It probes the placement itself rather than reading the live listing, and the host
-    object it caches is what a following ``get_host`` returns, so it must carry the
-    observed state too or gc would see the record-derived CRASHED and treat the host
-    as terminal.
-    """
-    host_id = HostId.generate()
-    record = VpsHostRecord(
-        certified_host_data=_make_certified_data(host_id, "host-stopped"),
-        vps_ip="10.0.0.11",
-        config=VpsHostConfig(
-            vps_instance_id=VpsInstanceId("i-stopped"),
-            region="r",
-            plan="p",
-            container_name="mngr-agent-stopped",
-            volume_name=host_volume_name_for(host_id),
-        ),
-    )
-    provider.hostnames = ["10.0.0.11"]
-    provider.per_vps_records = {"10.0.0.11": _VpsDiscoveryData(records=(record,))}
-    provider.placement_outer_by_ip = {"10.0.0.11": cast(OuterHostInterface, _ExitedContainerOuter())}
-
-    discovered = provider.discover_hosts(cg=provider.mngr_ctx.concurrency_group)
-
-    assert [host.host_id for host in discovered] == [host_id]
-    assert provider.get_host(host_id).get_state() == HostState.STOPPED
 
 
 def test_discover_hides_unreachable_vps_host_when_not_including_destroyed(

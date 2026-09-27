@@ -1,9 +1,9 @@
-"""App-global health watchdog for the Imbue Studio discovery pipeline.
+"""App-global health watchdog for the minds discovery pipeline.
 
 The discovery pipeline is two processes: a *producer* (``mngr observe
 --discovery-only``, a grandchild of the detached ``mngr latchkey forward``
 supervisor, which writes the shared discovery-events file on each poll cycle) and a
-*consumer* (the single ``mngr forward --observe-via-file`` subprocess Imbue Studio
+*consumer* (the single ``mngr forward --observe-via-file`` subprocess minds
 spawns, which tails that file and folds snapshots into
 ``MngrCliBackendResolver``). When snapshots stop arriving the resolver freezes
 at its last-known state: the workspace list, host-liveness dots, and the
@@ -167,7 +167,7 @@ OnChangeCallback = Callable[[], None]
 class DiscoveryHealthWatchdog(MutableModel):
     """Three-state discovery-pipeline health machine + producer remediation.
 
-    Construct one per Imbue Studio process. Drive it from two sources:
+    Construct one per minds process. Drive it from two sources:
 
     - a background loop that calls :meth:`evaluate` every poll with the
       resolver's latest ``last_event_at``;

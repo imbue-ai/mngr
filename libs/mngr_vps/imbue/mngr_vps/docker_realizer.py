@@ -45,7 +45,6 @@ from imbue.mngr_vps.container_setup import exec_in_container
 from imbue.mngr_vps.container_setup import host_volume_name_for
 from imbue.mngr_vps.container_setup import image_exists
 from imbue.mngr_vps.container_setup import is_running_container_state
-from imbue.mngr_vps.container_setup import memory_cap_labels
 from imbue.mngr_vps.container_setup import prepare_btrfs_on_outer
 from imbue.mngr_vps.container_setup import provision_snapshot_helper_on_outer
 from imbue.mngr_vps.container_setup import pull_image
@@ -369,7 +368,6 @@ class DockerRealizer(SnapshotCapableRealizer):
             LABEL_HOST_NAME: str(ctx.name),
             LABEL_PROVIDER: str(self.provider_name),
             LABEL_TAGS: json.dumps(dict(ctx.tags) if ctx.tags else {}),
-            **memory_cap_labels(ctx.effective_start_args),
         }
         logger.log(LogLevel.BUILD.value, "Starting Docker container on VPS...", source="vps")
         snapshots_dir_on_outer = self.config.btrfs_mount_path / "snapshots"

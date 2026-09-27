@@ -8,7 +8,6 @@ from datetime import timezone
 
 import boto3
 import pytest
-from botocore.stub import ANY
 from botocore.stub import Stubber
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -87,26 +86,21 @@ def _build_provider(mngr_ctx: MngrContext, *, auto_shutdown_seconds: int | None)
     )
 
 
-def _build_stubbed_provider(
-    mngr_ctx: MngrContext, *, default_ami_id: str | None = "ami-x"
-) -> tuple[AwsProvider, Stubber]:
+def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[AwsProvider, Stubber]:
     """Build an AwsProvider whose EC2 client is a botocore Stubber.
 
-    Lets a test script EC2 responses without any real AWS call: a
-    ``describe_instances`` response for the ``_find_instance_for_host`` tests
-    (the tag-based lookup that resolves a stopped instance), or
-    ``describe_images`` / ``run_instances`` for the create-path tests. Pass
-    ``default_ami_id=None`` to leave the AMI unconfigured so the create path
-    runs the EC2 lookup.
+    Used by the ``_find_instance_for_host`` tests, which need to script a
+    ``describe_instances`` response (the tag-based lookup that resolves a
+    stopped instance) without any real AWS call.
     """
-    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id=default_ami_id, auto_shutdown_seconds=3600)
+    config = AwsProviderConfig(backend=AWS_BACKEND_NAME, default_ami_id="ami-x", auto_shutdown_seconds=3600)
     session = boto3.Session(aws_access_key_id="AKIATEST", aws_secret_access_key="secret", region_name="us-east-1")
     ec2 = session.client("ec2", region_name="us-east-1")
     stubber = Stubber(ec2)
     client = _StubbedAwsVpsClient(
         session=session,
         region="us-east-1",
-        ami_id=default_ami_id or "",
+        ami_id="ami-x",
         security_group=ExistingSecurityGroup(id="sg-x"),
         stubbed_ec2_client=ec2,
     )
@@ -728,7 +722,9 @@ def test_validate_provider_args_under_pytest_raises_when_zero(
         provider._validate_provider_args_for_create()
 
 
+# =============================================================================
 # AWS build-args parser (--aws-region, --aws-instance-type, --aws-ami, --git-depth)
+# =============================================================================
 
 
 def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:
@@ -803,7 +799,9 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
         provider._parse_build_args(["--vps-region=us-east-1"])
 
 
+# =============================================================================
 # Read paths surface auth failures as ProviderUnavailableError (not ...Empty)
+# =============================================================================
 #
 # Missing credentials means the backend's state is *unknown* -- we couldn't
 # authenticate, so any running instances are hidden from us. Per the
@@ -818,9 +816,8 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 # AMI selection is a create-only concern (read paths do not need it to
 # enumerate or reach existing instances). ``build_provider_instance`` never
 # touches AMI resolution; that lives in ``AwsProvider._create_vps_instance``,
-# the only call site, and an unresolvable AMI there (no matching Debian image
-# in the region, or a failed DescribeImages) raises ``AwsAmiResolutionError``,
-# an ``MngrError``. Create-path missing-creds is surfaced
+# the only call site, and a missing-AMI failure there raises ``MngrError``
+# (a config error to be fixed). Create-path missing-creds is surfaced
 # identically to read paths because the create flow calls
 # ``build_provider_instance`` first -- no ``bootstrap_for_host_creation``
 # override is needed, matching the Azure pattern.
@@ -867,83 +864,34 @@ def test_build_provider_instance_does_not_touch_ami_resolution(
     assert isinstance(provider, AwsProvider)
 
 
-def _build_default_parsed_options(provider: AwsProvider) -> ParsedAwsBuildOptions:
-    """Build options with no ``--aws-ami=`` override, so the create path falls through to AMI resolution."""
-    return ParsedAwsBuildOptions(
-        region=provider.aws_config.default_region,
-        plan=provider.aws_config.default_instance_type,
-        docker_build_args=(),
-    )
-
-
-def _queue_default_instance_type_architecture(provider: AwsProvider, stubber: Stubber) -> None:
-    """Queue the DescribeInstanceTypes answer the resolver needs before it can ask DescribeImages."""
-    instance_type = provider.aws_config.default_instance_type
-    stubber.add_response(
-        "describe_instance_types",
-        {"InstanceTypes": [{"InstanceType": instance_type, "ProcessorInfo": {"SupportedArchitectures": ["x86_64"]}}]},
-        {"InstanceTypes": [instance_type]},
-    )
-
-
-def test_create_vps_instance_launches_the_newest_debian_ami_when_none_is_configured(
+def test_create_vps_instance_raises_mngr_error_when_no_ami_configured(
+    monkeypatch: pytest.MonkeyPatch,
     temp_mngr_ctx: MngrContext,
 ) -> None:
-    """With no ``--aws-ami=`` and no ``default_ami_id``, the AMI EC2 resolves is the one RunInstances launches."""
-    provider, stubber = _build_stubbed_provider(temp_mngr_ctx, default_ami_id=None)
-    _queue_default_instance_type_architecture(provider, stubber)
-    stubber.add_response(
-        "describe_images",
-        {
-            "Images": [
-                {"ImageId": "ami-older", "CreationDate": "2026-07-22T10:00:00.000Z"},
-                {"ImageId": "ami-newest", "CreationDate": "2026-09-14T08:30:00.000Z"},
-            ]
-        },
-    )
-    stubber.add_response(
-        "run_instances",
-        {"Instances": [{"InstanceId": "i-resolved"}]},
-        expected_params={
-            "ImageId": "ami-newest",
-            "InstanceType": provider.aws_config.default_instance_type,
-            "MinCount": 1,
-            "MaxCount": 1,
-            "UserData": "",
-            "BlockDeviceMappings": ANY,
-            "InstanceInitiatedShutdownBehavior": ANY,
-            "NetworkInterfaces": ANY,
-            "MetadataOptions": ANY,
-            "TagSpecifications": ANY,
-        },
-    )
-    stubber.activate()
+    """Missing AMI is a create-time config error (MngrError), not a state signal.
 
-    instance_id = provider._create_vps_instance(
-        parsed=_build_default_parsed_options(provider), label="test", user_data="", ssh_key_ids=(), tags={}
-    )
-
-    assert instance_id == VpsInstanceId("i-resolved")
-    stubber.assert_no_pending_responses()
-
-
-def test_create_vps_instance_raises_when_ec2_has_no_debian_ami_to_resolve(
-    temp_mngr_ctx: MngrContext,
-) -> None:
-    """An empty DescribeImages answer is a create-time ``AwsAmiResolutionError`` (an ``MngrError``).
-
-    Not a state signal: ``ProviderUnavailableError`` would misclassify a
-    reachable backend whose region simply has no matching image as
-    unreachable. The create flow's ``create_host`` except handler cleans up
-    any SSH key uploaded before this raise, so no leak.
+    Distinct from the missing-creds case: ``ProviderUnavailableError`` would
+    misclassify "I have valid creds but the operator forgot to pin a
+    ``default_ami_id``" as an unreachable backend. The right shape at the
+    create path is a plain ``MngrError`` carrying the actionable how-to-fix
+    from ``AwsProviderConfig.get_ami_id_for_region``. The create flow's
+    ``create_host`` except handler cleans up any SSH key uploaded before this
+    raise, so no leak.
     """
-    provider, stubber = _build_stubbed_provider(temp_mngr_ctx, default_ami_id=None)
-    _queue_default_instance_type_architecture(provider, stubber)
-    stubber.add_response("describe_images", {"Images": []})
-    stubber.activate()
+    clear_aws_env(monkeypatch)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIATEST")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+    config = AwsProviderConfig(
+        backend=AWS_BACKEND_NAME,
+        default_region="ap-south-1",
+        default_ami_id=None,
+    )
+    name = ProviderInstanceName("aws-test")
+    provider = AwsProviderBackend.build_provider_instance(name=name, config=config, mngr_ctx=temp_mngr_ctx)
+    assert isinstance(provider, AwsProvider)
+    parsed = ParsedAwsBuildOptions(
+        region=config.default_region, plan=config.default_instance_type, docker_build_args=()
+    )
 
-    with pytest.raises(MngrError, match="no available debian-13-amd64"):
-        provider._create_vps_instance(
-            parsed=_build_default_parsed_options(provider), label="test", user_data="", ssh_key_ids=(), tags={}
-        )
-    stubber.assert_no_pending_responses()
+    with pytest.raises(MngrError, match="No AMI configured"):
+        provider._create_vps_instance(parsed=parsed, label="test", user_data="", ssh_key_ids=(), tags={})

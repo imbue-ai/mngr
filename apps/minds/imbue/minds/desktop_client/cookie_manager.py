@@ -1,9 +1,9 @@
-"""Bare-origin Imbue Studio session cookie helpers.
+"""Bare-origin minds session cookie helpers.
 
 After Phase 2 of the mngr_forward split, the per-subdomain auth bridge
 (``create_subdomain_auth_token`` / ``verify_subdomain_auth_token``) lives
 in the ``mngr_forward`` plugin (``libs/mngr_forward/imbue/mngr_forward/cookie.py``).
-Imbue Studio keeps only its own bare-origin session cookie — origin-scoped to
+Minds keeps only its own bare-origin session cookie — origin-scoped to
 ``localhost:<minds-port>`` — for authenticating the desktop UI.
 """
 
@@ -24,7 +24,7 @@ _COOKIE_MAX_AGE_SECONDS: Final[int] = 30 * 24 * 60 * 60
 
 
 def create_session_cookie(signing_key: CookieSigningKey) -> str:
-    """Create a signed session cookie value for the Imbue Studio bare-origin server."""
+    """Create a signed session cookie value for the minds bare-origin server."""
     serializer = URLSafeTimedSerializer(secret_key=signing_key.get_secret_value())
     return serializer.dumps(_SESSION_PAYLOAD, salt=_COOKIE_SALT)
 

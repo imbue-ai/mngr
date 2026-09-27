@@ -1,4 +1,4 @@
-"""What the local compute backends need from the machine Imbue Studio runs on, and whether it is there.
+"""What the local compute backends need from the machine minds runs on, and whether it is there.
 
 The desktop app bundles every tool it can, but the local backends sit on
 software only the machine's owner can install: Docker's daemon and socket

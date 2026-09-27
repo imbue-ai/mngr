@@ -87,8 +87,8 @@ def test_resolve_anonymous_user_id_persists_under_the_data_dir_and_is_stable(tmp
 def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # The env vars Imbue Studio publishes for the daemon must be consumable by the daemon's own resolver,
-    # yielding Imbue Studio's resolved DSN + environment + bucket + consent-file path. Verified end-to-end here
+    # The env vars minds publishes for the daemon must be consumable by the daemon's own resolver,
+    # yielding minds' resolved DSN + environment + bucket + consent-file path. Verified end-to-end here
     # so the two sides (publisher and consumer) cannot drift apart. The bucket is always published (it
     # is infrastructure, decoupled from consent); consent lives in the file.
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-staging")
@@ -114,7 +114,7 @@ def test_resolve_latchkey_forward_sentry_env_round_trips_into_forward_config(
 
 
 def test_consent_file_round_trips_minds_settings_to_the_daemon_reader(tmp_path: Path) -> None:
-    # What Imbue Studio writes (from its consent settings) must be exactly what the daemon's live reader sees,
+    # What minds writes (from its consent settings) must be exactly what the daemon's live reader sees,
     # and rewriting it must change the next read -- this is the mechanism that propagates a grant/revoke
     # to the running daemon without respawning it.
     consent_path = latchkey_forward_sentry_consent_path(tmp_path)
@@ -128,7 +128,7 @@ def test_consent_file_round_trips_minds_settings_to_the_daemon_reader(tmp_path: 
 
 
 def test_collect_external_attachments_classifies_flat_minds_log_layout(tmp_path: Path) -> None:
-    # The Imbue Studio logs dir is flat: the live backend jsonl (`*.jsonl`) and its
+    # The minds logs dir is flat: the live backend jsonl (`*.jsonl`) and its
     # timestamped rotations (`*.jsonl.<ts>`), the backend stdout/stderr log
     # (`minds.log`) and its gzipped rotations (`minds.log.<ts>.gz`), and the
     # Electron main-process log (`electron.log`) and its gzipped rotations
@@ -231,8 +231,8 @@ def test_collect_external_attachments_never_reaches_into_a_machine_store(tmp_pat
 
 def test_collect_external_attachments_sweeps_latchkey_and_discovery_dirs(tmp_path: Path) -> None:
     # The latchkey forward daemon's logs (structured jsonl + raw stdout/stderr capture)
-    # and the shared discovery event stream live outside the flat Imbue Studio logs dir; the
-    # external groups must sweep those directories without touching the Imbue Studio log folder.
+    # and the shared discovery event stream live outside the flat minds logs dir; the
+    # external groups must sweep those directories without touching the minds log folder.
     logs_folder = tmp_path / "logs"
     logs_folder.mkdir()
     (logs_folder / "minds-events.jsonl").write_text("live\n")

@@ -33,11 +33,11 @@ def test_backend_name_defaults_to_azure() -> None:
     assert str(config.backend) == "azure"
 
 
-def test_default_image_is_debian_13() -> None:
+def test_default_image_is_debian_12() -> None:
     config = AzureProviderConfig()
     assert config.image_publisher == "Debian"
-    assert config.image_offer == "debian-13"
-    assert config.image_sku == "13-gen2"
+    assert config.image_offer == "debian-12"
+    assert config.image_sku == "12-gen2"
     assert config.image_version == "latest"
 
 

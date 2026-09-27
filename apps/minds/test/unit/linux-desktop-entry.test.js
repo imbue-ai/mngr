@@ -21,41 +21,24 @@ test('paths default to ~/.local/share and honor XDG_DATA_HOME', () => {
   assert.equal(blank.applicationsDir, '/home/alice/.local/share/applications');
 });
 
-test('the entry launches the AppImage with the URL argument and claims both schemes', () => {
-  const entry = renderDesktopEntry({
-    appImagePath: '/home/alice/Apps/ImbueStudio 0.8.0.AppImage',
-    productName: 'ImbueStudio',
-    displayName: 'Imbue Studio',
-  });
+test('the entry launches the AppImage with the URL argument and claims the scheme', () => {
+  const entry = renderDesktopEntry({ appImagePath: '/home/alice/Apps/Mind 0.5.3.AppImage', productName: 'Mind' });
   const lines = entry.split('\n');
   assert.equal(lines[0], '[Desktop Entry]');
-  assert.ok(lines.includes('Exec="/home/alice/Apps/ImbueStudio 0.8.0.AppImage" %U'));
-  // The menu shows the display name; the window manager matches the entry to
-  // the window through WM_CLASS, which Electron sets to the productName.
-  assert.ok(lines.includes('Name=Imbue Studio'));
-  assert.ok(lines.includes('StartupWMClass=ImbueStudio'));
-  assert.ok(lines.includes('MimeType=x-scheme-handler/imbue-studio;x-scheme-handler/minds;'));
+  assert.ok(lines.includes('Exec="/home/alice/Apps/Mind 0.5.3.AppImage" %U'));
+  // Both carry the app's productName: the menu shows it, and the window
+  // manager matches the entry to the window through WM_CLASS, which Electron
+  // sets to the same name.
+  assert.ok(lines.includes('Name=Mind'));
+  assert.ok(lines.includes('StartupWMClass=Mind'));
+  assert.ok(lines.includes('MimeType=x-scheme-handler/minds;'));
   assert.ok(lines.includes('Icon=minds'));
   assert.ok(entry.endsWith('\n'));
 });
 
-test('a product name containing a space survives into the entry', () => {
-  // productName is "Imbue Studio", so the AppImage path and StartupWMClass both
-  // carry a space: Exec must stay quoted and the WM class must not be split.
-  const { productName } = require('../../package.json');
-  const lines = renderDesktopEntry({
-    appImagePath: '/home/alice/Apps/Imbue Studio 0.8.0.AppImage',
-    productName,
-    displayName: 'Imbue Studio',
-  }).split('\n');
-  assert.ok(lines.includes('Exec="/home/alice/Apps/Imbue Studio 0.8.0.AppImage" %U'));
-  assert.ok(lines.includes(`StartupWMClass=${productName}`));
-});
-
 test('a relative or unquotable path, or a missing name, is refused rather than written', () => {
-  const render = (appImagePath) =>
-    renderDesktopEntry({ appImagePath, productName: 'ImbueStudio', displayName: 'Imbue Studio' });
-  assert.throws(() => render('ImbueStudio.AppImage'), /must be absolute/);
+  const render = (appImagePath) => renderDesktopEntry({ appImagePath, productName: 'Mind' });
+  assert.throws(() => render('Mind.AppImage'), /must be absolute/);
   assert.throws(() => render('/tmp/a"b.AppImage'), /cannot be quoted/);
   assert.throws(() => render('/tmp/a\nb.AppImage'), /cannot be quoted/);
   // The rest of what the spec reserves inside a quoted Exec argument, plus
@@ -63,17 +46,6 @@ test('a relative or unquotable path, or a missing name, is refused rather than w
   for (const reserved of ['\\', '$', '`', '%']) {
     assert.throws(() => render(`/tmp/a${reserved}b.AppImage`), /cannot be quoted/);
   }
-  assert.throws(() => renderDesktopEntry({ appImagePath: '/tmp/ImbueStudio.AppImage' }), /product name/);
-  assert.throws(
-    () => renderDesktopEntry({ appImagePath: '/tmp/ImbueStudio.AppImage', productName: ' ' }),
-    /product name/,
-  );
-  assert.throws(
-    () => renderDesktopEntry({ appImagePath: '/tmp/ImbueStudio.AppImage', productName: 'ImbueStudio' }),
-    /display name/,
-  );
-  assert.throws(
-    () => renderDesktopEntry({ appImagePath: '/tmp/ImbueStudio.AppImage', productName: 'ImbueStudio', displayName: '' }),
-    /display name/,
-  );
+  assert.throws(() => renderDesktopEntry({ appImagePath: '/tmp/Mind.AppImage' }), /product name/);
+  assert.throws(() => renderDesktopEntry({ appImagePath: '/tmp/Mind.AppImage', productName: ' ' }), /product name/);
 });

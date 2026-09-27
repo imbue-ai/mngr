@@ -1,1 +1,0 @@
-Merges the host-sizing work (issue #974): `mngr list` reports a leased machine's real recorded size from the connector's current-size columns (`memory_units`, `disk_gb`) instead of the bake-time lease attributes, for stopped machines too. See the `mngr-host-sizing` entry for the details.

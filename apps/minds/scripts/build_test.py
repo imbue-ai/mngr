@@ -55,9 +55,7 @@ WORKSPACE_PACKAGES = [
     "minds",
     "imbue-mngr",
     "imbue-mngr-aws",
-    "imbue-mngr-azure",
     "imbue-mngr-claude",
-    "imbue-mngr-gcp",
     "imbue-mngr-codex",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
@@ -150,11 +148,7 @@ def test_workspace_wheel_excludes_test_files(built_wheels: dict[str, Path], pack
     )
 
 
-# Two network-bound installs into a fresh venv: a slow package fetch on a
-# loaded runner overruns the default 10-second budget.
 @pytest.mark.acceptance
-@pytest.mark.timeout(90)
-@pytest.mark.flaky
 def test_imbue_common_testing_extra_installs_its_test_library(built_wheels: dict[str, Path], tmp_path: Path) -> None:
     """A downstream suite installing ``imbue-common[testing]`` from the wheel can import the test
     library the wheel ships, and installing the wheel alone pulls in no pytest.

@@ -6,7 +6,7 @@ EOF, or any non-2xx response), and one more -- ``STALLED`` -- for a request the
 backend has not answered yet, which may still succeed. The plugin does not
 decide which of those matter -- that policy lives here:
 ``should_enroll_suspect_for_backend_failure`` selects the ones that suggest the
-backend is unreachable, and Imbue Studio routes only those into ``record_failure``.
+backend is unreachable, and minds routes only those into ``record_failure``.
 The plugin emits the success-side observation too --
 ``system_interface_backend_answered``, for a workspace's shell answering a
 forwarded request -- and the policy for that lives here as well, in
@@ -156,7 +156,7 @@ def should_enroll_suspect_for_backend_failure(
     The plugin emits a failure envelope for every non-2xx response, for
     connection-level failures (which carry no status code), and -- as
     ``STALLED`` -- for a request still in flight that the backend has not
-    answered within the plugin's stall window. Imbue Studio acts only on the ones that
+    answered within the plugin's stall window. Minds acts only on the ones that
     suggest the backend is unreachable: anything without a status code
     (``CONNECT_ERROR`` / ``TUNNEL_SETUP_FAILED`` / ``POOL_EXHAUSTED`` /
     ``BACKEND_NOT_LISTENING`` / ``SSE_EOF`` / ``STALLED``) or an infrastructure
@@ -490,7 +490,7 @@ class AgentFailureLogGate(MutableModel):
 class SystemInterfaceHealthTracker(MutableModel):
     """Per-agent health state machine driven by failure envelopes + probe results.
 
-    Construct one per Imbue Studio process; share with the envelope-consumer callback
+    Construct one per minds process; share with the envelope-consumer callback
     (which calls ``record_failure``), the background probe loop (which calls
     ``record_probe_success`` / ``record_probe_failure``), the recovery worker
     (``mark_recovering`` / ``mark_recovery_failed`` / ``record_probe_success``),
@@ -1274,7 +1274,7 @@ class SystemInterfaceHealthTracker(MutableModel):
     def record_backend_outage(self, agent_id: AgentId, provider_name: str, reason: str) -> None:
         """Record that ``provider_name`` rejected a command for ``agent_id`` as unavailable.
 
-        Called from the recovery worker, which is where Imbue Studio first runs a command
+        Called from the recovery worker, which is where minds first runs a command
         against a machine whose backend has gone down. Recording it is what lets
         the recovery surfaces name the backend on the same edge that raises them,
         rather than a provider poll later.
@@ -1450,7 +1450,7 @@ class SystemInterfaceHealthTracker(MutableModel):
 class BackendFailureRecorder(FrozenModel):
     """Routes one ``system_interface_backend_failure`` envelope into the tracker.
 
-    The plugin observes; this is the whole of Imbue Studio's policy on what to do with
+    The plugin observes; this is the whole of minds' policy on what to do with
     an observation, in one place so the enrollment decision and the cause record
     cannot drift apart. Registered as the consumer's failure callback in
     ``minds run``.

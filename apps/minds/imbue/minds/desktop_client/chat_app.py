@@ -77,9 +77,7 @@ class ChatAppAnswer(FrozenModel):
             "outer mngr's chatter so it can be shown as-is; '' when it gave none"
         )
     )
-    log_detail: str = Field(
-        description="``detail``, or failing that Imbue Studio's own words about the run; for logs only"
-    )
+    log_detail: str = Field(description="``detail``, or failing that minds' own words about the run; for logs only")
     script_exit_code: int | None = Field(description="The script's exit status; None when it never ran to its echo")
     exec_returncode: int = Field(description="The outer ``mngr exec``'s own exit status")
     fallback: ChatAppFallbackRun | None = Field(

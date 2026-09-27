@@ -38,6 +38,7 @@ from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
+from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import PyinfraConnector
@@ -71,14 +72,9 @@ from imbue.mngr.providers.ssh_utils import wait_for_sshd
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.constants import lima_host_data_disk_name
-from imbue.mngr_lima.data_types import LimaResizeOutcome
-from imbue.mngr_lima.data_types import LimaSizeRequest
-from imbue.mngr_lima.data_types import LimaVmSize
-from imbue.mngr_lima.data_types import ResolvedLimaVmSize
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
-from imbue.mngr_lima.errors import LimaResizeRefusedError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.host_store import LimaHostStore
@@ -93,9 +89,6 @@ from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
 from imbue.mngr_lima.limactl import limactl_delete
 from imbue.mngr_lima.limactl import limactl_disk_create
 from imbue.mngr_lima.limactl import limactl_disk_delete
-from imbue.mngr_lima.limactl import limactl_disk_list
-from imbue.mngr_lima.limactl import limactl_disk_resize
-from imbue.mngr_lima.limactl import limactl_edit_size
 from imbue.mngr_lima.limactl import limactl_list
 from imbue.mngr_lima.limactl import limactl_shell
 from imbue.mngr_lima.limactl import limactl_show_ssh
@@ -103,15 +96,6 @@ from imbue.mngr_lima.limactl import limactl_start_existing
 from imbue.mngr_lima.limactl import limactl_start_new
 from imbue.mngr_lima.limactl import limactl_stop
 from imbue.mngr_lima.limactl import resolve_lima_home
-from imbue.mngr_lima.primitives import LimaDiskSize
-from imbue.mngr_lima.sizing import apply_size_request_to_start_args
-from imbue.mngr_lima.sizing import host_resources_for_lima_host
-from imbue.mngr_lima.sizing import is_same_vm_size
-from imbue.mngr_lima.sizing import resolve_vm_size
-from imbue.mngr_lima.sizing import resolved_vm_size_from_resources
-from imbue.mngr_lima.sizing import vm_size_from_lima_config
-from imbue.mngr_lima.sizing import vm_size_from_limactl_instance
-from imbue.mngr_lima.sizing import vm_size_from_resources
 
 # Lima instance status values mapped to mngr HostState. "Broken" is limactl
 # positively reporting breakage -> CRASHED; "Unknown" means limactl could not
@@ -265,7 +249,9 @@ class LimaProviderInstance(BaseProviderInstance):
             self._evict_cached_host(host_id)
         self._host_store.clear_cache()
 
+    # =========================================================================
     # Directory and Store Properties
+    # =========================================================================
 
     @property
     def _provider_dir(self) -> Path:
@@ -322,7 +308,9 @@ class LimaProviderInstance(BaseProviderInstance):
             is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
         )
 
+    # =========================================================================
     # Volume Helpers
+    # =========================================================================
 
     def _ensure_host_volume_dir(self, host_id: HostId) -> Path:
         """Create and return the per-host volume directory."""
@@ -338,7 +326,9 @@ class LimaProviderInstance(BaseProviderInstance):
         """Generate a deterministic volume ID for a host."""
         return VolumeId(f"vol-{host_id.get_uuid().hex}")
 
+    # =========================================================================
     # Tag Helpers
+    # =========================================================================
 
     def _tags_path(self, host_id: HostId) -> Path:
         """Path to the JSON file storing tags for a host."""
@@ -361,7 +351,9 @@ class LimaProviderInstance(BaseProviderInstance):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(tags, indent=2))
 
+    # =========================================================================
     # SSH and Host Object Helpers
+    # =========================================================================
 
     def _get_ssh_config(self, instance_name: str) -> LimaSshConfig:
         """Get SSH connection info from Lima."""
@@ -656,7 +648,9 @@ sudo poweroff
                 timeout=CLOUD_INIT_TIMEOUT_SECONDS,
             )
 
+    # =========================================================================
     # Run-as-root SSH helpers
+    # =========================================================================
 
     def _ensure_keys_dir(self) -> Path:
         """Create (if needed) and return the provider-wide keys directory."""
@@ -746,7 +740,9 @@ sudo poweroff
             return "root", root_key_path
         return ssh_config.user, ssh_config.identity_file
 
+    # =========================================================================
     # Core Lifecycle Methods
+    # =========================================================================
 
     def create_host(
         self,
@@ -781,14 +777,12 @@ sudo poweroff
         # Built before the reservation so the reservation record carries the full
         # Lima config: lifecycle operations against an abandoned create (destroy,
         # discovery) can then find the instance and disk it may have left behind.
-        host_data_disk_size = self.config.host_data_disk_size if host_data_disk_name is not None else None
         lima_config_record = LimaHostConfig(
             instance_name=instance_name,
             start_args=effective_start_args,
             image_url=str(image) if image else None,
             is_host_data_volume_exposed=is_host_data_volume_exposed,
             host_data_disk_name=host_data_disk_name,
-            host_data_disk_size=host_data_disk_size,
             is_run_as_root=self.config.is_run_as_root,
             host_dir=str(self.host_dir),
         )
@@ -946,11 +940,8 @@ sudo poweroff
             ssh_config, self.config.is_run_as_root, host_id
         )
 
-        # The size the VM actually got: the start args, else the lima config, else lima's defaults.
-        resources = host_resources_for_lima_host(
-            resolve_vm_size(effective_start_args, vm_size_from_lima_config(lima_config)),
-            lima_config_record.host_data_disk_size,
-        )
+        # Read configured resources from Lima config
+        resources = self._read_resources_from_config(lima_config)
 
         host_record = HostRecord(
             certified_host_data=host_data,
@@ -997,6 +988,23 @@ sudo poweroff
 
         self._evict_cached_host(host_id, replacement=host)
         return host
+
+    def _read_resources_from_config(self, lima_config: dict) -> HostResources:
+        """Read configured resources from a Lima YAML config dict."""
+        cpus = lima_config.get("cpus", 4)
+        memory_str = lima_config.get("memory", "4GiB")
+        disk_str = lima_config.get("disk", "100GiB")
+
+        # Parse memory (Lima uses strings like "4GiB")
+        memory_gb = _parse_size_to_gb(memory_str) if isinstance(memory_str, str) else float(memory_str)
+        disk_gb = _parse_size_to_gb(disk_str) if isinstance(disk_str, str) else float(disk_str)
+
+        return HostResources(
+            cpu=CpuResources(count=int(cpus)),
+            memory_gb=memory_gb,
+            disk_gb=disk_gb,
+            gpu=None,
+        )
 
     def stop_host(
         self,
@@ -1057,10 +1065,6 @@ sudo poweroff
             )
 
         instance_name = host_record.config.instance_name
-
-        # The record is the source of truth for the VM's size (a resize while
-        # the VM ran only rewrote it), so bring the instance up to date first.
-        self._apply_recorded_size(host_record, self._find_limactl_instance(instance_name))
 
         try:
             limactl_start_existing(self.mngr_ctx.concurrency_group, instance_name)
@@ -1254,7 +1258,9 @@ sudo poweroff
         """Handle connection errors by clearing the cache."""
         self._evict_cached_host(host_id)
 
+    # =========================================================================
     # Discovery Methods
+    # =========================================================================
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
         """Retrieve a host by ID or name."""
@@ -1424,203 +1430,22 @@ sudo poweroff
         return discovered
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
-        """The size recorded for the host, read from its record alone (so a stopped host answers too)."""
-        host_record = self._host_store.read_host_record(host.id)
-        if host_record is None:
-            raise HostNotFoundError(self.name, host.id)
-        return self._recorded_resources(host_record)
-
-    def _recorded_resources(self, host_record: HostRecord) -> HostResources:
-        """The host's size: its start args where they set a dimension, else its recorded resources, else lima's defaults.
-
-        ``resize_host`` rewrites the start args and the resources together, so
-        for a record this version wrote they agree.
-        """
-        # CLEANUP: read host_record.resources directly once no lima host record
-        # predates honest size recording: those hold lima's 4 CPU / 4 GiB
-        # placeholder whatever their start args say, so the start args must win.
-        start_args = host_record.config.start_args if host_record.config is not None else ()
-        data_disk_size = self._recorded_data_disk_size(host_record)
-        if host_record.resources is not None:
-            fallback = vm_size_from_resources(host_record.resources, is_disk_gb_the_boot_disk=data_disk_size is None)
-        else:
-            fallback = LimaVmSize()
-        return host_resources_for_lima_host(resolve_vm_size(start_args, fallback), data_disk_size)
-
-    def _recorded_data_disk_size(self, host_record: HostRecord) -> LimaDiskSize | None:
-        """The size of the host's btrfs data disk, or None when it has none.
-
-        Records written before the size was recorded per host report the
-        provider's configured size, the best estimate of what they were
-        created with; only a size the record itself holds drives a grow.
-        """
-        if host_record.config is None or host_record.config.host_data_disk_name is None:
-            return None
-        if host_record.config.host_data_disk_size is not None:
-            return host_record.config.host_data_disk_size
-        return self.config.host_data_disk_size
-
-    def _find_limactl_instance(self, instance_name: str) -> dict[str, Any] | None:
-        for instance in limactl_list(self.mngr_ctx.concurrency_group):
-            if instance.get("name") == instance_name:
-                return instance
-        return None
-
-    def _apply_recorded_size(self, host_record: HostRecord, instance: Mapping[str, Any] | None) -> bool:
-        """Reconfigure the host's stopped VM to the size its record holds; returns whether that happened.
-
-        ``instance`` is the VM's ``limactl list`` entry, or None when lima does
-        not know it. The CPU count and memory go into the instance's lima
-        config, and the data disk is grown when the record is larger than the
-        disk (lima refuses a shrink, and so does ``resize_host``, so a smaller
-        record is only logged); a record that holds no data-disk size leaves
-        its disk as it is. A running VM cannot be edited, so it is left
-        alone and reported as not applied; ``start_host`` calls this again once
-        it is stopped. Raises MngrError with lima's own message when lima
-        refuses a value.
-        """
-        config = host_record.config
-        if config is None or instance is None or instance.get("status") == "Running":
-            return False
-        recorded_size = resolved_vm_size_from_resources(self._recorded_resources(host_record))
-        try:
-            self._reconfigure_stopped_vm(config, instance, recorded_size)
-        except LimaCommandError as e:
-            raise MngrError(
-                f"Lima refused the recorded size of host {host_record.certified_host_data.host_id}: {e}"
-            ) from e
-        return True
-
-    def _reconfigure_stopped_vm(
-        self, config: LimaHostConfig, instance: Mapping[str, Any], recorded_size: ResolvedLimaVmSize
-    ) -> None:
-        """Bring the stopped VM's instance config and data disk up to the recorded size; raises LimaCommandError when lima refuses."""
-        self._apply_vm_size(config.instance_name, instance, recorded_size)
-        if config.host_data_disk_name is not None:
-            self._grow_data_disk(config.host_data_disk_name, config.host_data_disk_size)
-
-    def _apply_vm_size(
-        self, instance_name: str, instance: Mapping[str, Any], recorded_size: ResolvedLimaVmSize
-    ) -> None:
-        """Edit the stopped instance's CPU count and memory when they differ from the record."""
-        current_size = vm_size_from_limactl_instance(instance)
-        if current_size is not None and is_same_vm_size(current_size, recorded_size):
-            return
-        limactl_edit_size(
-            self.mngr_ctx.concurrency_group,
-            instance_name,
-            cpus=recorded_size.cpus,
-            memory_gib=recorded_size.memory_gib,
+        """Get configured resources from the persistent host record."""
+        host_id = host.id
+        host_record = self._host_store.read_host_record(host_id)
+        if host_record is not None and host_record.resources is not None:
+            return host_record.resources
+        # Return defaults if no record
+        return HostResources(
+            cpu=CpuResources(count=4),
+            memory_gb=4.0,
+            disk_gb=100.0,
+            gpu=None,
         )
 
-    def _grow_data_disk(self, disk_name: str, recorded_size: LimaDiskSize | None) -> None:
-        """Grow the data disk to the recorded size when the disk is smaller than it."""
-        if recorded_size is None:
-            return
-        disk = next(
-            (d for d in limactl_disk_list(self.mngr_ctx.concurrency_group) if d.get("name") == disk_name), None
-        )
-        if disk is None:
-            logger.warning("Lima disk {} was not found, so it was not grown to its recorded size", disk_name)
-            return
-        current_bytes = disk.get("size")
-        if not isinstance(current_bytes, int):
-            logger.warning("Lima disk {} reports no size, so it was not grown to its recorded size", disk_name)
-            return
-        if recorded_size.size_bytes == current_bytes:
-            return
-        if recorded_size.size_bytes > current_bytes:
-            limactl_disk_resize(self.mngr_ctx.concurrency_group, disk_name, str(recorded_size))
-        else:
-            logger.warning(
-                "Lima disk {} is larger ({} bytes) than its recorded size {}; a disk never shrinks, so it was left as is",
-                disk_name,
-                current_bytes,
-                recorded_size,
-            )
-
-    def resize_host(self, host_id: HostId, request: LimaSizeRequest) -> LimaResizeOutcome:
-        """Rewrite the size recorded for the host, and reconfigure its VM to it at once when the VM is stopped.
-
-        A stopped VM is reconfigured before the record is written, so a value
-        lima refuses leaves the record untouched. A running VM cannot be edited,
-        so only the record changes and the next ``start_host`` applies it. The
-        data disk never shrinks, and a host without one cannot take a disk size.
-        """
-        host_record = self._host_store.read_host_record(host_id, use_cache=False)
-        if host_record is None:
-            raise HostNotFoundError(self.name, host_id)
-        config = host_record.config
-        if config is None:
-            raise MngrError(f"Host {host_id} has no Lima configuration and cannot be resized.")
-        self._refuse_impossible_disk_request(host_record, request)
-        resized_record = self._resized_host_record(host_record, request)
-        assert resized_record.resources is not None
-
-        # Apply to a stopped VM first, so lima's refusal leaves the record alone.
-        instance = self._find_limactl_instance(config.instance_name)
-        if instance is None:
-            raise MngrError(
-                f"Lima instance {config.instance_name} of host {host_id} was not found, so the host cannot be resized."
-            )
-        is_applied = self._apply_recorded_size(resized_record, instance)
-        self._host_store.write_host_record(resized_record)
-        logger.debug("Recorded the new size for host {}: {}", host_id, resized_record.resources)
-        return LimaResizeOutcome(resources=resized_record.resources, is_applied_to_instance=is_applied)
-
-    def _refuse_impossible_disk_request(self, host_record: HostRecord, request: LimaSizeRequest) -> None:
-        """Raises LimaResizeRefusedError when the request sets a disk size the host cannot take: a shrink, or any size on a host without a data disk."""
-        if request.data_disk_size is None:
-            return
-        host_id = host_record.certified_host_data.host_id
-        current_data_disk_size = self._recorded_data_disk_size(host_record)
-        if current_data_disk_size is None:
-            raise LimaResizeRefusedError(
-                f"Host {host_id} has no data disk (it uses the exposed bind-mount layout), so its disk cannot be resized."
-            )
-        if request.data_disk_size.size_bytes < current_data_disk_size.size_bytes:
-            raise LimaResizeRefusedError(
-                f"A data disk never shrinks: host {host_id} has {current_data_disk_size} and "
-                f"{request.data_disk_size} was requested."
-            )
-
-    def _resized_host_record(self, host_record: HostRecord, request: LimaSizeRequest) -> HostRecord:
-        """The record the host has once ``request`` is applied: its start args and resources rewritten together.
-
-        The record keeps the disk size it holds (None for a record from before
-        sizes were recorded per host) unless the request sets one, while the
-        reported size falls back to the provider's configured size either way.
-        The boot disk is carried over from the current resources, since a
-        resize never touches it.
-        """
-        config = host_record.config
-        assert config is not None
-        current_data_disk_size = self._recorded_data_disk_size(host_record)
-        current_resources = self._recorded_resources(host_record)
-        resized_start_args = apply_size_request_to_start_args(config.start_args, request)
-        recorded_data_disk_size = (
-            request.data_disk_size if request.data_disk_size is not None else config.host_data_disk_size
-        )
-        reported_data_disk_size = (
-            request.data_disk_size if request.data_disk_size is not None else current_data_disk_size
-        )
-        resized_vm_size = resolve_vm_size(
-            resized_start_args,
-            vm_size_from_resources(current_resources, is_disk_gb_the_boot_disk=current_data_disk_size is None),
-        )
-        resized_config = config.model_copy_update(
-            to_update(config.field_ref().start_args, resized_start_args),
-            to_update(config.field_ref().host_data_disk_size, recorded_data_disk_size),
-        )
-        return host_record.model_copy_update(
-            to_update(host_record.field_ref().config, resized_config),
-            to_update(
-                host_record.field_ref().resources,
-                host_resources_for_lima_host(resized_vm_size, reported_data_disk_size),
-            ),
-        )
-
+    # =========================================================================
     # Snapshot Methods (not supported)
+    # =========================================================================
 
     def create_snapshot(
         self,
@@ -1642,7 +1467,9 @@ sudo poweroff
     ) -> None:
         raise SnapshotsNotSupportedError(self.name)
 
+    # =========================================================================
     # Volume Methods
+    # =========================================================================
 
     def list_volumes(self) -> list[VolumeInfo]:
         """List all volumes managed by this provider.
@@ -1711,7 +1538,9 @@ sudo poweroff
         volume = LocalVolume(root_path=volume_dir)
         return HostVolume(volume=volume)
 
+    # =========================================================================
     # Host Mutation Methods
+    # =========================================================================
 
     def get_host_tags(self, host: HostInterface | HostId) -> dict[str, str]:
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -1762,7 +1591,9 @@ sudo poweroff
         self._evict_cached_host(host_id)
         return self.get_host(host_id)
 
+    # =========================================================================
     # Connector Method
+    # =========================================================================
 
     def get_connector(self, host: HostInterface | HostId) -> PyinfraHost:
         """Get the pyinfra connector for a host."""
@@ -1772,7 +1603,9 @@ sudo poweroff
             return host_obj.connector.host
         raise MngrError(f"Cannot get connector for offline host {host_id}")
 
+    # =========================================================================
     # Agent Data Persistence
+    # =========================================================================
 
     @property
     def is_agent_data_persistence_supported(self) -> bool:
@@ -1786,3 +1619,20 @@ sudo poweroff
 
     def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
         self._host_store.remove_persisted_agent_data(host_id, agent_id)
+
+
+def _parse_size_to_gb(size_str: str) -> float:
+    """Parse a Lima size string (e.g. '4GiB', '512MiB') to GB."""
+    size_str = size_str.strip()
+    if size_str.endswith("GiB"):
+        return float(size_str[:-3])
+    if size_str.endswith("MiB"):
+        return float(size_str[:-3]) / 1024.0
+    if size_str.endswith("TiB"):
+        return float(size_str[:-3]) * 1024.0
+    # Try plain number (assume GiB)
+    try:
+        return float(size_str)
+    except ValueError:
+        logger.warning("Could not parse size string: {}, defaulting to 4 GiB", size_str)
+        return 4.0

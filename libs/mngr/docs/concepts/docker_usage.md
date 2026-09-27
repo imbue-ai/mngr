@@ -75,12 +75,10 @@ You can set defaults that apply to every container in your config:
 ```toml
 [providers.docker]
 backend = "docker"
-default_cpus = 2
-default_memory = "4g"
-default_start_args = ["--tmpfs", "/run"]
+default_start_args = ["--cpus=2", "--memory=4g"]
 ```
 
-Per-create `-s` flags come after the defaults; Docker uses the last occurrence when a flag is repeated. The caps a container was created with are recorded and shown by `mngr list` (`host.resource`), and `mngr docker resize <host> --cpus N --memory SIZE` changes them afterwards; see the [docker provider](../core_plugins/providers/docker.md#size-cpu-and-memory-caps).
+Per-create `-s` flags are appended to the defaults; Docker uses the last occurrence when a flag is repeated.
 
 ## Custom images and Dockerfiles
 

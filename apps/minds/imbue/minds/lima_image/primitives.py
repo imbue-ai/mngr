@@ -27,7 +27,7 @@ _SHA256_HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 
 
 class MindsImageVersion(NonEmptyStr):
-    """An Imbue Studio release tag that names a pre-baked image set, e.g. ``minds-v0.3.4``."""
+    """A minds release tag that names a pre-baked image set, e.g. ``minds-v0.3.4``."""
 
     ...
 

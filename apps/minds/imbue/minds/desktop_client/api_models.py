@@ -1,7 +1,7 @@
 """Pydantic models for the ``/api/v1`` surface -- the single source of truth.
 
 These models describe the request bodies, query params, and responses of the
-Imbue Studio API. They live in this low module (no imports from ``api_v1`` or
+Minds API. They live in this low module (no imports from ``api_v1`` or
 ``api_schema``) so that both the route handlers (which validate against them) and
 the schema endpoint (which publishes them) can import them without an import
 cycle.
@@ -44,7 +44,7 @@ class ApiRequestModel(FrozenModel):
 
 
 class ApiErrorResponse(FrozenModel):
-    """A JSON error body returned by Imbue Studio API routes on failure."""
+    """A JSON error body returned by Minds API routes on failure."""
 
     error: str = Field(description="Human-readable error message")
     field: str | None = Field(default=None, description="Offending request field, when the error is field-specific")
@@ -265,9 +265,7 @@ class CreateWorkspaceRequest(ApiRequestModel):
     """Body for creating a new peer workspace."""
 
     git_url: str = Field(description="Template repository URL or local path (required)")
-    host_name: str | None = Field(
-        default=None, description="Workspace/host name; auto-assigned (workspace-N) when omitted"
-    )
+    host_name: str | None = Field(default=None, description="Workspace/host name; auto-assigned (mind-N) when omitted")
     branch: str | None = Field(default=None, description="Branch/tag to create from")
     color: str | None = Field(default=None, description="Hex color for the workspace tile")
     launch_mode: LaunchMode | None = Field(default=None, description="Compute provider (default DOCKER)")
@@ -489,9 +487,7 @@ class WorkspaceSummary(FrozenModel):
     account_email: str | None = Field(default=None, description="Email of the associated signed-in account, when any")
     provider_name: str | None = Field(default=None, description="Provider backend name")
     create_time: str | None = Field(default=None, description="Create time (UTC ISO 8601)")
-    original_minds_version: str | None = Field(
-        default=None, description="Immutable create-time Imbue Studio version label"
-    )
+    original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")
     color: str | None = Field(default=None, description="Workspace tile color")
 
 
@@ -516,7 +512,7 @@ class AccountsResponse(FrozenModel):
 
 
 class AppVersionResponse(FrozenModel):
-    """The version identity of the Imbue Studio desktop app a workspace is attached to."""
+    """The version identity of the minds desktop app a workspace is attached to."""
 
     workspace_template_ref: str = Field(
         description=(
@@ -551,15 +547,11 @@ class UpgradeMergeSummary(FrozenModel):
 
 
 class WorkspaceVersionResponse(FrozenModel):
-    """A workspace's Imbue Studio version: the immutable create-time version + git-derived current/history."""
+    """A workspace's minds version: the immutable create-time version + git-derived current/history."""
 
     agent_id: str = Field(description="The workspace agent id")
-    original_minds_version: str | None = Field(
-        default=None, description="Immutable create-time Imbue Studio version label"
-    )
-    current_minds_version: str | None = Field(
-        default=None, description="Current Imbue Studio version from the workspace git"
-    )
+    original_minds_version: str | None = Field(default=None, description="Immutable create-time minds version label")
+    current_minds_version: str | None = Field(default=None, description="Current minds version from the workspace git")
     upgrade_merges: tuple[UpgradeMergeSummary, ...] = Field(
         default=(), description="Upgrade merges applied since the workspace was created (best-effort)"
     )
@@ -580,7 +572,7 @@ class BackupSnapshotSummary(FrozenModel):
 class WorkspaceBackupsResponse(FrozenModel):
     """A workspace's snapshot picture: the restic listing plus the live backing-up flag.
 
-    Served from Imbue Studio's own restic access alone, so it works (and
+    Served from the minds machine's restic access alone, so it works (and
     stays fast) even when the workspace is offline or destroyed. The slow
     exec-based service verification lives on the separate ``backup-check``
     route so this response never waits on an exec into the workspace.
@@ -589,7 +581,7 @@ class WorkspaceBackupsResponse(FrozenModel):
     """
 
     agent_id: str = Field(description="The workspace agent id")
-    is_configured: bool = Field(description="Whether Imbue Studio holds a canonical restic.env for this workspace")
+    is_configured: bool = Field(description="Whether minds holds a canonical restic.env for this workspace")
     is_backing_up: bool = Field(description="Whether a (non-stale) restic backup is currently running")
     snapshots: tuple[BackupSnapshotSummary, ...] = Field(
         default=(),
@@ -705,14 +697,6 @@ class MachineSharingResponse(FrozenModel):
     identities: dict[str, IdentityRecordResponse] = Field(
         default_factory=dict,
         description="Identity record per granted user id the desktop knows (absent ids render as the bare id)",
-    )
-    migrated_domain_from: str | None = Field(
-        default=None,
-        description=(
-            "Set only on the read that moved the share off a content domain the tier retired: the "
-            "domain it lived at before. Links shared under it no longer work, and the new link is "
-            "not live until the workspace's share stack restarts."
-        ),
     )
 
 

@@ -1746,29 +1746,6 @@ def test_get_share_status_parses_status_document(monkeypatch: pytest.MonkeyPatch
     ]
     assert info.cert_not_after == "2026-10-01 00:00:00+00:00"
     assert info.relay_token is None
-    # A connector that predates the domain-migration flag sends nothing.
-    assert info.needs_reshare is False
-
-
-def test_get_share_status_parses_the_needs_reshare_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "host_id": _SHARE_HOST_ID,
-                "workspace_domain": _SHARE_DOMAIN,
-                "region": "us1",
-                "state": "active",
-                "needs_reshare": True,
-            },
-        )
-
-    client = _install_mock_httpx(monkeypatch, handler)
-
-    info = client.get_share_status(SecretStr("tok"), _SHARE_HOST_ID)
-
-    assert info is not None
-    assert info.needs_reshare is True
 
 
 def test_delete_share_hits_the_share_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1809,38 +1786,6 @@ def test_list_shares_parses_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(items) == 1
     assert items[0].host_id == _SHARE_HOST_ID
     assert items[0].state == "inactive"
-    assert items[0].needs_reshare is False
-
-
-def test_list_shares_parses_the_needs_reshare_flag_per_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "shares": [
-                    {
-                        "host_id": _SHARE_HOST_ID,
-                        "workspace_domain": _SHARE_DOMAIN,
-                        "region": "us1",
-                        "state": "active",
-                        "needs_reshare": True,
-                    },
-                    {
-                        "host_id": "host-" + "b" * 32,
-                        "workspace_domain": _SHARE_DOMAIN,
-                        "region": "us1",
-                        "state": "active",
-                        "needs_reshare": False,
-                    },
-                ]
-            },
-        )
-
-    client = _install_mock_httpx(monkeypatch, handler)
-
-    items = client.list_shares(SecretStr("tok"))
-
-    assert [item.needs_reshare for item in items] == [True, False]
 
 
 # Browser-login support probe + device-token exchange
@@ -2500,54 +2445,3 @@ def test_set_share_grantees_replaces_the_index_and_returns_the_count(monkeypatch
     _install_fake_transport(monkeypatch, handler)
     client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"))
     assert client.set_share_grantees(SecretStr("tok"), "host-abc", ["user-2", "user-3"]) == 2
-
-
-# -- Signup codes (admin-key authenticated) --
-
-
-def test_admin_signup_code_methods_hit_their_routes_and_parse(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, str, str]] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append((request.method, request.url.path, str(request.url.params)))
-        assert request.headers["authorization"] == "Bearer adm"
-        if request.method == "POST" and request.url.path == "/admin/signup-codes":
-            body = _json.loads(request.content)
-            assert body == {"email": "alice@imbue.com", "plan": "ally", "expires_in_days": 7, "note": "vip"}
-            return httpx.Response(
-                200,
-                json={
-                    "id": "code-1",
-                    "code": "plaintext-once",
-                    "invite_url": "https://accounts.example.com/invite/plaintext-once",
-                    "email": "alice@imbue.com",
-                    "plan_name": "ally",
-                    "expires_at": "2026-10-03T00:00:00+00:00",
-                    "revoked_count": 1,
-                },
-            )
-        if request.method == "GET":
-            return httpx.Response(
-                200,
-                json=[
-                    {"id": "code-1", "email": "alice@imbue.com", "created_at": "t0", "is_active": True},
-                    {"id": "code-0", "email": "alice@imbue.com", "created_at": "t-1", "revoked_at": "t0"},
-                ],
-            )
-        return httpx.Response(200, json={"status": "revoked", "id": "code-1"})
-
-    client = _install_mock_httpx(monkeypatch, handler)
-    created = client.admin_create_signup_code(
-        SecretStr("adm"), "alice@imbue.com", plan="ally", expires_in_days=7, note="vip"
-    )
-    assert created.code.get_secret_value() == "plaintext-once"
-    assert created.invite_url.endswith("/invite/plaintext-once")
-    assert created.revoked_count == 1
-    listed = client.admin_list_signup_codes(SecretStr("adm"), "alice@imbue.com")
-    assert [entry.is_active for entry in listed] == [True, False]
-    assert client.admin_revoke_signup_code(SecretStr("adm"), "code-1")["status"] == "revoked"
-    assert seen == [
-        ("POST", "/admin/signup-codes", ""),
-        ("GET", "/admin/signup-codes", "email=alice%40imbue.com"),
-        ("POST", "/admin/signup-codes/code-1/revoke", ""),
-    ]

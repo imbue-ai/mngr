@@ -86,14 +86,14 @@ def test_form_defaults_exclude_byok_only_launch_modes_and_carry_region_context(t
     [
         pytest.param(("user-a", "user-b"), "user-b", "user-b", id="signed-in-configured-default"),
         pytest.param(("user-current",), "user-departed", "user-current", id="sole-account-over-departed-default"),
-        pytest.param(("user-a", "user-b"), "user-gone", "user-a", id="first-account-over-departed-default"),
+        pytest.param(("user-a", "user-b"), "user-gone", "", id="departed-default-among-several"),
         pytest.param((), "user-gone", "", id="every-account-signed-out"),
     ],
 )
 def test_form_defaults_preselect_the_resolved_default_account(
     tmp_path: Path, user_ids: tuple[str, ...], configured_default: str, expected_default: str
 ) -> None:
-    """A stored default that has signed out is never preselected; the first signed-in account is instead."""
+    """A stored default that has signed out is never preselected; a sole signed-in account is instead."""
     client, _minds_config = build_desktop_client_with_accounts(
         tmp_path, user_ids, stored_default_account_id=configured_default
     )

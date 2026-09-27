@@ -6,7 +6,6 @@ from typing import cast
 
 import pytest
 from pydantic import ConfigDict
-from pydantic import Field
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.errors import MngrError
@@ -21,85 +20,9 @@ from imbue.mngr_vps.container_setup import build_home_volume_symlink_command
 from imbue.mngr_vps.container_setup import build_image_on_outer
 from imbue.mngr_vps.container_setup import build_image_on_outer_from_build_args
 from imbue.mngr_vps.container_setup import build_write_container_file_command
-from imbue.mngr_vps.container_setup import container_tmp_tmpfs_size_mib
 from imbue.mngr_vps.container_setup import env_sourced_build_secrets
-from imbue.mngr_vps.container_setup import has_memory_limit_start_arg
-from imbue.mngr_vps.container_setup import has_restart_policy_start_arg
 from imbue.mngr_vps.container_setup import image_exists
-from imbue.mngr_vps.container_setup import memory_cap_labels
-from imbue.mngr_vps.container_setup import resolve_remote_build_root
-from imbue.mngr_vps.container_setup import restart_policy_start_args
-from imbue.mngr_vps.container_setup import runsc_tmpfs_start_args
-from imbue.mngr_vps.container_setup import tmpfs_mount_paths_in_start_args
 from imbue.mngr_vps.data_types import ContainerFile
-
-
-def test_tmpfs_mount_paths_in_start_args_reads_both_flag_spellings() -> None:
-    args = ("--tmpfs", "/run", "--tmpfs=/tmp:rw,size=64m", "--workdir=/", "--tmpfs", "/scratch:noexec")
-    assert tmpfs_mount_paths_in_start_args(args) == {"/run", "/tmp", "/scratch"}
-    assert tmpfs_mount_paths_in_start_args(()) == set()
-    assert tmpfs_mount_paths_in_start_args(("--memory=1g", "--restart=unless-stopped")) == set()
-
-
-# An 8 GB cloud VM reports about 7945 MiB of MemTotal, so its /tmp cap is 993 MiB.
-_EIGHT_GB_VM_MEM_TOTAL_KIB = 8136000
-
-
-def test_container_tmp_tmpfs_size_is_an_eighth_of_the_vms_ram_with_a_floor() -> None:
-    assert container_tmp_tmpfs_size_mib(_EIGHT_GB_VM_MEM_TOTAL_KIB) == 993
-    assert container_tmp_tmpfs_size_mib(16 * 1024 * 1024) == 2048
-    assert container_tmp_tmpfs_size_mib(4 * 1024 * 1024) == 512
-    # A 2 GB VM would get 256 MiB from the fraction alone; the floor holds it there too.
-    assert container_tmp_tmpfs_size_mib(1990000) == 256
-    assert container_tmp_tmpfs_size_mib(900000) == 256
-
-
-def test_runsc_tmpfs_start_args_only_under_runsc_and_only_for_missing_mounts() -> None:
-    assert runsc_tmpfs_start_args(None, (), _EIGHT_GB_VM_MEM_TOTAL_KIB) == ()
-    assert runsc_tmpfs_start_args("runc", (), _EIGHT_GB_VM_MEM_TOTAL_KIB) == ()
-    assert runsc_tmpfs_start_args("runsc", (), _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--tmpfs",
-        "/run",
-        "--tmpfs",
-        "/tmp:exec,size=993m",
-    )
-    assert runsc_tmpfs_start_args("runsc", ("--tmpfs", "/run"), _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--tmpfs",
-        "/tmp:exec,size=993m",
-    )
-    # A caller's own /tmp mount (the gen-2 slice args) is kept as it is, unsized or not.
-    assert runsc_tmpfs_start_args("runsc", ("--tmpfs=/run", "--tmpfs=/tmp:exec"), _EIGHT_GB_VM_MEM_TOTAL_KIB) == ()
-    assert runsc_tmpfs_start_args("runsc", ("--tmpfs", "/tmp:exec,size=1g"), _EIGHT_GB_VM_MEM_TOTAL_KIB) == (
-        "--tmpfs",
-        "/run",
-    )
-
-
-def test_has_memory_limit_start_arg_reads_every_docker_spelling() -> None:
-    assert has_memory_limit_start_arg(("--memory=4096m",))
-    assert has_memory_limit_start_arg(("--memory", "4g"))
-    assert has_memory_limit_start_arg(("--cpus=2", "-m", "4g"))
-    assert not has_memory_limit_start_arg(())
-    assert not has_memory_limit_start_arg(("--memory-swap=4g", "--restart=unless-stopped"))
-
-
-def test_memory_cap_labels_mark_only_containers_without_an_explicit_limit() -> None:
-    assert memory_cap_labels(("--restart=unless-stopped",)) == {"com.imbue.mngr.memory-cap": "vm"}
-    assert memory_cap_labels(("--memory=7168m", "--memory-swap=7168m")) == {}
-
-
-def test_restart_policy_start_args_defaults_to_unless_stopped_unless_the_caller_chose_one() -> None:
-    assert restart_policy_start_args(()) == ("--restart=unless-stopped",)
-    assert restart_policy_start_args(("--workdir=/",)) == ("--restart=unless-stopped",)
-    assert restart_policy_start_args(("--restart=unless-stopped",)) == ()
-    assert restart_policy_start_args(("--restart", "always")) == ()
-    assert restart_policy_start_args(("--restart=no",)) == ()
-
-
-def test_has_restart_policy_start_arg_reads_both_flag_spellings() -> None:
-    assert has_restart_policy_start_arg(("--restart", "on-failure:3"))
-    assert has_restart_policy_start_arg(("--restart=always",))
-    assert not has_restart_policy_start_arg(("--restart-not-a-flag", "--workdir=/"))
 
 
 class _ImageInspectOuter(MutableModel):
@@ -131,42 +54,6 @@ def test_image_exists_true_when_inspect_succeeds() -> None:
 def test_image_exists_false_when_inspect_fails() -> None:
     outer = cast(OuterHostInterface, _ImageInspectOuter(present_image="default-workspace-template:minds-v9.9.9"))
     assert image_exists(outer, "default-workspace-template:absent-tag") is False
-
-
-class _FixedResultOuter(MutableModel):
-    """Outer host that answers every command with the same result and records what was asked."""
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    result: CommandResult
-    issued_commands: list[str] = Field(default_factory=list)
-
-    def execute_idempotent_command(
-        self,
-        command: str,
-        user: str | None = None,
-        cwd: Any = None,
-        env: Any = None,
-        timeout_seconds: float | None = None,
-    ) -> CommandResult:
-        self.issued_commands.append(command)
-        return self.result
-
-
-def test_resolve_remote_build_root_lives_under_dockers_data_root() -> None:
-    outer = _FixedResultOuter(result=CommandResult(stdout="/var/lib/docker\n", stderr="", success=True))
-    assert resolve_remote_build_root(cast(OuterHostInterface, outer)) == "/var/lib/docker/mngr-build"
-    assert outer.issued_commands == ["docker info -f '{{.DockerRootDir}}'"]
-
-
-def test_resolve_remote_build_root_raises_when_docker_cannot_answer_or_answers_nonsense() -> None:
-    for result in (
-        CommandResult(stdout="", stderr="Cannot connect to the Docker daemon", success=False),
-        CommandResult(stdout="\n", stderr="", success=True),
-        CommandResult(stdout="template parsing error\n", stderr="", success=True),
-    ):
-        with pytest.raises(MngrError, match="docker's data root"):
-            resolve_remote_build_root(cast(OuterHostInterface, _FixedResultOuter(result=result)))
 
 
 def test_clone_build_context_returns_none_for_non_git_context(tmp_path: Path) -> None:

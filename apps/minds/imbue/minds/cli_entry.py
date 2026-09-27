@@ -26,7 +26,7 @@ from imbue.minds.utils.logging import setup_logging
 )
 @click.pass_context
 def cli(ctx: click.Context, verbose: int, quiet: bool, output_format: str, log_file: str | None) -> None:
-    """Imbue Studio: run and manage your own persistent, specialized AI agents."""
+    """minds: run and manage your own persistent, specialized AI agents."""
     console_level = console_level_from_verbose_and_quiet(verbose, quiet)
     command_name = ctx.invoked_subcommand or "unknown"
     log_file_path = Path(log_file) if log_file else None

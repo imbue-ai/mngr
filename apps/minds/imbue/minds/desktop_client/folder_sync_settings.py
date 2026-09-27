@@ -42,7 +42,7 @@ class FolderSyncActivity(UpperCaseStrEnum):
     A remembered sync is not simply on or off, because turning it off leaves
     the machine holding a copy that the user may want back, may want gone, and
     may in the meantime have lost -- an agent can do what it likes to its own
-    filesystem, so this is what Imbue Studio last did, not what is certainly there.
+    filesystem, so this is what Minds last did, not what is certainly there.
     """
 
     ACTIVE = auto()

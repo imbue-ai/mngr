@@ -48,7 +48,7 @@ _FAST_INCIDENT_ONSET_DELAY: float = 0.45
         # are provably this device's fault and one says the host answered, but
         # none of them establishes whether the workspace itself is reachable --
         # only a probe does, so declining to enroll would trade a wrong label
-        # for a machine Imbue Studio never looks at again.
+        # for a machine minds never looks at again.
         (SystemInterfaceBackendFailureReason.TUNNEL_SETUP_FAILED, None, True),
         (SystemInterfaceBackendFailureReason.POOL_EXHAUSTED, None, True),
         (SystemInterfaceBackendFailureReason.BACKEND_NOT_LISTENING, None, True),
@@ -1464,7 +1464,7 @@ def test_every_connection_class_envelope_both_enrolls_and_names_its_cause(
 
     They enroll identically -- none of them establishes whether the workspace is
     reachable, and only a probe does -- while each records a distinct cause, so
-    what the surfaces claim can differ without what Imbue Studio *checks* differing.
+    what the surfaces claim can differ without what minds *checks* differing.
     ``BACKEND_NOT_LISTENING`` in particular changes no copy at all today; it is
     recorded so a log or a bug report can tell a dead service inside a reachable
     container from a container nothing could reach.

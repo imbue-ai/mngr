@@ -68,7 +68,7 @@ class GatewayPendingRequests(MutableModel, PendingRequestsInterface):
     gateway_client: LatchkeyGatewayClient = Field(
         frozen=True, description="Client for the gateway's permission-requests endpoints."
     )
-    data_dir: Path = Field(frozen=True, description="Imbue Studio data dir holding the response event log.")
+    data_dir: Path = Field(frozen=True, description="Minds data dir holding the response event log.")
 
     _responses_by_request_id: dict[str, RequestResponseEvent] = PrivateAttr(default_factory=dict)
     _last_good_pending: tuple[StreamedPermissionRequest, ...] = PrivateAttr(default=())

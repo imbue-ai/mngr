@@ -1,4 +1,4 @@
-"""End-to-end manual-trigger test for Imbue Studio.app launch -> first message
+"""End-to-end manual-trigger test for Mind.app launch -> first message
 -> slack permission flow. ONE Python script that replaces:
 
   apps/minds/scripts/launch-and-verify.sh
@@ -12,7 +12,7 @@ Invoked from .github/workflows/minds-launch-to-msg.yml as the single
 test step. NOT a pytest test (no markers, no collection).
 
 Flow:
-  1. Launch Imbue Studio.app via Playwright Electron, UI auth via
+  1. Launch Mind.app via Playwright Electron, UI auth via
      /authenticate?one_time_code=... (minted on disk)
   2. Workspace 1 (W1): click Create, fill form with HOST_NAME, wait for
      agent DONE, send first message ("pong"), wait for reply (screenshots
@@ -84,7 +84,7 @@ from typing import Any
 from loguru import logger
 
 # Playwright-Python has no Electron binding (only Node has _electron.launch).
-# Attach via CDP instead: launch Imbue Studio.app ourselves with
+# Attach via CDP instead: launch Mind.app ourselves with
 # `--remote-debugging-port=<N>` so its Chromium DevTools endpoint is reachable,
 # then `chromium.connect_over_cdp()`. Same API for pages, locators, etc.
 from playwright.sync_api import BrowserContext
@@ -99,8 +99,6 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
-from imbue.minds.bootstrap import MindsPathRole
-from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.desktop_client.e2e_workspace_runner import descendant_frames
 from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -120,7 +118,7 @@ class E2EFailure(Exception):
 
 # knobs (override via env)
 
-MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Imbue Studio.app/Contents/MacOS/Imbue Studio"))
+MINDS_APP_PATH = Path(os.environ.get("MINDS_APP_PATH", "/Applications/Mind.app/Contents/MacOS/Mind"))
 
 
 def _bundled_root_name() -> str:
@@ -149,23 +147,14 @@ def _bundled_root_name() -> str:
     return "minds"
 
 
-def _minds_roots() -> tuple[Path, Path]:
-    """The app's ``(state, logs)`` roots, resolved by the same helper the app's own backend uses."""
-    root_name = _bundled_root_name()
-    return (
-        minds_dir_for_role(MindsPathRole.STATE, root_name),
-        minds_dir_for_role(MindsPathRole.LOGS, root_name),
-    )
-
-
-MINDS_STATE_HOME, MINDS_LOG_HOME = _minds_roots()
-EVENTS_LOG = MINDS_LOG_HOME / "minds-events.jsonl"
-ONE_TIME_CODES = MINDS_STATE_HOME / "auth" / "one_time_codes.json"
+MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / f".{_bundled_root_name()}"
+EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
+ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
 # Plain HTTP; socat terminates TLS on :443.
 SLACK_MOCK_PORT = 8443
-LATCHKEY_DIR = MINDS_STATE_HOME / "latchkey"
+LATCHKEY_DIR = MINDS_HOME / "latchkey"
 # The latchkey-gateway extension writes pending permission request files
 # here. Iter 10 reads this directory directly to verify that Claude
 # re-submits a permission request after a deny (rather than infer it
@@ -182,7 +171,7 @@ HOST_NAME = os.environ.get("HOST_NAME") or f"e2e{time.strftime('%H%M%S')}"
 HOST_NAME_2 = os.environ.get("HOST_NAME_2") or f"{HOST_NAME}-b"
 # WORKSPACE_COUNT=1 (default) preserves the single-workspace flow for local
 # repro; CI sets =2 to drive the second workspace + cross-workspace follow-up
-# pings as an end-to-end isolation check on the same Imbue Studio.app session.
+# pings as an end-to-end isolation check on the same Mind.app session.
 WORKSPACE_COUNT = int(os.environ.get("WORKSPACE_COUNT", "1"))
 
 FIRST_PROMPT = "Reply with exactly the four characters: pong"
@@ -256,10 +245,10 @@ SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _activate_minds() -> None:
-    """Bring the app window forward before snapping so screencapture
+    """Bring the Minds window forward before snapping so screencapture
     sees the app, not just the wallpaper. Best-effort; silent on failure."""
     subprocess.run(
-        ["osascript", "-e", 'tell application "Imbue Studio" to activate'],
+        ["osascript", "-e", 'tell application "Mind" to activate'],
         check=False,
         capture_output=True,
         timeout=5,
@@ -626,7 +615,7 @@ def latchkey_clear_slack() -> None:
     )
 
 
-# Imbue Studio.app launcher + auth
+# Mind.app launcher + auth
 
 
 def wait_backend_url(since_offset: int = 0) -> str:
@@ -640,8 +629,7 @@ def wait_backend_url(since_offset: int = 0) -> str:
 
     deadline = time.time() + LAUNCH_BACKEND_TIMEOUT
     pattern = re.compile(
-        r"(?:Minds|Mind|Imbue Studio) login URL \(one-time use\): "
-        r"(http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
+        r"Minds login URL \(one-time use\): (http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
     )
     while time.time() < deadline:
         if EVENTS_LOG.exists() and EVENTS_LOG.stat().st_size > since_offset:
@@ -676,7 +664,7 @@ def _sleep(seconds: float) -> None:
 
 
 def _free_port() -> int:
-    """Reserve an ephemeral port for Imbue Studio.app's CDP endpoint."""
+    """Reserve an ephemeral port for Mind.app's CDP endpoint."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
@@ -698,7 +686,7 @@ def _wait_cdp(port: int, timeout: float = 60.0) -> str:
 
 
 def dismiss_consent_if_present(page: Page, *, timeout: float = 8_000) -> bool:
-    """Answer the error-reporting consent screen if it is up. True if dismissed.
+    """Answer the "Help improve Mind" consent screen if it is up. True if dismissed.
 
     The SPA consent screen (ConsentPage) takes over the page while
     ``error_reporting_consent_given`` is False, which it always is on a wiped
@@ -1384,9 +1372,9 @@ def pre_run_sweep() -> None:
     The sweep is idempotent and safe to call when there's nothing to clean.
     """
     logger.info("=== pre-run runner sweep ===")
-    # mac-runner-reset.sh already kills every /Applications/Imbue Studio.app/...
+    # mac-runner-reset.sh already kills every /Applications/Mind.app/...
     # process, wipes ~/.minds, and removes the .app entirely BEFORE we run.
-    # So orphan mngr forward / mngr event / Imbue Studio.app processes can't exist
+    # So orphan mngr forward / mngr event / Mind.app processes can't exist
     # by the time we get here. The state below is what mac-runner-reset.sh
     # does NOT cover: host-side mocking residue and a stray caffeinate.
     revert_etc_hosts()
@@ -1414,7 +1402,7 @@ def pre_run_sweep() -> None:
 
 def run_e2e() -> int:
     # Idempotent reset before any state mutation. Anything we leak (socat
-    # holding :443, /etc/hosts entry, orphan Imbue Studio.app/mngr children,
+    # holding :443, /etc/hosts entry, orphan Mind.app/mngr children,
     # latchkey creds, /tmp scratch dirs) is reverted here on the *next*
     # run's startup, so a mid-run crash never biases the following run.
     # The post-run teardown blocks below still handle the success path.
@@ -1437,7 +1425,7 @@ def run_e2e() -> int:
     ca_bundle = ensure_combined_cert_bundle(cert)
     logger.info("brew curl: {}; ca_bundle: {}", brew_curl, ca_bundle)
 
-    # 1. Launch Imbue Studio.app ourselves with --remote-debugging-port so Playwright
+    # 1. Launch Mind.app ourselves with --remote-debugging-port so Playwright
     # can attach via CDP. Use a free port to avoid clashes.
     cdp_port = _free_port()
     env = {
@@ -1498,7 +1486,7 @@ def run_e2e() -> int:
         win.goto(origin + "/")
         snap_page(win, "02-home-after-auth")
 
-        # The post-login error-reporting consent screen
+        # The post-login "Help improve Mind" error-reporting consent screen
         # (the SPA ConsentPage, shown while error_reporting_consent_given is False --
         # always here, since the runner's ~/.minds is wiped each run) sits on
         # the home page until answered. Dismiss it once via Continue; the
@@ -1812,7 +1800,7 @@ def run_e2e() -> int:
 
         # 10-14. Second workspace + cross-workspace follow-up. Drives a
         # FRESH host (HOST_NAME_2) through create + first-message on the
-        # same Imbue Studio.app session, then navigates back to W1's chat URL and
+        # same Mind.app session, then navigates back to W1's chat URL and
         # to W2's chat URL in turn, sending a unique-token follow-up to
         # each. Proves: state isolation between workspaces, both agents
         # survive cross-workspace navigation, mngr_forward + latchkey
@@ -2085,12 +2073,12 @@ def run_e2e() -> int:
             # tile check above (which scrapes the same discovery layer the
             # destroy handler does).
             logger.info("=== mngr CLI list: cross-check W1 present, W2 removed ===")
-            bundled_mngr = MINDS_STATE_HOME / ".venv" / "bin" / "mngr"
+            bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
             if bundled_mngr.exists():
                 # mngr's lima provider shells out to ``limactl list --json``
                 # without going through the bundled-binary env vars (those
                 # are minds-side ergonomics). The packaged binary's PATH
-                # doesn't include /Applications/Imbue Studio.app/.../Resources/lima/bin,
+                # doesn't include /Applications/Mind.app/.../Resources/lima/bin,
                 # so we prepend it here -- otherwise the discovery hits
                 # "No such file or directory: 'limactl'" and the agents
                 # array comes back empty even though the host_dir has W1.
@@ -2098,7 +2086,7 @@ def run_e2e() -> int:
                 bundled_lima_bin = minds_resources / "lima" / "bin"
                 mngr_env = {
                     **os.environ,
-                    "MNGR_HOST_DIR": str(MINDS_STATE_HOME / "mngr"),
+                    "MNGR_HOST_DIR": str(MINDS_HOME / "mngr"),
                     "PATH": f"{bundled_lima_bin}:{os.environ.get('PATH', '')}",
                 }
                 # ``--on-error continue`` puts each provider's discovery error
@@ -2109,7 +2097,7 @@ def run_e2e() -> int:
                 # discovered by providers that DID work, which is what we
                 # actually check. So: parse stdout regardless of exit code;
                 # only fail if the JSON itself is unusable.
-                # Run from $HOME, exactly as Imbue Studio.app spawns mngr (see
+                # Run from $HOME, exactly as Mind.app spawns mngr (see
                 # forward_cli.py and laptop_agent_types_seed.py). mngr's project
                 # config is discovered by walking up from cwd to a git worktree
                 # root and reading `<root>/.mngr/settings.toml`. Without this the
@@ -2145,7 +2133,7 @@ def run_e2e() -> int:
                 # lifecycle keeps a metadata record for ``destroyed_host_
                 # persisted_seconds`` after destroy completes (so historical
                 # state survives) -- so W2's agent stays in the data.json /
-                # mngr list for a grace period even though Imbue Studio.app's
+                # mngr list for a grace period even though Mind.app's
                 # discovery has already dropped its landing-page tile.
                 # Iter 5's home-page screenshot 20 is the canonical proof
                 # that destroy reached the user-visible state; this CLI

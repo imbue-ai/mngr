@@ -1,7 +1,4 @@
-from collections.abc import Sequence
 from pathlib import Path
-
-import click
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -11,7 +8,6 @@ from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_lima import hookimpl
-from imbue.mngr_lima.cli import lima_group
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import DEFAULT_HOST_DIR
 from imbue.mngr_lima.constants import LIMA_BACKEND_NAME
@@ -57,12 +53,10 @@ Supported build arguments for the lima provider:
 Start args are passed directly to 'limactl start'. Common options:
   --cpus=N              Number of CPU cores (default: 4)
   --memory=N            Memory in GiB (default: 4)
-  --disk=N              Boot disk in GiB (default: 100); the btrfs data disk is sized by
-                        the provider's host_data_disk_size setting instead
+  --disk=N              Disk in GiB (default: 100)
   --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
   --mount-writable      Make default mounts writable
-Run 'limactl start --help' for the full list. Change a host's size later with
-'mngr lima resize'.
+Run 'limactl start --help' for the full list.
 """
 
     @staticmethod
@@ -93,9 +87,3 @@ Run 'limactl start --help' for the full list. Change a host's size later with
 def register_provider_backend() -> tuple[type[ProviderBackendInterface], type[ProviderInstanceConfig]]:
     """Register the Lima provider backend."""
     return (LimaProviderBackend, LimaProviderConfig)
-
-
-@hookimpl
-def register_cli_commands() -> Sequence[click.Command]:
-    """Register the ``mngr lima ...`` command group."""
-    return [lima_group]

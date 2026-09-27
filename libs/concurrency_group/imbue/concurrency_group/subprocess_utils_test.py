@@ -6,12 +6,10 @@ import time
 import warnings
 from io import BytesIO
 from threading import Event
-from typing import Final
 from typing import IO
 from typing import cast
 
 import pytest
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -25,7 +23,6 @@ from imbue.concurrency_group.subprocess_utils import _shutdown_popen
 from imbue.concurrency_group.subprocess_utils import _start_exit_waiter
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
-from imbue.concurrency_group.test_utils import make_idle_child_script
 
 
 def test_check_raises_process_timeout_error_when_timed_out() -> None:
@@ -305,72 +302,26 @@ def test_shutdown_popen_reaps_already_exited_process_with_its_own_exit_code() ->
     assert returncode == 0
 
 
-_TRAP_ARMED_LINE: Final[str] = "trap-armed"
-_DYING_WORDS_LINE: Final[str] = "dying-words"
-
-# The trap is armed before the line that announces it, so a TERM sent in response to that
-# line always reaches an armed handler. sh defers a trap that arrives while it is blocked
-# in ``wait`` until the waited child exits, so this one waits in short foreground sleeps
-# instead, after each of which sh runs a pending trap.
-_CHILD_THAT_ANNOUNCES_ITS_TRAP: Final[str] = (
-    f"trap 'echo {_DYING_WORDS_LINE}; exit 1' TERM; echo {_TRAP_ARMED_LINE}; while :; do sleep 0.05; done"
-)
-
-# Real time never reaches this deadline: the clock it is measured against moves only when
-# the test moves it, so the test never waits for it and its length does not matter.
-_POSED_TIMEOUT_SECONDS: Final[float] = 30.0
-_PAST_THE_POSED_DEADLINE_SECONDS: Final[float] = _POSED_TIMEOUT_SECONDS + 1.0
-
-
-class _PosableMonotonicClock:
-    """A monotonic reading that advances only when the test advances it.
-
-    Lets a test say *when* a command's deadline expires, instead of betting that
-    the child reaches the state under test before a real deadline arrives.
-    """
-
-    def __init__(self) -> None:
-        self.seconds = 1000.0
-
-    def __call__(self) -> float:
-        return self.seconds
-
-    def advance(self, seconds: float) -> None:
-        self.seconds += seconds
-
-
 def test_timed_out_process_dying_words_are_captured() -> None:
     """Output written while the child handles its shutdown signal reaches the result.
 
     A timeout kill's final output is the tail that diagnoses where the command
     was stuck, and it is written after the read loop has stopped gathering --
     only the post-kill drain picks it up.
-
-    The deadline is stamped at spawn and nothing orders the child's startup against
-    it, so a real deadline has to be won: the TERM can reach a child that has not
-    armed its trap yet, which then dies on the default disposition having printed
-    nothing. Posing the clock supplies the missing order -- the deadline expires
-    only once the child's own output says the trap is armed -- so this holds for
-    any deadline, however short.
     """
-    clock = _PosableMonotonicClock()
-
-    def expire_the_deadline_once_the_trap_is_armed(line: str, is_stdout: bool) -> None:
-        if _TRAP_ARMED_LINE in line:
-            clock.advance(seconds=_PAST_THE_POSED_DEADLINE_SECONDS)
-
-    finished = run_local_command_modern_version(
-        ["sh", "-c", _CHILD_THAT_ANNOUNCES_ITS_TRAP],
-        is_checked=False,
-        timeout=_POSED_TIMEOUT_SECONDS,
-        trace_output=True,
-        trace_on_line_callback=expire_the_deadline_once_the_trap_is_armed,
-        monotonic_fn=clock,
+    # The sleep runs in the background with an interruptible ``wait``: a
+    # foreground sleep would defer the TERM trap until the sleep finished.
+    script = (
+        "trap 'kill $child 2>/dev/null; echo dying-words; exit 1' TERM; echo started; sleep 30 & child=$!; wait $child"
     )
-
+    finished = run_local_command_modern_version(
+        ["sh", "-c", script],
+        is_checked=False,
+        timeout=0.5,
+    )
     assert finished.is_timed_out
-    assert _TRAP_ARMED_LINE in finished.stdout
-    assert _DYING_WORDS_LINE in finished.stdout
+    assert "started" in finished.stdout
+    assert "dying-words" in finished.stdout
 
 
 def test_shutdown_killed_process_dying_words_are_captured() -> None:
@@ -382,22 +333,27 @@ def test_shutdown_killed_process_dying_words_are_captured() -> None:
     from the output callback on the child's own trap-armed line, so the TERM
     always reaches an armed handler.
     """
+    # The TERM lands right after trap-armed is read. bash defers a trap that
+    # arrives just before it blocks in ``wait`` until the waited child exits,
+    # so the child waits in short foreground sleeps instead, after each of
+    # which bash runs a pending trap.
+    script = "trap 'echo dying-words; exit 1' TERM; echo trap-armed; while :; do sleep 0.05; done"
     shutdown_event = ShutdownEvent.build_root()
 
     def request_shutdown_once_trap_is_armed(line: str, is_stdout: bool) -> None:
-        if _TRAP_ARMED_LINE in line:
+        if "trap-armed" in line:
             shutdown_event.set()
 
     finished = run_local_command_modern_version(
-        ["sh", "-c", _CHILD_THAT_ANNOUNCES_ITS_TRAP],
+        ["sh", "-c", script],
         is_checked=False,
         shutdown_event=shutdown_event,
         trace_output=True,
         trace_on_line_callback=request_shutdown_once_trap_is_armed,
     )
     assert not finished.is_timed_out
-    assert _TRAP_ARMED_LINE in finished.stdout
-    assert _DYING_WORDS_LINE in finished.stdout
+    assert "trap-armed" in finished.stdout
+    assert "dying-words" in finished.stdout
 
 
 class _EndlessStream:
@@ -582,71 +538,3 @@ def test_run_local_command_returns_the_exit_code_of_a_child_that_closed_its_pipe
 
     assert finished.is_timed_out is False
     assert finished.returncode == 7
-
-
-# An idle child's whole lifetime: long enough for a reintroduced timer to fire
-# repeatedly inside it, short enough to keep this a unit test, and unusual enough
-# not to collide with other tests' sleeps.
-_IDLE_CHILD_LIFETIME_SECONDS: Final[str] = "0.53"
-# A healthy run measures six or nine consultations -- two or three passes of the
-# loop -- and the same count whether the child idles for half a second or for two,
-# since the loop wakes for the child's exit and nothing else. The bound trips on a
-# timer with a period under about 70ms (measured: a 60ms poll reaches 36, an 80ms
-# poll only 27), and the 10ms poll this loop replaced reaches 159.
-_MAX_SHUTDOWN_EVENT_CONSULTATIONS_WHILE_IDLE: Final[int] = 30
-
-
-class _CountingShutdownEvent(ShutdownEvent):
-    """A real ShutdownEvent that records how often it was consulted.
-
-    The read loop consults it a fixed number of times per pass, so the count rises
-    with the number of times the loop woke.
-    """
-
-    _consultation_count: int = PrivateAttr(default=0)
-
-    @property
-    def consultation_count(self) -> int:
-        return self._consultation_count
-
-    def is_set(self) -> bool:
-        self._consultation_count += 1
-        return super().is_set()
-
-    def wait(self, timeout: float | None = None) -> bool:
-        self._consultation_count += 1
-        return super().wait(timeout)
-
-
-@pytest.mark.parametrize(
-    "is_closing_its_pipes",
-    [
-        pytest.param(False, id="child_keeps_its_pipes_open"),
-        pytest.param(True, id="child_closed_its_pipes"),
-    ],
-)
-def test_run_local_command_does_not_wake_while_its_child_sits_idle(is_closing_its_pipes: bool) -> None:
-    """The read loop must block until the child speaks, exits, or shutdown is requested.
-
-    Waking on a timer instead is the regression this loop was written to remove: a
-    poll per child per 10ms was most of what a handful of idle background processes
-    cost. ``test_waiting_on_idle_background_processes_uses_almost_no_cpu`` bounds that
-    cost end to end but cannot resolve it finely; counting the loop's wakeups pins the
-    property exactly.
-    """
-    shutdown_event = _CountingShutdownEvent()
-
-    finished = run_local_command_modern_version(
-        ["sh", "-c", make_idle_child_script(_IDLE_CHILD_LIFETIME_SECONDS, is_closing_its_pipes=is_closing_its_pipes)],
-        is_checked=False,
-        shutdown_event=shutdown_event,
-    )
-
-    assert finished.returncode == 0
-    assert shutdown_event.consultation_count >= 1, (
-        "the read loop never consulted its shutdown event, so this test can no longer see its wakeups"
-    )
-    assert shutdown_event.consultation_count <= _MAX_SHUTDOWN_EVENT_CONSULTATIONS_WHILE_IDLE, (
-        f"the read loop woke {shutdown_event.consultation_count} times (counted as shutdown-event "
-        f"consultations) while waiting {_IDLE_CHILD_LIFETIME_SECONDS}s on a child that did nothing"
-    )

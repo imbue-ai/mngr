@@ -236,7 +236,7 @@ def test_serve_request_arms_parent_death_watcher() -> None:
 def test_warm_process_exits_when_parent_disconnects(mngr_caller: MngrCaller) -> None:
     """A warm process must exit promptly once its parent socket is closed.
 
-    Closing the parent end without sending a request simulates the Imbue Studio backend
+    Closing the parent end without sending a request simulates the minds backend
     going away (e.g. a hard kill). The warm process's receiver thread observes
     the socket EOF and exits the process on its own, leaving no orphan -- even
     though the process is still paying the slow ``imbue.mngr.main`` import when

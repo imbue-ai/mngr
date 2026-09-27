@@ -175,29 +175,23 @@ def _locked_grants_write_clause(grants_toml_text: str) -> str:
 
 def provision_share_files_in_agent(
     agent_address: str,
-    # None means "share.env only" (a stale-domain repair): the grants document
-    # the workspace already holds is left exactly as it is.
-    grants_toml_text: str | None,
+    grants_toml_text: str,
     # None means "grants only" (the grants-only update path); the running
     # gateway re-reads grants per request, so share.env is untouched and the
     # tunnel never restarts.
     share_env_text: str | None,
     mngr_caller: MngrCaller,
 ) -> None:
-    """Write a share's files into the agent in ONE exec round trip.
+    """Write all of a share's files into the agent in ONE exec round trip.
 
     Ordering inside the script matters: the grants document lands BEFORE
     share.env, because the share-gateway brings the whole stack up the moment
     share.env appears -- the grants must already be in place by then. The
     grants write runs under the grants-file lock (see the module docstring).
     """
-    clauses: list[str] = []
-    if grants_toml_text is not None:
-        clauses.append(_locked_grants_write_clause(grants_toml_text))
+    clauses = [_locked_grants_write_clause(grants_toml_text)]
     if share_env_text is not None:
         clauses.append(_atomic_write_clause(_SHARE_ENV_FILE, share_env_text, "tmp_env"))
-    if not clauses:
-        raise ShareInjectionError(f"Nothing to write into agent {agent_address}: no grants and no share.env given")
     result = mngr_caller.call(
         ["exec", agent_address, " && ".join(clauses)],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,

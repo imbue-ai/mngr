@@ -2,10 +2,8 @@ import shlex
 
 from imbue.mngr_vps.host_setup import HostSetupStep
 from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
-from imbue.mngr_vps.host_setup import MNGR_SSHD_DROP_IN_PATH
 from imbue.mngr_vps.host_setup import build_auto_shutdown_command
 from imbue.mngr_vps.host_setup import build_host_setup_steps
-from imbue.mngr_vps.host_setup import render_sshd_drop_in_stage_script
 
 
 def generate_gce_startup_script(
@@ -28,9 +26,7 @@ def generate_gce_startup_script(
       the guest agent has no pre-sshd hook, so sshd boots with a random key first.
       We install ours and restart sshd as the first action to shrink that window;
       the provisioner closes it by polling the live key until it matches
-      (``GcpProvider._wait_for_expected_host_key``). On later boots the key is
-      already in place, so the restart is skipped: otherwise sshd would reset the
-      connection ``mngr start`` opens as soon as it sees the expected key.
+      (``GcpProvider._wait_for_expected_host_key``).
     - Each host-setup step runs in its own subshell so a step's early ``exit``
       cannot skip the ``mngr-ready`` marker; the outer ``set -e`` still aborts on
       any step failure.
@@ -53,35 +49,26 @@ def generate_gce_startup_script(
     return f"""#!/bin/bash
 set -e
 
-# Install our SSH host key and sshd drop-in first, restarting sshd only when they
-# change. On first boot sshd is serving its boot-generated random key, so the
-# restart is what makes it serve ours as soon as possible (see
-# _wait_for_expected_host_key). On every later boot the files already match and
-# the restart is skipped: a restart here would reset the connection mngr opens
-# right after `mngr start`, once it has seen the expected key.
-# The drop-in is the same file the shared host-setup step installs (key-only root
-# login, session caps, no per-source penalties); staging the identical content
-# here means that step later finds it in place and does not restart sshd a
-# second time. A drop-in wins because the stock sshd_config's ``Include``
-# precedes its values.
-MNGR_SSH_STAGE="$(mktemp -d)"
-cat > "$MNGR_SSH_STAGE/host_key" <<'MNGR_HOST_KEY_EOF'
+# Install our SSH host key and restart sshd first, so the server stops serving its
+# boot-generated random key as soon as possible (see _wait_for_expected_host_key).
+cat > /etc/ssh/ssh_host_ed25519_key <<'MNGR_HOST_KEY_EOF'
 {host_private_key.rstrip()}
 MNGR_HOST_KEY_EOF
-cat > "$MNGR_SSH_STAGE/host_key.pub" <<'MNGR_HOST_PUB_EOF'
+chmod 0600 /etc/ssh/ssh_host_ed25519_key
+cat > /etc/ssh/ssh_host_ed25519_key.pub <<'MNGR_HOST_PUB_EOF'
 {host_public_key.rstrip()}
 MNGR_HOST_PUB_EOF
-{render_sshd_drop_in_stage_script("$MNGR_SSH_STAGE/60-mngr.conf")}
+chmod 0644 /etc/ssh/ssh_host_ed25519_key.pub
+
+# Disable password auth, allow key-based root login (mngr SSHes in as root). A
+# drop-in wins because the stock sshd_config's ``Include`` precedes its values.
 mkdir -p /etc/ssh/sshd_config.d
-if ! cmp -s "$MNGR_SSH_STAGE/host_key" /etc/ssh/ssh_host_ed25519_key \\
-    || ! cmp -s "$MNGR_SSH_STAGE/host_key.pub" /etc/ssh/ssh_host_ed25519_key.pub \\
-    || ! cmp -s "$MNGR_SSH_STAGE/60-mngr.conf" {MNGR_SSHD_DROP_IN_PATH}; then
-    install -m 0600 "$MNGR_SSH_STAGE/host_key" /etc/ssh/ssh_host_ed25519_key
-    install -m 0644 "$MNGR_SSH_STAGE/host_key.pub" /etc/ssh/ssh_host_ed25519_key.pub
-    install -m 0644 "$MNGR_SSH_STAGE/60-mngr.conf" {MNGR_SSHD_DROP_IN_PATH}
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart
-fi
-rm -rf "$MNGR_SSH_STAGE"
+cat > /etc/ssh/sshd_config.d/60-mngr.conf <<'MNGR_SSHD_EOF'
+PasswordAuthentication no
+PermitRootLogin prohibit-password
+MNGR_SSHD_EOF
+
+systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart
 
 # Forward the provider key into root (some images install it on the default user
 # instead), so root SSH is reachable before the long Docker install.

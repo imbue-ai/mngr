@@ -13,7 +13,6 @@ from imbue.mngr.providers.local.volume import LocalVolume
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.host_store import LimaHostStore
-from imbue.mngr_lima.primitives import LimaDiskSize
 
 
 def _make_certified_data(host_id: HostId, host_name: str = "test-host") -> CertifiedHostData:
@@ -294,30 +293,3 @@ def test_host_record_without_creation_flag_deserializes_as_completed(tmp_path: P
     record = HostRecord.model_validate_json(raw)
 
     assert record.is_creation_in_progress is False
-
-
-def test_host_record_round_trips_the_data_disk_size_and_reads_older_records_without_one(tmp_path: Path) -> None:
-    store = _make_store(tmp_path)
-    host_id = HostId.generate()
-    record = HostRecord(
-        certified_host_data=_make_certified_data(host_id),
-        config=LimaHostConfig(
-            instance_name="mngr-test", host_data_disk_name="mngr-x-data", host_data_disk_size=LimaDiskSize("200GiB")
-        ),
-    )
-    store.write_host_record(record)
-    loaded = store.read_host_record(host_id, use_cache=False)
-    assert loaded is not None and loaded.config is not None
-    assert loaded.config.host_data_disk_size == "200GiB"
-
-    older_id = HostId.generate()
-    older_json = HostRecord(
-        certified_host_data=_make_certified_data(older_id), config=LimaHostConfig(instance_name="mngr-old")
-    ).model_dump_json()
-    assert "host_data_disk_size" in older_json
-    stripped = json.loads(older_json)
-    del stripped["config"]["host_data_disk_size"]
-    store.volume.write_files({f"host_state/{older_id}.json": json.dumps(stripped).encode("utf-8")})
-    loaded_older = store.read_host_record(older_id, use_cache=False)
-    assert loaded_older is not None and loaded_older.config is not None
-    assert loaded_older.config.host_data_disk_size is None

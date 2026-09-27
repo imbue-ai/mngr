@@ -17,11 +17,6 @@ DEB="$(realpath "${2:?path to the .deb}")"
 # Every extracted tree and the uv environment live under one scratch root,
 # removed however the script ends: the two package trees run to hundreds of
 # megabytes, and a failed sync leaves a managed CPython behind as well.
-# The Electron binary inside both packages. electron-builder names it after
-# package.json's `name`; ToDesktop's config schema has no `executableName`, so
-# renaming it means renaming the package.
-EXECUTABLE_NAME="imbue-studio"
-
 SCRATCH="$(mktemp -d)"
 trap 'rm -rf "$SCRATCH"' EXIT
 
@@ -119,7 +114,8 @@ package_type_of() {
 
 echo "== AppImage: $APPIMAGE"
 appimage_root=$(extract_appimage)
-assert_x86_64_elf "$appimage_root/$EXECUTABLE_NAME"
+# electron-builder names the Electron executable after package.json's `name`.
+assert_x86_64_elf "$appimage_root/minds"
 verify_tools "$appimage_root/resources"
 # electron-updater picks the AppImageUpdater unless this file names another
 # package; an AppImage that says deb would try to dpkg -i itself.
@@ -129,7 +125,7 @@ echo "ok: package-type $appimage_type"
 
 echo "== deb: $DEB"
 deb_root=$(extract_deb)
-assert_x86_64_elf "$deb_root/$EXECUTABLE_NAME"
+assert_x86_64_elf "$deb_root/minds"
 verify_tools "$deb_root/resources"
 deb_type=$(package_type_of "$deb_root/resources")
 [[ "$deb_type" == "deb" ]] || fail "the .deb's resources/package-type reads '$deb_type', so electron-updater would run the AppImage updater inside it"

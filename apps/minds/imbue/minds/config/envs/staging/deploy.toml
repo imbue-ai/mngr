@@ -2,12 +2,7 @@
 
 modal_workspace = "minds-staging"
 vault_path_prefix = "secrets/minds/staging"
-# The ops zone (telemetry, errors, the R2 setup scripts), not where user
-# content lives; that is content_domain below.
 cloudflare_domain = "minds-staging.com"
-# The user-content apex shared workspaces are served under, stamped over the
-# Vault sharing entry's SHARE_CONTENT_DOMAIN at deploy time.
-content_domain = "personal-imbue-staging.com"
 
 # Vault-backed per-env Modal Secrets (see dev/deploy.toml for the
 # full explanation). The `litellm-connector` Modal Secret is pushed
@@ -124,7 +119,6 @@ monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
 max_active_machine_units = 8
 max_total_machine_disk_gb = 140
-max_shared_workspaces = 50
 
 [plans.explorer]
 max_remote_workspaces = 2
@@ -135,7 +129,6 @@ monthly_llm_spend_usd = 0
 max_active_synced_workspaces = 200
 max_active_machine_units = 16
 max_total_machine_disk_gb = 280
-max_shared_workspaces = 50
 
 [plans.ally]
 max_remote_workspaces = 10
@@ -146,27 +139,6 @@ monthly_llm_spend_usd = 1000
 max_active_synced_workspaces = 200
 max_active_machine_units = 80
 max_total_machine_disk_gb = 1400
-max_shared_workspaces = 50
-
-# The waitlist plan (specs/minds-waitlist-signup-codes/spec.md): every quota at
-# zero. Accounts created without a signup code land here while [waitlist] is on;
-# a redeemed code promotes them to the plan they chose.
-[plans.guest]
-max_remote_workspaces = 0
-max_total_workspaces = 0
-max_buckets = 0
-max_total_bucket_gb = 0
-monthly_llm_spend_usd = 0
-max_active_synced_workspaces = 0
-max_active_machine_units = 0
-max_total_machine_disk_gb = 0
-max_shared_workspaces = 0
-
-# Whether accounts created without a signup code land on the guest plan (and
-# the download page requires a signed-in, invited account). Pushed to the
-# connector as MINDS_WAITLIST_ENABLED; off leaves signup and downloads open.
-[waitlist]
-is_enabled = true
 
 # Enable web workspace creation (the hosted chrome's POST /hosts/claim).
 # Deliberately unadvertised for now: only people who know the /web URL use it.
@@ -183,19 +155,14 @@ is_enabled = true
 # accounts surface and the web chrome are Modal custom domains on the
 # connector, sharing one browser session via a cookie scoped to the apex.
 # The apex is first-party only -- untrusted workspace content lives on the
-# separate content domain (personal-imbue-staging.com) -- and is staging's
-# own, so sessions can never cross tiers. Every host named here must be
-# registered and verified in the minds-staging Modal workspace (dashboard ->
-# Domains) BEFORE deploying with this block, or the deploy fails. The legacy
-# chrome origin redirects to the chrome origin; the api and llm origins are
-# the custom domains the connector and the LiteLLM proxy answer on.
+# separate content domain (minds-staging.com) -- and is staging's own, so
+# sessions can never cross tiers. Both hosts must be registered and verified
+# in the minds-staging Modal workspace (dashboard -> Domains) BEFORE deploying
+# with this block, or the deploy fails.
 [origins]
 accounts_origin = "https://accounts.imbue-staging.com"
-chrome_origin = "https://studio.imbue-staging.com"
+chrome_origin = "https://minds.imbue-staging.com"
 cookie_domain = "imbue-staging.com"
-legacy_chrome_origins = ["https://minds.imbue-staging.com"]
-api_origin = "https://api.studio.imbue-staging.com"
-llm_origin = "https://llm.studio.imbue-staging.com"
 
 # Whether this tier deploys the analytics app (analytics-<tier>): the
 # gold-table aggregation + lake maintenance crons. Staging's bringup

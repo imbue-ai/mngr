@@ -1,1 +1,0 @@
-- Gen-2 slice containers (the bake and the slow-path rebuild) now get an executable `/tmp` tmpfs capped at an eighth of the slice VM's RAM, instead of an uncapped one: `GEN2_CONTAINER_TMPFS_START_ARGS` mounts only `/run`, and mngr_vps adds the sized `/tmp` under runsc. A large write into `/tmp` now fails with "No space left on device" instead of OOM-killing the workspace.

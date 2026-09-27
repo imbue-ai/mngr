@@ -32,10 +32,10 @@ from imbue.mngr_latchkey.sentry import MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR
 # ``mngr latchkey forward``).
 _MINDS_SENTRY_SERVICE_NAME = "minds-backend"
 
-# The three Imbue Studio *Python-backend* Sentry projects. The ``mngr latchkey forward`` daemon (also a
-# Python process) reports to the same projects -- Imbue Studio passes it the resolved DSN via env var --
+# The three minds *Python-backend* Sentry projects. The ``mngr latchkey forward`` daemon (also a
+# Python process) reports to the same projects -- minds passes it the resolved DSN via env var --
 # distinguishing its events with a ``service`` tag rather than a separate project. These are
-# deliberately *not* the Imbue Studio *frontend* (JavaScript) DSNs, which live in
+# deliberately *not* the minds *frontend* (JavaScript) DSNs, which live in
 # :mod:`imbue.minds.utils.sentry.frontend`: a Sentry project is tied to one platform.
 SENTRY_DSN_PRODUCTION = (
     "https://d8658891db0c1246864df82eefd74b6d@o4504335315501056.ingest.us.sentry.io/4511609235636224"
@@ -43,13 +43,13 @@ SENTRY_DSN_PRODUCTION = (
 SENTRY_DSN_STAGING = "https://221f676a7e3c99733e85dc5c8dd6d6e2@o4504335315501056.ingest.us.sentry.io/4511609241862145"
 SENTRY_DSN_DEV = "https://0a66e5894c00f701e3c1b7c2daae4650@o4504335315501056.ingest.us.sentry.io/4511609244811264"
 
-# The S3 buckets Imbue Studio uploads log/traceback attachments to. ``development`` has no bucket.
+# The S3 buckets minds uploads log/traceback attachments to. ``development`` has no bucket.
 PRODUCTION_UPLOADS_BUCKET = "traceback-uploads-production"
 STAGING_UPLOADS_BUCKET = "traceback-uploads-staging"
 
 
 class SentryDeployEnvironment(StrEnum):
-    """Which Imbue Studio Python Sentry project (and S3 bucket) a process reports to.
+    """Which minds Python Sentry project (and S3 bucket) a process reports to.
 
     ``production`` and ``staging`` each report to their own Sentry DSN and S3 bucket;
     ``development`` reports to the shared dev Sentry project and uploads nothing to S3.
@@ -75,7 +75,7 @@ _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT: Mapping[SentryDeployEnvironment, str | Non
 }
 
 
-# Imbue Studio writes all of its logs flat into a single logs directory (``~/.minds/logs``):
+# Minds writes all of its logs flat into a single logs directory (``~/.minds/logs``):
 #   * ``minds-events.jsonl``      -- the live Python backend log (the loguru JSONL sink)
 #   * ``minds-events.jsonl.<ts>`` -- rotated Python backend logs (timestamp-suffixed, uncompressed)
 #   * ``minds.log``               -- the backend subprocess's stdout/stderr, written by the Electron shell
@@ -185,7 +185,7 @@ def _s3_attachment_bucket_for_environment(environment: SentryDeployEnvironment) 
     return _S3_ATTACHMENT_BUCKET_BY_ENVIRONMENT[environment]
 
 
-# Filename (under the Imbue Studio data dir) holding this install's stable anonymous user id. Kept next to
+# Filename (under the minds data dir) holding this install's stable anonymous user id. Kept next to
 # the other per-install state (config.toml, the latchkey consent file) so it persists across sessions.
 _ANONYMOUS_USER_ID_FILENAME = "anonymous_user_id"
 
@@ -205,9 +205,9 @@ def resolve_anonymous_user_id(data_dir: Path) -> str:
 
 
 def latchkey_forward_sentry_consent_path(data_dir: Path) -> Path:
-    """Path of the JSON consent file Imbue Studio maintains for the detached ``mngr latchkey forward`` daemon.
+    """Path of the JSON consent file minds maintains for the detached ``mngr latchkey forward`` daemon.
 
-    The daemon reads this file live (per event) to gate what it sends, so Imbue Studio rewrites it whenever
+    The daemon reads this file live (per event) to gate what it sends, so minds rewrites it whenever
     the user changes their error-reporting consent -- letting a grant/revoke reach the running daemon
     without respawning it.
     """
@@ -218,7 +218,7 @@ def write_latchkey_forward_sentry_consent(
     consent_file_path: Path,
     is_error_reporting_enabled: bool,
 ) -> None:
-    """Atomically write the daemon's live consent file from Imbue Studio's current consent setting.
+    """Atomically write the daemon's live consent file from minds' current consent setting.
 
     Called at startup and on every consent change so the detached daemon's live gate reflects the
     user's ``report_unexpected_errors`` choice promptly.
@@ -236,11 +236,11 @@ def resolve_latchkey_forward_sentry_env(consent_file_path: Path, anonymous_user_
     """Env vars to publish into the detached ``mngr latchkey forward`` supervisor.
 
     The daemon receives concrete Sentry *infrastructure* config (the DSN, environment name, and S3
-    bucket) that Imbue Studio resolves from its own environment model, plus the path of the
-    live consent file. The daemon needs no knowledge of Imbue Studio's Sentry projects/environments -- it just
+    bucket) that minds resolves from its own (minds-owned) environment model, plus the path of the
+    live consent file. The daemon needs no knowledge of minds' Sentry projects/environments -- it just
     reads strings from its ``MNGR_LATCHKEY_SENTRY_*`` vars. The infrastructure is a snapshot taken when
     the supervisor is (re)spawned (it rarely changes); the user-toggleable consent is *not* snapshotted
-    here -- it lives in the consent file, which Imbue Studio rewrites on every change so a grant/revoke reaches
+    here -- it lives in the consent file, which minds rewrites on every change so a grant/revoke reaches
     the running daemon live.
     """
     environment = resolve_sentry_environment()
@@ -251,7 +251,7 @@ def resolve_latchkey_forward_sentry_env(consent_file_path: Path, anonymous_user_
         MNGR_LATCHKEY_SENTRY_S3_BUCKET_ENV_VAR: bucket or "",
         MNGR_LATCHKEY_SENTRY_RELEASE_ENV_VAR: resolve_release_id(),
         MNGR_LATCHKEY_SENTRY_GIT_SHA_ENV_VAR: resolve_git_sha(),
-        # Share the same anonymous user id Imbue Studio uses, so the daemon's events count as the same
+        # Share the same anonymous user id minds uses, so the daemon's events count as the same
         # install (not a second user) in Sentry's per-issue user counts.
         MNGR_LATCHKEY_SENTRY_USER_ID_ENV_VAR: anonymous_user_id,
         MNGR_LATCHKEY_SENTRY_CONSENT_FILE_ENV_VAR: str(consent_file_path),
@@ -266,9 +266,9 @@ def _external_log_attachment_groups(
     The detached ``mngr latchkey forward`` daemon (which runs discovery and the
     reverse tunnels) logs into the latchkey plugin data dir, the shared
     discovery event stream persists under the mngr host dir, and every ``mngr``
-    subprocess Imbue Studio spawns (recovery restarts included) file-logs its
+    subprocess minds spawns (recovery restarts included) file-logs its
     per-command step timeline into the mngr CLI events dir -- all essential for
-    diagnosis, and all outside the flat Imbue Studio log folder that the default
+    diagnosis, and all outside the flat minds log folder that the default
     sweep covers.
     """
     return (
@@ -350,7 +350,7 @@ def setup_sentry(
     discovery_events_dir: Path,
     mngr_cli_events_dir: Path,
 ) -> None:
-    """Set up Sentry for the Imbue Studio backend process (Flask integration + flat-log layout)."""
+    """Set up Sentry for the minds backend process (Flask integration + flat-log layout)."""
     _setup_sentry(
         dsn=_SENTRY_DSN_BY_ENVIRONMENT[environment],
         environment_name=environment.value,
@@ -365,7 +365,7 @@ def setup_sentry(
         is_error_reporting_enabled=is_error_reporting_enabled,
         s3_attachment_bucket=_s3_attachment_bucket_for_environment(environment),
         # paramiko/pyinfra log handled SSH connection-failure noise at ERROR via stdlib logging; the
-        # Imbue Studio backend brokers cross-workspace reverse tunnels through the same paramiko machinery,
+        # minds backend brokers cross-workspace reverse tunnels through the same paramiko machinery,
         # so ignore those loggers to keep Sentry from flooding on already-handled failures.
         ignored_loggers=SENTRY_IGNORED_STDLIB_LOGGER_PATTERNS,
     )

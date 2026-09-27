@@ -346,7 +346,7 @@ def test_a_published_template_clone_reads_its_base_tag(tmp_path: Path) -> None:
 
 
 def test_the_tag_fetch_repoints_an_official_remote_left_pointing_elsewhere(tmp_path: Path) -> None:
-    """Imbue Studio owns the ``official`` remote name here as it does in the backup scripts: a stale one is repointed."""
+    """minds owns the ``official`` remote name here as it does in the backup scripts: a stale one is repointed."""
     workspace, official = _make_published_template_workspace(tmp_path)
     run_git_for_backup_test(workspace, "remote", "add", "official", str(tmp_path / "somewhere-else"))
     caller = _LocalGitCaller(repo=workspace, official_url=str(official))

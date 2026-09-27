@@ -130,7 +130,7 @@ test('off macOS the headline folds into the body so it is never lost', () => {
 });
 
 test('a banner with no title or subtitle still names the app', () => {
-  assert.deepEqual(nativeNotificationOptionsFor({ body: 'x' }, 'darwin'), { title: 'Imbue Studio', body: 'x' });
+  assert.deepEqual(nativeNotificationOptionsFor({ body: 'x' }, 'darwin'), { title: 'Mind', body: 'x' });
 });
 
 test('the link fallback copies the bare address for mailto and tel, and the whole URL otherwise', () => {

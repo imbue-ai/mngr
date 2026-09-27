@@ -2,7 +2,7 @@
 
 Backs both the local "report a bug" form and the authenticated ``/api/v1`` bug-report route, so reports
 from either path carry the same shape and are submitted the same way. All Sentry submission is owned by
-the outer Imbue Studio app -- agents never reach Sentry directly.
+the outer minds app -- agents never reach Sentry directly.
 
 What is collected depends on the report's context: the description and a handful of always-cheap
 "basics" (versions, OS) are unconditional; app diagnostics are added when requested, and per-workspace
@@ -110,7 +110,7 @@ def _collect_basics() -> dict[str, Any]:
 def _collect_system_usage(data_dir: Path | None) -> dict[str, Any]:
     """Lightweight host resource snapshot using only the standard library (no extra dependency)."""
     usage: dict[str, Any] = {"cpu_count": os.cpu_count()}
-    # getloadavg is available on macOS/Linux (the only platforms Imbue Studio targets), but guard anyway.
+    # getloadavg is available on macOS/Linux (the only platforms minds targets), but guard anyway.
     if hasattr(os, "getloadavg"):
         load_1m, load_5m, load_15m = os.getloadavg()
         usage["load_average"] = {"1m": load_1m, "5m": load_5m, "15m": load_15m}
@@ -125,7 +125,7 @@ def _collect_app_diagnostics(
     backend_resolver: BackendResolverInterface | None,
     data_dir: Path | None,
 ) -> dict[str, Any]:
-    """Imbue Studio app state available everywhere: signed-in accounts, known workspaces, host resource use."""
+    """Minds-app state available everywhere: signed-in accounts, known workspaces, host resource use."""
     diagnostics: dict[str, Any] = {"system": _collect_system_usage(data_dir)}
     if session_store is not None:
         diagnostics["signed_in_account_emails"] = [account.email for account in session_store.list_accounts()]
@@ -289,7 +289,7 @@ def _staged_console(logs_dir: Path | None, staging_dir: Path) -> Path | None:
     workspace, exec, or scanner is involved -- which is why every submit path
     can resolve it at plan time, before the event is captured, workspace or
     not. A tail that cannot be read or written costs the console file only,
-    with the why in Imbue Studio's own log (which rides every report).
+    with the why in minds' own log (which rides every report).
     """
     if logs_dir is None:
         return None

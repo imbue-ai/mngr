@@ -10,7 +10,6 @@ from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import CertifiedHostData
-from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -54,9 +53,6 @@ class MockProviderInstance(BaseProviderInstance):
     connection_errors_cleared: list[HostId] = Field(default_factory=list)
     gc_provider_resources_dry_runs: list[bool] = Field(default_factory=list)
     mock_connection_error_fallback_state: HostState | None = Field(default=None)
-    mock_host_resources: HostResources = Field(
-        default_factory=lambda: HostResources(cpu=CpuResources(count=1), memory_gb=1.0)
-    )
 
     @property
     def supports_snapshots(self) -> bool:
@@ -135,7 +131,7 @@ class MockProviderInstance(BaseProviderInstance):
         raise HostNotFoundError(self.name, host_id)
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
-        return self.mock_host_resources
+        raise NotImplementedError()
 
     def create_snapshot(self, host: HostInterface | HostId, name: SnapshotName | None = None) -> SnapshotId:
         raise NotImplementedError()

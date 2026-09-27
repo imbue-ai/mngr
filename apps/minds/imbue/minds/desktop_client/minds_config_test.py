@@ -37,8 +37,8 @@ def test_onboarding_complete_defaults_false_and_round_trips(tmp_path: Path) -> N
         ("user-kept", ["user-other", "user-kept"], "user-kept"),
         ("user-departed", ["user-only"], "user-only"),
         (None, ["user-only"], "user-only"),
-        ("user-departed", ["user-first", "user-second"], "user-first"),
-        (None, ["user-first", "user-second"], "user-first"),
+        ("user-departed", ["user-first", "user-second"], None),
+        (None, ["user-first", "user-second"], None),
         ("user-departed", [], None),
     ],
 )
@@ -47,39 +47,12 @@ def test_resolve_default_account_id(
     signed_in_user_ids: list[str],
     expected: str | None,
 ) -> None:
-    """A signed-in stored default wins; otherwise the first signed-in account is the default."""
+    """A signed-in stored default wins; otherwise a sole signed-in account is the default."""
     resolved = resolve_default_account_id(
         stored_default_account_id=stored_default_account_id,
         signed_in_user_ids=signed_in_user_ids,
     )
     assert resolved == expected
-
-
-def test_settle_default_account_id_stores_the_fallback_so_it_stays_put(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    config.set_default_account_id("user-departed")
-
-    assert config.settle_default_account_id(["user-first", "user-second"]) == "user-first"
-    # Stored, so a listing that later comes back in another order keeps the same default.
-    assert config.get_default_account_id() == "user-first"
-    assert config.settle_default_account_id(["user-second", "user-first"]) == "user-first"
-
-
-def test_settle_default_account_id_keeps_a_signed_in_default(tmp_path: Path) -> None:
-    config = _make_config(tmp_path)
-    config.set_default_account_id("user-second")
-
-    assert config.settle_default_account_id(["user-first", "user-second"]) == "user-second"
-    assert config.get_default_account_id() == "user-second"
-
-
-def test_settle_default_account_id_never_clears_the_default_on_an_empty_listing(tmp_path: Path) -> None:
-    # A failed account listing is empty too, so it cannot be taken as "everyone signed out".
-    config = _make_config(tmp_path)
-    config.set_default_account_id("user-kept")
-
-    assert config.settle_default_account_id([]) is None
-    assert config.get_default_account_id() == "user-kept"
 
 
 def test_set_and_get_default_account_id(tmp_path: Path) -> None:

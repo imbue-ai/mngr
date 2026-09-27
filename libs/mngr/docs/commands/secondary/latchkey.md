@@ -12,7 +12,7 @@ mngr latchkey <subcommand> [OPTIONS]
 Latchkey gateway lifecycle and per-agent setup [experimental].
 
 Wires the shared Latchkey gateway and per-agent permissions
-without requiring the Imbue Studio desktop app. Run ``mngr latchkey forward``
+without requiring the minds desktop app. Run ``mngr latchkey forward``
 once at startup, then call ``mngr latchkey create-agent-env`` /
 ``mngr latchkey link-permissions`` per host.
 
@@ -231,8 +231,8 @@ Long-running foreground process that:
    one gateway at each agent's fixed URL: the desktop gateway,
    reverse-tunneled onto the loopback of a local agent's host, or the VPS
    gateway, which a remote agent's container reaches over its docker bridge as
-   ``host.docker.internal`` and which forwards the extension routes Imbue Studio
-   owns back to the desktop over a separate VPS-loopback tunnel.
+   ``host.docker.internal`` and which forwards Minds-owned extension
+   routes back to the desktop over a separate VPS-loopback tunnel.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics
@@ -307,7 +307,7 @@ The returned token unlocks every service and every extension
 endpoint reachable through the gateway, so treat it like a root
 credential and pass it as the
 ``X-Latchkey-Gateway-Permissions-Override`` header to gateway
-requests that need wildcard access (e.g. the Imbue Studio desktop client
+requests that need wildcard access (e.g. the minds desktop client
 streaming pending permission requests from the
 ``permission-requests`` extension).
 

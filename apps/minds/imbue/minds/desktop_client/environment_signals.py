@@ -1,12 +1,12 @@
 """Laptop-side environment signals: sleep, and connectivity from this device.
 
-Imbue Studio convicts a workspace of being stuck by watching it fail to answer, and
+Minds convicts a workspace of being stuck by watching it fail to answer, and
 then acts on that conviction by restarting it. Both steps quietly assume the
 laptop was awake and on a working network the whole time. On a laptop neither
 holds often enough to matter: the lid closes mid-outage-check and every
 background loop stops dead; the wifi drops on a train and every remote machine
 stops answering at once; a corporate or hotel network passes HTTP but blocks
-outbound SSH, so the browser works while nothing Imbue Studio does can reach a host.
+outbound SSH, so the browser works while nothing minds does can reach a host.
 Each of those reads, through the machinery downstream, as the workspace dying.
 
 This module supplies the two facts that separate the device's condition from the
@@ -17,7 +17,7 @@ may suppress a negative verdict or withhold an action; nothing here can make a
 workspace read as healthy, and an *unknown* reading -- the state right after a
 wake, before any probe has landed -- suppresses nothing at all. Workspaces
 dialled on this device are exempt from the connectivity signals entirely (which
-machines those are is decided from the address Imbue Studio connects to, by the
+machines those are is decided from the address minds connects to, by the
 recovery paths that apply the rule); the sleep signal still applies to them,
 because the probe loop was frozen regardless of where the machine lives.
 
@@ -53,12 +53,12 @@ polls the network to keep a reading warm: a probe runs when some consumer is
 about to act on the answer, and then repeatedly only while a bad reading is
 outstanding, until it clears. Steady state is silence.
 
-The SSH facet asks about the endpoints Imbue Studio itself dials, supplied by whoever
-constructs the detector. It has to: Imbue Studio's machines are not on port 22 -- an
+The SSH facet asks about the endpoints minds itself dials, supplied by whoever
+constructs the detector. It has to: minds' machines are not on port 22 -- an
 imbue_cloud host answers on a port its box forwarded, somewhere in the
 22000-32000 range -- so a public :22 check would measure a port those machines
 never use, in both directions. Public SSH is still probed, but only to break the
-tie when none of Imbue Studio's own endpoints answer, which is the one case the
+tie when none of minds' own endpoints answer, which is the one case the
 endpoints cannot resolve alone: every machine failing is either the network or
 those machines, and a public host still serving SSH says it was the machines.
 """
@@ -125,7 +125,7 @@ OnWakeCallback = Callable[[datetime], None]
 class SleepTracker(MutableModel):
     """Records the wall-clock windows in which this process was not running.
 
-    Construct one per Imbue Studio process and drive it from a background loop that
+    Construct one per minds process and drive it from a background loop that
     calls :meth:`record_heartbeat` about once a second (see
     ``start_sleep_heartbeat_loop`` in ``app.py``). Consumers ask it two things:
     whether a stretch they have been measuring straddles a sleep
@@ -318,7 +318,7 @@ _PROBE_HOSTS: Final[tuple[str, ...]] = ("github.com", "gitlab.com", "bitbucket.o
 _HTTPS_PORT: Final[int] = 443
 _PUBLIC_SSH_PORT: Final[int] = 22
 
-# How many of Imbue Studio's own SSH endpoints one probe will try before falling back to
+# How many of minds' own SSH endpoints one probe will try before falling back to
 # the public quorum. The question is about the network, which any one of them
 # answers when it succeeds; the cap bounds the case where none of them do.
 _MAX_SAMPLED_WORKSPACE_SSH_ENDPOINTS: Final[int] = 3
@@ -384,10 +384,10 @@ class EnvironmentCondition(UpperCaseStrEnum):
 
 
 class SshEndpoint(FrozenModel):
-    """One ``host:port`` Imbue Studio opens SSH connections to."""
+    """One ``host:port`` minds opens SSH connections to."""
 
     host: str = Field(description="Hostname or address the SSH connection is made to")
-    port: int = Field(description="Port the SSH server answers on; rarely 22 for Imbue Studio's own machines")
+    port: int = Field(description="Port the SSH server answers on; rarely 22 for minds' own machines")
 
 
 class ConnectivityReading(FrozenModel):
@@ -402,7 +402,7 @@ class ConnectivityReading(FrozenModel):
     internet: ConnectivityFacet = Field(description="Whether any probe host answered on the HTTPS port")
     ssh: ConnectivityFacet = Field(
         description=(
-            "Whether this device can open the SSH connections Imbue Studio needs: whether any of the "
+            "Whether this device can open the SSH connections minds needs: whether any of the "
             "endpoints it dials served a banner, or failing that any of the public quorum hosts "
             "on port 22. UNKNOWN while the internet facet is down, which leaves port 22 untested."
         )
@@ -657,7 +657,7 @@ def _fire_connectivity_callbacks(callbacks: list[ConnectivityCallback]) -> None:
 class ConnectivityDetector(MutableModel):
     """Whether this device can reach anything, measured only when it is about to matter.
 
-    Construct one per Imbue Studio process. A consumer that is about to act on the
+    Construct one per minds process. A consumer that is about to act on the
     answer calls :meth:`probe_now` and blocks for it (seconds, on a worker
     thread of its own -- never on a loop that other work is waiting behind); a
     consumer that only wants to render the last known state calls
@@ -685,7 +685,7 @@ class ConnectivityDetector(MutableModel):
     workspace_ssh_endpoints_fn: Callable[[], tuple[SshEndpoint, ...]] = Field(
         default=lambda: (),
         description=(
-            "The SSH endpoints Imbue Studio actually dials, sampled fresh at probe time. Supplied as a "
+            "The SSH endpoints minds actually dials, sampled fresh at probe time. Supplied as a "
             "callable so this module stays a leaf: the endpoints come from discovery, which knows "
             "them per machine. Empty leaves the SSH facet on the public quorum alone. Order "
             "matters: only the first few are measured, so the ones most likely to answer come first."
@@ -790,7 +790,7 @@ class ConnectivityDetector(MutableModel):
         The internet facet is the quorum's disjunction: one host answering on
         443 is enough, since the question is whether this device can reach
         *anything*. The SSH facet is only asked once that has been established,
-        and is measured against the endpoints Imbue Studio itself dials -- see
+        and is measured against the endpoints minds itself dials -- see
         :meth:`_read_ssh_facet`.
 
         ``max_reuse_age_seconds`` lets a caller accept a reading that recent
@@ -953,16 +953,16 @@ class ConnectivityDetector(MutableModel):
             return any([future.result() for future in futures])
 
     def _read_ssh_facet(self) -> ConnectivityFacet:
-        """Whether this device can open the SSH connections Imbue Studio needs. Assumes the internet is up.
+        """Whether this device can open the SSH connections minds needs. Assumes the internet is up.
 
-        Asks Imbue Studio's *own* endpoints first, because they are the only ones whose
+        Asks minds' *own* endpoints first, because they are the only ones whose
         answer is the question: a machine's host is reached on whatever port its
         provider forwarded, and for imbue_cloud that is a box-forwarded port in
         the 22000-32000 range rather than 22. One of them answering settles it --
-        the network passes what Imbue Studio needs, whatever it does to port 22.
+        the network passes what minds needs, whatever it does to port 22.
 
         When none of them answer, the public quorum breaks the tie that the
-        endpoints alone cannot. Every one of Imbue Studio's machines failing has two
+        endpoints alone cannot. Every one of minds' machines failing has two
         explanations, and only one of them is the network: if a public host
         still serves an SSH banner, SSH leaves this device fine and those
         machines are simply unreachable for reasons of their own -- so the facet

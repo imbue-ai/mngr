@@ -7,7 +7,6 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import LIMA_BACKEND_NAME
 from imbue.mngr_lima.constants import MINIMUM_LIMA_VERSION
-from imbue.mngr_lima.primitives import LimaDiskSize
 
 
 def test_default_config() -> None:
@@ -80,10 +79,3 @@ def test_volume_home_path_accepted_with_host_dir_inside() -> None:
 
 def test_volume_home_path_defaults_to_none() -> None:
     assert LimaProviderConfig().volume_home_path is None
-
-
-def test_host_data_disk_size_must_be_a_lima_size() -> None:
-    assert LimaProviderConfig(host_data_disk_size=LimaDiskSize("200GiB")).host_data_disk_size == "200GiB"
-    assert LimaProviderConfig.model_validate({"host_data_disk_size": "200GiB"}).host_data_disk_size == "200GiB"
-    with pytest.raises(ValidationError):
-        LimaProviderConfig.model_validate({"host_data_disk_size": "huge"})

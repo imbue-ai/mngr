@@ -261,8 +261,10 @@ def _run_mngr(
     )
 
 
+# =============================================================================
 # Provider create with a project Dockerfile built on the VM (unique coverage:
 # the remote build-on-VM path, not exercised by the shared trips).
+# =============================================================================
 
 
 @pytest.mark.rsync
@@ -310,8 +312,9 @@ def test_provider_create_builds_dockerfile_on_vm(
         "command",
         "--provider",
         "azure",
+        # D2s_v3 because B-series is currently NotAvailableForSubscription in westus.
         "-b",
-        f"--azure-vm-size={AZURE_TEST_VM_SIZE}",
+        "--azure-vm-size=Standard_D2s_v3",
         "-b",
         "--file=Dockerfile",
         "-b",
@@ -338,10 +341,12 @@ def test_provider_create_builds_dockerfile_on_vm(
         _run_mngr(azure_test_settings_dir, temp_git_repo, "destroy", agent_name, "--force", timeout=180)
 
 
+# =============================================================================
 # Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
 # sketchy kill -> gc), parametrized over isolation mode. See
 # `imbue.mngr.providers.provider_release_testing` and
 # `specs/provider-release-tests.md`.
+# =============================================================================
 
 
 class _AzureReleaseProfile(VpsCloudReleaseProfile):
@@ -497,7 +502,9 @@ def test_provider_release_trip4(
     )
 
 
+# =============================================================================
 # API client smoke tests (real network calls, read-only)
+# =============================================================================
 
 
 @pytest.fixture()

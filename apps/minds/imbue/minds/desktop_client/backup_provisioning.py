@@ -6,8 +6,8 @@ desktop client schedules it on a detached thread), but nothing here is
 creation-specific: the same entry point can be re-applied to any
 already-created host later.
 
-The key idea: Imbue Studio initializes the restic repository itself (from the
-machine running Imbue Studio) and gives each workspace its own random repository
+The key idea: minds initializes the restic repository itself (from the
+machine running minds) and gives each workspace its own random repository
 password -- the repo's single key. Disaster recovery does not need a repo
 "master key": the canonical env (and therefore the random password) syncs
 inside the account's encrypted workspace record, unlocked by the master
@@ -20,12 +20,12 @@ backups:
 2. generates a random per-workspace ``RESTIC_PASSWORD`` and ``restic init``s
    the repo with it,
 3. writes the canonical ``restic.env`` (repo + creds + random password) to
-   the Imbue Studio store (see ``backup_env_store``), and
+   the minds-side store (see ``backup_env_store``), and
 4. injects that whole file into the workspace at
    ``data/.secrets/restic.env`` via ``mngr exec``.
 
 ``CONFIGURE_LATER`` is a no-op. Re-provisioning is idempotent: if a
-canonical env already exists for the workspace, Imbue Studio just re-injects it.
+canonical env already exists for the workspace, minds just re-injects it.
 """
 
 import base64
@@ -73,7 +73,7 @@ _WORKSPACE_PASSWORD_ENTROPY_BYTES = 32
 _MNGR_EXEC_TIMEOUT_SECONDS: Final[float] = 60.0
 
 _CANONICAL_ENV_HEADER = (
-    "# Managed by Imbue Studio. Definitive copy of this machine's restic backup\n"
+    "# Managed by minds. Definitive copy of this machine's restic backup\n"
     "# configuration (repository + credentials + the machine's random\n"
     "# password). The copy inside the machine is injected from this file;\n"
     "# edit here and re-inject rather than editing the machine copy.\n"
@@ -88,7 +88,7 @@ class BackupSetupRequest(FrozenModel):
         default="",
         description=(
             "For API_KEY: the user's free-form KEY=VALUE block (RESTIC_REPOSITORY + backend creds). "
-            "Must NOT define RESTIC_PASSWORD -- Imbue Studio assigns each workspace a random one."
+            "Must NOT define RESTIC_PASSWORD -- minds assigns each workspace a random one."
         ),
     )
     account_email: str = Field(
@@ -350,7 +350,7 @@ def _resolve_repository_and_backend_env(
         env = parse_restic_env(request.api_key_env_text)
         if "RESTIC_PASSWORD" in env:
             raise BackupProvisioningError(
-                "RESTIC_PASSWORD must not be set for api_key backups; Imbue Studio assigns each machine its own password"
+                "RESTIC_PASSWORD must not be set for api_key backups; minds assigns each machine its own password"
             )
         repository = env.pop("RESTIC_REPOSITORY", "")
         if not repository:
@@ -375,7 +375,7 @@ def configure_backups_for_host(
     # when the bucket create hits a quota limit; None disables eviction.
     quota_evictor: Callable[[], bool] | None = None,
 ) -> None:
-    """Provision the repository (from Imbue Studio) and inject the workspace's restic.env.
+    """Provision the repository (from minds) and inject the workspace's restic.env.
 
     No-op for ``CONFIGURE_LATER``. Idempotent: an existing canonical env is
     just re-injected. Raises ``BackupProvisioningError`` (or the
@@ -387,7 +387,7 @@ def configure_backups_for_host(
         return
 
     with log_span("Configuring {} backups for agent {}", request.backup_provider.value, agent_id):
-        # restic must be available on the Imbue Studio machine to init the repo.
+        # restic must be available on the minds machine to init the repo.
         restic_cli.ensure_restic_available()
 
         # Idempotent re-provision: the canonical env is the source of truth.
@@ -419,7 +419,7 @@ def configure_backups_for_host(
             repository=repository, backend_env=backend_env, workspace_password=workspace_password
         )
         # Persist the definitive copy first (so a later injection failure still
-        # leaves Imbue Studio able to reach the repo / show status), then inject.
+        # leaves minds able to reach the repo / show status), then inject.
         write_canonical_env(paths, agent_id, canonical_env)
         _inject_canonical_env(agent_address, canonical_env, parent_cg=parent_cg)
         logger.debug("Injected restic backup config into agent {}", agent_id)
@@ -455,7 +455,7 @@ def disable_backups_for_host(
 ) -> None:
     """Turn a workspace's backups off: archive the canonical env, rotate the workspace copy aside.
 
-    The canonical env moves to the Imbue Studio archive (old snapshots stay
+    The canonical env moves to the minds-side archive (old snapshots stay
     reachable through it) and the workspace's ``restic.env`` is rotated to
     ``restic.env.<timestamp>`` -- a missing file means "not configured", so the
     host-backup service goes idle and the rotated copy cannot be re-adopted.
@@ -491,7 +491,7 @@ def change_backup_destination_for_host(
 ) -> None:
     """Point a workspace's backups at a new destination via fresh provisioning.
 
-    Archives the existing canonical env on the Imbue Studio side (the old repository stays
+    Archives the existing canonical env minds-side (the old repository stays
     reachable through the archive), then runs the ordinary idempotent
     provisioning against the new inputs: new random per-workspace password,
     ``restic init`` keyed solely by that password, canonical env write, and

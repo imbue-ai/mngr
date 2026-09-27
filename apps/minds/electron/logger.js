@@ -3,8 +3,8 @@
 // The main process previously logged only to stdout/stderr via bare console.*
 // calls, which vanish in packaged builds -- so a main-process problem (e.g. a
 // content-view renderer dying over sleep) left nothing on disk to diagnose.
-// This module tees every console.log/warn/error into electron.log under the
-// tier's log root (rotated + gzipped like the other logs) and records uncaught exceptions /
+// This module tees every console.log/warn/error into ~/.minds/logs/electron.log
+// (rotated + gzipped like the other logs) and records uncaught exceptions /
 // unhandled rejections, so those failures are durably diagnosable and uploadable
 // with bug reports. Initialize this as the very first thing in main.js (before
 // initSentry) so startup output is captured.

@@ -1,6 +1,6 @@
 """Unit + local-restic integration tests for backup snapshot-state reads.
 
-restic is a required dependency of the Imbue Studio app (installed in the test
+restic is a required dependency of the minds app (installed in the test
 images), so the integration test runs unconditionally and FAILs -- not
 skips -- if the ``restic`` binary is missing.
 """

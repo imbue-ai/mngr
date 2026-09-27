@@ -98,9 +98,7 @@ class UiWorkspaceEntry(FrozenModel):
     is_network_dependent: bool = Field(
         default=True, description="Whether reaching this machine requires this device to have a working network"
     )
-    supports_shutdown: bool = Field(
-        default=False, description="Whether Imbue Studio can stop/start this workspace's host"
-    )
+    supports_shutdown: bool = Field(default=False, description="Whether minds can stop/start this workspace's host")
     liveness: str = Field(
         default="", description="RUNNING / STOPPED / STOPPING / STARTING / UNKNOWN when supports_shutdown, else empty"
     )
@@ -209,7 +207,7 @@ class UiProviderEntry(FrozenModel):
     name: str = Field(description="Provider instance name")
     backend: str | None = Field(description="Provider backend, None when errored/disabled")
     status: ProviderPanelStatus = Field(description="Panel status bucket")
-    is_enabled: bool = Field(description="Whether Imbue Studio's settings enable the provider")
+    is_enabled: bool = Field(description="Whether minds' settings enable the provider")
     error_type: str | None = Field(default=None, description="Discovery error type for errored providers")
     error_message: str | None = Field(default=None, description="Discovery error message for errored providers")
     is_cloud_account: bool = Field(default=False, description="Bring-your-own-key account row (deletable)")
@@ -363,7 +361,7 @@ class UiWorkspaceUpdate(FrozenModel):
     )
     unknown_reason: UpdateUnknownReason | None = Field(
         default=None,
-        description="On UNKNOWN, whether the machine or this build of Imbue Studio is the side with no version",
+        description="On UNKNOWN, whether the machine or this build of minds is the side with no version",
     )
     current_version: str = Field(description="The workspace's version, empty when unknown")
     supported_version: str = Field(
@@ -673,7 +671,7 @@ class UiAvailableConnection(FrozenModel):
 
 
 class UiPathSync(FrozenModel):
-    """What Imbue Studio knows about syncing one shared path.
+    """What Minds knows about syncing one shared path.
 
     Present whenever the path has ever been synced, not only while a sync is
     running: ``activity`` is what says which. ``state`` describes the running

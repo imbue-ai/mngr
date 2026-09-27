@@ -6,7 +6,6 @@ const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
 const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
-const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -27,8 +26,8 @@ let backendProcess = null;
 
 /**
  * Env var that points the latchkey gateway at the bundled curl router.
- * Set on the Imbue Studio backend process so it flows -- via ``dict(os.environ)``
- * inheritance -- to that process's own latchkey calls, the detached
+ * Set on the minds backend process so it flows -- via ``dict(os.environ)``
+ * inheritance -- to the minds process's own latchkey calls, the detached
  * ``mngr latchkey forward`` supervisor, and the gateway subprocess it
  * spawns.
  *
@@ -45,22 +44,6 @@ function latchkeyCurlEnv() {
     return {};
   }
   return { LATCHKEY_CURL: router };
-}
-
-/**
- * The three platform-canonical roots, as the env vars the Python backend reads
- * ahead of its own resolver.
- *
- * Always all three: the backend rejects a partial set rather than filling the
- * gaps in from its own resolver, which would split one tier across two layouts.
- */
-function platformRootEnv() {
-  const roots = paths.getPlatformRoots();
-  return {
-    MINDS_STATE_DIR: roots.state,
-    MINDS_CACHE_DIR: roots.cache,
-    MINDS_LOG_DIR: roots.logs,
-  };
 }
 
 // Backend stdout JSONL event fields that carry secrets and must be masked
@@ -260,7 +243,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // unchanged.
       const logStream = createRotatingLogStream({ filePath: logFile });
 
-      onProgress(`Starting ${PRODUCT_DISPLAY_NAME}...`);
+      onProgress('Starting Mind...');
 
       let uvBin, args, cwd, env;
 
@@ -331,7 +314,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
           MNGR_PREFIX: mngrPrefix,
-          ...platformRootEnv(),
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // The prestart hook (ensure-binaries.js) stages resources/desync/ before the
@@ -368,7 +350,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         uvBin = uvPath;
         args = [
           'run', '--project', pyprojectDir,
-          // --active makes uv use VIRTUAL_ENV (the venv under the state root) instead of
+          // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
           // <project>/.venv, which is inside the signed .app bundle and
           // read-only on macOS. Without this, `uv run` tries to create
           // .venv inside the bundle and fails with "Operation not permitted".
@@ -409,7 +391,6 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
           MNGR_PREFIX: mngrPrefix,
-          ...platformRootEnv(),
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           MINDS_RESTIC_BINARY: paths.getResticPath(),

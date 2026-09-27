@@ -17,7 +17,7 @@ from imbue.minds.desktop_client.webdav import _build_wsgidav_config
 
 
 def _build_authenticated_client(tmp_path: Path) -> tuple[FlaskClient, str]:
-    """Build a Flask test client + the central Imbue Studio API key it expects."""
+    """Build a Flask test client + the central minds API key it expects."""
     paths = InstallationPaths(data_dir=tmp_path / "minds")
     auth_store = FileAuthStore(data_directory=paths.auth_dir)
     api_key = generate_api_key()

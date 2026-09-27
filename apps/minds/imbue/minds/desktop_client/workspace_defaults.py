@@ -1,7 +1,7 @@
 """Defaults for the workspace create flow: template repo URL and ref.
 
 These are the create form's Repository / Version defaults, and the values a
-plain ``mngr create`` from Imbue Studio uses when the user does not override them.
+plain ``mngr create`` from minds uses when the user does not override them.
 Overridable via the MINDS_WORKSPACE_* env vars only when the operator
 explicitly opts in -- see ``_operator_workspace_default`` for the gating
 rationale.

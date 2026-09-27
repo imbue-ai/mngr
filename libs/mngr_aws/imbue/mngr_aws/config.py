@@ -1,7 +1,4 @@
-from collections.abc import Mapping
-from collections.abc import Sequence
 from typing import Annotated
-from typing import Any
 from typing import Final
 from typing import Literal
 
@@ -15,7 +12,6 @@ from pydantic import PrivateAttr
 from pydantic import SecretStr
 
 from imbue.imbue_common.frozen_model import FrozenModel
-from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.boto_config import AWS_BOTO_CONFIG
@@ -64,47 +60,24 @@ SecurityGroupSpec = Annotated[
     Field(discriminator="kind"),
 ]
 
-# Debian's official AWS publisher account and the name patterns of its Debian 13
-# "trixie" images, keyed by the EC2 architecture name ``DescribeInstanceTypes``
-# reports. The default AMI is the newest matching image in the target region for
-# the instance type's architecture, resolved at create time
-# (``AwsVpsClient.resolve_default_ami_id``) rather than pinned by id: Debian
-# deprecates old AMIs a few months after each point release, so a pinned id
-# eventually stops launching, while the newest image is always launchable and
-# carries the current security fixes.
-DEBIAN_AMI_OWNER_ID: Final[str] = "136693071363"
-DEBIAN_AMI_NAME_PATTERN_BY_ARCHITECTURE: Final[Mapping[str, str]] = {
-    "x86_64": "debian-13-amd64-*",
-    "arm64": "debian-13-arm64-*",
+DEFAULT_AMI_BY_REGION: Final[dict[str, str]] = {
+    # Debian 12 amd64. Fetched via
+    #   aws ec2 describe-images --owners 136693071363 \\
+    #       --filters Name=name,Values=debian-12-amd64-* Name=architecture,Values=x86_64 \\
+    #                 Name=state,Values=available \\
+    #       --query 'sort_by(Images, &CreationDate)[-1].ImageId'
+    # Periodically validated by ``test_default_amis_describe_successfully``
+    # in ``test_release_aws.py``; refresh when that release test starts
+    # flagging entries.
+    "us-east-1": "ami-05b5db63304a51103",
+    "us-east-2": "ami-07863ce80fb4e7190",
+    "us-west-1": "ami-07f5877f993ca15f3",
+    "us-west-2": "ami-04730af737bd6ef2e",
+    "eu-west-1": "ami-049f2bbc51711e7d3",
+    "eu-central-1": "ami-0eabf0a4c5d86ddb6",
+    "ap-southeast-1": "ami-0728f47e064ce89f5",
+    "ap-northeast-1": "ami-084b599f3a2dd0895",
 }
-
-
-@pure
-def pick_ami_architecture(supported_architectures: Sequence[str]) -> str | None:
-    """The EC2 architecture to resolve a Debian AMI for, given an instance type's supported architectures.
-
-    Prefers ``x86_64`` when an instance type supports several (Debian publishes
-    no ``i386`` images), then ``arm64``; None when Debian publishes nothing for
-    any of them.
-    """
-    for architecture in DEBIAN_AMI_NAME_PATTERN_BY_ARCHITECTURE:
-        if architecture in supported_architectures:
-            return architecture
-    return None
-
-
-@pure
-def pick_newest_ami_id(images: Sequence[Mapping[str, Any]]) -> str | None:
-    """The ``ImageId`` of the most recently created image in a ``DescribeImages`` response, or None if empty.
-
-    ``CreationDate`` is an ISO-8601 UTC timestamp, so string order is
-    chronological order.
-    """
-    if not images:
-        return None
-    newest = max(images, key=lambda image: str(image.get("CreationDate", "")))
-    image_id = newest.get("ImageId")
-    return str(image_id) if image_id else None
 
 
 class AwsProviderConfig(PublicIpVpsProviderConfig):
@@ -140,9 +113,8 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
     default_ami_id: str | None = Field(
         default=None,
         description=(
-            "Default AMI ID. When None, the newest Debian 13 AMI Debian publishes in the chosen "
-            "region for the instance type's architecture (amd64 or arm64) is resolved at create "
-            "time via ec2:DescribeInstanceTypes and ec2:DescribeImages."
+            "Default AMI ID. When None, the pinned per-region default (DEFAULT_AMI_BY_REGION) "
+            "is consulted for the chosen region."
         ),
     )
     security_group: SecurityGroupSpec = Field(
@@ -213,7 +185,7 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         description=(
             "Explicit AWS access key id. When set together with aws_secret_access_key, these are "
             "passed directly to boto3 and take precedence over the ambient credential chain. Used by "
-            "the Imbue Studio bring-your-own-account paste flow. Leave unset to use the ambient chain."
+            "the Minds bring-your-own-account paste flow. Leave unset to use the ambient chain."
         ),
     )
     aws_secret_access_key: SecretStr | None = Field(
@@ -274,6 +246,24 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
                 "set use_ec2_instance_metadata=true on the provider config to use its instance role."
             )
         return session
+
+    def get_ami_id_for_region(self, region: str) -> str:
+        """Return the AMI ID to use for the given region.
+
+        Priority: ``default_ami_id`` (explicit override) > pinned per-region
+        default (``DEFAULT_AMI_BY_REGION``). Raises ``AwsConfigError`` (a
+        ``ValueError``) when neither yields an AMI.
+        """
+        if self.default_ami_id:
+            return self.default_ami_id
+        ami = DEFAULT_AMI_BY_REGION.get(region)
+        if ami:
+            return ami
+        raise AwsConfigError(
+            f"No AMI configured for region {region!r}. Set default_ami_id (Debian 12 amd64 AMIs "
+            "are typically what you want; see the Debian AMI finder at "
+            "https://wiki.debian.org/Cloud/AmazonEC2Image)."
+        )
 
     def resolve_state_bucket_name(self, session: boto3.Session, region: str | None = None) -> str | None:
         """Return the effective state-bucket name, or None when it can't be resolved.

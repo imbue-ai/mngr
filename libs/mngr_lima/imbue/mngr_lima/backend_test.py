@@ -1,8 +1,6 @@
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_lima.backend import LimaProviderBackend
-from imbue.mngr_lima.backend import register_cli_commands
-from imbue.mngr_lima.cli import lima_group
 from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.constants import LIMA_BACKEND_NAME
 
@@ -34,9 +32,3 @@ def test_backend_start_args_help() -> None:
     help_text = LimaProviderBackend.get_start_args_help()
     assert "limactl start" in help_text
     assert "--cpus" in help_text
-
-
-def test_backend_registers_the_lima_cli_group() -> None:
-    commands = register_cli_commands()
-    assert [command.name for command in commands] == ["lima"]
-    assert "resize" in lima_group.commands

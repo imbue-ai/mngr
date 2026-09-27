@@ -5,43 +5,35 @@ const os = require('os');
 const path = require('path');
 
 // CLEANUP: delete this module, its call in main.js, and legacy-name-cleanup.test.js
-// once the Imbue Studio build has been on stable long enough for installs to
-// have launched once (specs/imbue-studio-rename/05_cleanup.md).
+// once the "Mind" rename has been on stable long enough for installs to have
+// launched once.
 //
 // Kept free of any `electron` import (like session-persistence.js and
 // update-channel.js) so it can be unit-tested under plain node.
 
-// Every name the app has shipped under before this one, each of which owned
-// its own set of per-user directories.
-//
-// Only ever names the app no longer runs under. Under the platform-canonical
-// layout (platform-roots.js) the current name's directories are the live data
-// root -- secrets, sessions, agent records, the virtualenv -- so appending it
-// here on the next rename would recursively delete all of it. A rename moves
-// that root; it never adds to this list.
-const LEGACY_APP_NAMES = Object.freeze(['Minds', 'Mind']);
+const LEGACY_APP_NAME = 'Minds';
 
 function defaultEnvironment() {
   return { platform: process.platform, homeDir: os.homedir(), env: process.env };
 }
 
 /**
- * The per-user directories Electron gave the app under its previous names.
+ * The per-user directories Electron gave the app under its previous name.
  *
  * The updater cache is deliberately absent: electron-builder derives its name
  * from the package name rather than the product name, so it did not move.
  */
 function legacyNameDirs({ platform, homeDir, env } = defaultEnvironment()) {
   if (platform === 'darwin') {
-    return LEGACY_APP_NAMES.flatMap((name) => [
-      path.join(homeDir, 'Library', 'Application Support', name),
-      path.join(homeDir, 'Library', 'Logs', name),
-      path.join(homeDir, 'Library', 'Caches', name),
-    ]);
+    return [
+      path.join(homeDir, 'Library', 'Application Support', LEGACY_APP_NAME),
+      path.join(homeDir, 'Library', 'Logs', LEGACY_APP_NAME),
+      path.join(homeDir, 'Library', 'Caches', LEGACY_APP_NAME),
+    ];
   }
   const config = env.XDG_CONFIG_HOME || path.join(homeDir, '.config');
   const cache = env.XDG_CACHE_HOME || path.join(homeDir, '.cache');
-  return LEGACY_APP_NAMES.flatMap((name) => [path.join(config, name), path.join(cache, name)]);
+  return [path.join(config, LEGACY_APP_NAME), path.join(cache, LEGACY_APP_NAME)];
 }
 
 /**
@@ -49,8 +41,7 @@ function legacyNameDirs({ platform, homeDir, env } = defaultEnvironment()) {
  *
  * Nothing is moved: `initSentry` opens the Crashpad database and the Sentry
  * queue at the new paths before this runs, so there is no empty destination to
- * move into. What is left behind is crash-reporter scratch: these names
- * predate the platform-canonical layout, so they never held user data.
+ * move into. What is left behind is crash-reporter scratch.
  *
  * Repeating this is free once the directories are gone, so it needs no record
  * of having run, and a removal that fails is simply retried on the next launch.
@@ -71,4 +62,4 @@ function removeLegacyNameDirs(environment = defaultEnvironment()) {
   return removed;
 }
 
-module.exports = { removeLegacyNameDirs, legacyNameDirs, LEGACY_APP_NAMES };
+module.exports = { removeLegacyNameDirs, legacyNameDirs, LEGACY_APP_NAME };

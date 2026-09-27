@@ -56,7 +56,6 @@ from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
 from imbue.mngr_codex.app_server_client import AppServerTransport
-from imbue.mngr_codex.app_server_client import TransportClosedError
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
 from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import ROOT_SESSION_FILENAME
@@ -369,13 +368,6 @@ class _ScriptedTransport:
             {"jsonrpc": "2.0", "id": request["id"], "error": {"code": code, "message": message}}
         )
 
-    def close_on(self, method: str) -> None:
-        """Drop the connection when ``method`` is sent, as the real transport reports a dead socket."""
-        self._responders[method] = self._raise_closed
-
-    def _raise_closed(self, request: Mapping[str, Any]) -> None:
-        raise TransportClosedError(f"scripted connection closed on {request.get('method')!r}")
-
     def params_of(self, method: str) -> Mapping[str, Any]:
         for frame in self.sent:
             parsed = json.loads(frame)
@@ -396,10 +388,7 @@ def _thread_read_result(status: Mapping[str, Any], turns: Sequence[Mapping[str, 
 
 
 def _scripted_codex_agent(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    transport: _ScriptedTransport,
-    agent_config: CodexAgentConfig,
+    local_provider: LocalProviderInstance, tmp_path: Path, transport: _ScriptedTransport
 ) -> CodexAgent:
     """A codex agent whose app-server connection is the given scripted transport."""
 
@@ -407,38 +396,7 @@ def _scripted_codex_agent(
         def _connect_app_server_transport(self) -> AppServerTransport:
             return transport
 
-    return _make_codex_agent(_ScriptedCodexAgent, local_provider, tmp_path, agent_config, is_auto_approve=True)
-
-
-def _establishing_codex_agent(
-    local_provider: LocalProviderInstance,
-    tmp_path: Path,
-    transport: _ScriptedTransport,
-    agent_config: CodexAgentConfig,
-    rollouts_by_session_id: Mapping[str, Path],
-) -> CodexAgent:
-    """A codex agent that can run ``wait_for_ready_signal``'s root-conversation establishment offline."""
-
-    class _EstablishingCodexAgent(CodexAgent):
-        def _connect_app_server_transport(self) -> AppServerTransport:
-            return transport
-
-        # Skip the real socket handshake; the scripted transport stands in for the daemon.
-        def _wait_for_app_server_ready(self, timeout: float | None) -> None:
-            return None
-
-        # No live tmux pane here; the hook-trust clear is a tmux concern, tested separately.
-        def _clear_hook_trust_prompt(self) -> None:
-            return None
-
-        # Stand in for the rollout the daemon would materialize, so the transcript-path write runs
-        # without a live daemon (and without the find racing a real file).
-        def _find_adopted_rollout_path(
-            self, host: OnlineHostInterface, sessions_dir: Path, session_id: str
-        ) -> Path | None:
-            return rollouts_by_session_id.get(session_id)
-
-    return _make_codex_agent(_EstablishingCodexAgent, local_provider, tmp_path, agent_config, is_auto_approve=True)
+    return _make_codex_agent(_ScriptedCodexAgent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
 
 
 def test_send_message_delivers_when_idle(local_provider: LocalProviderInstance, tmp_path: Path) -> None:
@@ -450,7 +408,7 @@ def test_send_message_delivers_when_idle(local_provider: LocalProviderInstance, 
     transport.respond_result("turn/start", {"turn": {"id": "turn-1", "status": "inProgress"}})
     # Post-send block check: active, no waiting flags -> not blocked.
     transport.respond_result("thread/read", _thread_read_result({"type": "active", "activeFlags": []}, []))
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig())
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
 
     agent.send_message("hello world")
 
@@ -476,7 +434,7 @@ def test_send_message_parks_when_busy(local_provider: LocalProviderInstance, tmp
         _thread_read_result({"type": "active", "activeFlags": []}, [{"id": "turn-7", "status": "inProgress"}]),
     )
     transport.respond_result("turn/steer", {"turnId": "turn-7"})
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig())
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
 
     agent.send_message("park me")
 
@@ -500,7 +458,7 @@ def test_send_message_pins_persisted_root_among_loaded_subagents(
     transport.respond_result("thread/loaded/list", {"data": ["subagent-a", "root-thread", "subagent-b"]})
     transport.respond_result("thread/read", _thread_read_result({"type": "idle"}, []))
     transport.respond_result("turn/start", {"turn": {"id": "turn-9", "status": "inProgress"}})
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig())
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
     agent.host.write_text_file(agent._get_agent_dir() / APP_SERVER_THREAD_FILENAME, "root-thread")
 
     agent.send_message("to the root")
@@ -517,7 +475,7 @@ def test_send_message_raises_send_message_error_when_not_accepted(
     transport.respond_result("thread/loaded/list", {"data": []})
     transport.respond_result("thread/start", {"thread": {"id": "thread-1", "status": {"type": "idle"}}})
     transport.respond_error("turn/start", -32000, "model provider unavailable")
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig())
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
 
     with pytest.raises(SendMessageError) as exc_info:
         agent.send_message("nope")
@@ -529,7 +487,7 @@ def test_send_message_raises_when_handshake_fails(local_provider: LocalProviderI
     """A failed ``initialize`` is a send failure -> ``SendMessageError``, connection closed."""
     transport = _ScriptedTransport()
     transport.respond_error("initialize", -32600, "requires experimentalApi capability")
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig())
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
 
     with pytest.raises(SendMessageError):
         agent.send_message("hello")
@@ -551,111 +509,13 @@ def test_send_message_raises_delivered_but_blocked_when_agent_blocks(
             {"type": "active", "activeFlags": ["waitingOnApproval"]}, [{"id": "turn-1", "status": "inProgress"}]
         ),
     )
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig())
+    agent = _scripted_codex_agent(local_provider, tmp_path, transport)
 
     with pytest.raises(MessageDeliveredButBlockedError):
         agent.send_message("do the risky thing")
     # It IS delivered: the turn was started before the block was detected.
     assert "turn/start" in transport.sent_methods()
     assert transport.is_closed is True
-
-
-# Falling back from a pinned model the account does not offer
-
-
-def _account_model(slug: str, *, is_default: bool, is_hidden: bool) -> dict[str, Any]:
-    return {"id": slug, "model": slug, "displayName": slug, "hidden": is_hidden, "isDefault": is_default}
-
-
-def _fresh_thread_send_transport(offered_models: Sequence[Mapping[str, Any]] | None) -> _ScriptedTransport:
-    """A daemon with no thread loaded, so a send starts one; ``None`` makes ``model/list`` fail."""
-    transport = _ScriptedTransport()
-    transport.respond_result("initialize", _initialize_result())
-    transport.respond_result("thread/loaded/list", {"data": []})
-    if offered_models is None:
-        transport.respond_error("model/list", -32000, "failed to load configuration")
-    else:
-        transport.respond_result("model/list", {"data": list(offered_models)})
-    transport.respond_result("thread/start", {"thread": {"id": "thread-1", "status": {"type": "idle"}}})
-    transport.respond_result("turn/start", {"turn": {"id": "turn-1", "status": "inProgress"}})
-    transport.respond_result("thread/read", _thread_read_result({"type": "active", "activeFlags": []}, []))
-    return transport
-
-
-def test_send_message_starts_thread_on_account_default_when_pinned_model_is_not_offered(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    transport = _fresh_thread_send_transport(
-        [
-            _account_model("gpt-6-astra", is_default=True, is_hidden=False),
-            _account_model("gpt-6-luna", is_default=False, is_hidden=False),
-        ]
-    )
-    config = CodexAgentConfig(model="gpt-6-sol", fall_back_to_account_default_model=True)
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, config)
-
-    agent.send_message("hello")
-
-    assert transport.params_of("model/list")["includeHidden"] is True
-    assert transport.params_of("thread/start")["model"] == "gpt-6-astra"
-    assert transport.params_of("turn/start")["threadId"] == "thread-1"
-
-
-@pytest.mark.parametrize(
-    "offered_models",
-    [
-        pytest.param(
-            [
-                _account_model("gpt-6-astra", is_default=True, is_hidden=False),
-                _account_model("gpt-6-sol", is_default=False, is_hidden=True),
-            ],
-            id="pin-offered-hidden",
-        ),
-        pytest.param(None, id="model-list-fails"),
-        pytest.param([{"id": "gpt-6-astra", "isDefault": True}], id="model-list-malformed"),
-        pytest.param([], id="nothing-marked-default"),
-    ],
-)
-def test_send_message_starts_thread_on_pinned_model_when_no_fallback_applies(
-    local_provider: LocalProviderInstance, tmp_path: Path, offered_models: Sequence[Mapping[str, Any]] | None
-) -> None:
-    """The pin stands (no model on ``thread/start``) when the account offers it, when its model list
-    cannot be read or is malformed, and when nothing is marked default -- and the send still goes through."""
-    transport = _fresh_thread_send_transport(offered_models)
-    config = CodexAgentConfig(model="gpt-6-sol", fall_back_to_account_default_model=True)
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, config)
-
-    agent.send_message("hello")
-
-    assert "model/list" in transport.sent_methods()
-    assert "model" not in transport.params_of("thread/start")
-    assert "turn/start" in transport.sent_methods()
-
-
-def test_send_message_keeps_pinned_model_when_fallback_is_off(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    transport = _fresh_thread_send_transport([_account_model("gpt-6-astra", is_default=True, is_hidden=False)])
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, CodexAgentConfig(model="gpt-6-sol"))
-
-    agent.send_message("hello")
-
-    assert "model/list" not in transport.sent_methods()
-    assert "model" not in transport.params_of("thread/start")
-
-
-def test_send_message_fails_without_starting_a_thread_when_model_list_hits_a_dead_connection(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    transport = _fresh_thread_send_transport([_account_model("gpt-6-astra", is_default=True, is_hidden=False)])
-    transport.close_on("model/list")
-    config = CodexAgentConfig(model="gpt-6-sol", fall_back_to_account_default_model=True)
-    agent = _scripted_codex_agent(local_provider, tmp_path, transport, config)
-
-    with pytest.raises(SendMessageError):
-        agent.send_message("hello")
-
-    assert "thread/start" not in transport.sent_methods()
 
 
 # Lifecycle / waiting_reason re-sourced from live thread status (event-sourced)
@@ -928,7 +788,7 @@ def test_resolve_canonical_path_resolves_symlinks(codex_agent: CodexAgent, tmp_p
 def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     command = str(codex_agent.assemble_command(codex_agent.host, (), None))
     codex_home = str(codex_agent._get_codex_home())
-    # The socket lives under a short /tmp path (NOT under CODEX_HOME) to stay under the unix-socket
+    # The socket lives at a short /tmp path (NOT under CODEX_HOME) to stay under the unix-socket
     # SUN_LEN limit; every client resolves it via get_codex_app_server_socket_path.
     socket_path = str(get_codex_app_server_socket_path(codex_agent._get_codex_home()))
     # Backgrounded supervisor, scoped to `&` so codex is the foreground process.
@@ -938,10 +798,8 @@ def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     assert f"cd {codex_agent.work_dir}" in command
     # CODEX_HOME injected only on the codex process.
     assert f"env CODEX_HOME={codex_home}" in command
-    # The agent's private socket directory exists, and the stale socket is cleaned, before the
-    # daemon binds.
-    socket_dir = str(get_codex_app_server_socket_path(codex_agent._get_codex_home()).parent)
-    assert f"mkdir -p -m 700 {socket_dir} && rm -f {socket_path}" in command
+    # The stale socket is cleaned before the daemon binds.
+    assert f"rm -f {socket_path}" in command
     # The daemon runs in a detached sidecar window; the visible TUI is `codex --remote`.
     assert "tmux new-window -d" in command
     assert "app-server --listen" in command
@@ -1137,9 +995,27 @@ def test_wait_for_ready_signal_establishes_and_persists_root_conversation(
     transport.respond_result("thread/inject_items", {})
 
     fake_rollout = tmp_path / "sessions" / "2026" / "01" / "01" / "rollout-2026-01-01T00-00-00-root-1.jsonl"
-    agent = _establishing_codex_agent(
-        local_provider, tmp_path, transport, CodexAgentConfig(), {"root-1": fake_rollout}
-    )
+
+    class _Agent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+        # Skip the real socket handshake; the scripted transport stands in for the daemon.
+        def _wait_for_app_server_ready(self, timeout: float | None) -> None:
+            return None
+
+        # No live tmux pane here; the hook-trust clear is a tmux concern, tested on its own below.
+        def _clear_hook_trust_prompt(self) -> None:
+            return None
+
+        # Stand in for the rollout the daemon would materialize, so the transcript-path write runs
+        # without a live daemon (and without the find racing a real file).
+        def _find_adopted_rollout_path(
+            self, host: OnlineHostInterface, sessions_dir: Path, session_id: str
+        ) -> Path | None:
+            return fake_rollout if session_id == "root-1" else None
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     calls: list[str] = []
     agent.wait_for_ready_signal(True, lambda: calls.append("started"))
 
@@ -1157,25 +1033,6 @@ def test_wait_for_ready_signal_establishes_and_persists_root_conversation(
     assert (agent._get_agent_dir() / TRANSCRIPT_PATH_FILENAME).read_text().strip() == str(fake_rollout)
 
 
-def test_wait_for_ready_signal_establishes_root_on_account_default_when_pinned_model_is_not_offered(
-    local_provider: LocalProviderInstance, tmp_path: Path
-) -> None:
-    """The root conversation a create establishes (which `mngr create --message` then talks to) falls back too."""
-    transport = _ScriptedTransport()
-    transport.respond_result("initialize", _initialize_result())
-    transport.respond_result("model/list", {"data": [_account_model("gpt-6-astra", is_default=True, is_hidden=False)]})
-    transport.respond_result("thread/start", {"thread": {"id": "root-1", "status": {"type": "idle"}}})
-    transport.respond_result("thread/inject_items", {})
-
-    fake_rollout = tmp_path / "sessions" / "2026" / "01" / "01" / "rollout-2026-01-01T00-00-00-root-1.jsonl"
-    config = CodexAgentConfig(model="gpt-6-sol", fall_back_to_account_default_model=True)
-    agent = _establishing_codex_agent(local_provider, tmp_path, transport, config, {"root-1": fake_rollout})
-    agent.wait_for_ready_signal(True, lambda: None)
-
-    assert transport.params_of("thread/start")["model"] == "gpt-6-astra"
-    assert (agent._get_agent_dir() / ROOT_SESSION_FILENAME).read_text().strip() == "root-1"
-
-
 def test_wait_for_ready_signal_skips_establish_when_root_already_persisted(
     local_provider: LocalProviderInstance, tmp_path: Path
 ) -> None:
@@ -1190,9 +1047,24 @@ def test_wait_for_ready_signal_skips_establish_when_root_already_persisted(
     transport.respond_result("initialize", _initialize_result())
     transport.respond_result("thread/start", {"thread": {"id": "root-new", "status": {"type": "idle"}}})
     fake_rollout = tmp_path / "sessions" / "2026" / "01" / "01" / "rollout-2026-01-01T00-00-00-adopted-9.jsonl"
-    agent = _establishing_codex_agent(
-        local_provider, tmp_path, transport, CodexAgentConfig(), {"adopted-9": fake_rollout}
-    )
+
+    class _Agent(CodexAgent):
+        def _connect_app_server_transport(self) -> AppServerTransport:
+            return transport
+
+        def _wait_for_app_server_ready(self, timeout: float | None) -> None:
+            return None
+
+        # No live tmux pane here; the hook-trust clear is a tmux concern, tested on its own below.
+        def _clear_hook_trust_prompt(self) -> None:
+            return None
+
+        def _find_adopted_rollout_path(
+            self, host: OnlineHostInterface, sessions_dir: Path, session_id: str
+        ) -> Path | None:
+            return fake_rollout if session_id == "adopted-9" else None
+
+    agent = _make_codex_agent(_Agent, local_provider, tmp_path, CodexAgentConfig(), is_auto_approve=True)
     agent_dir = agent._get_agent_dir()
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / ROOT_SESSION_FILENAME).write_text("adopted-9")

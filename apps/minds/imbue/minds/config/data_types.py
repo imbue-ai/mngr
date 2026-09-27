@@ -26,7 +26,6 @@ from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.errors import ManagementPlaneConfigError
 from imbue.minds.errors import OriginsConfigError
 from imbue.minds.errors import SshCaConfigError
-from imbue.minds.primitives import ContentDomain
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
@@ -39,21 +38,9 @@ MNGR_BINARY: Final[str] = "mngr"
 
 
 class InstallationPaths(FrozenModel):
-    """Resolved filesystem paths of one Imbue Studio installation (one data directory on one device).
+    """Resolved filesystem paths of one minds installation (one data directory on one device)."""
 
-    ``data_dir`` is the state root, which macOS backs up, and logs live on a
-    root of their own that it does not; see
-    ``imbue.minds.bootstrap.minds_dir_for_role`` for how the Electron shell
-    resolves them.
-    """
-
-    data_dir: Path = Field(
-        description="State root: secrets, sessions, agent records (e.g. ~/Library/Application Support/Imbue Studio/production)"
-    )
-    log_root: Path | None = Field(
-        default=None,
-        description="Log root; None lays it out under data_dir",
-    )
+    data_dir: Path = Field(description="Root directory for minds data (e.g. ~/.minds)")
 
     @property
     def auth_dir(self) -> Path:
@@ -62,19 +49,21 @@ class InstallationPaths(FrozenModel):
 
     @property
     def mngr_host_dir(self) -> Path:
-        """Directory where mngr stores agent state for this Imbue Studio install."""
+        """Directory where mngr stores agent state for this minds install (e.g. ~/.minds/mngr)."""
         return self.data_dir / "mngr"
 
     @property
     def log_dir(self) -> Path:
-        """Directory for log files.
+        """Directory for log files (e.g. ~/.minds/logs).
 
-        Both the backend's JSONL log (``minds-events.jsonl``, via ``--log-file``) and the Electron main-process log (``minds.log``) live here.
+        Mirrors the Electron shell's ``getLogDir()``: the Python backend's JSONL
+        log (``minds-events.jsonl``, via ``--log-file``) and the Electron
+        main-process log (``minds.log``) both live here.
         """
-        return self.log_root if self.log_root is not None else self.data_dir / "logs"
+        return self.data_dir / "logs"
 
     def workspace_dir(self, agent_id: AgentId) -> Path:
-        """Directory for a specific workspace's repo."""
+        """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
         return self.data_dir / str(agent_id)
 
 
@@ -407,7 +396,6 @@ class PlanQuotasConfig(FrozenModel):
     max_total_machine_disk_gb: NonNegativeInt = Field(
         description="Max machine data-disk GB summed across running + stopped remote machines"
     )
-    max_shared_workspaces: NonNegativeInt = Field(description="Max workspaces the account may have shared at once")
 
     def to_plan_row(self) -> dict[str, float]:
         """The connector-table column values for this plan (storage converted to bytes)."""
@@ -420,21 +408,7 @@ class PlanQuotasConfig(FrozenModel):
             "max_active_synced_workspaces": int(self.max_active_synced_workspaces),
             "max_active_machine_units": int(self.max_active_machine_units),
             "max_total_machine_disk_gb": int(self.max_total_machine_disk_gb),
-            "max_shared_workspaces": int(self.max_shared_workspaces),
         }
-
-
-class WaitlistDeployConfig(FrozenModel):
-    """The ``[waitlist]`` block of a ``deploy.toml`` (specs/minds-waitlist-signup-codes/spec.md).
-
-    Pushed into the connector's per-deploy Modal Secret as
-    ``MINDS_WAITLIST_ENABLED``. On, accounts created without a signup code
-    land on the zero-quota guest plan and the download page requires a
-    signed-in, invited account; off (and an absent block) leaves signup and
-    downloads open, which is what dev and ci tiers run.
-    """
-
-    is_enabled: bool = Field(description="Whether new accounts without a signup code are waitlisted on this tier")
 
 
 class WebWorkspacesConfig(FrozenModel):
@@ -507,7 +481,7 @@ class OriginsConfig(FrozenModel):
     chrome_origin: AnyUrl = Field(
         description=(
             "Origin of the hosted web chrome (served at ``/web``), e.g. "
-            "``https://studio.imbue.com``. Drives SHARE_CHROME_ORIGIN at deploy time, and "
+            "``https://minds.imbue.com``. Drives SHARE_CHROME_ORIGIN at deploy time, and "
             "is attached to the connector as a Modal custom domain."
         ),
     )
@@ -517,49 +491,10 @@ class OriginsConfig(FrozenModel):
             "session cookie is scoped to it so the session crosses the two hosts."
         ),
     )
-    legacy_chrome_origins: tuple[AnyUrl, ...] = Field(
-        default=(),
-        description=(
-            "Former web-chrome origins (e.g. ``https://minds.imbue.com``) the connector redirects to "
-            "``chrome_origin``. Attached to the connector as Modal custom domains so the redirect can be "
-            "served; pushed as LEGACY_CHROME_ORIGINS at deploy time. Empty means no redirect."
-        ),
-    )
-    api_origin: AnyUrl | None = Field(
-        default=None,
-        description=(
-            "Origin the connector's API is reached at (e.g. ``https://api.studio.imbue.com``), attached "
-            "to the connector as a Modal custom domain and polled for liveness after every deploy. None "
-            "keeps clients on the bare Modal URL."
-        ),
-    )
-    llm_origin: AnyUrl | None = Field(
-        default=None,
-        description=(
-            "Origin the LiteLLM proxy is reached at (e.g. ``https://llm.studio.imbue.com``), attached "
-            "to the proxy as a Modal custom domain and polled for liveness after every deploy. None "
-            "keeps clients on the bare Modal URL."
-        ),
-    )
-
-    def labeled_origins(self) -> tuple[tuple[str, AnyUrl], ...]:
-        """Every origin the block names, paired with the field name it came from (for error messages)."""
-        labeled: list[tuple[str, AnyUrl]] = [
-            ("accounts_origin", self.accounts_origin),
-            ("chrome_origin", self.chrome_origin),
-        ]
-        labeled.extend(
-            (f"legacy_chrome_origins[{idx}]", origin) for idx, origin in enumerate(self.legacy_chrome_origins)
-        )
-        if self.api_origin is not None:
-            labeled.append(("api_origin", self.api_origin))
-        if self.llm_origin is not None:
-            labeled.append(("llm_origin", self.llm_origin))
-        return tuple(labeled)
 
     @model_validator(mode="after")
     def _check_origins_are_https_hosts_under_the_cookie_domain(self) -> "OriginsConfig":
-        for label, origin in self.labeled_origins():
+        for label, origin in (("accounts_origin", self.accounts_origin), ("chrome_origin", self.chrome_origin)):
             if origin.scheme != "https":
                 raise OriginsConfigError(f"[origins] {label} must be https, got {origin}")
             if origin.path not in (None, "", "/") or origin.query is not None or origin.fragment is not None:
@@ -571,42 +506,6 @@ class OriginsConfig(FrozenModel):
                 raise OriginsConfigError(
                     f"[origins] {label} host {host!r} is not a subdomain of cookie_domain {self.cookie_domain!r}"
                 )
-        return self
-
-    @model_validator(mode="after")
-    def _check_legacy_origins_are_not_current_origins(self) -> "OriginsConfig":
-        # A legacy origin that is also the chrome origin would redirect to
-        # itself forever; one that is the accounts origin would redirect the
-        # sign-in pages away from the only host they work on.
-        current_hosts = {self.accounts_origin.host, self.chrome_origin.host}
-        for idx, origin in enumerate(self.legacy_chrome_origins):
-            if origin.host in current_hosts:
-                raise OriginsConfigError(
-                    f"[origins] legacy_chrome_origins[{idx}] {origin.host!r} is the current chrome or accounts host"
-                )
-        return self
-
-    @model_validator(mode="after")
-    def _check_api_and_llm_hosts_are_distinct(self) -> "OriginsConfig":
-        # Each custom domain can be attached to exactly one Modal function, so
-        # the API and LLM hosts cannot share a name with each other or with the
-        # browser-facing hosts; a legacy chrome host counts, since the connector
-        # answers everything on it with a redirect to the chrome origin.
-        browser_hosts = {
-            self.accounts_origin.host,
-            self.chrome_origin.host,
-            *(origin.host for origin in self.legacy_chrome_origins),
-        }
-        if self.api_origin is not None and self.api_origin.host in browser_hosts:
-            raise OriginsConfigError(f"[origins] api_origin {self.api_origin.host!r} is a browser-facing host")
-        if self.llm_origin is not None and self.llm_origin.host in browser_hosts:
-            raise OriginsConfigError(f"[origins] llm_origin {self.llm_origin.host!r} is a browser-facing host")
-        if (
-            self.api_origin is not None
-            and self.llm_origin is not None
-            and self.api_origin.host == self.llm_origin.host
-        ):
-            raise OriginsConfigError(f"[origins] api_origin and llm_origin share the host {self.api_origin.host!r}")
         return self
 
 
@@ -879,22 +778,7 @@ class DeployEnvConfig(FrozenModel):
         description="HCP Vault path prefix for this tier's secrets, e.g. `secrets/minds/production`."
     )
     cloudflare_domain: NonEmptyStr = Field(
-        description=(
-            "The tier's ops zone: the Cloudflare domain the telemetry and error-tracking hostnames and the "
-            "R2 setup scripts live under (e.g. ``imbueminds.com``). Not the user-content domain, which is "
-            "``content_domain``. Operator tooling derives the ``telemetry.``, ``errors.``, and R2 hostnames "
-            "from it (the box collector install, the provisioning recipes, ``scripts/r2/setup_tier.py``). "
-            "Must be a two-label apex: the ops-zone DNS writers derive the zone from a hostname's last two "
-            "labels and look it up by name, so neither a zone id nor a copy of this value is stored in Vault."
-        )
-    )
-    content_domain: ContentDomain | None = Field(
-        default=None,
-        description=(
-            "The apex shared-workspace hostnames live under (e.g. ``personal-imbue.com``), stamped over "
-            "the Vault ``sharing`` entry's SHARE_CONTENT_DOMAIN at deploy time so git is the source of "
-            "truth. Every committed tier sets it; None leaves the Vault value standing."
-        ),
+        description="Cloudflare zone domain used by this tier (informational; the connector also reads this from its own Vault entry)."
     )
     secrets: DeploySecretsConfig = Field(
         description="Which `.minds/template/*.sh`-shaped services the deploy step pulls from Vault and pushes to Modal."
@@ -952,12 +836,6 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "Pinned template + blessed compute shape for browser-driven workspace creation "
             "(the connector's POST /hosts/claim). None (the default) disables web creates on the tier."
-        ),
-    )
-    waitlist: WaitlistDeployConfig | None = Field(
-        default=None,
-        description=(
-            "Whether new accounts without a signup code are waitlisted (the guest plan). None (the default) means off."
         ),
     )
     storage: StorageDeployConfig | None = Field(

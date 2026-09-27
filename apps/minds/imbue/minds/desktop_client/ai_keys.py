@@ -100,7 +100,7 @@ def mint_workspace_credential_blob(
 
     The alias is deterministic and LiteLLM enforces unique aliases, so a key
     minted earlier -- including one whose create response was lost (LiteLLM
-    never re-reveals a secret, and Imbue Studio deliberately stores none) -- would
+    never re-reveals a secret, and minds deliberately stores none) -- would
     otherwise dead-end every later mint. ``is_rotate_on_exists`` makes the CLI
     delete the existing key and mint a fresh one inside its single invocation
     (each CLI subprocess pays a multi-second boot, so the rotation must not

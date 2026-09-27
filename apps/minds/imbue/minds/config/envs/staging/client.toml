@@ -3,10 +3,8 @@
 # Staging is shape-identical to production. Operators populate these values
 # once the staging Modal workspace + connector + litellm-proxy are stood up.
 
-# The api and llm custom domains from deploy.toml's [origins] block. The
-# *.modal.run URLs they front stay attached for the binaries that carry them.
-connector_url = "https://api.studio.imbue-staging.com"
-litellm_proxy_url = "https://llm.studio.imbue-staging.com"
+connector_url = "https://minds-staging--rsc-staging-api.modal.run"
+litellm_proxy_url = "https://minds-staging--llm-staging-proxy.modal.run"
 
 # The accounts host shared-workspace visitor links point at (a Modal custom
 # domain on the connector app; see the [origins] block in deploy.toml).

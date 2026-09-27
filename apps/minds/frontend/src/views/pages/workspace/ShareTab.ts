@@ -344,17 +344,6 @@ function renderEditor(
             [m(Spinner, { size: "sm" }), "Updating who can open this link..."],
           )
         : null,
-      share.migratedDomainFrom !== null && !isDisabling
-        ? m(
-            "div",
-            { id: "ws-share-moved", class: "mt-3" },
-            m(
-              Notice,
-              { variant: "info" },
-              "Sharing moved to a new address; links you shared before no longer work.",
-            ),
-          )
-        : null,
       share.isAwaitingLink(target) && !isDisabling
         ? m(
             "div",

@@ -1686,7 +1686,6 @@ class FakeSharingCli(FakeImbueCloudCli):
             relay_token=None,
             last_tunnel_login_at=self.share.last_tunnel_login_at,
             cert_not_after=self.share.cert_not_after,
-            needs_reshare=self.share.needs_reshare,
         )
 
     def create_share(
@@ -2192,75 +2191,6 @@ def test_machine_sharing_status_enabled(tmp_path: Path) -> None:
     assert body["url"] == f"https://{_TEST_HOST_ID}.owner1234.us1.shares.example/"
     # The grants document survives the exec envelope round trip.
     assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
-
-
-def test_machine_sharing_status_repairs_a_share_left_on_a_retired_content_domain(tmp_path: Path) -> None:
-    # Opening the share panel is what moves a share the connector flags
-    # needs_reshare: the read re-shares (the connector mints the new domain),
-    # rewrites share.env only, and reports the old domain once so the panel
-    # can say the address moved.
-    agent_id = AgentId()
-    stale_domain = f"{_TEST_HOST_ID}.owner1234.us1.retired.example"
-    grants_toml = '[workspace]\nemails = ["viewer@example.com"]\nemail_domains = []\n'
-    cli = _fake_sharing_cli(
-        share=ShareCliInfo(
-            host_id=_TEST_HOST_ID,
-            workspace_domain=stale_domain,
-            region="us1",
-            state="active",
-            relay_endpoints=TEST_RELAY_ENDPOINTS,
-            needs_reshare=True,
-        ),
-        mngr_caller=_ShareProbeCaller(is_share_env_present=True, grants_stdout=grants_toml),
-    )
-    client = _sharing_client(tmp_path, agent_id, cli)
-
-    response = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
-
-    assert response.status_code == 200, response.data
-    body = json.loads(response.data)
-    assert body["enabled"] is True
-    assert body["migrated_domain_from"] == stale_domain
-    assert body["workspace_domain"] == f"{_TEST_HOST_ID}.owner1234.us1.shares.example"
-    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
-    assert cli.created_shares == [_TEST_HOST_ID]
-    exec_commands = [call[2] for call in _recorded_mngr_calls(cli) if call and call[0] == "exec"]
-    assert len(exec_commands) == 2
-    assert "data/.secrets/share.env" in exec_commands[1]
-    assert "share_grants.toml" not in exec_commands[1]
-    # The moved share is current now: the next read is a plain status read.
-    again = json.loads(client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header()).data)
-    assert again["migrated_domain_from"] is None
-    assert cli.created_shares == [_TEST_HOST_ID]
-
-
-def test_machine_sharing_status_reports_a_failed_domain_move_as_an_error(tmp_path: Path) -> None:
-    agent_id = AgentId()
-    stale_share = ShareCliInfo(
-        host_id=_TEST_HOST_ID,
-        workspace_domain=f"{_TEST_HOST_ID}.owner1234.us1.retired.example",
-        region="us1",
-        state="active",
-        relay_endpoints=TEST_RELAY_ENDPOINTS,
-        needs_reshare=True,
-    )
-    cli = _fake_sharing_cli(
-        share=stale_share,
-        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
-        create_share_error="connector refused",
-    )
-    client = _sharing_client(tmp_path, agent_id, cli)
-    # The readiness poll's cached lookup from before the move was attempted.
-    state = get_state(client.application)
-    state.active_share_cache.put(_TEST_HOST_ID, stale_share)
-
-    response = client.get(f"/api/v1/workspace-sharing/{agent_id}", headers=_auth_header())
-
-    assert response.status_code == 502
-    assert "connector refused" in json.loads(response.data)["error"]
-    # The connector create may have moved the share before the failure, so
-    # the poll must not keep serving the old domain from its cache.
-    assert state.active_share_cache.get(_TEST_HOST_ID) is None
 
 
 def test_machine_sharing_status_reports_unknown_grants_when_the_read_fails(tmp_path: Path) -> None:

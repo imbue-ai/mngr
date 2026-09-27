@@ -82,7 +82,9 @@ class OvhProvider(VpsProvider):
         super().reset_caches()
         self._vps_iam_cache = None
 
+    # =========================================================================
     # Build-args parsing -- OVH uses --ovh-datacenter (alias for --ovh-region)
+    # =========================================================================
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         """Parse OVH-prefixed build args. ``--ovh-datacenter=`` is an alias for ``--ovh-region=``."""
@@ -102,7 +104,9 @@ class OvhProvider(VpsProvider):
             plan_arg_name="plan",
         )
 
+    # =========================================================================
     # Discovery -- list our VPSes via IAM v2 tags
+    # =========================================================================
 
     def _list_provider_vps_hostnames(self) -> list[str]:
         """Return SSH hostnames for OVH VPSes tagged with this provider's name.
@@ -129,7 +133,9 @@ class OvhProvider(VpsProvider):
         self._vps_iam_cache = hostnames
         return list(hostnames)
 
+    # =========================================================================
     # Pending-order reconciliation -- adopt VPSes from previously-timed-out orders
+    # =========================================================================
 
     def _provider_state_dir(self) -> Path:
         """``<profile_dir>/providers/<backend>/<instance_name>/`` -- mngr's per-instance state dir.
@@ -253,7 +259,9 @@ class OvhProvider(VpsProvider):
             placeholder_host_id,
         )
 
+    # =========================================================================
     # VPS provisioning -- OVH order + rebuild + TOFU + IAM tag attach
+    # =========================================================================
 
     def _maybe_claim_recycled_vps(
         self,
@@ -498,7 +506,7 @@ class OvhProvider(VpsProvider):
                 )
 
                 # OVH installs the rebuild key for the image's default
-                # non-root user (e.g. `debian` on the Debian images),
+                # non-root user (e.g. `debian` on `Debian 12 - Docker`),
                 # not for root. TOFU + bootstrap happen as that user;
                 # the bootstrap sudo-copies the key to /root/.ssh so the
                 # rest of the provider (which operates as root via the
@@ -531,12 +539,11 @@ class OvhProvider(VpsProvider):
                 # OVH has no cloud-init, so the host-level setup that cloud-init
                 # backends (Vultr) get at first boot is applied here over SSH via
                 # the single shared source of truth (``apply_host_setup_on_outer``):
-                # the base packages mngr_vps needs (rsync/inotify-tools/jq), the
-                # Docker daemon and journal bounds, pinned Docker, optional gVisor
-                # runsc (gated by ``install_gvisor_runtime``), the sshd drop-in,
-                # the container memory cap reconciler, plus the OVH-specific qemu
-                # purge that disables the hypervisor's filesystem-freezing
-                # automated backups. Runs as the final
+                # pinned Docker, optional gVisor runsc (gated by
+                # ``install_gvisor_runtime``), sshd tuning, the base packages
+                # mngr_vps needs (rsync/inotify-tools/jq), plus the
+                # OVH-specific qemu purge that disables the hypervisor's
+                # filesystem-freezing automated backups. Runs as the final
                 # outer-bootstrap step (on both the fresh-order and recycle
                 # paths -- the recycle rebuild reinstalls the qemu agent) before
                 # the base VpsProvider takes over. Any failure raises and

@@ -1,1 +1,0 @@
-Merges the Debian 13 default (issue #975): the default OVH image is plain `Debian 13` (no Docker-preinstalled trixie image exists; the shared host setup installs the pinned Docker anyway). Not yet exercised end to end, since the OVH release trip is blocked at order checkout for the available credentials. See the `mngr-host-sizing-debian-13` entry.

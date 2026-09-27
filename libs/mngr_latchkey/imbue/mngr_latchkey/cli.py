@@ -52,6 +52,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
+from imbue.mngr_latchkey._pre_lock_migration import pre_lock_forward_pid
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -70,6 +71,7 @@ from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.sentry import setup_forward_sentry
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import acquire_forward_lock
+from imbue.mngr_latchkey.store import delete_forward_info
 from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import probe_forward_lock
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
@@ -637,6 +639,18 @@ def _run_forward_supervisor(
     Extracted from :func:`_forward_command` so the latter can wrap it in a single error-logging +
     Sentry-flush boundary; see that function for why an unhandled error is logged through loguru.
     """
+    # CLEANUP: a forward predating the ownership lock holds none, so the lock
+    # below would be taken uncontended beside it, and its record is the only
+    # thing that can announce it. A record surviving the refusal names no live
+    # forward, so it goes. Remove the whole block with ``_pre_lock_migration``.
+    pre_lock_pid = pre_lock_forward_pid(latchkey.plugin_data_dir)
+    if pre_lock_pid is not None:
+        raise click.ClickException(
+            f"A ``mngr latchkey forward`` from an earlier build is still running for this latchkey "
+            f"directory (pid={pre_lock_pid}); stop it before starting a new one.",
+        )
+    delete_forward_info(latchkey.plugin_data_dir)
+
     # Exclusive ownership of this directory, held until the shutdown ``finally``
     # releases it -- or, on a path that never reaches it, until this process exits.
     try:
@@ -926,8 +940,8 @@ CommandHelpMetadata(
    one gateway at each agent's fixed URL: the desktop gateway,
    reverse-tunneled onto the loopback of a local agent's host, or the VPS
    gateway, which a remote agent's container reaches over its docker bridge as
-   ``host.docker.internal`` and which forwards the extension routes Imbue Studio
-   owns back to the desktop over a separate VPS-loopback tunnel.
+   ``host.docker.internal`` and which forwards Minds-owned extension
+   routes back to the desktop over a separate VPS-loopback tunnel.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics
@@ -1005,7 +1019,7 @@ The returned token unlocks every service and every extension
 endpoint reachable through the gateway, so treat it like a root
 credential and pass it as the
 ``X-Latchkey-Gateway-Permissions-Override`` header to gateway
-requests that need wildcard access (e.g. the Imbue Studio desktop client
+requests that need wildcard access (e.g. the minds desktop client
 streaming pending permission requests from the
 ``permission-requests`` extension).""",
     examples=(("Capture into a shell variable", "ADMIN_JWT=$(mngr latchkey admin-jwt)"),),
@@ -1107,7 +1121,7 @@ CommandHelpMetadata(
     one_line_description="Latchkey gateway lifecycle and per-agent setup [experimental]",
     synopsis="mngr latchkey <subcommand> [OPTIONS]",
     description="""Wires the shared Latchkey gateway and per-agent permissions
-without requiring the Imbue Studio desktop app. Run ``mngr latchkey forward``
+without requiring the minds desktop app. Run ``mngr latchkey forward``
 once at startup, then call ``mngr latchkey create-agent-env`` /
 ``mngr latchkey link-permissions`` per host.
 

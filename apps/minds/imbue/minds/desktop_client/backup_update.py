@@ -446,11 +446,11 @@ def _resolve_restore_snapshot(
     snapshot_id: str,
     parent_cg: ConcurrencyGroup | None,
 ) -> restic_cli.ResticSnapshot:
-    """Resolve the snapshot to restore, from Imbue Studio's own view of the repository.
+    """Resolve the snapshot to restore, from minds' own view of the repository.
 
-    Imbue Studio holds the canonical restic.env, so it can read the snapshot's
+    minds holds the canonical restic.env, so it can read the snapshot's
     recorded root and timestamp here -- the in-workspace script does not need
-    to re-query restic for metadata Imbue Studio already has. Doing it before the
+    to re-query restic for metadata minds already has. Doing it before the
     workspace is touched also means a bad snapshot id fails the operation
     outright, rather than after the services are stopped and a safety snapshot
     has been taken for nothing.
@@ -482,7 +482,7 @@ def _resolve_restore_subpath(
     snapshotted the whole unified host volume). All of those sit under the
     snapshot's recorded path, except in snapshots host_backup takes by backing
     up ``.`` from inside the tree: those hold ``workspace/`` at the snapshot's
-    own root, so the subpath is ``/``. Resolved here, from Imbue Studio's own view of
+    own root, so the subpath is ``/``. Resolved here, from minds' own view of
     the repository, so the in-workspace script only ever consumes a validated
     ``<snapshot>:<subpath>`` -- restoring the wrong level would wreck the
     workspace.
@@ -647,7 +647,7 @@ def _run_restore_phases(
             str(agent_id),
             "--snapshot-id",
             snapshot_id,
-            # Resolved above from Imbue Studio's own view of the repository, so the
+            # Resolved above from minds' own view of the repository, so the
             # script never re-queries restic for this metadata.
             "--snapshot-subpath",
             snapshot_subpath,

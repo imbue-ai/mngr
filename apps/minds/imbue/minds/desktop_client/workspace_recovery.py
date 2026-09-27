@@ -1,6 +1,6 @@
 """Workspace recovery: the passive backend verdict + the recovery worker.
 
-Imbue Studio recovers a machine two ways, and they are not the same action. On the
+minds recovers a machine two ways, and they are not the same action. On the
 STUCK edge it *starts* the machine, unasked: ``mngr start`` alone, which checks
 ground truth at commit time and no-ops against a host that is already running,
 so it can never bounce a live container. Only the user's "Restart machine" click
@@ -14,7 +14,7 @@ actions). They are extracted here -- away from :mod:`app` -- so the
 versioned ``/api/v1`` surface (:mod:`api_v1`) can drive them without importing
 :mod:`app` (which would form an import cycle, since ``app`` imports ``api_v1``).
 
-``read_backend_unreachable_verdict`` answers "can Imbue Studio reach the provider that
+``read_backend_unreachable_verdict`` answers "can minds reach the provider that
 hosts this machine at all?" from evidence already in hand, so a polling surface
 pays nothing for it. ``run_host_recovery_sequence`` is the background worker body
 (the stop step when there is one, then the start, then await recovery) that
@@ -27,7 +27,7 @@ supplies the raw facts -- has this process been running, can this device reach
 anything -- and is deliberately a leaf that knows nothing of machines or
 providers, so everything that answers one of its questions *from discovery*
 lives on this side of the line: :class:`WorkspaceSshEndpointSource` (the
-endpoints Imbue Studio itself dials, which is what the SSH facet measures),
+endpoints minds itself dials, which is what the SSH facet measures),
 :class:`ProviderErrorConnectivityTrigger` (a provider discovery cannot reach is
 the earliest evidence a cold start on a dead network produces),
 :func:`is_network_dependent_workspace` / :func:`is_network_dependent_provider`
@@ -161,20 +161,20 @@ _GATE_VOIDED_READING_ATTEMPT_LIMIT: Final[int] = 3
 # routinely pointed at a daemon on another machine (``host = "ssh://box"`` in
 # its config) and reports this same backend name. So a name outside this set
 # settles the question outright, while one inside it defers to the coordinates
-# Imbue Studio dials (:func:`is_loopback_host`) -- the machine's own, or its machines'
+# minds dials (:func:`is_loopback_host`) -- the machine's own, or its machines'
 # for the provider form -- and answers alone only where no coordinate has been
 # reported. Not ``mind_liveness``'s set of the same shape: that one is scoped
-# to backends Imbue Studio can also shut down, which excludes ``local`` -- and a local
+# to backends minds can also shut down, which excludes ``local`` -- and a local
 # workspace is the last one a dead network should be allowed to withhold a
 # start from.
 _ON_DEVICE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"local", "docker", "lima"})
 
 
 class WorkspaceSshEndpointSource(MutableModel):
-    """Supplies the connectivity detector with the SSH endpoints Imbue Studio actually dials.
+    """Supplies the connectivity detector with the SSH endpoints minds actually dials.
 
     The detector needs to know whether *this device* can open the connections
-    Imbue Studio depends on, and those are not on port 22: each machine's host is
+    minds depends on, and those are not on port 22: each machine's host is
     reached on whatever port its provider forwarded, which for imbue_cloud is a
     box-forwarded port in the 22000-32000 range. Discovery already reports the
     real coordinate per agent -- it is the same one the recovery card renders as
@@ -248,7 +248,7 @@ class ProviderErrorConnectivityTrigger(MutableModel):
 
     The gate on the STUCK edge only ever asks about the network once a *machine*
     has been convicted, and a machine can only be convicted once something has
-    tried to reach it. That leaves the case this exists for: Imbue Studio opened on a
+    tried to reach it. That leaves the case this exists for: minds opened on a
     dead network. Discovery's first poll of a remote provider fails immediately,
     the machines list renders rows nobody can reach, and until the user clicks
     into one there is nothing to convict and so nothing to say -- which is
@@ -365,7 +365,7 @@ class ProviderErrorConnectivityTrigger(MutableModel):
 def is_network_dependent_workspace(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> bool:
     """Whether reaching this workspace requires the device to have a working network.
 
-    Answered from the coordinate Imbue Studio dials whenever discovery reports one,
+    Answered from the coordinate minds dials whenever discovery reports one,
     because that is the fact every caller is really asking about: an endpoint on
     loopback answers with the wifi off and one anywhere else does not. It is
     also the only form that gets a docker provider pointed at another machine
@@ -1490,7 +1490,7 @@ def run_host_recovery_sequence(
                 )
             except MngrCommandError as exc:
                 # ``mngr stop --stop-host`` raises HostShutdownNotSupportedError when a provider's
-                # ``supports_shutdown_hosts`` is False (e.g. Modal). Imbue Studio runs mngr as a subprocess,
+                # ``supports_shutdown_hosts`` is False (e.g. Modal). minds runs mngr as a subprocess,
                 # so it can only match the error's message text in stderr -- keyed off mngr's exported
                 # HOST_SHUTDOWN_NOT_SUPPORTED_MESSAGE constant (one shared source of truth) rather than
                 # a duplicated literal.
@@ -1697,7 +1697,7 @@ def _recorded_backend_outage_reason(
     (see :func:`_report_recovery_step_failure`), and this is what reads it back.
     It is the only account of an outage available before the provider's next
     poll, which is exactly the window in which the recovery surfaces are raised
-    -- Imbue Studio starts a machine the moment it wedges, so the rejection lands
+    -- minds starts a machine the moment it wedges, so the rejection lands
     within seconds of the outage while the poll can be half a minute away.
 
     Its authority ends at the next poll that runs to completion. Whatever that
@@ -1777,7 +1777,7 @@ def read_backend_unreachable_verdict(
     outage a recovery already ran into, which the tracker holds.
 
     That last one is why this does not trail an outage by a provider poll. The
-    machine Imbue Studio is asked to recover is one it has just tried to start, and a
+    machine minds is asked to recover is one it has just tried to start, and a
     command mngr rejected at the provider names the backend on the spot; only an
     outage no command has run into yet waits for discovery.
 

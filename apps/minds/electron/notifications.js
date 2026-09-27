@@ -1,7 +1,6 @@
 'use strict';
 
 const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('./surface-routing');
-const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // All notification clicks share destination lookup, window selection, focus,
 // and navigation. Native banners have no source window. In-app clicks can
@@ -38,7 +37,7 @@ function routeNotificationClick(url, source, { findWindow, mostRecentWindow, foc
 // detail as the body. `subtitle` is macOS-only in Electron; elsewhere it is
 // folded into the body so the headline is never lost.
 function nativeNotificationOptionsFor(event, platform) {
-  const title = typeof event.title === 'string' && event.title ? event.title : PRODUCT_DISPLAY_NAME;
+  const title = typeof event.title === 'string' && event.title ? event.title : 'Mind';
   const subtitle = typeof event.subtitle === 'string' ? event.subtitle : '';
   const body = typeof event.body === 'string' ? event.body : '';
   if (platform === 'darwin') {

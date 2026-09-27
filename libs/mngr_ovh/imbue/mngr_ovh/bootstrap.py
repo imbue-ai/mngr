@@ -138,11 +138,9 @@ def bootstrap_root_authorized_keys_via_user(
 ) -> None:
     """Copy the rebuild SSH key from ``bootstrap_user``'s account to ``root``'s.
 
-    OVH's Debian-family VPS images (verified on ``Debian 12 - Docker``;
-    the plain ``Debian 13`` default is expected to behave the same, but
-    its release trip has not run yet) install the rebuild ``publicSshKey``
-    into the image's default non-root user (``debian``), not into
-    ``/root/.ssh/authorized_keys``.
+    OVH's Debian-family VPS images (verified: ``Debian 12 - Docker``)
+    install the rebuild ``publicSshKey`` into the image's default
+    non-root user (``debian``), not into ``/root/.ssh/authorized_keys``.
     The default user is in the ``sudo`` group with passwordless sudo and
     in the ``docker`` group, so it can bootstrap root login itself.
 

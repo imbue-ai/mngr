@@ -83,7 +83,7 @@ _FOLLOW_READ_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(connect=10.0, read=2.
 # Short timeout for one-shot POST / DELETE / GET calls.
 _ONE_SHOT_TIMEOUT_SECONDS: Final[float] = 10.0
 
-# How long Imbue Studio is willing to wait for ``mngr latchkey forward`` to
+# How long minds is willing to wait for ``mngr latchkey forward`` to
 # bind its gateway port and stamp the port onto its on-disk supervisor
 # record. Long enough to tolerate a cold gateway-binary start on a
 # slow box but short enough to keep ``minds run`` from blocking
@@ -125,11 +125,11 @@ class PredefinedRequestPayload(FrozenModel):
     )
 
 
-# The rationale stored on a request Imbue Studio files for itself. The request is
+# The rationale stored on a request Minds files for itself. The request is
 # approved in the same breath so nobody reads it in the UI, but the gateway
 # requires one and a reader of the permissions file deserves to know the grant
 # did not come from an agent asking.
-_MINDS_SHARE_RATIONALE: Final[str] = "Shared by the user from Imbue Studio."
+_MINDS_SHARE_RATIONALE: Final[str] = "Shared by the user from Minds."
 
 
 class FileSharingAccess(UpperCaseStrEnum):
@@ -183,7 +183,7 @@ class FileSharingRequestPayload(FrozenModel):
 class WorkspaceRequestPayload(FrozenModel):
     """Payload for ``type == "workspace"`` permission requests.
 
-    Grants access to the Imbue Studio cross-workspace management API under the
+    Grants access to the minds cross-workspace management API under the
     ``minds-workspaces`` detent scope. ``permissions`` are the verb schema
     names the agent wants; ``target_workspace_id`` is the workspace the
     targeted verbs (destroy / lifecycle / backups-export / ssh) act on, or
@@ -451,7 +451,7 @@ class LatchkeyGatewayClient(MutableModel):
 
         The cached ``_base_url`` is built once from the record naming the
         forward that owns the latchkey directory. If the supervisor
-        restarts mid-session -- or if Imbue Studio startup raced the
+        restarts mid-session -- or if minds startup raced the
         supervisor restart and cached the previous gateway's port --
         every subsequent connection attempt will fail with a
         transport-level error (typically ``[Errno 111] Connection
@@ -500,11 +500,11 @@ class LatchkeyGatewayClient(MutableModel):
         the ownership lock, carrying no port yet, and rewrites that record once
         it has bound the shared ``latchkey gateway`` subprocess to a free TCP
         port. We poll until the port becomes non-None (or the timeout expires)
-        so subsequent Imbue Studio startup steps can build the gateway URL
+        so subsequent minds startup steps can build the gateway URL
         deterministically without racing the supervisor's own startup.
 
         What is polled is the *live* owner's record, never one a departed
-        forward left behind: Imbue Studio terminates and respawns the supervisor on
+        forward left behind: minds terminates and respawns the supervisor on
         every start (see ``_restart_mngr_latchkey_forward_supervisor``), and the
         record only names the new forward once that forward claims the
         directory -- an ``mngr`` cold start later. A caller arriving in that
@@ -670,13 +670,13 @@ class LatchkeyGatewayClient(MutableModel):
     ) -> str:
         """File a file-sharing permission request against ``target`` and return its id.
 
-        Normally an *agent* files these and the user answers; Imbue Studio files one
+        Normally an *agent* files these and the user answers; Minds files one
         itself when the user shares a path from the Local files pane, having
         decided already. Approving it right after is what turns it into a grant.
 
         ``target`` is the workspace's own permissions file. Naming it is
         necessary and privileged: the gateway otherwise writes an approved
-        effect into whichever file the *caller's* context names, which for Imbue Studio
+        effect into whichever file the *caller's* context names, which for Minds
         is its own admin file -- and a file-sharing grant landing there wedges
         the gateway, since that file declares no ``latchkey-self`` scope. The
         extension only honours the override for the desktop client.

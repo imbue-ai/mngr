@@ -1,4 +1,4 @@
-"""Resolve the Imbue Studio desktop app version + git SHA for Sentry release tagging.
+"""Resolve the minds desktop app version + git SHA for Sentry release tagging.
 
 The Electron launcher (``electron/backend.js``) passes both values to the
 Python backend via environment variables on every spawn -- both for dev runs
@@ -36,7 +36,7 @@ UNKNOWN_GIT_SHA = "unknown"
 # launch-to-msg CI against (this binary, the new tag). Lives here (not in the
 # desktop client) so deploy-time code (`minds-admin env deploy`) can read it
 # without importing the whole desktop client.
-FALLBACK_BRANCH: Final[str] = "minds-v0.8.0"
+FALLBACK_BRANCH: Final[str] = "minds-v0.7.4"
 
 # The canonical repo key the pool bake stamps into row attributes for the
 # default workspace template (`host/org/repo`), the default the web-create
@@ -56,7 +56,7 @@ def _source_package_json() -> Path:
 
 @cache
 def resolve_release_id() -> str:
-    """Return the Imbue Studio desktop app version (``package.json`` ``version``).
+    """Return the minds desktop app version (``package.json`` ``version``).
 
     Prefers the value the Electron launcher passes via ``MINDS_RELEASE_ID``;
     falls back to reading the in-repo ``package.json`` for bare source runs.
@@ -68,7 +68,7 @@ def resolve_release_id() -> str:
     try:
         version = json.loads(package_json.read_text()).get("version")
     except (OSError, json.JSONDecodeError) as error:
-        logger.debug("Could not read Imbue Studio release id from {}: {}", package_json, error)
+        logger.debug("Could not read minds release id from {}: {}", package_json, error)
         return UNKNOWN_RELEASE_ID
     if isinstance(version, str) and version:
         return version

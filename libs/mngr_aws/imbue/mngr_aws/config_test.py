@@ -12,8 +12,7 @@ from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr_aws.boto_config import IMDS_CREDENTIAL_PROVIDER_NAME
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
 from imbue.mngr_aws.config import AwsProviderConfig
-from imbue.mngr_aws.config import pick_ami_architecture
-from imbue.mngr_aws.config import pick_newest_ami_id
+from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
 from imbue.mngr_aws.testing import clear_aws_env
 
 
@@ -140,34 +139,27 @@ def test_build_state_bucket_returns_bucket_when_resolvable() -> None:
         assert bucket.region == "us-east-1"
 
 
-def test_pick_newest_ami_id_returns_none_for_no_images() -> None:
-    assert pick_newest_ami_id([]) is None
+def test_get_ami_id_for_region_uses_default_ami_id() -> None:
+    config = AwsProviderConfig(default_ami_id="ami-deadbeef")
+    assert config.get_ami_id_for_region("us-east-1") == "ami-deadbeef"
+    assert config.get_ami_id_for_region("eu-west-1") == "ami-deadbeef"
 
 
-def test_pick_newest_ami_id_picks_the_latest_creation_date_regardless_of_order() -> None:
-    images = [
-        {"ImageId": "ami-older", "CreationDate": "2026-07-22T10:00:00.000Z"},
-        {"ImageId": "ami-newest", "CreationDate": "2026-09-14T08:30:00.000Z"},
-        {"ImageId": "ami-oldest", "CreationDate": "2026-06-01T00:00:00.000Z"},
-    ]
-    assert pick_newest_ami_id(images) == "ami-newest"
+def test_get_ami_id_for_region_uses_pinned_region_default() -> None:
+    config = AwsProviderConfig()
+    for region, ami_id in DEFAULT_AMI_BY_REGION.items():
+        assert config.get_ami_id_for_region(region) == ami_id
 
 
-def test_pick_newest_ami_id_returns_none_when_the_newest_image_has_no_id() -> None:
-    assert pick_newest_ami_id([{"CreationDate": "2026-09-14T08:30:00.000Z"}]) is None
+def test_get_ami_id_for_region_raises_when_missing() -> None:
+    config = AwsProviderConfig()
+    with pytest.raises(ValueError, match="No AMI configured"):
+        config.get_ami_id_for_region("ap-south-1")
 
 
-def test_pick_ami_architecture_prefers_x86_64_when_an_instance_type_supports_several() -> None:
-    assert pick_ami_architecture(["i386", "x86_64"]) == "x86_64"
-
-
-def test_pick_ami_architecture_picks_arm64_for_a_graviton_instance_type() -> None:
-    assert pick_ami_architecture(["arm64"]) == "arm64"
-
-
-def test_pick_ami_architecture_returns_none_when_debian_publishes_nothing_for_the_architectures() -> None:
-    assert pick_ami_architecture(["x86_64_mac"]) is None
-    assert pick_ami_architecture([]) is None
+def test_get_ami_id_explicit_takes_precedence_over_region_default() -> None:
+    config = AwsProviderConfig(default_ami_id="ami-override")
+    assert config.get_ami_id_for_region("us-east-1") == "ami-override"
 
 
 def test_allowed_ssh_cidrs_parses_to_scalar_tuple() -> None:

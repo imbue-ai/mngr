@@ -1,6 +1,5 @@
 from imbue.mngr_autocompact.config import AutoCompactPluginConfig
 from imbue.mngr_autocompact.config import ContextCompactionMode
-from imbue.mngr_autocompact.config import DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS
 
 
 def test_autocompact_config_defaults() -> None:
@@ -8,7 +7,7 @@ def test_autocompact_config_defaults() -> None:
     assert config.mode == ContextCompactionMode.DISABLED
     assert config.cache_ttl_minutes is None
     assert config.epsilon_offset_minutes == 3
-    assert config.min_context_tokens == DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS
+    assert config.min_context_tokens == 200_000
     assert config.get_trigger_delay_seconds(60) == 57 * 60.0
 
 

@@ -197,22 +197,13 @@ GEN2_GUEST_CONTAINERD_SNAPSHOTS_SUBVOLUME: Final[str] = (
 )
 GEN2_GUEST_CONTAINERD_CONTENT_SUBVOLUME: Final[str] = f"{GEN2_GUEST_CONTAINERD_ROOT}/io.containerd.content.v1.content"
 
-# The btrfs qgroup every subvolume the agent host writes is charged to, the
-# docker label that marks the agent host's container, and where its host volume
-# is mounted inside it. All three are contracts owned by
-# ``imbue.mngr_vps.container_setup`` (``HOST_QUOTA_QGROUP`` / ``LABEL_HOST_ID`` /
-# ``HOST_VOLUME_MOUNT_PATH``), which does not ship into the connector container;
-# the plugin's tests pin these copies to the originals.
+# The btrfs qgroup every subvolume the agent host writes is charged to, and the
+# docker label that marks the agent host's container. Both are contracts owned
+# by ``imbue.mngr_vps.container_setup`` (``HOST_QUOTA_QGROUP`` / ``LABEL_HOST_ID``),
+# which does not ship into the connector container; the plugin's tests pin these
+# copies to the originals.
 GEN2_GUEST_HOST_QUOTA_QGROUP: Final[str] = "1/0"
 GEN2_HOST_ID_CONTAINER_LABEL: Final[str] = "com.imbue.mngr.host-id"
-GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
-
-# The file, at the root of the agent host's volume, where the VM publishes the
-# container's memory headroom as its memory cgroup sees it, for the earlyoom
-# inside to read at ``/mngr-vol/.host-meminfo`` (``--host-meminfo``): under
-# gVisor the container's own /proc/meminfo cannot see the runtime's share of
-# the limit.
-GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME: Final[str] = ".host-meminfo"
 
 
 class SliceNetwork(FrozenModel):

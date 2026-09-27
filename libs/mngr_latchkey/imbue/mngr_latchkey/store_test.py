@@ -16,10 +16,12 @@ from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_admin_permissions_file
 from imbue.mngr_latchkey.store import forward_events_log_path
+from imbue.mngr_latchkey.store import forward_info_path
 from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_log_path
 from imbue.mngr_latchkey.store import forward_owner_path
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
+from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
@@ -276,6 +278,27 @@ def test_ensure_admin_permissions_file_is_idempotent(tmp_path: Path) -> None:
 
 
 # -- Pre-lock forward record ---------------------------------------------------
+
+
+def test_a_pre_lock_record_on_disk_still_parses(tmp_path: Path) -> None:
+    """Every record a pre-lock build wrote carries a gateway port, and must still be read.
+
+    CLEANUP: delete with ``_pre_lock_migration``.
+
+    The model forbids extra keys, so dropping ``gateway_port`` as unread would
+    make this record unparseable, and the migration would stop seeing the
+    forward that wrote it.
+    """
+    forward_info_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    forward_info_path(tmp_path).write_text(
+        json.dumps({"pid": 4242, "started_at": "2026-01-01T00:00:00Z", "gateway_port": 32867})
+    )
+    info = load_forward_info(tmp_path)
+    assert info is not None
+    assert info.pid == 4242
+
+
+# -- Forward ownership lock ----------------------------------------------------
 
 
 def test_forward_lock_path_lives_under_data_dir(tmp_path: Path) -> None:

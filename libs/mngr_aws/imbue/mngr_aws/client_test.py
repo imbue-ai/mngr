@@ -15,10 +15,8 @@ from botocore.stub import ANY
 from botocore.stub import Stubber
 
 from imbue.mngr.errors import MngrError
-from imbue.mngr_aws.client import AwsAmiResolutionError
 from imbue.mngr_aws.client import AwsVpsClient
 from imbue.mngr_aws.config import AutoCreateSecurityGroup
-from imbue.mngr_aws.config import DEBIAN_AMI_OWNER_ID
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import _StubbedAwsVpsClient
 from imbue.mngr_vps.errors import VpsApiError
@@ -128,7 +126,9 @@ def _make_stubbed_client(**client_kwargs: Any) -> tuple[AwsVpsClient, Stubber]:
     return client, stubber
 
 
+# =============================================================================
 # create_instance
+# =============================================================================
 
 
 def test_create_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -389,7 +389,9 @@ def test_create_instance_cross_region_raises(stubbed_client: tuple[AwsVpsClient,
         )
 
 
+# =============================================================================
 # destroy_instance / get_instance_status / get_instance_ip / list_instances
+# =============================================================================
 
 
 def test_destroy_instance(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -717,7 +719,9 @@ def test_list_instances_translates_client_errors(stubbed_client: tuple[AwsVpsCli
         client.list_instances(provider_tag="test")
 
 
+# =============================================================================
 # Key pairs
+# =============================================================================
 
 
 def test_upload_ssh_key(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
@@ -741,7 +745,9 @@ def test_delete_ssh_key(stubbed_client: tuple[AwsVpsClient, Stubber]) -> None:
     client.delete_ssh_key("mngr-test-h1")
 
 
+# =============================================================================
 # ensure_security_group
+# =============================================================================
 
 
 def test_ensure_security_group_returns_preset_id_when_provided(
@@ -1000,7 +1006,9 @@ def test_ensure_security_group_duplicate_on_one_port_does_not_drop_the_other(
     assert result.was_created is False
 
 
+# =============================================================================
 # delete_security_group (inverse of ensure; used by `mngr aws cleanup`)
+# =============================================================================
 
 
 def test_delete_security_group_deletes_when_present(
@@ -1039,7 +1047,9 @@ def test_delete_security_group_refuses_externally_managed_sg(
         client.delete_security_group()
 
 
+# =============================================================================
 # resolve_security_group_id (lookup-only; used by create_instance hot path)
+# =============================================================================
 
 
 def test_resolve_security_group_id_returns_preset_id_when_provided(
@@ -1096,167 +1106,3 @@ def test_resolve_security_group_id_raises_on_multi_vpc_name_collision(
     )
     with pytest.raises(MngrError, match="Found 2 security groups"):
         client.resolve_security_group_id()
-
-
-# Default AMI resolution
-
-_X86_INSTANCE_TYPE = "t3.small"
-_ARM_INSTANCE_TYPE = "t4g.small"
-
-
-def _describe_instance_types_params(instance_type: str) -> dict[str, list[str]]:
-    return {"InstanceTypes": [instance_type]}
-
-
-def _describe_instance_types_response(instance_type: str, architectures: list[str]) -> dict[str, list[dict[str, Any]]]:
-    return {
-        "InstanceTypes": [
-            {"InstanceType": instance_type, "ProcessorInfo": {"SupportedArchitectures": architectures}},
-        ]
-    }
-
-
-def _describe_debian_images_params(name_pattern: str, architecture: str) -> dict[str, Any]:
-    return {
-        "Owners": [DEBIAN_AMI_OWNER_ID],
-        "Filters": [
-            {"Name": "name", "Values": [name_pattern]},
-            {"Name": "architecture", "Values": [architecture]},
-            {"Name": "state", "Values": ["available"]},
-        ],
-    }
-
-
-_DESCRIBE_AMD64_IMAGES_PARAMS = _describe_debian_images_params("debian-13-amd64-*", "x86_64")
-_DESCRIBE_ARM64_IMAGES_PARAMS = _describe_debian_images_params("debian-13-arm64-*", "arm64")
-
-
-def _queue_x86_instance_type(stubber: Stubber) -> None:
-    stubber.add_response(
-        "describe_instance_types",
-        _describe_instance_types_response(_X86_INSTANCE_TYPE, ["x86_64"]),
-        _describe_instance_types_params(_X86_INSTANCE_TYPE),
-    )
-
-
-def test_resolve_default_ami_id_picks_the_newest_debian_13_image(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    _queue_x86_instance_type(stubber)
-    stubber.add_response(
-        "describe_images",
-        {
-            "Images": [
-                {"ImageId": "ami-older", "CreationDate": "2026-07-22T10:00:00.000Z"},
-                {"ImageId": "ami-newest", "CreationDate": "2026-09-14T08:30:00.000Z"},
-            ]
-        },
-        _DESCRIBE_AMD64_IMAGES_PARAMS,
-    )
-
-    assert client.resolve_default_ami_id(_X86_INSTANCE_TYPE) == "ami-newest"
-    stubber.assert_no_pending_responses()
-
-
-def test_resolve_default_ami_id_picks_the_arm64_image_for_a_graviton_instance_type(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "describe_instance_types",
-        _describe_instance_types_response(_ARM_INSTANCE_TYPE, ["arm64"]),
-        _describe_instance_types_params(_ARM_INSTANCE_TYPE),
-    )
-    stubber.add_response(
-        "describe_images",
-        {"Images": [{"ImageId": "ami-arm64", "CreationDate": "2026-09-14T08:30:00.000Z"}]},
-        _DESCRIBE_ARM64_IMAGES_PARAMS,
-    )
-
-    assert client.resolve_default_ami_id(_ARM_INSTANCE_TYPE) == "ami-arm64"
-    stubber.assert_no_pending_responses()
-
-
-def test_resolve_default_ami_id_is_cached_per_instance_type_and_architecture(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    # One DescribeInstanceTypes per instance type and one DescribeImages per
-    # architecture are queued: any further API call would fail the stubber, so
-    # the repeated resolves below must be served from the caches.
-    _queue_x86_instance_type(stubber)
-    stubber.add_response(
-        "describe_images",
-        {"Images": [{"ImageId": "ami-cached", "CreationDate": "2026-09-14T08:30:00.000Z"}]},
-        _DESCRIBE_AMD64_IMAGES_PARAMS,
-    )
-    stubber.add_response(
-        "describe_instance_types",
-        _describe_instance_types_response("m6i.large", ["x86_64"]),
-        _describe_instance_types_params("m6i.large"),
-    )
-
-    assert client.resolve_default_ami_id(_X86_INSTANCE_TYPE) == "ami-cached"
-    assert client.resolve_default_ami_id(_X86_INSTANCE_TYPE) == "ami-cached"
-    assert client.resolve_default_ami_id("m6i.large") == "ami-cached"
-    stubber.assert_no_pending_responses()
-
-
-def test_resolve_default_ami_id_raises_when_debian_publishes_no_matching_image(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    _queue_x86_instance_type(stubber)
-    stubber.add_response("describe_images", {"Images": []}, _DESCRIBE_AMD64_IMAGES_PARAMS)
-
-    with pytest.raises(AwsAmiResolutionError, match="no available debian-13-amd64-\\* .* AMI in region 'us-east-1'"):
-        client.resolve_default_ami_id(_X86_INSTANCE_TYPE)
-
-
-def test_resolve_default_ami_id_raises_when_the_instance_type_has_no_debian_architecture(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    stubber.add_response(
-        "describe_instance_types",
-        _describe_instance_types_response("mac2.metal", ["x86_64_mac"]),
-        _describe_instance_types_params("mac2.metal"),
-    )
-
-    with pytest.raises(AwsAmiResolutionError, match="'mac2.metal' .* supports architectures \\['x86_64_mac'\\]"):
-        client.resolve_default_ami_id("mac2.metal")
-    stubber.assert_no_pending_responses()
-
-
-def test_resolve_default_ami_id_wraps_a_describe_instance_types_failure(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    stubber.add_client_error(
-        "describe_instance_types",
-        service_error_code="InvalidInstanceType",
-        service_message="no such type",
-        http_status_code=400,
-        expected_params=_describe_instance_types_params("t3.nonexistent"),
-    )
-
-    with pytest.raises(AwsAmiResolutionError, match="architecture of instance type 't3.nonexistent'"):
-        client.resolve_default_ami_id("t3.nonexistent")
-
-
-def test_resolve_default_ami_id_wraps_a_describe_images_failure(
-    stubbed_client: tuple[AwsVpsClient, Stubber],
-) -> None:
-    client, stubber = stubbed_client
-    _queue_x86_instance_type(stubber)
-    stubber.add_client_error(
-        "describe_images",
-        service_error_code="UnauthorizedOperation",
-        service_message="not allowed",
-        http_status_code=403,
-        expected_params=_DESCRIBE_AMD64_IMAGES_PARAMS,
-    )
-
-    with pytest.raises(AwsAmiResolutionError, match="Could not list Debian AMIs in region 'us-east-1'"):
-        client.resolve_default_ami_id(_X86_INSTANCE_TYPE)

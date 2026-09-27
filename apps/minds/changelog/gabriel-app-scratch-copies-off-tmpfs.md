@@ -1,1 +1,0 @@
-- Remote workspaces' `/tmp` is now capped at an eighth of the VM's RAM (a little under 1 GiB on the default machine). A write past the cap fails with "No space left on device" instead of taking the whole workspace down. The workspace README says so, and the `repair-tmp-exec` rollout guide covers capping existing workspaces.

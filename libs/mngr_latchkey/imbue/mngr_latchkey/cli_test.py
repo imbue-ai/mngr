@@ -17,6 +17,8 @@ import subprocess
 import sys
 import threading
 from collections.abc import Iterator
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import Final
 from uuid import uuid4
@@ -51,12 +53,15 @@ from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
+from imbue.mngr_latchkey.store import LatchkeyForwardInfo
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_owner_path
+from imbue.mngr_latchkey.store import load_forward_info
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import save_forward_info
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
 
 # A version string the upstream ``Latchkey.initialize`` is happy with.
@@ -367,6 +372,14 @@ def _fake_running_supervisor() -> Iterator[int]:
         proc.wait(timeout=5.0)
 
 
+def _build_forward_info(*, pid: int, gateway_port: int | None) -> LatchkeyForwardInfo:
+    return LatchkeyForwardInfo(
+        pid=pid,
+        started_at=datetime.now(timezone.utc),
+        gateway_port=gateway_port,
+    )
+
+
 def test_gateway_info_prints_url_and_password_when_supervisor_record_is_ready(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
@@ -645,6 +658,40 @@ def test_forward_refuses_to_start_when_the_directory_is_already_owned(
     assert result.exit_code != 0
     assert "already owns" in result.output.lower()
     assert str(os.getpid()) in result.output
+    assert load_forward_info(data_dir) is None
+
+
+def test_forward_refuses_to_start_beside_a_forward_from_an_earlier_build(
+    cli_runner: CliRunner,
+    plugin_manager: pluggy.PluginManager,
+    latchkey_root: Path,
+    fake_latchkey_binary: Path,
+    clean_latchkey_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A forward predating the ownership lock holds none, so only its record announces it.
+
+    CLEANUP: delete with ``_pre_lock_migration``. Without this the new forward
+    would take the lock uncontended and run beside the old one, putting two
+    ``mngr observe`` producers on one events file.
+    """
+    del clean_latchkey_env
+    monkeypatch.setenv(ENV_LATCHKEY_DIRECTORY, str(latchkey_root))
+    monkeypatch.setenv(ENV_LATCHKEY_BINARY, str(fake_latchkey_binary))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    with _fake_running_supervisor() as pid:
+        save_forward_info(plugin_data_dir(latchkey_root), _build_forward_info(pid=pid, gateway_port=None))
+        result = cli_runner.invoke(
+            latchkey,
+            ["forward"],
+            obj=plugin_manager,
+            catch_exceptions=False,
+        )
+    assert result.exit_code != 0
+    assert "from an earlier build is still running" in result.output
+    assert str(pid) in result.output
 
 
 def test_forward_reports_an_unclaimable_directory_as_a_clean_failure(
@@ -681,6 +728,7 @@ def test_forward_reports_an_unclaimable_directory_as_a_clean_failure(
     )
     assert result.exit_code != 0
     assert "failed to claim this latchkey directory" in result.output.lower()
+    assert load_forward_info(data_dir) is None
 
 
 # register-agent

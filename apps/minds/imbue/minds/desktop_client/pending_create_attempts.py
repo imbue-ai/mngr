@@ -127,7 +127,7 @@ FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES: Final[int] = 1000
 CREATE_ATTEMPT_ID_HOST_LABEL: Final[str] = "create-attempt-id"
 
 # CLEANUP: drop the legacy label (and read_create_attempt_id_label's fallback to
-# it) once no supported install still has Lima / Docker hosts stamped by an Imbue Studio
+# it) once no supported install still has Lima / Docker hosts stamped by a minds
 # version that wrote it -- it held a create-attempt id but was misleadingly
 # named after the workspace.
 LEGACY_CREATE_ATTEMPT_ID_HOST_LABEL: Final[str] = "workspace-id"

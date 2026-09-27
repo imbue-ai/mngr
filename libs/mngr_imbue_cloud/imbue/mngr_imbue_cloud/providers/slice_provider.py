@@ -379,16 +379,16 @@ class SliceVpsDockerProvider(VpsProvider):
         """The owning bare-metal server's region, or a fallback if unknown."""
         return self.slice_config.slice_region or _FALLBACK_SLICE_REGION
 
-    def _compute_extra_start_args(self, mem_total_kib: int) -> tuple[str, ...]:
+    def _compute_extra_start_args(self) -> tuple[str, ...]:
         # Hard-cap the workspace container's memory so it can never starve the
         # slice VM's own daemons (sshd, dockerd) -- an uncapped workspace at
         # capacity collapses the VM-wide page cache and wedges the VM
-        # unrecoverably. The cap comes from the VM's own MemTotal (rounded down
-        # to MiB, as the shell does), so it is the one its every-boot reconcile
-        # oneshot computes.
-        if self.slice_config.slice_memory_mib is None:
+        # unrecoverably. Both container-creation paths set it: the bake per box,
+        # the slow-path rebuild from the lease's sizing column.
+        memory_mib = self.slice_config.slice_memory_mib
+        if memory_mib is None:
             return ()
-        return build_slice_container_memory_start_args(mem_total_kib // 1024)
+        return build_slice_container_memory_start_args(memory_mib)
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Slices have no region/plan flags (the VM is carved locally), so this

@@ -1,7 +1,7 @@
 """Unit tests for the friendly navigation-level 404/405 error page.
 
 A routing-level 404/405 reached by a real page navigation renders the
-RequestError page styled like the rest of Imbue Studio with a way back home, while fetch/XHR callers
+minds-styled RequestError page with a way back home, while fetch/XHR callers
 (who read resp.ok, not the body) keep the raw status and default body.
 """
 

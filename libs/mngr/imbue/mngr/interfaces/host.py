@@ -129,16 +129,6 @@ class HostInterface(MutableModel, ABC):
         ...
 
     @abstractmethod
-    def get_provider_resources(self) -> HostResources:
-        """Return the resource allocation (CPU, memory, disk) the provider recorded for this host.
-
-        Answered for stopped and unreachable hosts too (the listing fallback for
-        a host that cannot be read calls it), so the provider must derive it
-        from its own records and never from a connection to the host.
-        """
-        ...
-
-    @abstractmethod
     def get_image(self) -> str | None:
         """Return the base image used for this host, or None if not applicable."""
         ...
@@ -634,6 +624,11 @@ class OnlineHostInterface(HostInterface, OuterHostInterface, ABC):
         Uptime is measured on the host (not the local clock minus the host's boot
         time), so it is unaffected by clock skew between here and the host.
         """
+        ...
+
+    @abstractmethod
+    def get_provider_resources(self) -> HostResources:
+        """Return the resource allocation (CPU, memory, disk) for this host."""
         ...
 
     @abstractmethod

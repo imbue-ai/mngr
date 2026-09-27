@@ -69,7 +69,7 @@ def _stopped_machine_caller() -> ScriptedMngrCaller:
 class _SystemServicesResolver(StaticBackendResolver):
     """A resolver on which every workspace agent is its own host's system-services agent.
 
-    True of a real Imbue Studio workspace -- the primary agent *is* ``system-services`` --
+    True of a real minds workspace -- the primary agent *is* ``system-services`` --
     and what the host lifecycle action resolves against before it starts anything.
     """
 

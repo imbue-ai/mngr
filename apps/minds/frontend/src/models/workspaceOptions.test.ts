@@ -393,77 +393,6 @@ describe("ShareModel disable", () => {
   });
 });
 
-describe("ShareModel domain move", () => {
-  it("records the old domain and starts a provisioning wait when the read moved the share", async () => {
-    const { model } = makeShareModel(() => ({
-      ok: true,
-      status: 200,
-      body: sharingResponse({
-        enabled: true,
-        url: "https://moved.relay.example/",
-        grants: {
-          workspace: { emails: [OWNER], email_domains: [] },
-          services: {},
-        },
-        migrated_domain_from: "old.relay.example",
-      }),
-    }));
-    await model.load();
-
-    expect(model.status).toBe("ready");
-    expect(model.migratedDomainFrom).toBe("old.relay.example");
-    // The moved link is not live until the workspace's share stack restarts
-    // on the new address, exactly like a share enabled in this session.
-    expect(model.isLive).toBe(false);
-    expect(model.isAwaitingLink("system_interface")).toBe(true);
-  });
-
-  it("drops the moved-address notice once sharing is stopped in the same session", async () => {
-    const { model } = makeShareModel((_url, init) => ({
-      ok: true,
-      status: 200,
-      body:
-        init?.method === "DELETE"
-          ? null
-          : sharingResponse({
-              enabled: true,
-              url: "https://moved.relay.example/",
-              grants: {
-                workspace: { emails: [OWNER], email_domains: [] },
-                services: {},
-              },
-              migrated_domain_from: "old.relay.example",
-            }),
-    }));
-    await model.load();
-    expect(model.migratedDomainFrom).toBe("old.relay.example");
-
-    await model.disable();
-
-    expect(model.isMachineEnabled).toBe(false);
-    expect(model.migratedDomainFrom).toBeNull();
-  });
-
-  it("treats an already-published link as live when the share did not move", async () => {
-    const { model } = makeShareModel(() => ({
-      ok: true,
-      status: 200,
-      body: sharingResponse({
-        enabled: true,
-        url: "https://m.relay.example/",
-        grants: {
-          workspace: { emails: [OWNER], email_domains: [] },
-          services: {},
-        },
-      }),
-    }));
-    await model.load();
-
-    expect(model.migratedDomainFrom).toBeNull();
-    expect(model.isLive).toBe(true);
-  });
-});
-
 describe("ShareModel load failures", () => {
   it("locks the editor when the status read fails", async () => {
     const { model } = makeShareModel(() => ({
@@ -1058,7 +987,6 @@ describe("WorkspaceOptionsModel", () => {
             palette: { confusion: "#0b292b" },
             is_stale: false,
             is_leased_imbue_cloud: false,
-            leased_owner_email: "",
             has_account: true,
             account_email: OWNER,
             account_display_name: "Owner Person",

@@ -1,13 +1,13 @@
 # Behaviors
 
-The behavior corpus at `apps/minds/behaviors/` describes the externally observable behavior of Imbue Studio surfaces as Gherkin `.feature` files: scenarios for the flows a user or client can take, and rules for the invariants that hold across all flows and states.
+The behavior corpus at `apps/minds/behaviors/` describes the externally observable behavior of minds surfaces as Gherkin `.feature` files: scenarios for the flows a user or client can take, and rules for the invariants that hold across all flows and states.
 Each scenario and rule carries a stable coordinate that everything outside the corpus uses to refer to it.
-The corpus language -- folders, tags, coordinates, invariant scoping, prose sidecars -- is defined by the behaviors skill (`.agents/skills/behaviors/SKILL.md`); this page covers only the CLI as used for the Imbue Studio corpus.
+The corpus language -- folders, tags, coordinates, invariant scoping, prose sidecars -- is defined by the behaviors skill (`.agents/skills/behaviors/SKILL.md`); this page covers only the CLI as used for the minds corpus.
 
 ## The `mngr behaviors` CLI
 
 The CLI (from `libs/mngr_behaviors`) is corpus-generic: it operates on one corpus per invocation, named by a required `--root`.
-For the Imbue Studio corpus, run from the repo root and pass `--root apps/minds/behaviors`.
+For the minds corpus, run from the repo root and pass `--root apps/minds/behaviors`.
 `uv run mngr behaviors --help` and each subcommand's `--help` are authoritative for options and output fields.
 
 Parse every behavior file and enforce the corpus language, printing one line per violation and exiting nonzero if there are any:

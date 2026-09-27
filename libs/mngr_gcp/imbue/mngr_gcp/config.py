@@ -23,12 +23,11 @@ from imbue.mngr_vps.config import OfflineCapableVpsProviderConfig
 # the launched VM); the ADC used by mngr itself is never scoped here.
 DEFAULT_SERVICE_ACCOUNT_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/cloud-platform",)
 
-# Global Debian 13 "trixie" image family (GCE families are global, unlike
-# per-region AWS AMIs), matching the rest of the mngr fleet. Stock GCE Debian
-# images ship no cloud-init, so GCP bootstraps via the GCE ``startup-script``
-# metadata (run by the google-guest-agent on every image) -- see
-# ``generate_gce_startup_script``.
-DEFAULT_GCE_IMAGE: str = "projects/debian-cloud/global/images/family/debian-13"
+# Global Debian 12 image family (GCE families are global, unlike per-region AWS
+# AMIs), matching the rest of the mngr fleet. Stock GCE Debian images ship no
+# cloud-init, so GCP bootstraps via the GCE ``startup-script`` metadata (run by
+# the google-guest-agent on every image) -- see ``generate_gce_startup_script``.
+DEFAULT_GCE_IMAGE: str = "projects/debian-cloud/global/images/family/debian-12"
 
 # Final fallback zone when neither the provider config nor the active gcloud
 # config supplies one. GCE VMs are zonal, so a concrete zone is always required;
@@ -204,7 +203,7 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         description=(
             "Full JSON contents of a GCP service-account key. When set, credentials are built from "
             "it directly (bypassing Application Default Credentials) and its embedded project_id is "
-            "used as the resolved-project fallback. Used by the Imbue Studio bring-your-own-account paste "
+            "used as the resolved-project fallback. Used by the Minds bring-your-own-account paste "
             "flow. Leave unset to use ADC."
         ),
     )

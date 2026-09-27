@@ -1,4 +1,4 @@
-"""Unit tests for the Imbue Studio wrapper around the ``mngr forward`` plugin.
+"""Unit tests for the minds-side wrapper around the ``mngr forward`` plugin.
 
 Subprocess spawning (real ``mngr forward`` children) is exercised by the
 acceptance / e2e tests, not here. This file constructs the
@@ -410,10 +410,10 @@ def test_pre_start_snapshot_error_is_dropped_but_topology_merges() -> None:
 
     On startup the events-file replay delivers the pre-start backlog, whose last
     per-provider snapshot often carries a manufactured unavailability error: the
-    detached discovery producer keeps polling while Imbue Studio is closed, and the
+    detached discovery producer keeps polling while minds is closed, and the
     quit flow deliberately stops the docker state container, so every gap poll
     errors with "state container is stopped". That error describes the gap, not
-    the present (Imbue Studio restarts the state container before discovery consumes),
+    the present (minds restarts the state container before discovery consumes),
     so it must not surface as a current provider error -- while the same
     snapshot's topology still merges (last-good retention). A snapshot taken
     after the consumer started registers its error normally.
@@ -498,7 +498,7 @@ def test_a_host_the_last_completed_poll_could_not_read_is_reported_unread() -> N
 def test_repeated_pre_start_error_drops_log_one_counted_line_when_replay_ends() -> None:
     """A long backlog of identical pre-start errors logs one counted line, and only once replay ends.
 
-    The events file holds one snapshot per discovery cycle for however long Imbue Studio
+    The events file holds one snapshot per discovery cycle for however long minds
     was closed, and a wedged provider repeats the same error on every one of them,
     so a line per drop scales with the downtime.
     """
@@ -962,7 +962,7 @@ def test_event_services_envelope_carries_the_origin_label_to_the_resolver(
 def test_reverse_tunnel_established_is_silently_ignored(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    """Imbue Studio no longer asks the plugin for per-agent reverse tunnels.
+    """Minds no longer asks the plugin for per-agent reverse tunnels.
 
     The plugin may still emit ``reverse_tunnel_established`` envelopes
     on behalf of other callers (e.g. the latchkey supervisor); the
@@ -1027,7 +1027,7 @@ def test_an_unknown_reason_still_reports_a_connection_failure(consumer: Envelope
 
     Producer and consumer ship pinned together, so this should be unreachable --
     it exists so that if the pinning ever slips, the cost is a coarser verdict
-    rather than an outage Imbue Studio never hears about, which would leave the machine
+    rather than an outage minds never hears about, which would leave the machine
     unenrolled and never probed.
     """
     observed = _record_backend_failures(consumer)
@@ -1046,7 +1046,7 @@ def test_an_unknown_reason_still_reports_a_connection_failure(consumer: Envelope
 
     assert "SOMETHING_NEWER" in log_output.getvalue()
     assert observed == [(_AGENT_ID_1, SystemInterfaceBackendFailureReason.CONNECT_ERROR, None, None)]
-    # And the generic reason is one Imbue Studio acts on, so the machine is still
+    # And the generic reason is one minds acts on, so the machine is still
     # enrolled for probing rather than silently left alone.
     tracker = SystemInterfaceHealthTracker()
     BackendFailureRecorder(tracker=tracker)(*observed[0])
@@ -1057,7 +1057,7 @@ def test_backend_answered_envelope_reaches_its_callback_with_the_status(consumer
     """The plugin's report that a shell answered is what lets a live renderer clear a stale verdict.
 
     A status that will not parse is read as the absent one and said so, rather
-    than dropping the observation: the answer is the evidence Imbue Studio acts on, and
+    than dropping the observation: the answer is the evidence minds acts on, and
     an accepted websocket reports no status at all, so there is nothing a
     garbled value could mean that "no status" does not already cover.
     """
@@ -1309,7 +1309,7 @@ def test_terminate_is_no_op_when_no_process_attached(consumer: EnvelopeStreamCon
 
 def test_intentional_terminate_does_not_report_exit() -> None:
     """After consumer.terminate(), the lifecycle watcher must not report the
-    resulting exit to the on_unexpected_exit callbacks -- Imbue Studio itself asked
+    resulting exit to the on_unexpected_exit callbacks -- minds itself asked
     the subprocess to stop, so the pipeline is not unexpectedly down.
     """
     resolver = MngrCliBackendResolver()
@@ -1330,7 +1330,7 @@ def test_intentional_terminate_does_not_report_exit() -> None:
 
 
 def test_unintentional_subprocess_exit_reports_to_callback() -> None:
-    """If the subprocess exits without Imbue Studio calling terminate(), the lifecycle
+    """If the subprocess exits without minds calling terminate(), the lifecycle
     watcher reports the exit code once to the on_unexpected_exit callbacks so
     the watchdog can transition the app-global state to BLOCKED.
     """
@@ -1366,8 +1366,8 @@ def test_start_before_attach_raises(consumer: EnvelopeStreamConsumer) -> None:
 def test_build_forward_command_includes_use_http2_flag() -> None:
     """The spawned argv always carries --use-http2 so the proxy serves TLS.
 
-    Imbue Studio always runs the proxy with TLS + HTTP/2, matching the https/wss URLs
-    the rest of Imbue Studio builds, so a client that expects https reaches an https
+    minds always runs the proxy with TLS + HTTP/2, matching the https/wss URLs
+    the rest of minds builds, so a client that expects https reaches an https
     proxy.
     """
     config = ForwardSubprocessConfig(service="system_interface")
@@ -1397,7 +1397,7 @@ def test_build_forward_command_threads_includes_and_reverse_specs() -> None:
 
 
 def test_build_forward_command_passes_the_request_headers_file_only_when_configured() -> None:
-    """The proxy stamps the desktop's identity header from the file Imbue Studio maintains; without one it gets no flag."""
+    """The proxy stamps the desktop's identity header from the file minds maintains; without one it gets no flag."""
     with_file = _build_forward_command(
         ForwardSubprocessConfig(request_headers_file=Path("/tmp/minds/forward_headers.json")),
         preauth_cookie="s",

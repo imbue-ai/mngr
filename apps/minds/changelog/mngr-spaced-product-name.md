@@ -1,7 +1,0 @@
-The app now installs as `Imbue Studio.app` rather than `ImbueStudio.app`, matching how it is written everywhere else and how other macOS apps name themselves (`Google Chrome.app`, `Visual Studio Code.app`). On Linux it installs to `/opt/Imbue Studio/`.
-
-The `CFBundleName` override is gone, so it defaults to `productName` and the two can no longer drift apart. This also fixes the app failing to launch. Electron finds its helper processes at `Contents/Frameworks/<CFBundleName> Helper.app`, while the builder names those helpers after `productName`. Since the rename those two disagreed by exactly one space -- `Imbue Studio` against `ImbueStudio` -- so every macOS build exited at startup with `Unable to find helper app`. Giving `productName` the space makes all three agree.
-
-The package is renamed too, from `minds` to `imbue-studio`, which is what the Linux executable is named after: it is now `/opt/Imbue Studio/imbue-studio` rather than `.../minds`, and the `.deb` is `imbue-studio`. Two side effects, both harmless before a public release: the update cache moves to `~/Library/Caches/imbue-studio-updater`, so a staged update downloads once more, and a `.deb` installed under the old package name is not seen as the same package.
-
-Upgrading replaces the old bundle: the installer removes `ImbueStudio.app` alongside the older `Mind.app` and `Minds.app`. Your data is not affected -- it lives under `~/.minds`, which is keyed on the env name and not on the app's display name.

@@ -1,4 +1,4 @@
-"""Broker a reverse SSH tunnel from the Imbue Studio hub into a calling workspace.
+"""Broker a reverse SSH tunnel from the minds hub into a calling workspace.
 
 The cross-workspace SSH route hands a calling workspace a way to ``ssh`` into a
 target workspace. When the target is *remote* its host is reachable from
@@ -11,8 +11,8 @@ loopback listener there) that relays, through the hub, to the target's hub-local
 sshd. The caller then connects to ``127.0.0.1:<assigned port>`` with its own key.
 
 This reuses ``mngr_forward``'s ``SSHTunnelManager`` -- the same reverse-tunnel
-machinery the latchkey gateway forwarding uses -- so the only logic specific to Imbue Studio
-here is deciding when to broker and wrapping the manager's errors.
+machinery the latchkey gateway forwarding uses -- so the only minds-specific
+logic here is deciding when to broker and wrapping the manager's errors.
 """
 
 import ipaddress

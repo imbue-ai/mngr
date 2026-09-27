@@ -1,11 +1,7 @@
 from collections.abc import Mapping
 from typing import Any
 
-from imbue.imbue_common.pure import pure
-from imbue.mngr.interfaces.data_types import CpuResources
-from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.primitives import HostState
-from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 
 # Diagnostic carried on the UNKNOWN state of a container the outer host reports
 # running but whose inner data we could not read (docker exec produced no
@@ -103,24 +99,3 @@ def map_docker_status_to_host_state(status: str, exit_code: int) -> tuple[HostSt
     # An unrecognized status is a gap in our mapping, not evidence the
     # container is down: UNKNOWN, so consumers don't auto-restart off it.
     return HostState.UNKNOWN, f"could not determine state: unrecognized docker status {status!r}"
-
-
-@pure
-def host_resources_for_machine(lease_attributes: Mapping[str, Any], machine: WorkspaceInfo | None) -> HostResources:
-    """The machine's recorded allocation: memory and disk from the machine row, vCPUs from the lease attributes.
-
-    ``memory_units`` (1 unit = 1GiB of machine RAM) and ``disk_gb`` are the
-    connector's current-size columns, restamped on every start, so they follow
-    a resize. The bake-time lease attributes are never updated after a resize:
-    they are only the memory fallback against a connector too old to serve the
-    sizing columns, and the sole source of the vCPU count, which the client
-    cannot derive (it is the machine's proportional share of its box's threads).
-    """
-    cpus_attr = lease_attributes.get("cpus")
-    cpu_count = int(cpus_attr) if isinstance(cpus_attr, (int, float)) else 1
-    memory_attr = lease_attributes.get("memory_gb")
-    fallback_memory_gb = float(memory_attr) if isinstance(memory_attr, (int, float)) else 1.0
-    memory_units = machine.memory_units if machine is not None else None
-    memory_gb = float(memory_units) if memory_units is not None else fallback_memory_gb
-    disk_gb = float(machine.disk_gb) if machine is not None and machine.disk_gb is not None else None
-    return HostResources(cpu=CpuResources(count=cpu_count), memory_gb=memory_gb, disk_gb=disk_gb, gpu=None)

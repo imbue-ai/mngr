@@ -5,10 +5,8 @@
 # remote_service_connector, litellm-proxy) is stood up. Until then, the
 # values here may temporarily point at older infra during cutover.
 
-# The api and llm custom domains from deploy.toml's [origins] block. The
-# *.modal.run URLs they front stay attached for the binaries that carry them.
-connector_url = "https://api.studio.imbue.com"
-litellm_proxy_url = "https://llm.studio.imbue.com"
+connector_url = "https://minds-production--rsc-production-api.modal.run"
+litellm_proxy_url = "https://minds-production--llm-production-proxy.modal.run"
 
 # The accounts host shared-workspace visitor links point at (a Modal custom
 # domain on the connector app; see the [origins] block in deploy.toml).

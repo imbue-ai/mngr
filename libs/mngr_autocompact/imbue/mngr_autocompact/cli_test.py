@@ -9,7 +9,6 @@ from typing import cast
 import pluggy
 import pytest
 from click.testing import CliRunner
-from loguru import logger
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -405,46 +404,8 @@ def test_resolve_target_agents_non_compaction(temp_mngr_ctx: MngrContext) -> Non
             discovered_agent_names_by_id={raw_agent.id: raw_agent.name},
         )
 
-        warnings: list[str] = []
-        sink_id = logger.add(lambda msg: warnings.append(str(msg)), level="WARNING")
-        try:
-            resolved = cli_module._resolve_target_agents([AgentAddress(agent=AgentName("raw-agent"))], mngr_ctx)
-        finally:
-            logger.remove(sink_id)
-
-        assert resolved == []
-        assert any("raw-agent" in w and "does not support context compaction" in w for w in warnings)
-
-
-def test_resolve_target_agents_mixed_compaction_support(temp_mngr_ctx: MngrContext) -> None:
-    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
-        raw_agent = _DummyNonCompactionAgent(
-            id=AgentId.generate(),
-            name=AgentName("raw-agent"),
-            agent_type=AgentTypeName("raw"),
-            running=True,
-        )
-        comp_agent = _make_compaction_agent("comp-agent")
-        _add_fake_online_host(
-            provider,
-            mngr_ctx,
-            "on-host",
-            live_agents=[raw_agent, comp_agent],
-            discovered_agent_names_by_id={raw_agent.id: raw_agent.name, comp_agent.id: comp_agent.name},
-        )
-
-        warnings: list[str] = []
-        sink_id = logger.add(lambda msg: warnings.append(str(msg)), level="WARNING")
-        try:
-            resolved = cli_module._resolve_target_agents(
-                [AgentAddress(agent=AgentName("raw-agent")), AgentAddress(agent=AgentName("comp-agent"))],
-                mngr_ctx,
-            )
-        finally:
-            logger.remove(sink_id)
-
-        assert resolved == [comp_agent]
-        assert any("raw-agent" in w and "does not support context compaction" in w for w in warnings)
+        with pytest.raises(UserInputError, match="does not support context compaction"):
+            cli_module._resolve_target_agents([AgentAddress(agent=AgentName("raw-agent"))], mngr_ctx)
 
 
 def test_resolve_target_agents_single(temp_mngr_ctx: MngrContext) -> None:

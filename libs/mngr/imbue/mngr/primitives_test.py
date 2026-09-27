@@ -7,22 +7,16 @@ from typing import Any
 
 import pytest
 
-from imbue.imbue_common.primitives import InvalidPrimitiveValueError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
-from imbue.mngr.primitives import ByteSize
 from imbue.mngr.primitives import CertifiedDataError
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
-from imbue.mngr.primitives import DockerCpuCount
-from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidAgentInstanceKey
-from imbue.mngr.primitives import InvalidByteSizeError
-from imbue.mngr.primitives import InvalidDockerMemorySizeError
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
 from imbue.mngr.primitives import ProviderInstanceName
@@ -60,7 +54,9 @@ def test_agent_name_is_not_capped_at_host_name_length() -> None:
     assert str(AgentName(long_name)) == long_name
 
 
+# =============================================================================
 # DiscoveredAgent property tests
+# =============================================================================
 
 
 def _make_discovered_agent(
@@ -152,7 +148,9 @@ def test_discovered_agent_labels_returns_values_when_present() -> None:
     assert ref.labels == {"env": "prod", "team": "infra"}
 
 
+# =============================================================================
 # default_branch_name tests
+# =============================================================================
 
 
 def test_default_branch_name_uses_default_prefix() -> None:
@@ -167,7 +165,9 @@ def test_default_branch_name_uses_custom_prefix() -> None:
     assert result == "custom/my-agent"
 
 
+# =============================================================================
 # AgentName validation tests
+# =============================================================================
 
 
 def test_agent_name_rejects_leading_dash() -> None:
@@ -188,7 +188,9 @@ def test_agent_name_accepts_valid_name() -> None:
     assert str(name) == "good-agent-name"
 
 
+# =============================================================================
 # DiscoveredAgent.created_branch_name tests
+# =============================================================================
 
 
 def test_discovered_agent_created_branch_name_returns_none_when_missing() -> None:
@@ -222,7 +224,9 @@ def test_discovered_agent_created_branch_name_raises_on_unexpected_type() -> Non
         _ = ref.created_branch_name
 
 
+# =============================================================================
 # checked_out_branch_name tests
+# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -324,46 +328,3 @@ def test_agent_instance_key_distinguishes_same_agent_id_on_different_hosts() -> 
 def test_discovered_agent_instance_key_matches_its_ids() -> None:
     ref = _make_discovered_agent({})
     assert ref.instance_key == AgentInstanceKey.build(ref.agent_id, ref.host_id)
-
-
-@pytest.mark.parametrize(
-    ("value", "expected_bytes"),
-    [
-        ("512m", 512 * 1024**2),
-        ("4g", 4 * 1024**3),
-        ("4G", 4 * 1024**3),
-        ("4gb", 4 * 1024**3),
-        ("4GiB", 4 * 1024**3),
-        ("1.5g", int(1.5 * 1024**3)),
-        ("4096", 4096),
-        (" 2k ", 2048),
-    ],
-)
-def test_docker_memory_size_accepts_docker_spellings_and_converts_with_binary_units(
-    value: str, expected_bytes: int
-) -> None:
-    size = DockerMemorySize(value)
-    assert size.size_bytes == expected_bytes
-    assert size.size_gb == expected_bytes / 1024**3
-    assert size == value.strip()
-
-
-@pytest.mark.parametrize("value", ["", "lots", "4 gigs", "-1g", "4gg", "g"])
-def test_docker_memory_size_rejects_values_docker_would_not_accept(value: str) -> None:
-    with pytest.raises(InvalidDockerMemorySizeError):
-        DockerMemorySize(value)
-
-
-def test_docker_cpu_count_requires_a_positive_whole_number() -> None:
-    assert DockerCpuCount(4) == 4
-    with pytest.raises(InvalidPrimitiveValueError):
-        DockerCpuCount(0)
-
-
-def test_byte_size_is_the_shared_grammar_docker_memory_sizes_refine() -> None:
-    assert ByteSize("100GiB").size_bytes == 100 * 1024**3
-    assert ByteSize(" 512m ") == "512m"
-    with pytest.raises(InvalidByteSizeError):
-        ByteSize("huge")
-    assert issubclass(DockerMemorySize, ByteSize)
-    assert issubclass(InvalidDockerMemorySizeError, InvalidByteSizeError)

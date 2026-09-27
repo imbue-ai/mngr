@@ -21,7 +21,7 @@ backend = "aws"
 
 default_region = "us-east-1"
 default_instance_type = "t3.small"  # EC2 instance type
-# default_ami_id = "ami-..."        # optional override; defaults to the newest Debian 13 AMI for the instance type's architecture
+# default_ami_id = "ami-..."        # optional override; defaults to the pinned per-region AMI
 
 # Optional networking. security_group defaults to auto-create with name 'mngr-aws'.
 # To override:
@@ -85,7 +85,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `backend` | `aws` | Provider backend (always 'aws' for this type) |
 | `default_region` | `us-east-1` | Default AWS region. |
 | `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
-| `default_ami_id` | `None` (newest Debian 13 AMI for the instance type's architecture, resolved at create) | Default AMI ID. When None, the newest Debian 13 AMI Debian publishes in the chosen region for the instance type's architecture (amd64 or arm64) is resolved at create time via ec2:DescribeInstanceTypes and ec2:DescribeImages. |
+| `default_ami_id` | `None` (pinned Debian 12 amd64 per region) | Default AMI ID. When None, the pinned per-region default (DEFAULT_AMI_BY_REGION) is consulted for the chosen region. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. The auto-create path consults allowed_ssh_cidrs. |
 | `subnet_id` | `None` | Subnet ID. When None, EC2 picks the default-VPC subnet for the AZ. |
 | `vpc_id` | `None` | VPC ID. Only used to scope auto-created security group lookups. |
@@ -96,7 +96,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `is_offline_host_dir_enabled` | `true` | When on (default), a stopped instance's host_dir is readable without starting it, so `mngr event` / `mngr transcript` / `mngr file` work against it. `mngr aws prepare` sets up the access it needs. Set False to turn it off. |
 | `terminate_on_shutdown` | `false` | EC2 shutdown behavior (InstanceInitiatedShutdownBehavior) on an OS shutdown. False keeps the instance stoppable and resumable via `mngr start` (EBS preserved); True terminates it (ephemeral / self-cleaning). |
 | `use_ec2_instance_metadata` | `false` | Whether to consult the EC2 instance-metadata service (IMDS, 169.254.169.254) as a credential source. Off by default: on a host that is not an EC2 instance, IMDS is frequently routed-but-blackholed, so probing it blocks on the OS TCP connect timeout (tens of seconds) instead of failing fast, which can stall discovery. Set True only when running mngr on an EC2 instance that should authenticate via its attached IAM instance role. |
-| `aws_access_key_id` | `None` | Explicit AWS access key id. When set together with aws_secret_access_key, these are passed directly to boto3 and take precedence over the ambient credential chain. Used by the Imbue Studio bring-your-own-account paste flow. Leave unset to use the ambient chain. |
+| `aws_access_key_id` | `None` | Explicit AWS access key id. When set together with aws_secret_access_key, these are passed directly to boto3 and take precedence over the ambient credential chain. Used by the Minds bring-your-own-account paste flow. Leave unset to use the ambient chain. |
 | `aws_secret_access_key` | `None` | Explicit AWS secret access key. See aws_access_key_id. |
 | `aws_session_token` | `None` | Optional AWS session token, for temporary (STS/SSO) credentials. Only used when aws_access_key_id / aws_secret_access_key are set. |
 | `allowed_ssh_cidrs` | `("0.0.0.0/0",)` | Inbound CIDR blocks allowed on tcp/22 and the container SSH port in the security group / NSG / firewall rule the provider's `prepare` command creates. Default ('0.0.0.0/0',) allows any IP; use e.g. ('203.0.113.4/32',) to restrict to your own, or () for no ingress (no rule is created, so the instance is unreachable from outside its network). A warning is logged when the effective range is 0.0.0.0/0 or empty. Replaced, not merged, across config layers. |
@@ -136,7 +136,7 @@ ec2:StopInstances, ec2:StartInstances,
 ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
-ec2:DescribeImages, ec2:DescribeInstanceTypes,
+ec2:DescribeImages,
 s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket
 ```
 
@@ -160,7 +160,7 @@ s3:ListBucket, s3:DeleteObject, s3:DeleteBucket
 
 Deleting the S3 state bucket additionally uses `s3:ListBucket`, `s3:DeleteObject`, and `s3:DeleteBucket`.
 
-Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. Only the cheap index tags (`mngr-host-id`, `Name`, `mngr-created-at`) are stamped on the instance, to identify a stopped host during discovery; per-agent metadata lives in the S3 state bucket, not in tags (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeInstanceTypes` and `DescribeImages` resolve the default AMI at create time (the newest Debian 13 image Debian publishes in the region for the instance type's architecture, amd64 or arm64; set `default_ami_id` or pass `--aws-ami=` to skip both lookups).
+Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. Only the cheap index tags (`mngr-host-id`, `Name`, `mngr-created-at`) are stamped on the instance, to identify a stopped host during discovery; per-agent metadata lives in the S3 state bucket, not in tags (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
 
 ## Implementation details
 

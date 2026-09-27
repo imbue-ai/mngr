@@ -61,7 +61,7 @@ ISOLATION_METADATA_KEY: Final[str] = ISOLATION_TAG_KEY
 
 # SSH metadata is injected as ``<user>:<public-key>``. The google-guest-agent
 # creates whatever user is named here, so ``ubuntu`` works on any image (including
-# the default Debian 13) without pre-existing. The startup-script also writes the
+# the default Debian 12) without pre-existing. The startup-script also writes the
 # key into root's authorized_keys, where mngr actually connects.
 GCE_SSH_USERNAME: Final[str] = "ubuntu"
 
@@ -248,7 +248,9 @@ class GcpVpsClient(VpsClientInterface):
     _cached_instances_client: Any = PrivateAttr(default=None)
     _cached_firewalls_client: Any = PrivateAttr(default=None)
 
+    # =========================================================================
     # Lazily-built compute clients (overridden in tests to inject fakes)
+    # =========================================================================
 
     def _instances(self) -> Any:
         if self._cached_instances_client is None:
@@ -278,7 +280,9 @@ class GcpVpsClient(VpsClientInterface):
         with self._translate_gcp_errors():
             operation.result()
 
+    # =========================================================================
     # Firewall management (idempotent, tag-targeted, network-scoped)
+    # =========================================================================
 
     def _firewall_exists(self) -> bool:
         """Return True iff the configured firewall rule exists (read-only lookup)."""
@@ -430,7 +434,9 @@ class GcpVpsClient(VpsClientInterface):
         logger.info("Deleted firewall rule {} in project {}", self.firewall_name, self.project_id)
         return self.firewall_name
 
+    # =========================================================================
     # Instance Operations
+    # =========================================================================
 
     def create_instance(
         self,
@@ -786,7 +792,9 @@ class GcpVpsClient(VpsClientInterface):
                 )
         return instances
 
+    # =========================================================================
     # Instance metadata (offline-discovery mirror for STOPPED hosts)
+    # =========================================================================
 
     def set_instance_metadata(
         self, instance_id: VpsInstanceId, updates: Mapping[str, str], delete_keys: Sequence[str] = ()
@@ -874,7 +882,9 @@ class GcpVpsClient(VpsClientInterface):
                         )
         return managed
 
+    # =========================================================================
     # SSH Key Operations (no native GCE per-key resource; in-memory map)
+    # =========================================================================
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         """Stash the public key in memory under ``name``; return ``name`` as the key ID.

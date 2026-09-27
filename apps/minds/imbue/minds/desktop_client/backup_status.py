@@ -1,6 +1,6 @@
-"""Read per-workspace backup snapshot state by querying restic from the Imbue Studio app.
+"""Read per-workspace backup snapshot state by querying restic from the minds app.
 
-Because Imbue Studio holds the canonical ``restic.env`` for every workspace with
+Because minds holds the canonical ``restic.env`` for every workspace with
 backups configured, it can run restic against each repository directly --
 without the workspace being reachable -- to list a workspace's snapshots and
 report whether a backup is running right now. Both feed the per-workspace
@@ -71,7 +71,7 @@ def list_workspace_snapshots(
 ) -> tuple[restic_cli.ResticSnapshot, ...]:
     """List a workspace's restic snapshots from its canonical restic.env.
 
-    Works even when the workspace is offline or destroyed, because Imbue Studio holds
+    Works even when the workspace is offline or destroyed, because minds holds
     the canonical ``restic.env``. Raises ``BackupProvisioningError`` when no
     backups are configured (no canonical env) or its repository is missing, and
     propagates restic failures.

@@ -1312,7 +1312,7 @@ def test_syncing_a_folder_that_is_not_there_is_refused(
 
 
 def test_sharing_a_new_path_files_the_grant_against_the_workspaces_own_file(tmp_path: Path) -> None:
-    """Not Imbue Studio's own permissions file -- a file-sharing rule there wedges the gateway."""
+    """Not Minds' own permissions file -- a file-sharing rule there wedges the gateway."""
     agent_id, host_id = AgentId(), HostId()
     latchkey = _latchkey(tmp_path)
     permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)

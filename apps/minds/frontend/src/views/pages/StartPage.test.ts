@@ -95,11 +95,9 @@ describe("transcriptTurns", () => {
     const text = allText(turns);
     expect(text).toContain("On Imbue Cloud");
     expect(text).toContain("Imbue Cloud it is. A cloud workspace runs on our machines");
-    // The where-to-run buttons are gone; the account question's are up, with
-    // sign-in as the emphasized answer at the row's right end.
+    // The where-to-run buttons are gone; the account question's are up.
     const answers = withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"]);
-    expect(answers).toEqual(["signup", "signin"]);
-    expect(text).toContain("Sign in with the account you downloaded Imbue Studio with.");
+    expect(answers).toEqual(["signin", "signup"]);
     const undo = collectVnodes(turns).find((node) => node.attrs?.["aria-label"] === "Change answer");
     expect(undo).toBeDefined();
   });

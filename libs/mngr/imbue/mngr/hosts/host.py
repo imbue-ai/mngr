@@ -83,6 +83,7 @@ from imbue.mngr.interfaces.data_types import CleanupFailureCategory
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.data_types import FileTransferSpec
 from imbue.mngr.interfaces.data_types import HostBootInfo
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.host import AgentTmuxOptions
 from imbue.mngr.interfaces.host import CreateAgentOptions
 from imbue.mngr.interfaces.host import CreateWorkDirResult
@@ -1519,6 +1520,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             return _parse_boot_info_output(result.stdout)
 
         return HostBootInfo()
+
+    def get_provider_resources(self) -> HostResources:
+        """Get resources from the provider."""
+        return self.provider_instance.get_host_resources(self)
 
     def get_outer_ssh_port(self) -> int | None:
         """Delegate to the provider, which knows whether this host has a distinct outer sshd port."""

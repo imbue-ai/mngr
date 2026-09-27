@@ -39,7 +39,7 @@ class RootManifest(FrozenModel):
     """The minisign-signed manifest describing every arch's image for one release."""
 
     schema_version: int = Field(description="On-CDN manifest schema version; must equal ROOT_MANIFEST_SCHEMA_VERSION")
-    minds_version: MindsImageVersion = Field(description="The Imbue Studio release tag this manifest describes")
+    minds_version: MindsImageVersion = Field(description="The minds release tag this manifest describes")
     created_at: datetime = Field(description="When the manifest was produced (UTC)")
     entries: tuple[LimaImageEntry, ...] = Field(description="One entry per published architecture")
 

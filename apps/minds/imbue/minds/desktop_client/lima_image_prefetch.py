@@ -3,7 +3,7 @@
 Resolves the per-env image source from config, decides when a create should use
 the pre-baked image (the gate), and runs the background prefetch worker that
 keeps the current release's image present + verified. The heavy lifting lives in
-``imbue.minds.lima_image``; this module is the app-level wiring in Imbue Studio.
+``imbue.minds.lima_image``; this module is the minds-app-level wiring.
 """
 
 import threading

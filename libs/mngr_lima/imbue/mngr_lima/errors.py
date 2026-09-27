@@ -57,10 +57,6 @@ class LimaConfigError(MngrError, ValueError):
     """Raised when a LimaProviderConfig combines mutually-incompatible options."""
 
 
-class LimaResizeRefusedError(MngrError, ValueError):
-    """Raised when a lima resize asks for what the host cannot take: a data-disk shrink, or a disk size on a host without a data disk."""
-
-
 class LimaInstanceNameTooLongError(MngrError):
     """Raised when no Lima instance name fits UNIX_PATH_MAX for the current LIMA_HOME.
 

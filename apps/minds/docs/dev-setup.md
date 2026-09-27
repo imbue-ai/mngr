@@ -1,6 +1,6 @@
-# Setting up Imbue Studio for development
+# Setting up minds for development
 
-This is the one-time setup for hacking on the Imbue Studio desktop client and its
+This is the one-time setup for hacking on the minds desktop client and its
 stack from source. Run from source, the app targets production by default:
 it reads the in-repo production `client.toml`, owns `~/.minds/`, and needs
 nothing exported.
@@ -40,7 +40,7 @@ and, with `--raspberry-pi`, a Raspberry Pi 5 always-on host
 - [ ] **uv, git** -- the monorepo's core tooling. Every command is run via
       `uv run ...` from the repo root.
 
-- [ ] **Docker Desktop** (or colima / lima) -- local Imbue Studio agents run in
+- [ ] **Docker Desktop** (or colima / lima) -- local minds agents run in
       Docker (or Lima) containers; start it before creating an agent.
 
 - [ ] **Node 24.15.0 (via nvm) + pnpm 10.33.4** -- the Electron desktop
@@ -66,7 +66,7 @@ URL the app prints on startup.
 ## Imbue-internal: developing against a dev env
 
 Everything above is what a contributor working from the public repo needs.
-Imbue developers who iterate on mngr, the workspace template, and the Imbue Studio
+Imbue developers who iterate on mngr, the workspace template, and the minds
 services together use the private operator tooling on top of it, all of
 which lives outside the public mirror:
 

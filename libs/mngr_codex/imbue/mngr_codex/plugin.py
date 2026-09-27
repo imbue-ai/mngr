@@ -149,9 +149,7 @@ from imbue.mngr_codex.app_server_client import CodexAppServerClient
 from imbue.mngr_codex.app_server_client import CodexAppServerError
 from imbue.mngr_codex.app_server_client import Disposition
 from imbue.mngr_codex.app_server_client import DispositionKind
-from imbue.mngr_codex.app_server_client import ThreadInfo
 from imbue.mngr_codex.app_server_client import ThreadStatusSnapshot
-from imbue.mngr_codex.app_server_client import TransportClosedError
 from imbue.mngr_codex.app_server_client import connect_app_server_transport
 from imbue.mngr_codex.codex_config import APP_SERVER_THREAD_FILENAME
 from imbue.mngr_codex.codex_config import BACKGROUND_TASKS_SCRIPT_NAME
@@ -390,19 +388,11 @@ class CodexAgentConfig(AgentTypeConfig):
     # model is intentionally not defaulted: codex picks the account's default,
     # and a ChatGPT-account login rejects some ``*-codex`` model slugs, so
     # forcing one could break the agent. Set this to a model your account
-    # supports (e.g. "gpt-5.5") if codex's default fails (see the README), or
-    # pair a pin with fall_back_to_account_default_model for accounts that lack it.
+    # supports (e.g. "gpt-5.5") if codex's default fails (see the README).
     model: str | None = Field(
         default=None,
         description="Model slug to pin in the per-agent config.toml (e.g. 'gpt-5.5'). None leaves "
         "codex's own default in force. A ChatGPT-account login rejects some *-codex model slugs.",
-    )
-    fall_back_to_account_default_model: bool = Field(
-        default=False,
-        description="When True and `model` is set, mngr reads the account's model list before starting "
-        "a thread and, if the account does not offer the pinned model, starts the thread on the account's "
-        "default model instead of one whose every turn the account would reject. A thread that already "
-        "exists keeps its model.",
     )
     model_reasoning_effort: str | None = Field(
         default=None,
@@ -846,7 +836,7 @@ class CodexAgent(
             logger.warning("could not establish codex root conversation for {} (handshake): {}", self.name, exc)
             return
         try:
-            info = self._start_thread(client)
+            info = client.thread_start(cwd=str(self.work_dir))
             client.inject_items(_ROOT_MATERIALIZE_ITEMS)
             self._persist_root_conversation(info.thread_id)
             self._persist_transcript_path(info.thread_id)
@@ -1043,54 +1033,8 @@ class CodexAgent(
 
     def _start_and_persist_thread(self, client: CodexAppServerClient) -> None:
         """Start a fresh thread (idle) and persist its id as this agent's root thread."""
-        info = self._start_thread(client)
+        info = client.thread_start(cwd=str(self.work_dir))
         self._write_persisted_thread_id(info.thread_id)
-
-    def _start_thread(self, client: CodexAppServerClient) -> ThreadInfo:
-        """``thread/start`` a fresh thread, on the account's default model if the pinned one is not offered."""
-        return client.thread_start(cwd=str(self.work_dir), model=self._fallback_model_for_new_thread(client))
-
-    def _fallback_model_for_new_thread(self, client: CodexAppServerClient) -> str | None:
-        """The model to start a new thread on in place of the pinned ``model``, or ``None`` to keep the pin.
-
-        ``None`` leaves the thread to the per-agent config.toml. A model list the daemon cannot
-        produce is logged and keeps the pin: the send or create must not fail over it. A dead
-        connection propagates, since the ``thread/start`` that would follow cannot succeed either.
-        """
-        pinned_model = self.agent_config.model
-        if pinned_model is None or not self.agent_config.fall_back_to_account_default_model:
-            return None
-        try:
-            offered_models = client.model_list(include_hidden=True)
-        except TransportClosedError:
-            raise
-        except CodexAppServerError as exc:
-            logger.warning(
-                "could not read the codex account's models for {} ({}); starting on the pinned model {}",
-                self.name,
-                exc,
-                pinned_model,
-            )
-            return None
-        if any(offered.model == pinned_model for offered in offered_models):
-            return None
-        # codex marks exactly one entry of any non-empty list: the model it starts on with nothing configured.
-        default_model = next((offered.model for offered in offered_models if offered.is_default), None)
-        if default_model is None:
-            logger.warning(
-                "the codex account for {} does not offer the pinned model {} and marks no default model; "
-                "starting on the pinned model",
-                self.name,
-                pinned_model,
-            )
-            return None
-        logger.warning(
-            "the codex account for {} does not offer the pinned model {}; starting on its default model {}",
-            self.name,
-            pinned_model,
-            default_model,
-        )
-        return default_model
 
     def _submit_over_app_server(self, client: CodexAppServerClient, message: str) -> Disposition:
         """Submit ``message`` (mngr-minted client id); raise ``SendMessageError`` if not accepted."""
@@ -1179,6 +1123,8 @@ class CodexAgent(
         if "approval_policy" in self.agent_config.config_overrides:
             policy["approval_policy"] = self.agent_config.config_overrides["approval_policy"]
         return policy
+
+    # --- HasCompactionMixin capability implementation ---
 
     def request_compaction(self, instructions: str | None = None) -> None:
         """Perform context compaction on the Codex agent.
@@ -1736,9 +1682,8 @@ class CodexAgent(
         state = "$MNGR_AGENT_STATE_DIR"
         process_started_cmd = f'touch "{state}/{PROCESS_STARTED_MARKER_FILENAME}" 2>/dev/null || true'
 
-        # Create the agent's private socket directory (codex refuses a parent other users can write
-        # to) and remove any stale socket a prior run left behind before the daemon binds.
-        prepare_socket_cmd = f"mkdir -p -m 700 {shlex.quote(str(socket_path.parent))} && rm -f {quoted_socket}"
+        # Remove any stale socket a prior run left behind before the daemon binds.
+        rm_socket_cmd = f"rm -f {quoted_socket}"
 
         # The daemon runs as the foreground process of a detached sidecar window in the
         # SAME session, so `tmux kill-session` reaps it. `exec` replaces the wrapper shell
@@ -1813,7 +1758,7 @@ class CodexAgent(
 
         return CommandString(
             f"{background_cmd} {mkdir_cmd} && {cd_cmd} "
-            f"&& {{ {process_started_cmd}; {prepare_socket_cmd}; "
+            f"&& {{ {process_started_cmd}; {rm_socket_cmd}; "
             f"{spawn_daemon_cmd}; {wait_for_socket_cmd}; {wait_for_root_id_cmd}; {remote_cmd} ; }}"
         )
 

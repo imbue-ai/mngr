@@ -116,7 +116,7 @@ def running_local_workspace_entries(backend_resolver: BackendResolverInterface) 
     The quit prompt's scope. A cloud workspace is shutdown-capable but is not
     kept alive by the app: it goes on running its agents with the app closed, so
     quitting is no reason to offer to stop it (its Start/Stop control is). Only
-    local workspaces hold the user's own computer, which is what quitting frees.
+    local workspaces hold the user's own machine, which is what quitting frees.
     """
     return _running_entries(backend_resolver, compute_local_mind_liveness_by_agent_id(backend_resolver))
 

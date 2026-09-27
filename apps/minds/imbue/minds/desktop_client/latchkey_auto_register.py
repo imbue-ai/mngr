@@ -2,7 +2,7 @@
 
 Wires a callback onto :class:`MngrCliBackendResolver` that watches the
 discovery stream for new ``(host_id, agent_id)`` pairs and, for each one
-on a host Imbue Studio manages (i.e. a host whose ``latchkey_permissions.json``
+on a minds-managed host (i.e. a host whose ``latchkey_permissions.json``
 exists), appends the agent to the ``minds-api-proxy-per-agent-unauthorized``
 ``not.anyOf`` allowlist so the gateway's ``minds-api-proxy`` extension
 stops rejecting the agent's ``/api/v1/agents/<agent_id>/...`` calls.
@@ -131,7 +131,7 @@ class LatchkeyAutoRegister(MutableModel):
             ]
 
     def _handle_pair(self, host_id: HostId, agent_id: AgentId) -> None:
-        """Register ``agent_id`` on ``host_id`` if Imbue Studio manages the host.
+        """Register ``agent_id`` on ``host_id`` if the host is minds-managed.
 
         Hosts without an existing ``latchkey_permissions.json`` are *deferred*,
         not dropped. A brand-new workspace reaches discovery before agent
@@ -144,7 +144,7 @@ class LatchkeyAutoRegister(MutableModel):
         besides the observe stream's agent and provider snapshots, ``_on_change``
         fires on every service event a workspace emits and on the many request
         paths that call ``notify_change``. A host that genuinely is not
-        managed by Imbue Studio pays that stat forever, since we still refuse to conjure it
+        minds-managed pays that stat forever, since we still refuse to conjure it
         a file from a discovery event alone. Hence the one-shot deferral log: the
         stat is cheap, a log line per resolver change is not.
 

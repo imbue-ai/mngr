@@ -79,11 +79,11 @@ from imbue.mngr_imbue_cloud.providers.instance import _resolve_fast_path_attribu
 from imbue.mngr_imbue_cloud.providers.instance import leased_info_from_workspace
 from imbue.mngr_imbue_cloud.providers.instance import should_read_container_ca_trust_from_vm
 from imbue.mngr_imbue_cloud.providers.testing import load_pins_by_endpoint
-from imbue.mngr_imbue_cloud.providers.testing import make_workspace_info
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceInfo
 from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 from imbue.mngr_vps.container_setup import RUNNING_CONTAINER_STATE
 
 
@@ -166,7 +166,7 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
         agent_id=str(agent_id),
         host_id=str(host_id),
         host_name="unreachable-host",
-        attributes={"cpus": 2, "memory_gb": 8},
+        attributes={},
         leased_at="2025-01-01T00:00:00Z",
     )
     host_ref = DiscoveredHost(
@@ -208,10 +208,6 @@ def test_build_offline_details_from_lease_preserves_host_and_failure_reason(tmp_
     assert host_details.state == HostState.UNKNOWN
     # ``failure_reason`` carries the underlying error.
     assert host_details.failure_reason == failure_message
-    # The recorded size does not depend on reaching the box.
-    assert host_details.resource is not None
-    assert host_details.resource.cpu.count == 2
-    assert host_details.resource.memory_gb == 8.0
     # One agent_details per agent_ref, all attached to the offline host.
     assert len(agent_details_list) == 1
     assert agent_details_list[0].id == agent_id
@@ -326,7 +322,7 @@ def test_rename_host_raises_when_lease_not_found() -> None:
 # per-host authorized key and the served host key) survives a docker stop/start,
 # so only sshd -- a process launched via ``docker exec``, never the entrypoint --
 # must be relaunched. Without (1), start_host is never reached; without (2), the
-# container comes back with no sshd. Either way a stopped leased host is left
+# container comes back with no sshd. Either way a stopped leased mind is left
 # unrecoverable.
 
 
@@ -469,7 +465,7 @@ def test_get_host_returns_offline_host_when_container_stopped(tmp_path: Path, te
     ``start_host`` when ``get_host`` returns a non-online host. The previous
     implementation returned an online ``Host`` unconditionally, so ``mngr
     start`` skipped ``start_host`` and SSHed straight into the dead container,
-    leaving a stopped leased host unrecoverable.
+    leaving a stopped leased mind unrecoverable.
     """
     host_id = HostId.generate()
     lease = _make_lease(host_id)
@@ -1811,8 +1807,30 @@ def test_no_host_record_at_any_candidate_is_an_error() -> None:
         )
 
 
+def _make_workspace_info(
+    status: str, with_placement: bool = True, transition_error: str | None = None, stop_kind: str | None = None
+) -> WorkspaceInfo:
+    return WorkspaceInfo(
+        host_db_id=LeaseDbId("00000000-0000-0000-0000-0000000000aa"),
+        status=WorkspaceStatus(status),
+        stop_kind=WorkspaceStopKind(stop_kind) if stop_kind is not None else None,
+        vps_address="10.0.0.9" if with_placement else None,
+        ssh_port=22000 if with_placement else None,
+        ssh_user="root",
+        container_ssh_port=22001 if with_placement else None,
+        agent_id="agent-abc",
+        host_id="host-" + "a" * 32,
+        host_name="my-workspace",
+        attributes={"cpus": 2},
+        leased_at="2026-01-01T00:00:00+00:00",
+        transition_error=transition_error,
+        outer_host_public_key="ssh-ed25519 AAAA outer",
+        container_host_public_key="ssh-ed25519 AAAA container",
+    )
+
+
 def test_leased_info_from_workspace_projects_running_coordinates() -> None:
-    workspace = make_workspace_info("running")
+    workspace = _make_workspace_info("running")
 
     leased = leased_info_from_workspace(workspace)
 
@@ -1825,7 +1843,7 @@ def test_leased_info_from_workspace_projects_running_coordinates() -> None:
 
 
 def test_leased_info_from_workspace_rejects_missing_placement() -> None:
-    workspace = make_workspace_info("running", with_placement=False)
+    workspace = _make_workspace_info("running", with_placement=False)
 
     with pytest.raises(ImbueCloudConnectorError):
         leased_info_from_workspace(workspace)
@@ -1873,13 +1891,13 @@ def _advance_once(
 
 def test_advance_workspace_start_distinguishes_terminal_statuses() -> None:
     # Running: success, the workspace itself comes back.
-    running, _client = _advance_once(make_workspace_info("running"), _WorkspaceStartPollState())
+    running, _client = _advance_once(_make_workspace_info("running"), _WorkspaceStartPollState())
     assert isinstance(running, WorkspaceInfo)
 
     # Stopped after our start request: the start failed server-side; the
     # recorded error surfaces.
     stopped, _client = _advance_once(
-        make_workspace_info("stopped", with_placement=False, transition_error="no capacity"),
+        _make_workspace_info("stopped", with_placement=False, transition_error="no capacity"),
         _WorkspaceStartPollState(is_start_requested=True),
     )
     assert isinstance(stopped, WorkspaceStartFailedError)
@@ -1888,7 +1906,7 @@ def test_advance_workspace_start_distinguishes_terminal_statuses() -> None:
     # Crashed (operator abandon mid-start): terminal failure, not a 20-minute
     # poll-until-timeout; the message carries the reason and the recovery path.
     crashed, _client = _advance_once(
-        make_workspace_info("crashed", with_placement=False, transition_error="box died"),
+        _make_workspace_info("crashed", with_placement=False, transition_error="box died"),
         _WorkspaceStartPollState(),
     )
     assert isinstance(crashed, WorkspaceStartFailedError)
@@ -1897,7 +1915,7 @@ def test_advance_workspace_start_distinguishes_terminal_statuses() -> None:
 
     # An in-flight start keeps the poll going.
     starting, _client = _advance_once(
-        make_workspace_info("starting", with_placement=False), _WorkspaceStartPollState(is_start_requested=True)
+        _make_workspace_info("starting", with_placement=False), _WorkspaceStartPollState(is_start_requested=True)
     )
     assert starting is None
 
@@ -1906,13 +1924,13 @@ def test_advance_workspace_start_requests_the_start_once_the_stop_lands() -> Non
     # Still stopping: wait it out (the connector refuses starts mid-stop);
     # no start request is issued yet.
     state = _WorkspaceStartPollState()
-    outcome, client = _advance_once(make_workspace_info("stopping"), state)
+    outcome, client = _advance_once(_make_workspace_info("stopping"), state)
     assert outcome is None
     assert client.start_request_count == 0
     assert state.is_start_requested is False
 
     # Stopped: the probe itself issues the start request, exactly once.
-    outcome_after_stop, client_after_stop = _advance_once(make_workspace_info("stopped", with_placement=False), state)
+    outcome_after_stop, client_after_stop = _advance_once(_make_workspace_info("stopped", with_placement=False), state)
     assert outcome_after_stop is None
     assert client_after_stop.start_request_count == 1
     assert state.is_start_requested is True
@@ -1935,7 +1953,7 @@ def test_advance_workspace_start_refuses_a_held_stop_without_asking(
     # instead of waiting out the stop or requesting a start the server would
     # refuse anyway.
     state = _WorkspaceStartPollState()
-    outcome, client = _advance_once(make_workspace_info(status, with_placement=False, stop_kind=held_kind), state)
+    outcome, client = _advance_once(_make_workspace_info(status, with_placement=False, stop_kind=held_kind), state)
     assert isinstance(outcome, expected_error)
     assert str(outcome).startswith(expected_sentence)
     assert client.start_request_count == 0
@@ -1943,7 +1961,7 @@ def test_advance_workspace_start_refuses_a_held_stop_without_asking(
 
 def test_advance_workspace_start_treats_an_unknown_stop_kind_as_not_actionable() -> None:
     outcome, client = _advance_once(
-        make_workspace_info("stopped", with_placement=False, stop_kind="quarantine"), _WorkspaceStartPollState()
+        _make_workspace_info("stopped", with_placement=False, stop_kind="quarantine"), _WorkspaceStartPollState()
     )
     assert isinstance(outcome, UnrecognizedWorkspaceStatusError)
     assert client.start_request_count == 0
@@ -1953,7 +1971,7 @@ def test_advance_workspace_start_treats_an_unknown_stop_kind_as_not_actionable()
 def test_advance_workspace_start_requests_the_start_for_the_owners_own_stops(startable_kind: str | None) -> None:
     state = _WorkspaceStartPollState()
     outcome, client = _advance_once(
-        make_workspace_info("stopped", with_placement=False, stop_kind=startable_kind), state
+        _make_workspace_info("stopped", with_placement=False, stop_kind=startable_kind), state
     )
     assert outcome is None
     assert client.start_request_count == 1
@@ -1964,7 +1982,7 @@ def test_advance_workspace_start_surfaces_an_old_connector_bounce_to_stopping() 
     # stopping; the recorded reason must surface within one poll cycle
     # instead of burning the rest of the window into a generic timeout.
     bounced, _client = _advance_once(
-        make_workspace_info("stopping", transition_error="Error reading SSH protocol banner"),
+        _make_workspace_info("stopping", transition_error="Error reading SSH protocol banner"),
         _WorkspaceStartPollState(is_start_requested=True),
     )
     assert isinstance(bounced, WorkspaceStartFailedError)
@@ -1977,8 +1995,8 @@ def test_advance_workspace_start_fetches_a_token_every_probe() -> None:
     # validity keeps authenticating.
     state = _WorkspaceStartPollState()
     token_calls: list[int] = []
-    _advance_once(make_workspace_info("starting", with_placement=False), state, token_calls)
-    _advance_once(make_workspace_info("starting", with_placement=False), state, token_calls)
+    _advance_once(_make_workspace_info("starting", with_placement=False), state, token_calls)
+    _advance_once(_make_workspace_info("starting", with_placement=False), state, token_calls)
     assert len(token_calls) == 2
 
 
@@ -1986,7 +2004,7 @@ def test_advance_workspace_start_records_the_last_observed_status_and_error() ->
     # The poll state feeds the timeout message, so a start that never
     # converges names the real recorded reason instead of a bare timeout.
     state = _WorkspaceStartPollState()
-    _advance_once(make_workspace_info("stopping", transition_error="box unreachable"), state)
+    _advance_once(_make_workspace_info("stopping", transition_error="box unreachable"), state)
     assert state.last_observed_status is WorkspaceStatus.STOPPING
     assert state.last_transition_error == "box unreachable"
 
@@ -2014,7 +2032,7 @@ def test_start_refuses_a_workspace_whose_status_this_client_does_not_recognize()
     """
     provider = ImbueCloudProvider.model_construct(name=ProviderInstanceName("imbue-cloud-test"))
     # "migrating" is not in this client's vocabulary; the WireEnum coerces it.
-    workspace = make_workspace_info("migrating")
+    workspace = _make_workspace_info("migrating")
     assert workspace.status is WorkspaceStatus.UNKNOWN
 
     with pytest.raises(UnrecognizedWorkspaceStatusError, match="update the app"):
@@ -2162,8 +2180,8 @@ class _CannedLifecycleProvider(ImbueCloudProvider):
         return list(self._workspaces)
 
 
-def _stopped_workspace(host_id: HostId, memory_units: int | None = None, disk_gb: int | None = None) -> WorkspaceInfo:
-    workspace = make_workspace_info("stopped", with_placement=False, memory_units=memory_units, disk_gb=disk_gb)
+def _stopped_workspace(host_id: HostId) -> WorkspaceInfo:
+    workspace = _make_workspace_info("stopped", with_placement=False)
     return workspace.model_copy_update(
         to_update(workspace.field_ref().host_id, str(host_id)),
         to_update(workspace.field_ref().agent_id, str(AgentId.generate())),
@@ -2223,33 +2241,6 @@ def test_stopped_workspace_whose_cached_agents_lack_the_services_agent_still_sur
     assert str(agents[1].agent_id) == stopped_workspace.agent_id
 
 
-def test_stopped_workspace_details_report_the_row_sizing_columns(temp_mngr_ctx: MngrContext) -> None:
-    """A stopped workspace has no lease, yet its details carry the size the row records."""
-    stopped_workspace = _stopped_workspace(HostId.generate(), memory_units=16, disk_gb=56)
-    provider = _make_canned_lifecycle_provider(temp_mngr_ctx, [stopped_workspace])
-    host_ref, agents = _only_entry(provider.discover_hosts_and_agents(cg=temp_mngr_ctx.concurrency_group))
-
-    host_details, _agent_details = provider.get_host_and_agent_details(host_ref, agents)
-
-    assert host_details.state == HostState.STOPPED
-    assert host_details.resource is not None
-    assert host_details.resource.memory_gb == 16.0
-    assert host_details.resource.disk_gb == 56.0
-    assert host_details.resource.cpu.count == 2
-
-
-def test_get_host_resources_reads_the_row_sizing_columns_of_a_stopped_machine(temp_mngr_ctx: MngrContext) -> None:
-    """A stopped machine has no lease, so its size must come from the full-lifecycle row."""
-    stopped_machine = _stopped_workspace(HostId.generate(), memory_units=16, disk_gb=56)
-    provider = _make_canned_lifecycle_provider(temp_mngr_ctx, [stopped_machine])
-
-    resources = provider.get_host_resources(provider.to_offline_host(HostId(stopped_machine.host_id)))
-
-    assert resources.memory_gb == 16.0
-    assert resources.disk_gb == 56.0
-    assert resources.cpu.count == 2
-
-
 # destroy_host on a workspace with no lease entry: a stopped workspace holds its
 # lease without appearing in the running-only lease listing.
 
@@ -2287,7 +2278,7 @@ def test_destroy_host_releases_the_lease_of_a_stopped_workspace(temp_mngr_ctx: M
     """The exact leaked-lease bug: a stopped workspace has no lease entry, and its destroy
     used to run local cleanup only, leaving the row leased and counted against the quota."""
     host_id = HostId.generate()
-    workspace = make_workspace_info("stopped", with_placement=False)
+    workspace = _make_workspace_info("stopped", with_placement=False)
     stopped_workspace = workspace.model_copy_update(to_update(workspace.field_ref().host_id, str(host_id)))
     provider, client = _make_lifecycle_release_provider(temp_mngr_ctx, [stopped_workspace])
 

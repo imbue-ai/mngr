@@ -106,7 +106,7 @@ export function recoverySubheading(
   // opened on purpose never withholds the action -- but the copy does not urge
   // it, because the machine may well come back without one.
   return (
-    "Imbue Studio is still checking what's wrong. This machine may come back on its own. " +
+    "Mind is still checking what's wrong. This machine may come back on its own. " +
     "Restarting it will interrupt any work in progress."
   );
 }
@@ -116,11 +116,11 @@ export function recoverySubheading(
  *
  * Deliberately provider-agnostic -- no "check your internet", since a local
  * docker daemon is independent of the network. The actual cause comes from the
- * provider itself and is shown verbatim below this, so Imbue Studio never has to
+ * provider itself and is shown verbatim below this, so minds never has to
  * hand-author a sentence per provider failure mode.
  */
 const BACKEND_UNREACHABLE_EXPLANATION =
-  "This issue may be transient. Imbue Studio will reconnect you to your machine as soon as it can be reached again.";
+  "This issue may be transient. Mind will reconnect you to your machine as soon as it can be reached again.";
 
 /**
  * What this device's own condition means for the machine, and what to do.
@@ -130,12 +130,12 @@ const BACKEND_UNREACHABLE_EXPLANATION =
  * connection was not observed and cannot be reported on, so telling the user
  * their machine is fine would be a guess dressed as a reading -- and a wrong one
  * for a machine that died just before the network did. What is honest, and is
- * most of the reassurance anyway, is that Imbue Studio is watching and will say so when
+ * most of the reassurance anyway, is that minds is watching and will say so when
  * it can see again.
  *
  * They differ in what they ask of the user: nothing at all when the network is
  * simply down (it comes back, and the app is watching for it), and a different
- * network when this one blocks the connection Imbue Studio needs -- a wait that would
+ * network when this one blocks the connection minds needs -- a wait that would
  * never end on its own. The SSH copy names the protocol and concedes the browser
  * works, because otherwise it reads as the app being wrong about a connection
  * the user can see is fine.
@@ -145,10 +145,10 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
   string
 > = {
   OFFLINE:
-    "This device has no network connection. Imbue Studio will reconnect to your machine as soon as it does.",
+    "This device has no network connection. Mind will reconnect to your machine as soon as it does.",
   SSH_BLOCKED:
-    "This network blocks the connection Imbue Studio uses to reach your machines (SSH). " +
-    "Your browser works, but Imbue Studio can't get through. Try another network or a VPN.",
+    "This network blocks the connection Mind uses to reach your machines (SSH). " +
+    "Your browser works, but Mind can't get through. Try another network or a VPN.",
 };
 
 /**
@@ -169,7 +169,7 @@ const ENVIRONMENT_BLOCKED_EXPLANATION: Record<
 const DEVICE_CANNOT_CONNECT_CONDITION =
   "This machine may be running normally — the connection failed on this device, before reaching it.";
 const DEVICE_CANNOT_CONNECT_REMEDY =
-  "Restarting Imbue Studio rebuilds the connection.";
+  "Restarting Mind rebuilds the connection.";
 
 /**
  * The heading both device-scoped verdicts carry.
@@ -309,14 +309,14 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         ]);
       }
       // The backend being unreachable outranks whatever else the machine's
-      // health reads, because it explains it: a machine Imbue Studio cannot reach
+      // health reads, because it explains it: a machine minds cannot reach
       // through its provider reads stuck either way, and only one of the two
       // conditions can be acted on. Rendered without a restart button at all --
       // the recovery routes through the same backend.
       //
       // Except over a machine that is answering. A provider's poll can error
       // while its machines keep answering through the forward, and a machine
-      // Imbue Studio is in contact with is not unreachable whatever that poll did --
+      // minds is in contact with is not unreachable whatever that poll did --
       // so the band withholds this same verdict on a healthy machine, and the
       // card owes the user the ending it stayed up to deliver instead.
       //
@@ -405,7 +405,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
                     variant: "primary",
                     onclick: () => electronBridge.restartApp(),
                   },
-                  "Restart Imbue Studio",
+                  "Restart Mind",
                 )
               : null,
             m(

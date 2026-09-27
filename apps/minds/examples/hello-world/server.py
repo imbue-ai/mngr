@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple HTTP server for the hello-world agent.
+"""Simple HTTP server for the hello-world mind.
 
 Serves a basic web page with some interactive elements to demonstrate
 that the desktop client is working correctly.
@@ -23,7 +23,7 @@ _DEFAULT_PORT = 9100
 _INDEX_HTML = """<!DOCTYPE html>
 <html>
 <head>
-  <title>Hello World Agent</title>
+  <title>Hello World Mind</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -66,9 +66,9 @@ _INDEX_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>Hello World Agent</h1>
+  <h1>Hello World Mind</h1>
   <div class="status">
-    This agent is running and serving HTTP traffic.
+    This mind is running and serving HTTP traffic.
     If you can see this page through the desktop client,
     the proxy is working correctly.
   </div>
@@ -103,7 +103,7 @@ _INDEX_HTML = """<!DOCTYPE html>
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """Simple HTTP request handler for the hello-world agent."""
+    """Simple HTTP request handler for the hello-world mind."""
 
     def do_GET(self) -> None:
         if self.path == "/" or self.path == "":
@@ -189,7 +189,7 @@ def main() -> None:
     port = int(os.environ.get("PORT", str(_DEFAULT_PORT)))
     http_server = HTTPServer(("0.0.0.0", port), _Handler)
     _write_service_log(port)
-    sys.stderr.write("hello-world agent serving on port {}\n".format(port))
+    sys.stderr.write("hello-world mind serving on port {}\n".format(port))
     sys.stderr.flush()
     http_server.serve_forever()
 

@@ -25,7 +25,7 @@ def ensure_mngr_settings_before_mngr_import() -> None:
     """Reconcile the mngr settings for the active env, before mngr is imported.
 
     Called from ``main.py`` between ``apply_bootstrap()`` and the ``cli_entry`` import.
-    mngr consults settings.toml during its own import-time initialization (plugin blocking, config discovery), so the Imbue Studio overrides must be on disk before any ``imbue.mngr.*`` module loads -- this function enforces that ordering at runtime.
+    mngr consults settings.toml during its own import-time initialization (plugin blocking, config discovery), so the minds-side overrides must be on disk before any ``imbue.mngr.*`` module loads -- this function enforces that ordering at runtime.
     No-op when ``MINDS_ROOT_NAME`` is unset (an unactivated shell has nothing to reconcile).
     """
     already_imported = [name for name in sys.modules if name == "imbue.mngr" or name.startswith("imbue.mngr.")]
@@ -39,7 +39,7 @@ def ensure_mngr_settings_before_mngr_import() -> None:
     ensure_mngr_settings(MindsRoot.from_environment())
 
 
-# Provider blocks Imbue Studio pins in the profile settings, keyed by provider name.
+# Provider blocks minds pins in the profile settings, keyed by provider name.
 # ``pinned`` fields are re-asserted on every reconcile; ``user_owned_defaults``
 # fields are seeded once and then owned by the user (the providers panel's
 # Enable/Disable toggle writes them), so an existing boolean value always wins.
@@ -67,23 +67,23 @@ _DESIRED_PROVIDER_BLOCKS: Final[tuple[tuple[str, dict[str, object], dict[str, ob
     ),
 )
 
-# Plugins Imbue Studio disables for every mngr subprocess it spawns, keyed by the
+# Plugins minds disables for every mngr subprocess it spawns, keyed by the
 # pluggy entry-point name (NOT the package name -- mngr matches plugin-blocking
 # section names verbatim against the registered name).
 #
 # ``recursive`` is disabled because its on_host_created hook injects the
 # calling user's local ~/.claude/ and ~/.mngr/ deploy files into the workspace,
 # contradicting the contract that the repo is the full definition of the
-# workspace. Imbue Studio runs inside its own MNGR_HOST_DIR profile, so this only
-# affects the subprocesses Imbue Studio spawns.
+# workspace. minds runs inside its own MNGR_HOST_DIR profile, so this only
+# affects minds-spawned subprocesses.
 _DESIRED_PLUGIN_BLOCKS: Final[tuple[tuple[str, dict[str, object]], ...]] = (("recursive", {"enabled": False}),)
 
-# Top-level settings Imbue Studio pins for every profile it manages.
+# Top-level settings minds pins for every profile it manages.
 #
 # ``default_destroyed_host_persisted_seconds`` keeps destroyed mngr host
 # records for 30 days (mngr's own default is 7), matching the
 # destroyed-workspace backup retention window so host records and backups age
-# out together. Only the profiles Imbue Studio manages change.
+# out together. Only minds-managed profiles change.
 _DESTROYED_HOST_PERSISTED_SECONDS: Final[int] = 60 * 60 * 24 * 30
 _DESIRED_TOP_LEVEL_SETTINGS: Final[dict[str, object]] = {
     "default_destroyed_host_persisted_seconds": _DESTROYED_HOST_PERSISTED_SECONDS,
@@ -100,7 +100,7 @@ def _merge_block(
 
     Pinned fields are forced to their desired values.
     User-owned fields are seeded with their default only when missing or non-boolean; an existing boolean value is the user's and is left alone.
-    Fields Imbue Studio does not manage are never touched.
+    Fields minds does not manage are never touched.
     """
     block = section.get(name)
     if not isinstance(block, dict):
@@ -119,7 +119,7 @@ def _merge_block(
 
 
 def _reconcile_document(doc: tomlkit.TOMLDocument) -> bool:
-    """Bring the settings document to the shape Imbue Studio wants; returns whether it changed."""
+    """Bring the settings document to the desired minds-side shape; returns whether it changed."""
     is_changed = apply_settings_document_migrations(doc)
     providers_section = doc.setdefault("providers", tomlkit.table())
 
@@ -138,7 +138,7 @@ def _reconcile_document(doc: tomlkit.TOMLDocument) -> bool:
 
 
 def ensure_mngr_settings(root: MindsRoot) -> bool:
-    """Ensure the mngr settings.toml carries the Imbue Studio overrides.
+    """Ensure the mngr settings.toml carries the minds-side overrides.
 
     Reconciles the file to the desired shape declared above, writing only when something actually drifted.
     Returns ``True`` when the file was written -- the provider set visible to a running ``mngr observe`` changed, so callers that hold a supervisor handle should bounce the observe child.
@@ -149,6 +149,6 @@ def ensure_mngr_settings(root: MindsRoot) -> bool:
         return False
     is_modified = store.update(_reconcile_document)
     if is_modified:
-        logger.debug("Updated mngr settings at {} with Imbue Studio overrides", store.settings_path)
+        logger.debug("Updated mngr settings at {} with minds-side overrides", store.settings_path)
     apply_data_dir_migrations(root)
     return is_modified

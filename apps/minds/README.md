@@ -1,10 +1,10 @@
-# Imbue Studio
+# minds
 
 Run persistent, autonomous AI agents with web access and global forwarding.
 
 ## Overview
 
-Imbue Studio creates and manages persistent Claude agents running in Docker containers. Each agent gets:
+The minds app creates and manages persistent Claude agents running in Docker containers. Each agent gets:
 
 - A local web interface accessible through the desktop client
 - Optional workspace sharing over a self-hosted relay, with TLS terminated inside the workspace
@@ -13,7 +13,7 @@ Imbue Studio creates and manages persistent Claude agents running in Docker cont
 
 ## Getting started
 
-Imbue Studio ships as a desktop app (Electron, packaged via ToDesktop; see
+minds ships as a desktop app (Electron, packaged via ToDesktop; see
 [docs/desktop-app.md](./docs/desktop-app.md)).
 
 To run it from source, follow the setup guide

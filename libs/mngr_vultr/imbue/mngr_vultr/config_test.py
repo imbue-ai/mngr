@@ -10,7 +10,7 @@ def test_default_config_values() -> None:
     config = VultrProviderConfig()
     assert config.default_region == "ewr"
     assert config.default_plan == "vc2-2c-4gb"
-    assert config.default_os_id == 2625
+    assert config.default_os_id == 2136
     assert config.api_key is None
 
 

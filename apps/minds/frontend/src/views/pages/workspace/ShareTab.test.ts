@@ -27,7 +27,6 @@ async function readyShareModel(
   owner: Partial<
     Pick<ShareModelOptions, "ownerDisplayName" | "ownerProfilePictureUrl">
   > = {},
-  documentOverrides: Partial<MachineSharingResponse> = {},
 ): Promise<ShareModel> {
   const response: MachineSharingResponse = {
     enabled: true,
@@ -48,7 +47,6 @@ async function readyShareModel(
         profile_picture_url: null,
       },
     },
-    ...documentOverrides,
   };
   const model = new ShareModel(
     shareModelOptions({
@@ -96,28 +94,6 @@ function leadBox(row: AnyVnode): AnyVnode {
   expect(lead, "row has no 24 px lead box").toBeDefined();
   return lead as AnyVnode;
 }
-
-describe("ShareTab moved-address notice", () => {
-  it("shows the one-line notice only when the read moved the share", async () => {
-    const moved = await readyShareModel(
-      {},
-      { migrated_domain_from: "old.relay.example" },
-    );
-    const movedNotice = collectVnodes(renderTab(moved)).find(
-      (vnode) => attrsOf(vnode).id === "ws-share-moved",
-    );
-    expect(movedNotice).toBeDefined();
-    expect(allText(movedNotice as AnyVnode)).toContain(
-      "Sharing moved to a new address",
-    );
-
-    const unmoved = await readyShareModel();
-    const absent = collectVnodes(renderTab(unmoved)).find(
-      (vnode) => attrsOf(vnode).id === "ws-share-moved",
-    );
-    expect(absent).toBeUndefined();
-  });
-});
 
 describe("ShareTab grantee rows", () => {
   it("renders the owner with their picture, name, email, and the (you) suffix", async () => {

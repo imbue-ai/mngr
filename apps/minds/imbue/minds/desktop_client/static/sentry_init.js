@@ -1,4 +1,4 @@
-// Boot the frontend (browser) Sentry SDK for the Imbue Studio web UI.
+// Boot the frontend (browser) Sentry SDK for the minds web UI.
 //
 // This runs synchronously in <head>, immediately after the vendored
 // `sentry.browser.min.js` bundle (both emitted by `serve_spa_index` in

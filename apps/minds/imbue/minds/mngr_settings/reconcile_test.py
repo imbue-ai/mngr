@@ -77,7 +77,7 @@ def test_ensure_mngr_settings_removes_legacy_ambient_aws_region_blocks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Ambient ``aws-<region>`` blocks written by earlier builds are actively
-    deleted at boot (the machine-credential AWS path was removed from Imbue Studio;
+    deleted at boot (the machine-credential AWS path was removed from minds;
     ``byok-aws-<slug>`` accounts are the only AWS path). BYOK blocks survive."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     settings_path.write_text(
@@ -120,13 +120,13 @@ def test_ensure_mngr_settings_preserves_modal_is_enabled_on_rewrite(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """When something else forces a rewrite, a panel-toggled modal Disable is carried
-    over while the fields Imbue Studio controls are re-pinned."""
+    over while the minds-controlled fields are re-pinned."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     ensure_mngr_settings(MindsRoot("minds-dev-tname"))
     set_provider_is_enabled("modal", False, root=MindsRoot("minds-dev-tname"))
 
     # Force the rewrite path: a stale extra aws-* block makes the desired-shape
-    # check fail, so every block Imbue Studio controls is re-pinned.
+    # check fail, so every minds-controlled block is re-pinned.
     with settings_path.open("a") as f:
         f.write('\n[providers.aws-eu-central-9]\nbackend = "aws"\n')
 

@@ -6,14 +6,13 @@ const paths = require('./paths');
 const { initElectronLogging, closeElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
 const { initSentry, captureManualReport } = require('./sentry');
-const { migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
 const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
-const { DEEPLINK_SCHEMES, deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
+const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
 const {
-  SCHEME_MIME_TYPES,
+  SCHEME_MIME_TYPE,
   DESKTOP_ENTRY_FILENAME,
   ICON_PIXEL_SIZE,
   desktopEntryPaths,
@@ -54,7 +53,6 @@ const {
 const updater = require('./updater');
 const displayZoom = require('./display-zoom');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
-const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -68,40 +66,15 @@ const {
 const { registerContextMenuFor } = require('./context-menu');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
-// page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
+// page is the minds SPA (titlebar + hub pages + the sandboxed workspace
 // iframe + in-DOM modals, all Mithril-rendered). The main process no longer
 // consumes any event stream of its own: each renderer owns a /ui/ws
 // WebSocket and relays the few events main acts on over the 'shell-event'
 // IPC channel. Main owns the backend lifecycle, native dialogs/menus,
 // session restore, deeplinks, and the quit sequence.
 
-// Point Electron's own userData at this tier's state root, replacing the
-// per-productName default, so that dev, staging, and production installs stay
-// fully isolated from each other (cookies, sessions, Local Storage). Assignment
-// only -- nothing is created yet -- so it is safe to do before the migration
-// below, and it must precede initSentry(): Sentry starts a Crashpad handler that
-// resolves userData once, and would otherwise put crash dumps and the unsent
-// event queue outside the tier directory, shared across every tier.
-app.setPath('userData', paths.getStateDir());
-
-// Move this tier's files off the legacy ~/.<MINDS_ROOT_NAME> root, once. Runs
-// before logging and Sentry because both open files under the roots it moves.
-// Deliberately allowed to throw: a half-migrated tier has some files at the new
-// roots and some at the old, and booting on top of that is worse than not
-// booting. Neither of those two reporting channels exists yet, so the failure
-// gets written to the log root and shown before the throw takes the launch down.
-const legacyDataDir = paths.getLegacyDataDir();
-const platformRoots = paths.getPlatformRoots();
-try {
-  migrateLegacyDataDir({ legacyDir: legacyDataDir, roots: platformRoots });
-} catch (err) {
-  const detail = recordMigrationFailure({ roots: platformRoots, legacyDir: legacyDataDir, error: err });
-  dialog.showErrorBox('Minds could not move its data', detail);
-  throw err;
-}
-
-// Tee console output into the tier's log root and record uncaught main-process
-// failures BEFORE anything else runs.
+// Tee console output into ~/.minds/logs/electron.log and record uncaught
+// main-process failures BEFORE anything else runs.
 initElectronLogging();
 
 // A Linux launch with a --no-sandbox the sandbox did not need (see
@@ -170,7 +143,7 @@ if (app.isPackaged) {
     const pkg = require('../package.json');
     const shortSha = gitSha.slice(0, 8);
     app.setAboutPanelOptions({
-      applicationName: PRODUCT_DISPLAY_NAME,
+      applicationName: pkg.productName,
       applicationVersion: pkg.version,
       version: pkg.tdBuildId ? `${pkg.tdBuildId} · ${shortSha}` : shortSha,
     });
@@ -178,6 +151,10 @@ if (app.isPackaged) {
     console.warn(`[about-panel] Could not load build-info.json: ${err.message}`);
   }
 }
+
+// Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
+// and production installs are fully isolated (cookies, sessions, caches, etc.).
+app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
 
@@ -231,7 +208,7 @@ let isStartupRoutingPending = false;
 // one opened while it runs -- so such a window must not compute a route for
 // itself as well (see openStartupRoutedWindow).
 let isStartupRoutingBeingComputed = false;
-// A deeplink URL that arrived before the app could act on it.
+// A minds:// URL that arrived before the app could act on it.
 let pendingDeeplinkUrl = null;
 let canApplyDeeplinks = false;
 
@@ -242,14 +219,14 @@ const recentShellEventKeys = new Map(); // key -> timestamp
 const SHELL_EVENT_DEDUPE_WINDOW_MS = 3000;
 
 function getSessionStatePath() {
-  return path.join(paths.getStateDir(), 'window-state.json');
+  return path.join(paths.getDataDir(), 'window-state.json');
 }
 
 // The loading document's first-launch intro plays once per install. Electron
 // owns this marker because Electron is the only thing that plays the film; the
 // backend separately owns whether onboarding is complete.
 function getIntroSeenPath() {
-  return path.join(paths.getStateDir(), 'intro-seen.json');
+  return path.join(paths.getDataDir(), 'intro-seen.json');
 }
 
 function hasSeenIntro() {
@@ -264,7 +241,7 @@ function hasSeenIntro() {
 // Written when the film STARTS, so a quit during it still counts as seen.
 function markIntroSeen() {
   try {
-    fs.mkdirSync(paths.getStateDir(), { recursive: true });
+    fs.mkdirSync(paths.getDataDir(), { recursive: true });
     fs.writeFileSync(getIntroSeenPath(), JSON.stringify({ has_seen_intro: true }));
   } catch (err) {
     console.warn('[startup] could not write the intro-seen marker:', err.message);
@@ -278,7 +255,7 @@ function toAbsoluteUrl(url) {
 }
 
 // Classify a URL as "external" (open in the user's default browser). All
-// in-app navigation (the Imbue Studio backend, the mngr_forward plugin, and every
+// in-app navigation (the minds backend, the mngr_forward plugin, and every
 // `host-<id>.localhost` workspace origin) lives on localhost.
 function isExternalUrl(url) {
   let parsed;
@@ -298,7 +275,7 @@ function isExternalUrl(url) {
 }
 
 // Coordinate aliases from the relayed ``workspaces`` shell events: content
-// URLs are HOST-keyed while Imbue Studio records and channel events stay
+// URLs are HOST-keyed while minds records and channel events stay
 // AGENT-keyed.
 const workspaceHostIdByAgentId = new Map();
 const workspaceAgentIdByHostId = new Map();
@@ -482,12 +459,12 @@ function computeTitleFor(bundle) {
     const name = ws ? (ws.name || ws.id) : null;
     if (isPopoutBundle(bundle)) {
       const windowTitle = bundle.popout.title;
-      const parts = [windowTitle, name, PRODUCT_DISPLAY_NAME].filter((part) => Boolean(part));
+      const parts = [windowTitle, name, 'Mind'].filter((part) => Boolean(part));
       return parts.join(' — ');
     }
-    return name ? `${name} — ${PRODUCT_DISPLAY_NAME}` : PRODUCT_DISPLAY_NAME;
+    return name ? `${name} — Mind` : 'Mind';
   }
-  return PRODUCT_DISPLAY_NAME;
+  return 'Mind';
 }
 
 // The display zoom preference (Settings > Display), applied to every window.
@@ -499,7 +476,7 @@ let displayZoomPercent = null;
 
 function currentDisplayZoomPercent() {
   if (displayZoomPercent === null) {
-    const read = displayZoom.readZoomPercent(paths.getStateDir());
+    const read = displayZoom.readZoomPercent(paths.getDataDir());
     if (read.reason !== null) {
       console.warn(`[display-zoom] falling back to ${read.percent}%: stored preference ${read.reason}`);
     }
@@ -597,7 +574,7 @@ function buildBundleWindowOptions(kind, bounds) {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: PRODUCT_DISPLAY_NAME,
+    title: 'Mind',
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#ffffff',
@@ -803,11 +780,6 @@ function wireBundleWindowEvents(bundle) {
     // A window closed mid-intro can never report the film over; the startup
     // route waiting on it must not wait forever.
     bundle.resolveIntroFinished();
-    // Electron keeps its own visibilityChanged listener on the window for
-    // show/hide/minimize/maximize/restore, and that listener reads the native
-    // window destroy() already took away, so a visibility event arriving after
-    // teardown throws and strands the app in the dock (#480).
-    win.removeAllListeners();
   });
 }
 
@@ -855,12 +827,7 @@ function wireBundleNavigationEvents(bundle) {
     updateOsTitle(bundle);
   };
   wc.on('did-navigate', (_e, url) => onTopLevelNavigate(url));
-  // Unlike did-navigate, this one also fires for the frames inside the page
-  // (a pushState in the workspace shell or a chat page), which are not the
-  // window's own route.
-  wc.on('did-navigate-in-page', (_e, url, isMainFrame) => {
-    if (isMainFrame) onTopLevelNavigate(url);
-  });
+  wc.on('did-navigate-in-page', (_e, url) => onTopLevelNavigate(url));
 
   // Subframe navigation: the workspace iframe. This is main's tamper-proof
   // record of which workspace the window displays (used for session
@@ -1933,14 +1900,12 @@ function fetchAppStatus(timeoutMs = 25000) {
   });
 }
 
-for (const scheme of DEEPLINK_SCHEMES) {
-  if (process.defaultApp) {
-    if (process.argv.length >= 2) {
-      app.setAsDefaultProtocolClient(scheme, process.execPath, [path.resolve(process.argv[1])]);
-    }
-  } else {
-    app.setAsDefaultProtocolClient(scheme);
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('minds', process.execPath, [path.resolve(process.argv[1])]);
   }
+} else {
+  app.setAsDefaultProtocolClient('minds');
 }
 
 app.on('open-url', (event, url) => {
@@ -1973,7 +1938,7 @@ if (!gotLock) {
 
 /**
  * Register the running AppImage with the desktop: a menu entry, its icon, and
- * the deeplink scheme handlers, none of which an AppImage gets from an
+ * the minds:// scheme handler, none of which an AppImage gets from an
  * installer. Runs on every packaged Linux launch that has `APPIMAGE` set (the
  * AppImage runtime's name for the file being run), so the entry follows the
  * file after an in-place update renames it. Best effort throughout: a failure
@@ -1996,21 +1961,18 @@ function registerAppImageDesktopEntry() {
     // than an error, which would otherwise be written out as an empty PNG.
     if (icon.isEmpty()) throw new Error(`could not read the icon at ${iconSourcePath}`);
     fs.writeFileSync(iconPath, icon.resize({ width: ICON_PIXEL_SIZE, height: ICON_PIXEL_SIZE }).toPNG());
-    fs.writeFileSync(
-      desktopEntryPath,
-      renderDesktopEntry({ appImagePath, productName: app.name, displayName: PRODUCT_DISPLAY_NAME }),
-    );
+    fs.writeFileSync(desktopEntryPath, renderDesktopEntry({ appImagePath, productName: app.name }));
     console.log(`[desktop-entry] wrote ${desktopEntryPath} for ${appImagePath}`);
   } catch (err) {
     console.warn(`[desktop-entry] could not write the AppImage desktop entry: ${err.message}`);
     return;
   }
   // The database refresh is what makes the menu entry appear without a
-  // re-login; the mime default is what routes deeplinks here. Either tool
-  // may be absent on a minimal desktop, which is not worth an error.
+  // re-login; the mime default is what routes minds:// links here. Either
+  // tool may be absent on a minimal desktop, which is not worth an error.
   for (const [command, args] of [
     ['update-desktop-database', [applicationsDir]],
-    ['xdg-mime', ['default', DESKTOP_ENTRY_FILENAME, ...SCHEME_MIME_TYPES]],
+    ['xdg-mime', ['default', DESKTOP_ENTRY_FILENAME, SCHEME_MIME_TYPE]],
   ]) {
     execFile(command, args, (err) => {
       if (err) console.warn(`[desktop-entry] ${command} failed: ${err.message}`);
@@ -2034,9 +1996,8 @@ async function onReady() {
   initialBundle = createBundle();
   sizeFromSavedSession(initialBundle);
   updater.init({ onStatus: broadcastUpdateStatus });
-  // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the Imbue
-  // Studio build has been on stable long enough for installs to have launched
-  // once (specs/imbue-studio-rename/05_cleanup.md).
+  // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the "Mind"
+  // rename has been on stable long enough for installs to have launched once.
   // A dev run shares the machine with an installed app, whose directories these
   // would be. Deferred so the delete cannot hold up the first window.
   if (app.isPackaged) {
@@ -2079,7 +2040,7 @@ function installApplicationMenu() {
   appMenuInstalled = true;
   const template = [
     {
-      label: PRODUCT_DISPLAY_NAME,
+      label: app.name || 'Mind',
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -2346,7 +2307,7 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
 }
 
 async function startBackendWithRetry() {
-  broadcastStatusToLoadingWindows(`Starting ${PRODUCT_DISPLAY_NAME}...`);
+  broadcastStatusToLoadingWindows('Starting Mind...');
 
   try {
     const { loginUrl, port } = await startBackend(
@@ -2393,7 +2354,7 @@ async function startBackendWithRetry() {
         // screen and its Retry instead of a fresh window loaded at the dead
         // port -- whose own Reload button only re-loads that same dead port.
         showErrorInAllWindows(
-          `${PRODUCT_DISPLAY_NAME} stopped unexpectedly`,
+          'Mind stopped unexpectedly',
           readLastLogLines(50) || `Process exited with code ${code}`,
         );
       });
@@ -2447,7 +2408,7 @@ async function startBackendWithRetry() {
 
     flushPendingDeeplink();
   } catch (err) {
-    showErrorInAllWindows(`Failed to start ${PRODUCT_DISPLAY_NAME}`, err.message);
+    showErrorInAllWindows('Failed to start Mind', err.message);
   }
 }
 
@@ -2483,7 +2444,7 @@ function handleDeeplink(rawUrl) {
   if (!mru) {
     // macOS hands a URL to an already-running app via application:openURLs:,
     // which need not fire 'activate', so nothing else will open a window for
-    // it. A focus-only link (bare imbue-studio://, what the browser sign-in success
+    // it. A focus-only link (bare minds://, what the browser sign-in success
     // page's "Open app" uses) opens the home page: opening the app IS the
     // documented contract for it.
     //
@@ -2633,7 +2594,7 @@ ipcMain.handle('open-notification-settings', () => {
 
 // Trust the forward proxy's CA-signed leaf certs for its loopback origins.
 // The CA is local to this machine (under the plugin state dir) and only
-// Imbue Studio's own loopback origins use it; every real https origin still gets
+// minds' own loopback origins use it; every real https origin still gets
 // Chromium's default verification (cb(-3)).
 function isLoopbackHostname(hostname) {
   return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1';
@@ -2708,7 +2669,7 @@ ipcMain.handle('set-display-zoom', (_event, percent) => {
   if (normalized === null) {
     throw new Error(`Unknown display zoom ${JSON.stringify(percent)}`);
   }
-  displayZoom.writeZoomPercent(paths.getStateDir(), normalized);
+  displayZoom.writeZoomPercent(paths.getDataDir(), normalized);
   displayZoomPercent = normalized;
   applyDisplayZoomToAllWindows();
   return normalized;

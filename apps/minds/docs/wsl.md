@@ -1,6 +1,6 @@
-# Running Imbue Studio under WSL2 on Windows (experimental)
+# Running minds under WSL2 on Windows (experimental)
 
-Imbue Studio has no packaged Windows build, but the full stack -- the Electron
+minds has no packaged Windows build, but the full stack -- the Electron
 desktop app, the backend, mngr, and Docker workspaces -- runs inside WSL2 on
 Windows, with the Electron window displayed on the Windows desktop via WSLg.
 Verified on Windows Server 2022 (AWS metal) with WSL 2.7.10 and Ubuntu 24.04.
@@ -33,8 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scrip
 This is the same Linux installer every platform uses
 ([dev-setup.md](./dev-setup.md)); it detects WSL from `/proc/version` and adds
 the WSL-specific steps. It narrates each step, is idempotent (re-run it to
-update), and ends by launching the app and dropping an "Imbue Studio (WSL)"
-shortcut on the Windows desktop for next time. Flags (pass via `bash -s -- <flags>`):
+update), and ends by launching the app and dropping a "Mind (WSL)" shortcut on
+the Windows desktop for next time. Flags (pass via `bash -s -- <flags>`):
 
 - `--version REF` -- mngr ref to install (`latest` for the newest `minds-v*`
   tag; a fresh clone without it lands on `main`, and an existing checkout is
@@ -53,7 +53,7 @@ checkout, `uv sync`, and `pnpm install`. The launcher it writes
 It refuses clearly on: WSL1, missing systemd (it writes `/etc/wsl.conf` and
 asks you to `wsl --shutdown` and re-run), non-apt distros, <20GB free disk (5GB with `--skip-docker`), an
 install dir under `/mnt/` (Windows-filesystem line endings and IO would bite),
-and **Docker Desktop WSL integration** -- Imbue Studio has not been verified against
+and **Docker Desktop WSL integration** -- minds has not been verified against
 the Docker Desktop daemon (follow-up task; for now disable the integration for
 this distro or use a separate distro so Docker CE can be installed).
 
@@ -85,7 +85,7 @@ the same host dir and prefix the app runs with), never a raw `docker start`: doc
 its sshd, while the agent processes (tmux, supervisord, the system
 interface) exist only in tmux sessions that mngr recreates. A raw
 `docker start` leaves the workspace half-up -- reachable at the container
-level but serving nothing -- until Imbue Studio's health tracker marks it STUCK and
+level but serving nothing -- until minds' health tracker marks it STUCK and
 its recovery flow runs that `mngr start` for you a few minutes later.
 
 ## Gotchas (mostly for headless / remote setups)
@@ -101,7 +101,7 @@ its recovery flow runs that `mngr start` for you a few minutes later.
   session id. Re-run any keepalive task afterwards -- joining an
   already-running instance does not re-home WSLg.
 - WSL terminates the distro shortly after the last `wsl.exe` session exits,
-  killing Docker, tmux, and Imbue Studio. Interactively this doesn't bite (the app
+  killing Docker, tmux, and minds. Interactively this doesn't bite (the app
   window keeps the instance alive); for unattended boxes, hold a session open
   with a scheduled task:
 
