@@ -92,10 +92,10 @@ endpoint (authenticated by the relay token) and re-polls it, so relay
 fleet changes never require re-injecting materials.
 
 The grants document lists who may visit, by account id (`users`), by
-email (`emails`, invites the gateway upgrades to account ids on first
-visit), and by email domain (`email_domains`), per scope. Every writer of
+email (`emails`, email grants the gateway upgrades to account ids on first
+visit), and by email domain (`email_domains`), per app. Every writer of
 that file inside the container -- the desktop's injection and the gateway's
-invite upgrade -- holds a `flock` on `share_grants.toml.lock` around its
+email-grant upgrade -- holds a `flock` on `share_grants.toml.lock` around its
 write. Services learn who is asking from the `X-Imbue-Identity` header on
 each request (see the minds design doc); nothing about the owner is written
 into the workspace as a file.

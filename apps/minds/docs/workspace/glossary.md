@@ -96,6 +96,56 @@ Key concepts in the minds system:
   Someone becomes a visitor of a workspace the first time the connector's share broker (the sign-in step every visit passes through) authorizes their visit, and stops being one the moment their grant is removed, the workspace is unpublished, or their account is suspended. The account that published a workspace is never a visitor of it: the broker and the share-gateway give that account a separate path that ignores the grants.
   Not the anonymous *visitor id* of download attribution (a browser on imbue.com before any account exists), and not the relay's *visitor connection* (the browser's TCP connection).
 
+- **granter**: the role of whoever authors a grant. Any account with write access to the workspace can: the desktop client lets a signed-in account associated with the workspace edit the grants document, and inside the workspace anyone with a shell can rewrite it.
+  The granter of a grant is who may invite its grantee, and whose invitation allowance the delivery counts against.
+
+- **user grant**: a grant naming an account by its user id; the share-gateway matches these first.
+  What a typed address becomes when it resolves to an account at grant time, and what an email grant becomes on its grantee's first visit.
+
+- **email grant**: a grant naming an email address, normally one with no account yet; it admits the person who signs in with that address, verified.
+  If the address does have an account (the resolution at grant time missed it, or the account came later), the grant still admits them, and the share-gateway upgrades it to a user grant on their first visit. Older docs call this entry an invite; that word now means only an invitation.
+
+- **domain grant**: a grant naming an email domain; it admits everyone who signs in with a verified address at that domain, including people the granter has never met.
+  A domain grant cannot be invited: the granter passes the share URL on themselves.
+
+- **grantee**: the party a grant admits: the account of a user grant, the person at an email grant's address, or everyone at a domain grant's domain.
+
+- **invitee**: a grantee of a user grant or an email grant who has been invited, meaning an invitation exists for their grant.
+
+- **registered address**: an email address that is the verified email of an imbue account; *unregistered* otherwise.
+  Registration is what invitation routing checks, whatever the grant's kind says; it says nothing about whether minds is installed.
+
+- **share panel**: the granter's surface for creating grants and inviting: the "Share machine: <name>" panel in the desktop client's workspace options.
+
+- **joined**: a grantee's first authorized visit to the workspace, as recorded by the share broker's visit log. The visitor's own action, not a delivery outcome.
+
+- **invitation** [future]: the message telling a user grant's or an email grant's grantee that they have been granted access, delivered by Imbue over one channel from the single invitation content, carrying the plain share URL.
+  An invitation belongs to exactly one grant. To *invite* is to create a delivery for it.
+
+- **invitation content** [future]: the one content model behind every invitation (who granted access, which workspace, which app, the share URL, and how to stop receiving mail), rendered once per channel. It carries no message written by the granter.
+
+- **channel** [future]: how a delivery reaches an invitee: email, or an in-app notification in the minds notification feed.
+  Imbue selects the channel from the invitee's registration and notification preferences; the granter never chooses. In-app is modelled now and implemented later.
+
+- **delivery** [future]: one attempt to deliver an invitation over one channel, with a delivery outcome.
+  An invitation has one or more deliveries; inviting again creates another, subject to the invitation allowance and a per-grant cooldown held in one policy object so that it is easy to change.
+
+- **delivery outcome** [future]: the result of a delivery. At attempt time: `sent`, `suppressed`, `over allowance`, `unroutable`, or `failed`. Later, from the email provider's webhooks: `delivered`, `bounced`, `complained`, or `unsubscribed`.
+
+- **notification preferences** [future]: a registered account's choice of the channels it accepts notifications on, email and in-app, both on by default. Invitations are one kind of notification among others.
+  Unregistered addresses have no preferences. The invitation email's unsubscribe link turns email off for a registered address and adds any address to the suppression list.
+
+- **suppression list** [future]: the addresses Imbue will not email, each with a reason (`bounced`, `complained`, `unsubscribed`, `reported`, or `blocked`) and a source (an email provider webhook, the invitation email's own unsubscribe or report link, or an operator).
+  Checked before every email delivery; a suppressed delivery still counts against the allowance. `reported` means the recipient used the email's link to report the invitation as unwanted, which also counts against the granter.
+
+- **email provider** [future]: the external service (an ESP) that sends invitation email and reports delivery events by webhook. The design does not name one.
+
+- **invitation allowance** [future]: the number of deliveries a granter may attempt per channel in any rolling 24 hours: a constant per channel in one policy object, counted from delivery rows (a per-account override may come later).
+  Every attempted delivery counts, including suppressed ones; refused attempts do not. The granter learns of the allowance only when refused.
+
+- **granter-visible invitation outcome** [future]: what the granter may learn about an invitation: `invited`, `could not invite` (the reason withheld), `over allowance`, or `joined`.
+  Bounces, complaints, opt-outs, reports, and suppression are never shown to the granter, so that abuse is guesswork rather than a probe.
+
 - **share-gateway**: the background service that watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled.
   Who may access the share is controlled by the grants document (`data/.secrets/share_grants.toml`), which the desktop client rewrites as the user edits grants.
 
