@@ -81,6 +81,21 @@ Key concepts in the minds system:
 - **app watcher**: a background service that monitors `data/.state/apps.toml` and writes service events to `events/services/events.jsonl` so the desktop client can discover an agent's apps.
   (Forwarding reconciliation happens on the minds side, via the `mngr forward` plumbing -- not in the watcher.)
 
+- **to publish**: to make a workspace reachable in a browser at its share URL through the self-hosted relay, for as long as it stays published.
+  Publishing is workspace-level and is started from the desktop client's Share tab by a signed-in account associated with the workspace: it provisions the relay materials and certificate that the share-gateway runs the share stack from, and unpublishing drops the tunnel, cutting off anyone connected.
+  Who may enter a published workspace is decided by its grants; the URL alone admits nobody.
+  The code and older docs say "share" for this; the verb is "publish" from here on, and "share" survives only inside existing names such as share URL, share panel, and share-gateway.
+
+- **grant**: an entry in a workspace's grants document (`data/.secrets/share_grants.toml`) that admits a party to one app of the workspace while it is published.
+  The system interface is an app like the others, with one difference: a grant on it admits the entire workspace, every app included, which the Share tab calls the whole machine. A grant on any other app admits that app alone.
+  The party is named by an account id, an email address, or a domain. The share-gateway re-reads the document on every request, so removing a grant takes effect immediately.
+  A grant names who may enter and nothing more: it does not notify anyone, and it does not make someone a visitor until they visit.
+
+- **visitor**: a person who opens someone else's published workspace in a browser through its share URL.
+  A role toward one workspace, not a kind of account: the same person publishes their own workspaces and is a visitor to anyone else's. A visitor needs an imbue account with a verified email, because that is what the grants are checked against; they need no desktop client and no machine.
+  Someone becomes a visitor of a workspace the first time the connector's share broker (the sign-in step every visit passes through) authorizes their visit, and stops being one the moment their grant is removed, the workspace is unpublished, or their account is suspended. The account that published a workspace is never a visitor of it: the broker and the share-gateway give that account a separate path that ignores the grants.
+  Not the anonymous *visitor id* of download attribution (a browser on imbue.com before any account exists), and not the relay's *visitor connection* (the browser's TCP connection).
+
 - **share-gateway**: the background service that watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled.
   Who may access the share is controlled by the grants document (`data/.secrets/share_grants.toml`), which the desktop client rewrites as the user edits grants.
 
