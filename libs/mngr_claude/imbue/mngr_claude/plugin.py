@@ -2801,9 +2801,16 @@ class ClaudeAgent(
         If ``instructions`` is provided, it is appended to the ``/compact`` command
         (e.g. ``/compact <instructions>``).
         """
-        command = f"/compact {instructions.strip()}" if instructions and instructions.strip() else "/compact"
-        self.send_message(command)
-        record_agent_compacted(self)
+        try:
+            command = f"/compact {instructions.strip()}" if instructions and instructions.strip() else "/compact"
+            self.send_message(command)
+        finally:
+            # Even if compaction fails, we still record it.
+            # The goal of this is to be conservative around compaction: We want to avoid trying to compact an
+            # agent over and over as part of `mngr autocompact` when compaction isn't going through.
+            # We prefer in that case to just not compact, rather than continuously sending more compaction
+            # requests to the agent.
+            record_agent_compacted(self)
 
     def get_cache_ttl_minutes(self) -> int | None:
         """Return Claude Code's prompt cache TTL (60 minutes)."""
