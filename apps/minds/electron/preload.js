@@ -58,6 +58,34 @@ contextBridge.exposeInMainWorld('mindsNative', {
 
   // Multi-window (desktop-only concept).
   openWorkspaceInNewWindow: (agentId) => ipcRenderer.send('open-workspace-in-new-window', agentId),
+
+  // Pulled-out workspace windows (the pull-out-window spec). The workspace
+  // shell asks for one through the embed contract; the SPA relays the ask
+  // here with the workspace's id. A popout window's own page uses its bar's
+  // drag, its title, and the reattach ask main sends it when no desktop
+  // window can take the window back; a main window hears when a popout's
+  // window is to return to its desktop (a drop onto it, a popout's close).
+  openPopoutWindow: (request) => ipcRenderer.send('open-popout-window', request),
+  beginWorkspaceWindowDrag: (request) => ipcRenderer.send('begin-workspace-window-drag', request),
+  endWorkspaceWindowDrag: (workspaceId, windowId, isDetached) =>
+    ipcRenderer.send('end-workspace-window-drag', { workspaceId, windowId, isDetached }),
+  onTearOut: (callback) => {
+    ipcRenderer.on('tear-out', (_event, report) => callback(report));
+  },
+  beginPopoutDrag: (grab) => ipcRenderer.send('begin-popout-drag', grab),
+  endPopoutBarDrag: () => ipcRenderer.send('end-popout-bar-drag'),
+  closePopout: () => ipcRenderer.send('close-popout'),
+  popoutReattached: () => ipcRenderer.send('popout-reattached'),
+  setPopoutTitle: (title) => ipcRenderer.send('set-popout-title', title),
+  onPopoutReattachRequest: (callback) => {
+    ipcRenderer.on('popout-reattach-request', () => callback());
+  },
+  onReattachPopoutWindow: (callback) => {
+    ipcRenderer.on('reattach-popout-window', (_event, ask) => callback(ask));
+  },
+  onPopoutDropTarget: (callback) => {
+    ipcRenderer.on('popout-drop-target', (_event, isOver) => callback(Boolean(isOver)));
+  },
   openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
   onOpenNotification: (callback) => {
     notificationListener = callback;

@@ -29,7 +29,7 @@
 // contract by ADDING types, never by changing the meaning or payload of an
 // existing one. CONTRACT_VERSION below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "5";
+export const CONTRACT_VERSION = "6";
 
 // Message types
 
@@ -58,6 +58,30 @@ export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // cannot tell a loaded frame from one whose page has not run its listener
 // yet, since a send into a not-yet-listening document is simply lost.
 export const WORKSPACE_READY = "minds:workspace-ready";
+// workspace -> embedder: open one of the workspace's windows in a desktop
+// window of its own, placed beside the chrome window (the pull-out-window
+// spec). Payload: { windowId, title, width, height }; `width` / `height` are
+// the window's rendered size in CSS px. Sent again for a window already out
+// to show its popout.
+export const POP_OUT_WINDOW = "minds:pop-out-window";
+// workspace -> embedder: a drag of a window's title bar began (or the dragged
+// window changed size mid-drag). Payload: { windowId, title, width, height,
+// grabX, grabY }: the window's rendered size in CSS px and where inside it
+// the pointer holds it. The embedder watches the cursor from here: once it
+// leaves the chrome window by the tear-out distance the embedder opens a
+// popout under it and says so with TEAR_OUT, since the shell's own pointer
+// events stop at the window's edge on some platforms.
+export const WINDOW_DRAG_STARTED = "minds:window-drag-started";
+// workspace -> embedder: the shell's own drag gesture ended. Payload:
+// { windowId, isDetached }: `isDetached` is true when the shell detached the
+// window (its release arrived while torn out), false when the drag was
+// released inside or cancelled, which drops any popout being dragged.
+export const WINDOW_DRAG_ENDED = "minds:window-drag-ended";
+// workspace -> embedder: the pulled-out windows of the sending shell's active
+// desktop, with their titles. Payload: { windows: [{ windowId, title }] }.
+// Sent when the shell announces ready and whenever the set or a title
+// changes; a popout closes itself when its own window is absent.
+export const DETACHED_WINDOWS = "minds:detached-windows";
 
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
@@ -81,11 +105,33 @@ export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
 // announces nothing, never receives the ask, and the user just lands on the
 // workspace.
 export const FOCUS_CHAT = "minds:focus-chat";
+// embedder -> workspace: what this chrome can do, sent right after
+// WORKSPACE_READY. Payload: { canPopOut }. A workspace that never receives it
+// (an older chrome, a plain browser) keeps its pull-out gesture off.
+export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
+// embedder -> workspace: return a pulled-out window to the desktop, shown and
+// raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
+// fractions of the backdrop, clamped by the receiver) places it where a
+// re-dock drag dropped it, else it lands at its kept frame.
+export const REATTACH_WINDOW = "minds:reattach-window";
+// embedder -> workspace: the state of a title-bar drag the embedder is
+// watching (see WINDOW_DRAG_STARTED). Payload: { windowId, phase }: "out" --
+// the cursor left the chrome window by the tear-out distance and a popout now
+// follows it, so the shell detaches the window (saved at once, so the
+// popout's own shell reads it) and hides it; "in" -- the cursor came back
+// inside and the popout is gone, so the shell brings the window back and
+// shows it again; "released" -- the button was released while out, so the
+// shell ends its gesture, the detach already saved.
+export const TEAR_OUT = "minds:tear-out";
 
 // Upper bound on entries per message, bounding the work it can demand; the
 // snapshot carries the newest verdicts and older cards fall back to the
 // transcript's own resolution notices.
 export const MAX_PERMISSION_RESOLUTION_ENTRIES = 64;
+// Upper bound on entries in a DETACHED_WINDOWS message.
+export const MAX_DETACHED_WINDOW_ENTRIES = 128;
+// The shell's own bound on a window title.
+export const MAX_WINDOW_TITLE_LENGTH = 256;
 
 // Payload validation
 
@@ -101,6 +147,42 @@ export const HOST_ID_PATTERN = /^host-[a-f0-9]{1,64}$/i;
 // Superset (plus a length cap) of the canonical registry rule, mngr_latchkey's
 // SERVICE_NAME_PATTERN; an alignment test keeps the two in step.
 export const SERVICE_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+// Window ids are minted by the workspace shell (`win-<hex>`).
+export const WINDOW_ID_PATTERN = /^win-[a-f0-9]{1,64}$/i;
+// The phases of an embedder-watched drag (see TEAR_OUT).
+export const TEAR_OUT_PHASES = ['out', 'in', 'released'];
+
+function isWindowIdValid(value) {
+  return typeof value === 'string' && WINDOW_ID_PATTERN.test(value);
+}
+
+function isFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isTitleValid(value) {
+  return typeof value === 'string' && value.length <= MAX_WINDOW_TITLE_LENGTH;
+}
+
+// A window's rendered size: two finite, positive numbers.
+function isSizeValid(data) {
+  return isFiniteNumber(data.width) && isFiniteNumber(data.height) && data.width > 0 && data.height > 0;
+}
+
+function isDetachedWindowEntryValid(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  return isWindowIdValid(entry.windowId) && isTitleValid(entry.title);
+}
+
+// A frame in fractions of the backdrop; the receiver clamps it into the unit
+// square, so only the numbers' finiteness is checked here.
+function isFrameValid(value) {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object') return false;
+  return ['x', 'y', 'width', 'height'].every(function (key) {
+    return isFiniteNumber(value[key]);
+  });
+}
 
 function isOptionalIdValid(value, pattern) {
   if (value === undefined || value === '') return true;
@@ -129,6 +211,21 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [WORKSPACE_READY]: function () {
     return true;
   },
+  [POP_OUT_WINDOW]: function (data) {
+    return isWindowIdValid(data.windowId) && isTitleValid(data.title) && isSizeValid(data);
+  },
+  [WINDOW_DRAG_STARTED]: function (data) {
+    if (!isWindowIdValid(data.windowId) || !isTitleValid(data.title) || !isSizeValid(data)) return false;
+    return isFiniteNumber(data.grabX) && isFiniteNumber(data.grabY);
+  },
+  [WINDOW_DRAG_ENDED]: function (data) {
+    return isWindowIdValid(data.windowId) && typeof data.isDetached === 'boolean';
+  },
+  [DETACHED_WINDOWS]: function (data) {
+    if (!Array.isArray(data.windows)) return false;
+    if (data.windows.length > MAX_DETACHED_WINDOW_ENTRIES) return false;
+    return data.windows.every(isDetachedWindowEntryValid);
+  },
 };
 
 function isResolutionEntryValid(entry) {
@@ -152,6 +249,15 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   [FOCUS_CHAT]: function (data) {
     // A chat's id is its first agent's id, so it takes the agent-id shape.
     return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
+  },
+  [EMBEDDER_CAPABILITIES]: function (data) {
+    return typeof data.canPopOut === 'boolean';
+  },
+  [REATTACH_WINDOW]: function (data) {
+    return isWindowIdValid(data.windowId) && isFrameValid(data.frame);
+  },
+  [TEAR_OUT]: function (data) {
+    return isWindowIdValid(data.windowId) && TEAR_OUT_PHASES.indexOf(data.phase) !== -1;
   },
 };
 

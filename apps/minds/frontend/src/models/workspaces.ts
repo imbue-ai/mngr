@@ -66,12 +66,20 @@ export class WorkspacesStore {
     return this.agentIdByHostId.get(anyId) ?? anyId;
   }
 
-  workspaceFrameUrl(anyId: string): string {
+  workspaceFrameUrl(anyId: string, soloWindowId: string | null = null): string {
     // Content URLs are keyed by the workspace id (the /goto/ bridge and the
     // origin family both route it); a host id from persisted state resolves
-    // through the alias map.
+    // through the alias map. A popout asks the workspace shell for one window
+    // edge to edge: the shell's `?solo=` boot parameter rides through the
+    // bridge's own `next`, which the /goto/ handler forwards as a same-origin
+    // path.
     const workspaceScoped = this.toAgentScopedId(anyId);
-    return "/forward-bridge?next=" + encodeURIComponent("/goto/" + workspaceScoped + "/");
+    const gotoPath = "/goto/" + workspaceScoped + "/";
+    const bridgeNext =
+      soloWindowId === null
+        ? gotoPath
+        : gotoPath + "?next=" + encodeURIComponent("/?solo=" + encodeURIComponent(soloWindowId));
+    return "/forward-bridge?next=" + encodeURIComponent(bridgeNext);
   }
 
   isDestroying(anyId: string): boolean {

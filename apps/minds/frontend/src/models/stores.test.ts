@@ -53,6 +53,23 @@ describe("WorkspacesStore", () => {
     );
   });
 
+  it("nests a popout's solo window through the bridge's own next", () => {
+    // /forward-bridge -> /_bridge -> /goto/<id>/?next=/?solo=<win> -> the
+    // workspace shell's origin at /?solo=<win>: each hop forwards a
+    // same-origin path, so the parameter is encoded once per layer.
+    const store = new WorkspacesStore();
+    store.applyWorkspacesMessage(workspacesMessage());
+    const gotoNext = "/goto/agent-aa11/?next=" + encodeURIComponent("/?solo=win-0123");
+    expect(store.workspaceFrameUrl("host-bb22", "win-0123")).toBe(
+      "/forward-bridge?next=" + encodeURIComponent(gotoNext),
+    );
+    const bridgeNext = new URL(store.workspaceFrameUrl("agent-aa11", "win-0123"), "http://x").searchParams.get(
+      "next",
+    );
+    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get("next");
+    expect(soloNext).toBe("/?solo=win-0123");
+  });
+
   it("caches accents under both coordinates and applies previews", () => {
     const store = new WorkspacesStore();
     store.applyWorkspacesMessage(workspacesMessage());

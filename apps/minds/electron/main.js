@@ -27,9 +27,29 @@ const {
 const { startRelaunchAfterExit } = require('./linux-relaunch');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
-const { parseWorkspaceId } = require('./surface-routing');
+const { parseWorkspaceId, parsePopoutRoute } = require('./surface-routing');
+// Pulled-out workspace windows (the pull-out-window spec): the pure decisions
+// live in ./popout-policy so they can be unit-tested under plain node.
+const {
+  followPosition,
+  popoutOpenBounds,
+  surfaceBounds,
+  isTornOut,
+  dropTargetFor,
+  redockFrame,
+  isReattachHandshakeNeeded,
+  isNavigationTarget,
+  TITLEBAR_HEIGHT,
+  POPOUT_MIN_WIDTH,
+  POPOUT_MIN_HEIGHT,
+} = require('./popout-policy');
 const { linkFallbackFor, nativeNotificationOptionsFor, routeNotificationClick } = require('./notifications');
-const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
+const {
+  shouldWriteSessionState,
+  createDebouncedSaver,
+  isSameSavedWindow,
+  splitRestoreEntries,
+} = require('./session-persistence');
 const updater = require('./updater');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
@@ -136,7 +156,19 @@ if (app.isPackaged) {
 app.setPath('userData', paths.getDataDir());
 
 const isMac = process.platform === 'darwin';
-const TITLEBAR_HEIGHT = 38;
+
+// A popout follows the cursor on a timer (Electron cannot hand a live drag
+// to a new native window): once per frame is smooth enough and cheap.
+const POPOUT_FOLLOW_INTERVAL_MS = 16;
+// How long an OS close of a popout waits for its page to return the window
+// to the desktop before the window goes anyway.
+const POPOUT_REATTACH_TIMEOUT_MS = 2000;
+// Window ids as the workspace shell mints them; mirrors the embed contract's
+// WINDOW_ID_PATTERN (never trust the renderer).
+const WINDOW_ID_PATTERN = /^win-[a-f0-9]{1,64}$/i;
+// The shell's own bound on a window title, applied wherever a popout's title
+// enters from the renderer.
+const POPOUT_TITLE_MAX_LENGTH = 256;
 
 // Local crash strip shown when a window's renderer process dies.
 const CHROME_CRASHED_PAGE_FILE = path.join(__dirname, 'chrome-crashed.html');
@@ -283,6 +315,30 @@ function wrapperUrlForWorkspace(workspaceId) {
   return backendBaseUrl + '/workspace/' + encodeURIComponent(agentScoped);
 }
 
+// The SPA URL that shows one pulled-out window of ``workspaceId`` in a popout
+// window (the pull-out-window spec). Like wrapperUrlForWorkspace, the
+// host-scoped coordinate rides through when no agent alias is known yet.
+function popoutUrlFor(workspaceId, windowId) {
+  if (!workspaceId || !windowId || !backendBaseUrl) return null;
+  const agentScoped = toAgentScopedWorkspaceId(workspaceId);
+  if (!/^(?:agent|host)-[a-f0-9]+$/i.test(agentScoped)) return null;
+  if (!WINDOW_ID_PATTERN.test(windowId)) return null;
+  return backendBaseUrl + '/popout/' + encodeURIComponent(agentScoped) + '/' + encodeURIComponent(windowId);
+}
+
+function isPopoutBundle(bundle) {
+  return bundle.kind === 'popout';
+}
+
+// The live popout showing ``windowId`` of ``workspaceId``, or null.
+function findPopoutBundle(workspaceId, windowId) {
+  for (const b of bundles) {
+    if (b.window.isDestroyed() || !isPopoutBundle(b)) continue;
+    if (b.popout.windowId === windowId && sameWorkspaceId(b.popout.workspaceId, workspaceId)) return b;
+  }
+  return null;
+}
+
 // Windows currently showing ``workspaceId`` (there may be several: the
 // one-window-per-workspace rule was deliberately dropped with the collapse --
 // a browser user can always open the same workspace in two tabs).
@@ -300,10 +356,14 @@ function findBundlesForWorkspace(workspaceId) {
 // window-creation order), this scans ``mruWindows`` (kept in actual
 // most-recently-focused order) -- the ordering a "focus the window already
 // showing this" gesture needs when more than one window is showing it.
+// Popouts are excluded: a gesture that navigates "the window showing this
+// workspace" must never land on a popout, which shows exactly one pulled-out
+// window and nothing else.
 function mostRecentBundleForWorkspace(workspaceId) {
   if (!workspaceId) return null;
   for (const b of mruWindows) {
-    if (!b.window.isDestroyed() && sameWorkspaceId(b.currentWorkspaceId, workspaceId)) return b;
+    if (b.window.isDestroyed() || !isNavigationTarget(b.kind)) continue;
+    if (sameWorkspaceId(b.currentWorkspaceId, workspaceId)) return b;
   }
   return null;
 }
@@ -343,12 +403,16 @@ function repaintAllWindowsAfterWake(trigger) {
   console.log(`[wake-repaint] ${trigger}: forced repaint of ${repainted} window(s)`);
 }
 
-function getMostRecentWindow() {
+// Popouts are excluded unless asked for, as in mostRecentBundleForWorkspace;
+// only "is anything open at all" and "bring the app forward" count one.
+function getMostRecentWindow({ includePopouts = false } = {}) {
   for (const b of mruWindows) {
-    if (!b.window.isDestroyed()) return b;
+    if (b.window.isDestroyed()) continue;
+    if (includePopouts || isNavigationTarget(b.kind)) return b;
   }
   for (const b of bundles) {
-    if (!b.window.isDestroyed()) return b;
+    if (b.window.isDestroyed()) continue;
+    if (includePopouts || isNavigationTarget(b.kind)) return b;
   }
   return null;
 }
@@ -392,6 +456,11 @@ function computeTitleFor(bundle) {
   if (agentId) {
     const ws = workspaceList.find((w) => sameWorkspaceId(w.id, agentId));
     const name = ws ? (ws.name || ws.id) : null;
+    if (isPopoutBundle(bundle)) {
+      const windowTitle = bundle.popout.title;
+      const parts = [windowTitle, name, 'Mind'].filter((part) => Boolean(part));
+      return parts.join(' — ');
+    }
     return name ? `${name} — Mind` : 'Mind';
   }
   return 'Mind';
@@ -407,17 +476,26 @@ function updateAllOsTitles() {
 }
 
 // Tear down every live window currently open to ``agentId`` (the workspace was
-// destroyed or stopped). Never leaves the app windowless: when no window
-// showing something ELSE would survive, the affected windows are all
-// navigated home instead of closed (closing them would commit an app
-// shutdown).
+// destroyed or stopped). Never leaves the app without a main window: when no
+// main window showing something ELSE would survive, the affected main windows
+// are all navigated home instead of closed (closing them would commit an app
+// shutdown, or leave only popouts, which can show nothing else).
 function detachWindowsForWorkspace(workspaceId) {
   if (!workspaceId) return;
   const affected = findBundlesForWorkspace(workspaceId);
   if (affected.length === 0) return;
-  const liveBundleCount = [...bundles].filter((b) => !b.window.isDestroyed()).length;
+  const isLiveMainBundle = (b) => !b.window.isDestroyed() && !isPopoutBundle(b);
+  const liveMainCount = [...bundles].filter(isLiveMainBundle).length;
+  const affectedMainCount = affected.filter(isLiveMainBundle).length;
   for (const b of affected) {
-    if (liveBundleCount - affected.length >= 1) {
+    if (isPopoutBundle(b)) {
+      // The workspace is going: nothing to return the window to, so the
+      // popout closes without asking its page to reattach. Its placement
+      // keeps the window pulled out; the ghost's "Bring back" works when the
+      // workspace returns.
+      settlePopout(b);
+      b.window.close();
+    } else if (liveMainCount - affectedMainCount >= 1) {
       b.window.close();
     } else if (backendBaseUrl) {
       navigateBundle(b, backendBaseUrl + '/');
@@ -456,7 +534,7 @@ function navigateBundle(bundle, url) {
   if (loadTarget) bundle.window.webContents.loadURL(loadTarget).catch(() => {});
 }
 
-function buildBundleWindowOptions() {
+function buildBundleWindowOptions(kind, bounds) {
   const windowOptions = {
     width: 1200,
     height: 800,
@@ -472,6 +550,21 @@ function buildBundleWindowOptions() {
       nodeIntegration: false,
     },
   };
+  if (kind === 'popout') {
+    // A popout is frameless on every platform: its own bar (drawn by the
+    // SPA) is the drag handle and carries the close control, and it opens
+    // at the size the workspace drew the window.
+    windowOptions.frame = false;
+    windowOptions.minWidth = POPOUT_MIN_WIDTH;
+    windowOptions.minHeight = POPOUT_MIN_HEIGHT;
+    if (bounds) {
+      windowOptions.x = bounds.x;
+      windowOptions.y = bounds.y;
+      windowOptions.width = bounds.width;
+      windowOptions.height = bounds.height;
+    }
+    return windowOptions;
+  }
   if (isMac) {
     windowOptions.titleBarStyle = 'hiddenInset';
     windowOptions.trafficLightPosition = { x: 12, y: (TITLEBAR_HEIGHT - 16) / 2 };
@@ -481,11 +574,36 @@ function buildBundleWindowOptions() {
   return windowOptions;
 }
 
-function createBundle() {
-  const win = new BrowserWindow(buildBundleWindowOptions());
+// ``kind`` is 'main' (the app's ordinary window: the SPA's hub pages and the
+// workspace surface) or 'popout' (one pulled-out workspace window, see the
+// pull-out-window spec); a popout names its workspace and window up front.
+function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
+  const win = new BrowserWindow(buildBundleWindowOptions(kind, bounds));
 
   const bundle = {
     window: win,
+    kind,
+    // For a popout: the workspace and window it shows, the follow loop while
+    // the cursor drags it, whether its page has settled the window (so an OS
+    // close needs no reattach handshake), the main window a re-dock drag is
+    // over, and the window's title for the OS title.
+    popout:
+      popout === null
+        ? null
+        : {
+            workspaceId: popout.workspaceId,
+            windowId: popout.windowId,
+            title: (popout.title || '').slice(0, POPOUT_TITLE_MAX_LENGTH),
+            followTimer: null,
+            followGrab: null,
+            isRedockDrag: false,
+            dropTarget: null,
+            isReattachSettled: false,
+            reattachTimer: null,
+          },
+    // For a main window: the workspace title-bar drag main is watching, if
+    // any (see startDragWatch).
+    dragWatch: null,
     // The URL this window's content is "at" for session persistence and
     // titles: the displayed workspace's /goto path, or the local page path.
     currentContentUrl: null,
@@ -583,10 +701,42 @@ function wireBundleWindowEvents(bundle) {
       runQuitSequence();
       return;
     }
-    if (!isShuttingDown) saveSessionState();
+    // A popout's OS close returns its window to the desktop first: the page
+    // is asked to reattach and the close is retried once it answers (or
+    // after a short wait). Not during a quit, when the popout is restored
+    // next launch instead, and not when the page cannot be asked, which
+    // settles the popout and lets this close go through.
+    if (
+      isPopoutBundle(bundle) &&
+      isReattachHandshakeNeeded({
+        isShuttingDown,
+        isQuitSequenceRunning,
+        isReattachSettled: bundle.popout.isReattachSettled,
+      }) &&
+      requestPopoutReattach(bundle)
+    ) {
+      event.preventDefault();
+      return;
+    }
+    if (isShuttingDown) return;
+    if (isLeavingSession(bundle)) forgetPopoutSessionEntry(bundle);
+    else saveSessionState();
   });
 
   win.on('closed', () => {
+    if (isPopoutBundle(bundle)) {
+      stopFollowingCursor(bundle);
+      // A pending reattach handshake ends with the window: its timer must not
+      // fire against a window that is already gone.
+      settlePopout(bundle);
+      // A drag watch ends with the popout it opened: left running, its next
+      // tick would open another one under the still-held cursor.
+      for (const other of bundles) {
+        if (other.dragWatch && other.dragWatch.popout === bundle) stopDragWatch(other);
+      }
+    } else {
+      stopDragWatch(bundle);
+    }
     bundles.delete(bundle);
     const mruIdx = mruWindows.indexOf(bundle);
     if (mruIdx >= 0) mruWindows.splice(mruIdx, 1);
@@ -623,9 +773,15 @@ function wireBundleNavigationEvents(bundle) {
     // coordinate counts (a cold-start restore may carry the host-scoped id
     // before discovery re-confirms the agent).
     const workspaceRouteMatch = parsed.pathname.match(/^\/workspace\/((?:agent|host)-[a-f0-9]+)(?:\/options)?\/?$/i);
+    const popoutRoute = parsePopoutRoute(url);
     if (workspaceRouteMatch) {
       bundle.currentWorkspaceId = toHostScopedWorkspaceId(workspaceRouteMatch[1]);
       bundle.currentContentUrl = '/goto/' + bundle.currentWorkspaceId + '/';
+    } else if (popoutRoute) {
+      // A popout persists as its own port-independent route, host-keyed like
+      // the workspace windows, and is restored through it.
+      bundle.currentWorkspaceId = toHostScopedWorkspaceId(popoutRoute.workspaceId);
+      bundle.currentContentUrl = '/popout/' + bundle.currentWorkspaceId + '/' + popoutRoute.windowId;
     } else {
       bundle.currentWorkspaceId = null;
       bundle.currentContentUrl = parsed.pathname + parsed.search;
@@ -643,6 +799,9 @@ function wireBundleNavigationEvents(bundle) {
   // derives its own UI state from its navigation intents instead.
   wc.on('did-frame-navigate', (_e, url, _code, _status, isMainFrame) => {
     if (isMainFrame || bundle.isErrorState) return;
+    // A popout's content URL is its own route (recorded above); the frame
+    // inside it is that route's workspace by construction.
+    if (isPopoutBundle(bundle)) return;
     const workspaceId = parseWorkspaceId(url);
     if (!workspaceId) return;
     if (bundle.currentWorkspaceId !== workspaceId) {
@@ -737,6 +896,13 @@ function wireBundleNavigationEvents(bundle) {
 }
 
 function registerShortcutsFor(bundle, wc) {
+  // The release of a watched title-bar drag reaches this window wherever the
+  // cursor is by then, which the workspace shell's own pointer events do not
+  // on every platform (see startDragWatch).
+  wc.on('input-event', (_event, input) => {
+    if (input.type === 'mouseUp' && bundle.dragWatch) releaseDragWatch(bundle);
+  });
+
   wc.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     const key = input.key ? input.key.toLowerCase() : '';
@@ -767,6 +933,13 @@ function registerShortcutsFor(bundle, wc) {
       : input.control && !input.shift && !input.alt && !input.meta;
     if (closeTabCombo && key === 'w' && bundle.currentWorkspaceId) {
       event.preventDefault();
+      if (isPopoutBundle(bundle)) {
+        // In a popout the chord closes the popout, which returns its window
+        // to the desktop (the close handshake), rather than closing the
+        // workspace window for everyone.
+        bundle.window.close();
+        return;
+      }
       try { wc.send('close-active-tab'); } catch { /* noop */ }
       return;
     }
@@ -840,11 +1013,23 @@ function wireBundleShowLogic(bundle) {
 }
 
 function openNewWindow(url, { showInactive = false } = {}) {
+  const absolute = toAbsoluteUrl(url);
+  // A popout route (a session restore's) opens a popout window, not a main
+  // window on that page.
+  const popoutRoute = parsePopoutRoute(absolute);
+  if (popoutRoute) {
+    const popoutUrl = popoutUrlFor(popoutRoute.workspaceId, popoutRoute.windowId);
+    const bundle = createBundle({ kind: 'popout', popout: popoutRoute });
+    if (showInactive) bundle.showInactiveOnFirstShow = true;
+    bundle.isLoadingState = false;
+    if (popoutUrl) bundle.window.webContents.loadURL(popoutUrl).catch(() => {});
+    return bundle;
+  }
   const bundle = createBundle();
   if (showInactive) bundle.showInactiveOnFirstShow = true;
   bundle.isLoadingState = false;
-  const workspaceId = parseWorkspaceId(toAbsoluteUrl(url));
-  const target = workspaceId ? wrapperUrlForWorkspace(workspaceId) : toAbsoluteUrl(url);
+  const workspaceId = parseWorkspaceId(absolute);
+  const target = workspaceId ? wrapperUrlForWorkspace(workspaceId) : absolute;
   if (target) bundle.window.webContents.loadURL(target).catch(() => {});
   return bundle;
 }
@@ -915,6 +1100,8 @@ function openOrFocusWindow({ isReopen = false } = {}) {
   const target = decideNewWindowTarget({
     hasBackendUrl: !!backendBaseUrl,
     hasErrorTakeover: !!lastErrorTakeover,
+    // Main windows only: a popout shows one pulled-out window and cannot
+    // take the route (or the home page) this request wants a window for.
     hasLiveWindow: getMostRecentWindow() != null,
     isStartupRoutingPending,
     isShuttingDown,
@@ -1095,9 +1282,23 @@ function parseRecoveryPageAgentId(url) {
 function toPersistedContentUrl(url) {
   if (!url) return null;
   const absolute = toAbsoluteUrl(url);
+  const popoutRoute = parsePopoutRoute(absolute);
+  if (popoutRoute) {
+    const hostScoped = toHostScopedWorkspaceId(popoutRoute.workspaceId);
+    return `/popout/${encodeURIComponent(hostScoped)}/${encodeURIComponent(popoutRoute.windowId)}`;
+  }
   const workspaceId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
   if (workspaceId) return `/goto/${encodeURIComponent(toHostScopedWorkspaceId(workspaceId))}/`;
   return toRelativeBackendUrl(absolute) ? '/' : null;
+}
+
+// The workspace a persisted entry belongs to, whichever shape it took: a
+// workspace window (/goto/, the recovery page, a legacy /goto agent id) or a
+// popout (/popout/<workspace>/<window>). Null for a plain page.
+function persistedEntryWorkspaceId(absolute) {
+  const popoutRoute = parsePopoutRoute(absolute);
+  if (popoutRoute) return popoutRoute.workspaceId;
+  return parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute) || parseLegacyGotoAgentId(absolute);
 }
 
 function parseLegacyGotoAgentId(url) {
@@ -1113,8 +1314,9 @@ function parseLegacyGotoAgentId(url) {
 
 function toRestoredContentUrl(entry) {
   const absolute = toAbsoluteUrl(entry.url);
-  const workspaceId =
-    parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute) || parseLegacyGotoAgentId(absolute);
+  // A popout restores as itself: openNewWindow turns the route into a popout.
+  if (parsePopoutRoute(absolute)) return absolute;
+  const workspaceId = persistedEntryWorkspaceId(absolute);
   if (workspaceId) {
     const wrapperUrl = wrapperUrlForWorkspace(workspaceId);
     if (wrapperUrl) return wrapperUrl;
@@ -1122,11 +1324,24 @@ function toRestoredContentUrl(entry) {
   return absolute;
 }
 
+// A settled popout is leaving the session: its window is back on the desktop
+// (or never left it, or is gone), so restoring the popout would pull the
+// window out again.
+function isLeavingSession(bundle) {
+  return isPopoutBundle(bundle) && bundle.popout.isReattachSettled;
+}
+
+function writeSessionState(windows) {
+  const p = getSessionStatePath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
+}
+
 function saveSessionState() {
   try {
     const windows = [];
     for (const b of mruWindows) {
-      if (b.window.isDestroyed()) continue;
+      if (b.window.isDestroyed() || isLeavingSession(b)) continue;
       const url = b.preErrorUrl || b.currentContentUrl;
       const persisted = toPersistedContentUrl(url);
       if (!persisted) continue;
@@ -1146,11 +1361,27 @@ function saveSessionState() {
       console.log(`[session] Skipping empty save; ${persistedWindowCount} window(s) already persisted (teardown race guard)`);
       return;
     }
-    const p = getSessionStatePath();
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ windows }, null, 2));
+    writeSessionState(windows);
   } catch (err) {
     console.log('[session] Failed to save state:', err.message);
+  }
+}
+
+// Drop a settled popout's entry from the saved session. Its close runs this
+// instead of a snapshot: with the popout the last window a snapshot is empty
+// and the empty-clobber guard would keep the file, entry and all.
+function forgetPopoutSessionEntry(bundle) {
+  try {
+    const state = loadSessionState();
+    const windows = state.windows.filter((entry) => {
+      const route = popoutEntryRoute(entry);
+      if (!route || route.windowId !== bundle.popout.windowId) return true;
+      return !sameWorkspaceId(route.workspaceId, bundle.popout.workspaceId);
+    });
+    if (windows.length === state.windows.length) return;
+    writeSessionState(windows);
+  } catch (err) {
+    console.log('[session] Failed to drop a popout from the saved state:', err.message);
   }
 }
 
@@ -1166,8 +1397,7 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   const results = [];
   for (const entry of state) {
     const absolute = toAbsoluteUrl(entry.url);
-    const workspaceId =
-      parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute) || parseLegacyGotoAgentId(absolute);
+    const workspaceId = persistedEntryWorkspaceId(absolute);
     if (workspaceId && (!knownAgentIdsSet || !knownAgentIdsSet.has(workspaceId))) {
       continue; // workspace no longer exists (or none are known)
     }
@@ -1176,11 +1406,29 @@ function filterRestorableUrls(state, knownAgentIdsSet) {
   return results;
 }
 
-// Size a window about to take the startup route to the saved session's first
-// entry, before it surfaces. Returns whether there was an entry to size from,
-// which is applyStartupRouting's ``boundsAlreadyApplied``.
+// The popout route a persisted entry names, or null for a main window's. Its
+// url is backend-relative and is read against a placeholder origin rather than
+// through toAbsoluteUrl, which leaves it relative until the backend is up --
+// and the launch window is sized from the saved session before that.
+function popoutEntryRoute(entry) {
+  const url = entry.url.startsWith('/') ? 'http://localhost' + entry.url : entry.url;
+  return parsePopoutRoute(url);
+}
+
+function isPopoutEntry(entry) {
+  return popoutEntryRoute(entry) !== null;
+}
+
+// The saved entry the launch window lands on: the first main-window one.
+function launchWindowEntry(entries) {
+  return splitRestoreEntries(entries, isPopoutEntry).first;
+}
+
+// Size a window about to take the startup route to the saved session's entry
+// it will land on, before it surfaces. Returns whether there was an entry to
+// size from, which is applyStartupRouting's ``boundsAlreadyApplied``.
 function sizeFromSavedSession(bundle) {
-  const [first] = loadSessionState().windows;
+  const first = launchWindowEntry(loadSessionState().windows);
   if (!first) return false;
   restoreWindowBounds(bundle, first);
   return true;
@@ -1476,7 +1724,9 @@ function postStopStateContainer() {
  * nothing to own it.
  */
 function showQuitPrompt(options) {
-  const bundle = getMostRecentWindow();
+  // Any window can own it, a popout included: with the last main window
+  // closed the popouts are what is on screen.
+  const bundle = getMostRecentWindow({ includePopouts: true });
   if (!bundle) return dialog.showMessageBox(options);
   focusBundle(bundle);
   return dialog.showMessageBox(bundle.window, options);
@@ -1641,7 +1891,7 @@ if (!gotLock) {
     // has -- even mid-quit, where openOrFocusWindow() would do nothing. With
     // none open there is nothing to focus, so reopen the app rather than
     // dropping the launch.
-    const mru = getMostRecentWindow();
+    const mru = getMostRecentWindow({ includePopouts: true });
     if (mru) focusBundle(mru);
     else openOrFocusWindow({ isReopen: true });
   });
@@ -1783,7 +2033,7 @@ function installApplicationMenu() {
           // closes its focused window with it (via the embed contract).
           label: 'Close Window',
           click: () => {
-            const target = getMostRecentWindow();
+            const target = getMostRecentWindow({ includePopouts: true });
             if (target && !target.window.isDestroyed()) target.window.close();
           },
         },
@@ -1797,7 +2047,7 @@ function installApplicationMenu() {
           label: 'Toggle Developer Tools',
           accelerator: 'Alt+Cmd+I',
           click: () => {
-            const bundle = getMostRecentWindow();
+            const bundle = getMostRecentWindow({ includePopouts: true });
             if (!bundle || bundle.window.isDestroyed()) return;
             if (!bundle.window.webContents.isDestroyed()) {
               bundle.window.webContents.toggleDevTools();
@@ -1980,19 +2230,37 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
     wc.loadURL(backendBaseUrl + '/').catch(() => {});
     return;
   }
-  const [first, ...rest] = restorable;
-  if (!boundsAlreadyApplied || !isSameSavedWindow(first, savedState.windows[0])) {
-    restoreWindowBounds(bundle, first);
+  // The launch window is a main window: it lands on the first main-window
+  // entry, and every popout entry opens as a popout of its own below.
+  const { first, rest } = splitRestoreEntries(restorable, isPopoutEntry);
+  if (first) {
+    if (!boundsAlreadyApplied || !isSameSavedWindow(first, launchWindowEntry(savedState.windows))) {
+      restoreWindowBounds(bundle, first);
+    }
+    wc.loadURL(toRestoredContentUrl(first)).catch(() => {});
+  } else {
+    // Every restorable window is a popout (off macOS the app runs on with
+    // only popouts open): the launch window has no saved page to return to.
+    wc.loadURL(backendBaseUrl + '/').catch(() => {});
   }
-  wc.loadURL(toRestoredContentUrl(first)).catch(() => {});
   const restoredBundles = [];
   for (const entry of rest) {
+    // Popouts outlive the main windows (they keep the app alive off macOS),
+    // so this route can land with some of the saved popouts still open; a
+    // second popout of the same window would be a duplicate.
+    const popoutRoute = popoutEntryRoute(entry);
+    if (popoutRoute && findPopoutBundle(popoutRoute.workspaceId, popoutRoute.windowId)) continue;
     const restored = openNewWindow(toRestoredContentUrl(entry), { showInactive: true });
     restoreWindowBounds(restored, entry);
     restoredBundles.push(restored);
   }
+  // The windows already open before the route landed keep their place behind
+  // the restored ones: mruWindows is also what saveSessionState records.
+  const alreadyOpen = mruWindows.filter(
+    (b) => b !== bundle && !restoredBundles.includes(b) && !b.window.isDestroyed(),
+  );
   mruWindows.length = 0;
-  mruWindows.push(bundle, ...restoredBundles);
+  mruWindows.push(bundle, ...restoredBundles, ...alreadyOpen);
   const raiseFirst = () => {
     if (!bundle.window.isDestroyed()) bundle.window.focus();
   };
@@ -2419,6 +2687,360 @@ ipcMain.handle('report-error', () => {
   }
 });
 
+// Pulled-out workspace windows (the pull-out-window spec).
+
+// The popout's page settled its window (it reattached, or the window is no
+// longer pulled out), so its OS close needs no handshake.
+function settlePopout(bundle) {
+  if (!isPopoutBundle(bundle)) return;
+  bundle.popout.isReattachSettled = true;
+  if (bundle.popout.reattachTimer !== null) {
+    clearTimeout(bundle.popout.reattachTimer);
+    bundle.popout.reattachTimer = null;
+  }
+}
+
+// Ask a main window showing the popout's workspace to return the popout's
+// window to the desktop, at ``frame`` (fractions of that window's surface)
+// when a drop named one. That window's shell is the desktop's one writer of
+// the layout, so the return goes through it rather than the popout's own
+// page whenever one is open; the popout closes itself once its own page sees
+// the window back (close-popout).
+function sendReattachAsk(target, bundle, frame) {
+  try {
+    // Agent-scoped like the SPA's own ids: a restored popout carries the
+    // host-scoped coordinate its persisted route was written with.
+    target.window.webContents.send('reattach-popout-window', {
+      workspaceId: toAgentScopedWorkspaceId(bundle.popout.workspaceId),
+      windowId: bundle.popout.windowId,
+      frame,
+    });
+  } catch (err) {
+    console.warn('[popout] could not ask the desktop window to take the window back:', err && err.message);
+  }
+}
+
+// An OS close of a popout (and its bar's "Return to desktop"): the window
+// goes back to the desktop first, through the most recent main window
+// showing the workspace, else through the popout's own page (which then
+// answers popout-reattached); the close goes on when the popout's page sees
+// the window back, when that answer arrives, or after the wait. Answers
+// whether the close must wait; a page that cannot be asked settles the
+// popout instead, and the close goes on.
+function requestPopoutReattach(bundle) {
+  if (bundle.popout.reattachTimer !== null) return true;
+  const wc = bundle.window.webContents;
+  if (wc.isDestroyed() || !isOnBackendPage(bundle)) {
+    settlePopout(bundle);
+    return false;
+  }
+  const target = mostRecentBundleForWorkspace(bundle.popout.workspaceId);
+  if (target) {
+    sendReattachAsk(target, bundle, null);
+  } else {
+    try {
+      wc.send('popout-reattach-request');
+    } catch (err) {
+      console.warn('[popout] could not ask the page to reattach:', err && err.message);
+    }
+  }
+  bundle.popout.reattachTimer = setTimeout(() => {
+    bundle.popout.reattachTimer = null;
+    console.warn('[popout] the page did not confirm the reattach in time; closing anyway');
+    settlePopout(bundle);
+    if (!bundle.window.isDestroyed()) bundle.window.close();
+  }, POPOUT_REATTACH_TIMEOUT_MS);
+  return true;
+}
+
+// The main windows a re-dock drag could drop onto, most recently focused
+// first, as the drop-target rule reads them.
+function redockCandidatesFor(bundle) {
+  const candidates = [];
+  for (const b of mruWindows) {
+    if (b.window.isDestroyed() || isPopoutBundle(b)) continue;
+    candidates.push({
+      id: b,
+      contentBounds: b.window.getContentBounds(),
+      isSameWorkspace: sameWorkspaceId(b.currentWorkspaceId, bundle.popout.workspaceId),
+    });
+  }
+  return candidates;
+}
+
+function sendDropTarget(target, isOver) {
+  if (!target || target.window.isDestroyed() || target.window.webContents.isDestroyed()) return;
+  try {
+    target.window.webContents.send('popout-drop-target', isOver);
+  } catch { /* noop */ }
+}
+
+// Follow the cursor with the popout until told to stop: the tear-out drag
+// (the workspace shell still holds the pointer) and the popout's own bar
+// drag (which may end over a main window as a re-dock).
+function startFollowingCursor(bundle, grab, { isRedockDrag }) {
+  stopFollowingCursor(bundle);
+  bundle.popout.followGrab = grab;
+  bundle.popout.isRedockDrag = isRedockDrag;
+  bundle.popout.followTimer = setInterval(() => {
+    if (bundle.window.isDestroyed()) {
+      stopFollowingCursor(bundle);
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const position = followPosition(cursor, bundle.popout.followGrab);
+    bundle.window.setPosition(position.x, position.y);
+    if (!bundle.popout.isRedockDrag) return;
+    const target = dropTargetFor(cursor, redockCandidatesFor(bundle));
+    if (target === bundle.popout.dropTarget) return;
+    sendDropTarget(bundle.popout.dropTarget, false);
+    sendDropTarget(target, true);
+    bundle.popout.dropTarget = target;
+  }, POPOUT_FOLLOW_INTERVAL_MS);
+}
+
+function stopFollowingCursor(bundle) {
+  if (bundle.popout.followTimer !== null) {
+    clearInterval(bundle.popout.followTimer);
+    bundle.popout.followTimer = null;
+  }
+  bundle.popout.followGrab = null;
+  const target = bundle.popout.dropTarget;
+  bundle.popout.dropTarget = null;
+  bundle.popout.isRedockDrag = false;
+  sendDropTarget(target, false);
+  return target;
+}
+
+// The renderer's popout asks all come from the SPA page of a window main
+// created; everything else is dropped, like shell events.
+function popoutSenderBundle(event) {
+  return trustedShellEventSenderBundle(event);
+}
+
+function isValidWorkspaceWindowIds(request) {
+  if (!request || typeof request !== 'object') return false;
+  if (typeof request.workspaceId !== 'string' || !/^(?:agent|host)-[a-f0-9]{1,64}$/i.test(request.workspaceId)) {
+    return false;
+  }
+  return typeof request.windowId === 'string' && WINDOW_ID_PATTERN.test(request.windowId);
+}
+
+function isValidPopoutRequest(request, numberKeys) {
+  if (!isValidWorkspaceWindowIds(request)) return false;
+  for (const key of numberKeys) {
+    if (typeof request[key] !== 'number' || !Number.isFinite(request[key])) return false;
+  }
+  return typeof request.title === 'string';
+}
+
+// Open the popout for ``request`` (validated) beside ``source`` (mode
+// "open") or under the cursor, following it (mode "drag"). Null when the
+// popout URL cannot be built yet.
+function openPopout(source, request, mode) {
+  const url = popoutUrlFor(request.workspaceId, request.windowId);
+  if (!url) {
+    console.warn(`[popout] no popout URL for ${request.windowId} of ${request.workspaceId}; not opening`);
+    return null;
+  }
+  const cursor = screen.getCursorScreenPoint();
+  const sourceBounds = source.window.getBounds();
+  const workArea = screen.getDisplayMatching(sourceBounds).workArea;
+  const bounds = popoutOpenBounds({ ...request, mode }, cursor, sourceBounds, workArea);
+  const bundle = createBundle({
+    kind: 'popout',
+    popout: { workspaceId: request.workspaceId, windowId: request.windowId, title: request.title },
+    bounds,
+  });
+  bundle.isLoadingState = false;
+  if (mode === 'drag') {
+    // The workspace shell still holds the pointer for the tear-out drag;
+    // surfacing the popout inactive keeps it that way, and the release ends
+    // the follow and focuses the popout.
+    bundle.showInactiveOnFirstShow = true;
+    startFollowingCursor(bundle, { grabX: request.grabX, grabY: request.grabY }, { isRedockDrag: false });
+    // Shown at once rather than at ready-to-show: the window is under the
+    // cursor now, and a blank card that follows the hand beats one that
+    // appears a beat later wherever the hand has got to.
+    bundle.window.showInactive();
+  }
+  bundle.window.webContents.loadURL(url).catch(() => {});
+  console.log(`[popout] opened ${request.windowId} of ${request.workspaceId} (${mode})`);
+  return bundle;
+}
+
+ipcMain.on('open-popout-window', (event, request) => {
+  const source = popoutSenderBundle(event);
+  if (!source || !isValidPopoutRequest(request, ['width', 'height'])) {
+    console.warn('[popout] dropped an open ask from an untrusted sender frame or with a malformed request');
+    return;
+  }
+  const existing = findPopoutBundle(request.workspaceId, request.windowId);
+  if (existing) {
+    // Already out (a "Show" from the desktop's ghost or taskbar): raise it.
+    focusBundle(existing);
+    return;
+  }
+  openPopout(source, request, 'open');
+});
+
+// A workspace title-bar drag, watched from here (the pull-out-window spec,
+// section 5.1). The workspace shell's pointer events stop at the chrome
+// window's edge on some platforms (an absolute-axis pointer under X11, which
+// Chromium routes as a pen, loses its capture there), so the shell cannot
+// tell when a drag has left the window. Main can: it samples the cursor
+// while the shell reports a drag in progress, opens the popout once the
+// cursor is past the workspace surface by the tear-out distance, drops it
+// when the cursor comes back, and ends the drag on the mouse-up the window
+// still receives. The shell hears each step as a tear-out message and keeps
+// its own gesture in step.
+function startDragWatch(source, request) {
+  stopDragWatch(source);
+  const watch = { request, popout: null, timer: null };
+  source.dragWatch = watch;
+  watch.timer = setInterval(() => {
+    if (source.window.isDestroyed()) {
+      stopDragWatch(source);
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const isOut = isTornOut(cursor, surfaceBounds(source.window.getContentBounds()));
+    if (isOut && watch.popout === null) {
+      watch.popout = openPopout(source, watch.request, 'drag');
+      if (watch.popout !== null) sendTearOut(source, watch.request, 'out');
+    } else if (!isOut && watch.popout !== null) {
+      dropDraggedPopout(watch);
+      sendTearOut(source, watch.request, 'in');
+    }
+  }, POPOUT_FOLLOW_INTERVAL_MS);
+}
+
+function stopDragWatch(source) {
+  const watch = source.dragWatch;
+  if (!watch) return;
+  clearInterval(watch.timer);
+  source.dragWatch = null;
+}
+
+// The drag came back inside or was cancelled: the window never left the
+// desktop, so the popout goes without any reattach.
+function dropDraggedPopout(watch) {
+  const popout = watch.popout;
+  watch.popout = null;
+  if (popout === null || popout.window.isDestroyed()) return;
+  stopFollowingCursor(popout);
+  settlePopout(popout);
+  popout.window.close();
+}
+
+// The drag was released with the popout out: it stays, focused.
+function settleDraggedPopout(watch) {
+  const popout = watch.popout;
+  watch.popout = null;
+  if (popout === null || popout.window.isDestroyed()) return;
+  stopFollowingCursor(popout);
+  focusBundle(popout);
+  scheduleSessionSave();
+}
+
+// The mouse-up of a watched drag arrived at the source window.
+function releaseDragWatch(source) {
+  const watch = source.dragWatch;
+  if (!watch) return;
+  stopDragWatch(source);
+  if (watch.popout === null) return;
+  settleDraggedPopout(watch);
+  sendTearOut(source, watch.request, 'released');
+}
+
+function sendTearOut(source, request, phase) {
+  if (source.window.isDestroyed()) return;
+  try {
+    source.window.webContents.send('tear-out', {
+      workspaceId: request.workspaceId,
+      windowId: request.windowId,
+      phase,
+    });
+  } catch (err) {
+    console.warn('[popout] could not report the tear-out to the page:', err && err.message);
+  }
+}
+
+ipcMain.on('begin-workspace-window-drag', (event, request) => {
+  const source = popoutSenderBundle(event);
+  if (!source || !isValidPopoutRequest(request, ['width', 'height', 'grabX', 'grabY'])) {
+    console.warn('[popout] dropped a drag-begin ask from an untrusted sender frame or with a malformed request');
+    return;
+  }
+  const watch = source.dragWatch;
+  if (watch && watch.request.windowId === request.windowId && watch.request.workspaceId === request.workspaceId) {
+    // The dragged window changed size (a snapped window un-snapped): the
+    // popout still to open takes the new size and grab.
+    watch.request = request;
+    return;
+  }
+  startDragWatch(source, request);
+});
+
+ipcMain.on('end-workspace-window-drag', (event, payload) => {
+  const source = popoutSenderBundle(event);
+  if (!source || !isValidWorkspaceWindowIds(payload)) return;
+  const watch = source.dragWatch;
+  if (!watch || watch.request.windowId !== payload.windowId) return;
+  stopDragWatch(source);
+  if (watch.popout === null) return;
+  // The shell's own release reached it first (a pointer that does leave the
+  // window): it detached the window, and the popout stays; a cancel drops it.
+  if (payload.isDetached === true) settleDraggedPopout(watch);
+  else dropDraggedPopout(watch);
+});
+
+ipcMain.on('begin-popout-drag', (event, grab) => {
+  const bundle = popoutSenderBundle(event);
+  if (!bundle || !isPopoutBundle(bundle) || !grab) return;
+  const grabX = Number(grab.grabX);
+  const grabY = Number(grab.grabY);
+  if (!Number.isFinite(grabX) || !Number.isFinite(grabY)) return;
+  startFollowingCursor(bundle, { grabX, grabY }, { isRedockDrag: true });
+});
+
+ipcMain.on('end-popout-bar-drag', (event) => {
+  const bundle = popoutSenderBundle(event);
+  if (!bundle || !isPopoutBundle(bundle)) return;
+  const target = stopFollowingCursor(bundle);
+  scheduleSessionSave();
+  if (!target || target.window.isDestroyed()) return;
+  // Released over a main window showing this workspace: that window's shell
+  // returns the window to the desktop where it was dropped, and the popout
+  // closes itself once its own page sees the window back.
+  const frame = redockFrame(bundle.window.getContentBounds(), target.window.getContentBounds());
+  sendReattachAsk(target, bundle, frame);
+  focusBundle(target);
+});
+
+ipcMain.on('close-popout', (event) => {
+  const bundle = popoutSenderBundle(event);
+  if (!bundle || !isPopoutBundle(bundle)) return;
+  // The page says the window is no longer pulled out (closed for everyone,
+  // or brought back from the desktop): nothing to reattach.
+  settlePopout(bundle);
+  bundle.window.close();
+});
+
+ipcMain.on('popout-reattached', (event) => {
+  const bundle = popoutSenderBundle(event);
+  if (!bundle || !isPopoutBundle(bundle)) return;
+  settlePopout(bundle);
+  bundle.window.close();
+});
+
+ipcMain.on('set-popout-title', (event, title) => {
+  const bundle = popoutSenderBundle(event);
+  if (!bundle || !isPopoutBundle(bundle) || typeof title !== 'string') return;
+  bundle.popout.title = title.slice(0, POPOUT_TITLE_MAX_LENGTH);
+  updateOsTitle(bundle);
+});
+
 ipcMain.on('open-workspace-in-new-window', (_event, agentId) => {
   if (typeof agentId !== 'string' || !/^(?:agent|host)-[a-f0-9]{1,64}$/i.test(agentId)) return;
   // "Open in new window" always opens a new window, even when another window
@@ -2456,9 +3078,16 @@ ipcMain.on('reload-chrome', (event) => {
     bundle.window.webContents.loadURL(failedUrl).catch(() => {});
     return;
   }
-  const target = bundle.currentWorkspaceId
-    ? wrapperUrlForWorkspace(bundle.currentWorkspaceId)
-    : toAbsoluteUrl(bundle.currentContentUrl || '/');
+  // A popout reloads as itself: its workspace id alone would name the
+  // workspace wrapper, which is a main window's page.
+  let target;
+  if (isPopoutBundle(bundle)) {
+    target = popoutUrlFor(bundle.popout.workspaceId, bundle.popout.windowId);
+  } else if (bundle.currentWorkspaceId) {
+    target = wrapperUrlForWorkspace(bundle.currentWorkspaceId);
+  } else {
+    target = toAbsoluteUrl(bundle.currentContentUrl || '/');
+  }
   if (target) bundle.window.webContents.loadURL(target).catch(() => {});
   else if (backendBaseUrl) bundle.window.webContents.loadURL(backendBaseUrl + '/').catch(() => {});
 });
@@ -2618,12 +3247,13 @@ app.on('window-all-closed', () => {
 // re-opens one on whatever the app's state warrants -- the session that was
 // open when the last window closed, the loading screen, or the error takeover.
 // With a window already open the OS just brings it forward, so we act only
-// when none remain.
+// when none remain. A popout is such a window: the OS raises it too, and a
+// main window is a Cmd+N away.
 app.on('activate', () => {
   if (!shouldOpenWindowOnActivate({
     isShuttingDown,
     isQuitSequenceRunning,
-    hasLiveWindow: getMostRecentWindow() != null,
+    hasLiveWindow: getMostRecentWindow({ includePopouts: true }) != null,
   })) {
     return;
   }

@@ -5,6 +5,7 @@ import {
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
+  popoutFromPath,
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
@@ -241,5 +242,32 @@ describe("parseWorkspaceIdFromUrl", () => {
     expect(
       parseWorkspaceIdFromUrl("http://evil.example/gotoevil/host-ab12/"),
     ).toBeNull();
+  });
+});
+
+describe("popoutFromPath", () => {
+  it("names the workspace and the window of a popout route, and nothing else", () => {
+    expect(popoutFromPath("/popout/agent-ab12/win-0123456789abcdef")).toEqual({
+      workspaceAnyId: "agent-ab12",
+      windowId: "win-0123456789abcdef",
+    });
+    // A cold-start restore may carry the host-scoped coordinate.
+    expect(popoutFromPath("/popout/host-99aa/win-01")?.workspaceAnyId).toBe("host-99aa");
+    expect(popoutFromPath("/popout/agent-ab12")).toBeNull();
+    expect(popoutFromPath("/popout/agent-ab12/not-a-window")).toBeNull();
+    expect(popoutFromPath("/popout/agent-ab12/win-01/more")).toBeNull();
+    expect(popoutFromPath("/workspace/agent-ab12")).toBeNull();
+  });
+
+  it("gives a popout its workspace's context and accent, but not the surface route's mount", () => {
+    const context = classifyRoute("/popout/agent-ab12/win-01");
+    expect(context.kind).toBe("workspace");
+    expect(context.workspaceAnyId).toBe("agent-ab12");
+    expect(context.activeTab).toBeNull();
+    expect(accentSourceForRoute("/popout/agent-ab12/win-01")).toBe("agent-ab12");
+    // The Shell mounts the popout's surface itself (with the solo window);
+    // the plain surface matcher stays strict to /workspace routes.
+    expect(workspaceSurfaceIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
+    expect(workspaceDisplayIdFromPath("/popout/agent-ab12/win-01")).toBeNull();
   });
 });

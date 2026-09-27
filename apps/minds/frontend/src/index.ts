@@ -103,7 +103,11 @@ function main(): void {
     relayShellEvent: (message) => electronBridge.sendShellEvent(message),
     onWorkspaceStopped: (message) => {
       // Main closes other windows showing this workspace (via the relay
-      // above); locally, leave the dead workspace if we display it.
+      // above); locally, leave the dead workspace if we display it. A popout
+      // is never navigated elsewhere: main closes it with the workspace's
+      // other windows, and mid-recovery it keeps showing its window, whose
+      // health band says what is going on.
+      if (shell.popoutRoute() !== null) return;
       const displayed = shell.displayedWorkspaceAnyId;
       if (
         displayed !== null &&
@@ -184,6 +188,21 @@ function main(): void {
     navigateExternalUrl(shell, url);
     m.redraw();
   });
+  // The pull-out-window spec's asks from main. To a main window: return a
+  // popout's window to the desktop this window shows (the popout was dropped
+  // onto it, or is closing); a popout is being dragged over this window, so
+  // the drop is offered here. To a popout with no desktop window to take its
+  // window back: the OS close was pressed, so the window goes back to the
+  // desktop through this popout's own page before the window is destroyed.
+  electronBridge.onReattachPopoutWindow((ask) => shell.handleReattachPopoutWindow(ask));
+  electronBridge.onPopoutReattachRequest(() => {
+    void shell.returnPopoutToDesktop(null).then(() => electronBridge.popoutReattached());
+  });
+  electronBridge.onPopoutDropTarget((isOver) => {
+    shell.setPopoutDropTarget(isOver);
+    m.redraw();
+  });
+  electronBridge.onTearOut((report) => shell.handleTearOut(report));
   // Main-process asks that target exactly ONE window (main picks it): the
   // deduped open_help routing sends {kind:'help'} to the window showing the
   // affected workspace (else the most recent one).

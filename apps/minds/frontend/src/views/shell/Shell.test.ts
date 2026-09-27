@@ -9,6 +9,7 @@ import { UpdateApplyModal } from "../components/UpdateApplyModal";
 import { UpdateModal } from "../components/UpdateModal";
 import { WebLoginModal } from "../components/WebLoginModal";
 import { WorkspaceFrame } from "./WorkspaceFrame";
+import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import type { UiNotificationEntry } from "../../channel/messages";
 import type { AnyVnode } from "../../testing";
 import {
@@ -1121,5 +1122,51 @@ describe("Shell toast layer", () => {
       m("div#panel-content"),
     );
     expect(findToastLayer(root)).toBeUndefined();
+  });
+});
+
+describe("Shell on the popout route", () => {
+  // A pulled-out workspace window's own desktop window: the same surface,
+  // one window edge to edge, under the popout's own bar.
+  const POPOUT_PATH = `/popout/${WORKSPACE_ID}/win-0123`;
+
+  function componentNames(root: AnyVnode): string[] {
+    return collectVnodes(root)
+      .map((vnode) => (typeof vnode.tag === "function" ? ((vnode.tag as { name?: string }).name ?? "") : ""))
+      .filter((name) => name !== "");
+  }
+
+  it("mounts the workspace surface in solo mode under the popout bar, with no titlebar or sidebar", () => {
+    const { state } = makeShell({
+      currentRouteSearch: () => "",
+      isPopoutDropTarget: false,
+    } as unknown as Partial<ShellState>);
+    const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
+    const names = componentNames(root);
+    expect(names).toContain("PopoutChrome");
+    expect(names).not.toContain("Titlebar");
+    expect(names).not.toContain("SidebarMenu");
+    const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
+    expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
+    expect(attrsOf(frame as AnyVnode).soloWindowId).toBe("win-0123");
+    // The routed page itself renders nothing of its own here.
+    expect(collectVnodes(root).some((vnode) => vnode.attrs?.id === "popout-page")).toBe(false);
+  });
+
+  it("mounts the ordinary surface with no solo window, and offers a drop only there", () => {
+    const { state } = makeShell({ isPopoutDropTarget: true } as unknown as Partial<ShellState>);
+    const root = renderShell(state, `/workspace/${WORKSPACE_ID}`, m("div#surface"));
+    const names = componentNames(root);
+    expect(names).toContain("Titlebar");
+    expect(collectVnodes(root).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(true);
+    const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
+    expect(attrsOf(frame as AnyVnode).soloWindowId).toBeNull();
+    // A popout dragged over a popout is not a drop target.
+    const popout = makeShell({
+      currentRouteSearch: () => "",
+      isPopoutDropTarget: true,
+    } as unknown as Partial<ShellState>);
+    const popoutRoot = renderShell(popout.state, POPOUT_PATH, m("div#popout-page"));
+    expect(collectVnodes(popoutRoot).some((vnode) => vnode.tag === PopoutDropOverlay)).toBe(false);
   });
 });

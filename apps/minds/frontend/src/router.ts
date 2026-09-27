@@ -9,6 +9,7 @@ import { consumeWebLoginParams, webLogin } from "./models/webLogin";
 import { Shell } from "./views/shell/Shell";
 import {
   isWorkspaceOverlayPath,
+  popoutFromPath,
   recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
@@ -26,6 +27,7 @@ import { DestroyingPage } from "./views/pages/DestroyingPage";
 import { HelpPage } from "./views/pages/HelpPage";
 import { InboxPage } from "./views/pages/InboxPage";
 import { LandingPage } from "./views/pages/LandingPage";
+import { PopoutPage } from "./views/pages/PopoutPage";
 import { RecoveryPage } from "./views/pages/RecoveryPage";
 import { SettingsPage } from "./views/pages/SettingsPage";
 import { StartPage } from "./views/pages/StartPage";
@@ -60,6 +62,9 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   // The options overlay: rendered by the Shell OVER the workspace surface.
   { path: "/workspace/:agentId/options", component: WorkspaceOptionsPage },
   { path: "/workspace/:agentId/backups", component: WorkspaceBackupsPage },
+  // A pulled-out workspace window in a desktop window of its own: the Shell
+  // mounts the workspace surface in solo mode under the popout bar.
+  { path: "/popout/:workspaceId/:windowId", component: PopoutPage },
   // The request-review popup: an app-overlay route the Shell floats as a
   // centered card, showing one request at a time and never a list.
   { path: "/inbox", component: InboxPage },
@@ -85,7 +90,9 @@ export function mountRouter(root: Element, shell: ShellState): void {
       // The surface id (bare workspace OR its options overlay) keeps the
       // WorkspaceFrame mounted across overlay open/close, so opening Share /
       // Settings never tears down and reloads the workspace iframe.
-      const workspaceParam = workspaceSurfaceIdFromPath(path);
+      // A popout keeps its window's workspace surface mounted the same way.
+      const workspaceParam =
+        workspaceSurfaceIdFromPath(path) ?? popoutFromPath(path)?.workspaceAnyId ?? null;
       shell.handleRouteChanged(path, search);
       // The options panel an app-level modal was opened over: the same page as
       // the routed one on the options route, so the Shell's single slot for it

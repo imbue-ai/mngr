@@ -22,7 +22,10 @@ import {
   isAppOverlayPath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
+  popoutFromPath,
 } from "./classify";
+import { PopoutChrome } from "./PopoutChrome";
+import { PopoutDropOverlay } from "./PopoutDropOverlay";
 import { noticeBandFor } from "./notice-band";
 import {
   standingUpdateNotice,
@@ -195,6 +198,9 @@ export function Shell(): m.Component<ShellAttrs> {
       const updateReady = updateReadyVersion();
 
       const routeSearch = shell.currentRouteSearch();
+      // A pulled-out window: the same surface, one window edge to edge, under
+      // the popout's own bar instead of the titlebar and the sidebar.
+      const popout = popoutFromPath(routePath);
       const isAppOverlay = isAppOverlayPath(routePath);
       // The New machine template stepper floats as a modal only when it is
       // over a machine (?workspace=); opened with none it redirects to the full
@@ -221,7 +227,11 @@ export function Shell(): m.Component<ShellAttrs> {
 
       const base =
         surfaceWorkspaceId !== null
-          ? m(WorkspaceFrame, { shell, workspaceAnyId: surfaceWorkspaceId })
+          ? m(WorkspaceFrame, {
+              shell,
+              workspaceAnyId: surfaceWorkspaceId,
+              soloWindowId: popout?.windowId ?? null,
+            })
           : m(
               "div#local-page-scroll",
               { class: localScrollClass },
@@ -430,8 +440,15 @@ export function Shell(): m.Component<ShellAttrs> {
         shell.stores.updates.isApplying(agentScoped);
 
       return m("div", { style: "display: contents" }, [
-        m(Titlebar, { shell, routePath }),
-        m(SidebarMenu, { shell }),
+        popout === null
+          ? m(Titlebar, { shell, routePath })
+          : m(PopoutChrome, { shell, workspaceAnyId: popout.workspaceAnyId, windowId: popout.windowId }),
+        popout === null ? m(SidebarMenu, { shell }) : null,
+        // A popout dragged over this window offers to return its window to the
+        // desktop here; the overlay names the drop.
+        shell.isPopoutDropTarget && surfaceWorkspaceId !== null && popout === null
+          ? m(PopoutDropOverlay)
+          : null,
         band !== null
           ? m(NoticeBand, {
               shell,

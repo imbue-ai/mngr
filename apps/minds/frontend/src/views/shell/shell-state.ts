@@ -15,10 +15,13 @@ import {
   isTitlebarPopupRoutePath,
   isWorkspaceOverlayPath,
   overlayBehindWorkspaceId,
+  popoutFromPath,
   recoveryWorkspaceIdFromPath,
   workspaceDisplayIdFromPath,
   workspaceSurfaceIdFromPath,
 } from "./classify";
+import type { PopoutRoute } from "./classify";
+import type { PopoutFrame, PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
 import { setPendingHelpLaunch } from "../../models/help";
 import { WebLoginModel, webLogin } from "../../models/webLogin";
@@ -48,6 +51,34 @@ export type FocusChatSender = (
   workspaceAgentId: string,
   chatAgentId: string,
 ) => boolean;
+
+/** Sends a reattach ask into the mounted frame: return the pulled-out window
+ * to the desktop, at `frame` when one is given. Registered by WorkspaceFrame. */
+export type ReattachWindowSender = (
+  windowId: string,
+  frame: PopoutFrame | null,
+) => void;
+
+/** Forwards a step of a watched title-bar drag into the mounted frame, when
+ * the report names the frame's workspace. Registered by WorkspaceFrame. */
+export type TearOutSender = (report: TearOutReport) => void;
+
+/** One pulled-out window as the workspace shell reports it. */
+export interface DetachedWindowEntry {
+  windowId: string;
+  title: string;
+}
+
+// How long a reattach waits for the shell to report the window back before
+// the popout goes anyway (the OS window is closing; the ghost's "Bring back"
+// remains if the shell never took it).
+const REATTACH_SETTLE_TIMEOUT_MS = 1000;
+
+interface ReattachWaiter {
+  windowId: string;
+  resolve: () => void;
+  settleTimer: ReturnType<typeof setTimeout>;
+}
 
 /** The mounted workspace content iframe, as the shell addresses it. */
 export interface WorkspaceFrameHandle {
@@ -164,6 +195,17 @@ export class ShellState {
   private lastOpenedInboxAtMs = 0;
 
   private permissionResolvedSender: PermissionResolvedSender | null = null;
+  private reattachWindowSender: ReattachWindowSender | null = null;
+  private tearOutSender: TearOutSender | null = null;
+  /** The pulled-out windows the mounted shell last reported (the
+   * pull-out-window spec, section 5.5). */
+  private detachedWindows: readonly DetachedWindowEntry[] = [];
+  /** Callers waiting for a window to leave the detached set (a reattach on
+   * its way): resolved by the next report without it, or by their timer. */
+  private reattachWaiters: ReattachWaiter[] = [];
+  /** Whether a popout is being dragged over this window's surface, offering
+   * to return its window to the desktop here. */
+  isPopoutDropTarget = false;
   /** The mounted Permissions pane's live list, registered while one is up. The
    * popup answers a request; the pane behind it is what shows the list that
    * request was in. */
@@ -309,6 +351,114 @@ export class ShellState {
   /** Register the mounted workspace frame's contract sender. */
   registerPermissionResolvedSender(sender: PermissionResolvedSender): void {
     this.permissionResolvedSender = sender;
+  }
+
+  registerReattachWindowSender(sender: ReattachWindowSender): void {
+    this.reattachWindowSender = sender;
+  }
+
+  unregisterReattachWindowSender(sender: ReattachWindowSender): void {
+    if (this.reattachWindowSender === sender) this.reattachWindowSender = null;
+  }
+
+  registerTearOutSender(sender: TearOutSender): void {
+    this.tearOutSender = sender;
+  }
+
+  unregisterTearOutSender(sender: TearOutSender): void {
+    if (this.tearOutSender === sender) this.tearOutSender = null;
+  }
+
+  /** Main reported a step of the title-bar drag it is watching; the mounted
+   * frame hears it when the report names its workspace. */
+  handleTearOut(report: TearOutReport): void {
+    this.tearOutSender?.(report);
+  }
+
+  /** The popout this window is, when its route is a popout's. */
+  popoutRoute(): PopoutRoute | null {
+    return popoutFromPath(this.currentRoutePath());
+  }
+
+  /** The title the mounted shell last reported for a pulled-out window, else
+   * a placeholder until it does. */
+  popoutWindowTitle(windowId: string): string {
+    return this.detachedWindows.find((entry) => entry.windowId === windowId)?.title ?? "…";
+  }
+
+  /** The mounted shell reported its pulled-out windows. In a popout window
+   * this is what says whether the window is still out: absent means it was
+   * closed for everyone or brought back from the desktop, and the popout
+   * closes itself. */
+  handleDetachedWindows(
+    windows: readonly DetachedWindowEntry[],
+    onTitle: (title: string) => void,
+    onGone: () => void,
+  ): void {
+    const previous = this.detachedWindows;
+    this.detachedWindows = windows;
+    const present = new Set(windows.map((entry) => entry.windowId));
+    const waiting = this.reattachWaiters;
+    this.reattachWaiters = waiting.filter((waiter) => present.has(waiter.windowId));
+    for (const waiter of waiting) {
+      if (present.has(waiter.windowId)) continue;
+      clearTimeout(waiter.settleTimer);
+      waiter.resolve();
+    }
+    const popout = this.popoutRoute();
+    if (popout === null) return;
+    const own = windows.find((entry) => entry.windowId === popout.windowId);
+    if (own === undefined) {
+      onGone();
+      return;
+    }
+    const previousTitle = previous.find((entry) => entry.windowId === popout.windowId)?.title;
+    if (own.title !== previousTitle) onTitle(own.title);
+  }
+
+  /** Main asks this window to return a pulled-out window of the workspace it
+   * shows to the desktop (the popout was dropped onto this window's surface,
+   * or is closing): the mounted shell takes the window back, and the popout
+   * closes itself once its own shell sees it back. Nothing when this window
+   * shows some other workspace, or is a popout itself (its shell is a view of
+   * one window and owns no desktop). */
+  handleReattachPopoutWindow(ask: PopoutReattachAsk): void {
+    const sender = this.reattachWindowSender;
+    const displayed = this.displayedWorkspaceAnyId;
+    if (sender === null || displayed === null || this.popoutRoute() !== null) return;
+    // Either spelling on either side: a restored popout or a cold-started
+    // main window may still name the workspace by its host-scoped id.
+    const workspaces = this.stores.workspaces;
+    if (workspaces.toAgentScopedId(displayed) !== workspaces.toAgentScopedId(ask.workspaceId)) return;
+    sender(ask.windowId, ask.frame);
+  }
+
+  /** Ask this popout's own shell to return its window to the desktop, at
+   * `frame` when a drop named one: the way back when no desktop window can
+   * take it. Resolves when the shell reports the window back (which it does
+   * only once its save has landed), or after a short wait when it never does. */
+  returnPopoutToDesktop(frame: PopoutFrame | null): Promise<void> {
+    const popout = this.popoutRoute();
+    const sender = this.reattachWindowSender;
+    if (popout === null || sender === null) return Promise.resolve();
+    const isStillDetached = this.detachedWindows.some((entry) => entry.windowId === popout.windowId);
+    sender(popout.windowId, frame);
+    if (!isStillDetached) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiter: ReattachWaiter = {
+        windowId: popout.windowId,
+        resolve,
+        settleTimer: setTimeout(() => {
+          this.reattachWaiters = this.reattachWaiters.filter((candidate) => candidate !== waiter);
+          resolve();
+        }, REATTACH_SETTLE_TIMEOUT_MS),
+      };
+      this.reattachWaiters.push(waiter);
+    });
+  }
+
+  setPopoutDropTarget(isOver: boolean): void {
+    this.isPopoutDropTarget = isOver;
   }
 
   registerFocusChatSender(sender: FocusChatSender): void {
@@ -665,6 +815,7 @@ export class ShellState {
     // while its request popup is the current route.
     this.displayedWorkspaceAnyId =
       workspaceSurfaceIdFromPath(path) ??
+      popoutFromPath(path)?.workspaceAnyId ??
       overlayBehindWorkspaceId(path, search);
     this.paintAccent(accentSource);
     const agentScoped =

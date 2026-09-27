@@ -75,6 +75,31 @@ function isSameSavedWindow(a, b) {
 }
 
 /**
+ * Split a saved session's entries into the one the launch window lands on and
+ * the rest, opened as windows of their own.
+ *
+ * The launch window is a main window, so it takes the first main-window entry.
+ * Popout entries (a pulled-out workspace window, persisted as its /popout/
+ * route) all go to ``rest`` whatever their position: only a window created
+ * for a popout route becomes a popout, and the save order is most-recently
+ * focused first, which a just-torn-out popout leads. ``first`` is null when
+ * every entry is a popout.
+ *
+ * @param {Array<{url: string}>} entries  Persisted window entries, in save order.
+ * @param {(entry: object) => boolean} isPopoutEntry
+ * @returns {{ first: object|null, rest: object[] }}
+ */
+function splitRestoreEntries(entries, isPopoutEntry) {
+  let first = null;
+  const rest = [];
+  for (const entry of entries) {
+    if (first === null && !isPopoutEntry(entry)) first = entry;
+    else rest.push(entry);
+  }
+  return { first, rest };
+}
+
+/**
  * Create a trailing-throttle scheduler that coalesces a burst of ``schedule()``
  * calls into at most one ``save()`` per ``delayMs``.
  *
@@ -131,4 +156,4 @@ function createDebouncedSaver({ save, delayMs, setTimer, clearTimer }) {
   return { schedule, flush, cancel, isPending };
 }
 
-module.exports = { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow };
+module.exports = { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow, splitRestoreEntries };

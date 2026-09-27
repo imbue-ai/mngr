@@ -90,23 +90,35 @@ function makeContract() {
     CLOSE_ACTIVE_TAB: "minds:close-active-tab",
     PERMISSION_RESOLUTIONS: "minds:permission-resolutions",
     WORKSPACE_READY: "minds:workspace-ready",
+    POP_OUT_WINDOW: "minds:pop-out-window",
+    WINDOW_DRAG_STARTED: "minds:window-drag-started",
+    WINDOW_DRAG_ENDED: "minds:window-drag-ended",
+    DETACHED_WINDOWS: "minds:detached-windows",
+    EMBEDDER_CAPABILITIES: "minds:embedder-capabilities",
+    REATTACH_WINDOW: "minds:reattach-window",
+    TEAR_OUT: "minds:tear-out",
     REQUEST_ID_PATTERN,
   } as Parameters<typeof buildEmbedHandlers>[0]["contract"];
 }
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
 
-function makeHandlers() {
+function makeHandlers(options: { canPopOut?: boolean } = {}) {
   const contract = makeContract();
   const navigations: { path: string; params?: Record<string, string> }[] = [];
   const popupOpens: (string | null)[] = [];
   const acks: string[] = [];
+  const ackPayloads: (Record<string, unknown> | undefined)[] = [];
+  const popoutCalls: unknown[] = [];
   let frontCount = 0;
   let readyCount = 0;
   const handlers = buildEmbedHandlers({
     contract,
     navigate: (path, params) => navigations.push({ path, params }),
-    sendAck: (type) => acks.push(type),
+    sendAck: (type, payload) => {
+      acks.push(type);
+      ackPayloads.push(payload);
+    },
     bringAppToFront: () => {
       frontCount += 1;
     },
@@ -115,6 +127,15 @@ function makeHandlers() {
     onWorkspaceReady: () => {
       readyCount += 1;
     },
+    popout:
+      options.canPopOut === true
+        ? {
+            open: (request) => popoutCalls.push(["open", request]),
+            beginDrag: (request) => popoutCalls.push(["drag", request]),
+            endDrag: (workspaceId, windowId, isDetached) => popoutCalls.push(["ended", workspaceId, windowId, isDetached]),
+            detachedWindows: (windows) => popoutCalls.push(["detached", windows]),
+          }
+        : null,
   });
   return {
     contract,
@@ -122,6 +143,8 @@ function makeHandlers() {
     navigations,
     popupOpens,
     acks,
+    ackPayloads,
+    popoutCalls,
     frontCount: () => frontCount,
     readyCount: () => readyCount,
   };
@@ -133,6 +156,56 @@ describe("buildEmbedHandlers", () => {
     handlers[contract.WORKSPACE_READY]({});
     expect(readyCount()).toBe(1);
     expect(navigations).toEqual([]);
+  });
+
+  it("answers a readiness announcement with what this chrome can do", () => {
+    // The workspace's pull-out gesture turns on only where a desktop window
+    // can be made; a plain browser says so and the gesture stays off.
+    const browser = makeHandlers();
+    browser.handlers[browser.contract.WORKSPACE_READY]({});
+    expect(browser.acks).toEqual([browser.contract.EMBEDDER_CAPABILITIES]);
+    expect(browser.ackPayloads).toEqual([{ canPopOut: false }]);
+    const desktop = makeHandlers({ canPopOut: true });
+    desktop.handlers[desktop.contract.WORKSPACE_READY]({});
+    expect(desktop.ackPayloads).toEqual([{ canPopOut: true }]);
+  });
+
+  it("hands the pull-out asks to main with the mounted workspace's id, and ignores them where nothing can pop out", () => {
+    const desktop = makeHandlers({ canPopOut: true });
+    const { contract, handlers, popoutCalls } = desktop;
+    const size = { windowId: "win-0123", title: "Notes", width: 640, height: 480 };
+    handlers[contract.POP_OUT_WINDOW]({ ...size, extra: "dropped" });
+    handlers[contract.WINDOW_DRAG_STARTED]({ ...size, grabX: 12, grabY: 8, extra: "dropped" });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: true });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false });
+    const request = { workspaceId: WORKSPACE_AGENT_ID, ...size };
+    expect(popoutCalls).toEqual([
+      ["open", request],
+      ["drag", { ...request, grabX: 12, grabY: 8 }],
+      ["ended", WORKSPACE_AGENT_ID, "win-0123", true],
+      ["ended", WORKSPACE_AGENT_ID, "win-0123", false],
+    ]);
+    const browser = makeHandlers();
+    expect(browser.handlers[browser.contract.POP_OUT_WINDOW]).toBeUndefined();
+    expect(browser.handlers[browser.contract.WINDOW_DRAG_STARTED]).toBeUndefined();
+    expect(browser.handlers[browser.contract.WINDOW_DRAG_ENDED]).toBeUndefined();
+    expect(browser.handlers[browser.contract.DETACHED_WINDOWS]).toBeUndefined();
+  });
+
+  it("reads the detached set as window ids with their titles, dropping off-shape entries", () => {
+    const { contract, handlers, popoutCalls } = makeHandlers({ canPopOut: true });
+    handlers[contract.DETACHED_WINDOWS]({
+      windows: [{ windowId: "win-1", title: "A" }, { windowId: "win-2" }, "junk", { title: "no id" }],
+    });
+    expect(popoutCalls).toEqual([
+      [
+        "detached",
+        [
+          { windowId: "win-1", title: "A" },
+          { windowId: "win-2", title: "" },
+        ],
+      ],
+    ]);
   });
 
   it("opens the review popup on the request the workspace asked to review", () => {

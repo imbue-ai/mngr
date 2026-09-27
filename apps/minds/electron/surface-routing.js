@@ -50,7 +50,24 @@ function parseSpaWorkspaceRouteId(url) {
   }
 }
 
+// The SPA's popout route (/popout/<workspace-id>/<window-id>): a pulled-out
+// workspace window in a desktop window of its own (the pull-out-window
+// spec). Answers both ids, or null. Path-only like parseSpaWorkspaceRouteId;
+// the workspace coordinate may be agent- or host-scoped (a cold-start restore
+// carries the host-scoped one).
+function parsePopoutRoute(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/popout\/((?:agent|host)-[a-f0-9]+)\/(win-[a-f0-9]+)\/?$/i);
+    return match ? { workspaceId: match[1], windowId: match[2] } : null;
+  } catch {
+    return null;
+  }
+}
+
 module.exports = {
   parseWorkspaceId,
   parseSpaWorkspaceRouteId,
+  parsePopoutRoute,
 };

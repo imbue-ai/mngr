@@ -30,6 +30,12 @@ export interface TitlebarAttrs {
   routePath: string;
 }
 
+/** The bar across the top of every chrome (the titlebar and the popout's bar):
+ * painted with the workspace accent while one is active (--titlebar-bg), else
+ * the neutral surface. The workspace surface starts 38px below it. */
+export const CHROME_BAR_STYLE = "background-color: var(--titlebar-bg, var(--c-surface-primary));";
+export const CHROME_BAR_CLASS = "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1";
+
 /** What each tab's dialog says on a creation page, where the workspace does not exist yet. */
 export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
   permissions: "Check back here after the workspace is created to manage its permissions.",
@@ -46,8 +52,8 @@ function startTitlebar(shell: ShellState): m.Children {
   return m(
     "div#minds-titlebar",
     {
-      style: "background-color: var(--titlebar-bg, var(--c-surface-primary));",
-      class: "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1",
+      style: CHROME_BAR_STYLE,
+      class: CHROME_BAR_CLASS,
       "data-titlebar-kind": "start",
     },
     [
@@ -125,10 +131,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
       const bar = m(
         "div#minds-titlebar",
         {
-          style:
-            "background-color: var(--titlebar-bg, var(--c-surface-primary));",
-          class:
-            "fixed top-0 left-0 right-0 h-[38px] flex items-center select-none z-[100] px-1",
+          style: CHROME_BAR_STYLE,
+          class: CHROME_BAR_CLASS,
         },
         m("div", { class: "flex-1 flex items-center gap-0.5 min-w-0" }, [
           shell.isMac
