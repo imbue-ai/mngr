@@ -35,6 +35,7 @@ from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.share_targets import split_share_targets
 from imbue.minds.desktop_client.state import get_state
+from imbue.minds.desktop_client.ui_api_lifecycle import build_ssh_command
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
@@ -108,6 +109,7 @@ class WorkspaceOptionsData(FrozenModel):
         description="Registered SVG icon markup per app share target (absent = none registered)",
     )
     whole_service: str = Field(description="The share target name that grants the whole machine")
+    ssh_command: str = Field(description="Copy-pasteable SSH command for the machine's host, '' when unknown")
 
 
 class WorkspaceMachineSizeData(FrozenModel):
@@ -234,6 +236,7 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         service_labels=resolve_share_target_labels(backend_resolver, parsed_agent_id),
         service_icons=service_icons,
         whole_service=whole_service,
+        ssh_command=build_ssh_command(backend_resolver, parsed_agent_id),
     )
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")
 

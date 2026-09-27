@@ -8,6 +8,7 @@ import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
 import { allText, attrsOf, collectVnodes, jsonResponse, settle } from "../../../testing";
+import { CopyField } from "../../components/Layout";
 import { SettingsGroups } from "./SettingsGroups";
 
 // Two machines, one without backups: the pane's state must be keyed on which
@@ -67,6 +68,7 @@ function press(node: AnyVnode, label: string): void {
 
 function harness(
   respond: (url: string, init?: RequestInit) => Promise<Response> = () => Promise.resolve(jsonResponse({})),
+  sshCommandByAgent: Record<string, string> = {},
 ): Harness {
   const shell = new ShellState(createEmptyStores());
   registerAppContext({ stores: shell.stores, shell });
@@ -112,6 +114,7 @@ function harness(
         app_services: [],
         service_labels: {},
         whole_service: "",
+        ssh_command: sshCommandByAgent[agentId] ?? "",
       };
       model.lastSavedColor = model.data.color;
       models.set(agentId, model);
@@ -351,5 +354,21 @@ describe("the General settings group's color picker", () => {
     expect(sentColors).toEqual(["#112233"]);
     expect(attrsOf(hexInput(afterBlur)).value).toBe("#112233");
     expect(allText(afterBlur)).not.toContain("not valid");
+  });
+});
+
+describe("the General settings group's SSH command", () => {
+  it("offers a remote machine's SSH command outside recovery, and nothing for a machine without one", () => {
+    const command = "ssh -i /k/id -p 2222 root@203.0.113.7";
+    const { draw } = harness(undefined, { [BACKED]: command });
+
+    const copyValues = (root: m.Children): unknown[] =>
+      collectVnodes(root)
+        .filter((vnode) => vnode.tag === CopyField)
+        .map((vnode) => attrsOf(vnode).value);
+
+    expect(copyValues(draw(BACKED, "general"))).toEqual([command]);
+    expect(allText(draw(UNBACKED, "general"))).not.toContain("Connect over SSH");
+    expect(copyValues(draw(UNBACKED, "general"))).toEqual([]);
   });
 });

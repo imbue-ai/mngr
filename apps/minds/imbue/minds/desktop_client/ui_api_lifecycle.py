@@ -55,6 +55,7 @@ from imbue.minds.desktop_client.workspace_recovery import read_environment_condi
 from imbue.minds.desktop_client.workspace_recovery import read_host_state
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostState
+from imbue.mngr.utils.ssh import build_ssh_connect_command
 
 _SECONDS_PER_DAY: float = 86400.0
 
@@ -272,11 +273,13 @@ def _resolve_workspace_coordinate(workspace_id: str) -> AgentId | None:
     )
 
 
-def _build_ssh_command(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
+def build_ssh_command(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str:
     ssh_info = backend_resolver.get_ssh_info(agent_id)
     if ssh_info is None:
         return ""
-    return f"ssh -i {ssh_info.key_path} -p {ssh_info.port} {ssh_info.user}@{ssh_info.host}"
+    return build_ssh_connect_command(
+        ssh_info.user, ssh_info.host, ssh_info.port, ssh_info.key_path, ssh_info.known_hosts_path
+    )
 
 
 def _is_host_offline(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> bool:
@@ -380,7 +383,7 @@ def _handle_recovery_info(workspace_id: str) -> Response:
         health=tracker.get_health(resolved_id) if tracker is not None else AgentHealth.HEALTHY,
         health_error=(tracker.get_last_recovery_error(resolved_id) or "") if tracker is not None else "",
         recovery_kind=tracker.get_recovery_kind(resolved_id) if tracker is not None else None,
-        ssh_command=_build_ssh_command(backend_resolver, resolved_id),
+        ssh_command=build_ssh_command(backend_resolver, resolved_id),
         is_host_offline=_is_host_offline(backend_resolver, resolved_id),
         device_environment=read_environment_condition(state.connectivity_detector, backend_resolver, resolved_id),
         is_backend_unreachable=backend_verdict is not None,

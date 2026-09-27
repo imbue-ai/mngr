@@ -13,7 +13,7 @@ import { machineVerdict } from "../../components/MachineVerdict";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { routeLinkAttrs } from "../../components/route-link";
-import { SectionHeader } from "../../components/Layout";
+import { CopyField, SectionHeader } from "../../components/Layout";
 import { TextInput } from "../../components/FormControls";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
 import type { SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
@@ -537,6 +537,20 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
 
     m(SectionHeader, "ID"),
     m("p", { class: "type-body font-mono text-secondary mb-8 select-all break-all" }, data.agent_id),
+
+    data.ssh_command
+      ? [
+          m(SectionHeader, "Connect over SSH"),
+          m("div", { id: "ssh-section", class: "mb-8" }, [
+            m(
+              "p",
+              { class: "type-helper text-tertiary mb-2" },
+              "For direct debugging, connect to the machine's host from a terminal:",
+            ),
+            m(CopyField, { value: data.ssh_command }),
+          ]),
+        ]
+      : null,
 
     m(SectionHeader, "Danger zone"),
     m(

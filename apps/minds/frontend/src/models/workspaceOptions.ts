@@ -36,6 +36,8 @@ export interface WorkspaceOptionsData {
   service_labels: Record<string, string>;
   service_icons?: Record<string, string>;
   whole_service: string;
+  /** "" when discovery reports no SSH endpoint for the machine. */
+  ssh_command: string;
 }
 
 /** Response shape of GET /ui/api/workspaces/<id>/machine-size (ui_api_options.py). */

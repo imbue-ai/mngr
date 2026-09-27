@@ -19,6 +19,7 @@ from imbue.minds.desktop_client.workspace_color import DEFAULT_WORKSPACE_COLOR
 from imbue.minds.desktop_client.workspace_color import WORKSPACE_PALETTE
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 _AGENT_ID = "agent-" + "a" * 32
 _HOST_ID = "host-" + "f" * 32
@@ -113,6 +114,24 @@ def test_options_data_returns_workspace_context(tmp_path: Path) -> None:
     assert data["app_services"] == ["web"]
     assert data["service_labels"] == {"web": "web-r4nd", "system_interface": "shell-r4nd"}
     assert data["whole_service"] == "system_interface"
+    assert data["ssh_command"] == ""
+
+
+def test_options_data_carries_the_ssh_command_for_a_remote_machine(tmp_path: Path) -> None:
+    base = _seeded_resolver()
+    resolver = base.model_copy_update(
+        to_update(
+            base.field_ref().ssh_info_by_agent_id,
+            {_AGENT_ID: RemoteSSHInfo(user="root", host="203.0.113.7", port=2222, key_path=Path("/k/id"))},
+        )
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, backend_resolver=resolver
+    )
+
+    data = json.loads(client.get(f"/ui/api/workspaces/{_AGENT_ID}/options").get_data(as_text=True))
+
+    assert data["ssh_command"] == "ssh -i /k/id -p 2222 root@203.0.113.7"
 
 
 def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_path: Path) -> None:

@@ -29,8 +29,8 @@ from imbue.minds.desktop_client.testing import build_resolver_with_provider_back
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
 from imbue.minds.desktop_client.testing import build_stub_connectivity_detector
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
-from imbue.minds.desktop_client.ui_api_lifecycle import _build_ssh_command
 from imbue.minds.desktop_client.ui_api_lifecycle import _resolve_workspace_coordinate_to_agent_id
+from imbue.minds.desktop_client.ui_api_lifecycle import build_ssh_command
 from imbue.minds.desktop_client.workspace_record_store import ReplicaRecord
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_forward.data_types import SystemInterfaceBackendFailureReason
@@ -421,22 +421,39 @@ def test_recovery_info_stops_blaming_this_device_once_the_machine_answers(tmp_pa
     assert payload["device_error_detail"] == ""
 
 
-def test_build_ssh_command_renders_the_resolvers_ssh_info() -> None:
-    """The recovery page's SSH command matches what mngr emits for the host."""
+@pytest.mark.parametrize(
+    ("ssh_info", "expected_command"),
+    [
+        pytest.param(
+            RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key")),
+            "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1",
+            id="no_known_hosts",
+        ),
+        pytest.param(
+            RemoteSSHInfo(
+                user="root",
+                host="203.0.113.7",
+                port=2222,
+                key_path=Path("/home/u/My Keys/id"),
+                known_hosts_path=Path("/home/u/.mngr/known_hosts"),
+            ),
+            "ssh -i '/home/u/My Keys/id' -o UserKnownHostsFile='\"/home/u/.mngr/known_hosts\"' "
+            "-o StrictHostKeyChecking=yes -p 2222 root@203.0.113.7",
+            id="pinned_known_hosts_and_spaced_key_path",
+        ),
+    ],
+)
+def test_build_ssh_command_matches_what_mngr_prints(ssh_info: RemoteSSHInfo, expected_command: str) -> None:
+    """The copyable SSH command pins the host key when known_hosts is known and quotes paths for the shell."""
     agent_id = AgentId()
-    resolver = StaticBackendResolver(
-        url_by_agent_and_service={},
-        ssh_info_by_agent_id={
-            str(agent_id): RemoteSSHInfo(user="root", host="127.0.0.1", port=60022, key_path=Path("/home/u/.mngr/key"))
-        },
-    )
-    assert _build_ssh_command(resolver, agent_id) == "ssh -i /home/u/.mngr/key -p 60022 root@127.0.0.1"
+    resolver = StaticBackendResolver(url_by_agent_and_service={}, ssh_info_by_agent_id={str(agent_id): ssh_info})
+    assert build_ssh_command(resolver, agent_id) == expected_command
 
 
 def test_build_ssh_command_is_empty_without_ssh_info() -> None:
     """An agent the resolver has no SSH info for yields no command (the copy button is then omitted)."""
     resolver = StaticBackendResolver(url_by_agent_and_service={})
-    assert _build_ssh_command(resolver, AgentId()) == ""
+    assert build_ssh_command(resolver, AgentId()) == ""
 
 
 # -- _resolve_workspace_coordinate_to_agent_id ------------------------------
