@@ -1,4 +1,6 @@
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from datetime import timezone
 from typing import Any
@@ -16,6 +18,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.errors import AgentNotFoundError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
@@ -29,6 +32,7 @@ from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.primitives import DiscoveredHost
+from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -73,11 +77,15 @@ def test_autocompact_check_requires_target_or_all(
     assert "Specify an agent target or use --all" in result.output
 
 
-def test_autocompact_check_rejects_both_target_and_all(
+@pytest.mark.parametrize("subcommand", ["check", "run"])
+@pytest.mark.parametrize("targets", [["my-agent"], ["agent-1", "agent-2"]])
+def test_autocompact_rejects_both_targets_and_all(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    subcommand: str,
+    targets: list[str],
 ) -> None:
-    result = cli_runner.invoke(autocompact_group, ["check", "my-agent", "--all"], obj=plugin_manager)
+    result = cli_runner.invoke(autocompact_group, [subcommand, *targets, "--all"], obj=plugin_manager)
     assert result.exit_code != 0
     assert "Cannot specify both an agent target and --all" in result.output
 
@@ -98,15 +106,6 @@ def test_autocompact_run_requires_target_or_all(
     result = cli_runner.invoke(autocompact_group, ["run"], obj=plugin_manager)
     assert result.exit_code != 0
     assert "Specify an agent target or use --all" in result.output
-
-
-def test_autocompact_run_rejects_both_target_and_all(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    result = cli_runner.invoke(autocompact_group, ["run", "my-agent", "--all"], obj=plugin_manager)
-    assert result.exit_code != 0
-    assert "Cannot specify both an agent target and --all" in result.output
 
 
 def test_output_check_result_human_no_agents(capsys: pytest.CaptureFixture[str]) -> None:
@@ -185,20 +184,25 @@ def test_autocompact_run_all_executes(
     assert "No agents require compaction." in result.output
 
 
-def test_autocompact_check_target_not_found(
+@pytest.mark.parametrize("subcommand", ["check", "run"])
+@pytest.mark.parametrize(
+    ("targets", "expected_message"),
+    [
+        (["non-existent"], "No agent(s) found matching: non-existent"),
+        (["non-existent-1", "non-existent-2"], "No agent(s) found matching: non-existent-1, non-existent-2"),
+    ],
+)
+def test_autocompact_targets_not_found_reports_all_names(
     cli_runner: CliRunner,
     plugin_manager: pluggy.PluginManager,
+    subcommand: str,
+    targets: list[str],
+    expected_message: str,
 ) -> None:
-    result = cli_runner.invoke(autocompact_group, ["check", "non-existent"], obj=plugin_manager)
+    result = cli_runner.invoke(autocompact_group, [subcommand, *targets], obj=plugin_manager)
     assert result.exit_code != 0
-
-
-def test_autocompact_run_target_not_found(
-    cli_runner: CliRunner,
-    plugin_manager: pluggy.PluginManager,
-) -> None:
-    result = cli_runner.invoke(autocompact_group, ["run", "non-existent"], obj=plugin_manager)
-    assert result.exit_code != 0
+    assert expected_message in result.output
+    assert "sub-exception" not in result.output
 
 
 class _FakeOnlineHost(Host):
@@ -268,8 +272,8 @@ class _FakeDiscoveryProvider(LocalProviderInstance):
         return super().get_host(host)
 
 
-def test_resolve_target_agent_host_offline(temp_mngr_ctx: MngrContext) -> None:
-    now = datetime(2026, 8, 27, 14, 0, 0, tzinfo=timezone.utc)
+@contextmanager
+def _fake_discovery_context(temp_mngr_ctx: MngrContext) -> Iterator[tuple[MngrContext, _FakeDiscoveryProvider]]:
     config = MngrConfig(
         providers={
             ProviderInstanceName("local"): ProviderInstanceConfig(backend=ProviderBackendName("local")),
@@ -286,215 +290,253 @@ def test_resolve_target_agent_host_offline(temp_mngr_ctx: MngrContext) -> None:
         host_dir=temp_mngr_ctx.config.default_host_dir,
         mngr_ctx=mngr_ctx,
     )
-    hid = HostId.generate()
-    off_host = OfflineHost(
-        id=hid,
-        certified_host_data=CertifiedHostData(
-            host_id=str(hid),
-            host_name="off-host",
-            created_at=now,
-            updated_at=now,
-        ),
-        provider_instance=provider,
-        mngr_ctx=mngr_ctx,
-    )
-    provider.mock_hosts[hid] = off_host
-    agent_id = AgentId.generate()
-    host_ref = DiscoveredHost(
-        host_id=hid,
-        host_name=HostName("off-host"),
-        provider_name=provider.name,
-        host_state=HostState.STOPPED,
-    )
-    agent_ref = DiscoveredAgent(
-        agent_id=agent_id,
-        agent_name=AgentName("off-agent"),
-        host_id=hid,
-        provider_name=provider.name,
-    )
-    provider.mock_agents_by_host[host_ref] = [agent_ref]
     providers_module._instance_cache[(provider.name, id(mngr_ctx))] = provider
-
     try:
-        with pytest.raises(UserInputError, match="Host 'off-host' is offline"):
-            cli_module._resolve_target_agent(AgentAddress(agent=AgentName("off-agent")), mngr_ctx)
+        yield mngr_ctx, provider
     finally:
         reset_provider_instances()
 
 
-def test_resolve_target_agent_not_running_or_missing(temp_mngr_ctx: MngrContext) -> None:
-    config = MngrConfig(
-        providers={
-            ProviderInstanceName("local"): ProviderInstanceConfig(backend=ProviderBackendName("local")),
-        },
-    )
-    mngr_ctx = MngrContext(
-        config=config,
-        pm=temp_mngr_ctx.pm,
-        profile_dir=temp_mngr_ctx.profile_dir,
-        concurrency_group=temp_mngr_ctx.concurrency_group,
-    )
-    provider = _FakeDiscoveryProvider(
-        name=ProviderInstanceName("local"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=mngr_ctx,
-    )
-    hid = HostId.generate()
-    stopped_agent = _DummyCompactionAgent(
-        id=AgentId.generate(),
-        name=AgentName("stopped-agent"),
-        agent_type=AgentTypeName("claude"),
-        running=False,
-    )
-    on_host = _FakeOnlineHost(
-        id=hid,
-        host_name=HostName("on-host"),
+def _add_fake_online_host(
+    provider: _FakeDiscoveryProvider,
+    mngr_ctx: MngrContext,
+    host_name: str,
+    live_agents: list[Any],
+    discovered_agent_names_by_id: dict[AgentId, AgentName],
+) -> None:
+    host_id = HostId.generate()
+    provider.mock_hosts[host_id] = _FakeOnlineHost(
+        id=host_id,
+        host_name=HostName(host_name),
         connector=PyinfraConnector(provider._create_local_pyinfra_host()),
         provider_instance=provider,
         mngr_ctx=mngr_ctx,
-        test_agents=[stopped_agent],
+        test_agents=live_agents,
     )
-    provider.mock_hosts[hid] = on_host
-
     host_ref = DiscoveredHost(
-        host_id=hid,
-        host_name=HostName("on-host"),
+        host_id=host_id,
+        host_name=HostName(host_name),
         provider_name=provider.name,
         host_state=HostState.RUNNING,
     )
-    missing_id = AgentId.generate()
-    missing_ref = DiscoveredAgent(
-        agent_id=missing_id,
-        agent_name=AgentName("missing-agent"),
-        host_id=hid,
-        provider_name=provider.name,
-    )
-    stopped_ref = DiscoveredAgent(
-        agent_id=stopped_agent.id,
-        agent_name=stopped_agent.name,
-        host_id=hid,
-        provider_name=provider.name,
-    )
-    provider.mock_agents_by_host[host_ref] = [missing_ref, stopped_ref]
-    providers_module._instance_cache[(provider.name, id(mngr_ctx))] = provider
+    provider.mock_agents_by_host[host_ref] = [
+        DiscoveredAgent(agent_id=agent_id, agent_name=agent_name, host_id=host_id, provider_name=provider.name)
+        for agent_id, agent_name in discovered_agent_names_by_id.items()
+    ]
 
-    try:
+
+def _make_compaction_agent(name: str, running: bool = True) -> _DummyCompactionAgent:
+    return _DummyCompactionAgent(
+        id=AgentId.generate(),
+        name=AgentName(name),
+        agent_type=AgentTypeName("claude"),
+        running=running,
+    )
+
+
+def test_resolve_target_agents_host_offline(temp_mngr_ctx: MngrContext) -> None:
+    now = datetime(2026, 8, 27, 14, 0, 0, tzinfo=timezone.utc)
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        hid = HostId.generate()
+        provider.mock_hosts[hid] = OfflineHost(
+            id=hid,
+            certified_host_data=CertifiedHostData(
+                host_id=str(hid),
+                host_name="off-host",
+                created_at=now,
+                updated_at=now,
+            ),
+            provider_instance=provider,
+            mngr_ctx=mngr_ctx,
+        )
+        host_ref = DiscoveredHost(
+            host_id=hid,
+            host_name=HostName("off-host"),
+            provider_name=provider.name,
+            host_state=HostState.STOPPED,
+        )
+        agent_ref = DiscoveredAgent(
+            agent_id=AgentId.generate(),
+            agent_name=AgentName("off-agent"),
+            host_id=hid,
+            provider_name=provider.name,
+        )
+        provider.mock_agents_by_host[host_ref] = [agent_ref]
+
+        with pytest.raises(UserInputError, match="Host 'off-host' is offline"):
+            cli_module._resolve_target_agents([AgentAddress(agent=AgentName("off-agent"))], mngr_ctx)
+
+
+def test_resolve_target_agents_not_running_or_missing(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        stopped_agent = _make_compaction_agent("stopped-agent", running=False)
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "on-host",
+            live_agents=[stopped_agent],
+            discovered_agent_names_by_id={
+                AgentId.generate(): AgentName("missing-agent"),
+                stopped_agent.id: stopped_agent.name,
+            },
+        )
+
         with pytest.raises(UserInputError, match="Agent 'missing-agent' is not running on host 'on-host'"):
-            cli_module._resolve_target_agent(AgentAddress(agent=AgentName("missing-agent")), mngr_ctx)
+            cli_module._resolve_target_agents([AgentAddress(agent=AgentName("missing-agent"))], mngr_ctx)
 
         with pytest.raises(UserInputError, match="Agent 'stopped-agent' is not running on host 'on-host'"):
-            cli_module._resolve_target_agent(AgentAddress(agent=AgentName("stopped-agent")), mngr_ctx)
-    finally:
-        reset_provider_instances()
+            cli_module._resolve_target_agents([AgentAddress(agent=AgentName("stopped-agent"))], mngr_ctx)
 
 
-def test_resolve_target_agent_non_compaction(temp_mngr_ctx: MngrContext) -> None:
-    config = MngrConfig(
-        providers={
-            ProviderInstanceName("local"): ProviderInstanceConfig(backend=ProviderBackendName("local")),
-        },
-    )
-    mngr_ctx = MngrContext(
-        config=config,
-        pm=temp_mngr_ctx.pm,
-        profile_dir=temp_mngr_ctx.profile_dir,
-        concurrency_group=temp_mngr_ctx.concurrency_group,
-    )
-    provider = _FakeDiscoveryProvider(
-        name=ProviderInstanceName("local"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=mngr_ctx,
-    )
-    hid = HostId.generate()
-    raw_agent = _DummyNonCompactionAgent(
-        id=AgentId.generate(),
-        name=AgentName("raw-agent"),
-        agent_type=AgentTypeName("raw"),
-        running=True,
-    )
-    on_host = _FakeOnlineHost(
-        id=hid,
-        host_name=HostName("on-host"),
-        connector=PyinfraConnector(provider._create_local_pyinfra_host()),
-        provider_instance=provider,
-        mngr_ctx=mngr_ctx,
-        test_agents=[raw_agent],
-    )
-    provider.mock_hosts[hid] = on_host
+def test_resolve_target_agents_non_compaction(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        raw_agent = _DummyNonCompactionAgent(
+            id=AgentId.generate(),
+            name=AgentName("raw-agent"),
+            agent_type=AgentTypeName("raw"),
+            running=True,
+        )
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "on-host",
+            live_agents=[raw_agent],
+            discovered_agent_names_by_id={raw_agent.id: raw_agent.name},
+        )
 
-    host_ref = DiscoveredHost(
-        host_id=hid,
-        host_name=HostName("on-host"),
-        provider_name=provider.name,
-        host_state=HostState.RUNNING,
-    )
-    raw_ref = DiscoveredAgent(
-        agent_id=raw_agent.id,
-        agent_name=raw_agent.name,
-        host_id=hid,
-        provider_name=provider.name,
-    )
-    provider.mock_agents_by_host[host_ref] = [raw_ref]
-    providers_module._instance_cache[(provider.name, id(mngr_ctx))] = provider
-
-    try:
         with pytest.raises(UserInputError, match="does not support context compaction"):
-            cli_module._resolve_target_agent(AgentAddress(agent=AgentName("raw-agent")), mngr_ctx)
-    finally:
-        reset_provider_instances()
+            cli_module._resolve_target_agents([AgentAddress(agent=AgentName("raw-agent"))], mngr_ctx)
 
 
-def test_resolve_target_agent_success(temp_mngr_ctx: MngrContext) -> None:
-    config = MngrConfig(
-        providers={
-            ProviderInstanceName("local"): ProviderInstanceConfig(backend=ProviderBackendName("local")),
-        },
-    )
-    mngr_ctx = MngrContext(
-        config=config,
-        pm=temp_mngr_ctx.pm,
-        profile_dir=temp_mngr_ctx.profile_dir,
-        concurrency_group=temp_mngr_ctx.concurrency_group,
-    )
-    provider = _FakeDiscoveryProvider(
-        name=ProviderInstanceName("local"),
-        host_dir=temp_mngr_ctx.config.default_host_dir,
-        mngr_ctx=mngr_ctx,
-    )
-    hid = HostId.generate()
-    comp_agent = _DummyCompactionAgent(
-        id=AgentId.generate(),
-        name=AgentName("comp-agent"),
-        agent_type=AgentTypeName("claude"),
-        running=True,
-    )
-    on_host = _FakeOnlineHost(
-        id=hid,
-        host_name=HostName("on-host"),
-        connector=PyinfraConnector(provider._create_local_pyinfra_host()),
-        provider_instance=provider,
-        mngr_ctx=mngr_ctx,
-        test_agents=[comp_agent],
-    )
-    provider.mock_hosts[hid] = on_host
+def test_resolve_target_agents_single(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        comp_agent = _make_compaction_agent("comp-agent")
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "on-host",
+            live_agents=[comp_agent],
+            discovered_agent_names_by_id={comp_agent.id: comp_agent.name},
+        )
 
-    host_ref = DiscoveredHost(
-        host_id=hid,
-        host_name=HostName("on-host"),
-        provider_name=provider.name,
-        host_state=HostState.RUNNING,
-    )
-    comp_ref = DiscoveredAgent(
-        agent_id=comp_agent.id,
-        agent_name=comp_agent.name,
-        host_id=hid,
-        provider_name=provider.name,
-    )
-    provider.mock_agents_by_host[host_ref] = [comp_ref]
-    providers_module._instance_cache[(provider.name, id(mngr_ctx))] = provider
+        resolved = cli_module._resolve_target_agents([AgentAddress(agent=AgentName("comp-agent"))], mngr_ctx)
+        assert resolved == [comp_agent]
 
-    try:
-        resolved = cli_module._resolve_target_agent(AgentAddress(agent=AgentName("comp-agent")), mngr_ctx)
-        assert resolved.name == AgentName("comp-agent")
-    finally:
-        reset_provider_instances()
+
+def test_resolve_target_agents_across_hosts_returns_only_targeted_agents(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        agent_a1 = _make_compaction_agent("agent-a1")
+        agent_a2 = _make_compaction_agent("agent-a2")
+        agent_b1 = _make_compaction_agent("agent-b1")
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "host-a",
+            live_agents=[agent_a1, agent_a2],
+            discovered_agent_names_by_id={agent_a1.id: agent_a1.name, agent_a2.id: agent_a2.name},
+        )
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "host-b",
+            live_agents=[agent_b1],
+            discovered_agent_names_by_id={agent_b1.id: agent_b1.name},
+        )
+
+        targets = [AgentAddress(agent=AgentName("agent-a2")), AgentAddress(agent=AgentName("agent-b1"))]
+        resolved = cli_module._resolve_target_agents(targets, mngr_ctx)
+        assert sorted(agent.name for agent in resolved) == [AgentName("agent-a2"), AgentName("agent-b1")]
+
+
+def test_resolve_target_agents_deduplicates_name_and_id_of_same_agent(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        comp_agent = _make_compaction_agent("comp-agent")
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "on-host",
+            live_agents=[comp_agent],
+            discovered_agent_names_by_id={comp_agent.id: comp_agent.name},
+        )
+
+        targets = [
+            AgentAddress(agent=AgentName("comp-agent")),
+            AgentAddress(agent=comp_agent.id),
+            AgentAddress(agent=AgentName("comp-agent")),
+        ]
+        resolved = cli_module._resolve_target_agents(targets, mngr_ctx)
+        assert resolved == [comp_agent]
+
+
+def test_resolve_target_agents_resolves_every_agent_sharing_a_name(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        agent_on_host_a = _make_compaction_agent("shared-name")
+        agent_on_host_b = _make_compaction_agent("shared-name")
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "host-a",
+            live_agents=[agent_on_host_a],
+            discovered_agent_names_by_id={agent_on_host_a.id: agent_on_host_a.name},
+        )
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "host-b",
+            live_agents=[agent_on_host_b],
+            discovered_agent_names_by_id={agent_on_host_b.id: agent_on_host_b.name},
+        )
+
+        resolved = cli_module._resolve_target_agents([AgentAddress(agent=AgentName("shared-name"))], mngr_ctx)
+        assert {id(agent) for agent in resolved} == {id(agent_on_host_a), id(agent_on_host_b)}
+
+        resolved = cli_module._resolve_target_agents(
+            [AgentAddress(agent=AgentName("shared-name"), host=HostAddress(host=HostName("host-b")))], mngr_ctx
+        )
+        assert resolved == [agent_on_host_b]
+
+
+def test_resolve_target_agents_reports_every_unknown_target(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        comp_agent = _make_compaction_agent("comp-agent")
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "on-host",
+            live_agents=[comp_agent],
+            discovered_agent_names_by_id={comp_agent.id: comp_agent.name},
+        )
+
+        targets = [
+            AgentAddress(agent=AgentName("unknown-agent-1")),
+            AgentAddress(agent=AgentName("comp-agent")),
+            AgentAddress(agent=AgentName("unknown-agent-2")),
+        ]
+        with pytest.raises(AgentNotFoundError) as exc_info:
+            cli_module._resolve_target_agents(targets, mngr_ctx)
+        assert "unknown-agent-1" in str(exc_info.value)
+        assert "unknown-agent-2" in str(exc_info.value)
+
+
+def test_resolve_target_agents_raises_user_error_unwrapped_from_worker(temp_mngr_ctx: MngrContext) -> None:
+    with _fake_discovery_context(temp_mngr_ctx) as (mngr_ctx, provider):
+        running_agent = _make_compaction_agent("running-agent")
+        stopped_agent = _make_compaction_agent("stopped-agent", running=False)
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "host-a",
+            live_agents=[running_agent],
+            discovered_agent_names_by_id={running_agent.id: running_agent.name},
+        )
+        _add_fake_online_host(
+            provider,
+            mngr_ctx,
+            "host-b",
+            live_agents=[stopped_agent],
+            discovered_agent_names_by_id={stopped_agent.id: stopped_agent.name},
+        )
+
+        targets = [AgentAddress(agent=AgentName("running-agent")), AgentAddress(agent=AgentName("stopped-agent"))]
+        with pytest.raises(UserInputError, match="Agent 'stopped-agent' is not running on host 'host-b'"):
+            cli_module._resolve_target_agents(targets, mngr_ctx)

@@ -6,7 +6,7 @@
 **Synopsis:**
 
 ```text
-mngr autocompact (check|run) [TARGET] [OPTIONS]
+mngr autocompact (check|run) [TARGETS...] [OPTIONS]
 ```
 
 Automatic context compaction commands for conversational agents.
@@ -34,12 +34,12 @@ Check agent(s) and report which would be compacted if idle past cache TTL.
 
 Evaluate running conversational agents and report which agents are idle past cache TTL and would be compacted.
 
-Either a specific agent target or the --all flag must be provided.
+Either agent target(s) or the --all flag must be provided.
 
 **Usage:**
 
 ```text
-mngr autocompact check [OPTIONS] [TARGET]
+mngr autocompact check [OPTIONS] [TARGETS]...
 ```
 **Options:**
 
@@ -74,6 +74,12 @@ mngr autocompact check [OPTIONS] [TARGET]
 $ mngr autocompact check my-agent
 ```
 
+**Check multiple specific agents**
+
+```bash
+$ mngr autocompact check agent-1 agent-2
+```
+
 **Check all running agents across all online hosts**
 
 ```bash
@@ -92,12 +98,12 @@ Evaluate agent(s) and trigger context compaction if idle past cache TTL.
 
 Evaluate running conversational agents and trigger context compaction if idle past cache TTL.
 
-Either a specific agent target or the --all flag must be provided.
+Either agent target(s) or the --all flag must be provided.
 
 **Usage:**
 
 ```text
-mngr autocompact run [OPTIONS] [TARGET]
+mngr autocompact run [OPTIONS] [TARGETS]...
 ```
 **Options:**
 
@@ -132,6 +138,12 @@ mngr autocompact run [OPTIONS] [TARGET]
 $ mngr autocompact run my-agent
 ```
 
+**Compact multiple specific agents if stale**
+
+```bash
+$ mngr autocompact run agent-1 agent-2
+```
+
 **Compact all running agents across all online hosts if stale**
 
 ```bash
@@ -163,16 +175,16 @@ $ mngr autocompact check --all
 $ mngr autocompact run --all
 ```
 
-**Check a specific agent**
+**Check specific agents**
 
 ```bash
-$ mngr autocompact check my-agent
+$ mngr autocompact check agent-1 agent-2
 ```
 
-**Run compaction on a specific agent**
+**Run compaction on specific agents**
 
 ```bash
-$ mngr autocompact run my-agent
+$ mngr autocompact run agent-1 agent-2
 ```
 
 **Output results in JSON format**

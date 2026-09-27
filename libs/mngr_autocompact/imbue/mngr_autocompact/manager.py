@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 
@@ -5,6 +7,8 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
 from imbue.concurrency_group.concurrency_group import InvalidConcurrencyGroupStateError
+from imbue.mngr.api.discover import DiscoveredAgent
+from imbue.mngr.api.discover import DiscoveredHost
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
@@ -13,6 +17,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.agent import HasCompactionMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentName
+from imbue.mngr.utils.thread_cleanup import mngr_executor
 from imbue.mngr_autocompact.config import AutoCompactPluginConfig
 from imbue.mngr_autocompact.config import ContextCompactionMode
 
@@ -137,11 +142,32 @@ def compact_agent_if_stale(
     return trigger_compaction(agent, instructions=instructions)
 
 
-def get_stale_agents(
+def _load_host_compaction_agents(
+    host_ref: DiscoveredHost,
+    agent_refs: list[DiscoveredAgent],
     mngr_ctx: MngrContext,
-    now: datetime | None = None,
-) -> list[AgentName]:
-    """Discover running agents across all online hosts and return names of stale agents."""
+) -> list[AgentInterface]:
+    """Load compaction-supporting agents for a single host."""
+    try:
+        provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
+        host = provider.get_host(host_ref.host_id)
+        if not isinstance(host, OnlineHostInterface):
+            return []
+
+        live_agents = {a.id: a for a in host.get_agents()}
+        compaction_agents: list[AgentInterface] = []
+        for agent_ref in agent_refs:
+            live_agent = live_agents.get(agent_ref.agent_id)
+            if live_agent is not None and isinstance(live_agent, HasCompactionMixin):
+                compaction_agents.append(live_agent)
+        return compaction_agents
+    except (MngrError, OSError) as e:
+        logger.debug("Error checking agents on host {}: {}", host_ref.host_name, e)
+        return []
+
+
+def get_compaction_agents(mngr_ctx: MngrContext) -> list[AgentInterface]:
+    """Discover all agents supporting compaction on online hosts, whether or not they are running."""
     outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=None,
@@ -149,73 +175,85 @@ def get_stale_agents(
         include_destroyed=False,
         reset_caches=False,
     )
-    stale: list[AgentName] = []
+    # Results are read after the executor exits so that a worker's exception propagates as-is
+    # instead of being wrapped in a ConcurrencyExceptionGroup.
+    with mngr_executor(
+        parent_cg=mngr_ctx.concurrency_group,
+        name="autocompact_load_host_agents",
+        max_workers=32,
+    ) as executor:
+        futures = [
+            executor.submit(_load_host_compaction_agents, host_ref, agent_refs, mngr_ctx)
+            for host_ref, agent_refs in outcome.agents_by_host.items()
+        ]
 
-    for host_ref, agent_refs in outcome.agents_by_host.items():
-        try:
-            provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-            host = provider.get_host(host_ref.host_id)
-            if not isinstance(host, OnlineHostInterface):
-                continue
-
-            live_agents = {a.id: a for a in host.get_agents()}
-            for agent_ref in agent_refs:
-                live_agent = live_agents.get(agent_ref.agent_id)
-                if live_agent is None or not isinstance(live_agent, HasCompactionMixin):
-                    continue
-
-                config = live_agent.mngr_ctx.get_plugin_config("autocompact", AutoCompactPluginConfig)
-                if is_agent_stale_for_compaction(
-                    live_agent,
-                    config,
-                    expected_mode=ContextCompactionMode.PROACTIVE_TIMER,
-                    now=now,
-                ):
-                    stale.append(live_agent.name)
-        except (MngrError, OSError) as e:
-            logger.debug("Error checking agents on host {}: {}", host_ref.host_name, e)
-
-    return stale
+    return [agent for future in futures for agent in future.result()]
 
 
-def compact_all_agents(
+def _evaluate_single_agent(
+    agent: AgentInterface,
+    action: Callable[[AgentInterface, AutoCompactPluginConfig], bool],
+) -> AgentName | None:
+    """Evaluate a single agent against an action, returning its name if matching."""
+    config = agent.mngr_ctx.get_plugin_config("autocompact", AutoCompactPluginConfig)
+    if action(agent, config):
+        return agent.name
+    return None
+
+
+def _evaluate_stale_agents(
     mngr_ctx: MngrContext,
+    action: Callable[[AgentInterface, AutoCompactPluginConfig], bool],
+    agents: Sequence[AgentInterface] | None = None,
+) -> list[AgentName]:
+    """Evaluate candidate agents against an action, returning matching agent names."""
+    candidate_agents = get_compaction_agents(mngr_ctx) if agents is None else agents
+    if not candidate_agents:
+        return []
+
+    with mngr_executor(
+        parent_cg=mngr_ctx.concurrency_group,
+        name="autocompact_evaluate_agents",
+        max_workers=32,
+    ) as executor:
+        futures = [executor.submit(_evaluate_single_agent, agent, action) for agent in candidate_agents]
+
+    return [name for future in futures if (name := future.result()) is not None]
+
+
+def get_stale_agents(
+    mngr_ctx: MngrContext,
+    agents: Sequence[AgentInterface] | None = None,
+    now: datetime | None = None,
+) -> list[AgentName]:
+    """Discover running agents across online hosts (or evaluate provided agents) and return names of stale agents."""
+    return _evaluate_stale_agents(
+        mngr_ctx,
+        lambda agent, config: is_agent_stale_for_compaction(
+            agent,
+            config,
+            expected_mode=ContextCompactionMode.PROACTIVE_TIMER,
+            now=now,
+        ),
+        agents=agents,
+    )
+
+
+def compact_stale_agents(
+    mngr_ctx: MngrContext,
+    agents: Sequence[AgentInterface] | None = None,
     now: datetime | None = None,
     instructions: str | None = None,
 ) -> list[AgentName]:
-    """Discover and compact all stale agents across all online hosts."""
-    outcome = discover_hosts_and_agents(
+    """Discover and compact stale agents across online hosts (or evaluate and compact provided agents)."""
+    return _evaluate_stale_agents(
         mngr_ctx,
-        provider_names=None,
-        agent_identifiers=None,
-        include_destroyed=False,
-        reset_caches=False,
+        lambda agent, config: compact_agent_if_stale(
+            agent,
+            config,
+            expected_mode=ContextCompactionMode.PROACTIVE_TIMER,
+            now=now,
+            instructions=instructions,
+        ),
+        agents=agents,
     )
-    compacted: list[AgentName] = []
-
-    for host_ref, agent_refs in outcome.agents_by_host.items():
-        try:
-            provider = get_provider_instance(host_ref.provider_name, mngr_ctx)
-            host = provider.get_host(host_ref.host_id)
-            if not isinstance(host, OnlineHostInterface):
-                continue
-
-            live_agents = {a.id: a for a in host.get_agents()}
-            for agent_ref in agent_refs:
-                live_agent = live_agents.get(agent_ref.agent_id)
-                if live_agent is None or not isinstance(live_agent, HasCompactionMixin):
-                    continue
-
-                config = live_agent.mngr_ctx.get_plugin_config("autocompact", AutoCompactPluginConfig)
-                if compact_agent_if_stale(
-                    live_agent,
-                    config,
-                    expected_mode=ContextCompactionMode.PROACTIVE_TIMER,
-                    now=now,
-                    instructions=instructions,
-                ):
-                    compacted.append(live_agent.name)
-        except (MngrError, OSError) as e:
-            logger.debug("Error checking agents on host {}: {}", host_ref.host_name, e)
-
-    return compacted

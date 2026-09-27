@@ -54,10 +54,12 @@ The plugin registers the `autocompact` command group on `mngr` with two subcomma
 ```bash
 # Inspect which agents need compaction without triggering it
 mngr autocompact check my-agent
+mngr autocompact check agent-1 agent-2
 mngr autocompact check --all
 
 # Run compaction on stale agents
 mngr autocompact run my-agent
+mngr autocompact run agent-1 agent-2
 mngr autocompact run --all
 
 # Output results as JSON

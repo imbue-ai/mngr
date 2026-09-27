@@ -4,6 +4,7 @@ from datetime import timezone
 from typing import Any
 from typing import cast
 
+import pytest
 from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -37,7 +38,8 @@ from imbue.mngr_autocompact import manager as manager_module
 from imbue.mngr_autocompact.config import AutoCompactPluginConfig
 from imbue.mngr_autocompact.config import ContextCompactionMode
 from imbue.mngr_autocompact.manager import compact_agent_if_stale
-from imbue.mngr_autocompact.manager import compact_all_agents
+from imbue.mngr_autocompact.manager import compact_stale_agents
+from imbue.mngr_autocompact.manager import get_compaction_agents
 from imbue.mngr_autocompact.manager import get_stale_agents
 from imbue.mngr_autocompact.manager import is_agent_stale_for_compaction
 from imbue.mngr_autocompact.manager import trigger_compaction
@@ -456,9 +458,36 @@ def test_get_stale_agents_empty(temp_mngr_ctx: MngrContext) -> None:
     assert stale == []
 
 
-def test_compact_all_agents_empty(temp_mngr_ctx: MngrContext) -> None:
-    compacted = compact_all_agents(temp_mngr_ctx)
+def test_compact_stale_agents_empty(temp_mngr_ctx: MngrContext) -> None:
+    compacted = compact_stale_agents(temp_mngr_ctx)
     assert compacted == []
+
+
+class _UnexpectedAgentError(Exception):
+    pass
+
+
+def test_get_stale_agents_propagates_unexpected_worker_error_unwrapped(temp_mngr_ctx: MngrContext) -> None:
+    mngr_ctx = MngrContext(
+        config=MngrConfig(
+            plugins={
+                PluginName("autocompact"): AutoCompactPluginConfig(mode=ContextCompactionMode.PROACTIVE_TIMER),
+            },
+        ),
+        pm=temp_mngr_ctx.pm,
+        profile_dir=temp_mngr_ctx.profile_dir,
+        concurrency_group=temp_mngr_ctx.concurrency_group,
+    )
+    agent = _DummyCompactionAgent(
+        id=AgentId.generate(),
+        name=AgentName("broken-agent"),
+        agent_type=AgentTypeName("claude"),
+        idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
+        mngr_ctx=mngr_ctx,
+        raise_on_is_running=_UnexpectedAgentError("boom"),
+    )
+    with pytest.raises(_UnexpectedAgentError, match="boom"):
+        get_stale_agents(mngr_ctx, agents=[cast(Any, agent)])
 
 
 class _FakeOnlineHost(Host):
@@ -598,7 +627,7 @@ def test_trigger_compaction_exceptions() -> None:
         assert agent.compaction_count == 0
 
 
-def test_get_stale_agents_and_compact_all_agents(temp_mngr_ctx: MngrContext) -> None:
+def test_get_stale_agents_and_compact_stale_agents(temp_mngr_ctx: MngrContext) -> None:
     now = datetime(2026, 8, 27, 14, 0, 0, tzinfo=timezone.utc)
     config = MngrConfig(
         providers={
@@ -762,11 +791,28 @@ def test_get_stale_agents_and_compact_all_agents(temp_mngr_ctx: MngrContext) -> 
 
     providers_module._instance_cache[(provider.name, id(mngr_ctx))] = provider
     try:
+        discovered_agents = get_compaction_agents(mngr_ctx)
+        assert len(discovered_agents) == 3
+        assert {a.name for a in discovered_agents} == {
+            AgentName("fresh-agent"),
+            AgentName("stale-agent"),
+            AgentName("on-prompt-agent"),
+        }
+
         stale_names = get_stale_agents(mngr_ctx, now=now)
         assert stale_names == [AgentName("stale-agent")]
 
-        compacted_names = compact_all_agents(mngr_ctx, now=now)
+        stale_explicit = get_stale_agents(mngr_ctx, agents=[cast(Any, fresh_agent), cast(Any, stale_agent)], now=now)
+        assert stale_explicit == [AgentName("stale-agent")]
+
+        compacted_names = compact_stale_agents(mngr_ctx, agents=[cast(Any, stale_agent)], now=now)
         assert compacted_names == [AgentName("stale-agent")]
+        assert stale_agent.compaction_count == 1
+        assert on_prompt_agent.compaction_count == 0
+
+        # Compaction ends the idle epoch, so a discovery-driven pass has nothing left to compact
+        compacted_via_discovery = compact_stale_agents(mngr_ctx, now=now)
+        assert compacted_via_discovery == []
         assert stale_agent.compaction_count == 1
         assert on_prompt_agent.compaction_count == 0
     finally:
