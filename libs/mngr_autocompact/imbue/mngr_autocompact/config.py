@@ -42,7 +42,7 @@ class AutoCompactPluginConfig(PluginConfig):
         description="How many minutes before cache expiry to trigger compaction.",
     )
     min_context_tokens: int = Field(
-        default=100_000,
+        default=200_000,
         ge=0,
         description="Minimum context size in tokens required to trigger compaction. Set to 0 to disable gating.",
     )

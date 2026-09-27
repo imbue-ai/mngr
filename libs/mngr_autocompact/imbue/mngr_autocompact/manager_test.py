@@ -68,7 +68,7 @@ class _DummyCompactionAgent(HasCompactionMixin):
         agent_type: AgentTypeName,
         running: bool = True,
         cache_ttl: int | None = 60,
-        context_tokens: int | None = 150_000,
+        context_tokens: int | None = 250_000,
         idle_since_dt: datetime | None = None,
         mngr_ctx: MngrContext | None = None,
         raise_on_is_running: Exception | None = None,
@@ -229,7 +229,7 @@ def test_is_agent_stale_timing_logic() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -270,7 +270,7 @@ def test_is_agent_stale_on_next_prompt_mode() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -303,7 +303,7 @@ def test_compact_agent_if_stale_on_next_prompt_mode() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -359,7 +359,7 @@ def test_check_and_compact_agent_not_stale() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -384,7 +384,7 @@ def test_is_agent_stale_for_compaction_stale() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -409,7 +409,7 @@ def test_compact_agent_if_stale_triggers() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -434,7 +434,7 @@ def test_compact_agent_if_stale_with_instructions() -> None:
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
     )
     config = AutoCompactPluginConfig(
@@ -568,7 +568,7 @@ def test_concurrency_group_inactive_skips_staleness_and_compaction(temp_mngr_ctx
         agent_type=AgentTypeName("claude"),
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
         mngr_ctx=inactive_ctx,
     )
@@ -602,7 +602,7 @@ def test_is_agent_stale_exceptions() -> None:
             agent_type=AgentTypeName("claude"),
             raise_on_is_running=exc,
             cache_ttl=60,
-            context_tokens=150_000,
+            context_tokens=250_000,
             idle_since_dt=datetime(2026, 8, 27, 12, 0, 0, tzinfo=timezone.utc),
         )
         assert not is_agent_stale_for_compaction(

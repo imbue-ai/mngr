@@ -22,8 +22,8 @@ mode = "proactive_timer"
 # Minutes before cache expiration to trigger compaction (default: 3)
 epsilon_offset_minutes = 3
 
-# Minimum context size in tokens required to trigger compaction (default: 100000; set to 0 to disable)
-min_context_tokens = 100000
+# Minimum context size in tokens required to trigger compaction (default: 200000; set to 0 to disable)
+min_context_tokens = 200000
 
 # Optional override for model cache TTL in minutes (uses agent's reported TTL if omitted)
 # cache_ttl_minutes = 60

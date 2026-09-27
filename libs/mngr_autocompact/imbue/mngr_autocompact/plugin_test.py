@@ -42,7 +42,7 @@ class _TestAgent(HasCompactionMixin):
         host: FakeHost,
         running: bool = True,
         cache_ttl: int | None = 60,
-        context_tokens: int | None = 150_000,
+        context_tokens: int | None = 250_000,
         idle_since_dt: datetime | None = None,
     ) -> None:
         self.id = id
@@ -105,7 +105,7 @@ def test_on_before_send_message_triggers_compaction_if_stale(tmp_path: Path, tem
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(hours=2),
     )
 
@@ -134,7 +134,7 @@ def test_on_before_send_message_skips_when_not_stale(tmp_path: Path, temp_mngr_c
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(minutes=5),
     )
 
@@ -162,7 +162,7 @@ def test_on_before_send_message_skips_when_disabled(tmp_path: Path, temp_mngr_ct
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(hours=2),
     )
 
@@ -190,7 +190,7 @@ def test_on_before_send_message_skips_when_proactive_timer(tmp_path: Path, temp_
         host=host,
         running=True,
         cache_ttl=60,
-        context_tokens=150_000,
+        context_tokens=250_000,
         idle_since_dt=datetime.now(timezone.utc) - timedelta(hours=2),
     )
 
