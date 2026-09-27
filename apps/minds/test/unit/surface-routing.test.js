@@ -10,7 +10,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseWorkspaceId, parseSpaWorkspaceRouteId } = require('../../electron/surface-routing');
+const { parseWorkspaceId, parseSpaWorkspaceRouteId, parsePopoutRoute } = require('../../electron/surface-routing');
 
 const BASE = 'http://localhost:8080';
 const AGENT = 'agent-0a1b2c3d4e5f';
@@ -59,4 +59,19 @@ test('parseSpaWorkspaceRouteId matches the SPA /workspace/<id> routes', () => {
   assert.equal(parseSpaWorkspaceRouteId(`${BASE}/notifications`), null);
   assert.equal(parseSpaWorkspaceRouteId(''), null);
   assert.equal(parseSpaWorkspaceRouteId(`/workspace/${AGENT}`), null);
+});
+
+test('parsePopoutRoute matches the SPA /popout/<workspace>/<window> route only', () => {
+  assert.deepEqual(parsePopoutRoute(`${BASE}/popout/${AGENT}/win-0123456789abcdef`), {
+    workspaceId: AGENT,
+    windowId: 'win-0123456789abcdef',
+  });
+  // A cold-start restore may carry the host-scoped coordinate; a trailing slash is fine.
+  assert.deepEqual(parsePopoutRoute(`${BASE}/popout/${HOST}/win-01/`), { workspaceId: HOST, windowId: 'win-01' });
+  assert.equal(parsePopoutRoute(`${BASE}/popout/${AGENT}`), null);
+  assert.equal(parsePopoutRoute(`${BASE}/popout/${AGENT}/not-a-window`), null);
+  assert.equal(parsePopoutRoute(`${BASE}/popout/${AGENT}/win-01/more`), null);
+  assert.equal(parsePopoutRoute(`${BASE}/workspace/${AGENT}`), null);
+  assert.equal(parsePopoutRoute(''), null);
+  assert.equal(parsePopoutRoute('/popout/x/y'), null);
 });

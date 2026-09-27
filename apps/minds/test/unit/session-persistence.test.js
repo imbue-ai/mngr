@@ -11,7 +11,12 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('../../electron/session-persistence');
+const {
+  shouldWriteSessionState,
+  createDebouncedSaver,
+  isSameSavedWindow,
+  splitRestoreEntries,
+} = require('../../electron/session-persistence');
 
 // A deterministic stand-in for setTimeout/clearTimeout: records armed
 // callbacks by id and fires them on demand, so debounce timing is exercised
@@ -89,6 +94,20 @@ test('isSameSavedWindow treats a missing entry as not-the-same', () => {
   assert.equal(isSameSavedWindow(entry, undefined), false);
   assert.equal(isSameSavedWindow(undefined, entry), false);
   assert.equal(isSameSavedWindow(undefined, undefined), false);
+});
+
+test('splitRestoreEntries lands the first main-window entry and opens every popout separately', () => {
+  const isPopoutEntry = (entry) => entry.url.startsWith('/popout/');
+  const popout = { url: '/popout/host-1/win-1' };
+  const main = { url: '/goto/host-1/' };
+  const page = { url: '/' };
+  // A just-torn-out popout leads the save order; the launch window still
+  // takes the main-window entry, and the popout keeps its place in the rest.
+  assert.deepEqual(splitRestoreEntries([popout, main, page], isPopoutEntry), { first: main, rest: [popout, page] });
+  assert.deepEqual(splitRestoreEntries([main, popout], isPopoutEntry), { first: main, rest: [popout] });
+  // Every entry a popout: nothing for the launch window to land on.
+  assert.deepEqual(splitRestoreEntries([popout], isPopoutEntry), { first: null, rest: [popout] });
+  assert.deepEqual(splitRestoreEntries([], isPopoutEntry), { first: null, rest: [] });
 });
 
 test('createDebouncedSaver coalesces a burst into a single save', () => {

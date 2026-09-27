@@ -2600,6 +2600,10 @@ def create_desktop_client(
         "/workspace/<agent_id>/settings",
         "/workspace/<agent_id>/options",
         "/workspace/<agent_id>/backups",
+        # A pulled-out workspace window in a desktop window of its own (the
+        # pull-out-window spec): the shell around the same sandboxed iframe,
+        # with the workspace shell showing one window edge to edge.
+        "/popout/<agent_id>/<window_id>",
         "/destroying/<agent_id>",
         "/agents/<agent_id>/recovery",
         "/help",

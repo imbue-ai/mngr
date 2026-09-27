@@ -12,11 +12,15 @@ import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
 import type {
+  DetachedWindowEntry,
   FocusChatSender,
   PermissionResolvedSender,
+  ReattachWindowSender,
   ShellState,
+  TearOutSender,
   WorkspaceFrameHandle,
 } from "./shell-state";
+import type { PopoutOpenRequest, TearOutReport, WorkspaceWindowDragRequest } from "../../electron-bridge";
 
 // The embed contract module is served verbatim at /_static/embed_contract.js
 // (single shared source with the workspace side; see docs/embed-contract.md).
@@ -31,6 +35,13 @@ interface EmbedContractModule {
   PERMISSION_RESOLUTIONS: string;
   FOCUS_CHAT: string;
   WORKSPACE_READY: string;
+  POP_OUT_WINDOW: string;
+  WINDOW_DRAG_STARTED: string;
+  WINDOW_DRAG_ENDED: string;
+  DETACHED_WINDOWS: string;
+  EMBEDDER_CAPABILITIES: string;
+  REATTACH_WINDOW: string;
+  TEAR_OUT: string;
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -65,6 +76,9 @@ async function loadEmbedContract(): Promise<EmbedContractModule> {
 export interface WorkspaceFrameAttrs {
   shell: ShellState;
   workspaceAnyId: string;
+  /** The one window the workspace shell shows edge to edge (a popout), else
+   * null for the whole desktop. */
+  soloWindowId: string | null;
 }
 
 /** The request an OPEN_REQUEST_MODAL message names, or null when it names
@@ -87,7 +101,7 @@ export function requestIdFromMessage(
 export interface EmbedHandlerDeps {
   contract: EmbedContractModule;
   navigate: (path: string, params?: Record<string, string>) => void;
-  sendAck: (type: string) => void;
+  sendAck: (type: string, payload?: Record<string, unknown>) => void;
   bringAppToFront: () => void;
   /** The mounted workspace's id, for the ?workspace= an overlay floats
    * over. */
@@ -95,6 +109,17 @@ export interface EmbedHandlerDeps {
   openRequestPopup: (requestId: string | null) => void;
   /** The mounted page announced that its endpoint is listening. */
   onWorkspaceReady: () => void;
+  /** The workspace asked to pull one of its windows out (the pull-out-window
+   * spec); null in a chrome that cannot, which then never answers with the
+   * capability either. */
+  popout: {
+    open: (request: PopoutOpenRequest) => void;
+    /** A title-bar drag began (or the dragged window changed size); main watches the cursor from here. */
+    beginDrag: (request: WorkspaceWindowDragRequest) => void;
+    /** The shell's own drag gesture ended, having detached the window or not. */
+    endDrag: (workspaceId: string, windowId: string, isDetached: boolean) => void;
+    detachedWindows: (windows: readonly DetachedWindowEntry[]) => void;
+  } | null;
 }
 
 /** The message-type -> handler map the embedder endpoint dispatches through.
@@ -153,7 +178,40 @@ export function buildEmbedHandlers(
     );
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
-  handlers[contract.WORKSPACE_READY] = () => onWorkspaceReady();
+  handlers[contract.WORKSPACE_READY] = () => {
+    onWorkspaceReady();
+    // What this chrome can do, so the workspace's pull-out gesture turns on
+    // only where a desktop window can be made.
+    sendAck(contract.EMBEDDER_CAPABILITIES, { canPopOut: deps.popout !== null });
+  };
+  const popout = deps.popout;
+  if (popout !== null) {
+    // The contract validated every field's shape; the fields are re-read
+    // here so nothing else of a message rides into main.
+    const openRequestOf = (message: Record<string, unknown>): PopoutOpenRequest => ({
+      workspaceId: workspaceAgentId(),
+      windowId: String(message.windowId),
+      title: String(message.title),
+      width: Number(message.width),
+      height: Number(message.height),
+    });
+    handlers[contract.POP_OUT_WINDOW] = (message) => popout.open(openRequestOf(message));
+    handlers[contract.WINDOW_DRAG_STARTED] = (message) =>
+      popout.beginDrag({ ...openRequestOf(message), grabX: Number(message.grabX), grabY: Number(message.grabY) });
+    handlers[contract.WINDOW_DRAG_ENDED] = (message) =>
+      popout.endDrag(workspaceAgentId(), String(message.windowId), message.isDetached === true);
+    handlers[contract.DETACHED_WINDOWS] = (message) => {
+      const windows = Array.isArray(message.windows) ? message.windows : [];
+      const entries: DetachedWindowEntry[] = [];
+      for (const raw of windows) {
+        if (typeof raw !== "object" || raw === null) continue;
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.windowId !== "string") continue;
+        entries.push({ windowId: entry.windowId, title: typeof entry.title === "string" ? entry.title : "" });
+      }
+      popout.detachedWindows(entries);
+    };
+  }
   return handlers;
 }
 
@@ -223,6 +281,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let snapshotResendTimer: ReturnType<typeof setTimeout> | null = null;
   let permissionResolvedSender: PermissionResolvedSender | null = null;
   let focusChatSender: FocusChatSender | null = null;
+  let reattachWindowSender: ReattachWindowSender | null = null;
+  let tearOutSender: TearOutSender | null = null;
   let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
   // Whether the page the frame currently holds has announced that its
@@ -234,10 +294,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   // itself -- which it does once.
   let isMountedPageReady = false;
 
-  function armFrame(shell: ShellState, workspaceAnyId: string): void {
+  let armedSoloWindowId: string | null = null;
+
+  function armFrame(shell: ShellState, workspaceAnyId: string, soloWindowId: string | null): void {
     if (frameElement === null) return;
     armedWorkspaceAnyId = workspaceAnyId;
-    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId);
+    armedSoloWindowId = soloWindowId;
+    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId);
     if (frameElement.getAttribute("src") !== expected) {
       isMountedPageReady = false;
       frameElement.src = expected;
@@ -253,14 +316,14 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
     frameElement.src =
-      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId);
+      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId);
   }
 
   return {
     oncreate(vnode) {
-      const { shell, workspaceAnyId } = vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId } = vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
-      armFrame(shell, workspaceAnyId);
+      armFrame(shell, workspaceAnyId, soloWindowId);
       // The armed id, not the attr, is what the shell asks about: this frame is
       // re-armed by onupdate, and it is mounted for the workspace an app modal
       // floats over as well as for the routed workspace surface.
@@ -274,7 +337,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // legacy host id with no alias mapping yet; re-arm when the mapping
       // lands and the URL therefore changes to the workspace-id form.
       unsubscribeWorkspaces = shell.stores.workspaces.onChanged(() => {
-        if (armedWorkspaceAnyId !== null) armFrame(shell, armedWorkspaceAnyId);
+        if (armedWorkspaceAnyId !== null) armFrame(shell, armedWorkspaceAnyId, armedSoloWindowId);
       });
 
       void loadEmbedContract().then((loaded) => {
@@ -288,7 +351,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         const handlers = buildEmbedHandlers({
           contract: loaded,
           navigate: (path, params) => m.route.set(path, params),
-          sendAck: (type) => endpoint?.send(type),
+          sendAck: (type, payload) => endpoint?.send(type, payload),
           bringAppToFront: () => electronBridge.bringAppToFront(),
           workspaceAgentId: () =>
             shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
@@ -302,6 +365,20 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingFocusChat();
           },
+          popout: electronBridge.canPopOut
+            ? {
+                open: (request) => electronBridge.openPopoutWindow(request),
+                beginDrag: (request) => electronBridge.beginWorkspaceWindowDrag(request),
+                endDrag: (workspaceId, windowId, isDetached) =>
+                  electronBridge.endWorkspaceWindowDrag(workspaceId, windowId, isDetached),
+                detachedWindows: (windows) =>
+                  shell.handleDetachedWindows(
+                    windows,
+                    (title) => electronBridge.setPopoutTitle(title),
+                    () => electronBridge.closePopout(),
+                  ),
+              }
+            : null,
         });
         endpoint = loaded.createEmbedderEndpoint({
           getFrameWindow: () => {
@@ -345,6 +422,15 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           return true;
         };
         shell.registerFocusChatSender(focusChatSender);
+        reattachWindowSender = (windowId, frame) => {
+          endpoint?.send(loaded.REATTACH_WINDOW, frame === null ? { windowId } : { windowId, frame });
+        };
+        shell.registerReattachWindowSender(reattachWindowSender);
+        tearOutSender = (report: TearOutReport) => {
+          if (report.workspaceId !== shell.stores.workspaces.toAgentScopedId(mountedAnyId())) return;
+          endpoint?.send(loaded.TEAR_OUT, { windowId: report.windowId, phase: report.phase });
+        };
+        shell.registerTearOutSender(tearOutSender);
         // Every (re)load of the workspace page starts it with an empty verdict
         // cache; push its snapshot so no card offers Approve/Deny for a
         // request decided while the page was not live. Sent twice (idempotent)
@@ -371,7 +457,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       });
     },
     onupdate(vnode) {
-      armFrame(vnode.attrs.shell, vnode.attrs.workspaceAnyId);
+      armFrame(vnode.attrs.shell, vnode.attrs.workspaceAnyId, vnode.attrs.soloWindowId);
     },
     onremove(vnode) {
       isRemoved = true;
@@ -387,6 +473,14 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       if (focusChatSender !== null) {
         vnode.attrs.shell.unregisterFocusChatSender(focusChatSender);
         focusChatSender = null;
+      }
+      if (reattachWindowSender !== null) {
+        vnode.attrs.shell.unregisterReattachWindowSender(reattachWindowSender);
+        reattachWindowSender = null;
+      }
+      if (tearOutSender !== null) {
+        vnode.attrs.shell.unregisterTearOutSender(tearOutSender);
+        tearOutSender = null;
       }
       // Clear the shell's handle only if it is still ours, so this teardown can
       // never unhook a frame that is actually mounted.

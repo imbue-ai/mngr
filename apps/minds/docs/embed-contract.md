@@ -1,6 +1,6 @@
 # The minds embed contract
 
-Version: 5 (tracks `CONTRACT_VERSION` in
+Version: 6 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The minds chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v5)
+## Message inventory (v6)
 
 ### workspace -> embedder
 
@@ -58,6 +58,10 @@ see the `*_PATTERN` constants in the module.
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
 | `minds:open-share-settings` | `{ serviceName }` | Open the shell's workspace-options panel on its Share tab, focused on that service. Fire-and-forget (no ack). |
 | `minds:workspace-ready` | `{}` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. |
+| `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Mind window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
+| `minds:window-drag-started` | `{ windowId, title, width, height, grabX, grabY }` | A drag of the window's title bar began (or the dragged window changed size mid-drag); `grabX`, `grabY` are where inside the window the pointer holds it. The embedder watches the cursor from here and reports each step with `minds:tear-out`, since the shell's own pointer events stop at the Mind window's edge on some platforms. |
+| `minds:window-drag-ended` | `{ windowId, isDetached }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out), false when the drag was released inside or cancelled, which drops any popout being dragged. |
+| `minds:detached-windows` | `{ windows: [{ windowId, title }] }` | The pulled-out windows of the sending shell's active desktop, with their titles (at most 128). Sent when the shell announces ready and whenever the set or a title changes; a popout closes itself when its own window is absent, so a solo shell sends a report without its own window only once the return is saved. |
 
 ### embedder -> workspace
 
@@ -67,6 +71,9 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-ai-keys-ack` | `{}` | A minds chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. The workspace raises a window already showing the chat, wherever it is; otherwise it points the viewer's pinned chat window at the chat; otherwise it opens the chat in a window of its own. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
+| `minds:embedder-capabilities` | `{ canPopOut }` | What this chrome can do, sent right after `minds:workspace-ready`. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off. |
+| `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Mind window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). |
+| `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the backdrop, clamped by the receiver) when a re-dock drag dropped it there, else at its kept frame. |
 
 The ack's semantic is "a minds chrome is present" -- NOT "the desktop app is
 present". Plain-browser chrome acks too.
@@ -156,3 +163,12 @@ payloads -- to the console.
   announces readiness. The `permission-resolutions` snapshot still goes on
   frame load (and once more shortly after), since v3 workspaces announce
   nothing.
+- **6** -- added the pull-out window set (see `specs/pull-out-window/spec.md`):
+  `pop-out-window`, `window-drag-started`, `window-drag-ended`, and
+  `detached-windows` (workspace -> embedder), plus `embedder-capabilities`,
+  `reattach-window`, and `tear-out` (embedder -> workspace). Window ids are validated against
+  `WINDOW_ID_PATTERN` (`win-<hex>`), titles against the shell's 256-character
+  bound, sizes as finite positive numbers, grab offsets as finite numbers, and
+  a frame as four finite numbers the receiver clamps. A shell whose vendored snapshot predates v6
+  never sees `embedder-capabilities`, so its gesture stays off; a v6 shell
+  facing an older chrome sends messages the chrome ignores.

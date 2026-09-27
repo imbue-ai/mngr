@@ -237,3 +237,75 @@ test('dispose unregisters the listener', () => {
   win.deliver({ source: parentWin, origin: 'o', data: { type: contract.CLOSE_ACTIVE_TAB } });
   assert.deepStrictEqual(seen, []);
 });
+
+test('embedder endpoint validates the pull-out message payloads', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: {
+      [contract.POP_OUT_WINDOW]: (msg) => seen.push(['out', msg.windowId]),
+      [contract.WINDOW_DRAG_STARTED]: (msg) => seen.push(['drag', msg.windowId, msg.grabX]),
+      [contract.WINDOW_DRAG_ENDED]: (msg) => seen.push(['ended', msg.windowId, msg.isDetached]),
+      [contract.DETACHED_WINDOWS]: (msg) => seen.push(['set', msg.windows.length]),
+    },
+  });
+  const deliver = (data) => win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data });
+  const open = { type: contract.POP_OUT_WINDOW, windowId: 'win-0123456789abcdef', title: 'Notes', width: 640, height: 480 };
+  deliver(open);
+  // Off-shape ids, a non-positive size, and an over-long title are dropped.
+  deliver({ ...open, windowId: 'win-../x' });
+  deliver({ ...open, width: 0 });
+  deliver({ ...open, title: 'x'.repeat(contract.MAX_WINDOW_TITLE_LENGTH + 1) });
+  const drag = { ...open, type: contract.WINDOW_DRAG_STARTED, grabX: 12, grabY: 8 };
+  deliver(drag);
+  deliver({ ...drag, grabX: Number.NaN });
+  deliver({ ...drag, height: -1 });
+  deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'win-abc', isDetached: true });
+  deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'win-abc', isDetached: 'yes' });
+  deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'agent-abc', isDetached: false });
+  deliver({ type: contract.DETACHED_WINDOWS, windows: [{ windowId: 'win-abc', title: 'A' }] });
+  deliver({ type: contract.DETACHED_WINDOWS, windows: [] });
+  deliver({ type: contract.DETACHED_WINDOWS, windows: [{ windowId: 'nope', title: 'A' }] });
+  deliver({ type: contract.DETACHED_WINDOWS, windows: 'not-a-list' });
+  deliver({
+    type: contract.DETACHED_WINDOWS,
+    windows: Array.from({ length: contract.MAX_DETACHED_WINDOW_ENTRIES + 1 }, () => ({ windowId: 'win-a', title: '' })),
+  });
+  assert.deepStrictEqual(seen, [
+    ['out', 'win-0123456789abcdef'],
+    ['drag', 'win-0123456789abcdef', 12],
+    ['ended', 'win-abc', true],
+    ['set', 1],
+    ['set', 0],
+  ]);
+});
+
+test('workspace endpoint validates the capabilities and reattach payloads', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: {
+      [contract.EMBEDDER_CAPABILITIES]: (msg) => seen.push(['caps', msg.canPopOut]),
+      [contract.REATTACH_WINDOW]: (msg) => seen.push(['reattach', msg.windowId, msg.frame === undefined]),
+      [contract.TEAR_OUT]: (msg) => seen.push(['tear', msg.windowId, msg.phase]),
+    },
+  });
+  const deliver = (data) => win.deliver({ source: parentWin, origin: 'http://chrome', data });
+  deliver({ type: contract.TEAR_OUT, windowId: 'win-abc', phase: 'out' });
+  deliver({ type: contract.TEAR_OUT, windowId: 'win-abc', phase: 'gone' });
+  deliver({ type: contract.TEAR_OUT, windowId: 'agent-abc', phase: 'in' });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: true });
+  deliver({ type: contract.EMBEDDER_CAPABILITIES, canPopOut: 'yes' });
+  deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc' });
+  deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: { x: 0.1, y: 0.2, width: 0.5, height: 0.5 } });
+  deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: { x: 0.1, y: 0.2, width: 0.5 } });
+  deliver({ type: contract.REATTACH_WINDOW, windowId: 'win-abc', frame: 'here' });
+  deliver({ type: contract.REATTACH_WINDOW, windowId: 'agent-abc' });
+  assert.deepStrictEqual(seen, [
+    ['tear', 'win-abc', 'out'],
+    ['caps', true],
+    ['reattach', 'win-abc', true],
+    ['reattach', 'win-abc', false],
+  ]);
+});

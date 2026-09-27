@@ -134,11 +134,84 @@ interface MindsNativeSurface {
   // nothing (the browser build, a partial test surface) reads as success.
   installUpdate?(): Promise<InstallUpdateOutcome | void>;
   onUpdateStatus?(callback: (status: UpdateStatus) => void): void;
+  // Pulled-out windows (the pull-out-window spec). Optional: a preload from
+  // before the feature lacks them, and the browser build has no windows.
+  openPopoutWindow?(request: PopoutOpenRequest): void;
+  // A workspace title-bar drag main watches from here (the pull-out-window
+  // spec, section 5.1); it reports each step of the tear-out through onTearOut.
+  beginWorkspaceWindowDrag?(request: WorkspaceWindowDragRequest): void;
+  endWorkspaceWindowDrag?(workspaceId: string, windowId: string, isDetached: boolean): void;
+  onTearOut?(callback: (report: TearOutReport) => void): void;
+  // The popout's own bar was pressed; main follows the cursor until the release.
+  beginPopoutDrag?(grab: PopoutGrab): void;
+  endPopoutBarDrag?(): void;
+  // The popout's window is no longer pulled out; main destroys the window.
+  closePopout?(): void;
+  // The reattach main asked this popout's own page for (an OS close with no
+  // desktop window to take the window back) has been sent.
+  popoutReattached?(): void;
+  setPopoutTitle?(title: string): void;
+  onPopoutReattachRequest?(callback: () => void): void;
+  // A main window is asked to return a popout's window to the desktop it
+  // shows: the popout was dropped onto it, or is closing.
+  onReattachPopoutWindow?(callback: (ask: PopoutReattachAsk) => void): void;
+  onPopoutDropTarget?(callback: (isOver: boolean) => void): void;
 }
 
 /** Why the main process could not install the staged update, or null when it is quitting into it. */
 export interface InstallUpdateOutcome {
   error: string | null;
+}
+
+/** A workspace window to open in a desktop window of its own beside this one
+ * (the pull-out-window spec): what main needs to open it. */
+export interface PopoutOpenRequest {
+  workspaceId: string;
+  windowId: string;
+  title: string;
+  width: number;
+  height: number;
+}
+
+/** A workspace title-bar drag for main to watch: the window's rendered size
+ * and where inside it the pointer holds it, so the popout main opens once the
+ * cursor leaves this window is sized and held the same way. */
+export interface WorkspaceWindowDragRequest extends PopoutOpenRequest {
+  grabX: number;
+  grabY: number;
+}
+
+/** One step of a watched drag, as main reports it: the cursor left the window
+ * by the tear-out distance and a popout follows it ("out"), came back inside
+ * ("in"), or the button was released while out ("released"). */
+export interface TearOutReport {
+  workspaceId: string;
+  windowId: string;
+  phase: "out" | "in" | "released";
+}
+
+/** Where the pointer holds a popout's bar, in the popout's own CSS pixels. */
+export interface PopoutGrab {
+  grabX: number;
+  grabY: number;
+}
+
+/** A frame in fractions of the workspace backdrop, as a drop back onto the
+ * desktop names it. */
+export interface PopoutFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Main's ask of a main window to return a pulled-out window of the workspace
+ * it shows to the desktop: at `frame` when the popout was dropped there, else
+ * at the window's kept frame (the popout is closing). */
+export interface PopoutReattachAsk {
+  workspaceId: string;
+  windowId: string;
+  frame: PopoutFrame | null;
 }
 
 declare global {
@@ -260,5 +333,47 @@ export const electronBridge = {
   },
   onUpdateStatus(callback: (status: UpdateStatus) => void): void {
     native()?.onUpdateStatus?.(callback);
+  },
+
+  /** Whether this chrome can pull a workspace window out into its own desktop
+   * window: only the desktop app, on a preload that knows how. */
+  get canPopOut(): boolean {
+    return native()?.openPopoutWindow !== undefined;
+  },
+  openPopoutWindow(request: PopoutOpenRequest): void {
+    native()?.openPopoutWindow?.(request);
+  },
+  beginWorkspaceWindowDrag(request: WorkspaceWindowDragRequest): void {
+    native()?.beginWorkspaceWindowDrag?.(request);
+  },
+  endWorkspaceWindowDrag(workspaceId: string, windowId: string, isDetached: boolean): void {
+    native()?.endWorkspaceWindowDrag?.(workspaceId, windowId, isDetached);
+  },
+  onTearOut(callback: (report: TearOutReport) => void): void {
+    native()?.onTearOut?.(callback);
+  },
+  beginPopoutDrag(grab: PopoutGrab): void {
+    native()?.beginPopoutDrag?.(grab);
+  },
+  endPopoutBarDrag(): void {
+    native()?.endPopoutBarDrag?.();
+  },
+  closePopout(): void {
+    native()?.closePopout?.();
+  },
+  popoutReattached(): void {
+    native()?.popoutReattached?.();
+  },
+  setPopoutTitle(title: string): void {
+    native()?.setPopoutTitle?.(title);
+  },
+  onPopoutReattachRequest(callback: () => void): void {
+    native()?.onPopoutReattachRequest?.(callback);
+  },
+  onReattachPopoutWindow(callback: (ask: PopoutReattachAsk) => void): void {
+    native()?.onReattachPopoutWindow?.(callback);
+  },
+  onPopoutDropTarget(callback: (isOver: boolean) => void): void {
+    native()?.onPopoutDropTarget?.(callback);
   },
 };

@@ -47,6 +47,23 @@ function pageContext(label: string): TitlebarContext {
 
 const ID_SEGMENT = "((?:agent|host)-[a-f0-9]+)";
 const CREATE_ATTEMPT_ID_SEGMENT = "(create-attempt-[a-f0-9]+)";
+// A workspace window id as the workspace shell mints it (`win-<hex>`).
+const WINDOW_ID_SEGMENT = "(win-[a-f0-9]+)";
+
+/** A pulled-out workspace window's route: the workspace it belongs to and
+ * the window shown edge to edge (the pull-out-window spec). */
+export interface PopoutRoute {
+  workspaceAnyId: string;
+  windowId: string;
+}
+
+/** The popout a path names (/popout/<workspace-id>/<window-id>), else null. */
+export function popoutFromPath(path: string): PopoutRoute | null {
+  const match = path.match(
+    new RegExp(`^/popout/${ID_SEGMENT}/${WINDOW_ID_SEGMENT}$`, "i"),
+  );
+  return match ? { workspaceAnyId: match[1], windowId: match[2] } : null;
+}
 
 /** The create attempt id when `path` is the creation page, else null. */
 export function creatingAttemptIdFromPath(path: string): string | null {
@@ -146,6 +163,10 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
   if (displayId !== null) {
     return workspaceContext(displayId, null);
   }
+  // A popout wears its workspace's context (its accent above all); the
+  // Shell draws the popout's own bar in place of the titlebar.
+  const popout = popoutFromPath(path);
+  if (popout !== null) return workspaceContext(popout.workspaceAnyId, null);
   let match = path.match(
     new RegExp(`^/workspace/${ID_SEGMENT}/settings$`, "i"),
   );
