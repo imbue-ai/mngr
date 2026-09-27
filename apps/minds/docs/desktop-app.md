@@ -15,7 +15,7 @@ Everything else -- agent creation, discovery, proxying, authentication, the web 
 
 ### App shell
 
-Each window is a frameless `BrowserWindow` (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` with `trafficLightPosition` on macOS) hosting ONE web context: the backend-served Mithril SPA shell (`apps/minds/frontend/`). That single page owns the titlebar, client-side routing among the hub pages (the titlebar never reloads), the sandboxed cross-origin iframe that displays workspace content (`WorkspaceFrame`), and the in-DOM Mithril modals (workspace switcher, inbox, help, sign-in, settings, accounts, workspace options). The identical page runs in a plain browser against a local `minds run` -- the desktop app adds only a slim native bridge (`window.mindsNative` from `preload.js`: window controls, native file picker, shell events, the release-channel and update-status calls behind Settings > Updates, and the startup/error/quitting screens).
+Each window is a frameless `BrowserWindow` (`frame: false` on Linux/Windows, `titleBarStyle: 'hiddenInset'` with `trafficLightPosition` on macOS) hosting ONE web context: the backend-served Mithril SPA shell (`apps/minds/frontend/`). That single page owns the titlebar, client-side routing among the hub pages (the titlebar never reloads), the sandboxed cross-origin iframe that displays workspace content (`WorkspaceFrame`), and the in-DOM Mithril modals (workspace switcher, inbox, help, sign-in, settings, accounts, workspace options). The identical page runs in a plain browser against a local `minds run` -- the desktop app adds only a slim native bridge (`window.mindsNative` from `preload.js`: window controls, native file picker, shell events, the release-channel and update-status calls behind Settings > Updates, the display-zoom calls behind Settings > Display, and the startup/error/quitting screens).
 
 Workspace content is entered through the minds `/forward-bridge` route, which hands the browser a `mngr forward` plugin session before landing on the plugin's `/goto/<host-id>/` workspace entry; the plugin appends a `frame-ancestors` policy to every workspace response so only the minds chrome (and the workspace's own origin family) may embed it. Chrome<->workspace messaging flows exclusively through the embed contract (see [embed-contract.md](./embed-contract.md)).
 
@@ -241,6 +241,7 @@ same shape:
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
   window-state.json       # Per-window content URLs + bounds, restored on launch and on a macOS reopen
+  display-zoom.json       # The zoom percent from Settings > Display, applied to every window by the Electron shell
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories

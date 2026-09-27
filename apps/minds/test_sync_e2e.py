@@ -53,14 +53,14 @@ from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
 from imbue.minds.desktop_client.dek_store import unwrap_bundle_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
-from imbue.minds.desktop_client.e2e_workspace_runner import _backend_origin_from_page
-from imbue.minds.desktop_client.e2e_workspace_runner import _workspace_coordinate_from_subdomain
+from imbue.minds.desktop_client.e2e_workspace_runner import backend_origin_from_page
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
 from imbue.minds.desktop_client.e2e_workspace_runner import create_workspace_via_electron
 from imbue.minds.desktop_client.e2e_workspace_runner import electron_app_session
 from imbue.minds.desktop_client.e2e_workspace_runner import ensure_minds_env_defaults
 from imbue.minds.desktop_client.e2e_workspace_runner import find_free_port
 from imbue.minds.desktop_client.e2e_workspace_runner import resolve_default_workspace_template_path
+from imbue.minds.desktop_client.e2e_workspace_runner import workspace_coordinate_from_subdomain
 from imbue.minds.testing import SyncE2EAccount
 from imbue.minds.testing import SyncE2EEnv
 from imbue.mngr.utils.testing import get_short_random_string
@@ -335,7 +335,7 @@ def _create_unassociated_workspace(runtime: _SyncE2ERuntime) -> str:
         workspace_name,
         find_free_port(),
         host_config_dir=runtime.host_config_root,
-        on_workspace_ready=lambda page: created_coordinates.append(_workspace_coordinate_from_subdomain(page.url)),
+        on_workspace_ready=lambda page: created_coordinates.append(workspace_coordinate_from_subdomain(page.url)),
     )
     assert created_coordinates, "The create flow finished without a workspace URL"
     agent_id = _agent_id_for_coordinate(runtime, created_coordinates[0])
@@ -403,7 +403,7 @@ def _sign_in_headless(runtime: _SyncE2ERuntime, page: Page, email: str, password
     initialized that mngr profile (the plugin's session store needs its
     config.toml).
     """
-    origin = _backend_origin_from_page(page)
+    origin = backend_origin_from_page(page)
     profile_config = mngr_host_dir_for(runtime.root_name) / "config.toml"
     _wait_until(
         f"the app's mngr profile config at {profile_config}",

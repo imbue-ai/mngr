@@ -9,14 +9,14 @@ from playwright.sync_api import Frame
 from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from imbue.minds.desktop_client.e2e_workspace_runner import NEW_CHAT_ROW_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import NEW_TERMINAL_ROW_SELECTOR
+from imbue.minds.desktop_client.e2e_workspace_runner import TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceCreateAttemptFailedError
 from imbue.minds.desktop_client.e2e_workspace_runner import WorkspaceFlowError
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_FIELD_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_INPUT_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _LAUNCHER_OVERLAY_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_CHAT_ROW_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import _NEW_TERMINAL_ROW_SELECTOR
-from imbue.minds.desktop_client.e2e_workspace_runner import _TERMINAL_IFRAME_SELECTOR
 from imbue.minds.desktop_client.e2e_workspace_runner import _chat_frame
 from imbue.minds.desktop_client.e2e_workspace_runner import _read_failure_message
 from imbue.minds.desktop_client.e2e_workspace_runner import _wait_for_workspace_ready_or_failure
@@ -213,7 +213,7 @@ def test_read_failure_message_handles_missing_element() -> None:
 
 def _terminal_selector_prefixes() -> list[str]:
     """The ``src^="..."`` prefix literals the terminal-iframe selector keys on."""
-    return re.findall(r'src\^="([^"]+)"', _TERMINAL_IFRAME_SELECTOR)
+    return re.findall(r'src\^="([^"]+)"', TERMINAL_IFRAME_SELECTOR)
 
 
 def test_terminal_iframe_selector_matches_the_labelled_origin() -> None:
@@ -343,7 +343,7 @@ class _FakeLauncherWorkspace(_FakeWorkspaceFrame):
         self.clicked.append(selector)
         if selector in (_LAUNCHER_INPUT_SELECTOR, _LAUNCHER_FIELD_SELECTOR):
             self._is_launcher_showing = True
-        if selector == f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_CHAT_ROW_SELECTOR}":
+        if selector == f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_CHAT_ROW_SELECTOR}":
             self._child_frame_lists = [[*self._existing_chats, self._chat]]
 
 
@@ -358,15 +358,15 @@ class _FakeTerminalLauncherWorkspace(_FakeLauncherWorkspace):
         self.waited_for.append(selector)
 
 
-_VISIBLE_NEW_CHAT_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_CHAT_ROW_SELECTOR}"
-_VISIBLE_NEW_TERMINAL_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {_NEW_TERMINAL_ROW_SELECTOR}"
+_VISIBLE_NEW_CHAT_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_CHAT_ROW_SELECTOR}"
+_VISIBLE_NEW_TERMINAL_ROW_SELECTOR = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {NEW_TERMINAL_ROW_SELECTOR}"
 
 
 def test_open_terminal_presses_the_terminal_row_and_waits_for_its_frame() -> None:
     workspace = _FakeTerminalLauncherWorkspace(is_launcher_showing=True)
     open_terminal_from_launcher(cast(Frame, workspace))
     assert workspace.clicked == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR]
-    assert workspace.waited_for == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR, _TERMINAL_IFRAME_SELECTOR]
+    assert workspace.waited_for == [_VISIBLE_NEW_TERMINAL_ROW_SELECTOR, TERMINAL_IFRAME_SELECTOR]
 
 
 def test_open_terminal_opens_the_launcher_first_when_it_is_not_showing() -> None:

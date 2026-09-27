@@ -769,3 +769,56 @@ describe("SettingsModel release channels", () => {
     });
   });
 });
+
+describe("SettingsModel display zoom", () => {
+  it("reads the stored percent from the main process", async () => {
+    await withMindsNative({ getDisplayZoom: async () => 125 }, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadDisplayZoom();
+      expect(model.displayZoomPercent).toBe(125);
+      expect(model.displayZoomError).toBe("");
+    });
+  });
+
+  it("reads null in the browser build, where the shell cannot scale windows", async () => {
+    await withMindsNative(null, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadDisplayZoom();
+      expect(model.displayZoomPercent).toBeNull();
+    });
+  });
+
+  it("shows the percent the main process confirmed after a change", async () => {
+    const stored: number[] = [];
+    const surface = {
+      getDisplayZoom: async () => 100,
+      setDisplayZoom: async (percent: number) => {
+        stored.push(percent);
+        return percent;
+      },
+    };
+    await withMindsNative(surface, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadDisplayZoom();
+      await model.setDisplayZoom(150);
+      expect(stored).toEqual([150]);
+      expect(model.displayZoomPercent).toBe(150);
+    });
+  });
+
+  it("keeps the current percent and states the reason when the main process refuses", async () => {
+    const surface = {
+      getDisplayZoom: async () => 100,
+      setDisplayZoom: async () => {
+        throw new Error("Unknown display zoom 137");
+      },
+    };
+    await withMindsNative(surface, async () => {
+      const model = new SettingsModel(undefined, () => {});
+      await model.loadDisplayZoom();
+      await model.setDisplayZoom(137);
+      expect(model.displayZoomPercent).toBe(100);
+      expect(model.displayZoomError).toContain("Unknown display zoom 137");
+    });
+  });
+});

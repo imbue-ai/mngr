@@ -45,7 +45,7 @@ export interface SettingsOverview {
 }
 
 export type SettingsSection =
-  "notifications" | "error-reporting" | "updates" | "backups";
+  "notifications" | "display" | "error-reporting" | "updates" | "backups";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -53,10 +53,17 @@ export const SETTINGS_SECTIONS: {
   group: "Other";
 }[] = [
   { name: "notifications", label: "Notifications", group: "Other" },
+  { name: "display", label: "Display", group: "Other" },
   { name: "error-reporting", label: "Error reporting", group: "Other" },
   { name: "updates", label: "Updates", group: "Other" },
   { name: "backups", label: "Master password", group: "Other" },
 ];
+
+/** The zoom sizes the Display panel offers; mirrors ZOOM_PERCENTS in
+ * electron/display-zoom.js, which is what the main process accepts. */
+export const DISPLAY_ZOOM_PERCENTS: number[] = [80, 90, 100, 110, 125, 150, 175, 200];
+
+export const DEFAULT_DISPLAY_ZOOM_PERCENT = 100;
 
 /**
  * Slowest to fastest, which is the order the list is rendered in.
@@ -126,6 +133,12 @@ export class SettingsModel {
   /** An install from the panel is running and the app has not quit yet. */
   isUpdateInstalling = false;
   updateError = "";
+
+  // -- Display zoom (desktop only) --
+  /** The stored zoom percent; null in the browser build, where the panel
+   * points at the browser's own zoom instead. */
+  displayZoomPercent: number | null = null;
+  displayZoomError = "";
   errorReportingError = "";
   updateWindowError = "";
   notificationPrefsError = "";
@@ -425,6 +438,32 @@ export class SettingsModel {
       this.masterPasswordError = "The change failed (network error).";
     }
     this.isMasterPasswordBusy = false;
+    this.redraw();
+  }
+
+  /** Read the stored zoom from the main process; null where the shell cannot
+   * scale windows (the browser build, a desktop build older than the setting). */
+  async loadDisplayZoom(): Promise<void> {
+    this.displayZoomError = "";
+    try {
+      this.displayZoomPercent = await electronBridge.getDisplayZoom();
+    } catch (error) {
+      this.displayZoomError = error instanceof Error ? error.message : String(error);
+    }
+    this.redraw();
+  }
+
+  /** Store a zoom percent and have the main process apply it to every open
+   * window at once. The model shows what the main process confirmed, so a
+   * refused value leaves the control where it was with the reason stated. */
+  async setDisplayZoom(percent: number): Promise<void> {
+    this.displayZoomError = "";
+    try {
+      const applied = await electronBridge.setDisplayZoom(percent);
+      if (applied !== null) this.displayZoomPercent = applied;
+    } catch (error) {
+      this.displayZoomError = error instanceof Error ? error.message : String(error);
+    }
     this.redraw();
   }
 

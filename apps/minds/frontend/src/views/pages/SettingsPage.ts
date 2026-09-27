@@ -1,5 +1,5 @@
-// The app-level ("Mind") settings page: Connectors, Local files, Machines
-// (delegation), Error reporting, Updates, and Master password. Port of
+// The app-level ("Mind") settings page: Notifications, Display, Error
+// reporting, Updates, and Master password. Port of
 // templates/pages/Settings.jinja + AppSettingsSections.jinja +
 // static/app_settings.js.
 
@@ -43,6 +43,8 @@ export function SettingsPage(): m.Component {
       // Desktop-only, and independent of the /ui/api settings payload: the
       // update state comes from the Electron main process, not the backend.
       void model.loadUpdateState();
+      // Desktop-only as well: the zoom lives in the Electron main process.
+      void model.loadDisplayZoom();
     },
     // Before the diff, not after it, so the section it picks is in the render
     // this redraw produces.
@@ -62,7 +64,9 @@ export function SettingsPage(): m.Component {
       // now the only surface reporting an update check, and the menu bar's
       // "Check for Updates..." lands here: gating it on the backend would make
       // a broken backend hide the one remedy the user can apply themselves.
-      const isPayloadNeeded = model.activeSection !== "updates";
+      // Display reads nothing from it either: the zoom lives in the main process.
+      const isPayloadNeeded =
+        model.activeSection !== "updates" && model.activeSection !== "display";
       return [
         m(
           "h1",

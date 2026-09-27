@@ -883,3 +883,47 @@ describe("SettingsSections notifications panel", () => {
     expect(allText(alert)).toBe("nope");
   });
 });
+
+describe("Display panel", () => {
+  function displayModel(percent: number | null): SettingsModel {
+    const model = new SettingsModel(undefined, () => {});
+    model.activeSection = "display";
+    model.displayZoomPercent = percent;
+    return model;
+  }
+
+  it("offers every zoom size with the stored one selected", async () => {
+    await withMindsNative({}, async () => {
+      const tree = renderRoot(SettingsSections, { model: displayModel(125) });
+      const select = collectVnodes(tree).find((vnode) => vnode.tag === "select");
+      expect(select).toBeDefined();
+      expect(attrsOf(select as AnyVnode).id).toBe("display-zoom-select");
+      const options = collectVnodes(select as AnyVnode).filter(
+        (vnode) => vnode.tag === "option",
+      );
+      expect(options.map((option) => attrsOf(option).value)).toEqual([
+        "80", "90", "100", "110", "125", "150", "175", "200",
+      ]);
+      const selected = options.filter((option) => attrsOf(option).selected === true);
+      expect(selected.map((option) => attrsOf(option).value)).toEqual(["125"]);
+      expect(collectText(tree).join(" ")).toContain("100% (default)");
+    });
+  });
+
+  it("points at the browser's own zoom when the shell cannot scale windows", async () => {
+    await withMindsNative(null, async () => {
+      const tree = renderRoot(SettingsSections, { model: displayModel(null) });
+      expect(collectVnodes(tree).find((vnode) => vnode.tag === "select")).toBeUndefined();
+      expect(collectText(tree).join(" ")).toContain("use the browser's own zoom");
+    });
+  });
+
+  it("states the main process's refusal beside the control", async () => {
+    await withMindsNative({}, async () => {
+      const model = displayModel(100);
+      model.displayZoomError = "Unknown display zoom 137";
+      const text = collectText(renderRoot(SettingsSections, { model })).join(" ");
+      expect(text).toContain("Unknown display zoom 137");
+    });
+  });
+});

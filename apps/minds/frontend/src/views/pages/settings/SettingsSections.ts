@@ -1,5 +1,5 @@
 // The app-level settings sections: left nav + one panel each for
-// notifications, error reporting, updates, and the master password. What an
+// notifications, display, error reporting, updates, and the master password. What an
 // agent may reach is not here: credentials and grants belong to one machine
 // each, so they live on that machine's Permissions tab. Port of
 // templates/AppSettingsSections.jinja with the interactivity of
@@ -13,7 +13,11 @@ import type {
   UpdateState,
 } from "../../../electron-bridge";
 import type { SettingsModel, SettingsSection } from "../../../models/settings";
-import { CHANNEL_COPY } from "../../../models/settings";
+import {
+  CHANNEL_COPY,
+  DEFAULT_DISPLAY_ZOOM_PERCENT,
+  DISPLAY_ZOOM_PERCENTS,
+} from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
@@ -234,6 +238,78 @@ function notificationsPanel(model: SettingsModel): m.Children {
           "p",
           { class: "type-body text-important mt-3", role: "alert" },
           model.notificationPrefsError,
+        )
+      : null,
+  ]);
+}
+
+/** Settings > Display: the zoom every desktop window renders at. The value
+ * comes from the Electron main process, not the settings payload, so the panel
+ * renders even when the backend is unreachable; in the browser build it can
+ * only point at the browser's own zoom. */
+function displayPanel(model: SettingsModel): m.Children {
+  const percent = model.displayZoomPercent;
+  return m("section", [
+    m("h2", { class: "type-heading-lg text-primary mb-2" }, "Display"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      "Applies to every window of the desktop app on this device.",
+    ),
+    m(
+      "label",
+      {
+        class:
+          "flex items-start justify-between gap-3 py-3 border-b border-subtle",
+        for: "display-zoom-select",
+      },
+      [
+        m("span", [
+          m("span", { class: "type-body text-primary font-semibold" }, "Zoom"),
+          m(
+            "span",
+            { class: "block type-helper text-tertiary" },
+            "Makes everything in the app larger or smaller, including your machines.",
+          ),
+        ]),
+        percent === null
+          ? null
+          : m(
+              "select",
+              {
+                id: "display-zoom-select",
+                class:
+                  "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+                value: String(percent),
+                onchange: (event: Event) =>
+                  void model.setDisplayZoom(
+                    Number((event.target as HTMLSelectElement).value),
+                  ),
+              },
+              DISPLAY_ZOOM_PERCENTS.map((option) =>
+                m(
+                  "option",
+                  { value: String(option), selected: option === percent },
+                  option === DEFAULT_DISPLAY_ZOOM_PERCENT
+                    ? `${option}% (default)`
+                    : `${option}%`,
+                ),
+              ),
+            ),
+      ],
+    ),
+    percent === null
+      ? m(
+          "p",
+          { class: "type-helper text-tertiary mt-3" },
+          "Zoom is a desktop app setting. In a browser, use the browser's own zoom.",
+        )
+      : null,
+    model.displayZoomError !== ""
+      ? m(
+          "p",
+          { class: "type-body text-important mt-3", role: "alert" },
+          model.displayZoomError,
         )
       : null,
   ]);
@@ -920,6 +996,7 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
             model.activeSection === "notifications"
               ? notificationsPanel(model)
               : null,
+            model.activeSection === "display" ? displayPanel(model) : null,
             model.activeSection === "error-reporting"
               ? errorReportingPanel(model)
               : null,

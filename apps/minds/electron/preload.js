@@ -65,6 +65,11 @@ contextBridge.exposeInMainWorld('mindsNative', {
     ipcRenderer.send('notification-listener-ready');
   },
 
+  // Display zoom (Settings > Display). Desktop-only: only the shell can scale
+  // a window, so the browser build leaves this to the browser's own zoom.
+  getDisplayZoom: () => ipcRenderer.invoke('get-display-zoom'),
+  setDisplayZoom: (percent) => ipcRenderer.invoke('set-display-zoom', percent),
+
   // Release channels. Desktop-only: the web UI has no binary to update, so the
   // Settings section that uses these renders only when mindsNative is present.
   getUpdateState: () => ipcRenderer.invoke('get-update-state'),

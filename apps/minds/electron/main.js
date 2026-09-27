@@ -31,6 +31,7 @@ const { parseWorkspaceId } = require('./surface-routing');
 const { linkFallbackFor, nativeNotificationOptionsFor, routeNotificationClick } = require('./notifications');
 const { shouldWriteSessionState, createDebouncedSaver, isSameSavedWindow } = require('./session-persistence');
 const updater = require('./updater');
+const displayZoom = require('./display-zoom');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
@@ -397,6 +398,39 @@ function computeTitleFor(bundle) {
   return 'Mind';
 }
 
+// The display zoom preference (Settings > Display), applied to every window.
+// Read from disk once and kept here for the app's life; `set-display-zoom` is
+// the only writer. Chromium keys zoom by origin and each window moves between
+// the file:// loading document and the backend origin, so the factor is
+// re-applied on every main-frame navigation rather than set once.
+let displayZoomPercent = null;
+
+function currentDisplayZoomPercent() {
+  if (displayZoomPercent === null) {
+    const read = displayZoom.readZoomPercent(paths.getDataDir());
+    if (read.reason !== null) {
+      console.warn(`[display-zoom] falling back to ${read.percent}%: stored preference ${read.reason}`);
+    }
+    displayZoomPercent = read.percent;
+  }
+  return displayZoomPercent;
+}
+
+function applyDisplayZoomTo(webContents) {
+  if (!webContents || webContents.isDestroyed()) return;
+  try {
+    webContents.setZoomFactor(displayZoom.zoomFactorForPercent(currentDisplayZoomPercent()));
+  } catch (err) {
+    console.warn('[display-zoom] could not apply the zoom factor:', err && err.message);
+  }
+}
+
+function applyDisplayZoomToAllWindows() {
+  for (const bundle of bundles) {
+    if (!bundle.window.isDestroyed()) applyDisplayZoomTo(bundle.window.webContents);
+  }
+}
+
 function updateOsTitle(bundle) {
   if (!bundle || bundle.window.isDestroyed()) return;
   bundle.window.setTitle(computeTitleFor(bundle));
@@ -519,7 +553,9 @@ function createBundle() {
 
   win.webContents.on('did-finish-load', () => {
     updateOsTitle(bundle);
+    applyDisplayZoomTo(win.webContents);
   });
+  win.webContents.on('did-navigate', () => applyDisplayZoomTo(win.webContents));
 
   // Every level from every frame of this window -- the SPA's own output and the
   // workspace iframe's, which share this webContents -- into the rolling
@@ -2355,6 +2391,21 @@ function handleAuthEvent(event) {
     }
   }
 }
+
+ipcMain.handle('get-display-zoom', () => currentDisplayZoomPercent());
+
+// Settings > Display. Stores the preference, then applies it to every open
+// window at once so the change is visible immediately everywhere.
+ipcMain.handle('set-display-zoom', (_event, percent) => {
+  const normalized = displayZoom.normalizeZoomPercent(percent);
+  if (normalized === null) {
+    throw new Error(`Unknown display zoom ${JSON.stringify(percent)}`);
+  }
+  displayZoom.writeZoomPercent(paths.getDataDir(), normalized);
+  displayZoomPercent = normalized;
+  applyDisplayZoomToAllWindows();
+  return normalized;
+});
 
 ipcMain.handle('get-update-state', () => updater.describe());
 

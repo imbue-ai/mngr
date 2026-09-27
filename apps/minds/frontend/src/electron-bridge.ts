@@ -119,6 +119,10 @@ interface MindsNativeSurface {
   // Renderer -> main shell-event relay (workspace_stopped, focus requests).
   // Added alongside the SPA shell; older preloads lack it, hence optional.
   sendShellEvent?(event: { type: string } & Record<string, unknown>): void;
+  // Display zoom (Settings > Display). Optional: a preload from before the
+  // setting shipped lacks them, and the browser build scales with the browser.
+  getDisplayZoom?(): Promise<number>;
+  setDisplayZoom?(percent: number): Promise<number>;
   // Release channels. Optional: a preload from before channels shipped lacks
   // them, and the browser build has no binary to update at all.
   getUpdateState?(): Promise<UpdateState>;
@@ -218,6 +222,17 @@ export const electronBridge = {
   },
   sendShellEvent(event: { type: string } & Record<string, unknown>): void {
     native()?.sendShellEvent?.(event);
+  },
+
+  /** The stored display zoom percent; null in the browser, and on a desktop
+   * build older than the setting. */
+  async getDisplayZoom(): Promise<number | null> {
+    return (await native()?.getDisplayZoom?.()) ?? null;
+  },
+  /** Store and apply a display zoom percent; resolves the stored value, or
+   * null where the shell cannot scale windows. */
+  async setDisplayZoom(percent: number): Promise<number | null> {
+    return (await native()?.setDisplayZoom?.(percent)) ?? null;
   },
 
   /** Null in the browser, and on a desktop build older than release channels. */

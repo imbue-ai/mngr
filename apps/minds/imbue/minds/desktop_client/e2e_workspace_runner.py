@@ -31,6 +31,7 @@ import threading
 import time
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
@@ -61,7 +62,7 @@ _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[5]
 # surface) is served from the backend's bare-localhost origin. We match those
 # backend pages, not the ``agent-<id>.localhost`` proxy.
 # The capturing group exposes the bare origin (``http://localhost:<port>``)
-# so :func:`_backend_origin_from_page` can reuse the same pattern instead of
+# so :func:`backend_origin_from_page` can reuse the same pattern instead of
 # re-encoding the localhost-origin contract a second time.
 _BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhost:\d+)(?:/|$)")
 # The agent subdomain URL the create flow redirects to once the workspace's
@@ -122,7 +123,7 @@ _CREATE_OUTCOME_POLL_INTERVAL_MS: Final[int] = 500
 
 # The desktop's backdrop, which the system_interface frontend renders once it has its desktops
 # (docs/system/blueprint/desktop-interface/contracts.md section 12 in default-workspace-template).
-_DESKTOP_BACKDROP_SELECTOR: Final[str] = "[data-desktop-id]"
+DESKTOP_BACKDROP_SELECTOR: Final[str] = "[data-desktop-id]"
 
 
 def configure_logging() -> None:
@@ -245,7 +246,7 @@ def _ensure_paired_workspace_env(setenv: Callable[[str, str], None]) -> None:
             )
 
 
-def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
+def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return the env vars the Electron child process should inherit.
 
     Mirrors ``just minds-start``: passes the DEFAULT_WORKSPACE_TEMPLATE path through the
@@ -255,11 +256,18 @@ def _build_electron_env(workspace_git_url: Path) -> dict[str, str]:
     ANTHROPIC creds the operator's shell might have exported so they
     don't silently leak into every workspace we create.
 
-    The workspace name is not prefilled: ``_drive_create_flow`` types it into
+    ``extra_env`` is layered over the inherited environment first, so a caller
+    that must not mutate its own ``os.environ`` (the demo harness selecting a
+    data root and display) can still address the child; the prefill and scrub
+    below win over it.
+
+    The workspace name is not prefilled: ``drive_create_flow`` types it into
     the create form's "Name" field directly, which is what pins the name the
     test later destroys by.
     """
     env = dict(os.environ)
+    if extra_env is not None:
+        env.update(extra_env)
     env["MINDS_WORKSPACE_GIT_URL"] = str(workspace_git_url)
     # Opt into the local-worktree create-form defaults (see just minds-start).
     env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
@@ -297,11 +305,6 @@ def _stream_electron_output(process: subprocess.Popen[bytes]) -> None:
     Electron is verbose; without draining the pipes the OS buffer fills and
     Electron blocks. We don't parse anything; the caller reads state from CDP.
     """
-    # ``_launched_electron`` always opens both pipes with ``subprocess.PIPE``;
-    # the explicit None check narrows ``Popen.stdout``/``stderr`` from
-    # ``IO[bytes] | None`` to ``IO[bytes]`` and turns a future regression
-    # (someone drops ``stdout=PIPE``) into an obvious assertion failure rather
-    # than a silent thread crash on ``None.readline``.
     if process.stdout is None or process.stderr is None:
         raise AssertionError("Electron subprocess was launched without piped stdout/stderr")
     for stream, prefix in ((process.stdout, "electron-out"), (process.stderr, "electron-err")):
@@ -352,10 +355,24 @@ def _terminate_electron_process_tree(process: subprocess.Popen[bytes]) -> None:
 
 
 @contextmanager
+def _user_data_dir_for_launch(persistent_dir: Path | None) -> Iterator[str]:
+    """The profile directory a launch runs with: the persistent one when given, else a fresh temporary one."""
+    if persistent_dir is not None:
+        persistent_dir.mkdir(parents=True, exist_ok=True)
+        yield str(persistent_dir)
+        return
+    with tempfile.TemporaryDirectory(prefix="minds-electron-userdata-") as temporary_dir:
+        yield temporary_dir
+
+
+@contextmanager
 def _launched_electron(
     workspace_git_url: Path,
     debug_port: int,
     host_config_dir: Path | None = None,
+    extra_env: Mapping[str, str] | None = None,
+    # A profile to keep between launches (cookies, the desktop's client identity); a throwaway one per launch when None.
+    user_data_dir: Path | None = None,
 ) -> Iterator[subprocess.Popen[bytes]]:
     """Start the Electron app, yield the process, and always tear it down.
 
@@ -386,7 +403,11 @@ def _launched_electron(
 
     Each launch also gets its own throwaway ``--user-data-dir`` so that,
     even if a prior attempt's teardown was imperfect, this instance never
-    collides with a stale single-instance lock from the default profile.
+    collides with a stale single-instance lock from the default profile --
+    unless the caller passes ``user_data_dir`` to keep one profile across
+    launches (the demo harness does, so the desktop keeps seeing the same
+    browser client), in which case releasing that profile's lock before a
+    relaunch rests on the whole-group teardown above.
 
     Note: tearing down Electron does NOT destroy the workspace's mngr
     agent / Docker container. Those persist as separate host-level
@@ -397,17 +418,17 @@ def _launched_electron(
             f"Electron binary missing at {_ELECTRON_BINARY}. Run `cd apps/minds && pnpm install` first."
         )
 
-    with tempfile.TemporaryDirectory(prefix="minds-electron-userdata-") as user_data_dir:
+    with _user_data_dir_for_launch(user_data_dir) as launch_user_data_dir:
         cmd = [
             str(_ELECTRON_BINARY),
             str(_ELECTRON_MAIN_JS),
             f"--remote-debugging-port={debug_port}",
-            # A fresh, throwaway profile per launch. Electron's single-instance
-            # lock is keyed on the user-data-dir; isolating it guarantees a
-            # relaunch (after a prior attempt was SIGKILLed) cannot fail
-            # ``requestSingleInstanceLock()`` against a lock a surviving child
-            # of the previous attempt might still hold.
-            f"--user-data-dir={user_data_dir}",
+            # A fresh, throwaway profile per launch unless the caller keeps one.
+            # Electron's single-instance lock is keyed on the user-data-dir;
+            # isolating it guarantees a relaunch (after a prior attempt was
+            # SIGKILLed) cannot fail ``requestSingleInstanceLock()`` against a
+            # lock a surviving child of the previous attempt might still hold.
+            f"--user-data-dir={launch_user_data_dir}",
             # GitHub Actions runners ship Electron's chrome-sandbox binary
             # without the setuid bit, so the renderer aborts on launch with
             # `FATAL:setuid_sandbox_host.cc -- The SUID sandbox helper
@@ -423,7 +444,7 @@ def _launched_electron(
         process = subprocess.Popen(
             cmd,
             cwd=str(host_config_dir or _REPO_ROOT),
-            env=_build_electron_env(workspace_git_url),
+            env=_build_electron_env(workspace_git_url, extra_env),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             # Own session/process group so teardown can signal the whole tree.
@@ -531,7 +552,7 @@ def _connect_and_pick_content_page(
     raise TimeoutError(f"No Electron content page settled on a backend URL within {timeout_seconds}s")
 
 
-def _backend_origin_from_page(page: Page) -> str:
+def backend_origin_from_page(page: Page) -> str:
     """Extract ``http://localhost:<backend_port>`` from a content-view page URL.
 
     Reuses :data:`_BACKEND_ORIGIN_PATTERN` so the localhost-origin contract
@@ -673,7 +694,7 @@ def _wait_for_workspace_ready_or_failure(browser: Browser, creating_page: Page, 
     )
 
 
-def _drive_create_flow(
+def drive_create_flow(
     browser: Browser,
     page: Page,
     default_workspace_template_path: Path,
@@ -700,7 +721,7 @@ def _drive_create_flow(
     There is no AI-provider or API-key field: workspaces boot unauthenticated
     and sign in through the workspace's own provider chooser afterwards.
     """
-    backend_origin = _backend_origin_from_page(page)
+    backend_origin = backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
 
     logger.info("Navigating to /create")
@@ -759,7 +780,7 @@ def _drive_create_flow(
     logger.info("Machine ready at {}", workspace_page.url)
 
     workspace_page.wait_for_selector(
-        _DESKTOP_BACKDROP_SELECTOR,
+        DESKTOP_BACKDROP_SELECTOR,
         state="visible",
         timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000,
     )
@@ -820,7 +841,7 @@ def _attempt_create_workspace_via_electron(
                 # Surface renderer console/JS errors into the run log so a stuck
                 # create step (creating-page handlers not attaching) is diagnosable.
                 _attach_renderer_diagnostics(page)
-                workspace_page = _drive_create_flow(
+                workspace_page = drive_create_flow(
                     browser,
                     page,
                     default_workspace_template_path,
@@ -840,6 +861,8 @@ def electron_app_session(
     workspace_git_url: Path,
     debug_port: int,
     host_config_dir: Path | None = None,
+    extra_env: Mapping[str, str] | None = None,
+    user_data_dir: Path | None = None,
 ) -> Iterator[tuple[Browser, Page]]:
     """Launch Electron + attach Playwright and yield ``(browser, content_page)``.
 
@@ -854,12 +877,15 @@ def electron_app_session(
     (``MINDS_ROOT_NAME`` set, ``debug_port`` free, ``host_config_dir`` for the
     pytest config guard). ``workspace_git_url`` only seeds the create form's
     repo prefill; sessions that never open the create form still need a real
-    path here.
+    path here. ``extra_env`` and ``user_data_dir`` are handed to every launch
+    (see :func:`_launched_electron`).
     """
     last_error: _ElectronConnectError | None = None
     for attempt in range(1, _ELECTRON_LAUNCH_ATTEMPTS + 1):
         attempt_port = debug_port if attempt == 1 else find_free_port()
-        with _launched_electron(workspace_git_url, attempt_port, host_config_dir):
+        with _launched_electron(
+            workspace_git_url, attempt_port, host_config_dir, extra_env=extra_env, user_data_dir=user_data_dir
+        ):
             with sync_playwright() as playwright:
                 try:
                     _wait_for_cdp(attempt_port, _CDP_READY_TIMEOUT_SECONDS)
@@ -969,12 +995,14 @@ def create_workspace_via_electron(
 # end-to-end against a real local-Docker workspace.
 
 _FLOW_SHOT_DIR: Final[Path] = Path("/tmp/minds-electron-flow")
-_CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
+CHAT_INPUT_SELECTOR: Final[str] = "textarea.message-input-textbox"
+# A sent message as the chat page shows it: the optimistic pending bubble, or the committed user turn.
+USER_TURN_SELECTOR: Final[str] = ".pending-message, .message.message-user"
 # A chat renders inside its own frame at the chat app's origin: the page's URL path is the
 # chat's agent id, which is how the frame is found among the workspace frame's descendants (the
 # desktop frames the chat app's root, and the root frames the chat) and how one open chat is told
 # from another.
-_CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/(agent-[0-9a-f]+)/?$")
+CHAT_PAGE_URL_PATTERN: Final[re.Pattern[str]] = re.compile(r"/(agent-[0-9a-f]+)/?$")
 _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
 # A fresh workspace opens on the welcome chat the creation page seeded; the desktop's launcher
 # (the menu behind the taskbar's field) carries one row per app launch path, each marked
@@ -985,8 +1013,8 @@ _CHAT_FRAME_POLL_INTERVAL_MS: Final[int] = 500
 _LAUNCHER_FIELD_SELECTOR: Final[str] = "[data-launcher-field]"
 _LAUNCHER_INPUT_SELECTOR: Final[str] = "[data-launcher-field] textarea"
 _LAUNCHER_OVERLAY_SELECTOR: Final[str] = "[data-launcher-overlay]"
-_NEW_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:new"]'
-_NEW_TERMINAL_ROW_SELECTOR: Final[str] = '[data-launch="terminal:new"]'
+NEW_CHAT_ROW_SELECTOR: Final[str] = '[data-launch="chat:new"]'
+NEW_TERMINAL_ROW_SELECTOR: Final[str] = '[data-launch="terminal:new"]'
 _LAUNCHER_ROW_TIMEOUT_SECONDS: Final[int] = 60
 # How long the shell gets to frame the new chat's page after the row is pressed.
 _NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
@@ -996,7 +1024,7 @@ _NEW_CHAT_FRAME_TIMEOUT_SECONDS: Final[int] = 60
 # https://terminal-<rand>.agent-<hex>.localhost:<port>/. Match the ``terminal-``
 # label prefix -- the trailing hyphen keeps it from matching an unrelated
 # service whose name merely starts with "terminal".
-_TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
+TERMINAL_IFRAME_SELECTOR: Final[str] = 'iframe[src^="https://terminal-"], iframe[src^="http://terminal-"]'
 # The welcome chat's composer is on its page before any agent exists, but the shell frames
 # the chat only once its app list has arrived, and a chat minted from a row is created
 # asynchronously (a sign-in through its provider chooser launches it), so a chat input can
@@ -1047,7 +1075,7 @@ def drive_create_docker_imbue_workspace(
     ``page`` is the chrome page the form is driven on; returns the workspace
     frame (the chrome page's content iframe) the ready workspace opens in.
     """
-    backend_origin = _backend_origin_from_page(page)
+    backend_origin = backend_origin_from_page(page)
     logger.info("Backend origin: {}", backend_origin)
     page.goto(f"{backend_origin}/create", wait_until="domcontentloaded")
     page.wait_for_selector("#create-form", state="attached", timeout=10_000)
@@ -1099,14 +1127,14 @@ def drive_create_docker_imbue_workspace(
     workspace_page = _wait_for_workspace_ready_or_failure(browser, page, _CREATE_FORM_TIMEOUT_SECONDS)
     logger.info("Machine ready at {}", workspace_page.url)
     workspace_page.wait_for_selector(
-        _DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
+        DESKTOP_BACKDROP_SELECTOR, state="visible", timeout=_SYSTEM_INTERFACE_TIMEOUT_SECONDS * 1000
     )
     logger.info("system_interface desktop rendered")
     _flow_screenshot(workspace_page, "02-workspace-desktop")
     return workspace_page
 
 
-def _workspace_coordinate_from_subdomain(url: str) -> str:
+def workspace_coordinate_from_subdomain(url: str) -> str:
     """Extract the workspace coordinate label from a workspace-origin URL.
 
     New origins carry the workspace id (``agent-<hex>``); a pre-existing
@@ -1164,7 +1192,7 @@ def _chat_frames_with_ids(workspace: Page | Frame) -> list[tuple[Frame, str]]:
     candidates = workspace.frames if isinstance(workspace, Page) else descendant_frames(workspace)
     matched: list[tuple[Frame, str]] = []
     for frame in candidates:
-        match = _CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])
+        match = CHAT_PAGE_URL_PATTERN.search(frame.url.split("?", 1)[0])
         if match is not None:
             matched.append((frame, match.group(1)))
     return matched
@@ -1211,7 +1239,7 @@ def start_new_chat_from_launcher(
     """
     # The row arrives with the shell's app list, which is also what frames the welcome chat, so
     # the chats already open are counted only once the row is on screen.
-    visible_row_selector = _reveal_launcher_row(workspace, _NEW_CHAT_ROW_SELECTOR)
+    visible_row_selector = _reveal_launcher_row(workspace, NEW_CHAT_ROW_SELECTOR)
     known_chat_ids = frozenset(chat_id for _frame, chat_id in _chat_frames_with_ids(workspace))
     workspace.click(visible_row_selector)
     logger.info("Started a new chat from the launcher; waiting up to {:.0f}s for its frame", timeout_seconds)
@@ -1232,7 +1260,7 @@ def _message_welcome_chat(page: Page | Frame, token: str) -> None:
 def _start_new_chat(page: Page | Frame) -> None:
     """The full flow's launcher step: start a second chat from the launcher's row and wait for its composer."""
     chat = start_new_chat_from_launcher(page)
-    chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
+    chat.wait_for_selector(CHAT_INPUT_SELECTOR, state="visible", timeout=_CHAT_INPUT_TIMEOUT_SECONDS * 1000)
     logger.info("The chat started from the launcher shows its composer at {}", chat.url)
     _flow_screenshot(page, "04b-new-chat-from-launcher")
 
@@ -1309,19 +1337,19 @@ def wait_for_chat_input(page: Page | Frame) -> Frame:
     # Playwright reads a zero timeout as "wait forever", so the remainder is floored.
     input_wait_seconds = max(input_deadline - time.monotonic(), 1.0)
     logger.info("Chat frame at {}; waiting up to {:.0f}s for its input", chat.url, input_wait_seconds)
-    chat.wait_for_selector(_CHAT_INPUT_SELECTOR, state="visible", timeout=input_wait_seconds * 1000)
+    chat.wait_for_selector(CHAT_INPUT_SELECTOR, state="visible", timeout=input_wait_seconds * 1000)
     return chat
 
 
 def send_chat_message(chat: Frame, page: Page | Frame, token: str) -> None:
     """Type a unique-token prompt into the chat's composer and send it; the user turn must render."""
     prompt = f"Reply with exactly this token and nothing else: {token}"
-    chat.fill(_CHAT_INPUT_SELECTOR, prompt)
-    chat.press(_CHAT_INPUT_SELECTOR, "Enter")
+    chat.fill(CHAT_INPUT_SELECTOR, prompt)
+    chat.press(CHAT_INPUT_SELECTOR, "Enter")
     logger.info("Sent chat message with token {}", token)
     # The user turn should render (optimistic pending bubble or a committed user
     # message) almost immediately -- proves the chat round-trips through the proxy.
-    chat.wait_for_selector(".pending-message, .message.message-user", state="attached", timeout=30_000)
+    chat.wait_for_selector(USER_TURN_SELECTOR, state="attached", timeout=30_000)
     _flow_screenshot(page, "03-message-sent")
 
 
@@ -1350,23 +1378,29 @@ def _send_message_and_await_reply(page: Page | Frame, token: str) -> None:
     await_chat_reply(chat, page, token)
 
 
-def _reveal_launcher_row(workspace: Page | Frame, row_selector: str) -> str:
-    """Bring a launcher row on screen, opening the launcher first when it is not showing; returns the selector
-    naming the row there."""
+def launcher_opener_selector(workspace: Page | Frame) -> str:
+    """The selector of the taskbar control that opens the launcher in the layout the workspace is showing."""
     # The launcher opens from the taskbar's search field: focusing its text area on a laptop, or
     # pressing the field itself where the compact layout renders it as a bare button. The shell
     # renders the taskbar together with the backdrop the caller has already waited for, so probing
     # for the input is enough to tell the two layouts apart.
+    if workspace.query_selector(_LAUNCHER_INPUT_SELECTOR) is not None:
+        return _LAUNCHER_INPUT_SELECTOR
+    return _LAUNCHER_FIELD_SELECTOR
+
+
+def visible_launcher_row_selector(row_selector: str) -> str:
+    """The row as it is found inside the showing launcher; rows render only inside the menu, so a wait
+    scoped this way also confirms the launcher came up."""
+    return f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {row_selector}"
+
+
+def _reveal_launcher_row(workspace: Page | Frame, row_selector: str) -> str:
+    """Bring a launcher row on screen, opening the launcher first when it is not showing; returns the selector
+    naming the row there."""
     if workspace.query_selector(f"{_LAUNCHER_OVERLAY_SELECTOR}:visible") is None:
-        opener = (
-            _LAUNCHER_INPUT_SELECTOR
-            if workspace.query_selector(_LAUNCHER_INPUT_SELECTOR) is not None
-            else _LAUNCHER_FIELD_SELECTOR
-        )
-        workspace.click(opener)
-    # Rows render only inside the menu, so scoping the wait to the showing one also confirms the
-    # opener brought the launcher up.
-    visible_row_selector = f"{_LAUNCHER_OVERLAY_SELECTOR}:visible {row_selector}"
+        workspace.click(launcher_opener_selector(workspace))
+    visible_row_selector = visible_launcher_row_selector(row_selector)
     workspace.wait_for_selector(visible_row_selector, state="visible", timeout=_LAUNCHER_ROW_TIMEOUT_SECONDS * 1000)
     return visible_row_selector
 
@@ -1378,8 +1412,8 @@ def _press_launcher_row(workspace: Page | Frame, row_selector: str) -> None:
 
 def open_terminal_from_launcher(workspace: Page | Frame) -> None:
     """Run the terminal app's ``new`` launch path from the launcher and wait for the terminal's frame."""
-    _press_launcher_row(workspace, _NEW_TERMINAL_ROW_SELECTOR)
-    workspace.wait_for_selector(_TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
+    _press_launcher_row(workspace, NEW_TERMINAL_ROW_SELECTOR)
+    workspace.wait_for_selector(TERMINAL_IFRAME_SELECTOR, state="attached", timeout=60_000)
     logger.info("Terminal iframe present")
 
 
@@ -1547,7 +1581,7 @@ def run_full_workspace_flow(
             )
             try:
                 content_page = _pick_content_page(browser, _BACKEND_READY_TIMEOUT_SECONDS)
-                backend_origin = _backend_origin_from_page(content_page)
+                backend_origin = backend_origin_from_page(content_page)
 
                 logger.info("=== STEP 1: create local Docker machine ===")
                 # The create form is driven on the chrome view (content_page); the
@@ -1559,7 +1593,7 @@ def run_full_workspace_flow(
                     browser, content_page, default_workspace_template_path, workspace_name
                 )
                 results["STEP 1 create"] = "PASS"
-                workspace_coordinate = _workspace_coordinate_from_subdomain(workspace_page.url)
+                workspace_coordinate = workspace_coordinate_from_subdomain(workspace_page.url)
                 logger.info("Workspace coordinate (from subdomain): {}", workspace_coordinate)
                 agent_id = _agent_id_for_coordinate(content_page, backend_origin, workspace_coordinate)
                 logger.info("Workspace agent id: {}", agent_id)
