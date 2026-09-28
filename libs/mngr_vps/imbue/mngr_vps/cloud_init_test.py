@@ -123,7 +123,7 @@ runcmd:
   - |
       set -e
       MNGR_BOUNDS_STAGE="$(mktemp -d)"
-      mkdir -p /etc/docker /etc/systemd/journald.conf.d
+      mkdir -p /etc/docker
       if [ -f /etc/docker/daemon.json ]; then
           jq -S . /etc/docker/daemon.json > "$MNGR_BOUNDS_STAGE/current.json"
       else
@@ -134,12 +134,15 @@ runcmd:
           install -m 0644 "$MNGR_BOUNDS_STAGE/merged.json" /etc/docker/daemon.json
           if systemctl is-active --quiet docker; then systemctl restart docker; fi
       fi
-      printf '[Journal]\\nSystemMaxUse=512M\\n' > "$MNGR_BOUNDS_STAGE/journald.conf"
-      if ! cmp -s "$MNGR_BOUNDS_STAGE/journald.conf" /etc/systemd/journald.conf.d/60-mngr.conf; then
-          install -m 0644 "$MNGR_BOUNDS_STAGE/journald.conf" /etc/systemd/journald.conf.d/60-mngr.conf
+      rm -rf "$MNGR_BOUNDS_STAGE"
+      mkdir -p /etc/systemd/journald.conf.d
+      MNGR_JOURNALD_STAGE="$(mktemp)"
+      printf '[Journal]\\nSystemMaxUse=512M\\n' > "$MNGR_JOURNALD_STAGE"
+      if ! cmp -s "$MNGR_JOURNALD_STAGE" /etc/systemd/journald.conf.d/60-mngr.conf; then
+          install -m 0644 "$MNGR_JOURNALD_STAGE" /etc/systemd/journald.conf.d/60-mngr.conf
           systemctl restart systemd-journald
       fi
-      rm -rf "$MNGR_BOUNDS_STAGE"
+      rm -f "$MNGR_JOURNALD_STAGE"
   - |
       set -e
       export DEBIAN_FRONTEND=noninteractive
