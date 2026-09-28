@@ -34,6 +34,10 @@ class ImbueCloudAuthError(ImbueCloudError, HostAuthenticationError):
         ImbueCloudError.__init__(self, message)
 
 
+class ImbueCloudDeviceCodeRefusedError(ImbueCloudAuthError):
+    """Raised when the connector refuses a browser-login code exchange (expired, reused, or PKCE mismatch)."""
+
+
 class ImbueCloudLeaseUnavailableError(ImbueCloudError):
     """Raised when the connector returns 503 (no matching pool host)."""
 

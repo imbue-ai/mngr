@@ -121,6 +121,7 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
         max_active_synced_workspaces=NonNegativeInt(200),
         max_active_machine_units=NonNegativeInt(16),
         max_total_machine_disk_gb=NonNegativeInt(280),
+        max_shared_workspaces=NonNegativeInt(50),
     )
     row = config.to_plan_row()
     assert row["max_total_bucket_bytes"] == 50 * 1024**3
@@ -130,11 +131,13 @@ def test_plan_quotas_config_to_plan_row_converts_gb_to_bytes() -> None:
     assert row["max_total_workspaces"] == 10
     assert row["max_active_machine_units"] == 16
     assert row["max_total_machine_disk_gb"] == 280
+    assert row["max_shared_workspaces"] == 50
     assert sorted(row) == [
         "max_active_machine_units",
         "max_active_synced_workspaces",
         "max_buckets",
         "max_remote_workspaces",
+        "max_shared_workspaces",
         "max_total_bucket_bytes",
         "max_total_machine_disk_gb",
         "max_total_workspaces",
@@ -164,12 +167,29 @@ def test_committed_deploy_tomls_all_define_the_launch_plans() -> None:
         plans = {name: PlanQuotasConfig.model_validate(values) for name, values in raw.get("plans", {}).items()}
         plan_blocks_by_tier[path.parent.name] = plans
     for tier, plans in plan_blocks_by_tier.items():
-        assert sorted(plans) == ["ally", "explorer", "free"], f"tier {tier} is missing a launch plan"
+        assert sorted(plans) == ["ally", "explorer", "free", "guest"], f"tier {tier} is missing a launch plan"
         assert plans == plan_blocks_by_tier["dev"], f"tier {tier} diverges from the shared [plans] values"
     assert plan_blocks_by_tier["dev"]["free"].max_remote_workspaces == 1
     assert plan_blocks_by_tier["dev"]["free"].monthly_llm_spend_usd == 0.0
     assert plan_blocks_by_tier["dev"]["explorer"].monthly_llm_spend_usd == 0.0
     assert plan_blocks_by_tier["dev"]["ally"].monthly_llm_spend_usd == 1000.0
+    # The waitlist plan holds nothing at all (specs/minds-waitlist-signup-codes/spec.md).
+    assert all(value == 0 for value in plan_blocks_by_tier["dev"]["guest"].to_plan_row().values())
+
+
+def test_committed_deploy_tomls_waitlist_only_the_shared_tiers() -> None:
+    """Production and staging waitlist new accounts; dev and ci stay open so signup tests run unchanged."""
+    envs_dir = Path(__file__).parent / "envs"
+    waitlist_by_tier = {
+        path.parent.name: DeployEnvConfig.model_validate(tomllib.loads(path.read_text())).waitlist
+        for path in sorted(envs_dir.glob("*/deploy.toml"))
+    }
+    assert {tier: config is not None and config.is_enabled for tier, config in waitlist_by_tier.items()} == {
+        "ci": False,
+        "dev": False,
+        "production": True,
+        "staging": True,
+    }
 
 
 def test_origins_config_accepts_https_subdomains_of_the_cookie_domain() -> None:

@@ -32,6 +32,7 @@ from imbue.mngr.agents.agent_release_testing import AgentReleaseContext
 from imbue.mngr.agents.agent_release_testing import AgentReleaseProfile
 from imbue.mngr.agents.agent_release_testing import run_agent_release_lifecycle
 from imbue.mngr.agents.agent_release_testing import run_message_delivery_journey
+from imbue.mngr.utils.testing import get_short_random_string
 from imbue.mngr.utils.testing import get_subprocess_test_env
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import run_mngr_subprocess
@@ -227,3 +228,63 @@ def test_codex_message_delivery_journey(tmp_path: Path) -> None:
     each delivered exactly once.
     """
     run_message_delivery_journey(_CodexReleaseProfile(), tmp_path)
+
+
+@pytest.mark.release
+@pytest.mark.tmux
+@pytest.mark.rsync
+@pytest.mark.timeout(900)
+def test_codex_agent_with_unoffered_pinned_model_starts_on_account_default(tmp_path: Path) -> None:
+    """A pin the account does not offer, with ``fall_back_to_account_default_model``, lands on the account default.
+
+    The root conversation mngr establishes at create is read back from the live daemon: its model must be
+    the one the account's own ``model/list`` marks default, not the unusable pin in config.toml.
+    """
+    profile = _CodexReleaseProfile()
+    reason = profile.unavailable_reason()
+    if reason is not None:
+        pytest.skip(reason)
+    ctx = profile.setup(tmp_path)
+    agent_name = f"codex-fallback-{get_short_random_string()}"
+    unoffered_model = f"gpt-unoffered-{get_short_random_string()}"
+    try:
+        create = profile.run_mngr(
+            ctx,
+            "create",
+            agent_name,
+            "codex",
+            "--no-connect",
+            "--yes",
+            "--no-ensure-clean",
+            "--source",
+            str(ctx.project_dir),
+            "-S",
+            f"agent_types.codex.model={unoffered_model}",
+            "-S",
+            "agent_types.codex.fall_back_to_account_default_model=true",
+            timeout=600,
+        )
+        assert create.returncode == 0, f"create failed:\n{create.stdout}\n{create.stderr}"
+
+        agent_dirs = [path for path in (ctx.host_dir / "agents").glob("*") if path.is_dir()]
+        assert len(agent_dirs) == 1
+        root_thread_id = (agent_dirs[0] / APP_SERVER_THREAD_FILENAME).read_text().strip()
+        socket_path = get_codex_app_server_socket_path(get_codex_home(agent_dirs[0]))
+        client = CodexAppServerClient(transport=connect_app_server_transport(socket_path))
+        try:
+            client.initialize("mngr-codex-release-test", "0")
+            account_default = next(
+                offered.model for offered in client.model_list(include_hidden=True) if offered.is_default
+            )
+            root_thread = client.thread_resume(root_thread_id)
+        finally:
+            client.close()
+
+        assert root_thread.model == account_default
+        assert root_thread.model != unoffered_model
+    finally:
+        try:
+            profile.run_mngr(ctx, "destroy", agent_name, "--force", timeout=150)
+        finally:
+            if ctx.teardown is not None:
+                ctx.teardown()

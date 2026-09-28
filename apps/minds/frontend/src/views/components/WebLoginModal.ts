@@ -1,12 +1,12 @@
 // The waiting modal for the browser sign-in flow: sign-in happens on the
 // hosted accounts page in the system browser, so this modal narrates the
-// wait, offers a copy-the-link fallback (for browsers that fail to launch),
-// and surfaces failures. Rendered by the Shell so any page can trigger it
-// through the shared webLogin model.
+// wait, offers to reopen the page or copy its link (for a browser that failed
+// to launch, or a tab the user closed), and surfaces failures. Rendered by
+// the Shell so any page can trigger it through the shared webLogin model.
 
 import m from "mithril";
 import { webLogin } from "../../models/webLogin";
-import { Button } from "./Button";
+import { Button, ButtonLink } from "./Button";
 import { Icon16 } from "./Icon";
 import { Modal } from "./Modal";
 import { Spinner } from "./Spinner";
@@ -51,7 +51,19 @@ function waitingBody(local: WebLoginModalLocalState): m.Children {
           m(
             "p",
             { class: "type-helper text-tertiary mb-2" },
-            "Browser didn't open? Open this link in a browser on this computer:",
+            "Didn't see the sign-in page, or closed it? Reopen it, or copy the link into a browser on this computer:",
+          ),
+          // An external link opens in the system browser (the Electron shell routes it there).
+          m(
+            ButtonLink,
+            {
+              id: "web-login-reopen-link",
+              href: webLogin.loginUrl,
+              target: "_blank",
+              rel: "noopener noreferrer",
+              extra: "mb-2",
+            },
+            "Reopen sign-in page",
           ),
           // The link is shown on one line (truncated, selectable) and the whole
           // pill copies it on click -- same pattern as the workspace share-link pill.
