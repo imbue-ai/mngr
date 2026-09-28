@@ -14,6 +14,11 @@ authenticates every agent (the per-agent auth is shared with `~/.codex`).
 Set fields under an `[agent_types.codex]` table in your mngr config, or pass overrides.
 
 - `model` — model slug to pin (e.g. `"gpt-5.5"`). Default: unset (codex's own default).
+- `fall_back_to_account_default_model` — when `true` and `model` is set, a new thread whose
+  account does not offer the pinned model starts on the account's default model instead
+  (mngr checks the account's model list first, and logs the substitution). It applies only to
+  threads mngr starts itself on a local host; a thread that already exists keeps its model.
+  Default: `false`.
 - `model_reasoning_effort` — `none|minimal|low|medium|high|xhigh`. Default: unset.
 - `sandbox_mode` — `read-only|workspace-write|danger-full-access`. Default: `workspace-write`.
 - `auto_allow_permissions` — when `true`, sets `approval_policy = "never"` so codex never
@@ -38,7 +43,8 @@ A ChatGPT-account login rejects some `*-codex` model slugs (e.g. `gpt-5.2-codex`
 deprecated for ChatGPT subscriptions, and some are gated to the interactive TUI. If your
 agent errors on the first message with that 400, set `model` to a slug your account
 supports (e.g. `"gpt-5.5"`), or authenticate with an API key (which carries the full
-model entitlement).
+model entitlement). To pin a model for every account while tolerating ones whose plan lacks
+it, also set `fall_back_to_account_default_model = true`.
 
 ## Waiting reason
 
