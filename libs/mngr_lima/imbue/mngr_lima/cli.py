@@ -5,6 +5,7 @@ import click
 from loguru import logger
 
 from imbue.imbue_common.primitives import InvalidPrimitiveValueError
+from imbue.imbue_common.primitives import PositiveInt
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.backend_hosts import resolve_host_on_backend
@@ -66,9 +67,11 @@ def _build_size_request(opts: LimaResizeCliOptions) -> LimaSizeRequest:
             raise UserInputError(f"--memory must be a number of GiB greater than 0, got {opts.memory}") from e
     data_disk_size: LimaDiskSize | None = None
     if opts.disk is not None:
-        if opts.disk <= 0:
-            raise UserInputError(f"--disk must be a whole number of GiB greater than 0, got {opts.disk}")
-        data_disk_size = LimaDiskSize(f"{opts.disk}GiB")
+        try:
+            disk_gib = PositiveInt(opts.disk)
+        except InvalidPrimitiveValueError as e:
+            raise UserInputError(f"--disk must be a whole number of GiB greater than 0, got {opts.disk}") from e
+        data_disk_size = LimaDiskSize(f"{disk_gib}GiB")
     return LimaSizeRequest(cpus=cpus, memory_gib=memory_gib, data_disk_size=data_disk_size)
 
 
