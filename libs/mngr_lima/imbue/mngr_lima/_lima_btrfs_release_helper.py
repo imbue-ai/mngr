@@ -25,10 +25,14 @@ from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.utils.testing import make_mngr_ctx
 from imbue.mngr_lima.config import LimaProviderConfig
+from imbue.mngr_lima.constants import lima_host_data_disk_mount_path
+from imbue.mngr_lima.data_types import LimaSizeRequest
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.limactl import limactl_disk_delete
+from imbue.mngr_lima.primitives import LimaCpuCount
 from imbue.mngr_lima.primitives import LimaDiskSize
+from imbue.mngr_lima.primitives import LimaMemoryGib
 
 # Lima YAML override merged in via the build_args path: forces qemu+TCG
 # (no KVM in modal sandboxes) and keeps the VM cheap. additionalDisks,
@@ -131,6 +135,61 @@ def _verify_persistence_across_restart(provider: LimaProviderInstance, host: Hos
         raise AssertionError(f"After restart, host_dir not btrfs: {stat_after.stdout!r}")
 
 
+def _read_data_disk_size_bytes(host: Host, disk_name: str) -> int:
+    """The size of the mounted data filesystem inside the VM, as df reports it."""
+    mount_path = lima_host_data_disk_mount_path(disk_name)
+    df_result = host.execute_idempotent_command(f"df -B1 --output=size {mount_path} | tail -1")
+    return int(df_result.stdout.strip())
+
+
+def _verify_resize_round_trip(provider: LimaProviderInstance, host: Host, disk_name: str) -> Host:
+    """Resize the running host (recorded only), then stop and start it and confirm the VM runs at the new size."""
+    before = provider.get_host_resources(host)
+    if (before.cpu.count, before.memory_gb, before.disk_gb) != (2, 2.0, 2.0):
+        raise AssertionError(f"Unexpected recorded size before the resize: {before}")
+
+    # A running VM cannot be edited, so the resize is recorded only.
+    request = LimaSizeRequest(cpus=LimaCpuCount(1), memory_gib=LimaMemoryGib(1.5), data_disk_size=LimaDiskSize("3GiB"))
+    outcome = provider.resize_host(host.id, request)
+    if outcome.is_applied_to_instance:
+        raise AssertionError("resize_host reported applying the size to a running VM")
+    if (outcome.resources.cpu.count, outcome.resources.memory_gb, outcome.resources.disk_gb) != (1, 1.5, 3.0):
+        raise AssertionError(f"Unexpected recorded size after the resize: {outcome.resources}")
+    if provider.get_host_resources(provider.to_offline_host(host.id)) != outcome.resources:
+        raise AssertionError("The offline host does not report the resized size")
+
+    # The next start applies the record: the instance config, the disk, and the filesystem.
+    provider.stop_host(host)
+    host_after = provider.start_host(host.id)
+    if not isinstance(host_after, Host):
+        raise AssertionError(f"start_host returned non-Host: {type(host_after).__name__}")
+    nproc = host_after.execute_idempotent_command("nproc").stdout.strip()
+    if nproc != "1":
+        raise AssertionError(f"Expected the VM to boot with 1 CPU after the resize, nproc says {nproc!r}")
+    mem_total_kib = int(host_after.execute_idempotent_command("awk '/^MemTotal:/{print $2}' /proc/meminfo").stdout)
+    if not 1.2 * 1024**2 < mem_total_kib <= 1.5 * 1024**2:
+        raise AssertionError(f"Expected ~1.5 GiB of VM memory after the resize, MemTotal is {mem_total_kib} kiB")
+    data_disk_bytes = _read_data_disk_size_bytes(host_after, disk_name)
+    if data_disk_bytes < 2.8 * 1024**3:
+        raise AssertionError(f"Expected the data filesystem to have grown to ~3 GiB, df says {data_disk_bytes} bytes")
+
+    # Resizing the stopped-then-started host again to the same size is a no-op that still reports applied=False
+    # (running), while a stopped host takes a resize at once.
+    provider.stop_host(host_after)
+    applied = provider.resize_host(host.id, LimaSizeRequest(cpus=LimaCpuCount(2)))
+    if not applied.is_applied_to_instance:
+        raise AssertionError("resize_host did not apply the size to a stopped VM")
+    host_final = provider.start_host(host.id)
+    if not isinstance(host_final, Host):
+        raise AssertionError(f"start_host returned non-Host: {type(host_final).__name__}")
+    nproc_final = host_final.execute_idempotent_command("nproc").stdout.strip()
+    if nproc_final != "2":
+        raise AssertionError(
+            f"Expected the VM to boot with 2 CPUs after the second resize, nproc says {nproc_final!r}"
+        )
+    return host_final
+
+
 def main() -> int:
     if os.geteuid() == 0:
         print("HELPER_RESULT: FAIL (helper must run as non-root; Lima refuses root)", file=sys.stderr)
@@ -175,6 +234,7 @@ def main() -> int:
 
             _verify_btrfs_layout(host)
             _verify_persistence_across_restart(provider, host)
+            host = _verify_resize_round_trip(provider, host, disk_name)
 
             # get_volume_for_host must return None in btrfs mode.
             if provider.get_volume_for_host(host.id) is not None:
