@@ -141,12 +141,15 @@ def remove_all_containers_by_prefix_via_cli(prefix: str) -> None:
         _docker("volume", "rm", "-f", *volume_names)
 
 
-def make_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker") -> DockerProviderInstance:
+def make_docker_provider(
+    mngr_ctx: MngrContext, name: str = "test-docker", config: DockerProviderConfig | None = None
+) -> DockerProviderInstance:
     # Explicitly pin isolate_host_volumes=False so the autouse loguru-warning
     # guard does not trip on the deprecation warning emitted for the None
     # (unset) default. Tests that specifically need to exercise None should
     # construct DockerProviderConfig themselves under capture_loguru().
-    config = DockerProviderConfig(isolate_host_volumes=False)
+    if config is None:
+        config = DockerProviderConfig(isolate_host_volumes=False)
     return DockerProviderInstance(
         name=ProviderInstanceName(name),
         host_dir=Path("/mngr"),
@@ -182,13 +185,7 @@ def make_docker_provider_with_local_volume(
     ``daemon_totals`` stands in for the ``docker info`` read that sizing falls
     back on, so resource reporting can be exercised without a daemon too.
     """
-    provider = (
-        make_docker_provider(mngr_ctx)
-        if config is None
-        else DockerProviderInstance(
-            name=ProviderInstanceName("test-docker"), host_dir=Path("/mngr"), mngr_ctx=mngr_ctx, config=config
-        )
-    )
+    provider = make_docker_provider(mngr_ctx, config=config)
     provider.__dict__["_state_volume"] = LocalVolume(root_path=volume_root)
     if daemon_totals is not None:
         provider.__dict__["_daemon_totals"] = daemon_totals
