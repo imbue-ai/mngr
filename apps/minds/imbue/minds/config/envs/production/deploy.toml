@@ -6,7 +6,12 @@
 
 modal_workspace = "minds-production"
 vault_path_prefix = "secrets/minds/production"
+# The ops zone (telemetry, errors, the R2 setup scripts), not where user
+# content lives; that is content_domain below.
 cloudflare_domain = "imbueminds.com"
+# The user-content apex shared workspaces are served under, stamped over the
+# Vault sharing entry's SHARE_CONTENT_DOMAIN at deploy time.
+content_domain = "personal-imbue.com"
 
 # Every service named here must exist as `.minds/template/<service>.sh`
 # (the schema) AND have a corresponding Vault entry at
@@ -169,14 +174,19 @@ max_total_machine_disk_gb = 1400
 # accounts surface and the web chrome are Modal custom domains on the
 # connector, sharing one browser session via a cookie scoped to the apex.
 # The apex is first-party only -- untrusted workspace content lives on the
-# separate content domain (imbueminds.com); policy: user content never gets
-# an imbue.com hostname. Both hosts must be registered and verified in the
-# minds-production Modal workspace (dashboard -> Domains) BEFORE deploying
-# with this block, or the deploy fails.
+# separate content domain (personal-imbue.com); policy: user content never
+# gets an imbue.com hostname. Every host named here must be registered and
+# verified in the minds-production Modal workspace (dashboard -> Domains)
+# BEFORE deploying with this block, or the deploy fails. The legacy chrome
+# origin redirects to the chrome origin; the api and llm origins are the
+# custom domains the connector and the LiteLLM proxy answer on.
 [origins]
 accounts_origin = "https://accounts.imbue.com"
-chrome_origin = "https://minds.imbue.com"
+chrome_origin = "https://studio.imbue.com"
 cookie_domain = "imbue.com"
+legacy_chrome_origins = ["https://minds.imbue.com"]
+api_origin = "https://api.studio.imbue.com"
+llm_origin = "https://llm.studio.imbue.com"
 
 # Whether this tier deploys the analytics app (analytics-<tier>): the
 # gold-table aggregation + lake maintenance crons. Production's bringup

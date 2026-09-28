@@ -1,7 +1,8 @@
 'use strict';
 
-// CLEANUP: delete alongside electron/legacy-name-cleanup.js once the "Mind"
-// rename has been on stable long enough for installs to have launched once.
+// CLEANUP: delete alongside electron/legacy-name-cleanup.js once the Imbue
+// Studio build has been on stable long enough for installs to have launched
+// once (specs/imbue-studio-rename/05_cleanup.md).
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -14,18 +15,32 @@ const { removeLegacyNameDirs, legacyNameDirs } = require('../../electron/legacy-
 const MAC = { platform: 'darwin', homeDir: '/Users/someone', env: {} };
 const LINUX = { platform: 'linux', homeDir: '/home/someone', env: {} };
 
-test('macOS legacy dirs are the three Electron roots under the old name', () => {
+test('macOS legacy dirs are the three Electron roots under each old name', () => {
   assert.deepEqual(legacyNameDirs(MAC), [
     '/Users/someone/Library/Application Support/Minds',
     '/Users/someone/Library/Logs/Minds',
     '/Users/someone/Library/Caches/Minds',
+    '/Users/someone/Library/Application Support/Mind',
+    '/Users/someone/Library/Logs/Mind',
+    '/Users/someone/Library/Caches/Mind',
   ]);
 });
 
-test('Linux legacy dirs follow XDG, honoring overrides', () => {
-  assert.deepEqual(legacyNameDirs(LINUX), ['/home/someone/.config/Minds', '/home/someone/.cache/Minds']);
+test('Linux legacy dirs follow XDG, honoring overrides, for each old name', () => {
+  assert.deepEqual(legacyNameDirs(LINUX), [
+    '/home/someone/.config/Minds',
+    '/home/someone/.cache/Minds',
+    '/home/someone/.config/Mind',
+    '/home/someone/.cache/Mind',
+  ]);
   const overridden = { ...LINUX, env: { XDG_CONFIG_HOME: '/cfg', XDG_CACHE_HOME: '/cache' } };
-  assert.deepEqual(legacyNameDirs(overridden), ['/cfg/Minds', '/cache/Minds']);
+  assert.deepEqual(legacyNameDirs(overridden), ['/cfg/Minds', '/cache/Minds', '/cfg/Mind', '/cache/Mind']);
+});
+
+test('the current name owns no legacy directory', () => {
+  for (const dir of [...legacyNameDirs(MAC), ...legacyNameDirs(LINUX)]) {
+    assert.ok(!dir.endsWith('/ImbueStudio') && !dir.endsWith('/Imbue Studio'), dir);
+  }
 });
 
 test('the updater cache is not a legacy directory', () => {
@@ -51,7 +66,7 @@ test('it removes the legacy directories and leaves nothing behind', () => {
   const { home, environment } = makeHome();
   try {
     const removed = removeLegacyNameDirs(environment);
-    assert.equal(removed.length, 3);
+    assert.equal(removed.length, 6);
     for (const dir of legacyNameDirs(environment)) {
       assert.ok(!fs.existsSync(dir), `${dir} survived`);
     }

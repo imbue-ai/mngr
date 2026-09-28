@@ -482,7 +482,7 @@ class OriginsConfig(FrozenModel):
     chrome_origin: AnyUrl = Field(
         description=(
             "Origin of the hosted web chrome (served at ``/web``), e.g. "
-            "``https://minds.imbue.com``. Drives SHARE_CHROME_ORIGIN at deploy time, and "
+            "``https://studio.imbue.com``. Drives SHARE_CHROME_ORIGIN at deploy time, and "
             "is attached to the connector as a Modal custom domain."
         ),
     )
@@ -857,7 +857,10 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "The tier's ops zone: the Cloudflare domain the telemetry and error-tracking hostnames and the "
             "R2 setup scripts live under (e.g. ``imbueminds.com``). Not the user-content domain, which is "
-            "``content_domain``. Informational to the deploy; the connector reads its own copy from Vault."
+            "``content_domain``. Operator tooling derives the ``telemetry.``, ``errors.``, and R2 hostnames "
+            "from it (the box collector install, the provisioning recipes, ``scripts/r2/setup_tier.py``). "
+            "Must be a two-label apex: the ops-zone DNS writers derive the zone from a hostname's last two "
+            "labels and look it up by name, so neither a zone id nor a copy of this value is stored in Vault."
         )
     )
     content_domain: ContentDomain | None = Field(
@@ -865,7 +868,7 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "The apex shared-workspace hostnames live under (e.g. ``personal-imbue.com``), stamped over "
             "the Vault ``sharing`` entry's SHARE_CONTENT_DOMAIN at deploy time so git is the source of "
-            "truth. None leaves the Vault value standing (dev envs today)."
+            "truth. Every committed tier sets it; None leaves the Vault value standing."
         ),
     )
     secrets: DeploySecretsConfig = Field(

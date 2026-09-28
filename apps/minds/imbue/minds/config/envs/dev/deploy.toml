@@ -11,7 +11,14 @@
 
 modal_workspace = "minds-dev"
 vault_path_prefix = "secrets/minds/dev"
+# The ops zone (telemetry, errors, the R2 setup scripts), not where user
+# content lives; that is content_domain below.
 cloudflare_domain = "minds-dev.com"
+# The user-content apex shared workspaces are served under, stamped over the
+# Vault sharing entry's SHARE_CONTENT_DOMAIN at deploy time. The connector
+# looks this zone up by name, so the tier's Cloudflare token needs zone read
+# and DNS edit on it.
+content_domain = "personal-imbue-dev.com"
 
 # Vault-backed per-env Modal Secrets. Each name corresponds to a
 # Vault entry at `<vault_path_prefix>/<name>` -- the deploy reads that

@@ -191,7 +191,7 @@ def serve_spa_index(**_path_params: str) -> Response:
         "  <head>\n"
         '    <meta charset="utf-8">\n'
         '    <meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        "    <title>Mind</title>\n"
+        "    <title>Imbue Studio</title>\n"
         f"{_build_sentry_head_tags()}"
         f"    <script>window.__MINDS_BOOTSTRAP__ = {_build_bootstrap_json()};</script>\n"
         '    <link rel="modulepreload" href="/_static/embed_contract.js">\n'

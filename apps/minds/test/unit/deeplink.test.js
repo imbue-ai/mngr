@@ -1,4 +1,4 @@
-// Unit tests for minds:// deeplink parsing.
+// Unit tests for imbue-studio:// (and, during the soak, minds://) deeplink parsing.
 //
 // Run with: pnpm --dir apps/minds test:unit   (or: node --test test/unit/)
 //
@@ -15,10 +15,30 @@ const {
   parseDeeplink,
   deeplinkTargetPath,
   extractDeeplinkUrlFromArgv,
+  DEEPLINK_SCHEMES,
   MAX_DEEPLINK_LENGTH,
 } = require('../../electron/deeplink');
 
 // -- parseDeeplink / deeplinkTargetPath --
+
+test('the primary scheme comes first and the previous one is still accepted', () => {
+  assert.deepEqual([...DEEPLINK_SCHEMES], ['imbue-studio', 'minds']);
+});
+
+test('bare imbue-studio:// -> focus only', () => {
+  assert.deepEqual(parseDeeplink('imbue-studio://'), { action: 'focus' });
+  assert.equal(deeplinkTargetPath('imbue-studio://'), null);
+});
+
+test('imbue-studio://create parses exactly like minds://create', () => {
+  const query = 'git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample&branch=v1.2.3';
+  assert.deepEqual(parseDeeplink(`imbue-studio://create?${query}`), parseDeeplink(`minds://create?${query}`));
+  assert.equal(
+    deeplinkTargetPath(`imbue-studio://create?${query}`),
+    '/create/template?git_url=https%3A%2F%2Fgithub.com%2Fimbue-ai%2Fexample&branch=v1.2.3',
+  );
+  assert.equal(deeplinkTargetPath('IMBUE-STUDIO://CREATE?branch=main'), '/create?branch=main');
+});
 
 test('bare minds:// -> focus only', () => {
   assert.deepEqual(parseDeeplink('minds://'), { action: 'focus' });
@@ -116,9 +136,11 @@ test('unknown hosts -> focus only', () => {
   assert.deepEqual(parseDeeplink('minds://%'), { action: 'focus' });
 });
 
-test('non-minds schemes -> focus only', () => {
+test('schemes outside the registered set -> focus only', () => {
   assert.deepEqual(parseDeeplink('https://create?git_url=x'), { action: 'focus' });
   assert.deepEqual(parseDeeplink('file:///create'), { action: 'focus' });
+  assert.deepEqual(parseDeeplink('imbue://create?git_url=x'), { action: 'focus' });
+  assert.deepEqual(parseDeeplink('studio://create?git_url=x'), { action: 'focus' });
 });
 
 test('garbage and non-string input never throws -> focus only', () => {
@@ -161,8 +183,14 @@ test('allowlist property: output is null or starts with /create', () => {
 // -- extractDeeplinkUrlFromArgv --
 
 test('finds the URL among binary path, app path, and switches', () => {
-  const argv = ['/usr/bin/electron', '--no-sandbox', '.', 'minds://create?git_url=x'];
-  assert.equal(extractDeeplinkUrlFromArgv(argv), 'minds://create?git_url=x');
+  const argv = ['/usr/bin/electron', '--no-sandbox', '.', 'imbue-studio://create?git_url=x'];
+  assert.equal(extractDeeplinkUrlFromArgv(argv), 'imbue-studio://create?git_url=x');
+  const legacy = ['/usr/bin/electron', '--no-sandbox', '.', 'minds://create?git_url=x'];
+  assert.equal(extractDeeplinkUrlFromArgv(legacy), 'minds://create?git_url=x');
+});
+
+test('an unregistered scheme in argv is not a deeplink', () => {
+  assert.equal(extractDeeplinkUrlFromArgv(['/usr/bin/electron', 'imbue://create', 'studio://x']), null);
 });
 
 test('argv without a URL -> null', () => {
@@ -172,6 +200,7 @@ test('argv without a URL -> null', () => {
 
 test('uppercase scheme is found', () => {
   assert.equal(extractDeeplinkUrlFromArgv(['MINDS://create']), 'MINDS://create');
+  assert.equal(extractDeeplinkUrlFromArgv(['IMBUE-STUDIO://create']), 'IMBUE-STUDIO://create');
 });
 
 test('first of two URLs wins', () => {

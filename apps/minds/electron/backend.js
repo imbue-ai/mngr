@@ -6,6 +6,7 @@ const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
 const { createRotatingLogStream } = require('./log-rotation');
 const { formatTimestampedLine, createLineSplitter } = require('./log-timestamp');
+const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // Swallow EPIPE on the Electron main process's own stdout/stderr. When dev
 // launches go through a pipe (e.g. `just minds-start | head -30`), the
@@ -243,7 +244,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
       // unchanged.
       const logStream = createRotatingLogStream({ filePath: logFile });
 
-      onProgress('Starting Mind...');
+      onProgress(`Starting ${PRODUCT_DISPLAY_NAME}...`);
 
       let uvBin, args, cwd, env;
 

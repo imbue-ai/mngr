@@ -7,6 +7,7 @@ const Sentry = require('@sentry/electron/main');
 const { parse: parseToml } = require('smol-toml');
 const paths = require('./paths');
 const { getBuildMetadata } = require('./build-metadata');
+const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 
 // Error reporting for the Electron MAIN process. This mirrors the Python
 // backend's Sentry setup (imbue/minds/utils/sentry/core.py) and the browser
@@ -417,7 +418,7 @@ function captureManualReport({ message, details }) {
   return (
     Sentry.captureEvent(
       {
-        message: message || 'Mind app error (manual report)',
+        message: message || `${PRODUCT_DISPLAY_NAME} app error (manual report)`,
         level: 'error',
         tags: { manually_submitted: 'true' },
         extra: { details: details || '', basics },

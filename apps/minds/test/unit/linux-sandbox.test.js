@@ -21,8 +21,8 @@ function helperStat({ uid, mode }) {
 const REGULAR_FILE = 0o100000;
 
 test('the profile electron-builder installs for the executable makes the namespace sandbox available', () => {
-  // What /proc/self/attr/current reads for /opt/Mind/minds under the
-  // .deb's `profile "minds" "/opt/Mind/minds" flags=(unconfined) { userns, }`.
+  // What /proc/self/attr/current reads for /opt/ImbueStudio/minds under the
+  // .deb's `profile "minds" "/opt/ImbueStudio/minds" flags=(unconfined) { userns, }`.
   const availability = sandboxAvailability({
     apparmorLabel: 'minds (unconfined)\n',
     profileName: 'minds',

@@ -10,9 +10,9 @@ const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
 const { decideStartupRoute } = require('./startup-routing');
-const { deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
+const { DEEPLINK_SCHEMES, deeplinkTargetPath, extractDeeplinkUrlFromArgv } = require('./deeplink');
 const {
-  SCHEME_MIME_TYPE,
+  SCHEME_MIME_TYPES,
   DESKTOP_ENTRY_FILENAME,
   ICON_PIXEL_SIZE,
   desktopEntryPaths,
@@ -53,6 +53,7 @@ const {
 const updater = require('./updater');
 const displayZoom = require('./display-zoom');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
+const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const {
@@ -143,7 +144,7 @@ if (app.isPackaged) {
     const pkg = require('../package.json');
     const shortSha = gitSha.slice(0, 8);
     app.setAboutPanelOptions({
-      applicationName: pkg.productName,
+      applicationName: PRODUCT_DISPLAY_NAME,
       applicationVersion: pkg.version,
       version: pkg.tdBuildId ? `${pkg.tdBuildId} · ${shortSha}` : shortSha,
     });
@@ -208,7 +209,7 @@ let isStartupRoutingPending = false;
 // one opened while it runs -- so such a window must not compute a route for
 // itself as well (see openStartupRoutedWindow).
 let isStartupRoutingBeingComputed = false;
-// A minds:// URL that arrived before the app could act on it.
+// A deeplink URL that arrived before the app could act on it.
 let pendingDeeplinkUrl = null;
 let canApplyDeeplinks = false;
 
@@ -459,12 +460,12 @@ function computeTitleFor(bundle) {
     const name = ws ? (ws.name || ws.id) : null;
     if (isPopoutBundle(bundle)) {
       const windowTitle = bundle.popout.title;
-      const parts = [windowTitle, name, 'Mind'].filter((part) => Boolean(part));
+      const parts = [windowTitle, name, PRODUCT_DISPLAY_NAME].filter((part) => Boolean(part));
       return parts.join(' — ');
     }
-    return name ? `${name} — Mind` : 'Mind';
+    return name ? `${name} — ${PRODUCT_DISPLAY_NAME}` : PRODUCT_DISPLAY_NAME;
   }
-  return 'Mind';
+  return PRODUCT_DISPLAY_NAME;
 }
 
 // The display zoom preference (Settings > Display), applied to every window.
@@ -574,7 +575,7 @@ function buildBundleWindowOptions(kind, bounds) {
     height: 800,
     minWidth: 800,
     minHeight: 600,
-    title: 'Mind',
+    title: PRODUCT_DISPLAY_NAME,
     show: false,
     autoHideMenuBar: true,
     backgroundColor: '#ffffff',
@@ -1900,12 +1901,14 @@ function fetchAppStatus(timeoutMs = 25000) {
   });
 }
 
-if (process.defaultApp) {
-  if (process.argv.length >= 2) {
-    app.setAsDefaultProtocolClient('minds', process.execPath, [path.resolve(process.argv[1])]);
+for (const scheme of DEEPLINK_SCHEMES) {
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(scheme, process.execPath, [path.resolve(process.argv[1])]);
+    }
+  } else {
+    app.setAsDefaultProtocolClient(scheme);
   }
-} else {
-  app.setAsDefaultProtocolClient('minds');
 }
 
 app.on('open-url', (event, url) => {
@@ -1938,7 +1941,7 @@ if (!gotLock) {
 
 /**
  * Register the running AppImage with the desktop: a menu entry, its icon, and
- * the minds:// scheme handler, none of which an AppImage gets from an
+ * the deeplink scheme handlers, none of which an AppImage gets from an
  * installer. Runs on every packaged Linux launch that has `APPIMAGE` set (the
  * AppImage runtime's name for the file being run), so the entry follows the
  * file after an in-place update renames it. Best effort throughout: a failure
@@ -1961,18 +1964,21 @@ function registerAppImageDesktopEntry() {
     // than an error, which would otherwise be written out as an empty PNG.
     if (icon.isEmpty()) throw new Error(`could not read the icon at ${iconSourcePath}`);
     fs.writeFileSync(iconPath, icon.resize({ width: ICON_PIXEL_SIZE, height: ICON_PIXEL_SIZE }).toPNG());
-    fs.writeFileSync(desktopEntryPath, renderDesktopEntry({ appImagePath, productName: app.name }));
+    fs.writeFileSync(
+      desktopEntryPath,
+      renderDesktopEntry({ appImagePath, productName: app.name, displayName: PRODUCT_DISPLAY_NAME }),
+    );
     console.log(`[desktop-entry] wrote ${desktopEntryPath} for ${appImagePath}`);
   } catch (err) {
     console.warn(`[desktop-entry] could not write the AppImage desktop entry: ${err.message}`);
     return;
   }
   // The database refresh is what makes the menu entry appear without a
-  // re-login; the mime default is what routes minds:// links here. Either
-  // tool may be absent on a minimal desktop, which is not worth an error.
+  // re-login; the mime default is what routes deeplinks here. Either tool
+  // may be absent on a minimal desktop, which is not worth an error.
   for (const [command, args] of [
     ['update-desktop-database', [applicationsDir]],
-    ['xdg-mime', ['default', DESKTOP_ENTRY_FILENAME, SCHEME_MIME_TYPE]],
+    ['xdg-mime', ['default', DESKTOP_ENTRY_FILENAME, ...SCHEME_MIME_TYPES]],
   ]) {
     execFile(command, args, (err) => {
       if (err) console.warn(`[desktop-entry] ${command} failed: ${err.message}`);
@@ -1996,8 +2002,9 @@ async function onReady() {
   initialBundle = createBundle();
   sizeFromSavedSession(initialBundle);
   updater.init({ onStatus: broadcastUpdateStatus });
-  // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the "Mind"
-  // rename has been on stable long enough for installs to have launched once.
+  // CLEANUP: remove alongside electron/legacy-name-cleanup.js once the Imbue
+  // Studio build has been on stable long enough for installs to have launched
+  // once (specs/imbue-studio-rename/05_cleanup.md).
   // A dev run shares the machine with an installed app, whose directories these
   // would be. Deferred so the delete cannot hold up the first window.
   if (app.isPackaged) {
@@ -2040,7 +2047,7 @@ function installApplicationMenu() {
   appMenuInstalled = true;
   const template = [
     {
-      label: app.name || 'Mind',
+      label: PRODUCT_DISPLAY_NAME,
       submenu: [
         { role: 'about' },
         { type: 'separator' },
@@ -2307,7 +2314,7 @@ function applyStartupRouting(bundle, { route, restorable, savedState }, { bounds
 }
 
 async function startBackendWithRetry() {
-  broadcastStatusToLoadingWindows('Starting Mind...');
+  broadcastStatusToLoadingWindows(`Starting ${PRODUCT_DISPLAY_NAME}...`);
 
   try {
     const { loginUrl, port } = await startBackend(
@@ -2354,7 +2361,7 @@ async function startBackendWithRetry() {
         // screen and its Retry instead of a fresh window loaded at the dead
         // port -- whose own Reload button only re-loads that same dead port.
         showErrorInAllWindows(
-          'Mind stopped unexpectedly',
+          `${PRODUCT_DISPLAY_NAME} stopped unexpectedly`,
           readLastLogLines(50) || `Process exited with code ${code}`,
         );
       });
@@ -2408,7 +2415,7 @@ async function startBackendWithRetry() {
 
     flushPendingDeeplink();
   } catch (err) {
-    showErrorInAllWindows('Failed to start Mind', err.message);
+    showErrorInAllWindows(`Failed to start ${PRODUCT_DISPLAY_NAME}`, err.message);
   }
 }
 
@@ -2444,7 +2451,7 @@ function handleDeeplink(rawUrl) {
   if (!mru) {
     // macOS hands a URL to an already-running app via application:openURLs:,
     // which need not fire 'activate', so nothing else will open a window for
-    // it. A focus-only link (bare minds://, what the browser sign-in success
+    // it. A focus-only link (bare imbue-studio://, what the browser sign-in success
     // page's "Open app" uses) opens the home page: opening the app IS the
     // documented contract for it.
     //
