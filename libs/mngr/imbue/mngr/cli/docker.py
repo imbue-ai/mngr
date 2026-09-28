@@ -1,4 +1,5 @@
 from typing import Any
+from typing import Final
 
 import click
 from loguru import logger
@@ -25,6 +26,11 @@ from imbue.mngr.primitives import InvalidDockerMemorySizeError
 from imbue.mngr.providers.docker.backend import DOCKER_BACKEND_NAME
 from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
+
+_RESIZE_APPLIED_NOTE: Final[str] = (
+    "The caps are applied to the container and recorded for every later start; a gVisor container reports the "
+    "new memory total in /proc/meminfo only after a restart."
+)
 
 
 class DockerResizeCliOptions(CommonCliOptions):
@@ -136,14 +142,7 @@ def docker_resize(ctx: click.Context, **kwargs: Any) -> None:
                 cpu_count=resources.cpu.count,
                 memory_gb=resources.memory_gb,
             ),
-            OperatorResultPart.shown(
-                "The caps are applied to the container and recorded for every later start; a gVisor container "
-                "reports the new memory total in /proc/meminfo only after a restart.",
-                note=(
-                    "Applied to the container and recorded for every later start; a gVisor container reports the "
-                    "new memory total only after a restart."
-                ),
-            ),
+            OperatorResultPart.shown(_RESIZE_APPLIED_NOTE, note=_RESIZE_APPLIED_NOTE),
         ),
         output_opts.output_format,
     )
