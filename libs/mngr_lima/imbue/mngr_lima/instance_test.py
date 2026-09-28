@@ -1042,3 +1042,38 @@ def test_apply_recorded_size_warns_instead_of_shrinking_a_larger_disk(
 
     assert "disk resize" not in invocation_log.read_text()
     assert "never shrinks" in captured.getvalue()
+
+
+def test_a_record_without_a_data_disk_size_is_never_grown_to_the_configured_size(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy record reports the provider's configured disk size, but only a size it holds itself drives a grow."""
+    host_id = _write_sized_record(lima_provider, "legacy-host", ("--cpus=2",), "mngr-x-data", None, None)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    invocation_log = _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 50
+    )
+
+    assert lima_provider.get_host_resources(lima_provider.to_offline_host(host_id)).disk_gb == 100.0
+    assert (
+        lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name))
+        is True
+    )
+    assert "disk resize" not in invocation_log.read_text()
+
+    # A resize that leaves the disk alone keeps the record's size unset rather than stamping the estimate in.
+    cpus_only = lima_provider.resize_host(host_id, LimaSizeRequest(cpus=LimaCpuCount(4)))
+    assert cpus_only.resources.disk_gb == 100.0
+    rewritten = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert rewritten is not None and rewritten.config is not None
+    assert rewritten.config.host_data_disk_size is None
+    assert "disk resize" not in invocation_log.read_text()
+
+    # An explicit disk size is recorded and applied.
+    grown = lima_provider.resize_host(host_id, LimaSizeRequest(data_disk_size=LimaDiskSize("200GiB")))
+    assert grown.resources.disk_gb == 200.0
+    assert "disk resize mngr-x-data --size 200GiB" in invocation_log.read_text()
+    regrown = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert regrown is not None and regrown.config is not None
+    assert regrown.config.host_data_disk_size == "200GiB"

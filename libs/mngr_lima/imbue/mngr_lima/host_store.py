@@ -57,7 +57,7 @@ class LimaHostConfig(FrozenModel):
             "Logical size of the btrfs additional disk (lima's size spelling, e.g. '100GiB'), "
             "recorded at create and rewritten by a resize; start_host grows the disk to it. None "
             "for the bind-mount layout and for records written before this field existed, which "
-            "fall back to the provider instance's configured host_data_disk_size."
+            "report the provider instance's configured host_data_disk_size but are never grown to it."
         ),
     )
     is_run_as_root: bool = Field(

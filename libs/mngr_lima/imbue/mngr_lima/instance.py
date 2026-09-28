@@ -1450,8 +1450,9 @@ sudo poweroff
     def _recorded_data_disk_size(self, host_record: HostRecord) -> LimaDiskSize | None:
         """The size of the host's btrfs data disk, or None when it has none.
 
-        Records written before the size was recorded per host carry the
-        provider's configured size, which is what they were created with.
+        Records written before the size was recorded per host report the
+        provider's configured size, the best estimate of what they were
+        created with; only a size the record itself holds drives a grow.
         """
         if host_record.config is None or host_record.config.host_data_disk_name is None:
             return None
@@ -1472,7 +1473,8 @@ sudo poweroff
         not know it. The CPU count and memory go into the instance's lima
         config, and the data disk is grown when the record is larger than the
         disk (lima refuses a shrink, and so does ``resize_host``, so a smaller
-        record is only logged). A running VM cannot be edited, so it is left
+        record is only logged); a record that holds no data-disk size leaves
+        its disk as it is. A running VM cannot be edited, so it is left
         alone and reported as not applied; ``start_host`` calls this again once
         it is stopped. Raises MngrError with lima's own message when lima
         refuses a value.
@@ -1484,7 +1486,7 @@ sudo poweroff
         try:
             self._apply_vm_size(config.instance_name, instance, recorded_size)
             if config.host_data_disk_name is not None:
-                self._grow_data_disk(config.host_data_disk_name, self._recorded_data_disk_size(host_record))
+                self._grow_data_disk(config.host_data_disk_name, config.host_data_disk_size)
         except LimaCommandError as e:
             raise MngrError(
                 f"Lima refused the recorded size of host {host_record.certified_host_data.host_id}: {e}"
@@ -1560,9 +1562,15 @@ sudo poweroff
                     f"{request.data_disk_size} was requested."
                 )
 
-        # Build the record the host will have.
+        # Build the record the host will have. The record keeps the disk size
+        # it holds (None for a record from before sizes were recorded per host)
+        # unless the request sets one; the reported size falls back to the
+        # provider's configured size either way.
         resized_start_args = apply_size_request_to_start_args(config.start_args, request)
-        resized_data_disk_size = (
+        recorded_data_disk_size = (
+            request.data_disk_size if request.data_disk_size is not None else config.host_data_disk_size
+        )
+        reported_data_disk_size = (
             request.data_disk_size if request.data_disk_size is not None else current_data_disk_size
         )
         # The resized start args carry the requested CPUs and memory, and the
@@ -1573,10 +1581,10 @@ sudo poweroff
             resized_start_args,
             vm_size_from_resources(current_resources, is_disk_gb_the_boot_disk=current_data_disk_size is None),
         )
-        resized_resources = host_resources_for_lima_host(resized_vm_size, resized_data_disk_size)
+        resized_resources = host_resources_for_lima_host(resized_vm_size, reported_data_disk_size)
         resized_config = config.model_copy_update(
             to_update(config.field_ref().start_args, resized_start_args),
-            to_update(config.field_ref().host_data_disk_size, resized_data_disk_size),
+            to_update(config.field_ref().host_data_disk_size, recorded_data_disk_size),
         )
         resized_record = host_record.model_copy_update(
             to_update(host_record.field_ref().config, resized_config),
