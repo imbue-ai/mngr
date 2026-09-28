@@ -130,7 +130,7 @@ Key concepts in the minds system:
 - **delivery** [future]: one attempt to deliver an invitation over one channel, with a delivery outcome.
   An invitation has one or more deliveries; inviting again creates another, subject to the invitation allowance and a per-grant cooldown held in one policy object so that it is easy to change.
 
-- **delivery outcome** [future]: the result of a delivery. At attempt time: `sent`, `suppressed`, `over allowance`, `unroutable`, or `failed`. Later, from the email provider's webhooks: `delivered`, `bounced`, `complained`, or `unsubscribed`.
+- **delivery outcome** [future]: the result of a delivery. At attempt time: `sent`, `suppressed`, `over allowance`, `too soon`, `unroutable`, or `failed`. Later, from the email provider's webhooks: `delivered`, `bounced`, `complained`, or `unsubscribed`.
 
 - **notification preferences** [future]: a registered account's choice of the channels it accepts notifications on, email and in-app, both on by default. Invitations are one kind of notification among others.
   Unregistered addresses have no preferences. The invitation email's unsubscribe link turns email off for a registered address and adds any address to the suppression list.
@@ -143,7 +143,7 @@ Key concepts in the minds system:
 - **invitation allowance** [future]: the number of deliveries a granter may attempt per channel in any rolling 24 hours: a constant per channel in one policy object, counted from delivery rows (a per-account override may come later).
   Every attempted delivery counts, including suppressed ones; refused attempts do not. The granter learns of the allowance only when refused.
 
-- **granter-visible invitation outcome** [future]: what the granter may learn about an invitation: `invited`, `could not invite` (the reason withheld), `over allowance`, or `joined`.
+- **granter-visible invitation outcome** [future]: what the granter may learn about an invitation: `invited`, `could not invite` (the reason withheld), `over allowance`, `too soon` (the same person was invited within the cooldown), or `joined`.
   Bounces, complaints, opt-outs, reports, and suppression are never shown to the granter, so that abuse is guesswork rather than a probe.
 
 - **share-gateway**: the background service that watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled.
