@@ -53,7 +53,6 @@ from imbue.mngr.interfaces.cleanup_failures import collecting_cleanup_failures
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
-from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -68,6 +67,7 @@ from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import DockerBuilder
+from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -83,9 +83,18 @@ from imbue.mngr.providers.docker.config import format_docker_publish_address
 from imbue.mngr.providers.docker.config import is_docker_daemon_local
 from imbue.mngr.providers.docker.config import ssh_host_for_docker_daemon
 from imbue.mngr.providers.docker.config import verify_ssh_bind_address_reachable
+from imbue.mngr.providers.docker.data_types import ContainerSize
+from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
+from imbue.mngr.providers.docker.data_types import DockerDaemonTotals
 from imbue.mngr.providers.docker.host_store import ContainerConfig
 from imbue.mngr.providers.docker.host_store import DockerHostStore
 from imbue.mngr.providers.docker.host_store import HostRecord
+from imbue.mngr.providers.docker.sizing import apply_size_request
+from imbue.mngr.providers.docker.sizing import clamp_cpus_to_daemon
+from imbue.mngr.providers.docker.sizing import docker_update_args
+from imbue.mngr.providers.docker.sizing import host_resources_for_container
+from imbue.mngr.providers.docker.sizing import parse_container_size
+from imbue.mngr.providers.docker.sizing import render_size_start_args
 from imbue.mngr.providers.docker.volume import DockerVolume
 from imbue.mngr.providers.docker.volume import LABEL_PREFIX
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
@@ -439,6 +448,42 @@ class DockerProviderInstance(BaseProviderInstance):
             return create_docker_client()
         except docker.errors.DockerException as e:
             raise ProviderUnavailableError(self.name, str(e)) from e
+
+    @cached_property
+    def _daemon_totals(self) -> DockerDaemonTotals:
+        """The CPU count and memory of the daemon's machine, read once per provider instance.
+
+        This is the ceiling an uncapped container can use, so it is what
+        ``get_host_resources`` reports for a dimension no cap was recorded for.
+        Read through the daemon's own endpoint (a local socket for a local
+        daemon), never through the container.
+        """
+        try:
+            info: dict[str, Any] = self._docker_client.info()
+        except docker.errors.DockerException as e:
+            raise ProviderUnavailableError(self.name, f"Cannot read Docker daemon info: {e}") from e
+        return DockerDaemonTotals(cpu_count=int(info["NCPU"]), memory_bytes=int(info["MemTotal"]))
+
+    def _default_size_start_args(self) -> tuple[str, ...]:
+        """The ``docker run`` caps the provider config asks for on every new container.
+
+        Docker refuses a CPU cap above the daemon's CPU count, so a configured
+        default that exceeds it is clamped rather than failing every create on a
+        smaller machine.
+        """
+        if self.config.default_cpus is None and self.config.default_memory is None:
+            return ()
+        clamped_cpus = self.config.default_cpus
+        if self.config.default_cpus is not None:
+            clamped_cpus = DockerCpuCount(clamp_cpus_to_daemon(self.config.default_cpus, self._daemon_totals))
+            if clamped_cpus != self.config.default_cpus:
+                logger.warning(
+                    "Clamped the default CPU cap from {} to {}: the Docker daemon has only {} CPUs",
+                    self.config.default_cpus,
+                    clamped_cpus,
+                    self._daemon_totals.cpu_count,
+                )
+        return render_size_start_args(ContainerSizeRequest(cpus=clamped_cpus, memory=self.config.default_memory))
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
@@ -1445,7 +1490,11 @@ kill -TERM 1
             )
 
         base_image = str(image) if image else (self.config.default_image or DEFAULT_IMAGE)
-        effective_start_args = tuple(self.config.default_start_args) + tuple(start_args or ())
+        # Docker keeps the last spelling of a repeated flag, so the configured
+        # size caps go first and any explicit start arg overrides them.
+        effective_start_args = (
+            self._default_size_start_args() + tuple(self.config.default_start_args) + tuple(start_args or ())
+        )
 
         # Detect whether we're falling through to the default with no user customization
         is_using_default = not image and not build_args and not self.config.default_image
@@ -1685,18 +1734,21 @@ kill -TERM 1
 
         # Native restart: just start the stopped container
         if container is not None:
-            with log_span("Starting stopped container", host_id=str(host_id)):
-                container.start()
-
-            self._container_cache_by_id[host_id] = container
-            self._evict_cached_host(host_id)
-
             if host_record is None:
                 raise HostNotFoundError(self.name, host_id)
 
             config = host_record.config
             if config is None:
                 raise MngrError(f"Host {host_id} has no configuration and cannot be started.")
+
+            # The record is the source of truth for the container's size (a
+            # resize rewrites it), so re-apply it before the container comes up.
+            self._apply_recorded_size(container, parse_container_size(config.start_args))
+            with log_span("Starting stopped container", host_id=str(host_id)):
+                container.start()
+
+            self._container_cache_by_id[host_id] = container
+            self._evict_cached_host(host_id)
 
             host_name = HostName(host_record.certified_host_data.host_name)
             user_tags = host_record.certified_host_data.user_tags
@@ -2211,18 +2263,63 @@ kill -TERM 1
         ]
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
-        """Get resource information for a Docker container.
+        """The caps recorded in the host's ``docker run`` arguments, filled in from the daemon's totals where uncapped.
 
-        Resource limits are applied via docker run flags (start_args) and are
-        managed by Docker directly. We return defaults here since we don't
-        parse the raw CLI args.
+        Reads only the host record and the daemon's cached totals, never the
+        container, so it answers the same for a stopped host and on the
+        unreachable-host listing fallback.
         """
-        return HostResources(
-            cpu=CpuResources(count=1, frequency_ghz=None),
-            memory_gb=1.0,
-            disk_gb=None,
-            gpu=None,
+        host_record = self._host_store.read_host_record(host.id)
+        if host_record is None or host_record.config is None:
+            recorded_size = ContainerSize()
+        else:
+            recorded_size = parse_container_size(host_record.config.start_args)
+        return host_resources_for_container(recorded_size, self._daemon_totals)
+
+    def _apply_recorded_size(self, container: docker.models.containers.Container, size: ContainerSize) -> None:
+        """Set ``size``'s caps on an existing container with ``docker update``; a no-op when nothing is capped.
+
+        Works on a running or a stopped container: docker records the caps in
+        the container's config and a stopped one picks them up when it starts.
+        Raises MngrError with docker's own message when it refuses a value.
+        """
+        update_args = docker_update_args(size)
+        if not update_args:
+            return
+        with log_span("Applying the recorded size to container {}", container.short_id):
+            try:
+                self._run_docker_creation_command(["update", *update_args, str(container.id)])
+            except ProcessError as e:
+                raise MngrError(f"Docker refused the size {list(update_args)}: {e.stderr.strip()}") from e
+
+    def resize_host(self, host_id: HostId, request: ContainerSizeRequest) -> HostResources:
+        """Rewrite the caps in the host's recorded ``docker run`` arguments and apply them to its container.
+
+        The container (running or stopped) is updated first, so a value docker
+        refuses leaves the record untouched; a host with no container (destroyed,
+        or restorable only from a snapshot) just has its record rewritten, and
+        the next start replays it. Returns the host's resulting resources.
+        """
+        host_record = self._host_store.read_host_record(host_id, use_cache=False)
+        if host_record is None:
+            raise HostNotFoundError(self.name, host_id)
+        config = host_record.config
+        if config is None:
+            raise MngrError(f"Host {host_id} has no container configuration and cannot be resized.")
+
+        resized_start_args = apply_size_request(config.start_args, request)
+        resized_size = parse_container_size(resized_start_args)
+
+        container = self._find_container_by_host_id(host_id)
+        if container is not None:
+            self._apply_recorded_size(container, resized_size)
+
+        updated_config = config.model_copy_update(to_update(config.field_ref().start_args, resized_start_args))
+        self._host_store.write_host_record(
+            host_record.model_copy_update(to_update(host_record.field_ref().config, updated_config))
         )
+        logger.debug("Recorded the new size for host {}: {}", host_id, list(resized_start_args))
+        return host_resources_for_container(resized_size, self._daemon_totals)
 
     # Snapshot Methods
 

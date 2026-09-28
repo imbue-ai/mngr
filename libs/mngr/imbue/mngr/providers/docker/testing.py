@@ -14,6 +14,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.cleanup_failures import CleanupFailedGroup
 from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.data_types import DockerDaemonTotals
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.volume import LABEL_PROVIDER
@@ -171,14 +172,26 @@ def make_offline_docker_provider(mngr_ctx: MngrContext, name: str = "test-docker
 def make_docker_provider_with_local_volume(
     mngr_ctx: MngrContext,
     volume_root: Path,
+    config: DockerProviderConfig | None = None,
+    daemon_totals: DockerDaemonTotals | None = None,
 ) -> DockerProviderInstance:
     """Create a Docker provider using a LocalVolume instead of a real Docker volume.
 
     This avoids needing a running Docker daemon for tests that only exercise
     state-volume logic (list_volumes, delete_volume, host store, etc.).
+    ``daemon_totals`` stands in for the ``docker info`` read that sizing falls
+    back on, so resource reporting can be exercised without a daemon too.
     """
-    provider = make_docker_provider(mngr_ctx)
+    provider = (
+        make_docker_provider(mngr_ctx)
+        if config is None
+        else DockerProviderInstance(
+            name=ProviderInstanceName("test-docker"), host_dir=Path("/mngr"), mngr_ctx=mngr_ctx, config=config
+        )
+    )
     provider.__dict__["_state_volume"] = LocalVolume(root_path=volume_root)
+    if daemon_totals is not None:
+        provider.__dict__["_daemon_totals"] = daemon_totals
     return provider
 
 

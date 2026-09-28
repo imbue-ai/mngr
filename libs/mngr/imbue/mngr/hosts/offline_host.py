@@ -21,6 +21,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
@@ -173,6 +174,9 @@ class BaseHost(HostInterface):
         return certified_data.plugin.get(plugin_name, {})
 
     # Provider-Derived Information
+
+    def get_provider_resources(self) -> HostResources:
+        return self.provider_instance.get_host_resources(self)
 
     def get_snapshots(self) -> list[SnapshotInfo]:
         """Get list of snapshots from the provider."""

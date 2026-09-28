@@ -13,6 +13,8 @@ from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.hosts.host import Host
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.primitives import AgentId
+from imbue.mngr.primitives import DockerCpuCount
+from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import ImageReference
@@ -21,6 +23,7 @@ from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.docker.backend import DockerProviderBackend
 from imbue.mngr.providers.docker.config import DockerProviderConfig
+from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
 from imbue.mngr.providers.docker.instance import create_docker_client
 from imbue.mngr.providers.docker.testing import make_docker_provider
@@ -780,3 +783,35 @@ def test_isolated_host_persists_data_across_restart(
     read = restarted.execute_idempotent_command("cat /mngr/restart-marker.txt")
     assert read.success
     assert "persisted" in read.stdout
+
+
+@pytest.mark.docker
+@pytest.mark.docker_sdk
+def test_stopped_host_reports_its_recorded_size_and_a_resize_applies_on_start(
+    docker_provider: DockerProviderInstance,
+) -> None:
+    host = docker_provider.create_host(HostName("test-sizing"), start_args=["--cpus=1", "--memory=512m"])
+    assert docker_provider.get_host_resources(host).cpu.count == 1
+    assert docker_provider.get_host_resources(host).memory_gb == 0.5
+
+    # A stopped host still answers from its record, with no container to ask.
+    docker_provider.stop_host(host, create_snapshot=False)
+    stopped = docker_provider.get_host(host.id)
+    assert isinstance(stopped, OfflineHost)
+    assert stopped.get_provider_resources().memory_gb == 0.5
+
+    # Resizing while stopped rewrites the record and docker's own config, so the
+    # next start comes up with the new cap.
+    resized = docker_provider.resize_host(host.id, ContainerSizeRequest(memory=DockerMemorySize("768m")))
+    assert resized.memory_gb == 0.75
+    restarted = docker_provider.start_host(host.id)
+    memory_max = restarted.execute_idempotent_command(
+        "cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes"
+    )
+    assert memory_max.stdout.strip() == str(768 * 1024**2)
+    assert docker_provider.get_host_resources(restarted).cpu.count == 1
+
+    # A value docker refuses (more CPUs than the daemon has) leaves the record untouched.
+    with pytest.raises(MngrError, match="Docker refused"):
+        docker_provider.resize_host(host.id, ContainerSizeRequest(cpus=DockerCpuCount(4096)))
+    assert docker_provider.get_host_resources(restarted).cpu.count == 1

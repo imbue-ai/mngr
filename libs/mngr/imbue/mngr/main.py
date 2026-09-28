@@ -23,6 +23,7 @@ from imbue.mngr.cli.connect import connect
 from imbue.mngr.cli.create import create
 from imbue.mngr.cli.default_command_group import DefaultCommandGroup
 from imbue.mngr.cli.destroy import destroy
+from imbue.mngr.cli.docker import docker_group
 from imbue.mngr.cli.events import events
 from imbue.mngr.cli.exec import exec_command
 from imbue.mngr.cli.extras import extras
@@ -265,6 +266,7 @@ BUILTIN_COMMANDS: list[click.Command] = [
     create,
     cleanup,
     destroy,
+    docker_group,
     exec_command,
     extras,
     list_command,

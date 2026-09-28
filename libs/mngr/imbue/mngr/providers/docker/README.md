@@ -52,7 +52,7 @@ The `host_state/` directory contains `HostRecord` JSON files. Each record stores
 
 - `certified_host_data`: the canonical host metadata (name, tags, snapshots, failure reason, timestamps, idle config)
 - `ssh_host`, `ssh_port`, `ssh_host_public_key`: SSH connection info. `ssh_port` is the port as last observed from docker (exposed in code as `HostRecord.last_discovered_ssh_port`; the JSON key is kept stable for older clients) -- it can go stale across a daemon restart and is reconciled against the container's live port mapping on connect/discovery
-- `config`: `ContainerConfig` (start_args, image) for replay on snapshot restore
+- `config`: `ContainerConfig` (start_args, image) for replay on snapshot restore. The `--cpus` / `--memory` / `--memory-swap` flags in `start_args` are also the host's recorded size: `get_host_resources` parses them (falling back to the daemon's `docker info` totals for an uncapped dimension), `resize_host` rewrites them, and the native start path re-applies them with `docker update` before `docker start`
 - `container_id`: Docker container ID
 
 For failed hosts (creation failure), only `certified_host_data` is populated; the SSH fields and config are `None`.
@@ -136,10 +136,25 @@ stop_host(host, create_snapshot=True)
 
 ```
 start_host(host_id)
-    1. docker start (restarts stopped container, filesystem preserved)
-    2. Re-run SSH setup (sshd, keys, etc.)
-    3. Return new Host object
+    1. docker update --cpus/--memory/--memory-swap from the recorded start_args
+       (no-op when the host is uncapped), so the record stays authoritative
+    2. docker start (restarts stopped container, filesystem preserved)
+    3. Re-run SSH setup (sshd, keys, etc.)
+    4. Return new Host object
 ```
+
+### Resize
+
+```
+resize_host(host_id, request)
+    1. Rewrite the --cpus / --memory / --memory-swap flags in the recorded start_args
+       (a dimension the request leaves unset keeps its current flags)
+    2. docker update the container (running or stopped) with the new caps; a value
+       docker refuses raises MngrError and leaves the record untouched
+    3. Write the host record
+```
+
+`create_host` renders the provider config's `default_cpus` / `default_memory` as the first start args (so `default_start_args` and caller `-s` flags override them), clamping `default_cpus` to the daemon's CPU count.
 
 ### Start (from snapshot)
 
