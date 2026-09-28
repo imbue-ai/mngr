@@ -143,9 +143,11 @@ def apply_size_request(start_args: Sequence[str], request: ContainerSizeRequest)
 def docker_update_args(size: ContainerSize) -> tuple[str, ...]:
     """The ``docker update`` flags that apply ``size`` to an existing container; empty when nothing is capped.
 
-    Docker refuses a memory update that leaves the swap cap where it was, so the
-    two are always sent together: the recorded swap cap when there is one, else
-    swap capped at the memory cap.
+    Docker refuses a memory cap above the container's current swap cap unless
+    the swap cap is updated with it, so the two are always sent together: the
+    recorded swap cap when there is one, else swap capped at the memory cap.
+    That default is mngr's no-swap policy, and it brings a recorded bare
+    ``--memory`` (a user-supplied start arg) under it from the first re-apply.
     """
     rendered: list[str] = []
     if size.cpus is not None:
