@@ -7,6 +7,7 @@ from loguru import logger
 from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
+from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import InvalidDockerMemorySizeError
 from imbue.mngr.providers.docker.data_types import ContainerSize
@@ -165,9 +166,9 @@ def _format_cpus(cpus: float) -> str:
 
 
 @pure
-def clamp_cpus_to_daemon(cpus: int, daemon_totals: DockerDaemonTotals) -> int:
+def clamp_cpus_to_daemon(cpus: DockerCpuCount, daemon_totals: DockerDaemonTotals) -> DockerCpuCount:
     """The largest whole CPU count the daemon accepts up to ``cpus`` (docker refuses a cap above its CPU count)."""
-    return min(cpus, max(1, daemon_totals.cpu_count))
+    return DockerCpuCount(min(cpus, max(1, daemon_totals.cpu_count)))
 
 
 @pure

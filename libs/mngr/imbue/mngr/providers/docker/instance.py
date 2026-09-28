@@ -481,7 +481,7 @@ class DockerProviderInstance(BaseProviderInstance):
         """The configured default CPU cap, lowered to the daemon's CPU count with a warning when it exceeds it."""
         if self.config.default_cpus is None:
             return None
-        clamped_cpus = DockerCpuCount(clamp_cpus_to_daemon(self.config.default_cpus, self._daemon_totals))
+        clamped_cpus = clamp_cpus_to_daemon(self.config.default_cpus, self._daemon_totals)
         if clamped_cpus != self.config.default_cpus:
             logger.warning(
                 "Clamped the default CPU cap from {} to {}: the Docker daemon has only {} CPUs",

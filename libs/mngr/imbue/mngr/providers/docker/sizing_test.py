@@ -112,7 +112,7 @@ def test_docker_update_args_always_sends_memory_and_swap_together() -> None:
 
 @pytest.mark.parametrize(("requested", "expected"), [(4, 4), (8, 8), (9, 8), (100, 8)])
 def test_clamp_cpus_to_daemon_never_exceeds_the_daemon_cpu_count(requested: int, expected: int) -> None:
-    assert clamp_cpus_to_daemon(requested, _DAEMON_TOTALS) == expected
+    assert clamp_cpus_to_daemon(DockerCpuCount(requested), _DAEMON_TOTALS) == expected
 
 
 def test_host_resources_for_container_reports_caps_and_fills_uncapped_dimensions_from_the_daemon() -> None:
