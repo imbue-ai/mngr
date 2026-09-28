@@ -1484,14 +1484,20 @@ sudo poweroff
             return False
         recorded_size = resolved_vm_size_from_resources(self._recorded_resources(host_record))
         try:
-            self._apply_vm_size(config.instance_name, instance, recorded_size)
-            if config.host_data_disk_name is not None:
-                self._grow_data_disk(config.host_data_disk_name, config.host_data_disk_size)
+            self._reconfigure_stopped_vm(config, instance, recorded_size)
         except LimaCommandError as e:
             raise MngrError(
                 f"Lima refused the recorded size of host {host_record.certified_host_data.host_id}: {e}"
             ) from e
         return True
+
+    def _reconfigure_stopped_vm(
+        self, config: LimaHostConfig, instance: Mapping[str, Any], recorded_size: ResolvedLimaVmSize
+    ) -> None:
+        """Bring the stopped VM's instance config and data disk up to the recorded size; raises LimaCommandError when lima refuses."""
+        self._apply_vm_size(config.instance_name, instance, recorded_size)
+        if config.host_data_disk_name is not None:
+            self._grow_data_disk(config.host_data_disk_name, config.host_data_disk_size)
 
     def _apply_vm_size(
         self, instance_name: str, instance: Mapping[str, Any], recorded_size: ResolvedLimaVmSize
