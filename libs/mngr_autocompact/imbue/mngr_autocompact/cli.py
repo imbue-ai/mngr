@@ -4,6 +4,7 @@ from typing import Any
 
 import click
 from click_option_group import optgroup
+from loguru import logger
 
 from imbue.mngr.api.find import AgentMatch
 from imbue.mngr.api.find import find_all_agents
@@ -97,7 +98,7 @@ def _load_running_compaction_agents_on_host(
     matches_on_host: Sequence[AgentMatch],
     mngr_ctx: MngrContext,
 ) -> list[AgentInterface]:
-    """Load the live agent for each match on one host, requiring it to be running and support compaction."""
+    """Load the live agent for each match on one host, requiring it to be running and filtering to those that support compaction."""
     host_match = matches_on_host[0]
     provider = get_provider_instance(host_match.provider_name, mngr_ctx)
     host = provider.get_host(host_match.host_id)
@@ -111,9 +112,12 @@ def _load_running_compaction_agents_on_host(
         if live_agent is None or not live_agent.is_running():
             raise UserInputError(f"Agent '{match.agent_name}' is not running on host '{match.host_name}'")
         if not isinstance(live_agent, HasCompactionMixin):
-            raise UserInputError(
-                f"Agent '{match.agent_name}' of type '{live_agent.agent_type}' does not support context compaction"
+            logger.warning(
+                "Agent '{}' of type '{}' does not support context compaction; ignoring",
+                match.agent_name,
+                live_agent.agent_type,
             )
+            continue
         compaction_agents.append(live_agent)
     return compaction_agents
 
