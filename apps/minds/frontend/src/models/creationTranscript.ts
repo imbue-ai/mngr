@@ -17,16 +17,16 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "what",
     label: "What a workspace is",
     detail:
-      "A workspace is a private computer where you and your Mind work together. It holds your files, apps, " +
+      "A workspace is a private computer where you and your agent work together. It holds your files, apps, " +
       "tools, and the memory you build together. It keeps your work in one place from one conversation to the " +
       "next, so you don’t have to start over.\n\n" +
-      "When you hand off a task or set a routine, your Mind can keep working while you’re away.",
+      "When you hand off a task or set a routine, your agent can keep working while you’re away.",
   },
   {
     id: "now",
     label: "What’s happening right now",
     detail:
-      "We’re setting up your workspace on its own computer. We’re installing the tools your Mind needs to make " +
+      "We’re setting up your workspace on its own computer. We’re installing the tools your agent needs to make " +
       "apps, work with your files and accounts, and keep tasks running while you’re away.\n\n" +
       "The last step connects your workspace to this app so you can start using it.\n\n" +
       "Want more detail? The setup log shows each part as it happens.",
@@ -35,7 +35,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "do",
     label: "What you can do with it",
     detail:
-      "Start with a problem you want to solve or an app you want to make. Your Mind can build tools around the " +
+      "Start with a problem you want to solve or an app you want to make. Your agent can build tools around the " +
       "way you work, use the files and accounts you connect, handle a task, or run a routine on a schedule.\n\n" +
       "You can keep what you make private, invite people to work with you in the same workspace, or share a " +
       "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
@@ -80,7 +80,7 @@ export const START_OPTIONS: StartOption[] = [
   {
     title: "Make something new",
     detail:
-      "Tell your Mind about a problem you want to solve or an app you want to make. It’ll help you shape it, " +
+      "Tell your agent about a problem you want to solve or an app you want to make. It’ll help you shape it, " +
       "build it, and improve it as you use it.",
   },
   {
@@ -91,11 +91,11 @@ export const START_OPTIONS: StartOption[] = [
   },
   {
     title: "Hand off some work",
-    detail: "Give your Mind a task to do now, or set something to run on a schedule.",
+    detail: "Give your agent a task to do now, or set something to run on a schedule.",
   },
   {
     title: "Learn how Mind works",
-    detail: "Ask your Mind to explain what it can do, how your workspace works, and what you control.",
+    detail: "Ask your agent to explain what it can do, how your workspace works, and what you control.",
   },
 ];
 
