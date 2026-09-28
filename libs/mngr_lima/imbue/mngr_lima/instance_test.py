@@ -866,7 +866,7 @@ def test_start_args_win_over_the_placeholder_size_older_records_hold(
     resources = lima_provider.get_host_resources(lima_provider.to_offline_host(host_id))
     assert resources == HostResources(cpu=CpuResources(count=8), memory_gb=16.0, disk_gb=20.0, gpu=None)
 
-    assert lima_provider._apply_recorded_size(record) is True
+    assert lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name)) is True
     assert "edit" not in invocation_log.read_text()
 
 
@@ -982,6 +982,21 @@ def test_resize_host_refuses_a_disk_shrink_and_a_disk_on_the_exposed_layout(
         lima_provider.resize_host(HostId.generate(), LimaSizeRequest(cpus=LimaCpuCount(2)))
 
 
+def test_resize_host_refuses_a_host_whose_instance_lima_does_not_know(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "gone-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
+    _install_fake_limactl_reporting(tmp_path, monkeypatch, "some-other-instance", "Stopped", 2, 4, "mngr-x-data", 100)
+
+    with pytest.raises(MngrError, match="was not found, so the host cannot be resized"):
+        lima_provider.resize_host(host_id, LimaSizeRequest(cpus=LimaCpuCount(4)))
+
+    unchanged = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert unchanged is not None
+    assert unchanged.resources == recorded
+
+
 def test_apply_recorded_size_skips_an_instance_already_at_the_recorded_size(
     lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -993,7 +1008,7 @@ def test_apply_recorded_size_skips_an_instance_already_at_the_recorded_size(
         tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 100
     )
 
-    assert lima_provider._apply_recorded_size(record) is True
+    assert lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name)) is True
 
     invocations = invocation_log.read_text()
     assert "edit" not in invocations
@@ -1012,7 +1027,7 @@ def test_apply_recorded_size_warns_instead_of_shrinking_a_larger_disk(
     )
 
     with capture_loguru() as captured:
-        lima_provider._apply_recorded_size(record)
+        lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name))
 
     assert "disk resize" not in invocation_log.read_text()
     assert "never shrinks" in captured.getvalue()

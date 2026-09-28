@@ -1060,7 +1060,7 @@ sudo poweroff
 
         # The record is the source of truth for the VM's size (a resize while
         # the VM ran only rewrote it), so bring the instance up to date first.
-        self._apply_recorded_size(host_record)
+        self._apply_recorded_size(host_record, self._find_limactl_instance(instance_name))
 
         try:
             limactl_start_existing(self.mngr_ctx.concurrency_group, instance_name)
@@ -1465,21 +1465,20 @@ sudo poweroff
                 return instance
         return None
 
-    def _apply_recorded_size(self, host_record: HostRecord) -> bool:
+    def _apply_recorded_size(self, host_record: HostRecord, instance: Mapping[str, Any] | None) -> bool:
         """Reconfigure the host's stopped VM to the size its record holds; returns whether that happened.
 
-        The CPU count and memory go into the instance's lima config, and the
-        data disk is grown when the record is larger than the disk (lima refuses
-        a shrink, and so does ``resize_host``, so a smaller record is only logged).
-        A running VM cannot be edited, so it is left alone and reported as not
-        applied; ``start_host`` calls this again once it is stopped. Raises
-        MngrError with lima's own message when lima refuses a value.
+        ``instance`` is the VM's ``limactl list`` entry, or None when lima does
+        not know it. The CPU count and memory go into the instance's lima
+        config, and the data disk is grown when the record is larger than the
+        disk (lima refuses a shrink, and so does ``resize_host``, so a smaller
+        record is only logged). A running VM cannot be edited, so it is left
+        alone and reported as not applied; ``start_host`` calls this again once
+        it is stopped. Raises MngrError with lima's own message when lima
+        refuses a value.
         """
         config = host_record.config
-        if config is None:
-            return False
-        instance = self._find_limactl_instance(config.instance_name)
-        if instance is None or instance.get("status") == "Running":
+        if config is None or instance is None or instance.get("status") == "Running":
             return False
         recorded_size = resolved_vm_size_from_resources(self._recorded_resources(host_record))
         try:
@@ -1585,7 +1584,12 @@ sudo poweroff
         )
 
         # Apply to a stopped VM first, so lima's refusal leaves the record alone.
-        is_applied = self._apply_recorded_size(resized_record)
+        instance = self._find_limactl_instance(config.instance_name)
+        if instance is None:
+            raise MngrError(
+                f"Lima instance {config.instance_name} of host {host_id} was not found, so the host cannot be resized."
+            )
+        is_applied = self._apply_recorded_size(resized_record, instance)
         self._host_store.write_host_record(resized_record)
         logger.debug("Recorded the new size for host {}: {}", host_id, resized_resources)
         return LimaResizeOutcome(resources=resized_resources, is_applied_to_instance=is_applied)
