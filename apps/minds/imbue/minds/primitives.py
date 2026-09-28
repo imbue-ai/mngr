@@ -1,12 +1,15 @@
 import os
+import re
 from enum import auto
 from typing import Final
+from typing import Self
 
 from pydantic import SecretStr
 
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.ids import RandomId
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.errors import ContentDomainError
 
 # Canonical set of AWS regions the minds app offers for ``LaunchMode.AWS``.
 # This is the single source of truth used both to write one
@@ -293,3 +296,21 @@ class GitCommitHash(NonEmptyStr):
     """A full git commit hash (40 hex characters)."""
 
     ...
+
+
+# One DNS label as the connector's share coordinates accept it: lowercase
+# alphanumerics with single interior hyphens, at most 63 characters.
+_DNS_LABEL_RE: Final[re.Pattern[str]] = re.compile(r"^(?=.{1,63}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+class ContentDomain(NonEmptyStr):
+    """The apex shared-workspace hostnames live under (e.g. ``personal-imbue.com``): dot-joined lowercase DNS labels."""
+
+    def __new__(cls, value: str) -> Self:
+        labels = value.split(".")
+        if not all(_DNS_LABEL_RE.match(label) is not None for label in labels):
+            raise ContentDomainError(
+                f"content_domain must be dot-joined lowercase DNS labels (letters, digits, interior hyphens; "
+                f"at most 63 characters each), got {value!r}"
+            )
+        return super().__new__(cls, value)

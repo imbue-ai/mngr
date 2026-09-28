@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.primitives import NonNegativeFloat
 from imbue.imbue_common.primitives import NonNegativeInt
+from imbue.minds.config.data_types import DeployEnvConfig
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MANAGEMENT_OVERLAY_CIDR_BY_TIER
 from imbue.minds.config.data_types import MANAGEMENT_OVERLAY_SUPERNET_CIDR
@@ -21,9 +22,12 @@ from imbue.minds.config.data_types import OriginsConfig
 from imbue.minds.config.data_types import PlanQuotasConfig
 from imbue.minds.config.data_types import management_overlay_for_tier
 from imbue.minds.config.data_types import parse_agents_from_mngr_output
+from imbue.minds.config.loader import committed_deploy_config_tiers
 from imbue.minds.config.loader import load_deploy_config
+from imbue.minds.errors import ContentDomainError
 from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.errors import ManagementPlaneConfigError
+from imbue.minds.primitives import ContentDomain
 from imbue.mngr.primitives import AgentId
 
 
@@ -212,6 +216,151 @@ def test_committed_tier_deploy_tomls_parse_with_their_origins_blocks() -> None:
         config = load_deploy_config(tier)
         assert config.origins is not None
         assert str(config.origins.cookie_domain) == apex
+
+
+# CLEANUP: drop the "is unset" assertions (or the whole test) once the cutover
+# PR (specs/imbue-studio-rename/04_cutover_rollout.md) sets any of these fields
+# on a committed deploy.toml.
+def test_every_committed_deploy_toml_still_loads_without_the_new_origin_fields() -> None:
+    """The rename fields are optional: no committed tier sets them yet, and every tier must keep loading."""
+    for tier in committed_deploy_config_tiers():
+        config = load_deploy_config(tier)
+        assert config.content_domain is None, f"tier {tier} sets content_domain before the cutover PR"
+        if config.origins is not None:
+            assert config.origins.legacy_chrome_origins == ()
+            assert config.origins.api_origin is None
+            assert config.origins.llm_origin is None
+
+
+def _origins_with_every_field() -> OriginsConfig:
+    return OriginsConfig(
+        accounts_origin=AnyUrl("https://accounts.imbue-staging.com"),
+        chrome_origin=AnyUrl("https://studio.imbue-staging.com"),
+        cookie_domain=NonEmptyStr("imbue-staging.com"),
+        legacy_chrome_origins=(AnyUrl("https://minds.imbue-staging.com"),),
+        api_origin=AnyUrl("https://api.studio.imbue-staging.com"),
+        llm_origin=AnyUrl("https://llm.studio.imbue-staging.com"),
+    )
+
+
+def test_origins_config_accepts_legacy_api_and_llm_origins_under_the_cookie_domain() -> None:
+    origins = _origins_with_every_field()
+    assert [label for label, _origin in origins.labeled_origins()] == [
+        "accounts_origin",
+        "chrome_origin",
+        "legacy_chrome_origins[0]",
+        "api_origin",
+        "llm_origin",
+    ]
+    assert origins.legacy_chrome_origins[0].host == "minds.imbue-staging.com"
+
+
+def test_origins_config_new_fields_default_to_nothing() -> None:
+    origins = OriginsConfig(
+        accounts_origin=AnyUrl("https://accounts.imbue-staging.com"),
+        chrome_origin=AnyUrl("https://minds.imbue-staging.com"),
+        cookie_domain=NonEmptyStr("imbue-staging.com"),
+    )
+    assert origins.legacy_chrome_origins == ()
+    assert origins.api_origin is None
+    assert origins.llm_origin is None
+    assert len(origins.labeled_origins()) == 2
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected_message"),
+    [
+        ("legacy_chrome_origins", (AnyUrl("https://minds.somewhere-else.com"),), "not a subdomain"),
+        ("legacy_chrome_origins", (AnyUrl("http://minds.imbue-staging.com"),), "must be https"),
+        ("api_origin", AnyUrl("https://api.studio.imbue-staging.com/v1"), "bare origin"),
+        ("llm_origin", AnyUrl("https://llm.elsewhere.com"), "not a subdomain"),
+    ],
+)
+def test_origins_config_holds_the_new_origins_to_the_same_shape_rule(
+    field_name: str, value: object, expected_message: str
+) -> None:
+    fields = _origins_with_every_field().model_dump()
+    fields[field_name] = value
+    with pytest.raises(ValueError, match=expected_message):
+        OriginsConfig.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    "legacy_origin",
+    ["https://studio.imbue-staging.com", "https://accounts.imbue-staging.com"],
+)
+def test_origins_config_rejects_a_legacy_origin_that_is_a_current_origin(legacy_origin: str) -> None:
+    fields = _origins_with_every_field().model_dump()
+    fields["legacy_chrome_origins"] = (AnyUrl(legacy_origin),)
+    with pytest.raises(ValueError, match="current chrome or accounts host"):
+        OriginsConfig.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected_message"),
+    [
+        ("api_origin", AnyUrl("https://studio.imbue-staging.com"), "browser-facing host"),
+        ("api_origin", AnyUrl("https://minds.imbue-staging.com"), "browser-facing host"),
+        ("llm_origin", AnyUrl("https://accounts.imbue-staging.com"), "browser-facing host"),
+        ("llm_origin", AnyUrl("https://minds.imbue-staging.com"), "browser-facing host"),
+        ("llm_origin", AnyUrl("https://api.studio.imbue-staging.com"), "share the host"),
+    ],
+)
+def test_origins_config_rejects_api_and_llm_hosts_that_collide(
+    field_name: str, value: AnyUrl, expected_message: str
+) -> None:
+    fields = _origins_with_every_field().model_dump()
+    fields[field_name] = value
+    with pytest.raises(ValueError, match=expected_message):
+        OriginsConfig.model_validate(fields)
+
+
+@pytest.mark.parametrize("value", ["personal-imbue.com", "personal-imbue-dev.com", "a1.b2.c3"])
+def test_content_domain_accepts_dot_joined_lowercase_dns_labels(value: str) -> None:
+    assert ContentDomain(value) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Personal-Imbue.com",
+        "-personal.com",
+        "personal-.com",
+        "personal..com",
+        "personal.com.",
+        "under_score.com",
+        "x" * 64 + ".com",
+    ],
+)
+def test_content_domain_rejects_anything_but_dns_labels(value: str) -> None:
+    with pytest.raises(ContentDomainError, match="dot-joined lowercase DNS labels"):
+        ContentDomain(value)
+
+
+def test_deploy_env_config_validates_content_domain_at_load() -> None:
+    raw = tomllib.loads(_minimal_deploy_toml('content_domain = "Personal.com"'))
+    with pytest.raises(ValidationError, match="dot-joined lowercase DNS labels"):
+        DeployEnvConfig.model_validate(raw)
+    loaded = DeployEnvConfig.model_validate(tomllib.loads(_minimal_deploy_toml('content_domain = "personal.com"')))
+    assert loaded.content_domain == ContentDomain("personal.com")
+
+
+def _minimal_deploy_toml(extra_top_level_line: str) -> str:
+    return f"""
+modal_workspace = "ws"
+vault_path_prefix = "secrets/minds/test"
+cloudflare_domain = "ops.example.com"
+{extra_top_level_line}
+
+[secrets]
+services = ["cloudflare"]
+
+[lifecycle]
+creates_resources = true
+modal_env_strategy = "PER_ENV"
+writes_local_state = true
+tracks_generation = false
+"""
 
 
 def test_management_plane_config_parses_a_full_document() -> None:
