@@ -49,7 +49,11 @@ def docker_group() -> None:
 
 
 def _build_size_request(opts: DockerResizeCliOptions) -> ContainerSizeRequest:
-    """The validated size the user asked for; raises UserInputError for a value docker could never accept."""
+    """The validated size the user asked for.
+
+    Raises click.UsageError when neither dimension is passed and UserInputError
+    for a value docker could never accept.
+    """
     if opts.cpus is None and opts.memory is None:
         raise click.UsageError("Nothing to resize: pass --cpus and/or --memory")
     cpus: DockerCpuCount | None = None
