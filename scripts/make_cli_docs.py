@@ -87,6 +87,7 @@ SECONDARY_COMMANDS = {
     "kanpan",
     "latchkey",
     "label",
+    "lima",
     "limit",
     "message",
     "observe",

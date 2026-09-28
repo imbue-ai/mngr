@@ -277,10 +277,12 @@ Provider: lima
   Start args are passed directly to 'limactl start'. Common options:
     --cpus=N              Number of CPU cores (default: 4)
     --memory=N            Memory in GiB (default: 4)
-    --disk=N              Disk in GiB (default: 100)
+    --disk=N              Boot disk in GiB (default: 100); the btrfs data disk is sized by
+                          the provider's host_data_disk_size setting instead
     --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
     --mount-writable      Make default mounts writable
-  Run 'limactl start --help' for the full list.
+  Run 'limactl start --help' for the full list. Change a host's size later with
+  'mngr lima resize'.
 
 Provider: local
   No build arguments are supported for the local provider.
