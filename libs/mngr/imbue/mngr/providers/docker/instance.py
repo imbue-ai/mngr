@@ -2271,9 +2271,9 @@ kill -TERM 1
     def get_host_resources(self, host: HostInterface) -> HostResources:
         """The caps recorded in the host's ``docker run`` arguments, filled in from the daemon's totals where uncapped.
 
-        Reads only the host record and the daemon's cached totals, never the
-        container, so it answers the same for a stopped host and on the
-        unreachable-host listing fallback.
+        Reads only the host record, and the daemon's cached totals for a
+        dimension with no recorded cap, never the container, so it answers the
+        same for a stopped host and on the unreachable-host listing fallback.
         """
         host_record = self._host_store.read_host_record(host.id)
         if host_record is None or host_record.config is None:
