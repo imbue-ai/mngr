@@ -418,9 +418,7 @@ def test_on_connection_error_clears_caches(docker_provider: DockerProviderInstan
     docker_provider.on_connection_error(host.id)
 
 
-# =========================================================================
 # SSH Setup Verification
-# =========================================================================
 
 
 @pytest.mark.docker
@@ -441,9 +439,7 @@ def test_ssh_packages_installed_after_create(docker_provider: DockerProviderInst
     assert result.success, f"openssh-server not installed: {result.stderr}"
 
 
-# =========================================================================
 # Snapshot Restore
-# =========================================================================
 
 
 @pytest.mark.docker
@@ -462,9 +458,7 @@ def test_stop_with_snapshot_then_start_preserves_data(docker_provider: DockerPro
     assert "snapshot-payload-xyz" in result.stdout
 
 
-# =========================================================================
 # Dockerfile-based Host Creation
-# =========================================================================
 
 
 @pytest.mark.docker
@@ -488,9 +482,7 @@ def test_create_host_with_dockerfile(docker_provider: DockerProviderInstance, tm
     assert "dockerfile-marker-content" in result.stdout
 
 
-# =========================================================================
 # Agent Data Persistence
-# =========================================================================
 
 
 @pytest.mark.docker
@@ -524,9 +516,7 @@ def test_remove_persisted_agent_data(docker_provider: DockerProviderInstance) ->
     assert len(records) == 0
 
 
-# =========================================================================
 # Stopped Host Behavior
-# =========================================================================
 
 
 @pytest.mark.docker
@@ -556,9 +546,7 @@ def test_start_failed_host_raises_error(docker_provider: DockerProviderInstance)
         docker_provider.start_host(host_id)
 
 
-# =========================================================================
 # Release Tests (comprehensive / slower)
-# =========================================================================
 
 
 @pytest.mark.release
@@ -724,9 +712,7 @@ def test_disconnect_closes_paramiko_ssh_client(docker_provider: DockerProviderIn
     )
 
 
-# =============================================================================
 # Host-volume isolation (volume-subpath)
-# =============================================================================
 
 
 @pytest.fixture

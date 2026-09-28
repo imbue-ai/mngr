@@ -58,9 +58,7 @@ def test_agent_name_is_not_capped_at_host_name_length() -> None:
     assert str(AgentName(long_name)) == long_name
 
 
-# =============================================================================
 # DiscoveredAgent property tests
-# =============================================================================
 
 
 def _make_discovered_agent(
@@ -152,9 +150,7 @@ def test_discovered_agent_labels_returns_values_when_present() -> None:
     assert ref.labels == {"env": "prod", "team": "infra"}
 
 
-# =============================================================================
 # default_branch_name tests
-# =============================================================================
 
 
 def test_default_branch_name_uses_default_prefix() -> None:
@@ -169,9 +165,7 @@ def test_default_branch_name_uses_custom_prefix() -> None:
     assert result == "custom/my-agent"
 
 
-# =============================================================================
 # AgentName validation tests
-# =============================================================================
 
 
 def test_agent_name_rejects_leading_dash() -> None:
@@ -192,9 +186,7 @@ def test_agent_name_accepts_valid_name() -> None:
     assert str(name) == "good-agent-name"
 
 
-# =============================================================================
 # DiscoveredAgent.created_branch_name tests
-# =============================================================================
 
 
 def test_discovered_agent_created_branch_name_returns_none_when_missing() -> None:
@@ -228,9 +220,7 @@ def test_discovered_agent_created_branch_name_raises_on_unexpected_type() -> Non
         _ = ref.created_branch_name
 
 
-# =============================================================================
 # checked_out_branch_name tests
-# =============================================================================
 
 
 @pytest.mark.parametrize(
