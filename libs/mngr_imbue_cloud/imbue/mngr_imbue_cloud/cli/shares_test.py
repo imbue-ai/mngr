@@ -59,6 +59,26 @@ def test_share_to_json_passes_the_chrome_origin_through() -> None:
     assert _share_to_json(info_without_chrome, include_token=False)["chrome_origin"] is None
 
 
+def test_share_to_json_passes_the_needs_reshare_flag_through() -> None:
+    # The desktop decides whether to repair a share from this key.
+    stale = ShareInfo(
+        host_id="host-" + "a" * 32,
+        workspace_domain="host-" + "a" * 32 + ".b.us1.old.example",
+        region="us1",
+        state="active",
+        needs_reshare=True,
+    )
+    assert _share_to_json(stale, include_token=False)["needs_reshare"] is True
+
+    current = ShareInfo(
+        host_id=stale.host_id,
+        workspace_domain=stale.workspace_domain,
+        region=stale.region,
+        state=stale.state,
+    )
+    assert _share_to_json(current, include_token=False)["needs_reshare"] is False
+
+
 def test_set_grantees_help_documents_the_repeatable_user_id_option() -> None:
     result = CliRunner().invoke(shares, ["set-grantees", "--help"])
     assert result.exit_code == 0

@@ -285,6 +285,10 @@ class ShareCliInfo(WireModel):
     # SHARE_CHROME_ORIGIN; None against a connector that predates the field or
     # a tier with none configured (callers fall back to the connector origin).
     chrome_origin: str | None = None
+    # True while the share is active on a content domain the tier moved away
+    # from; the share panel repairs it by re-sharing. False against a connector
+    # that predates the flag.
+    needs_reshare: bool = False
 
 
 # How long a readiness poll may reuse a cached connector share lookup. The

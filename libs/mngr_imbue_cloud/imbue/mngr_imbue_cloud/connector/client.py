@@ -1946,4 +1946,5 @@ def _parse_share_info(body: dict[str, Any], state: str) -> ShareInfo:
         last_tunnel_login_at=body.get("last_tunnel_login_at"),
         cert_not_after=body.get("cert_not_after"),
         chrome_origin=str(raw_chrome_origin) if raw_chrome_origin else None,
+        needs_reshare=body.get("needs_reshare") is True,
     )
