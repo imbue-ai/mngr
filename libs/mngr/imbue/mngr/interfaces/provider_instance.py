@@ -112,9 +112,10 @@ def _ssh_info_from_host(host: HostInterface) -> SSHInfo | None:
 def _read_offline_provider_resources(host: HostInterface) -> HostResources | None:
     """The size a provider recorded for a host that is not online, or None when that read itself fails.
 
-    This runs on the listing fallback for an unreachable host, which must
-    degrade to "size unknown" rather than fail because a provider's record
-    could not be read (e.g. a store that is itself remote).
+    This runs for every host the listing sees offline: an ordinarily stopped
+    host, and the fallback for one that could not be reached. Either way the
+    listing must degrade to "size unknown" rather than fail because a
+    provider's record could not be read (e.g. a store that is itself remote).
     """
     try:
         return host.get_provider_resources()
