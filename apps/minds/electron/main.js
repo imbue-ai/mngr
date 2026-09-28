@@ -781,6 +781,11 @@ function wireBundleWindowEvents(bundle) {
     // A window closed mid-intro can never report the film over; the startup
     // route waiting on it must not wait forever.
     bundle.resolveIntroFinished();
+    // Electron keeps its own visibilityChanged listener on the window for
+    // show/hide/minimize/maximize/restore, and that listener reads the native
+    // window destroy() already took away, so a visibility event arriving after
+    // teardown throws and strands the app in the dock (#480).
+    win.removeAllListeners();
   });
 }
 
