@@ -262,9 +262,7 @@ class LimaProviderInstance(BaseProviderInstance):
             self._evict_cached_host(host_id)
         self._host_store.clear_cache()
 
-    # =========================================================================
     # Directory and Store Properties
-    # =========================================================================
 
     @property
     def _provider_dir(self) -> Path:
@@ -321,9 +319,7 @@ class LimaProviderInstance(BaseProviderInstance):
             is_strict_parsing=self.mngr_ctx.config.strict_host_record_parsing,
         )
 
-    # =========================================================================
     # Volume Helpers
-    # =========================================================================
 
     def _ensure_host_volume_dir(self, host_id: HostId) -> Path:
         """Create and return the per-host volume directory."""
@@ -339,9 +335,7 @@ class LimaProviderInstance(BaseProviderInstance):
         """Generate a deterministic volume ID for a host."""
         return VolumeId(f"vol-{host_id.get_uuid().hex}")
 
-    # =========================================================================
     # Tag Helpers
-    # =========================================================================
 
     def _tags_path(self, host_id: HostId) -> Path:
         """Path to the JSON file storing tags for a host."""
@@ -364,9 +358,7 @@ class LimaProviderInstance(BaseProviderInstance):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(tags, indent=2))
 
-    # =========================================================================
     # SSH and Host Object Helpers
-    # =========================================================================
 
     def _get_ssh_config(self, instance_name: str) -> LimaSshConfig:
         """Get SSH connection info from Lima."""
@@ -661,9 +653,7 @@ sudo poweroff
                 timeout=CLOUD_INIT_TIMEOUT_SECONDS,
             )
 
-    # =========================================================================
     # Run-as-root SSH helpers
-    # =========================================================================
 
     def _ensure_keys_dir(self) -> Path:
         """Create (if needed) and return the provider-wide keys directory."""
@@ -753,9 +743,7 @@ sudo poweroff
             return "root", root_key_path
         return ssh_config.user, ssh_config.identity_file
 
-    # =========================================================================
     # Core Lifecycle Methods
-    # =========================================================================
 
     def create_host(
         self,
@@ -1262,9 +1250,7 @@ sudo poweroff
         """Handle connection errors by clearing the cache."""
         self._evict_cached_host(host_id)
 
-    # =========================================================================
     # Discovery Methods
-    # =========================================================================
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
         """Retrieve a host by ID or name."""
@@ -1590,9 +1576,7 @@ sudo poweroff
         logger.debug("Recorded the new size for host {}: {}", host_id, resized_resources)
         return LimaResizeOutcome(resources=resized_resources, is_applied_to_instance=is_applied)
 
-    # =========================================================================
     # Snapshot Methods (not supported)
-    # =========================================================================
 
     def create_snapshot(
         self,
@@ -1614,9 +1598,7 @@ sudo poweroff
     ) -> None:
         raise SnapshotsNotSupportedError(self.name)
 
-    # =========================================================================
     # Volume Methods
-    # =========================================================================
 
     def list_volumes(self) -> list[VolumeInfo]:
         """List all volumes managed by this provider.
@@ -1685,9 +1667,7 @@ sudo poweroff
         volume = LocalVolume(root_path=volume_dir)
         return HostVolume(volume=volume)
 
-    # =========================================================================
     # Host Mutation Methods
-    # =========================================================================
 
     def get_host_tags(self, host: HostInterface | HostId) -> dict[str, str]:
         host_id = host.id if isinstance(host, HostInterface) else host
@@ -1738,9 +1718,7 @@ sudo poweroff
         self._evict_cached_host(host_id)
         return self.get_host(host_id)
 
-    # =========================================================================
     # Connector Method
-    # =========================================================================
 
     def get_connector(self, host: HostInterface | HostId) -> PyinfraHost:
         """Get the pyinfra connector for a host."""
@@ -1750,9 +1728,7 @@ sudo poweroff
             return host_obj.connector.host
         raise MngrError(f"Cannot get connector for offline host {host_id}")
 
-    # =========================================================================
     # Agent Data Persistence
-    # =========================================================================
 
     @property
     def is_agent_data_persistence_supported(self) -> bool:

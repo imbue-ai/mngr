@@ -234,9 +234,7 @@ def test_build_add_known_hosts_command_escapes_quotes() -> None:
     assert "'\"'\"'" in cmd
 
 
-# =============================================================================
 # build_add_authorized_keys_command tests
-# =============================================================================
 
 
 def test_build_add_authorized_keys_command_empty() -> None:
@@ -280,12 +278,10 @@ def test_build_add_authorized_keys_command_is_idempotent(tmp_path: Path) -> None
     assert lines.count(key_b) == 1
 
 
-# =============================================================================
 # Activity Watcher Shell Function Tests
 #
 # These tests source the activity_watcher.sh script and exercise individual
 # functions in isolation via bash subprocess calls.
-# =============================================================================
 
 
 def _get_activity_watcher_script_path() -> str:
@@ -473,9 +469,7 @@ def test_get_activity_sources_returns_sources_when_configured(tmp_path: Path) ->
     assert "agent" in sources
 
 
-# =========================================================================
 # sshd start + self-healing entrypoint commands
-# =========================================================================
 
 
 def test_self_healing_entrypoint_is_valid_shell_and_backgrounds_only_idle() -> None:

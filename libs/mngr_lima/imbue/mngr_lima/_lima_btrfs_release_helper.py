@@ -173,8 +173,7 @@ def _verify_resize_round_trip(provider: LimaProviderInstance, host: Host, disk_n
     if data_disk_bytes < 2.8 * 1024**3:
         raise AssertionError(f"Expected the data filesystem to have grown to ~3 GiB, df says {data_disk_bytes} bytes")
 
-    # Resizing the stopped-then-started host again to the same size is a no-op that still reports applied=False
-    # (running), while a stopped host takes a resize at once.
+    # A stopped VM takes a resize at once.
     provider.stop_host(host_after)
     applied = provider.resize_host(host.id, LimaSizeRequest(cpus=LimaCpuCount(2)))
     if not applied.is_applied_to_instance:
