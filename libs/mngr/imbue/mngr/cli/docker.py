@@ -8,6 +8,7 @@ from imbue.imbue_common.primitives import InvalidPrimitiveValueError
 from imbue.mngr.api.discover import discover_hosts_and_agents
 from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.providers import get_provider_instance
+from imbue.mngr.api.providers import list_provider_names_to_load
 from imbue.mngr.cli.address_params import HOST_ADDRESS
 from imbue.mngr.cli.common_opts import add_common_options
 from imbue.mngr.cli.common_opts import setup_command_context
@@ -23,6 +24,7 @@ from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import InvalidDockerMemorySizeError
+from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.providers.docker.backend import DOCKER_BACKEND_NAME
 from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
@@ -68,14 +70,14 @@ def _build_size_request(opts: DockerResizeCliOptions) -> ContainerSizeRequest:
 
 
 def _docker_provider_names(mngr_ctx: MngrContext) -> tuple[str, ...]:
-    """Every provider instance a docker host can live on: the configured docker-backend instances plus the default one."""
-    configured = [
-        str(name) for name, config in mngr_ctx.config.providers.items() if config.backend == DOCKER_BACKEND_NAME
-    ]
-    default_name = str(DOCKER_BACKEND_NAME)
-    if default_name not in configured:
-        configured.append(default_name)
-    return tuple(configured)
+    """Every enabled provider instance a docker host can live on (a default instance is named after its backend)."""
+    docker_names: list[str] = []
+    for name in list_provider_names_to_load(mngr_ctx):
+        provider_config = mngr_ctx.config.providers.get(name)
+        backend = provider_config.backend if provider_config is not None else ProviderBackendName(str(name))
+        if backend == DOCKER_BACKEND_NAME:
+            docker_names.append(str(name))
+    return tuple(docker_names)
 
 
 def _resolve_host(address: HostAddress, mngr_ctx: MngrContext) -> DiscoveredHost:
