@@ -4,6 +4,7 @@ import pytest
 from imbue.mngr.cli.docker import DockerResizeCliOptions
 from imbue.mngr.cli.docker import _build_size_request
 from imbue.mngr.cli.docker import _docker_provider_names
+from imbue.mngr.cli.docker import _resolve_host
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import UserInputError
@@ -67,3 +68,10 @@ def test_docker_provider_names_keep_only_docker_backed_instances(
 
     # The test plugin manager registers only the local backend, so there is no default docker instance to list.
     assert _docker_provider_names(mngr_ctx) == ("remote-docker",)
+
+
+def test_resolve_host_refuses_to_scan_other_providers_when_no_docker_provider_is_enabled(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    with pytest.raises(UserInputError, match="No docker provider is enabled"):
+        _resolve_host(HostAddress(host=HostName("my-host")), temp_mngr_ctx)

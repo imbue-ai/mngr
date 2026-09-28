@@ -90,7 +90,13 @@ def _resolve_host(address: HostAddress, mngr_ctx: MngrContext) -> DiscoveredHost
     Only docker providers are discovered (an unrelated provider that cannot be
     reached must not stop a docker resize), unless the address names one.
     """
-    provider_names = (str(address.provider),) if address.provider is not None else _docker_provider_names(mngr_ctx)
+    if address.provider is not None:
+        provider_names: tuple[str, ...] = (str(address.provider),)
+    else:
+        provider_names = _docker_provider_names(mngr_ctx)
+        # Discovery reads an empty provider filter as "every provider", not "none".
+        if not provider_names:
+            raise UserInputError("No docker provider is enabled, so there is no docker host to resize")
     outcome = discover_hosts_and_agents(
         mngr_ctx,
         provider_names=provider_names,
