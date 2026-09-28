@@ -87,8 +87,15 @@ _HOOKS_FILENAME: str = "hooks.json"
 # long on macOS) keeps it short, the hash keeps it unique per agent and identical for every client
 # (daemon, ``--remote`` TUI, mngr's WebSocket client, Minds). A stale socket from a prior run is
 # ``rm -f``'d before the daemon binds.
+#
+# The socket sits in a per-agent directory, never directly in ``/tmp``: codex (0.157 and later)
+# refuses to bind unless the socket's parent is owned by the user or root and keeps other users
+# from replacing its entries, and a world-writable ``/tmp`` without the sticky bit (as on Modal
+# sandboxes) fails that check. codex creates a missing parent at 0700 itself; the daemon's launch
+# creates it too, for codex versions that do not.
 _APP_SERVER_SOCKET_DIR: str = "/tmp"
-_APP_SERVER_SOCKET_PREFIX: str = "mngr-codex-"
+_APP_SERVER_SOCKET_DIR_PREFIX: str = "mngr-codex-"
+_APP_SERVER_SOCKET_FILENAME: str = "app-server.sock"
 
 # Where output styles are authored, relative to the work_dir. Harness-neutral by design:
 # claude reads the same files through its own ``.claude/output-styles`` (a symlink to this),
@@ -125,13 +132,14 @@ def get_codex_hooks_path(codex_home: Path) -> Path:
 def get_codex_app_server_socket_path(codex_home: Path) -> Path:
     """Return the ``codex app-server`` unix-socket path for the agent whose home is ``codex_home``.
 
-    A short, stable ``/tmp/mngr-codex-<hash>.sock`` (NOT a path under ``codex_home``): a unix socket
-    path must fit in ``SUN_LEN`` (~108 bytes), which a deeply-nested agent state dir can exceed. The
-    hash of the absolute ``codex_home`` makes it unique per agent yet identical for every client
-    that resolves it from the same home. ~38 chars total, safely under the limit on Linux and macOS.
+    A short, stable ``/tmp/mngr-codex-<hash>/app-server.sock`` (NOT a path under ``codex_home``): a
+    unix socket path must fit in ``SUN_LEN`` (~108 bytes), which a deeply-nested agent state dir can
+    exceed. The hash of the absolute ``codex_home`` makes it unique per agent yet identical for every
+    client that resolves it from the same home. ~48 chars total, safely under the limit on Linux and
+    macOS. The parent directory is the agent's own (see ``_APP_SERVER_SOCKET_DIR``).
     """
     home_hash = hashlib.sha1(str(codex_home).encode("utf-8")).hexdigest()[:16]
-    return Path(_APP_SERVER_SOCKET_DIR) / f"{_APP_SERVER_SOCKET_PREFIX}{home_hash}.sock"
+    return Path(_APP_SERVER_SOCKET_DIR) / f"{_APP_SERVER_SOCKET_DIR_PREFIX}{home_hash}" / _APP_SERVER_SOCKET_FILENAME
 
 
 def get_shared_output_styles_dir(work_dir: Path) -> Path:

@@ -16,6 +16,7 @@ from imbue.mngr_codex.codex_config import RECORD_SESSION_POINTERS_SCRIPT_NAME
 from imbue.mngr_codex.codex_config import build_codex_config
 from imbue.mngr_codex.codex_config import build_codex_hooks_config
 from imbue.mngr_codex.codex_config import extract_latest_codex_version
+from imbue.mngr_codex.codex_config import get_codex_app_server_socket_path
 from imbue.mngr_codex.codex_config import get_codex_auth_path
 from imbue.mngr_codex.codex_config import get_codex_config_path
 from imbue.mngr_codex.codex_config import get_codex_home
@@ -55,6 +56,18 @@ def test_path_helpers_address_the_codex_home_tree() -> None:
 # =============================================================================
 # Update-check helpers (codex's version.json)
 # =============================================================================
+
+
+def test_app_server_socket_sits_in_its_own_directory_under_tmp() -> None:
+    """codex refuses a socket whose parent other users can write to, which a bare /tmp can be."""
+    deep_home = Path("/tmp") / ("nested" * 20) / "agent" / "plugin" / "codex" / ".codex"
+    socket_path = get_codex_app_server_socket_path(deep_home)
+
+    assert socket_path.parent != Path("/tmp")
+    assert socket_path.parent.parent == Path("/tmp")
+    assert len(str(socket_path)) < 104
+    assert get_codex_app_server_socket_path(deep_home) == socket_path
+    assert get_codex_app_server_socket_path(deep_home / "other").parent != socket_path.parent
 
 
 def test_parse_codex_cli_version_extracts_the_bare_semver() -> None:

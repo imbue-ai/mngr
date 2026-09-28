@@ -1736,8 +1736,9 @@ class CodexAgent(
         state = "$MNGR_AGENT_STATE_DIR"
         process_started_cmd = f'touch "{state}/{PROCESS_STARTED_MARKER_FILENAME}" 2>/dev/null || true'
 
-        # Remove any stale socket a prior run left behind before the daemon binds.
-        rm_socket_cmd = f"rm -f {quoted_socket}"
+        # Create the agent's private socket directory (codex refuses a parent other users can write
+        # to) and remove any stale socket a prior run left behind before the daemon binds.
+        rm_socket_cmd = f"mkdir -p -m 700 {shlex.quote(str(socket_path.parent))} && rm -f {quoted_socket}"
 
         # The daemon runs as the foreground process of a detached sidecar window in the
         # SAME session, so `tmux kill-session` reaps it. `exec` replaces the wrapper shell
