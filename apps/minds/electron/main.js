@@ -827,7 +827,12 @@ function wireBundleNavigationEvents(bundle) {
     updateOsTitle(bundle);
   };
   wc.on('did-navigate', (_e, url) => onTopLevelNavigate(url));
-  wc.on('did-navigate-in-page', (_e, url) => onTopLevelNavigate(url));
+  // Unlike did-navigate, this one also fires for the frames inside the page
+  // (a pushState in the workspace shell or a chat page), which are not the
+  // window's own route.
+  wc.on('did-navigate-in-page', (_e, url, isMainFrame) => {
+    if (isMainFrame) onTopLevelNavigate(url);
+  });
 
   // Subframe navigation: the workspace iframe. This is main's tamper-proof
   // record of which workspace the window displays (used for session
