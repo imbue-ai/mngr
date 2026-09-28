@@ -996,17 +996,22 @@ class _DockerProviderWithoutContainers(DockerProviderInstance):
         return None
 
 
-def test_resize_host_rewrites_the_recorded_start_args_and_reports_the_new_size(
-    temp_mngr_ctx: MngrContext, tmp_path: Path
-) -> None:
+def _make_provider_without_containers(mngr_ctx: MngrContext, volume_root: Path) -> _DockerProviderWithoutContainers:
     provider = _DockerProviderWithoutContainers(
         name=ProviderInstanceName("test-docker"),
         host_dir=Path("/mngr"),
-        mngr_ctx=temp_mngr_ctx,
+        mngr_ctx=mngr_ctx,
         config=DockerProviderConfig(isolate_host_volumes=False),
     )
-    provider.__dict__["_state_volume"] = LocalVolume(root_path=tmp_path)
+    provider.__dict__["_state_volume"] = LocalVolume(root_path=volume_root)
     provider.__dict__["_daemon_totals"] = _DAEMON_TOTALS
+    return provider
+
+
+def test_resize_host_rewrites_the_recorded_start_args_and_reports_the_new_size(
+    temp_mngr_ctx: MngrContext, tmp_path: Path
+) -> None:
+    provider = _make_provider_without_containers(temp_mngr_ctx, tmp_path)
     _write_host_record_with_start_args(provider, ("--cpus=1", "--memory=1g", "--memory-swap=1g", "--workdir=/"))
 
     resources = provider.resize_host(HostId(HOST_ID_A), ContainerSizeRequest(memory=DockerMemorySize("4g")))
@@ -1019,13 +1024,7 @@ def test_resize_host_rewrites_the_recorded_start_args_and_reports_the_new_size(
 
 
 def test_resize_host_refuses_a_host_without_a_container_config(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
-    provider = _DockerProviderWithoutContainers(
-        name=ProviderInstanceName("test-docker"),
-        host_dir=Path("/mngr"),
-        mngr_ctx=temp_mngr_ctx,
-        config=DockerProviderConfig(isolate_host_volumes=False),
-    )
-    provider.__dict__["_state_volume"] = LocalVolume(root_path=tmp_path)
+    provider = _make_provider_without_containers(temp_mngr_ctx, tmp_path)
     now = datetime.now(timezone.utc)
     provider._host_store.write_host_record(
         HostRecord(
