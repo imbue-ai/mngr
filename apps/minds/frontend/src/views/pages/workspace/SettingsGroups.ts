@@ -619,21 +619,10 @@ function renderAccountGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
     m(SectionHeader, "Account"),
     m("div", { id: "account-section" }, [
       data.is_leased_imbue_cloud
-        ? [
-            data.current_account
-              ? m("p", { class: "type-body text-primary mb-3" }, [
-                  "Linked to ",
-                  m("strong", data.current_account.email),
-                  ".",
-                ])
-              : null,
-            m(
-              Notice,
-              { variant: "info" },
-              "This machine runs on a host leased from Imbue Cloud, so its account link is fixed and cannot be changed.",
-            ),
-            m(Button, { variant: "danger", id: "disassociate-btn", disabled: true }, "Unlink"),
-          ]
+        ? m("p", { id: "leased-account-note", class: "type-body text-secondary" }, [
+            "Machines running in Imbue Cloud can't be moved to a different account.",
+            data.leased_owner_email ? [" This machine is owned by ", m("strong", data.leased_owner_email), "."] : null,
+          ])
         : data.current_account
           ? [
               m("p", { class: "type-body text-primary mb-3" }, [

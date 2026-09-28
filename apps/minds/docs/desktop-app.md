@@ -281,8 +281,9 @@ error-reporting settings). Signing in makes the new account the default
 when none is stored or the stored default's account has signed out.
 Signing out the default account makes the first account still signed in
 the default. A stored default account only
-applies while it is signed in; otherwise, when exactly one account is
-signed in, that account is the default. It carries no tier-bound
+applies while it is signed in; otherwise the first signed-in account
+becomes the default and is stored, so whenever any account is signed in,
+one of them is the default. It carries no tier-bound
 URL -- env selection happens via `MINDS_CLIENT_CONFIG_PATH` /
 `--config-file` as described above.
 

@@ -987,6 +987,7 @@ describe("WorkspaceOptionsModel", () => {
             palette: { confusion: "#0b292b" },
             is_stale: false,
             is_leased_imbue_cloud: false,
+            leased_owner_email: "",
             has_account: true,
             account_email: OWNER,
             account_display_name: "Owner Person",

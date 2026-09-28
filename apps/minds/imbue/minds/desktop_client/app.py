@@ -87,7 +87,7 @@ from imbue.minds.desktop_client.mind_liveness import compute_mind_liveness_by_ag
 from imbue.minds.desktop_client.minds_config import DEFAULT_NOTIFICATION_STYLE
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
-from imbue.minds.desktop_client.minds_config import resolve_default_account_id
+from imbue.minds.desktop_client.minds_config import settle_default_account_id
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationDispatchPreferences
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
@@ -729,16 +729,16 @@ def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -
 
     The home screen's bottom-left launcher and Manage Accounts both render from
     this one frame, so a sign-in, sign-out, or default switch updates them
-    together, without a reload. The launcher names the default (or first)
-    account and counts the rest. ``has_accounts`` is derived from the account
-    list rather than the email so the start flow's account step keeps its exact
-    "any account at all" meaning.
+    together, without a reload. The launcher names the default account and
+    counts the rest. Resolving the default also stores it (see
+    :func:`settle_default_account_id`), so the create form preselects the same
+    one. ``has_accounts`` is derived from the account list rather than the
+    email so the start flow's account step keeps its exact "any account at
+    all" meaning.
     """
     accounts = session_store.list_accounts() if session_store else []
-    minds_config: MindsConfig | None = get_state().minds_config
-    default_account_id = resolve_default_account_id(
-        stored_default_account_id=minds_config.get_default_account_id() if minds_config else None,
-        signed_in_user_ids=[str(account.user_id) for account in accounts],
+    default_account_id = settle_default_account_id(
+        get_state().minds_config, [str(account.user_id) for account in accounts]
     )
     root = MindsRoot.from_environment()
     entries = tuple(
@@ -751,7 +751,7 @@ def _build_ui_accounts_message(session_store: MultiAccountSessionStore | None) -
         )
         for account in accounts
     )
-    launcher_entry = next((entry for entry in entries if entry.is_default), entries[0] if entries else None)
+    launcher_entry = next((entry for entry in entries if entry.is_default), None)
     return UiAccountsMessage(
         has_accounts=bool(entries),
         account_email=launcher_entry.email if launcher_entry is not None else "",

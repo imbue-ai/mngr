@@ -246,7 +246,7 @@ export class CreateFormModel {
     if (this.defaults === null) return;
     this.defaults = { ...this.defaults, accounts: defaults.accounts, default_account_id: defaults.default_account_id };
     if (!defaults.accounts.some((account) => account.user_id === this.accountId)) {
-      this.accountId = defaults.default_account_id || (defaults.accounts[0]?.user_id ?? "");
+      this.accountId = defaults.default_account_id;
     }
   }
 

@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, getAppContext, registerAppContext } from "../../../app-context";
 import { createEmptyStores } from "../../../models/boot";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
-import type { SettingsGroup } from "../../../models/workspaceOptions";
+import type { SettingsGroup, WorkspaceOptionsData } from "../../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
@@ -28,7 +28,7 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
 interface Harness {
   /** Draw the pane for one machine against the same component instance, as a
    * route change would. */
-  draw: (agentId: string, group?: SettingsGroup) => m.Children;
+  draw: (agentId: string, group?: SettingsGroup, data?: Partial<WorkspaceOptionsData>) => m.Children;
   requests: string[];
 }
 
@@ -93,7 +93,7 @@ function harness(
 
   const models = new Map<string, WorkspaceOptionsModel>();
   const instance = SettingsGroups() as unknown as m.Component;
-  function draw(agentId: string, group: SettingsGroup = "updates"): m.Children {
+  function draw(agentId: string, group: SettingsGroup = "updates", data: Partial<WorkspaceOptionsData> = {}): m.Children {
     let model = models.get(agentId);
     if (model === undefined) {
       model = new WorkspaceOptionsModel(agentId);
@@ -105,6 +105,7 @@ function harness(
         palette: { blue: "#aabbcc", pink: "#e8a7a8" },
         is_stale: false,
         is_leased_imbue_cloud: false,
+        leased_owner_email: "",
         has_account: false,
         account_email: "",
         account_display_name: null,
@@ -115,6 +116,7 @@ function harness(
         service_labels: {},
         whole_service: "",
         ssh_command: sshCommandByAgent[agentId] ?? "",
+        ...data,
       };
       model.lastSavedColor = model.data.color;
       models.set(agentId, model);
@@ -290,6 +292,38 @@ describe("the Updates settings group's specific-version field", () => {
 
     // Kept for the machine it was typed for, not wiped on every switch.
     expect(attrsOf(overrideField(updatesGroup(draw(UNBACKED)))).value).toBe("upstream/some-branch");
+  });
+});
+
+describe("the Account settings group on a machine leased from Imbue Cloud", () => {
+  /** The drawn Account section's text, whitespace collapsed, and whether it offers an Unlink. */
+  function accountSection(root: m.Children): { text: string; hasUnlink: boolean } {
+    const section = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "account-section");
+    if (section === undefined) throw new Error("the Account section was not drawn");
+    return {
+      text: allText(section.children).replace(/\s+/g, " ").replace(/ ([.,])/g, "$1").trim(),
+      hasUnlink: collectVnodes(section).some((vnode) => attrsOf(vnode).id === "disassociate-btn"),
+    };
+  }
+
+  it("says the account cannot change and names the owner, with no Unlink to press", () => {
+    const { draw } = harness();
+    const section = accountSection(
+      draw(UNBACKED, "account", { is_leased_imbue_cloud: true, leased_owner_email: "owner@example.com" }),
+    );
+
+    expect(section.text).toBe(
+      "Machines running in Imbue Cloud can't be moved to a different account. This machine is owned by owner@example.com.",
+    );
+    expect(section.hasUnlink).toBe(false);
+  });
+
+  it("leaves the owner out when it is not known", () => {
+    const { draw } = harness();
+    const section = accountSection(draw(UNBACKED, "account", { is_leased_imbue_cloud: true, leased_owner_email: "" }));
+
+    expect(section.text).toBe("Machines running in Imbue Cloud can't be moved to a different account.");
+    expect(section.hasUnlink).toBe(false);
   });
 });
 
