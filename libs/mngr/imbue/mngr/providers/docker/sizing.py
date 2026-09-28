@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Final
 
@@ -24,6 +25,9 @@ _CPUS_FLAGS: Final[tuple[str, ...]] = (_CPUS_FLAG,)
 _MEMORY_FLAGS: Final[tuple[str, ...]] = (_MEMORY_FLAG, _MEMORY_SHORT_FLAG)
 _MEMORY_SWAP_FLAGS: Final[tuple[str, ...]] = (_MEMORY_SWAP_FLAG,)
 
+# Docker's spelling for "no swap cap at all", as opposed to a swap cap of some size.
+_UNLIMITED_SWAP_VALUE: Final[str] = "-1"
+
 
 @pure
 def _flag_value_at(start_args: Sequence[str], idx: int, flags: Sequence[str]) -> tuple[str | None, int]:
@@ -48,19 +52,21 @@ def _flag_value_at(start_args: Sequence[str], idx: int, flags: Sequence[str]) ->
 
 @pure
 def parse_container_size(start_args: Sequence[str]) -> ContainerSize:
-    """The caps a ``docker run`` argument list sets; the last spelling of each flag wins, like docker's CLI."""
+    """The caps a ``docker run`` argument list sets; the last spelling of each flag wins, like docker's CLI.
+
+    A ``0`` cap is docker's "no limit" and reads as uncapped; ``--memory-swap=-1``
+    is its "no swap cap" and is kept apart from a swap cap of some size.
+    """
     cpus: float | None = None
     memory: DockerMemorySize | None = None
     memory_swap: DockerMemorySize | None = None
+    is_swap_unlimited = False
     idx = 0
     while idx < len(start_args):
         cpus_value, cpus_span = _flag_value_at(start_args, idx, _CPUS_FLAGS)
         if cpus_span:
             if cpus_value is not None:
-                try:
-                    cpus = float(cpus_value)
-                except ValueError:
-                    logger.warning("Ignored an unparseable recorded --cpus value: {!r}", cpus_value)
+                cpus = _parse_cpus_or_warn(cpus_value)
             idx += cpus_span
             continue
         memory_value, memory_span = _flag_value_at(start_args, idx, _MEMORY_FLAGS)
@@ -72,20 +78,34 @@ def parse_container_size(start_args: Sequence[str]) -> ContainerSize:
         swap_value, swap_span = _flag_value_at(start_args, idx, _MEMORY_SWAP_FLAGS)
         if swap_span:
             if swap_value is not None:
-                memory_swap = _parse_memory_or_warn(swap_value, _MEMORY_SWAP_FLAG)
+                is_swap_unlimited = swap_value == _UNLIMITED_SWAP_VALUE
+                memory_swap = None if is_swap_unlimited else _parse_memory_or_warn(swap_value, _MEMORY_SWAP_FLAG)
             idx += swap_span
             continue
         idx += 1
-    return ContainerSize(cpus=cpus, memory=memory, memory_swap=memory_swap)
+    return ContainerSize(cpus=cpus, memory=memory, memory_swap=memory_swap, is_swap_unlimited=is_swap_unlimited)
+
+
+@pure
+def _parse_cpus_or_warn(value: str) -> float | None:
+    """A recorded ``--cpus`` value, or None when it is docker's ``0`` (no limit) or not a number."""
+    try:
+        cpus = float(value)
+    except ValueError:
+        logger.warning("Ignored an unparseable recorded --cpus value: {!r}", value)
+        return None
+    return cpus if cpus > 0 else None
 
 
 @pure
 def _parse_memory_or_warn(value: str, flag: str) -> DockerMemorySize | None:
+    """A recorded memory value, or None when it is docker's ``0`` (no limit) or not a size."""
     try:
-        return DockerMemorySize(value)
+        size = DockerMemorySize(value)
     except InvalidDockerMemorySizeError:
         logger.warning("Ignored an unparseable recorded {} value: {!r}", flag, value)
         return None
+    return size if size.size_bytes > 0 else None
 
 
 @pure
@@ -146,16 +166,22 @@ def docker_update_args(size: ContainerSize) -> tuple[str, ...]:
 
     Docker refuses a memory cap above the container's current swap cap unless
     the swap cap is updated with it, so the two are always sent together: the
-    recorded swap cap when there is one, else swap capped at the memory cap.
-    That default is mngr's no-swap policy, and it brings a recorded bare
-    ``--memory`` (a user-supplied start arg) under it from the first re-apply.
+    recorded swap setting when there is one (a cap, or ``-1`` for unlimited
+    swap), else swap capped at the memory cap. That default is mngr's no-swap
+    policy, and it brings a recorded bare ``--memory`` (a user-supplied start
+    arg) under it from the first re-apply.
     """
     rendered: list[str] = []
     if size.cpus is not None:
         rendered.extend([_CPUS_FLAG, _format_cpus(size.cpus)])
     if size.memory is not None:
-        memory_swap = size.memory_swap if size.memory_swap is not None else size.memory
-        rendered.extend([_MEMORY_FLAG, str(size.memory), _MEMORY_SWAP_FLAG, str(memory_swap)])
+        if size.is_swap_unlimited:
+            memory_swap = _UNLIMITED_SWAP_VALUE
+        elif size.memory_swap is not None:
+            memory_swap = str(size.memory_swap)
+        else:
+            memory_swap = str(size.memory)
+        rendered.extend([_MEMORY_FLAG, str(size.memory), _MEMORY_SWAP_FLAG, memory_swap])
     return tuple(rendered)
 
 
@@ -172,15 +198,19 @@ def clamp_cpus_to_daemon(cpus: DockerCpuCount, daemon_totals: DockerDaemonTotals
 
 
 @pure
-def host_resources_for_container(size: ContainerSize, daemon_totals: DockerDaemonTotals) -> HostResources:
+def host_resources_for_container(
+    size: ContainerSize,
+    # Consulted only for a dimension with no recorded cap, so a fully capped host needs no daemon read.
+    read_daemon_totals: Callable[[], DockerDaemonTotals],
+) -> HostResources:
     """What a container can use: each recorded cap, or the daemon machine's total where it is uncapped.
 
     A fractional CPU cap is reported rounded up, the way gVisor sizes the
     container's own ``nproc``. Disk is None: the host volume is a subpath of a
     shared named volume with no quota of its own.
     """
-    cpu_count = math.ceil(size.cpus) if size.cpus is not None else daemon_totals.cpu_count
-    memory_gb = size.memory.size_gb if size.memory is not None else daemon_totals.memory_bytes / 1024**3
+    cpu_count = math.ceil(size.cpus) if size.cpus is not None else read_daemon_totals().cpu_count
+    memory_gb = size.memory.size_gb if size.memory is not None else read_daemon_totals().memory_bytes / 1024**3
     return HostResources(
         cpu=CpuResources(count=max(1, cpu_count), frequency_ghz=None),
         memory_gb=memory_gb,

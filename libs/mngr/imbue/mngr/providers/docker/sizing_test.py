@@ -44,6 +44,15 @@ def test_parse_container_size_keeps_a_recorded_memory_swap() -> None:
     size = parse_container_size(("--memory=4g", "--memory-swap=6g"))
     assert size.memory == "4g"
     assert size.memory_swap == "6g"
+    assert not size.is_swap_unlimited
+
+
+def test_parse_container_size_reads_dockers_no_limit_spellings_as_uncapped() -> None:
+    assert parse_container_size(("--cpus=0", "--memory=0", "--memory-swap=0")) == ContainerSize()
+    unlimited_swap = parse_container_size(("--memory=4g", "--memory-swap=-1"))
+    assert unlimited_swap.memory == "4g"
+    assert unlimited_swap.memory_swap is None
+    assert unlimited_swap.is_swap_unlimited
 
 
 def test_parse_container_size_ignores_values_docker_could_not_have_accepted() -> None:
@@ -108,6 +117,12 @@ def test_docker_update_args_always_sends_memory_and_swap_together() -> None:
         "--memory-swap",
         "6g",
     )
+    assert docker_update_args(ContainerSize(memory=DockerMemorySize("4g"), is_swap_unlimited=True)) == (
+        "--memory",
+        "4g",
+        "--memory-swap",
+        "-1",
+    )
 
 
 @pytest.mark.parametrize(("requested", "expected"), [(4, 4), (8, 8), (9, 8), (100, 8)])
@@ -116,20 +131,30 @@ def test_clamp_cpus_to_daemon_never_exceeds_the_daemon_cpu_count(requested: int,
 
 
 def test_host_resources_for_container_reports_caps_and_fills_uncapped_dimensions_from_the_daemon() -> None:
-    capped = host_resources_for_container(ContainerSize(cpus=2.0, memory=DockerMemorySize("4g")), _DAEMON_TOTALS)
+    capped = host_resources_for_container(
+        ContainerSize(cpus=2.0, memory=DockerMemorySize("4g")), lambda: _DAEMON_TOTALS
+    )
     assert capped.cpu.count == 2
     assert capped.memory_gb == 4.0
     assert capped.disk_gb is None
 
-    uncapped = host_resources_for_container(ContainerSize(), _DAEMON_TOTALS)
+    uncapped = host_resources_for_container(ContainerSize(), lambda: _DAEMON_TOTALS)
     assert uncapped.cpu.count == 8
     assert uncapped.memory_gb == 32.0
 
-    memory_only = host_resources_for_container(ContainerSize(memory=DockerMemorySize("512m")), _DAEMON_TOTALS)
+    memory_only = host_resources_for_container(ContainerSize(memory=DockerMemorySize("512m")), lambda: _DAEMON_TOTALS)
     assert memory_only.cpu.count == 8
     assert memory_only.memory_gb == 0.5
 
 
+def test_host_resources_for_container_reads_the_daemon_only_for_an_uncapped_dimension() -> None:
+    def _fail_to_read() -> DockerDaemonTotals:
+        raise AssertionError("the daemon must not be read for a fully capped container")
+
+    fully_capped = host_resources_for_container(ContainerSize(cpus=2.0, memory=DockerMemorySize("4g")), _fail_to_read)
+    assert fully_capped.cpu.count == 2
+
+
 def test_host_resources_for_container_rounds_a_fractional_cpu_cap_up() -> None:
-    assert host_resources_for_container(ContainerSize(cpus=1.5), _DAEMON_TOTALS).cpu.count == 2
-    assert host_resources_for_container(ContainerSize(cpus=0.25), _DAEMON_TOTALS).cpu.count == 1
+    assert host_resources_for_container(ContainerSize(cpus=1.5), lambda: _DAEMON_TOTALS).cpu.count == 2
+    assert host_resources_for_container(ContainerSize(cpus=0.25), lambda: _DAEMON_TOTALS).cpu.count == 1

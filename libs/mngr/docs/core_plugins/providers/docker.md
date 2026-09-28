@@ -52,7 +52,7 @@ Run `docker run --help` for the full list of supported flags.
 
 A container's size is its `--cpus` and `--memory` caps. They are chosen at create time (through `-s` flags, or the provider's `default_cpus` / `default_memory` settings below) and recorded with the host, so `mngr list` reports them as `host.resource.cpu.count` and `host.resource.memory_gb` whether the container is running or stopped. A dimension with no cap reports the daemon machine's total for it, since that is what an uncapped container can use. Disk is not reported: the host volume is a subpath of a shared named volume with no quota of its own.
 
-Whenever mngr sets a memory cap it also sets `--memory-swap` to the same value, so a container at its limit is shed by the OOM killer instead of swapping the machine to a halt.
+Whenever mngr sets a memory cap it also sets `--memory-swap` to the same value, so a container at its limit is shed by the OOM killer instead of swapping the machine to a halt. A swap setting you passed yourself (`-s --memory-swap=6g`, or `-s --memory-swap=-1` for unlimited swap) is kept as recorded, and docker's `0` spellings (`--cpus=0`, `--memory=0`) read as uncapped.
 
 To change a host's size after creation:
 

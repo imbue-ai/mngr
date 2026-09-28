@@ -2280,14 +2280,15 @@ kill -TERM 1
             recorded_size = ContainerSize()
         else:
             recorded_size = parse_container_size(host_record.config.start_args)
-        return host_resources_for_container(recorded_size, self._daemon_totals)
+        return host_resources_for_container(recorded_size, lambda: self._daemon_totals)
 
     def _apply_recorded_size(self, container: docker.models.containers.Container, size: ContainerSize) -> None:
         """Set ``size``'s caps on an existing container with ``docker update``; a no-op when nothing is capped.
 
         Works on a running or a stopped container: docker records the caps in
         the container's config and a stopped one picks them up when it starts.
-        Raises MngrError with docker's own message when it refuses a value.
+        Raises MngrError with docker's own message when it refuses a value, or
+        naming the timeout when the daemon does not answer.
         """
         update_args = docker_update_args(size)
         if not update_args:
@@ -2295,6 +2296,8 @@ kill -TERM 1
         with log_span("Applying the recorded size to container {}", container.short_id):
             try:
                 self._run_docker_creation_command(["update", *update_args, str(container.id)])
+            except ProcessTimeoutError as e:
+                raise MngrError(f"Docker did not apply the size {list(update_args)} in time: {e}") from e
             except ProcessError as e:
                 raise MngrError(f"Docker refused the size {list(update_args)}: {e.stderr.strip()}") from e
 
@@ -2325,7 +2328,7 @@ kill -TERM 1
             host_record.model_copy_update(to_update(host_record.field_ref().config, updated_config))
         )
         logger.debug("Recorded the new size for host {}: {}", host_id, list(resized_start_args))
-        return host_resources_for_container(resized_size, self._daemon_totals)
+        return host_resources_for_container(resized_size, lambda: self._daemon_totals)
 
     # Snapshot Methods
 

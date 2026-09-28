@@ -13,6 +13,9 @@ class ContainerSize(FrozenModel):
     memory_swap: DockerMemorySize | None = Field(
         default=None, description="The `--memory-swap` cap in docker's spelling (memory plus swap)"
     )
+    is_swap_unlimited: bool = Field(
+        default=False, description="Whether `--memory-swap=-1` (unlimited swap) was recorded instead of a swap cap"
+    )
 
 
 class ContainerSizeRequest(FrozenModel):
