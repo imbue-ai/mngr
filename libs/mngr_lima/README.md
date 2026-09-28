@@ -19,7 +19,7 @@ mngr create @.lima
 mngr create @.lima -b "--file path/to/config.yaml"
 
 # Pass flags to limactl start
-mngr create @.lima -- --cpus=8 --memory=16GiB
+mngr create @.lima -- --cpus=8 --memory=16
 ```
 
 ## host_dir layout
