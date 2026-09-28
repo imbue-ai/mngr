@@ -301,6 +301,7 @@ mngr <command> [options]
 - [`clone`](libs/mngr/docs/commands/aliases/clone.md): Create a copy of an existing agent
 - [`migrate`](libs/mngr/docs/commands/aliases/migrate.md): Move an agent to a different host
 - [`limit`](libs/mngr/docs/commands/secondary/limit.md): Configure limits for agents and hosts
+- [`docker`](libs/mngr/docs/commands/secondary/docker.md): Docker-provider-specific commands (resize a container's CPU and memory caps)
 
 ### For moving data in and out:
 

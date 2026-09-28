@@ -39,18 +39,19 @@ import subprocess
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Final
 
 import boto3
 import pytest
-from botocore.exceptions import ClientError
 
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip1
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip2
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip3
 from imbue.mngr.providers.provider_release_testing import run_provider_release_trip4
 from imbue.mngr_aws.client import AWS_PYTEST_LAUNCHED_TAG
+from imbue.mngr_aws.client import AwsAmiResolutionError
 from imbue.mngr_aws.client import AwsVpsClient
-from imbue.mngr_aws.config import DEFAULT_AMI_BY_REGION
+from imbue.mngr_aws.config import AwsProviderConfig
 from imbue.mngr_aws.config import ExistingSecurityGroup
 from imbue.mngr_aws.testing import AWS_DEFAULT_REGION
 from imbue.mngr_aws.testing import AWS_RELEASE_TESTS_OPT_IN
@@ -242,12 +243,10 @@ def _run_mngr(
     )
 
 
-# =============================================================================
 # Trip 1 -- the shared provider release lifecycle (create -> stop/start ->
 # sketchy kill -> gc), parametrized over isolation mode. See
 # `imbue.mngr.providers.provider_release_testing` and
 # `specs/provider-release-tests.md`.
-# =============================================================================
 
 
 class _AwsReleaseProfile(VpsCloudReleaseProfile):
@@ -395,9 +394,7 @@ def test_provider_release_trip4(
     )
 
 
-# =============================================================================
 # API client smoke tests (real network calls, read-only)
-# =============================================================================
 
 
 @pytest.fixture()
@@ -428,94 +425,58 @@ def test_api_client_list_instances_does_not_error(aws_release_client: AwsVpsClie
     assert isinstance(instances, list)
 
 
-def _latest_debian_12_amd64_ami_id(region: str) -> str | None:
-    """Return the latest published Debian 12 amd64 AMI ID in ``region``, or ``None`` on error.
-
-    Queries the canonical Debian publisher account (owner id 136693071363)
-    and picks the newest ``debian-12-amd64-*`` image by creation date. Used
-    to surface a copy-pasteable replacement when ``DEFAULT_AMI_BY_REGION``
-    has gone stale; failures here (no creds, no matching images, etc.) are
-    suppressed because the lookup is best-effort hint generation -- the
-    primary assertion has already detected the staleness.
-    """
-    try:
-        response = (
-            boto3.Session(region_name=region)
-            .client("ec2")
-            .describe_images(
-                Owners=["136693071363"],
-                Filters=[
-                    {"Name": "name", "Values": ["debian-12-amd64-*"]},
-                    {"Name": "architecture", "Values": ["x86_64"]},
-                    {"Name": "state", "Values": ["available"]},
-                ],
-            )
-        )
-    except ClientError:
-        return None
-    images = response.get("Images", [])
-    if not images:
-        return None
-    latest = max(images, key=lambda img: img.get("CreationDate", ""))
-    return latest.get("ImageId") or None
+# Regions mngr users commonly target; the resolver must find an available Debian 13
+# image in each of them, or a create there fails.
+_DEFAULT_AMI_RESOLUTION_REGIONS: Final[tuple[str, ...]] = (
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
+    "eu-west-1",
+    "eu-central-1",
+    "ap-southeast-1",
+    "ap-northeast-1",
+)
 
 
-def test_default_amis_describe_successfully() -> None:
-    """Every entry in DEFAULT_AMI_BY_REGION must still resolve via DescribeImages.
+_ARM64_INSTANCE_TYPE: Final[str] = "t4g.small"
 
-    Hard-coded AMI IDs go stale over time -- Debian publishes new ones every
-    few months and older snapshots eventually get deprecated. A periodic
-    release-test run is the cheapest way to catch this: skipif gates the test
-    on AWS credentials, so local runs without creds skip silently.
 
-    Collects errors across every region rather than aborting on the first
-    failure, so a sweep produces a complete list of stale / inaccessible
-    entries in one run. When any failure is detected, the test additionally
-    queries the canonical Debian publisher and emits a copy-pasteable
-    replacement dict so the fix is mechanical.
+def _make_resolution_client(region: str) -> AwsVpsClient:
+    return AwsVpsClient(
+        session=boto3.Session(region_name=region),
+        region=region,
+        security_group=ExistingSecurityGroup(id="sg-unused-by-this-test"),
+    )
+
+
+def test_default_ami_resolves_in_every_default_region() -> None:
+    """``resolve_default_ami_id`` finds an available Debian 13 AMI in each region mngr users commonly target.
+
+    Debian publishes and deprecates AMIs per region on its own schedule; this
+    is the periodic check that the create-time lookup keeps working in the
+    regions users commonly target. Collects failures across every region rather
+    than aborting on the first, so one run reports every affected region.
     """
     failures: list[str] = []
-    suggestions: dict[str, str] = {}
-    for region, ami_id in DEFAULT_AMI_BY_REGION.items():
-        ec2 = boto3.Session(region_name=region).client("ec2")
-        is_stale = False
+    instance_type = AwsProviderConfig().default_instance_type
+    for region in _DEFAULT_AMI_RESOLUTION_REGIONS:
+        client = _make_resolution_client(region)
         try:
-            response = ec2.describe_images(ImageIds=[ami_id])
-        except ClientError as e:
-            # InvalidAMIID.NotFound -> deprecated; UnauthorizedOperation /
-            # AuthFailure -> the cred set lacks access to this region.
-            failures.append(f"{region}: AMI {ami_id} {e.response.get('Error', {}).get('Code', 'Unknown')}: {e}")
-            is_stale = True
-        else:
-            images = response.get("Images", [])
-            if not images:
-                failures.append(f"{region}: AMI {ami_id} not found")
-                is_stale = True
-            else:
-                image = images[0]
-                state = image.get("State", "")
-                if state != "available":
-                    failures.append(f"{region}: AMI {ami_id} state={state!r} (expected 'available')")
-                    is_stale = True
-        if is_stale:
-            latest = _latest_debian_12_amd64_ami_id(region)
-            if latest is not None:
-                suggestions[region] = latest
+            ami_id = client.resolve_default_ami_id(instance_type)
+        except AwsAmiResolutionError as e:
+            failures.append(f"{region}: {e}")
+            continue
+        assert ami_id.startswith("ami-"), f"{region}: unexpected AMI id {ami_id!r}"
+    assert not failures, "The default Debian 13 AMI could not be resolved in some regions:\n  " + "\n  ".join(failures)
 
-    if not failures:
-        return
-    message = "DEFAULT_AMI_BY_REGION has stale or inaccessible entries:\n  " + "\n  ".join(failures)
-    if suggestions:
-        message += "\n\nSuggested replacement (verified via DescribeImages, owner 136693071363):\n"
-        message += "DEFAULT_AMI_BY_REGION = {\n"
-        for region in DEFAULT_AMI_BY_REGION:
-            ami_id = suggestions.get(region, DEFAULT_AMI_BY_REGION[region])
-            message += f'    "{region}": "{ami_id}",\n'
-        message += "}\n"
-    else:
-        message += (
-            "\nCould not query the Debian publisher for replacement IDs (no creds for those "
-            "regions, or DescribeImages rate-limited). See "
-            "https://wiki.debian.org/Cloud/AmazonEC2Image for manual lookup.\n"
-        )
-    raise AssertionError(message)
+
+def test_default_ami_resolves_an_arm64_image_for_a_graviton_instance_type() -> None:
+    """A Graviton instance type without ``--aws-ami=`` gets Debian's arm64 image, not the amd64 one EC2 would reject."""
+    client = _make_resolution_client(AWS_DEFAULT_REGION)
+
+    ami_id = client.resolve_default_ami_id(_ARM64_INSTANCE_TYPE)
+
+    image = client._ec2().describe_images(ImageIds=[ami_id])["Images"][0]
+    assert image["Architecture"] == "arm64"
+    assert image["Name"].startswith("debian-13-arm64-")

@@ -22,8 +22,10 @@ from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.interfaces.data_types import BoundedHostRead
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostDetails
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.provider_instance import HostDiscoveryReadRegistry
@@ -376,6 +378,26 @@ def test_connection_error_fallback_without_override_uses_offline_state(
 
     assert host_details.state == HostState.CRASHED
     assert agent_details_list[0].host.state == HostState.CRASHED
+
+
+def test_connection_error_fallback_reports_the_provider_recorded_resources(
+    host_id: HostId, provider: MockProviderInstance, temp_mngr_ctx: MngrContext
+) -> None:
+    """The offline fallback still reports the host's size, read from the provider's records."""
+    online_host = _make_mock_online_host(host_id)
+    online_host.get_agents.side_effect = HostConnectionError("Error reading SSH protocol banner")
+
+    offline_host = _make_offline_host(host_id, provider, temp_mngr_ctx)
+    provider.mock_hosts = [online_host, offline_host]
+    provider.mock_offline_hosts = {str(host_id): offline_host}
+    provider.mock_host_resources = HostResources(cpu=CpuResources(count=3), memory_gb=6.0)
+
+    host_ref = DiscoveredHost(host_id=host_id, host_name=HostName("test-host"), provider_name=provider.name)
+    host_details, _agent_details_list = provider.get_host_and_agent_details(host_ref, [])
+
+    assert host_details.resource is not None
+    assert host_details.resource.cpu.count == 3
+    assert host_details.resource.memory_gb == 6.0
 
 
 def test_offline_field_generators_populate_plugin_data_via_get_host_and_agent_details(

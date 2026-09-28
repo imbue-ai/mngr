@@ -19,7 +19,10 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "loguru",
     "imbue-mngr",
+    # The bring-your-own-key cloud backends minds writes provider blocks for.
     "imbue-mngr-aws",
+    "imbue-mngr-azure",
+    "imbue-mngr-gcp",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
@@ -72,6 +75,8 @@ concurrency-group = { workspace = true }
 imbue-mngr = { workspace = true }
 imbue-mngr-antigravity = { workspace = true }
 imbue-mngr-aws = { workspace = true }
+imbue-mngr-azure = { workspace = true }
+imbue-mngr-gcp = { workspace = true }
 imbue-mngr-claude = { workspace = true }
 imbue-mngr-codex = { workspace = true }
 imbue-mngr-forward = { workspace = true }

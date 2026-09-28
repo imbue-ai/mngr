@@ -13,4 +13,4 @@ from typing import Final
 VULTR_RELEASE_TESTS_OPT_IN: Final[bool] = os.environ.get("MNGR_VULTR_RELEASE_TESTS") == "1"
 
 # Placeholder OS image id for cleanup-path ``VultrVpsClient`` construction.
-VULTR_TEST_OS_ID: Final[int] = 2136
+VULTR_TEST_OS_ID: Final[int] = 2625

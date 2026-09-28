@@ -814,6 +814,10 @@ class DockerConfigValidationError(ConfigError, ValueError):
     """Raised when Docker provider config fields are mutually inconsistent."""
 
 
+class InvalidContainerSizeError(MngrError, ValueError):
+    """Raised when a ContainerSize records a swap cap together with unlimited swap, which docker cannot express."""
+
+
 class ProviderTimeoutConfigError(ConfigError, ValueError):
     """Raised when a provider's discovery timeout fields are mis-ordered.
 

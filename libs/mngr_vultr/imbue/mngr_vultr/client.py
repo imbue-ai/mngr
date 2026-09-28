@@ -32,7 +32,7 @@ class VultrVpsClient(VpsClientInterface):
     api_key: SecretStr = Field(frozen=True, description="Vultr API key")
     os_id: int = Field(
         frozen=True,
-        description="Vultr OS image ID used by create_instance (e.g., 2136 = Debian 12 x64)",
+        description="Vultr OS image ID used by create_instance (e.g., 2625 = Debian 13 x64)",
     )
 
     def _headers(self) -> dict[str, str]:
@@ -88,9 +88,7 @@ class VultrVpsClient(VpsClientInterface):
     def _delete(self, path: str) -> None:
         self._request("DELETE", path)
 
-    # =========================================================================
     # Instance Operations
-    # =========================================================================
 
     def create_instance(
         self,
@@ -168,9 +166,7 @@ class VultrVpsClient(VpsClientInterface):
             return []
         return result["instances"]
 
-    # =========================================================================
     # SSH Key Operations
-    # =========================================================================
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         result = self._post("/ssh-keys", {"name": name, "ssh_key": public_key})

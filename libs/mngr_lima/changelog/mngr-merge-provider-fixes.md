@@ -1,0 +1,1 @@
+Merges the Debian 13 default (issue #975): the library default Lima guest image is the Debian 13 "trixie" genericcloud release `20260722-2547` served from imbue's artifact mirror, the same release the default-workspace-template pins. See the `mngr-host-sizing-debian-13` entry for the details.

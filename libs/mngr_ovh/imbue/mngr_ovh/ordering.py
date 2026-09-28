@@ -509,7 +509,7 @@ def rebuild_vps_with_public_key(
     """Trigger ``POST /vps/{s}/rebuild`` with our SSH pubkey, then wait for it to finish.
 
     Pre-installs ``public_ssh_key`` (registered for the OVH image's
-    default user; ``debian`` on the Debian 12 - Docker image) via the
+    default user; ``debian`` on the Debian images) via the
     OVH-side rebuild flow, sets ``doNotSendPassword=true`` so OVH does
     not generate or email a root password, and waits for the rebuild
     task to reach a terminal state.

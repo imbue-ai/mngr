@@ -252,8 +252,11 @@ def build_outer_listing_collection_script(
     - if the container is missing: emits ``CONTAINER_MISSING=true``.
     - if the container is running: ``docker exec``s the inner listing script
       and exits with its status.
-    - otherwise: ``docker cp``s the host_dir tree to a temp path on the outer
-      host and runs the stopped-variant listing script against it.
+    - otherwise: ``docker cp -L``s the host_dir tree to a temp path on the outer
+      host and runs the stopped-variant listing script against it. ``-L``
+      because a VPS container's host_dir is a symlink into its volume (``/mngr
+      -> /mngr-vol/host_dir``): without it a stopped container yields the link
+      itself, never a directory, and the host lists no agents.
 
     Always prepends ``CONTAINER_STATE=`` and ``CONTAINER_EXIT_CODE=`` lines so
     the caller can map the docker container status to a ``HostState`` without
@@ -302,7 +305,7 @@ RESOLVED_HOST_DIR={quoted_host_dir}
 for _mngr_candidate in {candidate_host_dirs}; do
     _mngr_dest="$TMP/extract-$(echo "$_mngr_candidate" | tr -c 'A-Za-z0-9' '_')"
     mkdir -p "$_mngr_dest"
-    docker cp "$CID":"$_mngr_candidate" "$_mngr_dest/" 2>/dev/null || continue
+    docker cp -L "$CID":"$_mngr_candidate" "$_mngr_dest/" 2>/dev/null || continue
     _mngr_extracted="$_mngr_dest/$(basename "$_mngr_candidate")"
     [ -d "$_mngr_extracted" ] || continue
     if [ -z "$EXTRACTED" ]; then

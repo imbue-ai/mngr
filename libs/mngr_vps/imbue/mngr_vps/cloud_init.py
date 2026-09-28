@@ -24,7 +24,7 @@ def generate_cloud_init_user_data(
     steps are the single source of truth shared with
     ``host_setup.apply_host_setup_on_outer`` (the SSH re-provisioning path), so
     cloud-init backends (Vultr, AWS) and SSH-only backends (OVH) install the same
-    pinned Docker, optional gVisor runsc, sshd tuning, and base packages.
+    host setup (pinned Docker, the sshd drop-in, and the rest of the shared steps).
 
     The first-boot-only pieces stay here in the cloud-init wrapper and are
     deliberately excluded from the shared steps: injecting the SSH host key,

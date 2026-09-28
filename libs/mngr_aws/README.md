@@ -21,7 +21,7 @@ backend = "aws"
 
 default_region = "us-east-1"
 default_instance_type = "t3.small"  # EC2 instance type
-# default_ami_id = "ami-..."        # optional override; defaults to the pinned per-region AMI
+# default_ami_id = "ami-..."        # optional override; defaults to the newest Debian 13 AMI for the instance type's architecture
 
 # Optional networking. security_group defaults to auto-create with name 'mngr-aws'.
 # To override:
@@ -85,7 +85,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `backend` | `aws` | Provider backend (always 'aws' for this type) |
 | `default_region` | `us-east-1` | Default AWS region. |
 | `default_instance_type` | `t3.small` | EC2 instance type. Surfaced as the `--aws-instance-type=` build arg. |
-| `default_ami_id` | `None` (pinned Debian 12 amd64 per region) | Default AMI ID. When None, the pinned per-region default (DEFAULT_AMI_BY_REGION) is consulted for the chosen region. |
+| `default_ami_id` | `None` (newest Debian 13 AMI for the instance type's architecture, resolved at create) | Default AMI ID. When None, the newest Debian 13 AMI Debian publishes in the chosen region for the instance type's architecture (amd64 or arm64) is resolved at create time via ec2:DescribeInstanceTypes and ec2:DescribeImages. |
 | `security_group` | `AutoCreateSecurityGroup(name="mngr-aws")` | Either {'kind': 'existing', 'id': 'sg-...'} to attach an existing security group, or {'kind': 'auto_create', 'name': '...'} to auto-create one by name. The auto-create path consults allowed_ssh_cidrs. |
 | `subnet_id` | `None` | Subnet ID. When None, EC2 picks the default-VPC subnet for the AZ. |
 | `vpc_id` | `None` | VPC ID. Only used to scope auto-created security group lookups. |
@@ -136,7 +136,7 @@ ec2:StopInstances, ec2:StartInstances,
 ec2:CreateTags, ec2:DeleteTags,
 ec2:DescribeKeyPairs, ec2:ImportKeyPair, ec2:DeleteKeyPair,
 ec2:DescribeSecurityGroups,
-ec2:DescribeImages,
+ec2:DescribeImages, ec2:DescribeInstanceTypes,
 s3:PutObject, s3:GetObject, s3:DeleteObject, s3:ListBucket
 ```
 
@@ -160,7 +160,7 @@ s3:ListBucket, s3:DeleteObject, s3:DeleteBucket
 
 Deleting the S3 state bucket additionally uses `s3:ListBucket`, `s3:DeleteObject`, and `s3:DeleteBucket`.
 
-Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. Only the cheap index tags (`mngr-host-id`, `Name`, `mngr-created-at`) are stamped on the instance, to identify a stopped host during discovery; per-agent metadata lives in the S3 state bucket, not in tags (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeImages` is needed by the AMI-staleness release test (`test_default_amis_describe_successfully`).
+Instance and volume tags are set at launch via `RunInstances` `TagSpecifications`. Only the cheap index tags (`mngr-host-id`, `Name`, `mngr-created-at`) are stamped on the instance, to identify a stopped host during discovery; per-agent metadata lives in the S3 state bucket, not in tags (see the offline-discovery note below). `ec2:StopInstances`/`ec2:StartInstances` back `mngr stop --stop-host` / `mngr start`, so a paused agent costs only EBS storage. `DescribeInstanceTypes` and `DescribeImages` resolve the default AMI at create time (the newest Debian 13 image Debian publishes in the region for the instance type's architecture, amd64 or arm64; set `default_ami_id` or pass `--aws-ami=` to skip both lookups).
 
 ## Implementation details
 

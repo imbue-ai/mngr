@@ -1,0 +1,7 @@
+A `mngr_vps` cloud host whose container died behind mngr's back (the memory cap's OOM kill, a `docker stop` on the VM, a VM reboot) is now recoverable, and usually recovers by itself:
+
+- Every container runs with `--restart=unless-stopped` unless the configured or caller start args already set a restart policy (the default-workspace-template's cloud create templates already pass it, so their `docker run` lines are unchanged), so an OOM kill, a Docker daemon restart, or a VM reboot brings a previously running container back on its own, with sshd relaunched by the container entrypoint. An explicit `docker stop`, which is what `mngr stop --stop-host` and the idle stop issue, still leaves the container stopped until `mngr start`.
+
+- `mngr list` shows a reachable VPS whose container is merely stopped as `STOPPED` on the agent row as well as the host row (it said `CRASHED` on the agent row, since the host record carries no stop reason for an out-of-band exit), and `mngr start <agent>@<host>` finds and revives the agent instead of failing with "0 agent(s)"; the listing fix itself is in `mngr` (`docker cp -L`).
+
+- The provider release trip stops the container out of band and asserts the host lists as `STOPPED` with its agent and `mngr start` revives it, then SIGKILLs the container's init the way the OOM killer does and asserts the host is back to `RUNNING` and reachable with no mngr command.

@@ -113,6 +113,11 @@ mngr imbue_cloud machines resize my-workspace --units 16
 mngr imbue_cloud machines resize my-workspace --disk-gb 56
 ```
 
+The current recorded size is also what `mngr list` reports for the machine's host, running
+or stopped: `host.resource.memory_gb` (units) and `host.resource.disk_gb`. The vCPU count in
+`host.resource.cpu.count` is the one recorded when the machine was created and does not follow
+a resize (the connector does not re-report it). A pending target only shows in `machines show`.
+
 Units and disk are metered by two plan quotas: `max_active_machine_units` caps the units
 summed across your running machines, and `max_total_machine_disk_gb` caps data-disk GB
 across running + stopped machines. Both return the standard structured 403

@@ -1094,7 +1094,7 @@ class OfflineCapableVpsProvider(VpsProvider):
             record = self._state_store.read_host_record(host_id)
             if record is None:
                 raise
-            return self._create_offline_host(record)
+            return self._create_offline_host(record, observed_state=None)
 
     def list_snapshots(self, host: HostInterface | HostId) -> list[SnapshotInfo]:
         """Return ``[]`` for a stopped host instead of raising.
