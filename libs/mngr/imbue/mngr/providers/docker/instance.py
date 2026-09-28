@@ -473,17 +473,23 @@ class DockerProviderInstance(BaseProviderInstance):
         """
         if self.config.default_cpus is None and self.config.default_memory is None:
             return ()
-        clamped_cpus = self.config.default_cpus
-        if self.config.default_cpus is not None:
-            clamped_cpus = DockerCpuCount(clamp_cpus_to_daemon(self.config.default_cpus, self._daemon_totals))
-            if clamped_cpus != self.config.default_cpus:
-                logger.warning(
-                    "Clamped the default CPU cap from {} to {}: the Docker daemon has only {} CPUs",
-                    self.config.default_cpus,
-                    clamped_cpus,
-                    self._daemon_totals.cpu_count,
-                )
-        return render_size_start_args(ContainerSizeRequest(cpus=clamped_cpus, memory=self.config.default_memory))
+        return render_size_start_args(
+            ContainerSizeRequest(cpus=self._clamped_default_cpus(), memory=self.config.default_memory)
+        )
+
+    def _clamped_default_cpus(self) -> DockerCpuCount | None:
+        """The configured default CPU cap, lowered to the daemon's CPU count with a warning when it exceeds it."""
+        if self.config.default_cpus is None:
+            return None
+        clamped_cpus = DockerCpuCount(clamp_cpus_to_daemon(self.config.default_cpus, self._daemon_totals))
+        if clamped_cpus != self.config.default_cpus:
+            logger.warning(
+                "Clamped the default CPU cap from {} to {}: the Docker daemon has only {} CPUs",
+                self.config.default_cpus,
+                clamped_cpus,
+                self._daemon_totals.cpu_count,
+            )
+        return clamped_cpus
 
     @cached_property
     def _state_volume(self) -> DockerVolume:
