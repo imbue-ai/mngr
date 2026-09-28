@@ -41,8 +41,8 @@ Docker records the caps in the container's configuration, so they survive
 stop/start and daemon restarts, and mngr re-applies the recorded size on every
 `mngr start` and on a snapshot restore. The cgroup caps take effect on a
 running container at once; what a gVisor (runsc) container reports as its
-memory total in /proc/meminfo, which anything inside the container that sizes
-itself from that total goes by, follows only after a restart.
+memory total in /proc/meminfo follows only after a restart, so restart the host
+if something inside it sizes itself from that total.
 
 Docker refuses a CPU cap above the daemon's CPU count; such a value is reported
 as an error and nothing is changed.
