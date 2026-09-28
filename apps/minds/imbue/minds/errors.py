@@ -148,6 +148,16 @@ class OriginsConfigError(MindError, ValueError):
     ...
 
 
+class ContentDomainError(MindError, ValueError):
+    """Raised when a deploy.toml ``content_domain`` is not dot-joined lowercase DNS labels.
+
+    Subclasses ``ValueError`` so pydantic treats it as a validation failure
+    when raised while validating the field.
+    """
+
+    ...
+
+
 class ManagementPlaneConfigError(MindError, ValueError):
     """Raised when a deploy.toml ``[management_plane]`` table is invalid.
 

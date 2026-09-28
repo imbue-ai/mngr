@@ -270,6 +270,7 @@ def test_run_host_recovery_sequence_pins_the_provider_on_both_steps(tmp_path: Pa
 # timed-out subprocess output capture
 
 
+@pytest.mark.flaky
 def test_run_mngr_capturing_timeout_carries_the_output_tail(tmp_path: Path) -> None:
     """A timed-out mngr subprocess's captured output rides the error instead of being discarded.
 

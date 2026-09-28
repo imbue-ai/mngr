@@ -26,6 +26,8 @@ export interface WorkspaceOptionsData {
   palette: Record<string, string>;
   is_stale: boolean;
   is_leased_imbue_cloud: boolean;
+  /** The account a leased machine belongs to; '' when not leased or not known. */
+  leased_owner_email: string;
   has_account: boolean;
   account_email: string;
   account_display_name: string | null;
@@ -107,6 +109,9 @@ export interface MachineSharingResponse {
   /** Identity record per granted account id the backend knows; an id absent
    * here renders as the bare id. */
   identities?: Record<string, IdentityRecord>;
+  /** Set only on the read that moved the share off a content domain the tier
+   * retired: the domain it lived at before. */
+  migrated_domain_from?: string | null;
 }
 
 /** One staged grantee of a share target: an account, an invited address, or a whole domain. */
@@ -258,6 +263,9 @@ export class ShareModel {
   gatewayError: string | null = null;
   gatewayFailedAttemptCount = 0;
   gatewayNextRetryAt: string | null = null;
+  /** The domain the share lived at before this session's load moved it to
+   * the tier's current address; null when the share did not move. */
+  migratedDomainFrom: string | null = null;
   currentTarget: string;
   errorMessage: string | null = null;
   isRetryOffered = false;
@@ -431,9 +439,18 @@ export class ShareModel {
       return;
     }
     this.adoptDocument(data);
-    // An already-published link is assumed live; the provisioning wait only
-    // applies to shares created in this session.
-    this.isLive = this.isMachineEnabled;
+    const migratedDomainFrom = data.migrated_domain_from ?? null;
+    if (migratedDomainFrom !== null) {
+      // The read itself moved the share to a new address: the new link is not
+      // live until the workspace's share stack restarts on it, so it gets the
+      // same provisioning wait as a fresh enable.
+      this.beginProvisioningWait();
+      this.migratedDomainFrom = migratedDomainFrom;
+    } else {
+      // An already-published link is assumed live; the provisioning wait only
+      // applies to shares created (or moved) in this session.
+      this.isLive = this.isMachineEnabled;
+    }
     this.status = "ready";
     this.syncReadinessPolling();
     this.redraw();
@@ -757,6 +774,7 @@ export class ShareModel {
    */
   private beginProvisioningWait(): void {
     this.isLive = false;
+    this.migratedDomainFrom = null;
     this.isCertIssued = false;
     this.isTunnelConnected = false;
     this.tunnelLoginAtSnapshot = undefined;

@@ -156,6 +156,7 @@ from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
+from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
 from imbue.minds.desktop_client.supertokens_routes import wake_ui_state_publisher
@@ -2740,6 +2741,7 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         service_labels=_service_labels(document),
         grants=grants,
         identities=_identities(document),
+        migrated_domain_from=_optional_str(document, "migrated_domain_from"),
     )
 
 
@@ -2821,12 +2823,35 @@ def _handle_workspace_sharing_readiness(workspace_id: str) -> SharingReadinessRe
     return _machine_sharing_readiness_core(host_id)
 
 
-def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse:
+def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse | Response:
     state = get_state()
-    document = get_sharing(
-        host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.identity_cache
-    )
+    try:
+        # Serialized with the writes: a read that repairs a stale-domain share
+        # rotates the relay token and rewrites share.env exactly like an enable.
+        with state.machine_sharing_locks.get_lock(host_id):
+            document = get_sharing(
+                host_id,
+                state.backend_resolver,
+                state.imbue_cloud_cli,
+                state.session_store,
+                state.identity_cache,
+                state.client_env_config,
+                state.forward_identity,
+            )
+    except SharingError as exc:
+        # A failed repair may still have moved the share on the connector, so
+        # the readiness poll must not keep serving the old domain from its cache.
+        _invalidate_sharing_caches(state, host_id)
+        return _json_error(str(exc), 502)
+    if document.get("migrated_domain_from") is not None:
+        _invalidate_sharing_caches(state, host_id)
     return _sharing_document_to_response(document)
+
+
+def _invalidate_sharing_caches(state: DesktopClientState, host_id: str) -> None:
+    """Drop the readiness poll's cached share lookup and gateway verdict for one machine."""
+    state.active_share_cache.invalidate(host_id)
+    state.gateway_status_cache.invalidate(host_id)
 
 
 # CLEANUP: retire the host-keyed /machines/<host_id>/sharing routes below once
@@ -2834,7 +2859,7 @@ def _machine_sharing_get_core(host_id: str) -> MachineSharingResponse:
 # workspace-keyed routes; only external API-token scripts could still use these).
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
-def _handle_machine_sharing_get(host_id: str) -> MachineSharingResponse:
+def _handle_machine_sharing_get(host_id: str) -> MachineSharingResponse | Response:
     """Return the machine's sharing document: status + the grants in force (compat shim)."""
     return _machine_sharing_get_core(host_id)
 
@@ -2859,8 +2884,7 @@ def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response
                 # The share state may have changed even on failure (the
                 # connector create can succeed before the injection fails), so
                 # the readiness poll must not keep serving a stale lookup.
-                state.active_share_cache.invalidate(host_id)
-                state.gateway_status_cache.invalidate(host_id)
+                _invalidate_sharing_caches(state, host_id)
     except EmptyGrantsError as exc:
         # A grants document naming nobody is a request-validation failure,
         # not an upstream fault. 400 rather than 422: spectree reserves 422
@@ -2889,8 +2913,7 @@ def _machine_sharing_delete_core(host_id: str) -> MachineSharingResponse | Respo
                     host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.forward_identity
                 )
             finally:
-                state.active_share_cache.invalidate(host_id)
-                state.gateway_status_cache.invalidate(host_id)
+                _invalidate_sharing_caches(state, host_id)
     except SharingError as exc:
         return _json_error(str(exc), 502)
     return MachineSharingResponse(host_id=host_id, enabled=False)

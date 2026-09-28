@@ -345,6 +345,14 @@ class ShareInfo(WireModel):
             "connector origin (today's behavior)."
         ),
     )
+    needs_reshare: bool = Field(
+        default=False,
+        description=(
+            "True while the share is active on a content domain the tier has moved away from: the "
+            "next re-share moves it to a fresh domain on the current apex. False from a connector "
+            "that predates the field."
+        ),
+    )
 
 
 class ShareRelayMap(WireModel):

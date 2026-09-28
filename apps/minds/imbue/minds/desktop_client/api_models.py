@@ -698,6 +698,14 @@ class MachineSharingResponse(FrozenModel):
         default_factory=dict,
         description="Identity record per granted user id the desktop knows (absent ids render as the bare id)",
     )
+    migrated_domain_from: str | None = Field(
+        default=None,
+        description=(
+            "Set only on the read that moved the share off a content domain the tier retired: the "
+            "domain it lived at before. Links shared under it no longer work, and the new link is "
+            "not live until the workspace's share stack restarts."
+        ),
+    )
 
 
 class ProviderToggleResponse(FrozenModel):

@@ -26,6 +26,7 @@ from imbue.minds.errors import MalformedMngrOutputError
 from imbue.minds.errors import ManagementPlaneConfigError
 from imbue.minds.errors import OriginsConfigError
 from imbue.minds.errors import SshCaConfigError
+from imbue.minds.primitives import ContentDomain
 from imbue.minds.primitives import ServiceName
 from imbue.mngr.primitives import AgentId
 
@@ -491,10 +492,49 @@ class OriginsConfig(FrozenModel):
             "session cookie is scoped to it so the session crosses the two hosts."
         ),
     )
+    legacy_chrome_origins: tuple[AnyUrl, ...] = Field(
+        default=(),
+        description=(
+            "Former web-chrome origins (e.g. ``https://minds.imbue.com``) the connector redirects to "
+            "``chrome_origin``. Attached to the connector as Modal custom domains so the redirect can be "
+            "served; pushed as LEGACY_CHROME_ORIGINS at deploy time. Empty means no redirect."
+        ),
+    )
+    api_origin: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Origin the connector's API is reached at (e.g. ``https://api.studio.imbue.com``), attached "
+            "to the connector as a Modal custom domain and polled for liveness after every deploy. None "
+            "keeps clients on the bare Modal URL."
+        ),
+    )
+    llm_origin: AnyUrl | None = Field(
+        default=None,
+        description=(
+            "Origin the LiteLLM proxy is reached at (e.g. ``https://llm.studio.imbue.com``), attached "
+            "to the proxy as a Modal custom domain and polled for liveness after every deploy. None "
+            "keeps clients on the bare Modal URL."
+        ),
+    )
+
+    def labeled_origins(self) -> tuple[tuple[str, AnyUrl], ...]:
+        """Every origin the block names, paired with the field name it came from (for error messages)."""
+        labeled: list[tuple[str, AnyUrl]] = [
+            ("accounts_origin", self.accounts_origin),
+            ("chrome_origin", self.chrome_origin),
+        ]
+        labeled.extend(
+            (f"legacy_chrome_origins[{idx}]", origin) for idx, origin in enumerate(self.legacy_chrome_origins)
+        )
+        if self.api_origin is not None:
+            labeled.append(("api_origin", self.api_origin))
+        if self.llm_origin is not None:
+            labeled.append(("llm_origin", self.llm_origin))
+        return tuple(labeled)
 
     @model_validator(mode="after")
     def _check_origins_are_https_hosts_under_the_cookie_domain(self) -> "OriginsConfig":
-        for label, origin in (("accounts_origin", self.accounts_origin), ("chrome_origin", self.chrome_origin)):
+        for label, origin in self.labeled_origins():
             if origin.scheme != "https":
                 raise OriginsConfigError(f"[origins] {label} must be https, got {origin}")
             if origin.path not in (None, "", "/") or origin.query is not None or origin.fragment is not None:
@@ -506,6 +546,42 @@ class OriginsConfig(FrozenModel):
                 raise OriginsConfigError(
                     f"[origins] {label} host {host!r} is not a subdomain of cookie_domain {self.cookie_domain!r}"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_legacy_origins_are_not_current_origins(self) -> "OriginsConfig":
+        # A legacy origin that is also the chrome origin would redirect to
+        # itself forever; one that is the accounts origin would redirect the
+        # sign-in pages away from the only host they work on.
+        current_hosts = {self.accounts_origin.host, self.chrome_origin.host}
+        for idx, origin in enumerate(self.legacy_chrome_origins):
+            if origin.host in current_hosts:
+                raise OriginsConfigError(
+                    f"[origins] legacy_chrome_origins[{idx}] {origin.host!r} is the current chrome or accounts host"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _check_api_and_llm_hosts_are_distinct(self) -> "OriginsConfig":
+        # Each custom domain can be attached to exactly one Modal function, so
+        # the API and LLM hosts cannot share a name with each other or with the
+        # browser-facing hosts; a legacy chrome host counts, since the connector
+        # answers everything on it with a redirect to the chrome origin.
+        browser_hosts = {
+            self.accounts_origin.host,
+            self.chrome_origin.host,
+            *(origin.host for origin in self.legacy_chrome_origins),
+        }
+        if self.api_origin is not None and self.api_origin.host in browser_hosts:
+            raise OriginsConfigError(f"[origins] api_origin {self.api_origin.host!r} is a browser-facing host")
+        if self.llm_origin is not None and self.llm_origin.host in browser_hosts:
+            raise OriginsConfigError(f"[origins] llm_origin {self.llm_origin.host!r} is a browser-facing host")
+        if (
+            self.api_origin is not None
+            and self.llm_origin is not None
+            and self.api_origin.host == self.llm_origin.host
+        ):
+            raise OriginsConfigError(f"[origins] api_origin and llm_origin share the host {self.api_origin.host!r}")
         return self
 
 
@@ -778,7 +854,19 @@ class DeployEnvConfig(FrozenModel):
         description="HCP Vault path prefix for this tier's secrets, e.g. `secrets/minds/production`."
     )
     cloudflare_domain: NonEmptyStr = Field(
-        description="Cloudflare zone domain used by this tier (informational; the connector also reads this from its own Vault entry)."
+        description=(
+            "The tier's ops zone: the Cloudflare domain the telemetry and error-tracking hostnames and the "
+            "R2 setup scripts live under (e.g. ``imbueminds.com``). Not the user-content domain, which is "
+            "``content_domain``. Informational to the deploy; the connector reads its own copy from Vault."
+        )
+    )
+    content_domain: ContentDomain | None = Field(
+        default=None,
+        description=(
+            "The apex shared-workspace hostnames live under (e.g. ``personal-imbue.com``), stamped over "
+            "the Vault ``sharing`` entry's SHARE_CONTENT_DOMAIN at deploy time so git is the source of "
+            "truth. None leaves the Vault value standing (dev envs today)."
+        ),
     )
     secrets: DeploySecretsConfig = Field(
         description="Which `.minds/template/*.sh`-shaped services the deploy step pulls from Vault and pushes to Modal."

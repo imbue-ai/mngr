@@ -386,6 +386,11 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
         ),
     )
 
+    created_workspace_domain_to_return: str | None = Field(
+        default=None,
+        description="workspace_domain the created share carries; None uses the canned <host>.owner1234 shape",
+    )
+
     def create_share(
         self,
         *,
@@ -399,7 +404,7 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
         self.add_share(account, host_id)
         return ShareCliInfo(
             host_id=host_id,
-            workspace_domain=f"{host_id}.owner1234.us1.shares.example",
+            workspace_domain=self.created_workspace_domain_to_return or f"{host_id}.owner1234.us1.shares.example",
             region="us1",
             state="active",
             relay_endpoints=TEST_RELAY_ENDPOINTS,

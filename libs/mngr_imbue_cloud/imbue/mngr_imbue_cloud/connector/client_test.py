@@ -1746,6 +1746,29 @@ def test_get_share_status_parses_status_document(monkeypatch: pytest.MonkeyPatch
     ]
     assert info.cert_not_after == "2026-10-01 00:00:00+00:00"
     assert info.relay_token is None
+    # A connector that predates the domain-migration flag sends nothing.
+    assert info.needs_reshare is False
+
+
+def test_get_share_status_parses_the_needs_reshare_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "host_id": _SHARE_HOST_ID,
+                "workspace_domain": _SHARE_DOMAIN,
+                "region": "us1",
+                "state": "active",
+                "needs_reshare": True,
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    info = client.get_share_status(SecretStr("tok"), _SHARE_HOST_ID)
+
+    assert info is not None
+    assert info.needs_reshare is True
 
 
 def test_delete_share_hits_the_share_route(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1786,6 +1809,38 @@ def test_list_shares_parses_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(items) == 1
     assert items[0].host_id == _SHARE_HOST_ID
     assert items[0].state == "inactive"
+    assert items[0].needs_reshare is False
+
+
+def test_list_shares_parses_the_needs_reshare_flag_per_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "shares": [
+                    {
+                        "host_id": _SHARE_HOST_ID,
+                        "workspace_domain": _SHARE_DOMAIN,
+                        "region": "us1",
+                        "state": "active",
+                        "needs_reshare": True,
+                    },
+                    {
+                        "host_id": "host-" + "b" * 32,
+                        "workspace_domain": _SHARE_DOMAIN,
+                        "region": "us1",
+                        "state": "active",
+                        "needs_reshare": False,
+                    },
+                ]
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    items = client.list_shares(SecretStr("tok"))
+
+    assert [item.needs_reshare for item in items] == [True, False]
 
 
 # Browser-login support probe + device-token exchange
