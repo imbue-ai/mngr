@@ -150,7 +150,7 @@ run_privileged_shell() {
     sudo sh -c "$command_text"
 }
 
-# ---------------------------------------------------------------- preflight
+# preflight
 step "Preflight checks"
 
 if [ "$(id -u)" = "0" ]; then
@@ -205,7 +205,7 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     fi
 fi
 
-# ---------------------------------------------------------------- apt packages
+# apt packages
 step "System packages (base tools + Electron runtime libraries)"
 
 # Installs the first available candidate for each |-separated group, so Ubuntu
@@ -259,7 +259,7 @@ else
     run_privileged "Installing ${missing_packages[*]}" sh -c "$resolve_script" sh "${missing_packages[@]}"
 fi
 
-# ---------------------------------------------------------------- checkout
+# checkout
 # Run from inside a checkout, use it (BASH_SOURCE is empty when piped in).
 CHECKOUT=""
 if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
@@ -322,7 +322,7 @@ fi
 
 NODE_VERSION="$(tr -d '[:space:]' < "$CHECKOUT/apps/minds/.nvmrc")"
 
-# ---------------------------------------------------------------- docker
+# docker
 if [ "$IS_SKIP_DOCKER" = 1 ]; then
     step "Skipping Docker (--skip-docker)"
 else
@@ -351,7 +351,7 @@ Remove the distro package and install Docker CE:  curl -fsSL https://get.docker.
     fi
 fi
 
-# ---------------------------------------------------------------- raspberry pi
+# raspberry pi
 IS_REBOOT_NEEDED=0
 if [ "$IS_RASPBERRY_PI" = 1 ]; then
     step "Raspberry Pi: gVisor runsc, registered the way the mngr_vps host setup registers it"
@@ -426,7 +426,7 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     fi
 fi
 
-# ---------------------------------------------------------------- lingering (WSL)
+# lingering (WSL)
 if [ "$IS_WSL" = 1 ]; then
     # WSL tears the distro down shortly after the last session exits; a
     # lingering user session keeps the app's background daemons alive.
@@ -437,7 +437,7 @@ if [ "$IS_WSL" = 1 ]; then
     fi
 fi
 
-# ---------------------------------------------------------------- $HOME toolchain
+# $HOME toolchain
 step "Toolchain under \$HOME: uv, nvm, Node ${NODE_VERSION}, pnpm"
 export PATH="$HOME/.local/bin:$PATH"
 mkdir -p "$HOME/.local/bin"
@@ -497,7 +497,7 @@ else
     npm install -g "pnpm@${PNPM_VERSION}" >/dev/null
 fi
 
-# ---------------------------------------------------------------- build the checkout
+# build the checkout
 step "Python workspace (uv sync --all-packages)"
 (cd "$CHECKOUT" && uv sync -q --all-packages)
 
@@ -508,7 +508,7 @@ step "Electron app dependencies (pnpm install)"
 step "Bundled binaries and the UI bundle (what 'pnpm start' does before every launch)"
 (cd "$CHECKOUT/apps/minds" && node scripts/ensure-binaries.js && pnpm run build:ui)
 
-# ---------------------------------------------------------------- launcher
+# launcher
 step "Launcher: $LAUNCHER"
 build_timeout_export=""
 if [ "$IS_RASPBERRY_PI" = 1 ]; then
@@ -534,8 +534,8 @@ if [ "$IS_RASPBERRY_PI" = 1 ]; then
     cat > "$HOME/.local/share/applications/minds.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=Mind
-Comment=Mind desktop client (from source)
+Name=Imbue Studio
+Comment=Imbue Studio desktop client (from source)
 Exec="$LAUNCHER"
 Icon=$CHECKOUT/apps/minds/electron/assets/icon.png
 Terminal=false
@@ -546,11 +546,11 @@ fi
 
 if [ "$IS_WSL" = 1 ]; then
     if command -v powershell.exe >/dev/null 2>&1 && [ -n "${WSL_DISTRO_NAME:-}" ]; then
-        step "Creating the 'Mind (WSL)' shortcut on the Windows desktop"
+        step "Creating the 'Imbue Studio (WSL)' shortcut on the Windows desktop"
         powershell.exe -NoProfile -NonInteractive -Command "
             \$desktop = [Environment]::GetFolderPath('Desktop')
             \$ws = New-Object -ComObject WScript.Shell
-            \$sc = \$ws.CreateShortcut(\"\$desktop\\Mind (WSL).lnk\")
+            \$sc = \$ws.CreateShortcut(\"\$desktop\\Imbue Studio (WSL).lnk\")
             \$sc.TargetPath = 'C:\\Windows\\System32\\wsl.exe'
             \$sc.Arguments = '-d $WSL_DISTRO_NAME -- bash -lc \"$LAUNCHER_WORD\"'
             \$sc.Description = 'Start the minds desktop app inside WSL'
@@ -561,7 +561,7 @@ if [ "$IS_WSL" = 1 ]; then
     fi
 fi
 
-# ---------------------------------------------------------------- done
+# done
 printf '\n\033[1;32mminds is installed.\033[0m (checkout: %s)\n' "$CHECKOUT"
 echo "Start it any time with: $LAUNCHER"
 if [ "$IS_REBOOT_NEEDED" = 1 ]; then

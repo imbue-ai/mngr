@@ -46,9 +46,9 @@ test('the relaunch command starts the executable with its arguments only once th
 });
 
 test('the relaunch command names the shell, the pid, and the executable positionally', () => {
-  const { command, args } = relaunchAfterExitCommand({ pid: 4242, executablePath: '/opt/Mind/minds', args: ['a', 'b'] });
+  const { command, args } = relaunchAfterExitCommand({ pid: 4242, executablePath: '/opt/ImbueStudio/minds', args: ['a', 'b'] });
   assert.equal(command, '/bin/sh');
-  assert.deepEqual(args.slice(-4), ['4242', '/opt/Mind/minds', 'a', 'b']);
+  assert.deepEqual(args.slice(-4), ['4242', '/opt/ImbueStudio/minds', 'a', 'b']);
   assert.equal(args[0], '-c');
 });
 

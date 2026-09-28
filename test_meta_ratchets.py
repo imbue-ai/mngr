@@ -1472,12 +1472,13 @@ _PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
 _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE = RegexRatchetRule(
     rule_name="minds references in mngr-level code",
     rule_description=(
-        "mngr-level code must not reference Mind, default-workspace-template, or the "
+        "mngr-level code must not reference Imbue Studio (or its previous name, Mind), "
+        "default-workspace-template, or the "
         "/home/user/workspace container path -- those are higher-level concerns layered on top "
         "of mngr (see specs/machine-workspace-naming/decisions.md). Describe the behavior "
         "generically (e.g. 'a caller may...') instead of naming the higher-level product."
     ),
-    pattern_string=r"(?i)\bminds?\b|default[-_]workspace[-_]template|/home/user/workspace",
+    pattern_string=r"(?i)\bminds?\b|imbue[ _-]?studio|default[-_]workspace[-_]template|/home/user/workspace",
 )
 
 

@@ -3,13 +3,16 @@
 // The freedesktop entry a running AppImage registers for itself.
 //
 // An AppImage is one file with no installer, so nothing registers a menu
-// entry, an icon, or the minds:// scheme handler for it; the .deb ships its
-// own system-wide entry from electron-builder and never reaches this.
+// entry, an icon, or the imbue-studio:// scheme handler for it; the .deb
+// ships its own system-wide entry from electron-builder and never reaches
+// this.
 //
 // Free of any `electron` import so it is unit-testable under plain node (see
 // ../test/unit/linux-desktop-entry.test.js).
 
 const path = require('path');
+
+const { DEEPLINK_SCHEMES } = require('./deeplink');
 
 const DESKTOP_ENTRY_FILENAME = 'minds.desktop';
 const ICON_NAME = 'minds';
@@ -17,7 +20,7 @@ const ICON_NAME = 'minds';
 // searches a directory index.theme does not list, and it stops at 512.
 const ICON_PIXEL_SIZE = 512;
 const ICON_SIZE = `${ICON_PIXEL_SIZE}x${ICON_PIXEL_SIZE}`;
-const SCHEME_MIME_TYPE = 'x-scheme-handler/minds';
+const SCHEME_MIME_TYPES = Object.freeze(DEEPLINK_SCHEMES.map((scheme) => `x-scheme-handler/${scheme}`));
 
 /**
  * Where the entry and icon go, per the XDG base directory spec: `$XDG_DATA_HOME`
@@ -35,14 +38,15 @@ function desktopEntryPaths({ homeDir, xdgDataHome }) {
 
 /**
  * The desktop entry text for the AppImage at `appImagePath`, for the app
- * named `productName`.
+ * named `productName` and shown as `displayName`.
  *
  * `productName` is the app's `productName` (Electron's `app.name`), which is
  * also the `WM_CLASS` Electron gives every window on Linux, so it serves as
  * `StartupWMClass` exactly as electron-builder's entry for the .deb uses it.
+ * `displayName` is what the menu shows.
  *
  * The Exec path is quoted so a directory with a space survives, and `%U`
- * hands the minds:// URL over as an argument, which is how main.js receives
+ * hands the deeplink URL over as an argument, which is how main.js receives
  * deeplinks on Linux (a second instance's argv, or a cold start's).
  *
  * Inside a quoted Exec argument the spec reserves `"`, backslash, `$` and
@@ -50,9 +54,12 @@ function desktopEntryPaths({ homeDir, xdgDataHome }) {
  * `%` starts a field code, so a path carrying any of them is refused rather
  * than written into an entry that launches the wrong file.
  */
-function renderDesktopEntry({ appImagePath, productName }) {
+function renderDesktopEntry({ appImagePath, productName, displayName }) {
   if (typeof productName !== 'string' || productName.trim() === '') {
     throw new Error(`The product name must be a non-empty string, got ${JSON.stringify(productName)}`);
+  }
+  if (typeof displayName !== 'string' || displayName.trim() === '') {
+    throw new Error(`The display name must be a non-empty string, got ${JSON.stringify(displayName)}`);
   }
   if (typeof appImagePath !== 'string' || !path.isAbsolute(appImagePath)) {
     throw new Error(`The AppImage path must be absolute, got ${JSON.stringify(appImagePath)}`);
@@ -63,13 +70,13 @@ function renderDesktopEntry({ appImagePath, productName }) {
   return [
     '[Desktop Entry]',
     'Type=Application',
-    `Name=${productName}`,
+    `Name=${displayName}`,
     'Comment=Persistent, autonomous AI agents',
     `Exec="${appImagePath}" %U`,
     `Icon=${ICON_NAME}`,
     'Terminal=false',
     'Categories=Development;',
-    `MimeType=${SCHEME_MIME_TYPE};`,
+    `MimeType=${SCHEME_MIME_TYPES.join(';')};`,
     `StartupWMClass=${productName}`,
     '',
   ].join('\n');
@@ -78,7 +85,7 @@ function renderDesktopEntry({ appImagePath, productName }) {
 module.exports = {
   DESKTOP_ENTRY_FILENAME,
   ICON_PIXEL_SIZE,
-  SCHEME_MIME_TYPE,
+  SCHEME_MIME_TYPES,
   desktopEntryPaths,
   renderDesktopEntry,
 };

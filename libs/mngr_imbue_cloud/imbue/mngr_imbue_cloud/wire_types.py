@@ -339,7 +339,7 @@ class ShareInfo(WireModel):
     chrome_origin: str | None = Field(
         default=None,
         description=(
-            "The tier's hosted web-chrome origin (e.g. https://minds.imbue.com), for clients to stamp "
+            "The tier's hosted web-chrome origin (e.g. https://studio.imbue.com), for clients to stamp "
             "into the workspace's share.env as SHARE_CHROME_ORIGIN. None from a connector that predates "
             "the field or a tier with no chrome origin configured; clients then fall back to the "
             "connector origin (today's behavior)."

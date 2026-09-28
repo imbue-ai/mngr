@@ -2,7 +2,12 @@
 
 modal_workspace = "minds-staging"
 vault_path_prefix = "secrets/minds/staging"
+# The ops zone (telemetry, errors, the R2 setup scripts), not where user
+# content lives; that is content_domain below.
 cloudflare_domain = "minds-staging.com"
+# The user-content apex shared workspaces are served under, stamped over the
+# Vault sharing entry's SHARE_CONTENT_DOMAIN at deploy time.
+content_domain = "personal-imbue-staging.com"
 
 # Vault-backed per-env Modal Secrets (see dev/deploy.toml for the
 # full explanation). The `litellm-connector` Modal Secret is pushed
@@ -155,14 +160,19 @@ max_total_machine_disk_gb = 1400
 # accounts surface and the web chrome are Modal custom domains on the
 # connector, sharing one browser session via a cookie scoped to the apex.
 # The apex is first-party only -- untrusted workspace content lives on the
-# separate content domain (minds-staging.com) -- and is staging's own, so
-# sessions can never cross tiers. Both hosts must be registered and verified
-# in the minds-staging Modal workspace (dashboard -> Domains) BEFORE deploying
-# with this block, or the deploy fails.
+# separate content domain (personal-imbue-staging.com) -- and is staging's
+# own, so sessions can never cross tiers. Every host named here must be
+# registered and verified in the minds-staging Modal workspace (dashboard ->
+# Domains) BEFORE deploying with this block, or the deploy fails. The legacy
+# chrome origin redirects to the chrome origin; the api and llm origins are
+# the custom domains the connector and the LiteLLM proxy answer on.
 [origins]
 accounts_origin = "https://accounts.imbue-staging.com"
-chrome_origin = "https://minds.imbue-staging.com"
+chrome_origin = "https://studio.imbue-staging.com"
 cookie_domain = "imbue-staging.com"
+legacy_chrome_origins = ["https://minds.imbue-staging.com"]
+api_origin = "https://api.studio.imbue-staging.com"
+llm_origin = "https://llm.studio.imbue-staging.com"
 
 # Whether this tier deploys the analytics app (analytics-<tier>): the
 # gold-table aggregation + lake maintenance crons. Staging's bringup

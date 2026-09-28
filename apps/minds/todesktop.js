@@ -1,11 +1,19 @@
 const pkg = require('./package.json');
+const { DEEPLINK_SCHEMES } = require('./electron/deeplink');
+const { PRODUCT_DISPLAY_NAME } = require('./electron/product-name');
 
 module.exports = {
   schemaVersion: 1,
   id: '26032588hqdzk',
-  // Registers minds:// as this app's URL scheme (CFBundleURLTypes on macOS).
+  // The file-system name (ImbueStudio.app, /opt/ImbueStudio): passed
+  // explicitly so the dashboard's app name can never override package.json.
+  productName: pkg.productName,
+  // Registers imbue-studio:// as this app's URL scheme (CFBundleURLTypes on
+  // macOS), plus the previous scheme while links in the wild still use it.
   // Runtime handling lives in electron/main.js (handleDeeplink).
-  appProtocolScheme: 'minds',
+  // CLEANUP: drop 'minds' once two stable releases have shipped with both
+  // schemes (specs/imbue-studio-rename/05_cleanup.md).
+  appProtocolScheme: [...DEEPLINK_SCHEMES],
   icon: './electron/assets/icon.png',
   appPath: '.',
   // `extraResources` is the only channel that reaches the shipped app: it
@@ -50,6 +58,13 @@ module.exports = {
   // second copy of its subtree in app.asar.
   mac: {
     entitlements: 'entitlements.mac.plist',
+    // The menu bar and the About panel read these; the bundle on disk keeps
+    // the spaceless productName, which Finder, the Dock, and the browser's
+    // open-external-app prompt show.
+    extendInfo: {
+      CFBundleName: PRODUCT_DISPLAY_NAME,
+      CFBundleDisplayName: PRODUCT_DISPLAY_NAME,
+    },
   },
   linux: {
     category: 'Development',

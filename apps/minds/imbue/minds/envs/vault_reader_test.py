@@ -98,9 +98,9 @@ def _make_branching_vault_binary(
 
 
 def test_read_vault_kv_happy_path(tmp_path: Path) -> None:
-    fake = _make_split_vault_binary(tmp_path, {"CLOUDFLARE_API_TOKEN": "abc", "CLOUDFLARE_ZONE_ID": "def"})
+    fake = _make_split_vault_binary(tmp_path, {"CLOUDFLARE_API_TOKEN": "abc", "CLOUDFLARE_ACCOUNT_ID": "def"})
     result = read_vault_kv(VaultPath("secrets/minds/dev/cloudflare"), vault_binary=str(fake))
-    assert result == {"CLOUDFLARE_API_TOKEN": "abc", "CLOUDFLARE_ZONE_ID": "def"}
+    assert result == {"CLOUDFLARE_API_TOKEN": "abc", "CLOUDFLARE_ACCOUNT_ID": "def"}
 
 
 def test_read_vault_kv_rejects_bad_prefix(tmp_path: Path) -> None:

@@ -33,8 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scrip
 This is the same Linux installer every platform uses
 ([dev-setup.md](./dev-setup.md)); it detects WSL from `/proc/version` and adds
 the WSL-specific steps. It narrates each step, is idempotent (re-run it to
-update), and ends by launching the app and dropping a "Mind (WSL)" shortcut on
-the Windows desktop for next time. Flags (pass via `bash -s -- <flags>`):
+update), and ends by launching the app and dropping an "Imbue Studio (WSL)"
+shortcut on the Windows desktop for next time. Flags (pass via `bash -s -- <flags>`):
 
 - `--version REF` -- mngr ref to install (`latest` for the newest `minds-v*`
   tag; a fresh clone without it lands on `main`, and an existing checkout is

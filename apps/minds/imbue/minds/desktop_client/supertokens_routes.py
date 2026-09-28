@@ -225,9 +225,9 @@ def wake_ui_state_publisher() -> None:
 _WEB_LOGIN_FLOW_TTL_SECONDS = 11 * 60
 
 # Passed to the plugin's login subcommand so its browser success page bounces
-# straight back to the desktop app: a bare minds:// deeplink focuses the app
-# without navigating (see the Electron main process's handleDeeplink).
-_MINDS_FOCUS_DEEPLINK = "minds://"
+# straight back to the desktop app: a bare imbue-studio:// deeplink focuses the
+# app without navigating (see the Electron main process's handleDeeplink).
+_MINDS_FOCUS_DEEPLINK = "imbue-studio://"
 
 
 class _WebLoginFlowStatus(FrozenModel):

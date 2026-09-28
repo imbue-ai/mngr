@@ -1,20 +1,27 @@
 'use strict';
 
-// Pure parsing logic for minds:// deeplinks. Kept free of any `electron`
-// imports so it can be unit-tested under plain node (see
+// Pure parsing logic for imbue-studio:// deeplinks. Kept free of any
+// `electron` imports so it can be unit-tested under plain node (see
 // ../test/unit/deeplink.test.js). main.js routes every OS delivery channel
 // (macOS `open-url`, win/linux second-instance argv, cold-start argv) through
 // these helpers and acts on the result.
 //
 // URL shape: the host names the action.
-//   minds://create?git_url=<repo>&branch=<ref>  -> a Template link:
+//   imbue-studio://create?git_url=<repo>&branch=<ref>  -> a Template link:
 //     main.js navigates to the SPA's Create from Template PAGE, which
 //     offers both ways forward (create a new machine, or add the Template
 //     to an existing one). `branch` accepts anything the create form's
 //     Branch input accepts and stays blank when absent (create then resolves
 //     the repo's latest version). Without a git_url the plain create page is
 //     the target.
-//   minds:// (or any unrecognized/malformed URL) -> just focus the app.
+//   imbue-studio:// (or any unrecognized/malformed URL) -> just focus the app.
+
+// The schemes the app registers with the OS and accepts here, primary first.
+// CLEANUP: drop 'minds' once two stable releases have shipped with both
+// schemes (specs/imbue-studio-rename/05_cleanup.md).
+const DEEPLINK_SCHEMES = Object.freeze(['imbue-studio', 'minds']);
+const DEEPLINK_PROTOCOLS = new Set(DEEPLINK_SCHEMES.map((scheme) => `${scheme}:`));
+const DEEPLINK_ARGV_PATTERN = new RegExp(`^(?:${DEEPLINK_SCHEMES.join('|')})://`, 'i');
 
 // Generous for a git URL plus ref, tight enough to bound log spam and
 // pathological input.
@@ -27,10 +34,11 @@ const MAX_DEEPLINK_LENGTH = 2048;
  *   { action: 'create', gitUrl: string, branch: string }  (params default '')
  *   { action: 'focus' }
  *
- * Never throws. Anything that is not a well-formed minds:// URL with a
- * recognized action host degrades to 'focus' -- the deliberate catch-all so
- * that a bare minds:// (used by the post-login web page) and any future or
- * malformed link at worst brings the app to the front.
+ * Never throws. Anything that is not a well-formed URL on one of the
+ * DEEPLINK_SCHEMES with a recognized action host degrades to 'focus' -- the
+ * deliberate catch-all so that a bare imbue-studio:// (used by the post-login
+ * web page) and any future or malformed link at worst brings the app to the
+ * front.
  */
 function parseDeeplink(rawUrl) {
   const FOCUS = { action: 'focus' };
@@ -43,8 +51,8 @@ function parseDeeplink(rawUrl) {
   } catch {
     return FOCUS;
   }
-  if (parsed.protocol !== 'minds:') return FOCUS;
-  // Non-special schemes preserve host case (minds://CREATE keeps host
+  if (!DEEPLINK_PROTOCOLS.has(parsed.protocol.toLowerCase())) return FOCUS;
+  // Non-special schemes preserve host case (imbue-studio://CREATE keeps host
   // "CREATE"), so lowercase explicitly. hostname (not host) ignores a port.
   const action = parsed.hostname.toLowerCase();
   if (action !== 'create') return FOCUS;
@@ -77,14 +85,21 @@ function deeplinkTargetPath(rawUrl) {
 /**
  * Find the deeplink URL in an argv array (win/linux second-instance and
  * cold-start delivery), where it sits among the binary path, app path, and
- * chromium switches. Returns the first minds:// argument, or null.
+ * chromium switches. Returns the first argument on one of the
+ * DEEPLINK_SCHEMES, or null.
  */
 function extractDeeplinkUrlFromArgv(argv) {
   if (!Array.isArray(argv)) return null;
   for (const arg of argv) {
-    if (typeof arg === 'string' && /^minds:\/\//i.test(arg)) return arg;
+    if (typeof arg === 'string' && DEEPLINK_ARGV_PATTERN.test(arg)) return arg;
   }
   return null;
 }
 
-module.exports = { parseDeeplink, deeplinkTargetPath, extractDeeplinkUrlFromArgv, MAX_DEEPLINK_LENGTH };
+module.exports = {
+  parseDeeplink,
+  deeplinkTargetPath,
+  extractDeeplinkUrlFromArgv,
+  DEEPLINK_SCHEMES,
+  MAX_DEEPLINK_LENGTH,
+};

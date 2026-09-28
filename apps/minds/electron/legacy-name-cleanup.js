@@ -5,35 +5,37 @@ const os = require('os');
 const path = require('path');
 
 // CLEANUP: delete this module, its call in main.js, and legacy-name-cleanup.test.js
-// once the "Mind" rename has been on stable long enough for installs to have
-// launched once.
+// once the Imbue Studio build has been on stable long enough for installs to
+// have launched once (specs/imbue-studio-rename/05_cleanup.md).
 //
 // Kept free of any `electron` import (like session-persistence.js and
 // update-channel.js) so it can be unit-tested under plain node.
 
-const LEGACY_APP_NAME = 'Minds';
+// Every name the app has shipped under before this one, each of which owned
+// its own set of per-user directories.
+const LEGACY_APP_NAMES = Object.freeze(['Minds', 'Mind']);
 
 function defaultEnvironment() {
   return { platform: process.platform, homeDir: os.homedir(), env: process.env };
 }
 
 /**
- * The per-user directories Electron gave the app under its previous name.
+ * The per-user directories Electron gave the app under its previous names.
  *
  * The updater cache is deliberately absent: electron-builder derives its name
  * from the package name rather than the product name, so it did not move.
  */
 function legacyNameDirs({ platform, homeDir, env } = defaultEnvironment()) {
   if (platform === 'darwin') {
-    return [
-      path.join(homeDir, 'Library', 'Application Support', LEGACY_APP_NAME),
-      path.join(homeDir, 'Library', 'Logs', LEGACY_APP_NAME),
-      path.join(homeDir, 'Library', 'Caches', LEGACY_APP_NAME),
-    ];
+    return LEGACY_APP_NAMES.flatMap((name) => [
+      path.join(homeDir, 'Library', 'Application Support', name),
+      path.join(homeDir, 'Library', 'Logs', name),
+      path.join(homeDir, 'Library', 'Caches', name),
+    ]);
   }
   const config = env.XDG_CONFIG_HOME || path.join(homeDir, '.config');
   const cache = env.XDG_CACHE_HOME || path.join(homeDir, '.cache');
-  return [path.join(config, LEGACY_APP_NAME), path.join(cache, LEGACY_APP_NAME)];
+  return LEGACY_APP_NAMES.flatMap((name) => [path.join(config, name), path.join(cache, name)]);
 }
 
 /**
@@ -62,4 +64,4 @@ function removeLegacyNameDirs(environment = defaultEnvironment()) {
   return removed;
 }
 
-module.exports = { removeLegacyNameDirs, legacyNameDirs, LEGACY_APP_NAME };
+module.exports = { removeLegacyNameDirs, legacyNameDirs, LEGACY_APP_NAMES };

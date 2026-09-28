@@ -112,7 +112,8 @@ test-minds-js:
 # redirector) into OUT_DIR. The deploy recipe copies these onto the VPS; see
 # apps/share_relay/README.md. RELAY_ID comes from `just register-share-relay`
 # (or `minds-admin relays list`); CONTENT_DOMAIN is the env's content
-# apex (imbueminds.com / minds-staging.com / minds-dev.com); PLUGIN_AUTH_URL is
+# apex (personal-imbue.com / personal-imbue-staging.com / personal-imbue-dev.com,
+# the tier deploy.toml's content_domain); PLUGIN_AUTH_URL is
 # the connector's /frps/auth endpoint for that env, WITHOUT any secret. The
 # plugin secret is read from FRPS_AUTH_SECRET in the environment
 # (Vault: secrets/minds/<tier>/sharing/FRPS_AUTH_SECRET).
@@ -158,8 +159,8 @@ deploy-share-relay host relay_id region content_domain plugin_auth_url:
 # Reconcile the region's DNS record set: relay.<region>.<domain> + *.<region>.<domain>
 # gray-cloud A records covering EVERY relay IP in the region (pass --ip per relay via
 # ips="ip1 ip2"). Bring-up / disaster-recovery path; the connector's health sweep
-# maintains the same records in steady state. Reads CLOUDFLARE_API_TOKEN +
-# CLOUDFLARE_ZONE_ID from the env.
+# maintains the same records in steady state. Reads CLOUDFLARE_API_TOKEN from
+# the env and looks the content domain's zone up by name.
 [group("share-relay ops")]
 dns-share-relay region content_domain +ips:
   uv run share-relay dns --region {{region}} --content-domain {{content_domain}} \

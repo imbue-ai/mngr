@@ -495,7 +495,7 @@ def _login_success_page(success_redirect_url: str | None, unverified_email: str 
     """Build the HTML the callback listener serves to the browser.
 
     With a redirect URL, the page offers a link to it -- the minds desktop
-    app passes its minds:// deeplink so a click hands focus back to the app;
+    app passes its imbue-studio:// deeplink so a click hands focus back to the app;
     since that flow is minds-driven (nothing else passes the option today),
     the page carries the minds wordmark. Deliberately a link rather than an
     automatic navigation: the click is a user gesture, so browsers show
@@ -681,7 +681,7 @@ def build_login_url(login_base_url: str, callback_url: str, code_challenge: str,
     "--success-redirect-url",
     default=None,
     help=(
-        "URL the success page links to once the callback lands (e.g. a minds:// "
+        "URL the success page links to once the callback lands (e.g. an imbue-studio:// "
         "deeplink so a click returns the user to the desktop app). Default: no link; "
         "the page just says to close the tab."
     ),

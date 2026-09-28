@@ -209,27 +209,41 @@ def test_origins_config_rejects_an_origin_with_a_path() -> None:
         )
 
 
-def test_committed_tier_deploy_tomls_parse_with_their_origins_blocks() -> None:
-    """The committed staging/production deploy.toml [origins] blocks must load
-    (and their hosts must sit under each tier's own cookie apex)."""
-    for tier, apex in (("staging", "imbue-staging.com"), ("production", "imbue.com")):
-        config = load_deploy_config(tier)
-        assert config.origins is not None
-        assert str(config.origins.cookie_domain) == apex
+@pytest.mark.parametrize(
+    ("tier", "apex", "content_domain"),
+    [
+        ("staging", "imbue-staging.com", "personal-imbue-staging.com"),
+        ("production", "imbue.com", "personal-imbue.com"),
+    ],
+)
+def test_committed_browser_tier_deploy_tomls_name_the_studio_origins(
+    tier: str, apex: str, content_domain: str
+) -> None:
+    """The cutover configuration (specs/imbue-studio-rename/04_cutover_rollout.md), pinned so a typo fails here rather than at a deploy."""
+    config = load_deploy_config(tier)
+    assert config.origins is not None
+    assert str(config.origins.cookie_domain) == apex
+    assert config.origins.accounts_origin.host == f"accounts.{apex}"
+    assert config.origins.chrome_origin.host == f"studio.{apex}"
+    assert [origin.host for origin in config.origins.legacy_chrome_origins] == [f"minds.{apex}"]
+    assert config.origins.api_origin is not None and config.origins.api_origin.host == f"api.studio.{apex}"
+    assert config.origins.llm_origin is not None and config.origins.llm_origin.host == f"llm.studio.{apex}"
+    assert config.content_domain == content_domain
 
 
-# CLEANUP: drop the "is unset" assertions (or the whole test) once the cutover
-# PR (specs/imbue-studio-rename/04_cutover_rollout.md) sets any of these fields
-# on a committed deploy.toml.
-def test_every_committed_deploy_toml_still_loads_without_the_new_origin_fields() -> None:
-    """The rename fields are optional: no committed tier sets them yet, and every tier must keep loading."""
+def test_every_committed_deploy_toml_names_the_tier_content_domain() -> None:
+    """Every tier stamps its own user-content apex; the dev and ci tiers share one and set no origins."""
+    expected_content_domain_by_tier = {
+        "production": "personal-imbue.com",
+        "staging": "personal-imbue-staging.com",
+        "dev": "personal-imbue-dev.com",
+        "ci": "personal-imbue-dev.com",
+    }
     for tier in committed_deploy_config_tiers():
         config = load_deploy_config(tier)
-        assert config.content_domain is None, f"tier {tier} sets content_domain before the cutover PR"
-        if config.origins is not None:
-            assert config.origins.legacy_chrome_origins == ()
-            assert config.origins.api_origin is None
-            assert config.origins.llm_origin is None
+        assert config.content_domain == expected_content_domain_by_tier[tier], tier
+        if tier in ("dev", "ci"):
+            assert config.origins is None, tier
 
 
 def _origins_with_every_field() -> OriginsConfig:
