@@ -1,9 +1,9 @@
-# Imbue Studio behavior corpus
+# Mind behavior corpus
 
 Understanding this behavior corpus calls for the behaviors skill; consult it when reading this file.
 
-This corpus specifies the externally observable behavior of the Imbue Studio *desktop client*.
-Established Imbue Studio terms are defined in the [workspace glossary](../docs/workspace/glossary.md) and are not redefined in this corpus; corpus-specific terms are defined in the README of the folder that specifies them.
+This corpus specifies the externally observable behavior of the minds *desktop client*.
+Established minds terms are defined in the [workspace glossary](../docs/workspace/glossary.md) and are not redefined in this corpus; corpus-specific terms are defined in the README of the folder that specifies them.
 
 ## Corpus-wide conventions
 

@@ -22,7 +22,7 @@ One ``mngr pair`` subprocess per sync, supervised here:
   sync is shown in: STARTING until ``pair_syncing`` says unison is watching
   both replicas, then SYNCING until the process exits.
 
-A sync runs only while Imbue Studio does, but the *choice* to keep a folder synced
+A sync runs only while Minds does, but the *choice* to keep a folder synced
 outlives it: :mod:`folder_sync_store` records it, and :meth:`restore_all`
 starts them again at launch. Quitting stops every sync; starting brings back
 every one the user had not turned off.
@@ -159,11 +159,11 @@ class FolderSyncState(UpperCaseStrEnum):
 
     Three states are terminal, and they are worth keeping apart because the
     user is owed a different thing by each. STOPPED means it ended because it
-    was asked to -- the user unticked the box, or Imbue Studio quit -- and is where a
+    was asked to -- the user unticked the box, or Minds quit -- and is where a
     settled inactive folder rests, so the unticked checkbox says everything and
     the row needs no badge. FAILED means it ended on its own, and carries the
     reason. UNKNOWN is neither: the folder is one the user still wants synced,
-    nothing is running, and Imbue Studio cannot say why. That is not a resting place,
+    nothing is running, and Minds cannot say why. That is not a resting place,
     it is a disagreement between what the app says and what it is doing -- and
     it used to be spelled STOPPED, which made it invisible.
     """
@@ -294,7 +294,7 @@ def _build_pair_argv(mngr_binary: str, spec: FolderSyncSpec, workspace_target: "
     ``--no-require-git`` is not a user choice: a sync is about files, and
     leaving git out keeps it from checking out branches or merging commits
     in either repository behind the user's back. ``--no-start`` is not one
-    either: restoring syncs is something Imbue Studio does on its own at startup, and
+    either: restoring syncs is something Minds does on its own at startup, and
     it must never be what turns a stopped machine on (and bills for it). Nor is
     ``--no-links``: the two sides are different computers, so a symlink does
     not mean the same thing on both.
@@ -325,7 +325,7 @@ def _build_pair_argv(mngr_binary: str, spec: FolderSyncSpec, workspace_target: "
         # not use that mode -- so it asks, rather than inheriting the answer.
         "--exclude",
         ".git",
-        # A directory Imbue Studio just created has no shared history with this
+        # A directory Minds just created has no shared history with this
         # folder, whatever an archive from an earlier pairing of the same two
         # paths says. Without this unison sees a replica that used to hold
         # files and now holds none, and refuses to start at all -- which is
@@ -347,7 +347,7 @@ def _build_workspace_prepare_argv(mngr_binary: str, agent_address: str, spec: Fo
     Does two things in one round trip, because it needs two answers from the
     same place: it creates the directory the sync lands in, and prints the
     agent's home directory, which is what the landing path is relative to.
-    Imbue Studio cannot know that home from here -- the agent may be on another
+    Minds cannot know that home from here -- the agent may be on another
     machine entirely -- and ``mngr exec`` runs where it can simply ask.
 
     """
@@ -412,7 +412,7 @@ def _build_workspace_deactivate_argv(mngr_binary: str, agent_address: str, spec:
     A rename within the machine's home, so it costs no copying however large
     the folder is. An already-absent copy is not a failure -- the agent may
     have deleted it -- and anything sitting in the destination is removed
-    first: nothing but Imbue Studio is supposed to write under
+    first: nothing but Minds is supposed to write under
     ``~/inactive_synced_folders``, so something there is a mistake rather than
     a file to preserve, and leaving it would strand this copy instead.
     """
@@ -825,7 +825,7 @@ class FolderSyncManager(MutableModel):
         asked for it.
 
         Raises :class:`FolderSyncError` only for what can be judged
-        immediately: a path that is refused, or a workspace Imbue Studio cannot place.
+        immediately: a path that is refused, or a workspace Minds cannot place.
         """
         spec = self._spec_for(agent_id, raw_local_path, direction, conflict)
         refusal = self._reason_to_refuse(spec.local_path, agent_id)
@@ -892,7 +892,7 @@ class FolderSyncManager(MutableModel):
 
         Lexical, so it does not see a folder reached through a symlinked
         component. That is the accepted limit: what is prevented is two copies
-        colliding on the machine, and a path Imbue Studio has never been told about
+        colliding on the machine, and a path Minds has never been told about
         cannot collide with one it has.
         """
         for other_path, activity in self._paths_with_a_copy_for(agent_id).items():
@@ -1011,7 +1011,7 @@ class FolderSyncManager(MutableModel):
         key = _SyncKey(agent_id=agent_id, local_path=local_path)
         spec = self._known_spec_for(key) or self._spec_for_forgotten(agent_id, local_path)
         if spec is None:
-            raise FolderSyncError(f"Imbue Studio has no record of syncing {local_path}, so there is nothing to retry.")
+            raise FolderSyncError(f"Minds has no record of syncing {local_path}, so there is nothing to retry.")
         with self._lock:
             self._applied_by_key.pop(key, None)
             self._runs_by_key.pop(key, None)
@@ -1272,7 +1272,7 @@ class FolderSyncManager(MutableModel):
         host_id = self._host_id_for(agent_id)
         if host_id is None:
             raise FolderSyncError(
-                "Imbue Studio does not know which machine this workspace runs on yet, so it cannot sync with it. "
+                "Minds does not know which machine this workspace runs on yet, so it cannot sync with it. "
                 "Try again in a moment."
             )
         return _build_folder_sync_spec(
@@ -1379,7 +1379,7 @@ class FolderSyncManager(MutableModel):
         host_id = self._host_id_for(record.agent_id)
         if host_id is None:
             raise FolderSyncError(
-                "Imbue Studio does not know which machine this workspace runs on yet. Try again in a moment."
+                "Minds does not know which machine this workspace runs on yet. Try again in a moment."
             )
         return _build_folder_sync_spec(
             agent_id=record.agent_id,
@@ -1438,7 +1438,7 @@ class FolderSyncManager(MutableModel):
     def _spec_for_forgotten(self, agent_id: str, local_path: str) -> FolderSyncSpec | None:
         """The spec of a remembered sync nothing is holding in memory, if there is one.
 
-        What a sync stopped in an earlier run of Imbue Studio leaves behind: a record
+        What a sync stopped in an earlier run of Minds leaves behind: a record
         and a copy on the machine, and no reason to have been touched since.
         """
         record = self._record_for(agent_id, local_path)
@@ -1504,7 +1504,7 @@ class FolderSyncManager(MutableModel):
         return build_agent_address(AgentId(spec.agent_id), self.backend_resolver)
 
     def _host_id_for(self, agent_id: str) -> str | None:
-        """The machine ``agent_id`` runs on, or None while Imbue Studio cannot say.
+        """The machine ``agent_id`` runs on, or None while Minds cannot say.
 
         None rather than a guess: a sync started against the wrong machine
         would write one desktop's files into somebody else's.
@@ -1545,11 +1545,11 @@ class FolderSyncManager(MutableModel):
         """Start every sync this computer remembered, at launch.
 
         The point of keeping a copy on the machine is that it is there when
-        Imbue Studio is not, so the copy has to catch up as soon as Imbue Studio is back
+        Minds is not, so the copy has to catch up as soon as Minds is back
         rather than when someone next opens the panel.
 
         Every failure is per-folder and lands on that folder's row: a machine
-        that is stopped (nothing here starts one), a workspace Imbue Studio cannot
+        that is stopped (nothing here starts one), a workspace Minds cannot
         place yet, or a folder that is no longer on this computer -- an
         unmounted disk, or one the user deleted. None of them are reasons to
         abandon the other folders, and none of them forget the intent, which is
@@ -1568,7 +1568,7 @@ class FolderSyncManager(MutableModel):
                 continue
             if not self._wait_until_host_is_known(record.agent_id):
                 message = (
-                    "Imbue Studio could not work out which machine this workspace runs on, so it did not "
+                    "Minds could not work out which machine this workspace runs on, so it did not "
                     "start syncing. Try again once the workspace is listed."
                 )
                 logger.warning("Could not restore the sync of {}: {}", record.local_path, message)

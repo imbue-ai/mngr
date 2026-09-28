@@ -281,7 +281,7 @@ def _handle_authenticate() -> Response:
         html = build_error_page_html(
             title="Sign-in failed",
             message="This login code is invalid or has already been used. "
-            "Find the login URL printed where the Imbue Studio app is running and open that full link.",
+            "Find the login URL printed where the Mind app is running and open that full link.",
         )
         return make_html_response(content=html, status_code=403)
 
@@ -1017,7 +1017,7 @@ def _finalize_destroyed_workspace(
 
 # Provider names that are always hidden from minds' providers panel:
 # - ``local``: always present, always healthy; nothing actionable.
-# - ``imbue_cloud``: the default singleton instance is non-functional. Imbue Studio
+# - ``imbue_cloud``: the default singleton instance is non-functional. Minds
 #   uses the multi-account variant (``imbue_cloud_<slug>`` per signed-in
 #   account), so the default block is dead weight and surfacing it would
 #   confuse users into thinking they need to enable / disable it.

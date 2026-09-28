@@ -53,12 +53,12 @@ export interface ManualCredentialParameter {
 }
 
 /** The credential form shown while an account that needs credentials is selected.
- * An empty `parameters` means Imbue Studio cannot work out what to ask for: the dialog
+ * An empty `parameters` means Mind cannot work out what to ask for: the dialog
  * shows `message` as an error and offers no Approve. */
 export interface ManualCredentialsPrompt {
   parameters: ManualCredentialParameter[];
   message: string;
-  /** The agent's note on where to find the credentials; its words, not Imbue Studio's. */
+  /** The agent's note on where to find the credentials; its words, not Mind's. */
   instructions?: string | null;
 }
 

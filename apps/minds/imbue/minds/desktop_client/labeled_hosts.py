@@ -1,6 +1,6 @@
 """CLI-backed host inventory for the create-attempt-labeled Lima / Docker hosts.
 
-Imbue Studio stamps every Lima / Docker workspace host with a ``create-attempt-id``
+Minds stamps every Lima / Docker workspace host with a ``create-attempt-id``
 label at create time. Both the startup reconcile
 and the create attempt discard / retry flows need to walk that inventory -- listing
 one provider's hosts (agent-less ones included) through ``mngr list --hosts``

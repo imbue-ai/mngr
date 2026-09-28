@@ -37,7 +37,7 @@ describe("the update-ready card", () => {
     // refusing the update: it installs on the next restart either way.
     const text = renderedText(card());
 
-    expect(text).toContain("Imbue Studio 0.4.2 is ready");
+    expect(text).toContain("Mind 0.4.2 is ready");
     expect(text).toContain("Installs when you restart");
   });
 
@@ -102,7 +102,7 @@ describe("the update-ready card", () => {
     const installing = card({ installPolicy: "on-request", needsPassword: true, isInstalling: true });
 
     const text = renderedText(installing);
-    expect(text).toContain("Installing Imbue Studio 0.4.2");
+    expect(text).toContain("Installing Mind 0.4.2");
     expect(text).toContain("Enter your password when asked");
     expect(text).not.toContain("Install and restart");
     expect(controls(installing)).toHaveLength(0);
@@ -116,7 +116,7 @@ describe("the update-ready card", () => {
     const restarting = card({ isInstalling: true });
 
     const text = renderedText(restarting);
-    expect(text).toContain("Restarting into Imbue Studio 0.4.2");
+    expect(text).toContain("Restarting into Mind 0.4.2");
     expect(text).not.toContain("Installing");
     expect(allText(heldControl(restarting).children)).toContain("Restarting...");
   });

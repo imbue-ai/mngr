@@ -11,18 +11,15 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_LISTEN_SECONDS
-from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
-from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
 from imbue.minds.desktop_client.imbue_cloud_cli import _ACCOUNTS_URL_SUBPROCESS_ENV
 from imbue.minds.desktop_client.imbue_cloud_cli import _CONNECTOR_URL_SUBPROCESS_ENV
+from imbue.minds.desktop_client.imbue_cloud_cli import _WEB_LOGIN_TIMEOUT_SECONDS
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_conflict_stored
 from imbue.minds.desktop_client.imbue_cloud_cli import _parse_stderr_error_message
-from imbue.minds.desktop_client.imbue_cloud_cli import classify_incomplete_web_login
 from imbue.minds.desktop_client.supertokens_routes import _WEB_LOGIN_FLOW_TTL_SECONDS
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.mngr_imbue_cloud.cli.auth import _LOGIN_LISTEN_TIMEOUT_SECONDS
 
 
 def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
@@ -120,28 +117,16 @@ def test_expect_success_unstructured_failure_is_not_reported_as_an_auth_verdict(
 
 
 def test_web_login_timeouts_stay_coherent_and_cover_a_slow_browser_leg() -> None:
-    """The three coupled web-login deadlines must stay ordered, with a listen window a slow sign-in fits in.
+    """The three coupled web-login deadlines must stay ordered as the listen window widens.
 
     The subprocess-kill deadline must exceed the listen window, so the plugin's own
     timeout message surfaces instead of a kill; the flow-status TTL must cover the
     whole subprocess lifetime, so the polling frontend never reports the flow
     expired while a sign-in is still in progress.
     """
-    assert WEB_LOGIN_LISTEN_SECONDS >= 30 * 60
-    assert WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS > WEB_LOGIN_LISTEN_SECONDS
-    assert _WEB_LOGIN_FLOW_TTL_SECONDS >= WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
-
-
-def test_auth_login_asks_the_plugin_to_listen_for_the_whole_window() -> None:
-    body = json.dumps({"user_id": "u-1", "email": "a@b.com"})
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=body))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    cli.auth_login()
-
-    argv = caller.calls[0]
-    assert argv[argv.index("--listen-timeout") + 1] == str(WEB_LOGIN_LISTEN_SECONDS)
-    assert caller.recorded_calls[0].timeout == WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
+    assert _LOGIN_LISTEN_TIMEOUT_SECONDS >= 600
+    assert _WEB_LOGIN_TIMEOUT_SECONDS > _LOGIN_LISTEN_TIMEOUT_SECONDS
+    assert _WEB_LOGIN_FLOW_TTL_SECONDS >= _WEB_LOGIN_TIMEOUT_SECONDS
 
 
 def test_parse_stderr_error_message_survives_surrounding_log_lines() -> None:
@@ -471,42 +456,3 @@ def test_sync_records_pull_raises_on_an_unexpected_shape() -> None:
 
     with pytest.raises(ImbueCloudCliError, match="sync records pull"):
         cli.sync_records_pull("owner@example.com")
-
-
-def _plugin_failure(error_class: str) -> MngrCallResult:
-    body = json.dumps({"error": f"plugin said {error_class}", "error_class": error_class}, indent=2)
-    return MngrCallResult(returncode=1, stdout="", stderr="Open this URL in your browser\n" + body + "\n")
-
-
-@pytest.mark.parametrize(
-    ("result", "expected_reason"),
-    [
-        (_plugin_failure("LoginTimeout"), WebLoginIncompleteReason.TIMED_OUT),
-        (
-            MngrCallResult(returncode=-1, is_timed_out=True, stderr="timed out after 630s"),
-            WebLoginIncompleteReason.TIMED_OUT,
-        ),
-        (_plugin_failure("LoginStateMismatch"), WebLoginIncompleteReason.CALLBACK_REJECTED),
-        (_plugin_failure("LoginCallbackMissingCode"), WebLoginIncompleteReason.CALLBACK_REJECTED),
-        (_plugin_failure("ImbueCloudDeviceCodeRefusedError"), WebLoginIncompleteReason.CODE_REFUSED),
-        # An unreachable connector is a real connection problem, not an incomplete sign-in.
-        (_plugin_failure("ImbueCloudAuthError"), None),
-        (MngrCallResult(returncode=1, stdout="", stderr="Traceback (most recent call last):\n"), None),
-        (MngrCallResult(returncode=0, stdout=json.dumps({"email": "a@b.com"}), stderr=""), None),
-    ],
-)
-def test_classify_incomplete_web_login(
-    result: MngrCallResult, expected_reason: WebLoginIncompleteReason | None
-) -> None:
-    assert classify_incomplete_web_login(result) == expected_reason
-
-
-def test_auth_login_raises_the_typed_incomplete_error_for_a_refused_code() -> None:
-    caller = RecordingMngrCaller(result=_plugin_failure("ImbueCloudDeviceCodeRefusedError"))
-    cli = ImbueCloudCli(mngr_caller=caller, connector_url=AnyUrl("https://connector.example/"))
-
-    with pytest.raises(ImbueCloudWebLoginIncompleteCliError) as exc_info:
-        cli.auth_login()
-
-    assert exc_info.value.reason == WebLoginIncompleteReason.CODE_REFUSED
-    assert "plugin said ImbueCloudDeviceCodeRefusedError" in str(exc_info.value)

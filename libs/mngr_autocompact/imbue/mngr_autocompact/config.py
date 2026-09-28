@@ -7,8 +7,6 @@ from pydantic import field_validator
 from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.mngr.config.data_types import PluginConfig
 
-DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS = 200_000
-
 
 class ContextCompactionMode(UpperCaseStrEnum):
     """How context compaction should be triggered for conversational agents."""
@@ -44,7 +42,7 @@ class AutoCompactPluginConfig(PluginConfig):
         description="How many minutes before cache expiry to trigger compaction.",
     )
     min_context_tokens: int = Field(
-        default=DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS,
+        default=200_000,
         ge=0,
         description="Minimum context size in tokens required to trigger compaction. Set to 0 to disable gating.",
     )

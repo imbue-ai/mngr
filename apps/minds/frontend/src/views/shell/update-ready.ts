@@ -73,7 +73,7 @@ export function watchUpdateStatus(onChange: () => void): void {
     // under on-quit, waiting for the install control under on-request.
     if (status.type === "checking" || status.type === "error") return;
     // `version` is optional on the shared status shape; without one, offer
-    // nothing rather than a card reading "Imbue Studio undefined is ready".
+    // nothing rather than a card reading "Mind undefined is ready".
     const offeredVersion =
       status.type === "update-downloaded" && status.version !== undefined ? status.version : null;
     // A failed install described the version that was offered before; a

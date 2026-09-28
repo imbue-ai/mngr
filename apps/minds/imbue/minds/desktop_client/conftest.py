@@ -45,8 +45,6 @@ from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.mock_local_prerequisites_test import FakeHostProbe
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
-from imbue.minds.desktop_client.supertokens_routes import _web_login_flows
-from imbue.minds.desktop_client.supertokens_routes import _web_login_flows_lock
 from imbue.minds.desktop_client.testing import device_id_for_test
 from imbue.minds.desktop_client.workspace_record_store import WorkspaceRecordStore
 from imbue.minds.primitives import ServiceName
@@ -100,9 +98,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
     login_url_to_write: str = Field(
         default="https://accounts.example.com/login?next=%2Faccounts%2Fauthorize",
         description="Sign-in URL auth_login writes to its url_file (the copy-the-link fallback)",
-    )
-    login_error_to_raise: Exception | None = Field(
-        default=None, description="Error auth_login raises instead of returning a session, when set"
     )
     is_auth_list_failing: bool = Field(
         default=False,
@@ -179,8 +174,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
     ) -> ImbueCloudAuthSession:
         if url_file is not None:
             url_file.write_text(self.login_url_to_write + "\n")
-        if self.login_error_to_raise is not None:
-            raise self.login_error_to_raise
         session = self.login_session_to_return
         if session is None:
             raise ImbueCloudCliError("auth login: no fake login session configured on FakeImbueCloudCli")
@@ -745,20 +738,6 @@ def make_resolver_with_data(
             resolver.update_services(AgentId(agent_id_str), services, labels)
 
     return resolver
-
-
-@pytest.fixture(autouse=True)
-def _forget_web_login_flows() -> Iterator[None]:
-    """Start each test with no browser sign-in flows tracked.
-
-    The flow table is process-wide, and a new sign-in joins any flow still
-    running, so a flow one test leaves running would be joined by the next.
-    """
-    with _web_login_flows_lock:
-        _web_login_flows.clear()
-    yield
-    with _web_login_flows_lock:
-        _web_login_flows.clear()
 
 
 @pytest.fixture(autouse=True)

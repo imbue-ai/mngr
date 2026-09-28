@@ -11,41 +11,29 @@ must:
 The ``running_callback_server`` fixture lives in ``cli/conftest.py``.
 
 Also covers ``_persist_auth_response`` (every OK response counts as signed in
-immediately -- verification is non-blocking), the PKCE / login-URL helpers
-the browser flow is built from, and the page the browser lands on, which must
-report the sign-in's real outcome.
+immediately -- verification is non-blocking) and the PKCE / login-URL helpers
+the browser flow is built from.
 """
 
 import base64
 import hashlib
-import json
-import signal
-import threading
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
 from pathlib import Path
 
 import httpx
 import pytest
-from click.testing import CliRunner
-from click.testing import Result
 from pydantic import AnyUrl
 
-from imbue.mngr.config.loader import get_or_create_profile_dir
-from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_imbue_cloud.cli._common import resolve_accounts_url
 from imbue.mngr_imbue_cloud.cli.auth import _CallbackCaptureBox
-from imbue.mngr_imbue_cloud.cli.auth import _LoginPageOutcome
 from imbue.mngr_imbue_cloud.cli.auth import _bind_callback_listener
 from imbue.mngr_imbue_cloud.cli.auth import _ensure_connector_supports_browser_login
-from imbue.mngr_imbue_cloud.cli.auth import _hold_listener_lease
-from imbue.mngr_imbue_cloud.cli.auth import _login_result_page
+from imbue.mngr_imbue_cloud.cli.auth import _login_success_page
 from imbue.mngr_imbue_cloud.cli.auth import _make_callback_handler_class
 from imbue.mngr_imbue_cloud.cli.auth import _persist_auth_response
 from imbue.mngr_imbue_cloud.cli.auth import _revoke_server_sessions
 from imbue.mngr_imbue_cloud.cli.auth import _write_login_url_file
-from imbue.mngr_imbue_cloud.cli.auth import auth
 from imbue.mngr_imbue_cloud.cli.auth import build_login_url
 from imbue.mngr_imbue_cloud.cli.auth import compute_pkce_challenge
 from imbue.mngr_imbue_cloud.cli.auth import make_pkce_verifier
@@ -62,11 +50,6 @@ from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 def _get(port: int, path: str) -> int:
     with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5.0) as resp:
         return resp.status
-
-
-def _get_page_text(url: str) -> str:
-    with urllib.request.urlopen(url, timeout=60.0) as resp:
-        return resp.read().decode("utf-8")
 
 
 def test_callback_handler_captures_login_query_params(
@@ -120,8 +103,7 @@ def test_callback_handler_serves_the_verification_reminder_for_an_unverified_ema
     running_callback_server: tuple[_CallbackCaptureBox, int],
 ) -> None:
     """A callback flagged verified=0 renders the reminder; the plain page otherwise."""
-    box, port = running_callback_server
-    box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
+    _box, port = running_callback_server
     reminder = _get_body(port, "/callback?code=abc123&state=xyz&email=alice%40example.com&verified=0")
     assert "Click the email verification link" in reminder
     assert "You must verify your address: alice@example.com" in reminder
@@ -133,8 +115,7 @@ def test_callback_handler_serves_the_verification_reminder_for_an_unverified_ema
 
 
 def test_success_page_without_redirect_says_return_to_terminal() -> None:
-    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
-    assert "You are signed in" in page
+    page = _login_success_page(None, None).decode("utf-8")
     assert "return to your terminal" in page
     assert "<script>" not in page
 
@@ -143,37 +124,15 @@ def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> No
     # Deliberately a plain link, not an automatic navigation: the click is the
     # user gesture that triggers the browser's open-external-app prompt. The
     # app-driven variant carries the minds wordmark and copy.
-    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
+    page = _login_success_page("minds://", None).decode("utf-8")
     assert '<a href="minds://">Open app</a>' in page
     assert "<svg" in page and 'fill="currentColor"' in page
-    assert "You&#x27;re in! Feel free to close this tab." in page
+    assert "Feel free to close this tab." in page
     assert "<script>" not in page
 
 
-@pytest.mark.parametrize(
-    ("success_redirect_url", "outcome", "expected_text", "unexpected_text"),
-    [
-        ("minds://", _LoginPageOutcome.FAILED, "Sign-in didn&#x27;t finish. Go back to the app", "You&#x27;re in"),
-        ("minds://", _LoginPageOutcome.PENDING, "Almost done. Go back to the app", "You&#x27;re in"),
-        (None, _LoginPageOutcome.FAILED, "Sign-in did not finish", "You are signed in"),
-        (None, _LoginPageOutcome.PENDING, "Almost done", "You are signed in"),
-    ],
-)
-def test_result_page_never_claims_success_for_an_unfinished_sign_in(
-    success_redirect_url: str | None,
-    outcome: _LoginPageOutcome,
-    expected_text: str,
-    unexpected_text: str,
-) -> None:
-    # An unverified address must not turn an unfinished sign-in into the verification reminder either.
-    page = _login_result_page(success_redirect_url, outcome, "alice@example.com").decode("utf-8")
-    assert expected_text in page
-    assert unexpected_text not in page
-    assert "Click the email verification link" not in page
-
-
 def test_success_page_with_unverified_email_leads_with_the_verification_reminder() -> None:
-    page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, "alice@example.com").decode("utf-8")
+    page = _login_success_page("minds://", "alice@example.com").decode("utf-8")
     assert '<h1 class="verify">Click the email verification link</h1>' in page
     assert "You must verify your address: alice@example.com" in page
     assert "Check your spam folder" in page
@@ -183,7 +142,7 @@ def test_success_page_with_unverified_email_leads_with_the_verification_reminder
 
 
 def test_success_page_escapes_the_unverified_email() -> None:
-    page = _login_result_page(None, _LoginPageOutcome.SIGNED_IN, "<b>bold</b>@example.com").decode("utf-8")
+    page = _login_success_page(None, "<b>bold</b>@example.com").decode("utf-8")
     assert "<b>" not in page
     assert "&lt;b&gt;bold&lt;/b&gt;@example.com" in page
 
@@ -191,7 +150,7 @@ def test_success_page_escapes_the_unverified_email() -> None:
 def test_success_page_escapes_redirect_url_markup() -> None:
     """A crafted URL must not be able to inject markup into the page: the
     href is attribute-escaped."""
-    page = _login_result_page('minds://x?a=<b>&q="hi"', _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
+    page = _login_success_page('minds://x?a=<b>&q="hi"', None).decode("utf-8")
     assert "<b>" not in page
     assert 'href="minds://x?a=&lt;b&gt;&amp;q=&quot;hi&quot;"' in page
 
@@ -288,7 +247,7 @@ def test_bind_callback_listener_reports_an_occupied_port_as_json(
     _box, occupied_port = running_callback_server
 
     with pytest.raises(SystemExit):
-        _bind_callback_listener(occupied_port, _make_callback_handler_class(_CallbackCaptureBox(), None, 0.0))
+        _bind_callback_listener(occupied_port, _make_callback_handler_class(_CallbackCaptureBox(), None))
 
     stderr = capsys.readouterr().err
     assert '"error"' in stderr
@@ -301,7 +260,7 @@ def test_bind_callback_listener_reports_an_out_of_range_port_as_json(
     """A --callback-port outside 0-65535 raises OverflowError from socket.bind,
     which must become the JSON error body, not a raw traceback."""
     with pytest.raises(SystemExit):
-        _bind_callback_listener(70000, _make_callback_handler_class(_CallbackCaptureBox(), None, 0.0))
+        _bind_callback_listener(70000, _make_callback_handler_class(_CallbackCaptureBox(), None))
 
     stderr = capsys.readouterr().err
     assert '"error"' in stderr
@@ -470,169 +429,3 @@ def test_signout_revoke_all_devices_propagates_a_failed_revocation(tmp_path: Pat
 
     with pytest.raises(ImbueCloudAuthError):
         _revoke_server_sessions(store, client, account, session, all_devices=True)
-
-
-def test_capture_box_keeps_the_first_published_outcome() -> None:
-    """The login command publishes a success inside its listener block and a
-    failure on the way out; the success must not be overwritten."""
-    box = _CallbackCaptureBox()
-    box.publish_outcome(_LoginPageOutcome.SIGNED_IN)
-    box.publish_outcome(_LoginPageOutcome.FAILED)
-    assert box.wait_for_outcome(0.0) == _LoginPageOutcome.SIGNED_IN
-
-
-def test_capture_box_reports_pending_when_no_outcome_arrives_in_time() -> None:
-    assert _CallbackCaptureBox().wait_for_outcome(0.0) == _LoginPageOutcome.PENDING
-
-
-def _run_login_and_complete_the_callback(connector_url: str, tmp_path: Path, host_dir: Path) -> tuple[Result, str]:
-    """Run ``auth login`` against ``connector_url`` and play the browser's final redirect.
-
-    Returns the command's result and the text of the page the browser was shown.
-    """
-    # The command saves the session under the active mngr profile.
-    get_or_create_profile_dir(host_dir)
-    url_file = tmp_path / "login.url"
-    results: list[Result] = []
-    login_thread = threading.Thread(
-        target=lambda: results.append(
-            CliRunner().invoke(
-                auth,
-                [
-                    "login",
-                    "--no-browser",
-                    "--url-file",
-                    str(url_file),
-                    "--success-redirect-url",
-                    "minds://",
-                    "--connector-url",
-                    connector_url,
-                ],
-            )
-        ),
-        daemon=True,
-        name="auth-login-under-test",
-    )
-    login_thread.start()
-
-    login_url, _, _ = poll_for_value(lambda: url_file.read_text().strip() if url_file.exists() else None, timeout=30.0)
-    assert login_url is not None, "auth login never wrote its sign-in URL"
-    next_path = urllib.parse.parse_qs(urllib.parse.urlparse(login_url).query)["next"][0]
-    authorize_query = urllib.parse.parse_qs(urllib.parse.urlparse(next_path).query)
-    callback_url = authorize_query["redirect_uri"][0]
-    state = authorize_query["state"][0]
-
-    page = _get_page_text(f"{callback_url}?{urllib.parse.urlencode({'code': 'code-8821', 'state': state})}")
-    login_thread.join(timeout=60.0)
-    assert results, "auth login did not finish"
-    return results[0], page
-
-
-def test_login_page_says_signed_in_only_after_the_code_exchange_succeeds(
-    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
-    tmp_path: Path,
-    temp_host_dir: Path,
-) -> None:
-    result, page = _run_login_and_complete_the_callback(device_login_connector_stub(200)[0], tmp_path, temp_host_dir)
-
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["email"] == "device-login-4417@example.com"
-    assert "You&#x27;re in!" in page
-
-
-def test_login_page_reports_failure_when_the_connector_refuses_the_code(
-    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
-    tmp_path: Path,
-    temp_host_dir: Path,
-) -> None:
-    result, page = _run_login_and_complete_the_callback(device_login_connector_stub(400)[0], tmp_path, temp_host_dir)
-
-    assert result.exit_code == 1
-    # The JSON error body follows the "Open this URL" line on stderr.
-    error_body = json.loads(result.stderr[result.stderr.index("{") :])
-    assert error_body["error_class"] == "ImbueCloudDeviceCodeRefusedError"
-    assert "Sign-in didn&#x27;t finish" in page
-    assert "You&#x27;re in" not in page
-
-
-def test_login_gives_up_after_the_requested_listen_timeout(
-    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
-    tmp_path: Path,
-    temp_host_dir: Path,
-) -> None:
-    get_or_create_profile_dir(temp_host_dir)
-    result = CliRunner().invoke(
-        auth,
-        [
-            "login",
-            "--no-browser",
-            "--listen-timeout",
-            "1",
-            "--url-file",
-            str(tmp_path / "login.url"),
-            "--connector-url",
-            device_login_connector_stub(200)[0],
-        ],
-    )
-
-    assert result.exit_code == 1
-    error_body = json.loads(result.stderr[result.stderr.index("{") :])
-    assert error_body["error_class"] == "LoginTimeout"
-
-
-def test_login_holds_the_listener_lease_while_waiting_and_releases_it_after(
-    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
-    tmp_path: Path,
-    temp_host_dir: Path,
-) -> None:
-    """The connector checks this lease before redirecting, so it must be live before the browser can arrive."""
-    connector_url, recorded_requests = device_login_connector_stub(200)
-
-    result, page = _run_login_and_complete_the_callback(connector_url, tmp_path, temp_host_dir)
-
-    assert result.exit_code == 0, result.output
-    assert "You&#x27;re in!" in page
-    lease_requests = [request for request in recorded_requests if "/auth/device/attempts/" in request]
-    challenge = lease_requests[0].rsplit("/", 1)[1]
-    assert lease_requests[0] == f"PUT /auth/device/attempts/{challenge}"
-    assert lease_requests[-1] == f"DELETE /auth/device/attempts/{challenge}"
-    assert recorded_requests.index(lease_requests[0]) < recorded_requests.index("POST /auth/device/token")
-
-
-def test_login_still_signs_in_against_a_connector_without_listener_leases(
-    device_login_connector_stub: Callable[..., tuple[str, list[str]]],
-    tmp_path: Path,
-    temp_host_dir: Path,
-) -> None:
-    connector_url, _recorded_requests = device_login_connector_stub(200, device_attempts_status_code=404)
-
-    result, page = _run_login_and_complete_the_callback(connector_url, tmp_path, temp_host_dir)
-
-    assert result.exit_code == 0, result.output
-    assert "You&#x27;re in!" in page
-
-
-def test_sigterm_while_holding_the_listener_lease_still_releases_it() -> None:
-    """The desktop stops ``auth login`` with SIGTERM on quit; the connector must still learn the listener is gone."""
-    lease_requests: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        lease_requests.append(f"{request.method} {request.url.path}")
-        return httpx.Response(200, json={"status": "OK"})
-
-    client = ImbueCloudConnectorClient(base_url=AnyUrl("https://example.com"), transport=httpx.MockTransport(handler))
-    challenge = compute_pkce_challenge(make_pkce_verifier())
-    # The handler is only installed on the main thread; elsewhere the raised SIGTERM would kill the test process.
-    assert threading.current_thread() is threading.main_thread()
-    handler_before = signal.getsignal(signal.SIGTERM)
-
-    with pytest.raises(SystemExit) as exc_info:
-        with _hold_listener_lease(client, challenge):
-            signal.raise_signal(signal.SIGTERM)
-
-    assert exc_info.value.code == 128 + signal.SIGTERM
-    assert lease_requests == [
-        f"PUT /auth/device/attempts/{challenge}",
-        f"DELETE /auth/device/attempts/{challenge}",
-    ]
-    assert signal.getsignal(signal.SIGTERM) == handler_before

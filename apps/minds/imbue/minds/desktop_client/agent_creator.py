@@ -57,14 +57,12 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
 from imbue.minds.desktop_client.labeled_hosts import ListedHost
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
-from imbue.minds.desktop_client.mngr_command import format_output_tail
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.pending_create_attempts import CREATE_ATTEMPT_ID_HOST_LABEL
 from imbue.minds.desktop_client.pending_create_attempts import FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES
@@ -392,9 +390,7 @@ class AgentCreateAttemptInfo(FrozenModel):
     is populated atomically with the ``DONE`` status.
     """
 
-    create_attempt_id: CreateAttemptId = Field(
-        description="Internal handle, used only inside Imbue Studio, for this in-flight create attempt"
-    )
+    create_attempt_id: CreateAttemptId = Field(description="Minds-internal handle for this in-flight create attempt")
     agent_id: AgentId | None = Field(
         default=None,
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
@@ -487,7 +483,7 @@ def sweep_orphaned_scratch_clones(temp_dir: Path) -> None:
     next create for that repo deleted it.
 
     Only roots untouched for a day are removed, so a clone belonging to a
-    *concurrently running* second Imbue Studio instance is never deleted out from under
+    *concurrently running* second Minds instance is never deleted out from under
     it, which is the exact failure this whole change is about.
     """
     cutoff = time.time() - ORPHANED_SCRATCH_CLONE_AGE_SECONDS
@@ -865,7 +861,7 @@ def _rsync_worktree_over_clone(
         rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
 
 
-# Constant agent name for every minds-created agent. Imbue Studio runs one agent
+# Constant agent name for every minds-created agent. Minds runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
 # constant so callers can pass it to ``mngr`` without re-validating. The
@@ -951,7 +947,7 @@ class _PrebakedImageProgressReporter(MutableModel):
         if fetched_bytes - self.last_logged_bytes < _PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES:
             return
         self.last_logged_bytes = fetched_bytes
-        self.log_line(f"[Imbue Studio] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
+        self.log_line(f"[minds] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
 
 
 class _PrebakedImageFallbackReporter(MutableModel):
@@ -960,7 +956,7 @@ class _PrebakedImageFallbackReporter(MutableModel):
     log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
 
     def __call__(self, reason: str) -> None:
-        self.log_line(f"[Imbue Studio] Building the workspace in the VM (slower): {reason}.")
+        self.log_line(f"[minds] Building the workspace in the VM (slower): {reason}.")
 
 
 def provider_instance_name_for_launch(
@@ -1452,16 +1448,14 @@ def resolve_template_version(
 
 
 class _CreateEventCapture(MutableModel):
-    """Forwards each child-process line to ``on_output`` while sniffing for ``mngr create``'s JSONL events.
+    """Forwards each child-process line to ``on_output`` while sniffing for ``mngr create``'s JSONL ``created`` event.
 
     ``mngr create --format jsonl`` writes structured event records to stdout
-    -- the final one being ``{"event": "created", "agent_id": "...", "host_id": "..."}``
-    on success, or ``{"event": "error", "error_class": "...", "message": "..."}``
-    on failure. Each line still goes through to the caller's ``on_output`` so
-    log streaming behaviour is unchanged; this wrapper just records the
-    canonical agent id when it sees the ``created`` event (so the caller can
-    return it without a follow-up ``mngr list`` lookup) and the failure's
-    class and message when it sees the ``error`` event.
+    -- the final one being ``{"event": "created", "agent_id": "...", "host_id": "..."}``.
+    Each line still goes through to the caller's ``on_output`` so log
+    streaming behaviour is unchanged; this wrapper just records the
+    canonical agent id when it sees the matching event so the caller can
+    return it without a follow-up ``mngr list`` lookup.
     """
 
     inner_on_output: OutputCallback | None = Field(
@@ -1484,13 +1478,6 @@ class _CreateEventCapture(MutableModel):
             "*type* instead of substring-matching human-formatted text."
         ),
     )
-    error_message: str | None = Field(
-        default=None,
-        description=(
-            "The ``message`` of the JSONL ``error`` event that set ``error_class``: mngr's own wording "
-            "of the failure. The two are always taken from one event, so they describe the same error."
-        ),
-    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         if self.inner_on_output is not None:
@@ -1509,13 +1496,8 @@ class _CreateEventCapture(MutableModel):
         event_type = event.get("event")
         if event_type == "error":
             error_class_raw = event.get("error_class")
-            if not (isinstance(error_class_raw, str) and error_class_raw):
-                return
-            self.error_class = error_class_raw
-            error_message_raw = event.get("message")
-            self.error_message = (
-                error_message_raw.strip() if isinstance(error_message_raw, str) and error_message_raw.strip() else None
-            )
+            if isinstance(error_class_raw, str) and error_class_raw:
+                self.error_class = error_class_raw
             return
         if event_type != "created":
             return
@@ -1635,7 +1617,13 @@ def run_mngr_create(
             )
 
     if result.returncode != 0:
-        raise _mngr_create_failure(result.returncode, result.stdout, result.stderr, capture)
+        raise MngrCommandError(
+            "mngr create failed (exit code {}):\n{}".format(
+                result.returncode,
+                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
+            ),
+            error_class=capture.error_class,
+        )
 
     if capture.canonical_agent_id is None or capture.canonical_host_id is None:
         # Exit-zero without a created event almost certainly means the
@@ -1653,31 +1641,6 @@ def run_mngr_create(
         raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
 
     return capture.canonical_agent_id, canonical_host_id
-
-
-@pure
-def _mngr_create_failure(
-    returncode: int | None, stdout: str, stderr: str, capture: _CreateEventCapture
-) -> MngrCommandError:
-    """The error a failed ``mngr create`` surfaces: the subprocess transcript, or just the refusal it was told.
-
-    A quota refusal comes with mngr's own sentence for the person (the waitlist
-    message, "N of M used"), so that sentence is the whole message and the
-    transcript moves to ``output_tail``; every other failure keeps the transcript
-    in the message, since nothing shorter names its cause.
-    """
-    error_message = capture.error_message
-    if capture.error_class == QUOTA_EXCEEDED_ERROR_CLASS and error_message is not None:
-        return MngrCommandError(
-            error_message,
-            error_class=capture.error_class,
-            output_tail=format_output_tail(stdout, stderr),
-        )
-    transcript = stderr.strip() if stderr.strip() else stdout.strip()
-    return MngrCommandError(
-        f"mngr create failed (exit code {returncode}):\n{transcript}",
-        error_class=capture.error_class,
-    )
 
 
 def run_mngr_aws_prepare(
@@ -2540,7 +2503,7 @@ class AgentCreator(MutableModel):
                         # container's bare receiver also rejects shallow source
                         # packs with "shallow update not allowed". Cloning
                         # deeply avoids both. Local file:// clones are cheap.
-                        log_sink.put("[Imbue Studio] Cloning local worktree: {}".format(resolved_path))
+                        log_sink.put("[minds] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
                         scratch_clone_root = make_scratch_clone_root(repo_name)
                         clone_target = scratch_clone_root / repo_name
@@ -2571,12 +2534,12 @@ class AgentCreator(MutableModel):
                     else:
                         workspace_dir = resolved_path
                         is_workspace_dir_scratch_clone = False
-                        log_sink.put("[Imbue Studio] Using local directory: {}".format(workspace_dir))
+                        log_sink.put("[minds] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
                     scratch_clone_root = make_scratch_clone_root(repo_name)
                     clone_target = scratch_clone_root / repo_name
-                    log_sink.put("[Imbue Studio] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    log_sink.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     # Clone only the requested branch (non-shallow) when one is
                     # given: cheaper than a full clone, yet keeps the complete
                     # ancestry that the downstream mirror-push into the agent
@@ -2601,7 +2564,7 @@ class AgentCreator(MutableModel):
                 if branch:
                     with self._lock:
                         self._statuses[cid_str] = AgentCreateAttemptStatus.CHECKING_OUT_BRANCH
-                    log_sink.put("[Imbue Studio] Checking out branch '{}'...".format(branch))
+                    log_sink.put("[minds] Checking out branch '{}'...".format(branch))
                     # Scratch clones were just fetched into, so FETCH_HEAD is the
                     # requested ref; a plain local directory has no such fetch, and
                     # is the user's own checkout whose branch tip must not be reset.
@@ -2641,7 +2604,7 @@ class AgentCreator(MutableModel):
                 #
                 # ``prepare_agent_latchkey`` raises on infrastructure
                 # failures (latchkey CLI broken, on-disk write failed,
-                # etc.). Imbue Studio tolerates those by falling back to an
+                # etc.). Minds tolerates those by falling back to an
                 # empty setup so the agent still comes up -- it just
                 # won't authenticate to a password-protected gateway and
                 # won't have its own permissions file. The user can
@@ -2658,7 +2621,7 @@ class AgentCreator(MutableModel):
                 # no pre-created scaffolding at all.
 
                 parsed_host = HostName(host_name)
-                log_sink.put("[Imbue Studio] Creating machine '{}' (mode: {})...".format(host_name, launch_mode.value))
+                log_sink.put("[minds] Creating machine '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # A dead (interrupted / failed) earlier create attempt holding this
                 # same name on this provider is implicitly discarded before the
@@ -2682,7 +2645,7 @@ class AgentCreator(MutableModel):
                 if self.lima_image_gate is not None:
                     is_lima = launch_mode is LaunchMode.LIMA
                     if is_lima:
-                        log_sink.put("[Imbue Studio] Checking for a pre-baked Lima image...")
+                        log_sink.put("[minds] Checking for a pre-baked Lima image...")
                     prebaked_lima_image_raw_path = self.lima_image_gate.resolve_image_for_create(
                         is_lima_launch_mode=is_lima,
                         repo_url=repo_source or "",
@@ -2698,7 +2661,7 @@ class AgentCreator(MutableModel):
                         else None,
                     )
                     if prebaked_lima_image_raw_path is not None:
-                        log_sink.put("[Imbue Studio] Using pre-baked Lima image (fast create).")
+                        log_sink.put("[minds] Using pre-baked Lima image (fast create).")
 
                 # ``fast_mode`` is the only knob that varies between the fast-
                 # path and slow-path attempts; bundle the rest of the per-
@@ -2786,12 +2749,12 @@ class AgentCreator(MutableModel):
                             link_error,
                         )
                         log_sink.put(
-                            "[Imbue Studio] Warning: could not link latchkey permissions handle to "
+                            "[minds] Warning: could not link latchkey permissions handle to "
                             f"canonical path for host {canonical_host_id}; this will be repaired "
                             f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
 
-                log_sink.put("[Imbue Studio] Agent created successfully.")
+                log_sink.put("[minds] Agent created successfully.")
 
                 # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
@@ -2885,7 +2848,7 @@ class AgentCreator(MutableModel):
             OSError,
         ) as e:
             logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
-            log_sink.put("[Imbue Studio] ERROR: {}".format(e))
+            log_sink.put("[minds] ERROR: {}".format(e))
             error_kind = classify_create_attempt_error(repo_source, e)
             # Snapshot the failure (and the create attempt log's tail) into the
             # pending-create-attempt record BEFORE publishing the in-memory
@@ -2958,7 +2921,7 @@ class AgentCreator(MutableModel):
                     "Could not list {} hosts to discard a dead create attempt: {}", provider_instance_name, e
                 )
                 log_sink.put(
-                    "[Imbue Studio] Warning: could not check for a leftover host from a previous attempt; "
+                    "[minds] Warning: could not check for a leftover host from a previous attempt; "
                     f"continuing anyway: {e}"
                 )
                 return
@@ -2967,7 +2930,7 @@ class AgentCreator(MutableModel):
             leftover = find_host_by_create_attempt_id_label(leftover_hosts, record.create_attempt_id)
             if leftover is not None:
                 log_sink.put(
-                    f"[Imbue Studio] Cleaning up the previous attempt's unfinished host '{leftover.name}' ({leftover.id})..."
+                    f"[minds] Cleaning up the previous attempt's unfinished host '{leftover.name}' ({leftover.id})..."
                 )
                 destroy_argv = [self.mngr_binary, "destroy", f"@{leftover.id}.{leftover.provider}", "--force"]
                 try:
@@ -2984,9 +2947,7 @@ class AgentCreator(MutableModel):
                         record.create_attempt_id,
                         e,
                     )
-                    log_sink.put(
-                        f"[Imbue Studio] Warning: could not remove the previous attempt's host {leftover.id}: {e}"
-                    )
+                    log_sink.put(f"[minds] Warning: could not remove the previous attempt's host {leftover.id}: {e}")
                     continue
             self.pending_create_attempt_store.delete_record(record.create_attempt_id)
             self.forget_create_attempt(CreateAttemptId(record.create_attempt_id))
@@ -3012,7 +2973,7 @@ class AgentCreator(MutableModel):
         from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
-        log_sink.put("[Imbue Studio] Trying fast path (adopt a matching pre-baked pool host)...")
+        log_sink.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
         try:
             return _attempt_mngr_create(_FAST_MODE_REQUIRE, attempt_params)
         except MngrCommandError as exc:
@@ -3020,7 +2981,7 @@ class AgentCreator(MutableModel):
                 raise
             logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
             log_sink.put(
-                "[Imbue Studio] No matching pre-baked pool host; falling back to slow path (leasing any host "
+                "[minds] No matching pre-baked pool host; falling back to slow path (leasing any host "
                 "and rebuilding it). This is slower but always works when the pool has free hosts..."
             )
             return _attempt_mngr_create(_FAST_MODE_PREVENT, attempt_params)
@@ -3033,7 +2994,7 @@ class AgentCreator(MutableModel):
         """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
 
         The plugin raises on infrastructure failures so the caller can
-        decide. Imbue Studio's policy is to fall back to an empty setup -- the
+        decide. Minds's policy is to fall back to an empty setup -- the
         agent still comes up without latchkey wiring, and the user can
         fix the latchkey installation and re-create the agent.
         """
@@ -3045,11 +3006,11 @@ class AgentCreator(MutableModel):
             )
         except LatchkeyError as e:
             logger.warning("Failed to prepare latchkey wiring: {}", e)
-            log_sink.put("[Imbue Studio] Warning: latchkey wiring skipped: {}".format(e))
+            log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
         except LatchkeyStoreError as e:
             logger.warning("Failed to materialize latchkey permissions handle: {}", e)
-            log_sink.put("[Imbue Studio] Warning: latchkey wiring skipped: {}".format(e))
+            log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
 
     def _provision_backups(
@@ -3152,7 +3113,7 @@ class AgentCreator(MutableModel):
             return
 
         deadline = time.monotonic() + timeout_seconds
-        log_sink.put("[Imbue Studio] Waiting for system interface to be ready...")
+        log_sink.put("[minds] Waiting for system interface to be ready...")
         last_outcome: WorkspaceProbeOutcome | None = None
         attempt = 0
         with make_workspace_probe_client(
@@ -3171,7 +3132,7 @@ class AgentCreator(MutableModel):
                 last_outcome = outcome
                 if outcome.is_ready:
                     logger.debug("Machine ready for {} after {} probe(s)", agent_id, attempt)
-                    log_sink.put("[Imbue Studio] System interface is ready.")
+                    log_sink.put("[minds] System interface is ready.")
                     # Propagate the success into the shared health tracker,
                     # clearing the suspect flag and probe-failure run that
                     # the warmup failures enrolled, so the chrome does not
@@ -3189,6 +3150,6 @@ class AgentCreator(MutableModel):
             last_outcome.summary if last_outcome is not None else "never probed",
         )
         log_sink.put(
-            "[Imbue Studio] Warning: machine did not become ready within "
+            "[minds] Warning: machine did not become ready within "
             f"{timeout_seconds:.0f}s; you may see a retry page on first load."
         )

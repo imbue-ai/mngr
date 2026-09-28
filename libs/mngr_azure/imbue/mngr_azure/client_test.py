@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from azure.core.exceptions import ODataV4Format
 
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ProviderInstanceName
@@ -15,6 +16,9 @@ from imbue.mngr_azure.client import SELF_DEALLOCATE_ROLE_ID
 from imbue.mngr_azure.client import SELF_DEALLOCATE_ROLE_NAME
 from imbue.mngr_azure.client import _computer_name
 from imbue.mngr_azure.client import _make_vm_name
+from imbue.mngr_azure.client import is_sku_unavailable_error
+from imbue.mngr_azure.errors import AzureProviderError
+from imbue.mngr_azure.errors import AzureVmSizeUnavailableError
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_azure.testing import FakeAuthorizationClient
 from imbue.mngr_azure.testing import FakeComputeClient
@@ -63,9 +67,7 @@ def _created_vm(client: _StubbedAzureVpsClient) -> Any:
     return compute.virtual_machines.created[0][1]
 
 
-# =========================================================================
 # VM naming
-# =========================================================================
 
 
 def test_make_vm_name_is_valid_and_typed() -> None:
@@ -121,9 +123,7 @@ def test_linux_hostname_rejects_invalid() -> None:
         LinuxHostname("Has-Upper")
 
 
-# =========================================================================
 # create_instance
-# =========================================================================
 
 
 def test_create_instance_builds_public_ip_nic_and_vm() -> None:
@@ -252,6 +252,63 @@ def test_create_instance_raises_when_subnet_missing() -> None:
         )
 
 
+def test_create_instance_raises_a_curated_error_when_azure_refuses_the_vm_size() -> None:
+    compute = FakeComputeClient()
+    # The SDK renders the ARM error code as a parenthesized prefix of the message.
+    compute.virtual_machines.create_error = make_azure_http_error(
+        409,
+        "(SkuNotAvailable) The requested VM size for resource 'Following SKUs have failed for Capacity "
+        "Restrictions: Standard_B2s' is currently not available in location 'westus'.",
+    )
+    client = _make_client(compute=compute)
+    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
+    with pytest.raises(AzureVmSizeUnavailableError) as raised:
+        client.create_instance(
+            label="agent",
+            region=_REGION,
+            plan="Standard_B2s",
+            user_data="#cloud-config\n",
+            ssh_key_ids=["k1"],
+            tags={},
+        )
+    assert raised.value.vm_size == "Standard_B2s"
+    assert raised.value.region == _REGION
+    assert raised.value.status_code == 409
+    # Both an Azure-plugin error and a VPS API error, so either family of handler sees it.
+    assert isinstance(raised.value, AzureProviderError)
+    assert isinstance(raised.value, VpsApiError)
+    assert "will not launch VM size 'Standard_B2s' in region" in str(raised.value)
+    assert "--azure-vm-size=" in str(raised.value)
+    assert "Capacity Restrictions" in str(raised.value)
+
+
+def test_create_instance_keeps_other_vm_create_failures_as_plain_api_errors() -> None:
+    compute = FakeComputeClient()
+    compute.virtual_machines.create_error = make_azure_http_error(403, "AuthorizationFailed")
+    client = _make_client(compute=compute)
+    client.upload_ssh_key("k1", "ssh-ed25519 AAAA")
+    with pytest.raises(VpsApiError, match="AuthorizationFailed") as raised:
+        client.create_instance(
+            label="agent",
+            region=_REGION,
+            plan="Standard_B2s",
+            user_data="#cloud-config\n",
+            ssh_key_ids=["k1"],
+            tags={},
+        )
+    assert not isinstance(raised.value, AzureVmSizeUnavailableError)
+
+
+def test_is_sku_unavailable_error_reads_the_arm_error_code() -> None:
+    error = make_azure_http_error(409, "unrelated wording")
+    error.error = ODataV4Format({"error": {"code": "SkuNotAvailable", "message": "refused"}})
+    assert is_sku_unavailable_error(error)
+
+
+def test_is_sku_unavailable_error_is_false_for_other_errors() -> None:
+    assert not is_sku_unavailable_error(make_azure_http_error(403, "AuthorizationFailed"))
+
+
 def test_create_instance_cleans_up_nic_and_ip_when_vm_create_fails() -> None:
     # When the VM create fails (e.g. SkuNotAvailable / quota), create_instance
     # raises before returning an instance id, so the create_host failure-cleanup
@@ -278,9 +335,7 @@ def test_create_instance_cleans_up_nic_and_ip_when_vm_create_fails() -> None:
     assert network.public_ip_addresses.deleted[0].endswith("-ip")
 
 
-# =========================================================================
 # reclaim_orphaned_network_resources (GC-time NIC/IP reclaim)
-# =========================================================================
 
 
 def _orphan_resource(name: str, *, age_seconds: float, attached: bool, attach_attr: str, tagged: bool = True) -> Any:
@@ -355,9 +410,7 @@ def test_create_instance_requires_uploaded_ssh_key() -> None:
         )
 
 
-# =========================================================================
 # ensure_network / resolve_subnet_id
-# =========================================================================
 
 
 def test_ensure_network_skips_ssh_rule_and_warns_when_no_cidrs(log_warnings: list[str]) -> None:
@@ -427,9 +480,7 @@ def test_resolve_subnet_id_returns_id_when_present() -> None:
     assert client.resolve_subnet_id() == "/subnets/mngr-subnet"
 
 
-# =========================================================================
 # status / ip / listing
-# =========================================================================
 
 
 @pytest.mark.parametrize(
@@ -508,9 +559,7 @@ def test_list_mngr_managed_vms_spans_provider_names() -> None:
     assert sorted(vm["id"] for vm in managed) == ["vm-a", "vm-b"]
 
 
-# =========================================================================
 # resource group cleanup
-# =========================================================================
 
 
 def test_delete_managed_resource_group_deletes_when_owned() -> None:
@@ -537,9 +586,7 @@ def test_delete_managed_resource_group_none_when_missing() -> None:
     assert client.delete_managed_resource_group() is None
 
 
-# =========================================================================
 # destroy
-# =========================================================================
 
 
 def test_destroy_instance_idempotent_on_404() -> None:
@@ -569,9 +616,7 @@ def test_set_instance_tags_merges_into_existing_tags() -> None:
     assert parameters.tags == {"mngr-host-id": "host-1", "mngr-host-name": "mngr-new"}
 
 
-# =========================================================================
 # deallocate_instance / start_instance (Azure-only idle-pause + resume)
-# =========================================================================
 
 
 def test_deallocate_instance_records_the_deallocate() -> None:
@@ -615,9 +660,7 @@ def test_start_instance_raises_when_the_operation_outlasts_the_timeout() -> None
         client.start_instance(VpsInstanceId("vm1"), timeout_seconds=0.01)
 
 
-# =========================================================================
 # list power-state population (deallocated VM surfaces state="deallocated")
-# =========================================================================
 
 
 def test_list_instances_does_not_request_instance_view_expand() -> None:
@@ -646,9 +689,7 @@ def test_list_instances_does_not_request_instance_view_expand() -> None:
     assert instances[0]["state"] == ""
 
 
-# =========================================================================
 # ensure_self_deallocate_role / assign_self_deallocate_role (graceful fallback)
-# =========================================================================
 
 
 def _self_vm_scope(vm_name: str) -> str:
@@ -730,9 +771,7 @@ def test_assign_self_deallocate_role_true_when_assignment_already_exists() -> No
     assert client.assign_self_deallocate_role("vm1") is True
 
 
-# =========================================================================
 # _is_authorization_error / _is_role_assignment_exists (error classifiers)
-# =========================================================================
 
 
 def test_is_authorization_error_classifies_403_and_message() -> None:

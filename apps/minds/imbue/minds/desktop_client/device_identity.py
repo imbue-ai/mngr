@@ -39,7 +39,7 @@ def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> DeviceId:
         if os.path.lexists(device_id_path) and not device_id_path.is_file():
             raise DeviceIdError(
                 f"The device id path at {device_id_path} exists but is not a regular file. "
-                "Remove it, then restart Imbue Studio."
+                "Remove it, then restart minds."
             )
         existing_device_id = _read_host_id_shaped_file(device_id_path, "device id")
         if existing_device_id is not None:
@@ -56,7 +56,7 @@ def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> DeviceId:
         try:
             data_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            raise DeviceIdError(f"Could not create the Imbue Studio data directory at {data_dir}: {e}") from e
+            raise DeviceIdError(f"Could not create the minds data directory at {data_dir}: {e}") from e
         # Write the full contents to a uniquely-named temp file first, then
         # hard-link it into place: the link is an atomic exclusive publish, so
         # a visible device id file always holds a complete value (a plain
@@ -108,5 +108,5 @@ def _read_host_id_shaped_file(path: Path, file_description: str) -> DeviceId | N
     except InvalidRandomIdError as e:
         raise DeviceIdError(
             f"The {file_description} file at {path} does not contain a valid device id: {e}. "
-            "Fix or delete the file, then restart Imbue Studio."
+            "Fix or delete the file, then restart minds."
         ) from e

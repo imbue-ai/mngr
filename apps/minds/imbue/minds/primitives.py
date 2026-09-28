@@ -19,16 +19,12 @@ from imbue.minds.errors import ContentDomainError
 # deliberately exposes only the US datacenters by default: every configured
 # region adds a provider that ``mngr list`` fans out to on each discovery
 # cycle, and the non-US regions roughly doubled listing latency for little
-# benefit to the current user base. ``mngr_aws`` still ships pinned default
-# AMIs for more regions, so this set can be widened later without other
-# changes; any region added here must have an AMI in ``mngr_aws`` or it would
-# fail AMI resolution at create time. Lives in ``primitives`` (which never
-# imports ``mngr``) so the early ``bootstrap`` module can read it without
-# violating its no-mngr-on-import contract.
+# benefit to the current user base. ``mngr_aws`` resolves the newest Debian
+# AMI in whichever region a provider is configured for at create time, so this
+# set can be widened without any ``mngr_aws`` change. Lives in ``primitives``
+# (which never imports ``mngr``) so the early ``bootstrap`` module can read it
+# without violating its no-mngr-on-import contract.
 CONFIGURED_AWS_REGIONS: Final[tuple[str, ...]] = (
-    # Exactly the regions with a pinned AMI in mngr_aws's DEFAULT_AMI_BY_REGION
-    # -- the one hard constraint on this list (a region without an AMI fails at
-    # create). Widen the AMI table first to widen this.
     "us-east-1",
     "us-east-2",
     "us-west-1",
@@ -72,20 +68,26 @@ CONFIGURED_GCP_MACHINE_TYPES: Final[tuple[tuple[str, str], ...]] = (
     ("e2-standard-8", "e2-standard-8 — 8 vCPU / 32 GB"),
 )
 DEFAULT_GCP_MACHINE_TYPE: Final[str] = "e2-standard-2"
-# Two families on purpose: new pay-as-you-go subscriptions frequently hit
-# SkuNotAvailable capacity restrictions on the cheap burstable B-series in
-# popular regions; the Dsv5/Dasv5 families draw from different hardware pools
-# and often have capacity where B-series is gated.
+# Several families on purpose: new pay-as-you-go subscriptions are barred
+# (SkuNotAvailable) from the cheap burstable B-series and the v3/v5 D-series in
+# popular regions, even with unused vCPU quota; the v6 D-series (Dsv6 / Dadsv6)
+# is what a fresh subscription is actually allowed to launch there, so it is the
+# recommended default and the older families stay as cheaper options for
+# established subscriptions.
 CONFIGURED_AZURE_VM_SIZES: Final[tuple[tuple[str, str], ...]] = (
-    ("Standard_B2s", "Standard_B2s — 2 vCPU / 4 GB (cheapest; heavy builds may be slow)"),
-    ("Standard_B2ms", "Standard_B2ms — 2 vCPU / 8 GB (recommended)"),
-    ("Standard_D2as_v5", "Standard_D2as_v5 — 2 vCPU / 8 GB (AMD; try if B-series is unavailable)"),
-    ("Standard_D2s_v5", "Standard_D2s_v5 — 2 vCPU / 8 GB (Intel; try if B-series is unavailable)"),
-    ("Standard_B4ms", "Standard_B4ms — 4 vCPU / 16 GB"),
-    ("Standard_D4as_v5", "Standard_D4as_v5 — 4 vCPU / 16 GB (AMD)"),
-    ("Standard_B8ms", "Standard_B8ms — 8 vCPU / 32 GB"),
+    ("Standard_B2s", "Standard_B2s — 2 vCPU / 4 GB (cheapest; often barred on new subscriptions)"),
+    ("Standard_B2ms", "Standard_B2ms — 2 vCPU / 8 GB (burstable; often barred on new subscriptions)"),
+    ("Standard_D2s_v6", "Standard_D2s_v6 — 2 vCPU / 8 GB (recommended)"),
+    ("Standard_D2ads_v6", "Standard_D2ads_v6 — 2 vCPU / 8 GB (AMD, with local disk)"),
+    (
+        "Standard_D2s_v5",
+        "Standard_D2s_v5 — 2 vCPU / 8 GB (Intel, previous generation; often barred on new subscriptions)",
+    ),
+    ("Standard_D4s_v6", "Standard_D4s_v6 — 4 vCPU / 16 GB"),
+    ("Standard_D4ads_v6", "Standard_D4ads_v6 — 4 vCPU / 16 GB (AMD, with local disk)"),
+    ("Standard_D8s_v6", "Standard_D8s_v6 — 8 vCPU / 32 GB"),
 )
-DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_B2ms"
+DEFAULT_AZURE_VM_SIZE: Final[str] = "Standard_D2s_v6"
 
 # Curated placement choices for bring-your-own-key GCP / Azure accounts (GCE is
 # zonal, so GCP offers zones; Azure offers regions). Small US-centric lists,
@@ -146,7 +148,7 @@ class DeviceId(RandomId):
 
 
 class CreateAttemptId(RandomId):
-    """Internal handle, used only inside Imbue Studio, for an in-flight ``mngr create`` invocation.
+    """Minds-internal handle for an in-flight ``mngr create`` invocation.
 
     Returned by ``AgentCreator.create_agent_async`` so the desktop client
     UI has something to poll status / stream logs against immediately --

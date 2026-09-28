@@ -136,9 +136,7 @@ class BaseHost(HostInterface):
         """Get the name of the provider instance managing this host."""
         return self.provider_instance.name
 
-    # =========================================================================
     # Activity Configuration
-    # =========================================================================
 
     def get_activity_config(self) -> ActivityConfig:
         """Get the activity configuration for this host."""
@@ -167,18 +165,14 @@ class BaseHost(HostInterface):
             )
             self.set_certified_data(updated_data)
 
-    # =========================================================================
     # Certified Data
-    # =========================================================================
 
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
         """Get certified plugin data from data.json."""
         certified_data = self.get_certified_data()
         return certified_data.plugin.get(plugin_name, {})
 
-    # =========================================================================
     # Provider-Derived Information
-    # =========================================================================
 
     def get_snapshots(self) -> list[SnapshotInfo]:
         """Get list of snapshots from the provider."""
@@ -194,9 +188,7 @@ class BaseHost(HostInterface):
         all_data = self.get_certified_data()
         return {**all_data.user_tags}
 
-    # =========================================================================
     # Agent Information
-    # =========================================================================
 
     def _validate_and_create_discovered_agent(self, agent_data: dict[str, Any]) -> DiscoveredAgent | None:
         """Validate agent data and create a DiscoveredAgent if valid.
@@ -237,9 +229,7 @@ class BaseHost(HostInterface):
             if existing.agent_name == new_name and existing.agent_id != agent_id:
                 raise DuplicateAgentNameError(new_name, existing.agent_id)
 
-    # =========================================================================
     # Agent-Derived Information
-    # =========================================================================
     def get_state(self) -> HostState:
         """Get the current state of the host.
 
@@ -316,6 +306,16 @@ class OfflineHost(BaseHost):
         frozen=True,
         description="The certified host data loaded from data.json",
     )
+    observed_state: HostState | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The lifecycle state the provider saw for itself when it built this host, e.g. STOPPED for a "
+            "reachable VPS whose container has merely exited. The certified data alone cannot tell that "
+            "apart from a crash (no stop reason is recorded either way), so when set it takes precedence "
+            "over the derivation from certified data."
+        ),
+    )
 
     @property
     def is_local(self) -> bool:
@@ -334,9 +334,13 @@ class OfflineHost(BaseHost):
         """Return the number of seconds since this host was stopped, based on updated_at."""
         return (datetime.now(timezone.utc) - self.certified_host_data.updated_at).total_seconds()
 
-    # =========================================================================
+    def get_state(self) -> HostState:
+        """The state the provider observed directly when it has one, else the record-derived state."""
+        if self.observed_state is not None:
+            return self.observed_state
+        return super().get_state()
+
     # Certified Data
-    # =========================================================================
 
     def get_certified_data(self) -> CertifiedHostData:
         return self.certified_host_data
@@ -350,9 +354,7 @@ class OfflineHost(BaseHost):
         )
         self.on_updated_host_data(self.id, stamped_data)
 
-    # =========================================================================
     # Agent Operations
-    # =========================================================================
 
     def rename_agent(
         self,
@@ -428,6 +430,7 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
         return cls(
             id=host.id,
             certified_host_data=host.certified_host_data,
+            observed_state=host.observed_state,
             provider_instance=host.provider_instance,
             mngr_ctx=host.mngr_ctx,
             host_dir_override=host.host_dir_override,

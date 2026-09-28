@@ -67,9 +67,11 @@ class ParsedAwsBuildOptions(ParsedVpsBuildOptions):
         default=None,
         description=(
             "Per-host AMI override from ``--aws-ami=<ami-id>``. When set, "
-            "``AwsVpsClient.create_instance`` launches this AMI instead of the "
-            "provider config's default. When unset, the client's configured "
-            "default AMI applies."
+            "``AwsVpsClient.create_instance`` launches this AMI. When unset, "
+            "``AwsProvider._create_vps_instance`` uses the provider config's "
+            "``default_ami_id``, or, if that is unset too, the newest Debian 13 "
+            "AMI in the region for the instance type's architecture (amd64 or "
+            "arm64), resolved from EC2 at create time."
         ),
     )
     spot: bool = Field(
@@ -189,9 +191,11 @@ class AwsProvider(OfflineCapableVpsProvider):
 
         Accepts ``--aws-region=REGION``, ``--aws-instance-type=TYPE``,
         ``--aws-ami=AMI-ID``, ``--aws-spot`` (presence-only), and the shared
-        ``--git-depth=N``. ``--aws-ami=`` is the per-host AMI override (falls
-        back to the provider config when omitted); ``--aws-spot`` opts the
-        host into EC2 spot capacity.
+        ``--git-depth=N``. ``--aws-ami=`` is the per-host AMI override (when
+        omitted, the provider config's ``default_ami_id`` applies, or, if that
+        is unset too, the newest Debian 13 AMI for the instance type's
+        architecture, resolved from EC2 at create time); ``--aws-spot`` opts
+        the host into EC2 spot capacity.
 
         Composed from the shared low-level helpers rather than the convenience
         ``parse_vps_build_args`` because AWS has knobs beyond region + plan.
@@ -249,25 +253,26 @@ class AwsProvider(OfflineCapableVpsProvider):
         Calls through ``self.aws_client`` (the concrete typed AWS client) rather
         than the shared ``self.vps_client`` interface so the AWS-only
         ``ami_id_override`` kwarg is statically visible. ``ami_id_override``
-        comes from ``--aws-ami=<ami-id>``; when None, the default AMI for the
-        target region is resolved from the config just in time. Resolving AMI
-        here (the only create-path call site) rather than in
+        comes from ``--aws-ami=<ami-id>``; when None, the config's
+        ``default_ami_id`` is used, and when that is unset too the newest
+        Debian 13 AMI in the region for the instance type's architecture is
+        resolved from EC2 just in time. Resolving
+        the AMI here (the only create-path call site) rather than in
         ``build_provider_instance`` keeps AMI selection a create-only concern
-        so a misconfigured AMI does not hide already-running instances from
+        so an unresolvable AMI does not hide already-running instances from
         ``mngr list`` / ``connect`` / ``gc``. The create path's ``create_host``
         except handler reverses any SSH key upload that may have happened
-        before this raise, so the missing-AMI failure leaves no leaked state.
+        before this raise, so a failed resolution leaves no leaked state.
         """
         aws_parsed = self._require_parsed(parsed, ParsedAwsBuildOptions)
         ami_id_override = aws_parsed.ami_id_override
         spot = aws_parsed.spot
         if ami_id_override:
             effective_ami_id = ami_id_override
+        elif self.aws_config.default_ami_id:
+            effective_ami_id = self.aws_config.default_ami_id
         else:
-            try:
-                effective_ami_id = self.aws_config.get_ami_id_for_region(parsed.region)
-            except ValueError as e:
-                raise MngrError(f"AWS provider {self.name!r}: {e}") from e
+            effective_ami_id = self.aws_client.resolve_default_ami_id(parsed.plan)
         return self.aws_client.create_instance(
             label=label,
             region=parsed.region,
@@ -283,11 +288,9 @@ class AwsProvider(OfflineCapableVpsProvider):
     # (cached listing -> non-empty main_ip) covers AWS unchanged: a stopped EC2
     # instance loses its ephemeral IP and is excluded by the non-empty IP check.
 
-    # =========================================================================
     # Native EC2 stop/start (idle-pause + resume) -- the base
     # OfflineCapableVpsProvider owns the orchestration; here we supply only the
     # EC2-specific cloud-API hooks.
-    # =========================================================================
 
     def _pause_cloud_instance(self, instance_id: VpsInstanceId) -> None:
         with log_span("Stopping EC2 instance"):
@@ -297,9 +300,7 @@ class AwsProvider(OfflineCapableVpsProvider):
         with log_span("Starting EC2 instance"):
             return self.aws_client.start_instance(instance_id)
 
-    # =========================================================================
     # Self-stopping idle watcher (in-container sentinel + host-side systemd)
-    # =========================================================================
 
     @property
     def _supports_bare_isolation(self) -> bool:
@@ -316,9 +317,7 @@ class AwsProvider(OfflineCapableVpsProvider):
     # default ``shutdown -P now`` (EC2 then applies its
     # ``InstanceInitiatedShutdownBehavior``), so AWS overrides none of those hooks.
 
-    # =========================================================================
     # Offline discovery (so STOPPED hosts list + resolve by name from the bucket)
-    # =========================================================================
 
     def _host_name_tag_key(self) -> str:
         # The host name is mirrored into the EC2 ``Name`` tag (as ``mngr-<host_name>``);

@@ -316,9 +316,7 @@ def _infer_argument_description(arg: click.Argument) -> str:
     return f"The {name.replace('_', ' ')} (optional)"
 
 
-# ---------------------------------------------------------------------------
 # Click usage extraction
-# ---------------------------------------------------------------------------
 
 
 def _format_usage_line(command: click.Command, prog_name: str) -> str:
@@ -336,9 +334,7 @@ def _format_usage_block(command: click.Command, prog_name: str) -> str:
     return f"**Usage:**\n\n```text\n{usage_line}\n```"
 
 
-# ---------------------------------------------------------------------------
 # Metadata formatting
-# ---------------------------------------------------------------------------
 
 
 def _format_description_block(metadata: CommandHelpMetadata) -> str:
@@ -476,9 +472,7 @@ def get_output_dir(command_name: str, base_dir: Path) -> Path | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Subcommand docs
-# ---------------------------------------------------------------------------
 
 
 def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: str) -> str:
@@ -524,9 +518,7 @@ def generate_subcommand_docs(command: click.Group, prog_name: str, parent_key: s
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # Top-level command doc generation
-# ---------------------------------------------------------------------------
 
 
 def build_command_doc(command_name: str, base_dir: Path) -> tuple[Path, str] | None:
@@ -704,9 +696,7 @@ def build_pypi_readme(repo_root: Path) -> tuple[Path, str]:
     return dest, content
 
 
-# -----------------------------------------------------------------------------
 # Provider / agent config tables
-# -----------------------------------------------------------------------------
 # Each plugin README documents its provider/agent config in a markdown table.
 # The Description column is the single source of truth in the Pydantic
 # ``Field(description=...)`` (also surfaced via ``mngr config``), so we render it
@@ -746,7 +736,7 @@ CONFIG_TABLES: tuple[ConfigTable, ...] = (
         description_header="Description",
         extra_fields=("allowed_ssh_cidrs", "associate_public_ip", "auto_shutdown_seconds"),
         default_overrides={
-            "default_ami_id": "`None` (pinned Debian 12 amd64 per region)",
+            "default_ami_id": "`None` (newest Debian 13 AMI for the instance type's architecture, resolved at create)",
             "security_group": '`AutoCreateSecurityGroup(name="mngr-aws")`',
             "allowed_ssh_cidrs": '`("0.0.0.0/0",)`',
             "state_bucket_name": "`None` (auto-derived)",

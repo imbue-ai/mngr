@@ -1054,12 +1054,3 @@ body {
 #help-backdrop {
   -webkit-app-region: no-drag;
 }
-
-/* While a keystroke edits text, the pointer is hidden until it moves, so it
- * never sits over what is being typed (hide-cursor-while-typing.ts toggles
- * the class). ``*`` with ``!important`` because fields, links, and buttons
- * set their own cursors, which would otherwise win over the hidden one. */
-html.typing-hides-cursor,
-html.typing-hides-cursor * {
-  cursor: none !important;
-}

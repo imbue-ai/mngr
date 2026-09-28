@@ -177,6 +177,12 @@ A host is considered "destroyed" when either of these is true:
 
 `mngr` does a little bit of caching to remember hosts that have been destroyed recently (so that it is easier to tell that they were destroyed), but generally once a host is destroyed, it is gone for good.
 
+## Sizing
+
+A host's size (CPUs, memory, disk) is chosen when it is created, through the provider's build and start arguments (`-b` / `-s` on `mngr create`; e.g. `-s --cpus=2 -s --memory=4g` for docker, `-b --aws-instance-type=t3.large` for AWS). Providers report the allocation they have recorded via `HostResources` (`host.resource.*` in `mngr list`).
+
+There is deliberately no generic resize operation: on most providers whatever a host was created with is what it has for life. The few providers whose substrate can change size after creation (imbue_cloud today, via `mngr imbue_cloud machines resize`) expose that through their own provider-specific command, which rewrites the size that provider recorded and applies it on the host's next start.
+
 ## Properties
 
 See [host spec](../../future_specs/host.md) for the properties of hosts and their storage locations.

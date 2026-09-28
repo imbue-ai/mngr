@@ -24,8 +24,8 @@ project_id = "my-gcp-project"      # optional; falls back to the gcloud/ADC defa
 default_region = "us-west1"
 default_zone = "us-west1-a"        # GCE VMs are zonal
 default_machine_type = "e2-small"  # machine type (~2 vCPU / 2GB)
-# default_source_image defaults to the global Debian 12 family; override only if needed:
-# default_source_image = "projects/debian-cloud/global/images/family/debian-12"
+# default_source_image defaults to the global Debian 13 family; override only if needed:
+# default_source_image = "projects/debian-cloud/global/images/family/debian-13"
 
 # Inbound CIDRs for tcp/22 and the container SSH port on the firewall rule.
 # Default '0.0.0.0/0' (a warning is logged; tighten for production).
@@ -116,7 +116,7 @@ These fields extend the base `VpsProviderConfig` (see `mngr_vps`):
 | `default_region` | derived from zone | GCE region (e.g., 'us-west1'). Used only to validate the resolved zone; when unset, derived from the resolved zone. Set it to catch a mismatched default_zone typo. |
 | `default_zone` | gcloud `compute/zone`, else `us-west1-a` | Zone for new instances (GCE VMs are zonal). When unset, taken from the active 'gcloud config get compute/zone'. Must lie in default_region when both are set explicitly. |
 | `default_machine_type` | `e2-small` | GCE machine type. |
-| `default_source_image` | `projects/debian-cloud/global/images/family/debian-12` | GCE VM boot-disk image (distinct from the base default_image, the Docker container image run inside the VM). |
+| `default_source_image` | `projects/debian-cloud/global/images/family/debian-13` | GCE VM boot-disk image (distinct from the base default_image, the Docker container image run inside the VM). |
 | `boot_disk_size_gb` | `30` | Boot disk size in GB. |
 | `boot_disk_type` | `pd-balanced` | Boot disk type. |
 | `network` | `default` | VPC network for the instance NIC and firewall rule. |

@@ -215,7 +215,8 @@ Provider: aws
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
                                 (default: provider config's default_ami_id, or the
-                                pinned per-region default for the chosen region)
+                                newest Debian 13 AMI in the region for the instance
+                                type's architecture, resolved from EC2 at create time)
     --aws-spot                  Run on EC2 spot capacity (presence-only flag).
                                 AWS may reclaim with ~2 min notice; the host is
                                 terminated, not stopped, on reclaim. Opt-in only.

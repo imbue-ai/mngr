@@ -109,7 +109,9 @@ def _handshaken_client(transport: ScriptedTransport) -> CodexAppServerClient:
     return client
 
 
+# =============================================================================
 # handshake
+# =============================================================================
 
 
 def test_initialize_handshake_sends_experimental_capability_and_initialized() -> None:
@@ -231,7 +233,9 @@ def test_thread_compact_start_propagates_error() -> None:
     assert exc_info.value.code == -32600
 
 
+# =============================================================================
 # submit: idle -> started, busy -> steered
+# =============================================================================
 
 
 def test_submit_when_idle_starts_a_turn() -> None:
@@ -269,7 +273,9 @@ def test_submit_requires_a_bound_thread() -> None:
         client.submit("hello", "cid-1")
 
 
+# =============================================================================
 # submit: ABA -32600 re-decide-once
+# =============================================================================
 
 
 def test_submit_aba_redecides_as_start_when_turn_ended() -> None:
@@ -334,7 +340,9 @@ def test_submit_reraises_a_non_aba_error() -> None:
     assert len(transport.sent_of("turn/steer")) == 1
 
 
+# =============================================================================
 # interrupt / model_list / settings_update
+# =============================================================================
 
 
 def test_interrupt_sends_turn_interrupt_for_the_bound_thread() -> None:
@@ -396,17 +404,10 @@ def test_model_list_parses_the_data_envelope() -> None:
     assert transport.sent_of("model/list")[0]["params"] == {"includeHidden": False}
 
 
-@pytest.mark.parametrize(
-    "result",
-    [
-        pytest.param({"models": []}, id="no-data-array"),
-        pytest.param({"data": [{"id": "gpt-5.6-sol"}]}, id="malformed-entry"),
-    ],
-)
-def test_model_list_raises_codex_error_for_a_malformed_result(result: Mapping[str, Any]) -> None:
+def test_model_list_raises_without_a_data_array() -> None:
     transport = ScriptedTransport()
     client = _handshaken_client(transport)
-    transport.respond_result("model/list", result)
+    transport.respond_result("model/list", {"models": []})
     with pytest.raises(CodexAppServerError):
         client.model_list()
 
@@ -431,7 +432,9 @@ def test_settings_update_defaults_send_only_the_thread_id() -> None:
     assert transport.sent_of("thread/settings/update")[0]["params"] == {"threadId": "thread-1"}
 
 
+# =============================================================================
 # notifications / activity tracking / errors
+# =============================================================================
 
 
 def test_notification_handlers_receive_events_and_track_active_turn() -> None:
@@ -522,7 +525,9 @@ def test_malformed_and_untyped_frames_are_ignored() -> None:
     assert seen == ["item/completed", "turn/diff/updated"]
 
 
+# =============================================================================
 # thread_resume / thread_read / result-shape guards
+# =============================================================================
 
 
 def test_thread_resume_binds_and_returns_seed() -> None:
@@ -692,7 +697,9 @@ def test_steer_raises_when_result_lacks_a_turn_id() -> None:
         client.submit("hello", "cid-1")
 
 
+# =============================================================================
 # real WebSocket transport (against a fake connection)
+# =============================================================================
 
 
 class _FakeConnection:

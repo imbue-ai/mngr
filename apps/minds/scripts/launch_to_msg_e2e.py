@@ -629,8 +629,7 @@ def wait_backend_url(since_offset: int = 0) -> str:
 
     deadline = time.time() + LAUNCH_BACKEND_TIMEOUT
     pattern = re.compile(
-        r"(?:Minds|Mind|Imbue Studio) login URL \(one-time use\): "
-        r"(http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
+        r"Minds login URL \(one-time use\): (http://(?:127\.0\.0\.1|localhost):\d+/login\?one_time_code=[A-Za-z0-9_-]+)"
     )
     while time.time() < deadline:
         if EVENTS_LOG.exists() and EVENTS_LOG.stat().st_size > since_offset:

@@ -39,7 +39,7 @@ Email verification is non-blocking: a fresh signup counts as signed in immediate
 
 ## Account plans and quotas
 
-Every account has a plan whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, synced workspaces, and shared workspaces. New accounts pick "free" (one remote workspace) or "explorer" (two remote workspaces, in exchange for sharing product data from those workspaces with Imbue) at signup; an account with no recorded choice defaults to "free". "Ally" grants higher limits and requires a paid-listed email. While Imbue Cloud is waitlisted, an account created without an invite code lands on "guest", which holds zero of everything until the invite link from its invitation email is opened (the connector answers such accounts' create, share, and plan-switch requests with a waitlist message). The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit.
+Every account has a plan whose quotas cap resource use: remote workspaces, buckets, total bucket storage, monthly LLM spend, and synced workspaces. New accounts pick "free" (one remote workspace) or "explorer" (two remote workspaces, in exchange for sharing product data from those workspaces with Imbue) at signup; an account with no recorded choice defaults to "free". "Ally" grants higher limits and requires a paid-listed email. The connector enforces quotas at grant time and returns a structured 403 (`quota_exceeded`, with the entitlement name, limit, and current usage) when a cap is hit. Workspace sharing (`mngr imbue_cloud shares`, self-hosted relays with workspace-terminated TLS) is capped separately at 50 shared workspaces per account rather than through a plan entitlement.
 
 ```bash
 # Show the plan, entitlement values, and live usage.
@@ -112,6 +112,11 @@ mngr imbue_cloud machines show my-workspace
 mngr imbue_cloud machines resize my-workspace --units 16
 mngr imbue_cloud machines resize my-workspace --disk-gb 56
 ```
+
+The current recorded size is also what `mngr list` reports for the machine's host, running
+or stopped: `host.resource.memory_gb` (units) and `host.resource.disk_gb`. The vCPU count in
+`host.resource.cpu.count` is the one recorded when the machine was created and does not follow
+a resize (the connector does not re-report it). A pending target only shows in `machines show`.
 
 Units and disk are metered by two plan quotas: `max_active_machine_units` caps the units
 summed across your running machines, and `max_total_machine_disk_gb` caps data-disk GB

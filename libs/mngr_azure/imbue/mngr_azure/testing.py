@@ -41,12 +41,13 @@ AZURE_TEST_NAME_PREFIX: Final[str] = "mngr-test-"
 # time so conftest and test_release_azure observe the same value.
 AZURE_DEFAULT_REGION: Final[str] = os.environ.get("MNGR_AZURE_REGION", "westus")
 
-# VM size the lifecycle release tests provision. Defaults to a D-series size
-# because B-series (the provider default, ``Standard_B2s``) is currently
-# ``NotAvailableForSubscription`` in westus -- so without this override the
-# create/exec/destroy and stop/start tests would fail on ``SkuNotAvailable``
-# before exercising anything. Override via ``MNGR_AZURE_VM_SIZE``.
-AZURE_TEST_VM_SIZE: Final[str] = os.environ.get("MNGR_AZURE_VM_SIZE", "Standard_D2s_v3")
+# VM size the lifecycle release tests provision. Defaults to a v6 D-series size
+# because the B-series (the provider default, ``Standard_B2s``) and the v3/v5
+# D-series are ``NotAvailableForSubscription`` in westus on the CI
+# subscription -- so without this override the create/exec/destroy and
+# stop/start tests would fail on ``SkuNotAvailable`` before exercising anything.
+# Override via ``MNGR_AZURE_VM_SIZE``.
+AZURE_TEST_VM_SIZE: Final[str] = os.environ.get("MNGR_AZURE_VM_SIZE", "Standard_D2s_v6")
 
 # Resource group the release tests + scanner operate in. Read once at import time.
 AZURE_DEFAULT_RESOURCE_GROUP: Final[str] = os.environ.get("MNGR_AZURE_RESOURCE_GROUP", "mngr")

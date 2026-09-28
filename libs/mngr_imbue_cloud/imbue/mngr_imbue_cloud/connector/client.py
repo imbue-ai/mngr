@@ -48,7 +48,6 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudBucketNotFoundError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudCleanupGrantBudgetError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudClientTooOldError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudConnectorError
-from imbue.mngr_imbue_cloud.errors import ImbueCloudDeviceCodeRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudKeyError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudLeaseUnavailableError
@@ -88,8 +87,6 @@ from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayEndpoint
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayLogin
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayMap
-from imbue.mngr_imbue_cloud.wire_types import SignupCodeCreated
-from imbue.mngr_imbue_cloud.wire_types import SignupCodeInfo
 from imbue.mngr_imbue_cloud.wire_types import StorageCleanupGrant
 from imbue.mngr_imbue_cloud.wire_types import StorageRecheckResult
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
@@ -129,8 +126,6 @@ _TRANSPORT_RETRY_BASE_SLEEP_SECONDS = 0.5
 # starts past this point, so slow failures (per-request timeouts stacking up)
 # cannot multiply the caller's wait.
 _TRANSPORT_RETRY_TOTAL_SECONDS_CAP = 60.0
-# The sign-in listener lease is renewed every few seconds, so each call is kept short.
-_DEVICE_LOGIN_ATTEMPT_TIMEOUT_SECONDS = 5.0
 
 # Transport errors raised before the request was put on the wire: the server
 # never saw it, so retrying is safe even for a non-idempotent call. Used to gate
@@ -469,7 +464,7 @@ class ImbueCloudConnectorClient(MutableModel):
         )
         if response.status_code == 400:
             detail = _detail_from_response(response)
-            raise ImbueCloudDeviceCodeRefusedError(f"Device code exchange refused: {detail}")
+            raise ImbueCloudAuthError(f"Device code exchange refused: {detail}")
         if response.status_code == 404:
             raise ImbueCloudAuthError(
                 "The connector does not serve the browser-login code exchange (it is too old). "
@@ -513,30 +508,6 @@ class ImbueCloudConnectorClient(MutableModel):
         if response.status_code in (200, 204, 401):
             return
         raise ImbueCloudAuthError(f"Revoke failed ({response.status_code}): {response.text[:200]}")
-
-    def renew_device_login_attempt(self, code_challenge: str) -> None:
-        """Tell the connector this machine is still listening for the browser sign-in keyed by ``code_challenge``.
-
-        Any answer is accepted: a connector that predates listener leases
-        (404/405) hands the browser to the loopback unconditionally, which is
-        what the lease would have told it anyway.
-        """
-        self._send_device_login_attempt_update("PUT", code_challenge)
-
-    def release_device_login_attempt(self, code_challenge: str) -> None:
-        """Tell the connector this machine stopped listening for the browser sign-in keyed by ``code_challenge``."""
-        self._send_device_login_attempt_update("DELETE", code_challenge)
-
-    def _send_device_login_attempt_update(self, method: str, code_challenge: str) -> None:
-        response = self._send(
-            method,
-            self._url(f"/auth/device/attempts/{code_challenge}"),
-            exc_cls=ImbueCloudAuthError,
-            headers=_client_id_headers(),
-            timeout=_DEVICE_LOGIN_ATTEMPT_TIMEOUT_SECONDS,
-        )
-        if response.status_code not in (200, 204):
-            logger.debug("Connector answered {} to a {} of the sign-in listener lease", response.status_code, method)
 
     def auth_revoke_current_session(self, access_token: SecretStr) -> None:
         """Revoke only the presented session (this device's sign-out).
@@ -1478,55 +1449,6 @@ class ImbueCloudConnectorClient(MutableModel):
             exc_cls=ImbueCloudAccountError,
             headers=self._bearer(admin_api_key),
             json={"entitlement": entitlement, "value": value},
-            timeout=self.timeout_seconds,
-        )
-        return self._check(response, ImbueCloudAccountError)
-
-    # Signup codes (specs/minds-waitlist-signup-codes/spec.md)
-
-    def admin_create_signup_code(
-        self,
-        admin_api_key: SecretStr,
-        email: str,
-        plan: str | None,
-        expires_in_days: int | None,
-        note: str | None,
-    ) -> SignupCodeCreated:
-        """Mint a signup code for the email (revoking its older active codes); the plaintext comes back once."""
-        response = self._send(
-            "POST",
-            self._url("/admin/signup-codes"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            json={"email": email, "plan": plan, "expires_in_days": expires_in_days, "note": note},
-            timeout=self.timeout_seconds,
-        )
-        return validate_wire(SignupCodeCreated, self._check(response, ImbueCloudAccountError))
-
-    def admin_list_signup_codes(self, admin_api_key: SecretStr, email: str | None) -> list[SignupCodeInfo]:
-        """List signup codes, newest first: one email's, or every one when ``email`` is None."""
-        response = self._send(
-            "GET",
-            self._url("/admin/signup-codes"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
-            params={"email": email} if email else None,
-            timeout=self.timeout_seconds,
-        )
-        return parse_wire_entries(
-            SignupCodeInfo,
-            self._check(response, ImbueCloudAccountError),
-            "GET /admin/signup-codes",
-            ImbueCloudAccountError,
-        )
-
-    def admin_revoke_signup_code(self, admin_api_key: SecretStr, code_id: str) -> dict[str, Any]:
-        """Revoke one signup code by id (safe to retry: a spent code answers ``already_inactive``)."""
-        response = self._send(
-            "POST",
-            self._url(f"/admin/signup-codes/{quote(code_id, safe='')}/revoke"),
-            exc_cls=ImbueCloudAccountError,
-            headers=self._bearer(admin_api_key),
             timeout=self.timeout_seconds,
         )
         return self._check(response, ImbueCloudAccountError)

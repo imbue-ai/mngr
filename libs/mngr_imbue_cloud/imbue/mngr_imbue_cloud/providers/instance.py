@@ -78,7 +78,6 @@ from imbue.mngr.interfaces.data_types import BoundedProviderDiscoveryResult
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CleanupFailure
 from imbue.mngr.interfaces.data_types import CleanupFailureCategory
-from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostDetails
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -156,6 +155,7 @@ from imbue.mngr_imbue_cloud.providers.adoption import rebind_host_key_pins_to_en
 from imbue.mngr_imbue_cloud.providers.adoption import record_bound_endpoints
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
+from imbue.mngr_imbue_cloud.providers.listing import host_resources_for_machine
 from imbue.mngr_imbue_cloud.providers.rebuild import build_delegated_vps_provider
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.providers.slice_provider import read_container_ca_trust_files_from_vm
@@ -1413,10 +1413,10 @@ class ImbueCloudProvider(BaseProviderInstance):
         self,
         host_ref: DiscoveredHost,
         agent_refs: Sequence[DiscoveredAgent],
-        workspace: WorkspaceInfo,
+        machine: WorkspaceInfo,
         offline_field_generators: Mapping[str, Mapping[str, Callable[[DiscoveredAgent, HostDetails], Any]]],
     ) -> tuple[HostDetails, list[AgentDetails]]:
-        """Build details for a non-running workspace (no box, so no SSH info).
+        """Build details for a non-running machine (no box, so no SSH info).
 
         The state comes from the lifecycle listing; ``transition_error``
         (a failed start, e.g. no capacity) surfaces as ``failure_reason``
@@ -1424,10 +1424,11 @@ class ImbueCloudProvider(BaseProviderInstance):
         """
         host_details = HostDetails(
             id=host_ref.host_id,
-            name=workspace.host_name,
+            name=machine.host_name,
             provider_name=self.name,
-            state=WORKSPACE_HOST_STATE_BY_STATUS[workspace.status],
-            failure_reason=workspace.transition_error,
+            state=WORKSPACE_HOST_STATE_BY_STATUS[machine.status],
+            resource=host_resources_for_machine(machine.attributes, machine),
+            failure_reason=machine.transition_error,
         )
         agent_details_list = [
             build_agent_details_from_offline_ref(agent_ref, host_details, offline_field_generators)
@@ -1459,6 +1460,7 @@ class ImbueCloudProvider(BaseProviderInstance):
             name=str(host_ref.host_name),
             provider_name=host_ref.provider_name,
             state=host_ref.host_state or HostState.UNKNOWN,
+            resource=host_resources_for_machine(lease.attributes, self._find_workspace(host_ref.host_id)),
             ssh=ssh_info,
             failure_reason=failure_message,
         )
@@ -1510,12 +1512,7 @@ class ImbueCloudProvider(BaseProviderInstance):
         image = certified.get("image", "")
         tags = dict(certified.get("user_tags", {}))
         plugin = dict(certified.get("plugin", {}))
-        attributes = lease.attributes or {}
-        cpus_attr = attributes.get("cpus")
-        memory_attr = attributes.get("memory_gb")
-        cpu_count = int(cpus_attr) if isinstance(cpus_attr, (int, float)) else 1
-        memory_gb = float(memory_attr) if isinstance(memory_attr, (int, float)) else 1.0
-        resource = HostResources(cpu=CpuResources(count=cpu_count), memory_gb=memory_gb, disk_gb=None, gpu=None)
+        resource = host_resources_for_machine(lease.attributes, self._find_workspace(host_ref.host_id))
         return HostDetails(
             id=host_ref.host_id,
             name=HostName(host_name_str),
@@ -1828,16 +1825,18 @@ class ImbueCloudProvider(BaseProviderInstance):
         )
 
     def get_host_resources(self, host: HostInterface) -> HostResources:
-        leased = self._list_leased_hosts_cached()
-        for entry in leased:
-            if entry.host_id == str(host.id):
-                attrs = entry.attributes
-                cpus = int(attrs.get("cpus", 1)) if isinstance(attrs.get("cpus"), int) else 1
-                memory = (
-                    float(attrs.get("memory_gb", 1.0)) if isinstance(attrs.get("memory_gb"), (int, float)) else 1.0
-                )
-                return HostResources(cpu=CpuResources(count=cpus), memory_gb=memory, disk_gb=None, gpu=None)
-        return HostResources(cpu=CpuResources(count=1), memory_gb=1.0, disk_gb=None, gpu=None)
+        """The machine's recorded size, whether it is running or stopped.
+
+        A stopped machine has no lease entry (the lease listing covers only
+        running machines), but its row still carries the sizing columns, so the
+        full-lifecycle listing is consulted first and the lease only as the
+        old-connector fallback.
+        """
+        machine = self._find_workspace(host.id)
+        if machine is not None:
+            return host_resources_for_machine(machine.attributes, machine)
+        leased = self._find_leased(host.id)
+        return host_resources_for_machine(leased.attributes if leased is not None else {}, None)
 
     # Lifecycle
 

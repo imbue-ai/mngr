@@ -231,7 +231,7 @@ class FileSharingGrantHandler(RequestEventHandler):
     the request stops appearing as pending.
     """
 
-    data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ``~/.minds``).")
+    data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
     gateway_client: LatchkeyGatewayClient = Field(
         description=(
             "HTTP client used to call ``POST /permission-requests/approve/<id>`` and "

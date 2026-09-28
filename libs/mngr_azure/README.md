@@ -24,7 +24,7 @@ backend = "azure"
 
 subscription_id = "00000000-0000-0000-0000-000000000000"  # optional
 default_region = "westus"
-default_vm_size = "Standard_B2s"            # 2 vCPU / 4GB; B-series is quota-friendly on new subs
+default_vm_size = "Standard_B2s"            # 2 vCPU / 4GB, cheapest; new subs are often barred from it (see SkuNotAvailable below)
 
 # One-off infrastructure names (created by `mngr azure prepare`)
 resource_group = "mngr"
@@ -131,12 +131,16 @@ OS disk are reaped automatically via their `delete_option=Delete` (no orphaned
 resources).
 
 If a `mngr create` fails *after* the public IP + NIC are provisioned but before
-the VM (e.g. an Azure `SkuNotAvailable` capacity error), those are cleaned up —
+the VM (e.g. an Azure `SkuNotAvailable` error), those are cleaned up —
 immediately when possible, or otherwise reclaimed at GC time by `mngr gc` (which
 also runs after every `mngr destroy`) (Azure reserves the NIC for the would-be VM
-for 180s, so immediate deletion can be briefly blocked). A `SkuNotAvailable` error means the chosen VM
-size has no capacity in the region right now; pick another size with
-`-b --azure-vm-size=...` or another region.
+for 180s, so immediate deletion can be briefly blocked). A `SkuNotAvailable` error means Azure will not
+launch the chosen VM size in that region for your subscription. Despite Azure's "Capacity Restrictions"
+wording this is a per-subscription restriction, not a passing shortage: new pay-as-you-go subscriptions
+are commonly barred from the B-series and the v3/v5 D-series in popular regions even with unused vCPU
+quota. mngr raises `AzureVmSizeUnavailableError` naming the size and region; pick another size with
+`-b --azure-vm-size=...` (the Dsv6 / Ddsv6 families, e.g. `Standard_D2s_v6`, are commonly allowed),
+another region, or request access under Azure Portal > Subscriptions > Usage + quotas.
 
 ## How it works
 
@@ -147,7 +151,7 @@ size has no capacity in the region right now; pick another size with
 - **SSH keys** are injected inline at VM create (`os_profile.linux_configuration.ssh`);
   Azure has no per-key resource. Cloud-init also forwards the key into root's
   `authorized_keys`, so mngr's root SSH works.
-- **Image:** Debian 12 by default (matching the other mngr providers; runs
+- **Image:** Debian 13 by default (matching the other mngr providers; runs
   cloud-init with the Azure datasource, so the shared `mngr_vps` bootstrap
   works unchanged). Configurable via `image_publisher` / `image_offer` /
   `image_sku` / `image_version`.

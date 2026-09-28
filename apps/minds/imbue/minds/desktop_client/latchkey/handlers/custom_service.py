@@ -222,7 +222,7 @@ def _needs_credentials(prompt: UiManualCredentialsPrompt, message: str | None = 
 class CustomServiceGrantHandler(RequestEventHandler):
     """Handler for custom-service permission requests."""
 
-    data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ``~/.minds``).")
+    data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
     latchkey: Latchkey = Field(
         description=(
             "This computer's latchkey. Registration goes through it: ``config.json`` is shared into every "
@@ -525,14 +525,14 @@ class CustomServiceGrantHandler(RequestEventHandler):
             return UiManualCredentialsPrompt(
                 parameters=(),
                 message=(
-                    f"{domain} has no browser sign-in, and Imbue Studio cannot work out which credentials to "
+                    f"{domain} has no browser sign-in, and Mind cannot work out which credentials to "
                     "ask for. It has to be connected some other way."
                 ),
             )
         return UiManualCredentialsPrompt(
             parameters=parsed.parameters,
             message=(
-                f"{domain} has no browser sign-in, so Imbue Studio needs its credentials. Get them from the "
+                f"{domain} has no browser sign-in, so Mind needs its credentials. Get them from the "
                 "provider and fill them in -- Approve stores them and creates the connection."
             ),
             instructions=instructions,

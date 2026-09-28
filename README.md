@@ -250,7 +250,7 @@ uv tool upgrade imbue-mngr
 git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages
 ```
 
-To run the [Imbue Studio](apps/minds/README.md) desktop app from source on Linux, one script installs its prerequisites (Docker, uv, the pinned Node and pnpm) and launches it; see [apps/minds/docs/dev-setup.md](apps/minds/docs/dev-setup.md):
+To run the [minds](apps/minds/README.md) desktop app from source on Linux, one script installs its prerequisites (Docker, uv, the pinned Node and pnpm) and launches it; see [apps/minds/docs/dev-setup.md](apps/minds/docs/dev-setup.md):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install-linux.sh | bash
 ```

@@ -20,7 +20,6 @@ from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.local_process import RunningProcess
 from imbue.concurrency_group.test_utils import IdleChildrenCpuMeasurement
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
-from imbue.concurrency_group.test_utils import make_idle_child_script
 from imbue.concurrency_group.test_utils import poll_until
 from imbue.concurrency_group.thread_utils import ObservableThread
 
@@ -667,14 +666,7 @@ def test_new_resources_cannot_be_created_when_ancestor_has_failed_strands() -> N
 # not to collide with other tests' sleeps.
 _IDLE_CHILD_SLEEP_SECONDS: Final[str] = "2.37"
 _IDLE_CHILD_COUNT: Final[int] = 8
-# A ceiling in seconds, not a fraction of the wait: the noise it has to clear is a
-# fixed quantity rather than a rate. CI's gVisor sandbox charges CPU in 10ms ticks
-# to whichever thread is running when one fires, and this wait really costs only a
-# few milliseconds, in bursts far shorter than a tick -- so what the clock reports
-# is mostly tick alignment. Measured there: up to 0.06s idle, 0.07s with the
-# container under CPU contention, and CI has reported 0.12s. The 10ms poll this
-# loop replaced costs at least 0.56s over the same window.
-_MAX_CPU_SECONDS_WHILE_WAITING_ON_IDLE_CHILDREN: Final[float] = 0.25
+_MAX_CPU_FRACTION_WHILE_WAITING_ON_IDLE_CHILDREN: Final[float] = 0.02
 _IDLE_CHILDREN_CPU_PROBE_PROGRAM: Final[str] = (
     "import sys\n"
     "from imbue.concurrency_group.test_utils import measure_cpu_waiting_on_idle_children\n"
@@ -685,16 +677,11 @@ _IDLE_CHILDREN_CPU_PROBE_PROGRAM: Final[str] = (
 @pytest.mark.parametrize(
     "child_script",
     [
-        pytest.param(
-            make_idle_child_script(_IDLE_CHILD_SLEEP_SECONDS, is_closing_its_pipes=False),
-            id="child_keeps_its_pipes_open",
-        ),
-        pytest.param(
-            make_idle_child_script(_IDLE_CHILD_SLEEP_SECONDS, is_closing_its_pipes=True),
-            id="child_closed_its_pipes",
-        ),
+        pytest.param(f"exec sleep {_IDLE_CHILD_SLEEP_SECONDS}", id="child_keeps_its_pipes_open"),
+        pytest.param(f"exec >&- 2>&-; exec sleep {_IDLE_CHILD_SLEEP_SECONDS}", id="child_closed_its_pipes"),
     ],
 )
+@pytest.mark.flaky
 def test_waiting_on_idle_background_processes_uses_almost_no_cpu(child_script: str) -> None:
     # Long-lived streams spend nearly all of their life idle, so waiting on
     # them must not cost CPU on a timer. The measurement runs in a fresh
@@ -707,6 +694,6 @@ def test_waiting_on_idle_background_processes_uses_almost_no_cpu(child_script: s
         )
     measurement = IdleChildrenCpuMeasurement.model_validate_json(finished.stdout.strip().splitlines()[-1])
 
-    assert measurement.cpu_seconds < _MAX_CPU_SECONDS_WHILE_WAITING_ON_IDLE_CHILDREN, (
+    assert measurement.cpu_seconds < _MAX_CPU_FRACTION_WHILE_WAITING_ON_IDLE_CHILDREN * measurement.wall_seconds, (
         f"used {measurement.cpu_seconds:.3f}s of CPU over {measurement.wall_seconds:.3f}s waiting on idle children"
     )

@@ -83,9 +83,63 @@ runcmd:
   - touch /root/.ssh/authorized_keys && chmod 0600 /root/.ssh/authorized_keys
   - |
       set -e
+      install -d -m 1777 /var/lib/mngr-tmp
+      MNGR_TMP_STAGE="$(mktemp -d /var/lib/mngr-tmp/.mngr-stage.XXXXXX)"
+      cat > "$MNGR_TMP_STAGE/unit" <<'MNGR_TMP_MOUNT_UNIT_EOF'
+      [Unit]
+      Description=mngr: /tmp on the VM's disk instead of a RAM-backed tmpfs
+      DefaultDependencies=no
+      Conflicts=umount.target
+      Before=local-fs.target umount.target
+      After=local-fs-pre.target
+      ConditionPathIsDirectory=/var/lib/mngr-tmp
+      [Mount]
+      What=/var/lib/mngr-tmp
+      Where=/tmp
+      Type=none
+      Options=bind,nosuid,nodev
+      [Install]
+      WantedBy=local-fs.target
+      MNGR_TMP_MOUNT_UNIT_EOF
+      if ! cmp -s "$MNGR_TMP_STAGE/unit" /etc/systemd/system/tmp.mount; then
+          install -m 0644 "$MNGR_TMP_STAGE/unit" /etc/systemd/system/tmp.mount
+          systemctl daemon-reload
+          systemctl enable tmp.mount
+      fi
+      rm -rf "$MNGR_TMP_STAGE"
+      if ! findmnt -no SOURCE /tmp 2>/dev/null | grep -q '/var/lib/mngr-tmp\\]$'; then
+          systemctl restart tmp.mount || { umount -l /tmp && systemctl restart tmp.mount; }
+      fi
+      findmnt -no SOURCE /tmp | grep -q '/var/lib/mngr-tmp\\]$'
+  - |
+      set -e
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update
+      for attempt in 1 2 3 4 5 6; do
+          if apt-get update; then break; fi
+          if [ "$attempt" = 6 ]; then echo "apt-get update failed after 6 attempts" >&2; exit 1; fi
+          sleep 10
+      done
       apt-get install -y curl ca-certificates gnupg rsync inotify-tools jq
+  - |
+      set -e
+      MNGR_BOUNDS_STAGE="$(mktemp -d)"
+      mkdir -p /etc/docker /etc/systemd/journald.conf.d
+      if [ -f /etc/docker/daemon.json ]; then
+          jq -S . /etc/docker/daemon.json > "$MNGR_BOUNDS_STAGE/current.json"
+      else
+          echo '{}' > "$MNGR_BOUNDS_STAGE/current.json"
+      fi
+      jq -S --argjson bounds '{"builder": {"gc": {"defaultKeepStorage": "1GB", "enabled": true}}, "log-driver": "json-file", "log-opts": {"max-file": "3", "max-size": "50m"}}' '. * $bounds' "$MNGR_BOUNDS_STAGE/current.json" > "$MNGR_BOUNDS_STAGE/merged.json"
+      if ! cmp -s "$MNGR_BOUNDS_STAGE/current.json" "$MNGR_BOUNDS_STAGE/merged.json"; then
+          install -m 0644 "$MNGR_BOUNDS_STAGE/merged.json" /etc/docker/daemon.json
+          if systemctl is-active --quiet docker; then systemctl restart docker; fi
+      fi
+      printf '[Journal]\\nSystemMaxUse=512M\\n' > "$MNGR_BOUNDS_STAGE/journald.conf"
+      if ! cmp -s "$MNGR_BOUNDS_STAGE/journald.conf" /etc/systemd/journald.conf.d/60-mngr.conf; then
+          install -m 0644 "$MNGR_BOUNDS_STAGE/journald.conf" /etc/systemd/journald.conf.d/60-mngr.conf
+          systemctl restart systemd-journald
+      fi
+      rm -rf "$MNGR_BOUNDS_STAGE"
   - |
       set -e
       export DEBIAN_FRONTEND=noninteractive
@@ -102,10 +156,61 @@ runcmd:
       systemctl start docker
   - |
       set -e
-      if ! grep -q '^MaxSessions' /etc/ssh/sshd_config 2>/dev/null; then
-          printf '\\nMaxSessions 100\\nMaxStartups 100:30:200\\n' >> /etc/ssh/sshd_config
+      MNGR_SSHD_STAGE="$(mktemp -d)"
+      printf 'MaxSessions 100\\nMaxStartups 100:30:200\\nPermitRootLogin prohibit-password\\nPasswordAuthentication no\\nKbdInteractiveAuthentication no\\n' > "$MNGR_SSHD_STAGE/60-mngr.conf"
+      if sshd -T 2>/dev/null | grep -qi '^persourcepenalties'; then printf 'PerSourcePenalties no\\n' >> "$MNGR_SSHD_STAGE/60-mngr.conf"; fi
+      mkdir -p /etc/ssh/sshd_config.d
+      if ! cmp -s "$MNGR_SSHD_STAGE/60-mngr.conf" /etc/ssh/sshd_config.d/60-mngr.conf; then
+          install -m 0644 "$MNGR_SSHD_STAGE/60-mngr.conf" /etc/ssh/sshd_config.d/60-mngr.conf
           systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null || true
       fi
+      rm -rf "$MNGR_SSHD_STAGE"
+  - |
+      set -e
+      MNGR_MEMORY_STAGE="$(mktemp -d)"
+      cat > "$MNGR_MEMORY_STAGE/script" <<'MNGR_MEMORY_SCRIPT_EOF'
+      #!/bin/sh
+      # Installed by mngr_vps: cap every VM-sized mngr agent container at the VM's RAM minus a reserve.
+      set -u
+      attempt=0
+      until docker info >/dev/null 2>&1; do
+          attempt=$((attempt + 1))
+          if [ "$attempt" -ge 30 ]; then
+              echo "WARNING: docker did not become available; leaving container memory caps unchanged" >&2
+              exit 0
+          fi
+          sleep 2
+      done
+      total_kib=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+      cap_mib=$(( total_kib / 1024 - 1024 ))
+      if [ "$cap_mib" -le 0 ]; then exit 0; fi
+      cap_bytes=$(( cap_mib * 1024 * 1024 ))
+      for container_id in $(docker ps -aq --filter "label=com.imbue.mngr.host-id" --filter "label=com.imbue.mngr.memory-cap=vm"); do
+          current=$(docker inspect --format '{{.HostConfig.Memory}}' "$container_id")
+          if [ "$current" != "$cap_bytes" ]; then
+              docker update --memory "${cap_mib}m" --memory-swap "${cap_mib}m" "$container_id" \\
+                  || echo "WARNING: could not update the memory cap of $container_id" >&2
+          fi
+      done
+      MNGR_MEMORY_SCRIPT_EOF
+      cat > "$MNGR_MEMORY_STAGE/unit" <<'MNGR_MEMORY_UNIT_EOF'
+      [Unit]
+      Description=mngr: cap the agent container's memory at the VM's RAM minus a reserve
+      After=docker.service
+      Wants=docker.service
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/mngr-vps-container-memory.sh
+      [Install]
+      WantedBy=multi-user.target
+      MNGR_MEMORY_UNIT_EOF
+      if ! cmp -s "$MNGR_MEMORY_STAGE/script" /usr/local/sbin/mngr-vps-container-memory.sh || ! cmp -s "$MNGR_MEMORY_STAGE/unit" /etc/systemd/system/mngr-vps-container-memory.service; then
+          install -m 0755 "$MNGR_MEMORY_STAGE/script" /usr/local/sbin/mngr-vps-container-memory.sh
+          install -m 0644 "$MNGR_MEMORY_STAGE/unit" /etc/systemd/system/mngr-vps-container-memory.service
+          systemctl daemon-reload
+          systemctl enable mngr-vps-container-memory.service
+      fi
+      rm -rf "$MNGR_MEMORY_STAGE"
   - touch /var/run/mngr-ready
 """)
 

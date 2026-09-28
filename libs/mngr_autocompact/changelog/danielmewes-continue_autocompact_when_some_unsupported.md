@@ -1,1 +1,0 @@
-When running `mngr autocompact check` or `mngr autocompact run` with agent targets that do not support context compaction, log a warning and ignore those agents instead of failing with an error. Autocompaction continues for any targets that support it and exits with code 0.

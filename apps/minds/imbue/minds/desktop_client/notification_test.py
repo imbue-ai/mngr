@@ -30,7 +30,7 @@ def test_electron_dispatch_emits_the_slack_style_layout_and_the_click_url(capsys
 def test_electron_dispatch_omits_the_url_when_there_is_nowhere_to_land(capsys: pytest.CaptureFixture[str]) -> None:
     dispatcher = NotificationDispatcher(is_electron=True)
 
-    dispatcher.dispatch(NotificationRequest(title="Imbue Studio", subtitle="Test notification", body="hello"))
+    dispatcher.dispatch(NotificationRequest(title="Mind", subtitle="Test notification", body="hello"))
 
     (event,) = _emitted_events(capsys.readouterr().out)
     assert "url" not in event

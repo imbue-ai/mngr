@@ -118,7 +118,7 @@ def test_generate_bootstrap_payload_is_gce_startup_script_not_cloud_init(
 ) -> None:
     """GCP renders a GCE startup-script, since stock GCE images do not run cloud-init.
 
-    This is what makes the default Debian 12 image work: the google-guest-agent
+    This is what makes the default Debian 13 image work: the google-guest-agent
     executes the ``startup-script`` metadata on every image, unlike cloud-init's
     ``user-data`` which the stock GCE Debian images ignore.
     """
@@ -255,9 +255,7 @@ def test_validate_provider_args_requires_firewall_rule(temp_mngr_ctx: MngrContex
         provider._validate_provider_args_for_create()
 
 
-# =============================================================================
 # GCP build-args parser (--gcp-zone, --gcp-machine-type, --git-depth)
-# =============================================================================
 
 
 def test_parse_build_args_uses_defaults_when_none(temp_mngr_ctx: MngrContext) -> None:
@@ -313,7 +311,6 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
         provider._parse_build_args(["--vps-region=us-west1-a"])
 
 
-# =============================================================================
 # Offline discovery + the GCE-metadata-backed state store (stop/start lifecycle):
 # instance lookup, agent/host-record mirror, discovery, offline reconstruction.
 #
@@ -323,7 +320,6 @@ def test_parse_build_args_rejects_dropped_vps_prefix(temp_mngr_ctx: MngrContext)
 # The full host record lives in the ``mngr-host-state`` metadata value and one
 # full agent JSON per agent under ``mngr-agent-<id>`` -- the GCP analog of the
 # AWS/Azure object-storage state bucket, behind the same HostStateStore interface.
-# =============================================================================
 
 
 def _build_stubbed_provider(mngr_ctx: MngrContext) -> tuple[GcpProvider, FakeInstancesClient]:

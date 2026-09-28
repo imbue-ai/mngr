@@ -12,6 +12,9 @@ from pydantic import SecretStr
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.bootstrap import mngr_host_dir_for
+from imbue.mngr_vps.container_setup import LABEL_HOST_ID
+from imbue.mngr_vps.container_setup import container_tmp_tmpfs_size_mib
+from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",
@@ -279,3 +282,141 @@ class SyncE2EAccount(FrozenModel):
     password: SecretStr = Field(description="The account's sign-in password (typed into the real UI)")
     user_id: str = Field(description="SuperTokens user id (used for teardown and record assertions)")
     access_token: SecretStr = Field(description="A session JWT for read-only connector polling from the test")
+
+
+# The per-cloud release tests (apps/minds/test_*_workspace_release.py) create a
+# real VM through a minds-shaped provider block and assert the agent container
+# has the shape minds relies on: a gVisor (runsc) sandbox, /run and /tmp on
+# tmpfs, and a memory cap derived from the VM's RAM. Each test differs only in
+# its provider block and credentials; the mngr driving and the assertions are
+# shared here so the per-cloud tests cannot drift.
+
+# Disable every provider a minds profile might otherwise enable, so a release
+# test's ``mngr list`` fans out to its one cloud provider only.
+_CLOUD_WORKSPACE_RELEASE_TEST_DISABLED_PROVIDERS: Final[str] = (
+    "\n[providers.modal]\nis_enabled = false\n"
+    "\n[providers.vultr]\nis_enabled = false\n"
+    "\n[providers.ovh]\nis_enabled = false\n"
+    "\n[providers.imbue_cloud]\nis_enabled = false\n"
+    "\n[providers.aws]\nis_enabled = false\n"
+    "\n[providers.gcp]\nis_enabled = false\n"
+    "\n[providers.azure]\nis_enabled = false\n"
+)
+
+# Hard timeout for one mngr command in a cloud release test; a create that
+# provisions a VM and builds the container routinely runs several minutes.
+_CLOUD_WORKSPACE_MNGR_COMMAND_TIMEOUT_SECONDS: Final[int] = 600
+
+
+def make_cloud_workspace_release_env(
+    tmp_path: Path, provider_block: str, base_env: Mapping[str, str]
+) -> dict[str, str]:
+    """The subprocess env a cloud workspace release test drives mngr with.
+
+    Writes a self-contained project ``settings.toml`` under ``tmp_path`` holding
+    ``provider_block`` (the cloud's ``[providers.<name>]`` block, written exactly
+    as minds writes it plus the release-test-only ``auto_shutdown_seconds`` safety
+    net the cloud providers require under pytest) with every other provider
+    disabled, and points ``MNGR_PROJECT_CONFIG_DIR`` at it. ``MNGR_HOST_DIR`` and
+    ``HOME`` are isolated under ``tmp_path`` so no developer mngr profile or config
+    is loaded (every loaded config must opt into pytest, and a developer's would
+    not); ``base_env`` supplies everything else, such as the cloud credentials.
+    """
+    settings_dir = tmp_path / "config"
+    settings_dir.mkdir()
+    (settings_dir / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n" + provider_block + _CLOUD_WORKSPACE_RELEASE_TEST_DISABLED_PROVIDERS
+    )
+    env = dict(base_env)
+    env["MNGR_PROJECT_CONFIG_DIR"] = str(settings_dir)
+    env["MNGR_HOST_DIR"] = str(tmp_path / "mngr_home")
+    env["HOME"] = str(tmp_path / "home")
+    Path(env["HOME"]).mkdir()
+    return env
+
+
+def run_mngr_for_cloud_workspace_release_test(
+    env: Mapping[str, str], cwd: Path, *args: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the monorepo's ``mngr`` (the dev shim on PATH) with the release env in scope.
+
+    Invokes the bare ``mngr`` shim rather than ``uv run mngr``: ``uv run`` in an
+    arbitrary cwd would try to build that directory's own venv, whereas the shim
+    always routes to this checkout's mngr. Streams stdout+stderr to a file so a
+    stuck create is still diagnosable on timeout. The log is written *outside*
+    ``cwd`` so it doesn't dirty the source git repo (``mngr create`` enforces a
+    clean working tree).
+    """
+    log_path = cwd.parent / f"mngr-{args[0] if args else 'cmd'}.log"
+    with log_path.open("w") as log_file:
+        proc = subprocess.Popen(
+            ["mngr", *args],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=str(cwd),
+            env=env,
+        )
+        try:
+            returncode = proc.wait(timeout=_CLOUD_WORKSPACE_MNGR_COMMAND_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            returncode = 124
+    return subprocess.CompletedProcess(args=list(args), returncode=returncode, stdout=log_path.read_text(), stderr="")
+
+
+def assert_cloud_workspace_container_shape(
+    env: Mapping[str, str], repo: Path, *, agent_address: str, host_name: str, provider_name: str
+) -> None:
+    """Assert a created cloud workspace has the container shape minds relies on.
+
+    The host lists as running on its provider; the agent runs inside a gVisor
+    (runsc) sandbox (gVisor advertises itself in the emulated kernel log and in
+    /proc/version, a normal kernel does neither, and either also proves the agent
+    is containerized rather than on the bare VM); /run and /tmp are tmpfs (the
+    mounts runsc needs for supervisord's control socket), /tmp executable and
+    capped at the mngr_vps fraction of the VM's RAM; and the container's memory
+    is capped at the VM's RAM minus the mngr_vps reserve.
+    """
+    listing = run_mngr_for_cloud_workspace_release_test(env, repo, "list")
+    assert listing.returncode == 0, f"list failed:\n{listing.stdout}"
+    assert host_name in listing.stdout
+    assert provider_name in listing.stdout
+
+    inner_probe = run_mngr_for_cloud_workspace_release_test(
+        env,
+        repo,
+        "exec",
+        agent_address,
+        "cat /proc/version; echo '---dmesg---'; dmesg 2>/dev/null | head -5; echo '---mounts---'; mount | grep -E ' /(run|tmp) '",
+    )
+    assert inner_probe.returncode == 0, f"exec failed:\n{inner_probe.stdout}"
+    assert "gvisor" in inner_probe.stdout.lower(), (
+        f"expected a gVisor (runsc) signature in /proc/version or dmesg, got:\n{inner_probe.stdout}"
+    )
+    assert " /run type tmpfs " in inner_probe.stdout, f"expected /run on tmpfs, got:\n{inner_probe.stdout}"
+    tmp_mount_lines = [line for line in inner_probe.stdout.splitlines() if " /tmp type tmpfs " in line]
+    assert len(tmp_mount_lines) == 1, f"expected /tmp on tmpfs, got:\n{inner_probe.stdout}"
+    assert "noexec" not in tmp_mount_lines[0], f"expected an executable /tmp, got:\n{tmp_mount_lines[0]}"
+
+    outer_probe = run_mngr_for_cloud_workspace_release_test(
+        env,
+        repo,
+        "exec",
+        "--outer",
+        agent_address,
+        "awk '/^MemTotal:/{print $2}' /proc/meminfo; "
+        f"docker inspect --format '{{{{.HostConfig.Memory}}}}' $(docker ps -q --filter label={LABEL_HOST_ID})",
+    )
+    assert outer_probe.returncode == 0, f"outer exec failed:\n{outer_probe.stdout}"
+    probe_lines = [line.strip() for line in outer_probe.stdout.splitlines() if line.strip().isdigit()]
+    assert len(probe_lines) == 2, f"expected MemTotal and the container memory cap, got:\n{outer_probe.stdout}"
+    mem_total_kib, container_memory_bytes = (int(line) for line in probe_lines)
+    assert container_memory_bytes == expected_container_memory_cap_bytes(mem_total_kib), (
+        f"container memory cap {container_memory_bytes} does not match the VM's RAM ({mem_total_kib} KiB)"
+    )
+    expected_tmp_size_option = f"size={container_tmp_tmpfs_size_mib(mem_total_kib) * 1024}k"
+    assert expected_tmp_size_option in tmp_mount_lines[0], (
+        f"expected /tmp capped at {expected_tmp_size_option} for a VM with {mem_total_kib} KiB, got:\n{tmp_mount_lines[0]}"
+    )

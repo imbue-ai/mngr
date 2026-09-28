@@ -19,7 +19,6 @@ import tempfile
 import time
 from collections.abc import Mapping
 from collections.abc import Sequence
-from enum import auto
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -31,10 +30,8 @@ from pydantic import SecretStr
 from pydantic import TypeAdapter
 from pydantic import ValidationError
 
-from imbue.imbue_common.enums import UpperCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
-from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.host_keyed_ttl_cache import HostKeyedTtlCache
 from imbue.minds.errors import MindError
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -45,13 +42,11 @@ from imbue.mngr_imbue_cloud.wire import WireModel
 
 _DEFAULT_TIMEOUT_SECONDS = 60.0
 _LEASE_TIMEOUT_SECONDS = 300.0
-# How long a browser sign-in keeps listening for the browser (the plugin's
-# --listen-timeout). A browser that finishes after this lands on a closed local
-# port, so the window covers as long as a sign-in plausibly stays open.
-WEB_LOGIN_LISTEN_SECONDS: Final[float] = 60 * 60.0
-# The outer kill deadline leaves headroom over the listen window (spawn, code
-# exchange, session persist) so the plugin's own timeout error is the one that surfaces.
-WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS: Final[float] = WEB_LOGIN_LISTEN_SECONDS + 30.0
+# The plugin's `auth login` enforces its own listen deadline
+# (_LOGIN_LISTEN_TIMEOUT_SECONDS in the plugin's cli/auth.py) with a proper
+# timeout error; this outer kill deadline needs headroom over it (spawn, code
+# exchange, session persist) so the plugin's message is the one that surfaces.
+_WEB_LOGIN_TIMEOUT_SECONDS = 630.0
 _KEY_OP_TIMEOUT_SECONDS = 90.0
 # Force-destroy empties the bucket over S3 before deleting it, so it can run
 # far longer than the other bucket ops (many objects, plus credential
@@ -65,12 +60,10 @@ _BUCKET_DESTROY_TIMEOUT_SECONDS = 600.0
 _CONNECTOR_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL"
 _ACCOUNTS_URL_SUBPROCESS_ENV: str = "MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL"
 
-# The plugin's error_class marker for a structured quota refusal (a 403
-# ``quota_exceeded``), as written into its JSON stderr body by
-# handle_imbue_cloud_errors and into ``mngr create --format jsonl``'s error
-# event. Substring-matched here (like the 503 unavailable_signal) because log
-# lines may surround the body.
-QUOTA_EXCEEDED_ERROR_CLASS: Final[str] = "ImbueCloudQuotaExceededError"
+# The plugin's error_class marker for a structured quota refusal, as written
+# into its JSON stderr body by handle_imbue_cloud_errors. Substring-matched
+# (like the 503 unavailable_signal) because log lines may surround the body.
+_QUOTA_ERROR_CLASS_SIGNAL = "ImbueCloudQuotaExceededError"
 
 # The plugin's error_class marker for a structured email-verification refusal
 # (``code: email_not_verified``), written by handle_imbue_cloud_errors.
@@ -164,34 +157,6 @@ class ImbueCloudAuthFailedCliError(ImbueCloudCliError):
 
     auth_status: str = "ERROR"
     auth_message: str = ""
-
-
-class WebLoginIncompleteReason(UpperCaseStrEnum):
-    """Why a browser sign-in ended without signing in, other than a connector verdict or an outage."""
-
-    # Nobody finished signing in within the listen window.
-    TIMED_OUT = auto()
-    # The browser came back without a usable handoff (wrong state, no code).
-    CALLBACK_REJECTED = auto()
-    # The browser signed in, but the connector refused the one-time code.
-    CODE_REFUSED = auto()
-
-
-class ImbueCloudWebLoginIncompleteCliError(ImbueCloudCliError):
-    """The browser sign-in (``auth login``) ended without signing this machine in; ``reason`` says why."""
-
-    reason: WebLoginIncompleteReason = WebLoginIncompleteReason.TIMED_OUT
-
-
-# The plugin's ``auth login`` error classes for a sign-in that ended without
-# signing in, keyed to why. Anything else (an unreachable connector, a crash)
-# stays a plain failure.
-_WEB_LOGIN_INCOMPLETE_REASON_BY_ERROR_CLASS: Final[dict[str, WebLoginIncompleteReason]] = {
-    "LoginTimeout": WebLoginIncompleteReason.TIMED_OUT,
-    "LoginStateMismatch": WebLoginIncompleteReason.CALLBACK_REJECTED,
-    "LoginCallbackMissingCode": WebLoginIncompleteReason.CALLBACK_REJECTED,
-    "ImbueCloudDeviceCodeRefusedError": WebLoginIncompleteReason.CODE_REFUSED,
-}
 
 
 class ImbueCloudLeaseActiveCliError(ImbueCloudCliError):
@@ -492,7 +457,7 @@ class ImbueCloudCli(MutableModel):
             too_old_exc.stdout = result.stdout
             too_old_exc.stderr = result.stderr
             raise too_old_exc
-        if QUOTA_EXCEEDED_ERROR_CLASS in result.stderr:
+        if _QUOTA_ERROR_CLASS_SIGNAL in result.stderr:
             quota_message = _parse_stderr_error_message(result.stderr)
             quota_exc = ImbueCloudQuotaExceededCliError(
                 f"{command_repr}: {quota_message}" if quota_message else f"{command_repr}: quota exceeded"
@@ -578,26 +543,14 @@ class ImbueCloudCli(MutableModel):
         it (PKCE) for this machine's session. ``url_file`` is where the plugin
         writes the sign-in URL once its listener is live -- the desktop
         client's copy-the-link fallback reads it. Blocks until the flow
-        finishes or the listen window passes. A sign-in that ends without
-        signing in raises ``ImbueCloudWebLoginIncompleteCliError``.
+        finishes (or the plugin's own 300s timeout).
         """
-        args: list[str] = ["auth", "login", "--listen-timeout", str(WEB_LOGIN_LISTEN_SECONDS)]
+        args: list[str] = ["auth", "login"]
         if success_redirect_url is not None:
             args.extend(["--success-redirect-url", success_redirect_url])
         if url_file is not None:
             args.extend(["--url-file", str(url_file)])
-        result = self._run(
-            args, cg_name="imbue-cloud-auth-login", timeout_seconds=WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
-        )
-        incomplete_reason = classify_incomplete_web_login(result)
-        if incomplete_reason is not None:
-            error_message = _parse_stderr_error_message(result.stderr) or result.stderr.strip()
-            incomplete_exc = ImbueCloudWebLoginIncompleteCliError(f"auth login: {error_message}")
-            incomplete_exc.reason = incomplete_reason
-            incomplete_exc.exit_code = result.returncode if result.returncode is not None else 1
-            incomplete_exc.stdout = result.stdout
-            incomplete_exc.stderr = result.stderr
-            raise incomplete_exc
+        result = self._run(args, cg_name="imbue-cloud-auth-login", timeout_seconds=_WEB_LOGIN_TIMEOUT_SECONDS)
         body = self._expect_success(result, "auth login")
         return ImbueCloudAuthSession.model_validate(body)
 
@@ -1227,16 +1180,6 @@ def _parse_stderr_error_message(stderr: str) -> str | None:
     """Extract the ``error`` message from the plugin's JSON stderr body, if present."""
     body = _parse_stderr_error_body(stderr)
     return None if body is None else str(body["error"])
-
-
-@pure
-def classify_incomplete_web_login(result: MngrCallResult) -> WebLoginIncompleteReason | None:
-    """Why an ``auth login`` run ended without signing in, or None if it signed in or failed some other way."""
-    if result.is_timed_out:
-        return WebLoginIncompleteReason.TIMED_OUT
-    error_body = _parse_stderr_error_body(result.stderr) if result.returncode != 0 else None
-    error_class = None if error_body is None else error_body.get("error_class")
-    return _WEB_LOGIN_INCOMPLETE_REASON_BY_ERROR_CLASS.get(error_class) if isinstance(error_class, str) else None
 
 
 def _parse_auth_failure_body(stderr: str) -> dict[str, Any] | None:

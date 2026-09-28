@@ -6,7 +6,6 @@ import "./style.css";
 import { registerAppContext } from "./app-context";
 import { UiChannelClient } from "./channel/client";
 import { electronBridge } from "./electron-bridge";
-import { installCursorHidingWhileTyping } from "./hide-cursor-while-typing";
 import { bootFromBootstrap, createEmptyStores } from "./models/boot";
 import { onboardingProgress } from "./models/onboarding";
 import {
@@ -256,7 +255,6 @@ function main(): void {
   // Delegated hover/focus tooltips for the [data-tooltip] chrome (titlebar
   // buttons, etc.); one document-level install survives mithril's re-renders.
   installTooltips();
-  installCursorHidingWhileTyping(document);
   channel.start();
 
   // ``?web-login=1`` asks this window to start the browser sign-in as soon

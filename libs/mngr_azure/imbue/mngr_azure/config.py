@@ -31,16 +31,16 @@ _STATE_ACCOUNT_HASH_LENGTH: Final[int] = _STATE_ACCOUNT_NAME_MAX_LENGTH - len(_S
 AZURE_MANAGED_BY_TAG_KEY: Final[str] = "managed-by"
 AZURE_MANAGED_BY_TAG_VALUE: Final[str] = "mngr"
 
-# Default marketplace image: Debian 12 (gen2), matching the Debian-12 default of
-# the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure image runs
-# cloud-init with the Azure datasource, so the shared ``mngr_vps``
+# Default marketplace image: Debian 13 "trixie" (gen2), matching the Debian 13
+# default of the other mngr providers (aws / gcp / ovh / vultr). Debian's Azure
+# image runs cloud-init with the Azure datasource, so the shared ``mngr_vps``
 # cloud-init flow (Docker install, SSH host-key injection, mngr bootstrap) works
 # unchanged. The four-part publisher/offer/sku/version URN is configurable for
 # users who want a different distro or a custom image; ``test_release_azure``
 # validates that the default still resolves.
 DEFAULT_IMAGE_PUBLISHER: Final[str] = "Debian"
-DEFAULT_IMAGE_OFFER: Final[str] = "debian-12"
-DEFAULT_IMAGE_SKU: Final[str] = "12-gen2"
+DEFAULT_IMAGE_OFFER: Final[str] = "debian-13"
+DEFAULT_IMAGE_SKU: Final[str] = "13-gen2"
 DEFAULT_IMAGE_VERSION: Final[str] = "latest"
 
 
@@ -174,9 +174,10 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
     default_vm_size: str = Field(
         default="Standard_B2s",
         description=(
-            "Default Azure VM size (e.g. 'Standard_B2s' for 2 vCPU / 4GB). B-series is the burstable "
-            "family most likely to have nonzero vCPU quota on a fresh pay-as-you-go subscription. "
-            "Surfaced to users as the `--azure-vm-size=` build arg."
+            "Default Azure VM size (e.g. 'Standard_B2s' for 2 vCPU / 4GB), the cheapest burstable size. "
+            "Fresh pay-as-you-go subscriptions are often barred from the B-series and older D-series in "
+            "popular regions (Azure answers SkuNotAvailable); the Dsv6 / Ddsv6 families (e.g. "
+            "'Standard_D2s_v6') are commonly allowed there. Surfaced to users as the `--azure-vm-size=` build arg."
         ),
     )
     image_publisher: str = Field(default=DEFAULT_IMAGE_PUBLISHER, description="Marketplace image publisher.")

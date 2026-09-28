@@ -11,9 +11,8 @@ from imbue.minds.mngr_settings.data_types import CloudAccountRecord
 from imbue.minds.mngr_settings.errors import MindsSettingsError
 from imbue.minds.mngr_settings.file_store import settings_store_for
 from imbue.minds.mngr_settings.provider_blocks import AWS_DEFAULT_INSTANCE_TYPE
-from imbue.minds.mngr_settings.provider_blocks import AWS_DEFAULT_START_ARGS
-from imbue.minds.mngr_settings.provider_blocks import AWS_DOCKER_RUNTIME
-from imbue.minds.mngr_settings.provider_blocks import AWS_INSTALL_GVISOR_RUNTIME
+from imbue.minds.mngr_settings.provider_blocks import BYOK_DOCKER_RUNTIME
+from imbue.minds.mngr_settings.provider_blocks import BYOK_INSTALL_GVISOR_RUNTIME
 from imbue.minds.mngr_settings.provider_blocks import BYOK_PROVIDER_NAME_PREFIX
 from imbue.minds.mngr_settings.provider_blocks import BYOK_SUPPORTED_BACKENDS
 from imbue.minds.mngr_settings.provider_blocks import WORKSPACE_HOST_DIR
@@ -167,15 +166,13 @@ def _register_cloud_account_block(
     block["host_dir"] = WORKSPACE_HOST_DIR
     block["volume_home_path"] = WORKSPACE_VOLUME_HOME_PATH
     block["host_log_dir"] = WORKSPACE_HOST_LOG_DIR
-    # Per-backend placement + shape.
-    # AWS keeps the gVisor hardening knobs; GCP / Azure run the providers' default docker runtime (their templates' hardening args are runtime-agnostic).
-    # GCE is zonal, so the GCP "region" value is a zone.
+    # Every cloud runs the agent in a gVisor (runsc) container: the VM's host setup installs the runtime, and mngr_vps adds the tmpfs mounts runsc needs.
+    block["install_gvisor_runtime"] = BYOK_INSTALL_GVISOR_RUNTIME
+    block["docker_runtime"] = BYOK_DOCKER_RUNTIME
+    # Per-backend placement + shape. GCE is zonal, so the GCP "region" value is a zone.
     if backend == "aws":
         block["default_region"] = region
         block["default_instance_type"] = AWS_DEFAULT_INSTANCE_TYPE
-        block["install_gvisor_runtime"] = AWS_INSTALL_GVISOR_RUNTIME
-        block["docker_runtime"] = AWS_DOCKER_RUNTIME
-        block["default_start_args"] = list(AWS_DEFAULT_START_ARGS)
     elif backend == "gcp":
         block["default_zone"] = region
         block["default_machine_type"] = DEFAULT_GCP_MACHINE_TYPE
