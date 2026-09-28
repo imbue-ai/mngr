@@ -397,6 +397,7 @@ class PlanQuotasConfig(FrozenModel):
     max_total_machine_disk_gb: NonNegativeInt = Field(
         description="Max machine data-disk GB summed across running + stopped remote machines"
     )
+    max_shared_workspaces: NonNegativeInt = Field(description="Max workspaces the account may have shared at once")
 
     def to_plan_row(self) -> dict[str, float]:
         """The connector-table column values for this plan (storage converted to bytes)."""
@@ -409,7 +410,21 @@ class PlanQuotasConfig(FrozenModel):
             "max_active_synced_workspaces": int(self.max_active_synced_workspaces),
             "max_active_machine_units": int(self.max_active_machine_units),
             "max_total_machine_disk_gb": int(self.max_total_machine_disk_gb),
+            "max_shared_workspaces": int(self.max_shared_workspaces),
         }
+
+
+class WaitlistDeployConfig(FrozenModel):
+    """The ``[waitlist]`` block of a ``deploy.toml`` (specs/minds-waitlist-signup-codes/spec.md).
+
+    Pushed into the connector's per-deploy Modal Secret as
+    ``MINDS_WAITLIST_ENABLED``. On, accounts created without a signup code
+    land on the zero-quota guest plan and the download page requires a
+    signed-in, invited account; off (and an absent block) leaves signup and
+    downloads open, which is what dev and ci tiers run.
+    """
+
+    is_enabled: bool = Field(description="Whether new accounts without a signup code are waitlisted on this tier")
 
 
 class WebWorkspacesConfig(FrozenModel):
@@ -927,6 +942,12 @@ class DeployEnvConfig(FrozenModel):
         description=(
             "Pinned template + blessed compute shape for browser-driven workspace creation "
             "(the connector's POST /hosts/claim). None (the default) disables web creates on the tier."
+        ),
+    )
+    waitlist: WaitlistDeployConfig | None = Field(
+        default=None,
+        description=(
+            "Whether new accounts without a signup code are waitlisted (the guest plan). None (the default) means off."
         ),
     )
     storage: StorageDeployConfig | None = Field(

@@ -40,6 +40,7 @@ from imbue.minds.desktop_client.agent_creator import _build_mngr_create_command
 from imbue.minds.desktop_client.agent_creator import _is_git_worktree
 from imbue.minds.desktop_client.agent_creator import _is_github_https_url
 from imbue.minds.desktop_client.agent_creator import _is_local_path
+from imbue.minds.desktop_client.agent_creator import _mngr_create_failure
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials
 from imbue.minds.desktop_client.agent_creator import _redact_url_credentials_in_text
 from imbue.minds.desktop_client.agent_creator import _rsync_worktree_over_clone
@@ -197,6 +198,63 @@ def test_create_event_capture_ignores_error_event_without_error_class() -> None:
     capture = _CreateEventCapture()
     capture('{"event": "error", "message": "something failed"}', is_stdout=True)
     assert capture.error_class is None
+
+
+def test_create_event_capture_records_error_message_from_jsonl_error_event() -> None:
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "error", "error_class": "ImbueCloudQuotaExceededError", "message": " This account is on the waitlist. "}',
+        is_stdout=True,
+    )
+    assert capture.error_class == "ImbueCloudQuotaExceededError"
+    assert capture.error_message == "This account is on the waitlist."
+
+
+def test_create_event_capture_takes_error_class_and_message_from_one_event() -> None:
+    """A later error event replaces both fields, so the message never belongs to an earlier event's class."""
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "error", "error_class": "ImbueCloudQuotaExceededError", "message": "This account is on the waitlist."}',
+        is_stdout=True,
+    )
+    capture('{"event": "error", "error_class": "MngrError"}', is_stdout=True)
+    assert capture.error_class == "MngrError"
+    assert capture.error_message is None
+
+
+def test_mngr_create_failure_shows_only_the_quota_refusal_message() -> None:
+    """A quota refusal surfaces mngr's own sentence; the transcript moves to output_tail."""
+    capture = _CreateEventCapture()
+    capture(
+        '{"event": "error", "error_class": "ImbueCloudQuotaExceededError", "message": "This account is on the waitlist."}',
+        is_stdout=True,
+    )
+    error = _mngr_create_failure(
+        1, "", "imbue_cloud[x] FAST PATH: leasing\nError: This account is on the waitlist.", capture
+    )
+    assert str(error) == "This account is on the waitlist."
+    assert error.error_class == "ImbueCloudQuotaExceededError"
+    assert error.output_tail is not None
+    assert "FAST PATH" in error.output_tail
+
+
+def test_mngr_create_failure_keeps_the_transcript_for_other_errors() -> None:
+    capture = _CreateEventCapture()
+    capture('{"event": "error", "error_class": "FastPathUnavailableError", "message": "no match"}', is_stdout=True)
+    error = _mngr_create_failure(1, "", "Error: no match", capture)
+    assert str(error) == "mngr create failed (exit code 1):\nError: no match"
+    assert error.error_class == "FastPathUnavailableError"
+    assert error.output_tail is None
+
+
+def test_mngr_create_failure_keeps_the_transcript_for_a_quota_event_without_a_message() -> None:
+    """A quota refusal whose event carried no sentence has nothing shorter to show than the transcript."""
+    capture = _CreateEventCapture()
+    capture('{"event": "error", "error_class": "ImbueCloudQuotaExceededError", "message": "  "}', is_stdout=True)
+    error = _mngr_create_failure(1, "", "Error: quota", capture)
+    assert str(error) == "mngr create failed (exit code 1):\nError: quota"
+    assert error.error_class == "ImbueCloudQuotaExceededError"
+    assert error.output_tail is None
 
 
 def test_mngr_command_error_carries_error_class() -> None:

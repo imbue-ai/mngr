@@ -193,11 +193,16 @@ export const FLOW: Record<StepId, FlowStep> = {
     choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
     aside: { label: EXISTING_LOGIN_LABEL },
   },
+  // Sign in leads: the app is downloaded from a page that already required an
+  // Imbue account, so the account step is a sign-in for nearly everyone. The
+  // quieter create-account button stays for dev and CI runs.
   auth: {
-    ask: "A cloud workspace runs on our machines, so it needs an Imbue account.",
+    ask:
+      "A cloud workspace runs on our machines, so it needs an Imbue account. " +
+      "Sign in with the account you downloaded Mind with.",
     choices: [
-      { id: "signin", label: "Sign in", said: "", ack: "Welcome back.", isEmphasized: false },
-      { id: "signup", label: "Create an account", said: "", ack: "You're in.", isEmphasized: true },
+      { id: "signup", label: "Create an account", said: "", ack: "You're in.", isEmphasized: false },
+      { id: "signin", label: "Sign in", said: "", ack: "Welcome back.", isEmphasized: true },
     ],
   },
   retry: {
