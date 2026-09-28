@@ -27,6 +27,7 @@ from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaInstanceNameTooLongError
 from imbue.mngr_lima.errors import LimaNotInstalledError
 from imbue.mngr_lima.errors import LimaVersionError
+from imbue.mngr_lima.sizing import format_gib
 
 # Lima rejects a VM whose SSH control-socket path would reach UNIX_PATH_MAX. In
 # pkg/instance/create.go it forms that path as
@@ -480,8 +481,9 @@ def limactl_edit_size(
     ``--tty=false`` applies the flags without opening an editor. Lima refuses
     to edit a running instance, which surfaces as LimaCommandError.
     """
-    cmd = ["limactl", "edit", "--tty=false", f"--cpus={cpus}", f"--memory={memory_gib:g}", instance_name]
-    with log_span("Running limactl edit for {}: {} CPUs, {:g} GiB", instance_name, cpus, memory_gib):
+    memory_text = format_gib(memory_gib)
+    cmd = ["limactl", "edit", "--tty=false", f"--cpus={cpus}", f"--memory={memory_text}", instance_name]
+    with log_span("Running limactl edit for {}: {} CPUs, {} GiB", instance_name, cpus, memory_text):
         _run_limactl(cg, "edit", cmd, timeout=timeout)
 
 
