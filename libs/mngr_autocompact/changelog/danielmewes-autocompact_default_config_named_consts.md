@@ -1,0 +1,1 @@
+Introduce a DEFAULT_AUTOCOMPACT_MIN_CONTEXT_TOKENS named constant for the min autocompaction token threshold, and derived _INCREASED_AUTOCOMPACT_MIN_CONTEXT_TOKENS constants in the unit tests.
