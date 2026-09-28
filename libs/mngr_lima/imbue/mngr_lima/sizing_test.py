@@ -4,6 +4,7 @@ from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.utils.testing import allow_warnings
 from imbue.mngr_lima.data_types import LimaSizeRequest
+from imbue.mngr_lima.data_types import LimaVmSize
 from imbue.mngr_lima.data_types import ResolvedLimaVmSize
 from imbue.mngr_lima.primitives import LimaCpuCount
 from imbue.mngr_lima.primitives import LimaDiskSize
@@ -16,7 +17,9 @@ from imbue.mngr_lima.sizing import parse_vm_size_start_args
 from imbue.mngr_lima.sizing import resolve_vm_size
 from imbue.mngr_lima.sizing import resolved_vm_size_from_resources
 from imbue.mngr_lima.sizing import strip_size_start_args
+from imbue.mngr_lima.sizing import vm_size_from_lima_config
 from imbue.mngr_lima.sizing import vm_size_from_limactl_instance
+from imbue.mngr_lima.sizing import vm_size_from_resources
 
 
 @pytest.mark.parametrize(
@@ -83,21 +86,31 @@ def test_format_gib_keeps_whole_numbers_whole() -> None:
     assert format_gib(1.5) == "1.5"
 
 
-def test_resolve_vm_size_prefers_start_args_then_the_instance_config_then_lima_defaults() -> None:
-    lima_config = {"cpus": 6, "memory": "12GiB", "disk": "50GiB"}
-    assert resolve_vm_size(("--cpus=2",), lima_config) == ResolvedLimaVmSize(
-        cpus=2, memory_gib=12.0, boot_disk_gib=50.0
-    )
-    assert resolve_vm_size((), {}) == ResolvedLimaVmSize(cpus=4, memory_gib=4.0, boot_disk_gib=100.0)
-    assert resolve_vm_size((), {"memory": 2, "disk": 30.5}) == ResolvedLimaVmSize(
+def test_resolve_vm_size_prefers_start_args_then_the_fallback_then_lima_defaults() -> None:
+    fallback = LimaVmSize(cpus=6, memory_gib=12.0, boot_disk_gib=50.0)
+    assert resolve_vm_size(("--cpus=2",), fallback) == ResolvedLimaVmSize(cpus=2, memory_gib=12.0, boot_disk_gib=50.0)
+    assert resolve_vm_size((), LimaVmSize()) == ResolvedLimaVmSize(cpus=4, memory_gib=4.0, boot_disk_gib=100.0)
+    assert resolve_vm_size((), LimaVmSize(memory_gib=2.0, boot_disk_gib=30.5)) == ResolvedLimaVmSize(
         cpus=4, memory_gib=2.0, boot_disk_gib=30.5
     )
 
 
-def test_resolve_vm_size_ignores_unparseable_config_values() -> None:
+def test_vm_size_from_lima_config_reads_the_size_keys_and_ignores_unparseable_values() -> None:
+    assert vm_size_from_lima_config({"cpus": 6, "memory": "12GiB", "disk": "50GiB"}) == LimaVmSize(
+        cpus=6, memory_gib=12.0, boot_disk_gib=50.0
+    )
+    assert vm_size_from_lima_config({"memory": 2, "disk": 30.5}) == LimaVmSize(memory_gib=2.0, boot_disk_gib=30.5)
     with allow_warnings():
-        size = resolve_vm_size((), {"cpus": True, "memory": "plenty", "disk": ["big"]})
-    assert size == ResolvedLimaVmSize(cpus=4, memory_gib=4.0, boot_disk_gib=100.0)
+        unparseable = vm_size_from_lima_config({"cpus": True, "memory": "plenty", "disk": ["big"]})
+    assert unparseable == LimaVmSize()
+
+
+def test_vm_size_from_resources_takes_the_disk_as_the_boot_disk_only_on_the_exposed_layout() -> None:
+    resources = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=20.0, gpu=None)
+    assert vm_size_from_resources(resources, is_disk_gb_the_boot_disk=True) == LimaVmSize(
+        cpus=2, memory_gib=4.0, boot_disk_gib=20.0
+    )
+    assert vm_size_from_resources(resources, is_disk_gb_the_boot_disk=False) == LimaVmSize(cpus=2, memory_gib=4.0)
 
 
 def test_vm_size_from_limactl_instance_converts_bytes_to_gib() -> None:

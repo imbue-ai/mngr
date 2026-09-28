@@ -73,6 +73,7 @@ from imbue.mngr_lima.constants import CLOUD_INIT_TIMEOUT_SECONDS
 from imbue.mngr_lima.constants import lima_host_data_disk_name
 from imbue.mngr_lima.data_types import LimaResizeOutcome
 from imbue.mngr_lima.data_types import LimaSizeRequest
+from imbue.mngr_lima.data_types import LimaVmSize
 from imbue.mngr_lima.data_types import ResolvedLimaVmSize
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.errors import LimaCommandUnavailableError
@@ -108,7 +109,9 @@ from imbue.mngr_lima.sizing import host_resources_for_lima_host
 from imbue.mngr_lima.sizing import is_same_vm_size
 from imbue.mngr_lima.sizing import resolve_vm_size
 from imbue.mngr_lima.sizing import resolved_vm_size_from_resources
+from imbue.mngr_lima.sizing import vm_size_from_lima_config
 from imbue.mngr_lima.sizing import vm_size_from_limactl_instance
+from imbue.mngr_lima.sizing import vm_size_from_resources
 
 # Lima instance status values mapped to mngr HostState. "Broken" is limactl
 # positively reporting breakage -> CRASHED; "Unknown" means limactl could not
@@ -945,7 +948,8 @@ sudo poweroff
 
         # The size the VM actually got: the start args, else the lima config, else lima's defaults.
         resources = host_resources_for_lima_host(
-            resolve_vm_size(effective_start_args, lima_config), lima_config_record.host_data_disk_size
+            resolve_vm_size(effective_start_args, vm_size_from_lima_config(lima_config)),
+            lima_config_record.host_data_disk_size,
         )
 
         host_record = HostRecord(
@@ -1427,13 +1431,21 @@ sudo poweroff
         return self._recorded_resources(host_record)
 
     def _recorded_resources(self, host_record: HostRecord) -> HostResources:
-        """The record's resources, or for a record written before they were recorded honestly, the size its start args imply."""
-        if host_record.resources is not None:
-            return host_record.resources
+        """The host's size: its start args where they set a dimension, else its recorded resources, else lima's defaults.
+
+        ``resize_host`` rewrites the start args and the resources together, so
+        for a record this version wrote they agree.
+        """
+        # CLEANUP: read host_record.resources directly once no lima host record
+        # predates honest size recording: those hold lima's 4 CPU / 4 GiB
+        # placeholder whatever their start args say, so the start args must win.
         start_args = host_record.config.start_args if host_record.config is not None else ()
-        return host_resources_for_lima_host(
-            resolve_vm_size(start_args, {}), self._recorded_data_disk_size(host_record)
-        )
+        data_disk_size = self._recorded_data_disk_size(host_record)
+        if host_record.resources is not None:
+            fallback = vm_size_from_resources(host_record.resources, is_disk_gb_the_boot_disk=data_disk_size is None)
+        else:
+            fallback = LimaVmSize()
+        return host_resources_for_lima_host(resolve_vm_size(start_args, fallback), data_disk_size)
 
     def _recorded_data_disk_size(self, host_record: HostRecord) -> LimaDiskSize | None:
         """The size of the host's btrfs data disk, or None when it has none.

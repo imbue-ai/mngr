@@ -164,28 +164,51 @@ def _gib_from_lima_config_value(value: object, key: str) -> float | None:
 
 
 @pure
-def resolve_vm_size(start_args: Sequence[str], lima_config: Mapping[str, Any]) -> ResolvedLimaVmSize:
-    """The size a VM boots with: its start arguments, else its lima config, else lima's own defaults."""
-    from_start_args = parse_vm_size_start_args(start_args)
+def vm_size_from_lima_config(lima_config: Mapping[str, Any]) -> LimaVmSize:
+    """The sizes a lima instance config sets (``cpus``, ``memory``, ``disk``); a missing or unparseable key is None."""
     config_cpus = lima_config.get("cpus")
-    config_memory_gib = _gib_from_lima_config_value(lima_config.get("memory"), "memory")
-    config_disk_gib = _gib_from_lima_config_value(lima_config.get("disk"), "disk")
+    cpus = config_cpus if isinstance(config_cpus, int) and not isinstance(config_cpus, bool) and config_cpus > 0 else None
+    return LimaVmSize(
+        cpus=cpus,
+        memory_gib=_gib_from_lima_config_value(lima_config.get("memory"), "memory"),
+        boot_disk_gib=_gib_from_lima_config_value(lima_config.get("disk"), "disk"),
+    )
+
+
+@pure
+def vm_size_from_resources(resources: HostResources, is_disk_gb_the_boot_disk: bool) -> LimaVmSize:
+    """The VM size a host's recorded resources describe.
+
+    ``disk_gb`` is the boot disk only on the exposed layout; on the btrfs layout
+    it is the data disk and the boot disk is not recorded at all.
+    """
+    return LimaVmSize(
+        cpus=resources.cpu.count,
+        memory_gib=resources.memory_gb,
+        boot_disk_gib=resources.disk_gb if is_disk_gb_the_boot_disk else None,
+    )
+
+
+@pure
+def resolve_vm_size(start_args: Sequence[str], fallback: LimaVmSize) -> ResolvedLimaVmSize:
+    """The size a VM boots with: its start arguments, else ``fallback``, else lima's own defaults."""
+    from_start_args = parse_vm_size_start_args(start_args)
     if from_start_args.cpus is not None:
         cpus = from_start_args.cpus
-    elif isinstance(config_cpus, int) and not isinstance(config_cpus, bool) and config_cpus > 0:
-        cpus = config_cpus
+    elif fallback.cpus is not None:
+        cpus = fallback.cpus
     else:
         cpus = LIMA_DEFAULT_CPUS
     if from_start_args.memory_gib is not None:
         memory_gib = from_start_args.memory_gib
-    elif config_memory_gib is not None:
-        memory_gib = config_memory_gib
+    elif fallback.memory_gib is not None:
+        memory_gib = fallback.memory_gib
     else:
         memory_gib = LIMA_DEFAULT_MEMORY_GIB
     if from_start_args.boot_disk_gib is not None:
         boot_disk_gib = from_start_args.boot_disk_gib
-    elif config_disk_gib is not None:
-        boot_disk_gib = config_disk_gib
+    elif fallback.boot_disk_gib is not None:
+        boot_disk_gib = fallback.boot_disk_gib
     else:
         boot_disk_gib = LIMA_DEFAULT_BOOT_DISK_GIB
     return ResolvedLimaVmSize(cpus=cpus, memory_gib=memory_gib, boot_disk_gib=boot_disk_gib)

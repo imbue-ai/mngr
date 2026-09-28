@@ -849,6 +849,27 @@ def test_get_host_resources_derives_a_legacy_record_from_its_start_args_and_conf
     assert resources.disk_gb == 100.0
 
 
+def test_start_args_win_over_the_placeholder_size_older_records_hold(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record from before honest size recording holds 4 CPU / 4 GiB whatever its start args say; the VM must not be edited down to it."""
+    placeholder = HostResources(cpu=CpuResources(count=4), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(
+        lima_provider, "older-host", ("--cpus=8", "--memory=16", "--disk=20"), None, None, placeholder
+    )
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    invocation_log = _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 8, 16, "unrelated-data", 1
+    )
+
+    resources = lima_provider.get_host_resources(lima_provider.to_offline_host(host_id))
+    assert resources == HostResources(cpu=CpuResources(count=8), memory_gb=16.0, disk_gb=20.0, gpu=None)
+
+    assert lima_provider._apply_recorded_size(record) is True
+    assert "edit" not in invocation_log.read_text()
+
+
 def test_get_host_resources_raises_for_an_unknown_host(lima_provider: LimaProviderInstance) -> None:
     host_id = HostId.generate()
     with pytest.raises(HostNotFoundError):
