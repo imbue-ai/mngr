@@ -1,6 +1,8 @@
 from pydantic import Field
+from pydantic import model_validator
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.mngr.errors import InvalidContainerSizeError
 from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import DockerMemorySize
 
@@ -16,6 +18,14 @@ class ContainerSize(FrozenModel):
     is_swap_unlimited: bool = Field(
         default=False, description="Whether `--memory-swap=-1` (unlimited swap) was recorded instead of a swap cap"
     )
+
+    @model_validator(mode="after")
+    def _validate_swap_is_capped_or_unlimited(self) -> "ContainerSize":
+        if self.memory_swap is not None and self.is_swap_unlimited:
+            raise InvalidContainerSizeError(
+                f"A swap cap ({self.memory_swap}) and unlimited swap cannot both be recorded for one container"
+            )
+        return self
 
 
 class ContainerSizeRequest(FrozenModel):

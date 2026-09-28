@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import DockerMemorySize
@@ -53,6 +54,11 @@ def test_parse_container_size_reads_dockers_no_limit_spellings_as_uncapped() -> 
     assert unlimited_swap.memory == "4g"
     assert unlimited_swap.memory_swap is None
     assert unlimited_swap.is_swap_unlimited
+
+
+def test_container_size_refuses_a_swap_cap_together_with_unlimited_swap() -> None:
+    with pytest.raises(ValidationError, match="unlimited swap"):
+        ContainerSize(memory=DockerMemorySize("4g"), memory_swap=DockerMemorySize("6g"), is_swap_unlimited=True)
 
 
 def test_parse_container_size_ignores_values_docker_could_not_have_accepted() -> None:
