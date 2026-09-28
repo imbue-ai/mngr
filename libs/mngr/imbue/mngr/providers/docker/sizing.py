@@ -161,7 +161,7 @@ def docker_update_args(size: ContainerSize) -> tuple[str, ...]:
 @pure
 def _format_cpus(cpus: float) -> str:
     """A CPU cap as docker prints it: a whole number stays whole (``2``, not ``2.0``)."""
-    return str(int(cpus)) if cpus.is_integer() else str(cpus)
+    return str(int(cpus)) if float(cpus).is_integer() else str(cpus)
 
 
 @pure
