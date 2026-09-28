@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import pytest
 from flask.testing import FlaskClient
+from loguru import logger as loguru_logger
 from pydantic import AnyUrl
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -29,6 +30,8 @@ from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudAuthSession
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import WebLoginIncompleteReason
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.supertokens_routes import _WebLoginFlowStatus
@@ -36,6 +39,7 @@ from imbue.minds.desktop_client.supertokens_routes import _read_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _record_web_login_status
 from imbue.minds.desktop_client.supertokens_routes import _run_web_login_subprocess
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
+from imbue.minds.errors import MindError
 from imbue.minds.primitives import OutputFormat
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.forward_supervisor import LatchkeyForwardSupervisor
@@ -421,6 +425,95 @@ def test_run_web_login_subprocess_records_error_when_the_plugin_fails(tmp_path: 
     assert "sign-in service" in status.error
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected_copy", "expected_log_level"),
+    [
+        (WebLoginIncompleteReason.TIMED_OUT, "The sign-in timed out before your browser finished.", "WARNING"),
+        # The browser finished in these two, so the failed handoff is a bug that must reach error reporting.
+        (WebLoginIncompleteReason.CALLBACK_REJECTED, "The sign-in couldn't be confirmed.", "ERROR"),
+        (WebLoginIncompleteReason.CODE_REFUSED, "Your browser signed you in, but the app couldn't finish", "ERROR"),
+    ],
+)
+def test_run_web_login_subprocess_names_why_an_incomplete_sign_in_failed(
+    tmp_path: Path,
+    reason: WebLoginIncompleteReason,
+    expected_copy: str,
+    expected_log_level: str,
+) -> None:
+    """None of these is a connection problem, so none may show the "could not reach" copy."""
+    cli = make_fake_imbue_cloud_cli()
+    login_error = ImbueCloudWebLoginIncompleteCliError(f"auth login: {reason}")
+    login_error.reason = reason
+    cli.login_error_to_raise = login_error
+    flow_id = f"flow-{uuid4().hex}"
+    _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+
+    # loguru does not propagate to the logging module caplog hooks, so capture with a sink.
+    failure_log_levels: list[str] = []
+    sink_id = loguru_logger.add(
+        lambda message: failure_log_levels.append(message.record["level"].name),
+        level="WARNING",
+        filter=lambda record: f"auth login: {reason}" in record["message"],
+    )
+    try:
+        _run_web_login_subprocess(
+            flow_id=flow_id,
+            url_file=tmp_path / "login-url.txt",
+            imbue_cloud_cli=cli,
+            session_store=make_session_store_for_test(tmp_path, cli),
+            sync_scheduler=None,
+            minds_config=None,
+            output_format=OutputFormat.JSON,
+            latchkey_forward_supervisor=None,
+            connector_url=str(FAKE_CONNECTOR_URL),
+            notify_accounts_changed=_do_nothing,
+        )
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert failure_log_levels == [expected_log_level]
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.state == "error"
+    assert status.error is not None
+    assert expected_copy in status.error
+    assert "Try again" in status.error
+    assert "sign-in service" not in status.error
+
+
+def test_run_web_login_subprocess_fails_the_flow_when_the_login_crashes(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A crash must not leave the flow "running": every later sign-in would join the dead flow."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.login_error_to_raise = MindError("unexpected plugin output")
+    flow_id = f"flow-{uuid4().hex}"
+    _record_web_login_status(flow_id, _WebLoginFlowStatus(state="running", deadline=time.monotonic() + 60))
+
+    with pytest.raises(MindError, match="unexpected plugin output"):
+        _run_web_login_subprocess(
+            flow_id=flow_id,
+            url_file=tmp_path / "login-url.txt",
+            imbue_cloud_cli=cli,
+            session_store=make_session_store_for_test(tmp_path, cli),
+            sync_scheduler=None,
+            minds_config=None,
+            output_format=OutputFormat.JSON,
+            latchkey_forward_supervisor=None,
+            connector_url=str(FAKE_CONNECTOR_URL),
+            notify_accounts_changed=_do_nothing,
+        )
+
+    status = _read_web_login_status(flow_id)
+    assert status is not None
+    assert status.state == "error"
+    assert status.error is not None
+    assert "Try again" in status.error
+    cli.login_error_to_raise = None
+    client, _minds_config = _build_auth_test_client(tmp_path, cli, root_concurrency_group)
+    assert client.post("/auth/api/web-login/start").get_json()["flow_id"] != flow_id
+
+
 # Route tests
 
 
@@ -478,6 +571,36 @@ def test_web_login_start_and_status_round_trip(tmp_path: Path, root_concurrency_
     assert body["login_url"] == cli.login_url_to_write
     # The signin bookkeeping ran: the first account became the default.
     assert minds_config.get_default_account_id() is not None
+
+
+def test_web_login_start_joins_the_flow_already_in_flight(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A second start must not race a second listener and browser tab against the first."""
+    cli = make_fake_imbue_cloud_cli()
+    cli.login_session_to_return = ImbueCloudAuthSession(
+        user_id=f"user-{uuid4().hex}", email=f"user-{uuid4().hex}@example.com", display_name=None
+    )
+    client, _minds_config = _build_auth_test_client(tmp_path, cli, root_concurrency_group)
+    running_flow_id = f"flow-{uuid4().hex}"
+    login_url = "https://accounts.example.com/login?next=%2Faccounts%2Fauthorize"
+    _record_web_login_status(
+        running_flow_id,
+        _WebLoginFlowStatus(state="running", login_url=login_url, deadline=time.monotonic() + 60),
+    )
+
+    joined = client.post("/auth/api/web-login/start")
+    assert joined.status_code == 200
+    assert joined.get_json()["flow_id"] == running_flow_id
+    # The frontend reopens the running sign-in's page from this.
+    assert joined.get_json()["is_already_running"] is True
+    assert joined.get_json()["login_url"] == login_url
+
+    # Once that flow has ended, a start begins a fresh one.
+    _record_web_login_status(running_flow_id, _WebLoginFlowStatus(state="error", deadline=time.monotonic() + 60))
+    fresh = client.post("/auth/api/web-login/start")
+    assert fresh.status_code == 200
+    assert fresh.get_json()["flow_id"] != running_flow_id
 
 
 def test_web_login_status_404s_for_unknown_flow(tmp_path: Path) -> None:

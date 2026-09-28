@@ -1,0 +1,1 @@
+Combines the waitlist and signup-code work from `mngr/release-onboarding` with the browser sign-in handoff fixes from `mngr/signin-handoff-followup` (PR #1371); see this project's `mngr-release-onboarding.md` and `mngr-signin-handoff-followup.md` entries (where present) for the details of each.

@@ -256,6 +256,43 @@ describe("WebLoginModel", () => {
   });
 });
 
+describe("WebLoginModel.start joining a waiting sign-in", () => {
+  function makeModel(startBody: object): { model: WebLoginModel; openedUrls: string[] } {
+    const openedUrls: string[] = [];
+    const model = new WebLoginModel(
+      (input) =>
+        Promise.resolve(
+          String(input).includes("/web-login/start") ? jsonResponse(startBody) : jsonResponse({ state: "waiting" }),
+        ),
+      () => {},
+      () => {},
+      (url) => openedUrls.push(url),
+    );
+    return { model, openedUrls };
+  }
+
+  it("opens the waiting sign-in's page in the browser again", async () => {
+    const { model, openedUrls } = makeModel({
+      flow_id: "flow-1",
+      is_already_running: true,
+      login_url: "https://accounts.example.com/login?next=x",
+    });
+
+    await model.start();
+
+    expect(model.state).toBe("waiting");
+    expect(openedUrls).toEqual(["https://accounts.example.com/login?next=x"]);
+  });
+
+  it("leaves opening the browser to the new sign-in itself", async () => {
+    const { model, openedUrls } = makeModel({ flow_id: "flow-2" });
+
+    await model.start();
+
+    expect(openedUrls).toEqual([]);
+  });
+});
+
 describe("consumeWebLoginParams", () => {
   it("returns the message and strips both params when the sign-in is requested", () => {
     const params = new URLSearchParams("web-login=1&web-login-message=please%20sign%20in&keep=me");

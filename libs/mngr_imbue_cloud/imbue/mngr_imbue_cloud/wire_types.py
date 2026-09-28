@@ -461,6 +461,10 @@ class AccountEntitlementValues(WireModel):
             "an older connector."
         ),
     )
+    max_shared_workspaces: int | None = Field(
+        default=None,
+        description="Max workspaces the account may have shared at once; None against an older connector.",
+    )
 
 
 class AccountUsageInfo(WireModel):
@@ -554,6 +558,33 @@ class AdminAccountInfo(AccountInfo):
     suspended_reason: str | None = Field(
         default=None, description="Operator-recorded suspension reason (internal; never shown to the user)"
     )
+
+
+class SignupCodeInfo(WireModel):
+    """One signup code as the connector lists it (GET /admin/signup-codes): never the code or its hash."""
+
+    id: str = Field(description="The row id, the handle `revoke` takes")
+    email: str = Field(description="The address the code was issued to (lowercased)")
+    plan_name: str | None = Field(default=None, description="Plan pinned for redemption; None means the form's choice")
+    note: str | None = Field(default=None, description="Operator note")
+    created_at: str = Field(description="When the code was minted")
+    expires_at: str | None = Field(default=None, description="When it stops redeeming; None never expires")
+    revoked_at: str | None = Field(default=None, description="When it was revoked")
+    consumed_at: str | None = Field(default=None, description="When it was redeemed")
+    consumed_by_user_id: str | None = Field(default=None, description="The account it was redeemed for")
+    is_active: bool = Field(default=False, description="Unconsumed, unrevoked, and unexpired")
+
+
+class SignupCodeCreated(WireModel):
+    """The one response that carries a signup code's plaintext (POST /admin/signup-codes)."""
+
+    id: str = Field(description="The row id")
+    code: SecretStr = Field(description="The plaintext code; shown once, never stored")
+    invite_url: str = Field(description="The invite link to email: <accounts origin>/invite/<code>")
+    email: str = Field(description="The address the code was issued to (lowercased)")
+    plan_name: str | None = Field(default=None, description="Plan pinned for redemption, if any")
+    expires_at: str | None = Field(default=None, description="When it stops redeeming; None never expires")
+    revoked_count: int = Field(default=0, description="Older active codes for the email this mint revoked")
 
 
 class SyncWorkspaceRecord(WireModel):

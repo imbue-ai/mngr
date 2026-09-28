@@ -57,12 +57,14 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudClientTooOldCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import QUOTA_EXCEEDED_ERROR_CLASS
 from imbue.minds.desktop_client.labeled_hosts import ListedHost
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
 from imbue.minds.desktop_client.lima_image_prefetch import LimaImageCreateGate
 from imbue.minds.desktop_client.lima_image_prefetch import prebaked_image_mngr_setting_args
+from imbue.minds.desktop_client.mngr_command import format_output_tail
 from imbue.minds.desktop_client.mngr_command import run_mngr_to_completion
 from imbue.minds.desktop_client.pending_create_attempts import CREATE_ATTEMPT_ID_HOST_LABEL
 from imbue.minds.desktop_client.pending_create_attempts import FAILED_CREATE_ATTEMPT_LOG_TAIL_MAX_LINES
@@ -1448,14 +1450,16 @@ def resolve_template_version(
 
 
 class _CreateEventCapture(MutableModel):
-    """Forwards each child-process line to ``on_output`` while sniffing for ``mngr create``'s JSONL ``created`` event.
+    """Forwards each child-process line to ``on_output`` while sniffing for ``mngr create``'s JSONL events.
 
     ``mngr create --format jsonl`` writes structured event records to stdout
-    -- the final one being ``{"event": "created", "agent_id": "...", "host_id": "..."}``.
-    Each line still goes through to the caller's ``on_output`` so log
-    streaming behaviour is unchanged; this wrapper just records the
-    canonical agent id when it sees the matching event so the caller can
-    return it without a follow-up ``mngr list`` lookup.
+    -- the final one being ``{"event": "created", "agent_id": "...", "host_id": "..."}``
+    on success, or ``{"event": "error", "error_class": "...", "message": "..."}``
+    on failure. Each line still goes through to the caller's ``on_output`` so
+    log streaming behaviour is unchanged; this wrapper just records the
+    canonical agent id when it sees the ``created`` event (so the caller can
+    return it without a follow-up ``mngr list`` lookup) and the failure's
+    class and message when it sees the ``error`` event.
     """
 
     inner_on_output: OutputCallback | None = Field(
@@ -1478,6 +1482,13 @@ class _CreateEventCapture(MutableModel):
             "*type* instead of substring-matching human-formatted text."
         ),
     )
+    error_message: str | None = Field(
+        default=None,
+        description=(
+            "The ``message`` of the JSONL ``error`` event that set ``error_class``: mngr's own wording "
+            "of the failure. The two are always taken from one event, so they describe the same error."
+        ),
+    )
 
     def __call__(self, line: str, is_stdout: bool) -> None:
         if self.inner_on_output is not None:
@@ -1496,8 +1507,13 @@ class _CreateEventCapture(MutableModel):
         event_type = event.get("event")
         if event_type == "error":
             error_class_raw = event.get("error_class")
-            if isinstance(error_class_raw, str) and error_class_raw:
-                self.error_class = error_class_raw
+            if not (isinstance(error_class_raw, str) and error_class_raw):
+                return
+            self.error_class = error_class_raw
+            error_message_raw = event.get("message")
+            self.error_message = (
+                error_message_raw.strip() if isinstance(error_message_raw, str) and error_message_raw.strip() else None
+            )
             return
         if event_type != "created":
             return
@@ -1617,13 +1633,7 @@ def run_mngr_create(
             )
 
     if result.returncode != 0:
-        raise MngrCommandError(
-            "mngr create failed (exit code {}):\n{}".format(
-                result.returncode,
-                result.stderr.strip() if result.stderr.strip() else result.stdout.strip(),
-            ),
-            error_class=capture.error_class,
-        )
+        raise _mngr_create_failure(result.returncode, result.stdout, result.stderr, capture)
 
     if capture.canonical_agent_id is None or capture.canonical_host_id is None:
         # Exit-zero without a created event almost certainly means the
@@ -1641,6 +1651,31 @@ def run_mngr_create(
         raise MngrCommandError(f"mngr create emitted an invalid host_id {capture.canonical_host_id!r}: {e}") from e
 
     return capture.canonical_agent_id, canonical_host_id
+
+
+@pure
+def _mngr_create_failure(
+    returncode: int | None, stdout: str, stderr: str, capture: _CreateEventCapture
+) -> MngrCommandError:
+    """The error a failed ``mngr create`` surfaces: the subprocess transcript, or just the refusal it was told.
+
+    A quota refusal comes with mngr's own sentence for the person (the waitlist
+    message, "N of M used"), so that sentence is the whole message and the
+    transcript moves to ``output_tail``; every other failure keeps the transcript
+    in the message, since nothing shorter names its cause.
+    """
+    error_message = capture.error_message
+    if capture.error_class == QUOTA_EXCEEDED_ERROR_CLASS and error_message is not None:
+        return MngrCommandError(
+            error_message,
+            error_class=capture.error_class,
+            output_tail=format_output_tail(stdout, stderr),
+        )
+    transcript = stderr.strip() if stderr.strip() else stdout.strip()
+    return MngrCommandError(
+        f"mngr create failed (exit code {returncode}):\n{transcript}",
+        error_class=capture.error_class,
+    )
 
 
 def run_mngr_aws_prepare(

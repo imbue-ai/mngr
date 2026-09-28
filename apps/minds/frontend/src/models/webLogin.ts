@@ -4,7 +4,9 @@
 // and polls its status so the WebLoginModal can narrate the wait, offer the
 // copy-the-link fallback, and surface errors. Dismissing the modal only hides
 // it -- the subprocess keeps listening until its own timeout, and a sign-in
-// that still completes simply shows up via the accounts channel.
+// that still completes simply shows up via the accounts channel. Starting
+// again while it is still listening rejoins that flow (opening its sign-in
+// page in the browser again) rather than racing a second one.
 //
 // The poll is also what hands focus back: signing in happens in the system
 // browser, so the app has to raise itself once the flow lands (see raiseApp).
@@ -42,6 +44,7 @@ export class WebLoginModel {
   private readonly fetchImpl: FetchLike;
   private readonly redraw: () => void;
   private readonly bringAppToFront: () => void;
+  private readonly openInBrowser: (url: string) => void;
   private activeFlowId = "";
   private isClosedOnSignIn = false;
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -58,10 +61,13 @@ export class WebLoginModel {
     fetchImpl: FetchLike = (input, init) => fetch(input, init),
     redraw: () => void = m.redraw,
     bringAppToFront: () => void = () => electronBridge.bringAppToFront(),
+    // The Electron shell routes a new-window request for an external URL to the system browser.
+    openInBrowser: (url: string) => void = (url) => void window.open(url, "_blank", "noopener"),
   ) {
     this.fetchImpl = fetchImpl;
     this.redraw = redraw;
     this.bringAppToFront = bringAppToFront;
+    this.openInBrowser = openInBrowser;
   }
 
   get isOpen(): boolean {
@@ -86,7 +92,12 @@ export class WebLoginModel {
     this.redraw();
     try {
       const response = await this.fetchImpl("/auth/api/web-login/start", { method: "POST", credentials: "same-origin" });
-      const body = (await response.json()) as { flow_id?: string; error?: string };
+      const body = (await response.json()) as {
+        flow_id?: string;
+        error?: string;
+        is_already_running?: boolean;
+        login_url?: string | null;
+      };
       // The user may have dismissed (or restarted) the flow while the start
       // request was in flight; a superseded continuation must not reopen the
       // modal or clobber the newer flow's state.
@@ -99,6 +110,12 @@ export class WebLoginModel {
       }
       this.activeFlowId = body.flow_id;
       this.state = "waiting";
+      // Joining a sign-in still waiting from earlier: its browser tab may be long
+      // gone, so open the page again rather than leave the user to find it.
+      if (body.is_already_running && body.login_url) {
+        this.loginUrl = body.login_url;
+        this.openInBrowser(body.login_url);
+      }
       this.schedulePoll();
     } catch {
       if (generation !== this.generation) return;
