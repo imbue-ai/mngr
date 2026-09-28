@@ -516,7 +516,8 @@ def test_provision_script_grows_the_data_filesystem_on_every_boot() -> None:
     script = _generated_provision_script(None, None)
     assert "cloud-guest-utils" in script
     assert "btrfs filesystem resize max /mnt/lima-mngr-abc-data" in script
-    assert 'growpart "/dev/$DATA_GROW_DISK"' in script
+    # growpart exits 1 for "already full-size" and 2 for a real failure; only the former is tolerated.
+    assert 'growpart "/dev/$DATA_GROW_DISK" "${DATA_GROW_SRC##*[!0-9]}" || [ $? -eq 1 ]' in script
     # The grow runs after the mount block (which is skipped once mounted) and before the symlink.
     assert script.index("mountpoint -q /mnt/lima-mngr-abc-data") < script.index("btrfs filesystem resize max")
     assert script.index("btrfs filesystem resize max") < script.index("ln -sfn /mnt/lima-mngr-abc-data /mngr")

@@ -386,7 +386,8 @@ def _build_grow_data_disk_block(host_data_disk_name: str) -> str:
 
     Lima partitions the disk when it first formats it, so the partition is
     grown first (``growpart`` exits 1 when it is already full-size, which is
-    tolerated); a disk mngr formatted whole has no parent partition and skips
+    tolerated; any other failure aborts provisioning like the rest of the
+    script); a disk mngr formatted whole has no parent partition and skips
     that step. ``btrfs filesystem resize max`` is a no-op at full size.
     """
     lima_mount = lima_host_data_disk_mount_path(host_data_disk_name)
@@ -394,7 +395,7 @@ def _build_grow_data_disk_block(host_data_disk_name: str) -> str:
 DATA_GROW_SRC="$(findmnt -no SOURCE {lima_mount})"
 DATA_GROW_DISK="$(lsblk -no PKNAME "$DATA_GROW_SRC" | head -1)"
 if [ -n "$DATA_GROW_DISK" ] && command -v growpart >/dev/null 2>&1; then
-    growpart "/dev/$DATA_GROW_DISK" "${{DATA_GROW_SRC##*[!0-9]}}" || true
+    growpart "/dev/$DATA_GROW_DISK" "${{DATA_GROW_SRC##*[!0-9]}}" || [ $? -eq 1 ]
 fi
 btrfs filesystem resize max {lima_mount}"""
 
