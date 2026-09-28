@@ -336,8 +336,9 @@ def _wait_for_output_or_wakeup(
     selector: selectors.BaseSelector,
     wakeup_pipe: _WakeupPipe,
     timeout_time: float | None,
+    monotonic_fn: Callable[[], float],
 ) -> None:
-    remaining_seconds = None if timeout_time is None else max(0.0, timeout_time - time.monotonic())
+    remaining_seconds = None if timeout_time is None else max(0.0, timeout_time - monotonic_fn())
     for key, _ in selector.select(timeout=remaining_seconds):
         if key.fd == wakeup_pipe.read_fd:
             wakeup_pipe.drain()
@@ -352,22 +353,25 @@ def _unregister_streams_at_end_of_file(selector: selectors.BaseSelector, gathere
         selector.unregister(gatherer.stderr)
 
 
-def _is_timeout(timeout_time: float | None = None) -> bool:
+def _is_timeout(timeout_time: float | None = None, monotonic_fn: Callable[[], float] = time.monotonic) -> bool:
     """Whether a deadline stamped by :func:`run_local_command_modern_version` has passed.
 
-    Read off the monotonic clock, which does not advance while the machine is
-    suspended -- so a laptop that sleeps mid-command spends none of the budget
-    it was frozen for. Wall clock would: the process cannot notice its own
-    deadline while it is not running, so two fifteen-minute sleeps would burn a
-    twenty-one minute budget in a couple of hundred seconds of running time and
-    the command would be killed and reported as timed out at the wake. True on
-    both platforms this runs on -- Darwin's ``mach_absolute_time`` and Linux's
-    ``CLOCK_MONOTONIC`` both exclude suspend.
+    A deadline only means anything against the clock that stamped it: a caller
+    that stamped one against a posed clock passes that same clock back in here.
+
+    The default is the real monotonic clock, which does not advance while the
+    machine is suspended -- so a laptop that sleeps mid-command spends none of
+    the budget it was frozen for. Wall clock would: the process cannot notice
+    its own deadline while it is not running, so two fifteen-minute sleeps would
+    burn a twenty-one minute budget in a couple of hundred seconds of running
+    time and the command would be killed and reported as timed out at the wake.
+    True on both platforms this runs on -- Darwin's ``mach_absolute_time`` and
+    Linux's ``CLOCK_MONOTONIC`` both exclude suspend.
     """
     if timeout_time is None:
         return False
     else:
-        return time.monotonic() > timeout_time
+        return monotonic_fn() > timeout_time
 
 
 def run_local_command_modern_version(
@@ -386,6 +390,7 @@ def run_local_command_modern_version(
     name: str | None = None,
     is_output_accumulated: bool = True,
     stdin_bytes: bytes | None = None,
+    monotonic_fn: Callable[[], float] = time.monotonic,
 ) -> FinishedProcess:
     """
     Run a subprocess command and return the result.
@@ -410,6 +415,14 @@ def run_local_command_modern_version(
     and whose full history would otherwise grow without bound. The returned
     ``FinishedProcess`` then carries ``OUTPUT_NOT_ACCUMULATED_PLACEHOLDER`` in place of its
     output, including in any ``ProcessError`` that ``is_checked`` raises.
+
+    ``monotonic_fn`` is the clock ``timeout`` is stamped and checked against. Nothing
+    synchronises a child's startup against a deadline stamped at spawn, so a test that needs
+    the deadline to arrive at a particular point in the child's life -- once it has installed
+    a signal handler, say -- poses this clock and expires the deadline itself, rather than
+    betting that the child gets there first. The post-kill drain of the pipes stays bounded
+    against the real clock either way (see ``_POST_KILL_DRAIN_TIMEOUT_SECONDS``), so a posed
+    clock cannot leave it unbounded.
     """
     try:
         shutdown_event = shutdown_event if shutdown_event is not None else ShutdownEvent.build_root()
@@ -466,7 +479,7 @@ def run_local_command_modern_version(
             is_output_accumulated=is_output_accumulated,
         )
 
-        timeout_time = time.monotonic() + timeout if timeout is not None else None
+        timeout_time = monotonic_fn() + timeout if timeout is not None else None
 
         with (
             _open_wakeup_pipe() as wakeup_pipe,
@@ -478,16 +491,16 @@ def run_local_command_modern_version(
             selector.register(gatherer.stdout, selectors.EVENT_READ)
             selector.register(gatherer.stderr, selectors.EVENT_READ)
 
-            while not shutdown_event.is_set() and not _is_timeout(timeout_time):
+            while not shutdown_event.is_set() and not _is_timeout(timeout_time, monotonic_fn=monotonic_fn):
                 if exited_event.is_set():
                     gatherer.gather_output()
                     exit_code = process.returncode
                     break
-                _wait_for_output_or_wakeup(selector, wakeup_pipe, timeout_time)
+                _wait_for_output_or_wakeup(selector, wakeup_pipe, timeout_time, monotonic_fn=monotonic_fn)
                 gatherer.gather_output()
                 _unregister_streams_at_end_of_file(selector, gatherer)
             else:
-                if _is_timeout(timeout_time):
+                if _is_timeout(timeout_time, monotonic_fn=monotonic_fn):
                     shutdown_reason = f"it exceeded its {timeout:.0f}s timeout"
                 else:
                     shutdown_reason = "the parent requested cleanup (shutdown_event was set)"
@@ -521,7 +534,7 @@ def run_local_command_modern_version(
             if is_output_accumulated
             else OUTPUT_NOT_ACCUMULATED_PLACEHOLDER,
             command=tuple(command),
-            is_timed_out=_is_timeout(timeout_time),
+            is_timed_out=_is_timeout(timeout_time, monotonic_fn=monotonic_fn),
             is_output_already_logged=trace_output,
             display_name=name,
         )
