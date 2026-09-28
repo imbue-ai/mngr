@@ -486,12 +486,10 @@ def _sorted_panel_accounts(stored: Sequence[str], granted: frozenset[str]) -> tu
 def describe_why_desktop_egress_is_unsupported(device_id: str, is_machine_of_its_own: bool) -> str | None:
     """The reason a workspace's desktop egress toggles cannot be offered, or ``None`` when they can."""
     if not device_id:
-        return (
-            "Imbue Studio does not know this computer's device id, so it cannot send requests through this computer."
-        )
+        return "Minds does not know this computer's device id, so it cannot send requests through this computer."
     if not is_machine_of_its_own:
         return (
-            "This workspace does not run on a machine of its own that Imbue Studio has set up from this computer, "
+            "This workspace does not run on a machine of its own that Minds has set up from this computer, "
             "so its requests cannot be sent through this computer."
         )
     return None
@@ -978,7 +976,7 @@ def connect_service_with_credentials(
         # no way to tell a credentials service from a browser one, and the
         # wrong guess would reject what the user just typed.
         raise PermissionToggleError(
-            f"Imbue Studio could not ask latchkey how {display_name} connects. Try again in a moment.",
+            f"Minds could not ask latchkey how {display_name} connects. Try again in a moment.",
         )
     if service_info.is_browser_auth_supported:
         raise PermissionToggleError(f"{display_name} is connected by signing in, not by entering credentials.")
@@ -989,9 +987,7 @@ def connect_service_with_credentials(
             custom_service_credential_header(read_registered_services(latchkey.latchkey_directory), service_name),
         )
     except CredentialCommandError as e:
-        raise PermissionToggleError(
-            f"Imbue Studio cannot work out which credentials {display_name} needs: {e}."
-        ) from e
+        raise PermissionToggleError(f"Minds cannot work out which credentials {display_name} needs: {e}.") from e
 
     # Which account the credentials land under is decided from what latchkey
     # stores right now, not from what the pane was rendered with. The first

@@ -125,7 +125,7 @@ def _collect_app_diagnostics(
     backend_resolver: BackendResolverInterface | None,
     data_dir: Path | None,
 ) -> dict[str, Any]:
-    """Imbue Studio app state available everywhere: signed-in accounts, known workspaces, host resource use."""
+    """Minds-app state available everywhere: signed-in accounts, known workspaces, host resource use."""
     diagnostics: dict[str, Any] = {"system": _collect_system_usage(data_dir)}
     if session_store is not None:
         diagnostics["signed_in_account_emails"] = [account.email for account in session_store.list_accounts()]

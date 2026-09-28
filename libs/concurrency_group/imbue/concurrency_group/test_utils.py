@@ -32,18 +32,6 @@ def poll_until(
     return condition()
 
 
-def make_idle_child_script(sleep_seconds: str, is_closing_its_pipes: bool) -> str:
-    """A shell script for a child that produces no output for ``sleep_seconds``, then exits.
-
-    ``is_closing_its_pipes`` picks between the two shapes an idle child presents to the
-    read loop: one that holds its stdout and stderr open for its whole life, and one
-    whose pipes are at end-of-file from the start (``>&-`` closes the descriptor). Both
-    must leave the loop blocked rather than spinning, so tests of idle cost cover each.
-    """
-    closing_prefix = "exec >&- 2>&-; " if is_closing_its_pipes else ""
-    return f"{closing_prefix}exec sleep {sleep_seconds}"
-
-
 class IdleChildrenCpuMeasurement(FrozenModel):
     """How much CPU a process spent waiting for a batch of idle background children to exit."""
 

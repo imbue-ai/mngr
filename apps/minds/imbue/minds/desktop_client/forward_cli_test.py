@@ -962,7 +962,7 @@ def test_event_services_envelope_carries_the_origin_label_to_the_resolver(
 def test_reverse_tunnel_established_is_silently_ignored(
     consumer: EnvelopeStreamConsumer,
 ) -> None:
-    """Imbue Studio no longer asks the plugin for per-agent reverse tunnels.
+    """Minds no longer asks the plugin for per-agent reverse tunnels.
 
     The plugin may still emit ``reverse_tunnel_established`` envelopes
     on behalf of other callers (e.g. the latchkey supervisor); the

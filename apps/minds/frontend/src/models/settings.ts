@@ -375,7 +375,7 @@ export class SettingsModel {
       if (response.ok) {
         const result = (await response.json()) as { is_electron: boolean };
         this.testNotificationResult = result.is_electron
-          ? "Sent. If no banner appeared, check your system's notification settings for Imbue Studio."
+          ? "Sent. If no banner appeared, check your system's notification settings for Mind."
           : "Nothing to send to: system notifications need the desktop app.";
       } else {
         this.testNotificationResult = `Could not send a test notification (HTTP ${response.status}).`;
@@ -555,7 +555,7 @@ export class SettingsModel {
       this.peekedChannels = await electronBridge.peekUpdateChannels();
       const target = this.peekedChannels[channel];
       if (target !== undefined && target.version === null) {
-        this.updateError = `The ${channel} channel is unavailable right now, so Imbue Studio stayed on ${this.updateState.channel}.`;
+        this.updateError = `The ${channel} channel is unavailable right now, so Mind stayed on ${this.updateState.channel}.`;
         return;
       }
       if (target !== undefined && target.wouldPark) {

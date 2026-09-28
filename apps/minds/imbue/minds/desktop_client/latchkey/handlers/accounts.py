@@ -68,7 +68,7 @@ class AccountsPermissionGrantHandler(RequestEventHandler):
     nudges the request's chat with the verdict (:mod:`.messaging`).
     """
 
-    data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ``~/.minds``).")
+    data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
     latchkey: Latchkey = Field(
         description="Latchkey wrapper, used to reach the plugin data dir a grant's permissions file lives under."
     )

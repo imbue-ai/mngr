@@ -26,28 +26,28 @@ export const MANIFESTO_POINTS: DisclosurePoint[] = [
     id: "loyal",
     label: "is 100% loyal to you",
     detail:
-      "Your agent works for you and nobody else. It is not tuned to sell you things, keep you scrolling, " +
+      "Your Mind works for you and nobody else. It is not tuned to sell you things, keep you scrolling, " +
       "or serve an advertiser. When your interests and someone else's differ, it takes your side.",
   },
   {
     id: "data",
     label: "never sells your data",
     detail:
-      "What you tell your agent stays between you and it. Your conversations, files and memory are never " +
+      "What you tell your Mind stays between you and it. Your conversations, files and memory are never " +
       "sold, shared with advertisers, or used to train models for other people.",
   },
   {
     id: "transparent",
     label: "is fully transparent",
     detail:
-      "You can see what your agent is doing and why: every action it takes, every service it reaches, " +
+      "You can see what your Mind is doing and why: every action it takes, every service it reaches, " +
       "every permission it uses. There is no hidden behavior and nothing you are not allowed to inspect.",
   },
   {
     id: "secure",
     label: "is safe and secure",
     detail:
-      "Your agent runs in its own workspace, apart from your other data, and only reaches the services you " +
+      "Your Mind runs in its own workspace, apart from your other data, and only reaches the services you " +
       "grant it. You decide what it may touch, and you can take a permission back at any time.",
   },
   {
@@ -199,7 +199,7 @@ export const FLOW: Record<StepId, FlowStep> = {
   auth: {
     ask:
       "A cloud workspace runs on our machines, so it needs an Imbue account. " +
-      "Sign in with the account you downloaded Imbue Studio with.",
+      "Sign in with the account you downloaded Mind with.",
     choices: [
       { id: "signup", label: "Create an account", said: "", ack: "You're in.", isEmphasized: false },
       { id: "signin", label: "Sign in", said: "", ack: "Welcome back.", isEmphasized: true },

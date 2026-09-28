@@ -1,4 +1,4 @@
-# Imbue Studio
+# minds
 
 Run persistent, autonomous AI agents with web access and global forwarding.
 

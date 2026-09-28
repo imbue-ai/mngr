@@ -218,7 +218,7 @@ def test_a_restore_that_fails_is_reported_on_the_row_not_only_the_log(
             activity=FolderSyncActivity.ACTIVE,
         )
     )
-    # A resolver that knows no agents is how "Imbue Studio cannot say which machine
+    # A resolver that knows no agents is how "Minds cannot say which machine
     # this workspace runs on yet" looks from here.
     manager = FolderSyncManager(
         concurrency_group=root_concurrency_group,
@@ -454,7 +454,7 @@ def test_a_shared_file_cannot_be_synced(
     tmp_path: Path,
     folder_sync_manager: FolderSyncManager,
 ) -> None:
-    """unison has no native single-file sync, so Imbue Studio does not pretend to."""
+    """unison has no native single-file sync, so Minds does not pretend to."""
     shared_file = tmp_path / "corpus.jsonl"
     shared_file.write_text("{}\n")
 
@@ -475,7 +475,7 @@ def test_a_sync_comes_back_after_a_restart(
     folder_sync_store: FolderSyncStore,
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """The copy on the machine is meant to be there when Imbue Studio is not, so it catches up when Imbue Studio is back."""
+    """The copy on the machine is meant to be there when Minds is not, so it catches up when Minds is back."""
     local_folder = tmp_path / "notes"
     local_folder.mkdir()
     folder_sync_manager.start(
@@ -746,7 +746,7 @@ def test_unsharing_deletes_a_copy_left_over_from_an_earlier_run(
     folder_sync_manager: FolderSyncManager,
     folder_sync_store: FolderSyncStore,
 ) -> None:
-    """A sync turned off before Imbue Studio last quit is a record and a copy, and nothing in memory.
+    """A sync turned off before Minds last quit is a record and a copy, and nothing in memory.
 
     Its copy is the one most likely to be forgotten about, so unsharing has to
     reach it from the record alone.

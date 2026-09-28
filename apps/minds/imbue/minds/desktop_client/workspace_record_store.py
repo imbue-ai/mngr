@@ -429,7 +429,7 @@ class WorkspaceRecordStore(MutableModel):
     outside the lock so a slow connector round-trip never blocks readers.
     """
 
-    paths: InstallationPaths = Field(frozen=True, description="Imbue Studio data dir (replica + keys live under it)")
+    paths: InstallationPaths = Field(frozen=True, description="Minds data dir (replica + keys live under it)")
     mngr_host_dir: Path | None = Field(
         default=None,
         frozen=True,

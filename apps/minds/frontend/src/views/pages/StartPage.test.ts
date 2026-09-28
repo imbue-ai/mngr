@@ -99,7 +99,7 @@ describe("transcriptTurns", () => {
     // sign-in as the emphasized answer at the row's right end.
     const answers = withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"]);
     expect(answers).toEqual(["signup", "signin"]);
-    expect(text).toContain("Sign in with the account you downloaded Imbue Studio with.");
+    expect(text).toContain("Sign in with the account you downloaded Mind with.");
     const undo = collectVnodes(turns).find((node) => node.attrs?.["aria-label"] === "Change answer");
     expect(undo).toBeDefined();
   });

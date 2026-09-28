@@ -1,4 +1,4 @@
-// The app-level ("Imbue Studio") settings page: Notifications, Display, Error
+// The app-level ("Mind") settings page: Notifications, Display, Error
 // reporting, Updates, and Master password. Port of
 // templates/pages/Settings.jinja + AppSettingsSections.jinja +
 // static/app_settings.js.
