@@ -167,7 +167,9 @@ def _gib_from_lima_config_value(value: object, key: str) -> float | None:
 def vm_size_from_lima_config(lima_config: Mapping[str, Any]) -> LimaVmSize:
     """The sizes a lima instance config sets (``cpus``, ``memory``, ``disk``); a missing or unparseable key is None."""
     config_cpus = lima_config.get("cpus")
-    cpus = config_cpus if isinstance(config_cpus, int) and not isinstance(config_cpus, bool) and config_cpus > 0 else None
+    cpus = (
+        config_cpus if isinstance(config_cpus, int) and not isinstance(config_cpus, bool) and config_cpus > 0 else None
+    )
     return LimaVmSize(
         cpus=cpus,
         memory_gib=_gib_from_lima_config_value(lima_config.get("memory"), "memory"),

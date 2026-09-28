@@ -820,8 +820,8 @@ def _install_fake_limactl_reporting(
         tmp_path / "bin",
         f'echo "$@" >> "{invocation_log}"\n'
         'if [ "$1" = "--version" ]; then echo "limactl version 2.1.2"; exit 0; fi\n'
-        f"if [ \"$1\" = \"list\" ]; then echo '{instance_line}'; exit 0; fi\n"
-        f"if [ \"$1\" = \"disk\" ] && [ \"$2\" = \"list\" ]; then echo '{disk_line}'; exit 0; fi\n"
+        f'if [ "$1" = "list" ]; then echo \'{instance_line}\'; exit 0; fi\n'
+        f'if [ "$1" = "disk" ] && [ "$2" = "list" ]; then echo \'{disk_line}\'; exit 0; fi\n'
         f"{failure_line}"
         "exit 0\n",
         monkeypatch,
@@ -868,7 +868,10 @@ def test_start_args_win_over_the_placeholder_size_older_records_hold(
     resources = lima_provider.get_host_resources(lima_provider.to_offline_host(host_id))
     assert resources == HostResources(cpu=CpuResources(count=8), memory_gb=16.0, disk_gb=20.0, gpu=None)
 
-    assert lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name)) is True
+    assert (
+        lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name))
+        is True
+    )
     assert "edit" not in invocation_log.read_text()
 
 
@@ -953,7 +956,15 @@ def test_resize_host_leaves_the_record_alone_when_lima_refuses(
     record = lima_provider._host_store.read_host_record(host_id)
     assert record is not None and record.config is not None
     _install_fake_limactl_reporting(
-        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 100, failing_subcommand="edit"
+        tmp_path,
+        monkeypatch,
+        record.config.instance_name,
+        "Stopped",
+        2,
+        4,
+        "mngr-x-data",
+        100,
+        failing_subcommand="edit",
     )
 
     with pytest.raises(MngrError, match="Lima refused the recorded size"):
@@ -1005,7 +1016,10 @@ def test_apply_recorded_size_skips_an_instance_already_at_the_recorded_size(
         tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 100
     )
 
-    assert lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name)) is True
+    assert (
+        lima_provider._apply_recorded_size(record, lima_provider._find_limactl_instance(record.config.instance_name))
+        is True
+    )
 
     invocations = invocation_log.read_text()
     assert "edit" not in invocations
