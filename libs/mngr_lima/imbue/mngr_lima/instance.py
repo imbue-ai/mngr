@@ -1547,49 +1547,9 @@ sudo poweroff
         config = host_record.config
         if config is None:
             raise MngrError(f"Host {host_id} has no Lima configuration and cannot be resized.")
-
-        # Validate the disk dimension against what the host has.
-        current_data_disk_size = self._recorded_data_disk_size(host_record)
-        if request.data_disk_size is not None:
-            if config.host_data_disk_name is None:
-                raise LimaResizeRefusedError(
-                    f"Host {host_id} has no data disk (it uses the exposed bind-mount layout), so its disk cannot be resized."
-                )
-            assert current_data_disk_size is not None
-            if request.data_disk_size.size_bytes < current_data_disk_size.size_bytes:
-                raise LimaResizeRefusedError(
-                    f"A data disk never shrinks: host {host_id} has {current_data_disk_size} and "
-                    f"{request.data_disk_size} was requested."
-                )
-
-        # Build the record the host will have. The record keeps the disk size
-        # it holds (None for a record from before sizes were recorded per host)
-        # unless the request sets one; the reported size falls back to the
-        # provider's configured size either way.
-        resized_start_args = apply_size_request_to_start_args(config.start_args, request)
-        recorded_data_disk_size = (
-            request.data_disk_size if request.data_disk_size is not None else config.host_data_disk_size
-        )
-        reported_data_disk_size = (
-            request.data_disk_size if request.data_disk_size is not None else current_data_disk_size
-        )
-        # The resized start args carry the requested CPUs and memory, and the
-        # current resources hold the boot disk (on the exposed layout, where it
-        # is the disk reported).
-        current_resources = self._recorded_resources(host_record)
-        resized_vm_size = resolve_vm_size(
-            resized_start_args,
-            vm_size_from_resources(current_resources, is_disk_gb_the_boot_disk=current_data_disk_size is None),
-        )
-        resized_resources = host_resources_for_lima_host(resized_vm_size, reported_data_disk_size)
-        resized_config = config.model_copy_update(
-            to_update(config.field_ref().start_args, resized_start_args),
-            to_update(config.field_ref().host_data_disk_size, recorded_data_disk_size),
-        )
-        resized_record = host_record.model_copy_update(
-            to_update(host_record.field_ref().config, resized_config),
-            to_update(host_record.field_ref().resources, resized_resources),
-        )
+        self._refuse_impossible_disk_request(host_record, request)
+        resized_record = self._resized_host_record(host_record, request)
+        assert resized_record.resources is not None
 
         # Apply to a stopped VM first, so lima's refusal leaves the record alone.
         instance = self._find_limactl_instance(config.instance_name)
@@ -1599,8 +1559,60 @@ sudo poweroff
             )
         is_applied = self._apply_recorded_size(resized_record, instance)
         self._host_store.write_host_record(resized_record)
-        logger.debug("Recorded the new size for host {}: {}", host_id, resized_resources)
-        return LimaResizeOutcome(resources=resized_resources, is_applied_to_instance=is_applied)
+        logger.debug("Recorded the new size for host {}: {}", host_id, resized_record.resources)
+        return LimaResizeOutcome(resources=resized_record.resources, is_applied_to_instance=is_applied)
+
+    def _refuse_impossible_disk_request(self, host_record: HostRecord, request: LimaSizeRequest) -> None:
+        """Raises LimaResizeRefusedError when the request sets a disk size the host cannot take: a shrink, or any size on a host without a data disk."""
+        if request.data_disk_size is None:
+            return
+        host_id = host_record.certified_host_data.host_id
+        current_data_disk_size = self._recorded_data_disk_size(host_record)
+        if current_data_disk_size is None:
+            raise LimaResizeRefusedError(
+                f"Host {host_id} has no data disk (it uses the exposed bind-mount layout), so its disk cannot be resized."
+            )
+        if request.data_disk_size.size_bytes < current_data_disk_size.size_bytes:
+            raise LimaResizeRefusedError(
+                f"A data disk never shrinks: host {host_id} has {current_data_disk_size} and "
+                f"{request.data_disk_size} was requested."
+            )
+
+    def _resized_host_record(self, host_record: HostRecord, request: LimaSizeRequest) -> HostRecord:
+        """The record the host has once ``request`` is applied: its start args and resources rewritten together.
+
+        The record keeps the disk size it holds (None for a record from before
+        sizes were recorded per host) unless the request sets one, while the
+        reported size falls back to the provider's configured size either way.
+        The boot disk is carried over from the current resources, since a
+        resize never touches it.
+        """
+        config = host_record.config
+        assert config is not None
+        current_data_disk_size = self._recorded_data_disk_size(host_record)
+        current_resources = self._recorded_resources(host_record)
+        resized_start_args = apply_size_request_to_start_args(config.start_args, request)
+        recorded_data_disk_size = (
+            request.data_disk_size if request.data_disk_size is not None else config.host_data_disk_size
+        )
+        reported_data_disk_size = (
+            request.data_disk_size if request.data_disk_size is not None else current_data_disk_size
+        )
+        resized_vm_size = resolve_vm_size(
+            resized_start_args,
+            vm_size_from_resources(current_resources, is_disk_gb_the_boot_disk=current_data_disk_size is None),
+        )
+        resized_config = config.model_copy_update(
+            to_update(config.field_ref().start_args, resized_start_args),
+            to_update(config.field_ref().host_data_disk_size, recorded_data_disk_size),
+        )
+        return host_record.model_copy_update(
+            to_update(host_record.field_ref().config, resized_config),
+            to_update(
+                host_record.field_ref().resources,
+                host_resources_for_lima_host(resized_vm_size, reported_data_disk_size),
+            ),
+        )
 
     # Snapshot Methods (not supported)
 
