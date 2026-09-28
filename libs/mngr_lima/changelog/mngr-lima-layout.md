@@ -1,0 +1,1 @@
+Lima v2 layout and resize (issue #978, in progress): growable state moves onto the btrfs data disk and journald is capped, `mngr list` reports the CPUs, memory, and data-disk size a lima host was actually created with, and a new `mngr lima resize HOST [--cpus N] [--memory N] [--disk N]` rewrites the recorded size and applies it on the host's next start (disk grow-only).
