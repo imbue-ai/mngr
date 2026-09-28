@@ -32,8 +32,11 @@ def test_build_size_request_requires_at_least_one_dimension() -> None:
 def test_build_size_request_validates_each_dimension_before_touching_any_host() -> None:
     with pytest.raises(UserInputError, match="--cpus must be a whole number"):
         _build_size_request(_make_options(cpus=0, memory=None, disk=None))
-    with pytest.raises(UserInputError, match="--memory must be a number of GiB"):
+    with pytest.raises(UserInputError, match="--memory must be a finite number of GiB"):
         _build_size_request(_make_options(cpus=None, memory=-1.0, disk=None))
+    # click's FLOAT converts "nan" and "inf", which lima would refuse but a record-only resize would keep.
+    with pytest.raises(UserInputError, match="--memory must be a finite number of GiB"):
+        _build_size_request(_make_options(cpus=None, memory=float("nan"), disk=None))
     with pytest.raises(UserInputError, match="--disk must be a whole number of GiB"):
         _build_size_request(_make_options(cpus=None, memory=None, disk=0))
 

@@ -64,7 +64,7 @@ def _build_size_request(opts: LimaResizeCliOptions) -> LimaSizeRequest:
         try:
             memory_gib = LimaMemoryGib(opts.memory)
         except InvalidPrimitiveValueError as e:
-            raise UserInputError(f"--memory must be a number of GiB greater than 0, got {opts.memory}") from e
+            raise UserInputError(f"--memory must be a finite number of GiB greater than 0, got {opts.memory}") from e
     data_disk_size: LimaDiskSize | None = None
     if opts.disk is not None:
         try:
