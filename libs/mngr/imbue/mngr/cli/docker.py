@@ -24,10 +24,10 @@ from imbue.mngr.primitives import DockerCpuCount
 from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import HostAddress
 from imbue.mngr.primitives import InvalidDockerMemorySizeError
-from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.providers.docker.backend import DOCKER_BACKEND_NAME
 from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
 from imbue.mngr.providers.docker.instance import DockerProviderInstance
+from imbue.mngr.providers.registry import resolve_backend_name
 
 _RESIZE_APPLIED_NOTE: Final[str] = (
     "The caps are applied to the container and recorded for every later start; a gVisor container reports the "
@@ -77,9 +77,7 @@ def _docker_provider_names(mngr_ctx: MngrContext) -> tuple[str, ...]:
     """Every enabled provider instance a docker host can live on (a default instance is named after its backend)."""
     docker_names: list[str] = []
     for name in list_provider_names_to_load(mngr_ctx):
-        provider_config = mngr_ctx.config.providers.get(name)
-        backend = provider_config.backend if provider_config is not None else ProviderBackendName(str(name))
-        if backend == DOCKER_BACKEND_NAME:
+        if resolve_backend_name(name, mngr_ctx) == DOCKER_BACKEND_NAME:
             docker_names.append(str(name))
     return tuple(docker_names)
 
