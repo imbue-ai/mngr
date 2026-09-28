@@ -142,7 +142,10 @@ def remove_all_containers_by_prefix_via_cli(prefix: str) -> None:
 
 
 def make_docker_provider(
-    mngr_ctx: MngrContext, name: str = "test-docker", config: DockerProviderConfig | None = None
+    mngr_ctx: MngrContext,
+    name: str = "test-docker",
+    config: DockerProviderConfig | None = None,
+    provider_class: type[DockerProviderInstance] = DockerProviderInstance,
 ) -> DockerProviderInstance:
     # Explicitly pin isolate_host_volumes=False so the autouse loguru-warning
     # guard does not trip on the deprecation warning emitted for the None
@@ -150,7 +153,7 @@ def make_docker_provider(
     # construct DockerProviderConfig themselves under capture_loguru().
     if config is None:
         config = DockerProviderConfig(isolate_host_volumes=False)
-    return DockerProviderInstance(
+    return provider_class(
         name=ProviderInstanceName(name),
         host_dir=Path("/mngr"),
         mngr_ctx=mngr_ctx,
@@ -177,6 +180,7 @@ def make_docker_provider_with_local_volume(
     volume_root: Path,
     config: DockerProviderConfig | None = None,
     daemon_totals: DockerDaemonTotals | None = None,
+    provider_class: type[DockerProviderInstance] = DockerProviderInstance,
 ) -> DockerProviderInstance:
     """Create a Docker provider using a LocalVolume instead of a real Docker volume.
 
@@ -184,8 +188,10 @@ def make_docker_provider_with_local_volume(
     state-volume logic (list_volumes, delete_volume, host store, etc.).
     ``daemon_totals`` stands in for the ``docker info`` read that sizing falls
     back on, so resource reporting can be exercised without a daemon too.
+    ``provider_class`` lets a test instantiate a subclass that stubs out other
+    daemon-backed lookups.
     """
-    provider = make_docker_provider(mngr_ctx, config=config)
+    provider = make_docker_provider(mngr_ctx, config=config, provider_class=provider_class)
     provider.__dict__["_state_volume"] = LocalVolume(root_path=volume_root)
     if daemon_totals is not None:
         provider.__dict__["_daemon_totals"] = daemon_totals

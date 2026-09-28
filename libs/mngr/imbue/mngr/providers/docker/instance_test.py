@@ -996,16 +996,10 @@ class _DockerProviderWithoutContainers(DockerProviderInstance):
         return None
 
 
-def _make_provider_without_containers(mngr_ctx: MngrContext, volume_root: Path) -> _DockerProviderWithoutContainers:
-    provider = _DockerProviderWithoutContainers(
-        name=ProviderInstanceName("test-docker"),
-        host_dir=Path("/mngr"),
-        mngr_ctx=mngr_ctx,
-        config=DockerProviderConfig(isolate_host_volumes=False),
+def _make_provider_without_containers(mngr_ctx: MngrContext, volume_root: Path) -> DockerProviderInstance:
+    return make_docker_provider_with_local_volume(
+        mngr_ctx, volume_root, daemon_totals=_DAEMON_TOTALS, provider_class=_DockerProviderWithoutContainers
     )
-    provider.__dict__["_state_volume"] = LocalVolume(root_path=volume_root)
-    provider.__dict__["_daemon_totals"] = _DAEMON_TOTALS
-    return provider
 
 
 def test_resize_host_rewrites_the_recorded_start_args_and_reports_the_new_size(
