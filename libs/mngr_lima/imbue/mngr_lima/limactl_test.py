@@ -15,6 +15,9 @@ from imbue.mngr_lima.limactl import host_name_from_instance_name
 from imbue.mngr_lima.limactl import is_transient_lima_download_error
 from imbue.mngr_lima.limactl import lima_instance_name
 from imbue.mngr_lima.limactl import lima_instance_name_from_host_id
+from imbue.mngr_lima.limactl import limactl_disk_list
+from imbue.mngr_lima.limactl import limactl_disk_resize
+from imbue.mngr_lima.limactl import limactl_edit_size
 from imbue.mngr_lima.limactl import limactl_list
 from imbue.mngr_lima.limactl import limactl_shell
 from imbue.mngr_lima.limactl import resolve_lima_home
@@ -207,3 +210,36 @@ def test_is_transient_lima_download_error_ignores_non_start_commands() -> None:
 def test_is_transient_lima_download_error_ignores_unrelated_failures() -> None:
     error = LimaCommandError("start", 1, "field `images` must be set")
     assert is_transient_lima_download_error(error) is False
+
+
+def test_limactl_edit_size_and_disk_resize_spell_their_commands_for_limactl(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocation_log = tmp_path / "invocations.log"
+    install_fake_limactl(tmp_path / "bin", f'echo "$@" >> "{invocation_log}"\nexit 0\n', monkeypatch)
+
+    limactl_edit_size(temp_mngr_ctx.concurrency_group, "mngr-x", cpus=4, memory_gib=1.5)
+    limactl_disk_resize(temp_mngr_ctx.concurrency_group, "mngr-x-data", "200GiB")
+
+    assert invocation_log.read_text().splitlines() == [
+        "edit --tty=false --cpus=4 --memory=1.5 mngr-x",
+        "disk resize mngr-x-data --size 200GiB",
+    ]
+
+
+def test_limactl_disk_list_parses_one_disk_per_line(
+    temp_mngr_ctx: MngrContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake_limactl(
+        tmp_path / "bin",
+        'echo \'{"name": "a-data", "size": 1073741824}\'\necho \'{"name": "b-data", "size": 2147483648}\'\nexit 0\n',
+        monkeypatch,
+    )
+
+    disks = limactl_disk_list(temp_mngr_ctx.concurrency_group)
+
+    assert [(disk["name"], disk["size"]) for disk in disks] == [("a-data", 1073741824), ("b-data", 2147483648)]

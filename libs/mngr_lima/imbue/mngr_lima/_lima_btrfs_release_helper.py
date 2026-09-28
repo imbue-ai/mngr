@@ -28,6 +28,7 @@ from imbue.mngr_lima.config import LimaProviderConfig
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.limactl import limactl_disk_delete
+from imbue.mngr_lima.primitives import LimaDiskSize
 
 # Lima YAML override merged in via the build_args path: forces qemu+TCG
 # (no KVM in modal sandboxes) and keeps the VM cheap. additionalDisks,
@@ -56,7 +57,7 @@ def _build_provider(profile_dir: Path) -> tuple[LimaProviderInstance, Concurrenc
         host_dir=Path("/mngr"),
         is_host_data_volume_exposed=False,
         # Small disk so the modal sandbox finishes mkfs quickly.
-        host_data_disk_size="2GiB",
+        host_data_disk_size=LimaDiskSize("2GiB"),
         default_idle_timeout=3600,
         # Modal sandboxes have no /dev/kvm so qemu runs in TCG (software
         # emulation). Cold boot of a Debian cloud image under TCG is

@@ -7,8 +7,11 @@ import pytest
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNameConflictError
 from imbue.mngr.errors import HostNotFoundError
+from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import SnapshotsNotSupportedError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import CpuResources
+from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
@@ -16,17 +19,22 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.providers.ssh_utils import load_or_create_ssh_keypair
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_lima.config import LimaProviderConfig
+from imbue.mngr_lima.data_types import LimaSizeRequest
 from imbue.mngr_lima.errors import LimaCommandUnavailableError
 from imbue.mngr_lima.errors import LimaHostCreationError
+from imbue.mngr_lima.errors import LimaResizeRefusedError
 from imbue.mngr_lima.host_store import HostRecord
 from imbue.mngr_lima.host_store import LimaHostConfig
 from imbue.mngr_lima.instance import LimaProviderInstance
 from imbue.mngr_lima.instance import _find_conflicting_host_record
-from imbue.mngr_lima.instance import _parse_size_to_gb
 from imbue.mngr_lima.instance import _record_state_for_conflict_message
 from imbue.mngr_lima.instance import _recorded_host_dir_override
 from imbue.mngr_lima.limactl import LimaSshConfig
+from imbue.mngr_lima.primitives import LimaCpuCount
+from imbue.mngr_lima.primitives import LimaDiskSize
+from imbue.mngr_lima.primitives import LimaMemoryGib
 from imbue.mngr_lima.testing import install_fake_limactl
 
 
@@ -251,14 +259,6 @@ def test_get_volume_for_host_returns_none_for_btrfs_mode_record(lima_provider: L
     # flag must short-circuit the result to None.
     lima_provider._ensure_host_volume_dir(host_id)
     assert lima_provider.get_volume_for_host(host_id) is None
-
-
-def test_parse_size_to_gb() -> None:
-    assert _parse_size_to_gb("4GiB") == 4.0
-    assert _parse_size_to_gb("512MiB") == 0.5
-    assert _parse_size_to_gb("1TiB") == 1024.0
-    assert _parse_size_to_gb("8") == 8.0
-    assert _parse_size_to_gb("invalid") == 4.0  # default fallback
 
 
 def test_reset_caches(lima_provider: LimaProviderInstance) -> None:
@@ -757,3 +757,226 @@ def test_offline_host_log_dir_uses_the_recorded_host_dir(lima_provider: LimaProv
     offline_host = lima_provider._create_offline_host(record)
 
     assert lima_provider._host_log_dir_str(offline_host.host_dir) == "/home/user/.mngr/logs"
+
+
+def _write_sized_record(
+    provider: LimaProviderInstance,
+    host_name: str,
+    start_args: tuple[str, ...],
+    host_data_disk_name: str | None,
+    host_data_disk_size: str | None,
+    resources: HostResources | None,
+) -> HostId:
+    """Write a completed host record carrying the given size, returning its id."""
+    host_id = HostId.generate()
+    now = datetime.now(timezone.utc)
+    provider._host_store.write_host_record(
+        HostRecord(
+            certified_host_data=CertifiedHostData(
+                host_id=str(host_id), host_name=host_name, user_tags={}, snapshots=[], created_at=now, updated_at=now
+            ),
+            ssh_hostname="127.0.0.1",
+            config=LimaHostConfig(
+                instance_name=f"mngr-{host_id.get_uuid().hex}",
+                start_args=start_args,
+                host_data_disk_name=host_data_disk_name,
+                host_data_disk_size=LimaDiskSize(host_data_disk_size) if host_data_disk_size is not None else None,
+                is_host_data_volume_exposed=host_data_disk_name is None,
+            ),
+            resources=resources,
+        )
+    )
+    return host_id
+
+
+def _install_fake_limactl_reporting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    instance_name: str,
+    status: str,
+    cpus: int,
+    memory_gib: int,
+    disk_name: str,
+    disk_gib: int,
+) -> Path:
+    """A limactl whose ``list`` and ``disk list`` report one instance and one disk, logging every other call."""
+    invocation_log = tmp_path / "invocations.log"
+    memory_bytes = memory_gib * 1024**3
+    disk_bytes = disk_gib * 1024**3
+    install_fake_limactl(
+        tmp_path / "bin",
+        f'echo "$@" >> "{invocation_log}"\n'
+        'if [ "$1" = "--version" ]; then echo "limactl version 2.1.2"; exit 0; fi\n'
+        'if [ "$1" = "list" ]; then echo \'{"name": "'
+        f"{instance_name}"
+        '", "status": "'
+        f"{status}"
+        '", "cpus": '
+        f"{cpus}"
+        ', "memory": '
+        f"{memory_bytes}"
+        ', "disk": 21474836480}\'; exit 0; fi\n'
+        'if [ "$1" = "disk" ] && [ "$2" = "list" ]; then echo \'{"name": "'
+        f"{disk_name}"
+        '", "size": '
+        f"{disk_bytes}"
+        "}'; exit 0; fi\n"
+        "exit 0\n",
+        monkeypatch,
+    )
+    return invocation_log
+
+
+def test_get_host_resources_reports_the_recorded_size(lima_provider: LimaProviderInstance) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "sized-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
+
+    assert lima_provider.get_host_resources(lima_provider.to_offline_host(host_id)) == recorded
+
+
+def test_get_host_resources_derives_a_legacy_record_from_its_start_args_and_configured_disk(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    """A record written before sizes were recorded honestly answers from its start args and the provider's disk size."""
+    host_id = _write_sized_record(
+        lima_provider, "legacy-host", ("--cpus=2", "--memory=4", "--disk=20"), "mngr-x-data", None, None
+    )
+
+    resources = lima_provider.get_host_resources(lima_provider.to_offline_host(host_id))
+
+    assert resources.cpu.count == 2
+    assert resources.memory_gb == 4.0
+    assert resources.disk_gb == 100.0
+
+
+def test_get_host_resources_raises_for_an_unknown_host(lima_provider: LimaProviderInstance) -> None:
+    host_id = HostId.generate()
+    with pytest.raises(HostNotFoundError):
+        lima_provider.get_host_resources(lima_provider.to_offline_host(host_id))
+
+
+def test_resize_host_reconfigures_a_stopped_vm_and_grows_its_disk_before_recording(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(
+        lima_provider, "stopped-host", ("--cpus=2", "--memory=4", "--disk=20"), "mngr-x-data", "100GiB", recorded
+    )
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    invocation_log = _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 100
+    )
+
+    outcome = lima_provider.resize_host(
+        host_id,
+        LimaSizeRequest(cpus=LimaCpuCount(4), memory_gib=LimaMemoryGib(8), data_disk_size=LimaDiskSize("200GiB")),
+    )
+
+    assert outcome.is_applied_to_instance is True
+    assert outcome.resources == HostResources(cpu=CpuResources(count=4), memory_gb=8.0, disk_gb=200.0, gpu=None)
+    invocations = invocation_log.read_text()
+    assert f"edit --tty=false --cpus=4 --memory=8 {record.config.instance_name}" in invocations
+    assert "disk resize mngr-x-data --size 200GiB" in invocations
+    rewritten = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert rewritten is not None and rewritten.config is not None
+    assert rewritten.config.start_args == ("--disk=20", "--cpus=4", "--memory=8")
+    assert rewritten.config.host_data_disk_size == "200GiB"
+    assert rewritten.resources == outcome.resources
+
+
+def test_resize_host_only_records_for_a_running_vm(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "running-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    invocation_log = _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Running", 2, 4, "mngr-x-data", 100
+    )
+
+    outcome = lima_provider.resize_host(host_id, LimaSizeRequest(memory_gib=LimaMemoryGib(8)))
+
+    assert outcome.is_applied_to_instance is False
+    assert outcome.resources.memory_gb == 8.0
+    assert outcome.resources.cpu.count == 2
+    assert "edit" not in invocation_log.read_text()
+    rewritten = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert rewritten is not None and rewritten.config is not None
+    assert rewritten.config.start_args == ("--cpus=2", "--memory=8")
+
+
+def test_resize_host_leaves_the_record_alone_when_lima_refuses(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "refused-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    install_fake_limactl(
+        tmp_path / "bin",
+        'if [ "$1" = "list" ]; then echo \'{"name": "'
+        f"{record.config.instance_name}"
+        '", "status": "Stopped", "cpus": 2, "memory": 4294967296, "disk": 1}\'; exit 0; fi\n'
+        'if [ "$1" = "edit" ]; then echo "memory too large" >&2; exit 1; fi\nexit 0\n',
+        monkeypatch,
+    )
+
+    with pytest.raises(MngrError, match="Lima refused the recorded size"):
+        lima_provider.resize_host(host_id, LimaSizeRequest(memory_gib=LimaMemoryGib(999)))
+
+    unchanged = lima_provider._host_store.read_host_record(host_id, use_cache=False)
+    assert unchanged is not None
+    assert unchanged.resources == recorded
+
+
+def test_resize_host_refuses_a_disk_shrink_and_a_disk_on_the_exposed_layout(
+    lima_provider: LimaProviderInstance,
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    btrfs_id = _write_sized_record(lima_provider, "btrfs-host", (), "mngr-x-data", "100GiB", recorded)
+    exposed_id = _write_sized_record(lima_provider, "exposed-host", (), None, None, recorded)
+
+    with pytest.raises(LimaResizeRefusedError, match="never shrinks"):
+        lima_provider.resize_host(btrfs_id, LimaSizeRequest(data_disk_size=LimaDiskSize("50GiB")))
+    with pytest.raises(LimaResizeRefusedError, match="no data disk"):
+        lima_provider.resize_host(exposed_id, LimaSizeRequest(data_disk_size=LimaDiskSize("200GiB")))
+    with pytest.raises(HostNotFoundError):
+        lima_provider.resize_host(HostId.generate(), LimaSizeRequest(cpus=LimaCpuCount(2)))
+
+
+def test_apply_recorded_size_skips_an_instance_already_at_the_recorded_size(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "settled-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    invocation_log = _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 100
+    )
+
+    assert lima_provider._apply_recorded_size(record) is True
+
+    invocations = invocation_log.read_text()
+    assert "edit" not in invocations
+    assert "disk resize" not in invocations
+
+
+def test_apply_recorded_size_warns_instead_of_shrinking_a_larger_disk(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=100.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "shrunk-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    invocation_log = _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 300
+    )
+
+    with capture_loguru() as captured:
+        lima_provider._apply_recorded_size(record)
+
+    assert "disk resize" not in invocation_log.read_text()
+    assert "never shrinks" in captured.getvalue()

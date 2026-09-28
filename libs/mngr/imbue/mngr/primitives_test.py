@@ -12,6 +12,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import AgentTypeName
+from imbue.mngr.primitives import ByteSize
 from imbue.mngr.primitives import CertifiedDataError
 from imbue.mngr.primitives import CommandString
 from imbue.mngr.primitives import DiscoveredAgent
@@ -20,6 +21,7 @@ from imbue.mngr.primitives import DockerMemorySize
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import InvalidAgentInstanceKey
+from imbue.mngr.primitives import InvalidByteSizeError
 from imbue.mngr.primitives import InvalidDockerMemorySizeError
 from imbue.mngr.primitives import InvalidName
 from imbue.mngr.primitives import MAX_HOST_NAME_LENGTH
@@ -356,3 +358,12 @@ def test_docker_cpu_count_requires_a_positive_whole_number() -> None:
     assert DockerCpuCount(4) == 4
     with pytest.raises(InvalidPrimitiveValueError):
         DockerCpuCount(0)
+
+
+def test_byte_size_is_the_shared_grammar_docker_memory_sizes_refine() -> None:
+    assert ByteSize("100GiB").size_bytes == 100 * 1024**3
+    assert ByteSize(" 512m ") == "512m"
+    with pytest.raises(InvalidByteSizeError):
+        ByteSize("huge")
+    assert issubclass(DockerMemorySize, ByteSize)
+    assert issubclass(InvalidDockerMemorySizeError, InvalidByteSizeError)

@@ -1,0 +1,1 @@
+The host-setup step that bounds the docker daemon and caps the journal now renders the journald cap through the shared `build_cap_journald_command` snippet in mngr core (`providers/ssh_host_setup.py`), which the lima provider uses too; the resulting drop-in (`/etc/systemd/journald.conf.d/60-mngr.conf`, `SystemMaxUse=512M`) is unchanged.

@@ -47,15 +47,21 @@ class DockerCpuCount(PositiveInt):
     """Whole CPUs a docker container is capped at (``docker run --cpus``). Must be > 0."""
 
 
-class InvalidDockerMemorySizeError(ValueError):
+class InvalidByteSizeError(ValueError):
     pass
 
 
-# Docker's byte-size grammar (go-units ``RAMInBytes``): a number, an optional
-# unit letter (binary multiples), and an optional ``b`` / ``ib`` suffix.
-_DOCKER_MEMORY_SIZE_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)?) ?(?P<unit>[kKmMgGtTpP])?(?:[iI]?[bB])?$")
+class InvalidDockerMemorySizeError(InvalidByteSizeError):
+    pass
 
-_DOCKER_MEMORY_UNIT_MULTIPLIERS: Final[Mapping[str, int]] = {
+
+# The byte-size grammar of go-units ``RAMInBytes``, which both docker
+# (``--memory``) and lima (``memory``, ``disk``, ``limactl disk --size``) take: a
+# number, an optional unit letter (binary multiples), and an optional ``b`` /
+# ``ib`` suffix.
+_BYTE_SIZE_RE = re.compile(r"^(?P<number>\d+(?:\.\d+)?) ?(?P<unit>[kKmMgGtTpP])?(?:[iI]?[bB])?$")
+
+_BYTE_SIZE_UNIT_MULTIPLIERS: Final[Mapping[str, int]] = {
     "": 1,
     "k": 1024,
     "m": 1024**2,
@@ -65,27 +71,35 @@ _DOCKER_MEMORY_UNIT_MULTIPLIERS: Final[Mapping[str, int]] = {
 }
 
 
-class DockerMemorySize(NonEmptyStr):
-    """A memory size in docker's own spelling (``512m``, ``4g``, ``4GiB``, ``4096``), as ``docker run --memory`` takes it."""
+class ByteSize(NonEmptyStr):
+    """A byte size in go-units spelling (``512m``, ``4g``, ``4GiB``, ``4096``), kept exactly as written."""
 
     def __new__(cls, value: str) -> Self:
         stripped = value.strip()
-        if _DOCKER_MEMORY_SIZE_RE.match(stripped) is None:
-            raise InvalidDockerMemorySizeError(
-                f"{cls.__name__} must be a docker memory size such as '512m' or '4g': '{value}'"
-            )
+        if _BYTE_SIZE_RE.match(stripped) is None:
+            raise InvalidByteSizeError(f"{cls.__name__} must be a size such as '512m' or '4GiB': '{value}'")
         return super().__new__(cls, stripped)
 
     @property
     def size_bytes(self) -> int:
-        match = _DOCKER_MEMORY_SIZE_RE.match(self)
+        match = _BYTE_SIZE_RE.match(self)
         assert match is not None
         unit = (match.group("unit") or "").lower()
-        return int(float(match.group("number")) * _DOCKER_MEMORY_UNIT_MULTIPLIERS[unit])
+        return int(float(match.group("number")) * _BYTE_SIZE_UNIT_MULTIPLIERS[unit])
 
     @property
     def size_gb(self) -> float:
         return self.size_bytes / 1024**3
+
+
+class DockerMemorySize(ByteSize):
+    """A memory size in docker's own spelling (``512m``, ``4g``, ``4GiB``, ``4096``), as ``docker run --memory`` takes it."""
+
+    def __new__(cls, value: str) -> Self:
+        try:
+            return super().__new__(cls, value)
+        except InvalidByteSizeError as e:
+            raise InvalidDockerMemorySizeError(str(e)) from e
 
 
 class AgentNameStyle(UpperCaseStrEnum):

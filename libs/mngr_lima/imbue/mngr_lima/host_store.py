@@ -19,6 +19,7 @@ from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.volume import Volume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_lima.primitives import LimaDiskSize
 
 
 class LimaHostConfig(FrozenModel):
@@ -48,6 +49,15 @@ class LimaHostConfig(FrozenModel):
             "Name of the Lima-managed additional disk used to back host_dir "
             "when is_host_data_volume_exposed=False. None when the host uses "
             "the bind-mount layout."
+        ),
+    )
+    host_data_disk_size: LimaDiskSize | None = Field(
+        default=None,
+        description=(
+            "Logical size of the btrfs additional disk (lima's size spelling, e.g. '100GiB'), "
+            "recorded at create and rewritten by a resize; start_host grows the disk to it. None "
+            "for the bind-mount layout and for records written before this field existed, which "
+            "fall back to the provider instance's configured host_data_disk_size."
         ),
     )
     is_run_as_root: bool = Field(

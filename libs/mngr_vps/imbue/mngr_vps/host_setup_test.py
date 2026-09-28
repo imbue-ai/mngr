@@ -9,12 +9,12 @@ from pydantic import Field
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.providers.ssh_host_setup import JOURNALD_DROP_IN_PATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.errors import VpsProvisioningError
 from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_RESERVE_MIB
 from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_UNIT_NAME
 from imbue.mngr_vps.host_setup import ContainerMemoryCapProbe
-from imbue.mngr_vps.host_setup import JOURNALD_DROP_IN_PATH
 from imbue.mngr_vps.host_setup import MNGR_SSHD_DROP_IN_PATH
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_VERSION
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_BINARY_INSTALL_SCRIPT

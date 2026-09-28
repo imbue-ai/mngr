@@ -2,6 +2,7 @@ from typing import Final
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_lima.primitives import LimaDiskSize
 
 LIMA_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("lima")
 
@@ -39,7 +40,7 @@ CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
 
 # Default logical size of the btrfs additional disk. qcow2 is sparse so this
 # is a logical cap visible to the guest, not upfront host disk usage.
-DEFAULT_HOST_DATA_DISK_SIZE: Final[str] = "100GiB"
+DEFAULT_HOST_DATA_DISK_SIZE: Final[LimaDiskSize] = LimaDiskSize("100GiB")
 
 
 def lima_host_data_disk_mount_path(disk_name: str) -> str:

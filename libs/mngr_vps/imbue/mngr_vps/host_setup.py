@@ -10,6 +10,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.interfaces.host import OuterHostInterface
+from imbue.mngr.providers.ssh_host_setup import build_cap_journald_command
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import LABEL_MEMORY_CAP
 from imbue.mngr_vps.container_setup import MEMORY_CAP_FOLLOWS_VM_LABEL_VALUE
@@ -300,24 +301,23 @@ rm -rf "$MNGR_SSHD_STAGE\""""
 
 # Bounds on what the Docker daemon and the journal may accumulate on the VM's
 # disk: container logs rotate (a chatty agent cannot fill the root disk),
-# the build cache is bounded, and the journal is capped. The daemon.json is
-# merged with jq rather than written whole because ``runsc install`` (the gVisor
-# step) also writes that file; both sides are canonicalized before comparing, so
-# an already-converged host gets no docker restart. Docker is restarted only
-# when it is already running: on first boot the daemon is installed afterwards
-# and starts with this config.
+# the build cache is bounded, and the journal is capped by the snippet every
+# mngr-provisioned VM shares. The daemon.json is merged with jq rather than
+# written whole because ``runsc install`` (the gVisor step) also writes that
+# file; both sides are canonicalized before comparing, so an already-converged
+# host gets no docker restart. Docker is restarted only when it is already
+# running: on first boot the daemon is installed afterwards and starts with
+# this config.
 _DOCKER_DAEMON_BOUNDS: Final[dict[str, object]] = {
     "log-driver": "json-file",
     "log-opts": {"max-size": "50m", "max-file": "3"},
     "builder": {"gc": {"enabled": True, "defaultKeepStorage": "1GB"}},
 }
 _DOCKER_DAEMON_JSON_PATH: Final[str] = "/etc/docker/daemon.json"
-JOURNALD_DROP_IN_PATH: Final[str] = "/etc/systemd/journald.conf.d/60-mngr.conf"
-_JOURNALD_SYSTEM_MAX_USE: Final[str] = "512M"
 
 _DOCKER_DAEMON_BOUNDS_SCRIPT: Final[str] = f"""set -e
 MNGR_BOUNDS_STAGE="$(mktemp -d)"
-mkdir -p /etc/docker /etc/systemd/journald.conf.d
+mkdir -p /etc/docker
 if [ -f {_DOCKER_DAEMON_JSON_PATH} ]; then
     jq -S . {_DOCKER_DAEMON_JSON_PATH} > "$MNGR_BOUNDS_STAGE/current.json"
 else
@@ -328,12 +328,8 @@ if ! cmp -s "$MNGR_BOUNDS_STAGE/current.json" "$MNGR_BOUNDS_STAGE/merged.json"; 
     install -m 0644 "$MNGR_BOUNDS_STAGE/merged.json" {_DOCKER_DAEMON_JSON_PATH}
     if systemctl is-active --quiet docker; then systemctl restart docker; fi
 fi
-printf '[Journal]\\nSystemMaxUse={_JOURNALD_SYSTEM_MAX_USE}\\n' > "$MNGR_BOUNDS_STAGE/journald.conf"
-if ! cmp -s "$MNGR_BOUNDS_STAGE/journald.conf" {JOURNALD_DROP_IN_PATH}; then
-    install -m 0644 "$MNGR_BOUNDS_STAGE/journald.conf" {JOURNALD_DROP_IN_PATH}
-    systemctl restart systemd-journald
-fi
-rm -rf "$MNGR_BOUNDS_STAGE\""""
+rm -rf "$MNGR_BOUNDS_STAGE"
+{build_cap_journald_command()}"""
 
 # RAM (MiB) held back from the agent container's hard cap so the VM's own
 # daemons (dockerd/containerd, sshd, systemd, journald, the snapshot helper,
