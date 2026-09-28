@@ -928,6 +928,21 @@ def test_resize_host_only_records_for_a_running_vm(
     assert rewritten.config.start_args == ("--cpus=2", "--memory=8")
 
 
+def test_resize_host_keeps_the_boot_disk_of_an_exposed_layout_host(
+    lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no data disk the reported disk is the boot disk, which a CPU or memory resize must not touch."""
+    recorded = HostResources(cpu=CpuResources(count=2), memory_gb=4.0, disk_gb=20.0, gpu=None)
+    host_id = _write_sized_record(lima_provider, "exposed-host", ("--cpus=2", "--disk=20"), None, None, recorded)
+    record = lima_provider._host_store.read_host_record(host_id)
+    assert record is not None and record.config is not None
+    _install_fake_limactl_reporting(tmp_path, monkeypatch, record.config.instance_name, "Running", 2, 4, "none", 1)
+
+    outcome = lima_provider.resize_host(host_id, LimaSizeRequest(cpus=LimaCpuCount(4)))
+
+    assert outcome.resources == HostResources(cpu=CpuResources(count=4), memory_gb=4.0, disk_gb=20.0, gpu=None)
+
+
 def test_resize_host_leaves_the_record_alone_when_lima_refuses(
     lima_provider: LimaProviderInstance, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

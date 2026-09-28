@@ -1566,11 +1566,13 @@ sudo poweroff
         resized_data_disk_size = (
             request.data_disk_size if request.data_disk_size is not None else current_data_disk_size
         )
+        # The resized start args carry the requested CPUs and memory, and the
+        # current resources hold the boot disk (on the exposed layout, where it
+        # is the disk reported).
         current_resources = self._recorded_resources(host_record)
-        resized_vm_size = ResolvedLimaVmSize(
-            cpus=request.cpus if request.cpus is not None else current_resources.cpu.count,
-            memory_gib=request.memory_gib if request.memory_gib is not None else current_resources.memory_gb,
-            boot_disk_gib=resolved_vm_size_from_resources(current_resources).boot_disk_gib,
+        resized_vm_size = resolve_vm_size(
+            resized_start_args,
+            vm_size_from_resources(current_resources, is_disk_gb_the_boot_disk=current_data_disk_size is None),
         )
         resized_resources = host_resources_for_lima_host(resized_vm_size, resized_data_disk_size)
         resized_config = config.model_copy_update(
