@@ -671,7 +671,7 @@ class UiAvailableConnection(FrozenModel):
 
 
 class UiPathSync(FrozenModel):
-    """What Minds knows about syncing one shared path.
+    """What Imbue Studio knows about syncing one shared path.
 
     Present whenever the path has ever been synced, not only while a sync is
     running: ``activity`` is what says which. ``state`` describes the running

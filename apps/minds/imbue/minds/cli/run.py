@@ -13,7 +13,7 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
    ``mngr_forward_session=<value>`` on ``localhost:<mngr-forward-port>``
    before the first agent-subdomain navigation.
 
-Agents reach the Minds API via the latchkey gateway's bundled
+Agents reach the Imbue Studio API via the latchkey gateway's bundled
 ``minds-api-proxy`` extension rather than over a per-agent reverse SSH
 tunnel; the supervisor wires a gateway into each agent's container (the
 desktop gateway reverse-tunneled in, or the VPS-resident gateway
@@ -561,7 +561,7 @@ def run(
     # Spawn the plugin and attach the envelope consumer that feeds the
     # surviving resolver from the plugin's stdout stream. We no longer
     # ask the plugin to set up a per-agent reverse SSH tunnel for the
-    # Minds API: agents reach it through the latchkey gateway's bundled
+    # Imbue Studio API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
     # `mngr forward` and every other laptop-side mngr invocation (including the
@@ -781,7 +781,7 @@ def run(
     code = OneTimeCode(secrets.token_urlsafe(32))
     auth_store.add_one_time_code(code=code)
     minds_login_url = f"http://localhost:{port}/login?one_time_code={code}"
-    logger.info("Minds login URL (one-time use): {}", minds_login_url)
+    logger.info("Imbue Studio login URL (one-time use): {}", minds_login_url)
     emit_event("login_url", {"login_url": minds_login_url, "message": minds_login_url}, output_format)
 
     app = create_desktop_client(

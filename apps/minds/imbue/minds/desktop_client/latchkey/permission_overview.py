@@ -16,7 +16,7 @@ cleared outside the app, or one that was granted before it was ever connected),
 so no grant is invisible and unrevocable.
 
 Permissions are stored per host -- every agent on a host shares one
-``latchkey_permissions.json`` (see :func:`permissions_path_for_host`). Minds
+``latchkey_permissions.json`` (see :func:`permissions_path_for_host`). Imbue Studio
 workspaces map 1:1 to hosts, so each column in the settings view is one
 workspace, labelled by its primary agent's display name. Only non-destroyed
 workspaces are shown (via

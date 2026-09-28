@@ -113,7 +113,7 @@ class WorkspacePermissionGrantHandler(RequestEventHandler):
     verdict (:mod:`.messaging`). Denial drops the pending record via ``DELETE``.
     """
 
-    data_dir: Path = Field(frozen=True, description="Minds data directory (typically ``~/.minds``).")
+    data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ``~/.minds``).")
     latchkey: Latchkey = Field(
         description="Latchkey wrapper, used to reach the plugin data dir a grant's permissions file lives under."
     )

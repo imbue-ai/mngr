@@ -1,7 +1,7 @@
 """Pydantic models for the ``/api/v1`` surface -- the single source of truth.
 
 These models describe the request bodies, query params, and responses of the
-Minds API. They live in this low module (no imports from ``api_v1`` or
+Imbue Studio API. They live in this low module (no imports from ``api_v1`` or
 ``api_schema``) so that both the route handlers (which validate against them) and
 the schema endpoint (which publishes them) can import them without an import
 cycle.
@@ -44,7 +44,7 @@ class ApiRequestModel(FrozenModel):
 
 
 class ApiErrorResponse(FrozenModel):
-    """A JSON error body returned by Minds API routes on failure."""
+    """A JSON error body returned by Imbue Studio API routes on failure."""
 
     error: str = Field(description="Human-readable error message")
     field: str | None = Field(default=None, description="Offending request field, when the error is field-specific")
@@ -265,7 +265,9 @@ class CreateWorkspaceRequest(ApiRequestModel):
     """Body for creating a new peer workspace."""
 
     git_url: str = Field(description="Template repository URL or local path (required)")
-    host_name: str | None = Field(default=None, description="Workspace/host name; auto-assigned (mind-N) when omitted")
+    host_name: str | None = Field(
+        default=None, description="Workspace/host name; auto-assigned (workspace-N) when omitted"
+    )
     branch: str | None = Field(default=None, description="Branch/tag to create from")
     color: str | None = Field(default=None, description="Hex color for the workspace tile")
     launch_mode: LaunchMode | None = Field(default=None, description="Compute provider (default DOCKER)")

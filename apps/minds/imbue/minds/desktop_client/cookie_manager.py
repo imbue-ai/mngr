@@ -3,7 +3,7 @@
 After Phase 2 of the mngr_forward split, the per-subdomain auth bridge
 (``create_subdomain_auth_token`` / ``verify_subdomain_auth_token``) lives
 in the ``mngr_forward`` plugin (``libs/mngr_forward/imbue/mngr_forward/cookie.py``).
-Minds keeps only its own bare-origin session cookie — origin-scoped to
+Imbue Studio keeps only its own bare-origin session cookie — origin-scoped to
 ``localhost:<minds-port>`` — for authenticating the desktop UI.
 """
 

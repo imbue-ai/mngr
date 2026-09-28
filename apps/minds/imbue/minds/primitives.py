@@ -146,7 +146,7 @@ class DeviceId(RandomId):
 
 
 class CreateAttemptId(RandomId):
-    """Minds-internal handle for an in-flight ``mngr create`` invocation.
+    """Internal handle, used only inside Imbue Studio, for an in-flight ``mngr create`` invocation.
 
     Returned by ``AgentCreator.create_agent_async`` so the desktop client
     UI has something to poll status / stream logs against immediately --

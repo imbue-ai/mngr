@@ -40,7 +40,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
       "You can keep what you make private, invite people to work with you in the same workspace, or share a " +
       "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
       "works in the same place. Sharing a copy gives someone the app without giving them your data.\n\n" +
-      "When Mind needs an account, it’ll ask you to connect it. You can see and remove that access later.",
+      "When Imbue Studio needs an account, it’ll ask you to connect it. You can see and remove that access later.",
   },
   {
     id: "data",
@@ -48,7 +48,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     detail:
       "Your workspace keeps its own files, apps, memory, and settings. Imbue never sells that data or uses it to " +
       "train AI models for other people.\n\n" +
-      "When Mind uses an outside AI model or connected service, that company’s data rules apply too.\n\n" +
+      "When Imbue Studio uses an outside AI model or connected service, that company’s data rules apply too.\n\n" +
       "We’re working toward full end-to-end encryption. Once that’s ready, no one but you—not even Imbue—will " +
       "be able to read what’s in your workspace.\n\n" +
       "Your workspace is backed up as you use it, much like version history in a document. It’s built to move " +
@@ -86,7 +86,7 @@ export const START_OPTIONS: StartOption[] = [
   {
     title: "Connect your data",
     detail:
-      "Connect your email, calendar, Slack, GitHub, or another service so Mind can help with the information " +
+      "Connect your email, calendar, Slack, GitHub, or another service so Imbue Studio can help with the information " +
       "already there.",
   },
   {
@@ -94,7 +94,7 @@ export const START_OPTIONS: StartOption[] = [
     detail: "Give your agent a task to do now, or set something to run on a schedule.",
   },
   {
-    title: "Learn how Mind works",
+    title: "Learn how Imbue Studio works",
     detail: "Ask your agent to explain what it can do, how your workspace works, and what you control.",
   },
 ];

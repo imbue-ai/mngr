@@ -36,7 +36,7 @@ class UiManualCredentialsPrompt(FrozenModel):
 
     parameters: tuple[CredentialCommandParameter, ...] = Field(
         description=(
-            "One labeled input per value the service's credential command needs. Empty when Minds cannot "
+            "One labeled input per value the service's credential command needs. Empty when Imbue Studio cannot "
             "work out what to ask for, in which case the dialog shows the message as an error and offers "
             "no Approve."
         ),

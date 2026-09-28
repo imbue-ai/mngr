@@ -2315,7 +2315,7 @@ def test_sweep_reclaims_stale_scratch_clones_but_spares_live_ones(tmp_path: Path
     Per-attempt directories are removed in the attempt's ``finally``, which a
     force-quit skips (the create worker is a daemon thread), and a full clone is
     ~240MB. The age guard is what keeps the sweep from deleting a clone belonging
-    to a concurrently running second Minds instance -- i.e. from reintroducing the
+    to a concurrently running second Imbue Studio instance -- i.e. from reintroducing the
     very race this change removes.
     """
     stale = make_scratch_clone_root("default-workspace-template", temp_dir=tmp_path)

@@ -2034,7 +2034,7 @@ def _sse(payload: dict[str, object]) -> str:
 # Emitted at the start of a log replay whose earliest lines the create-attempt-log
 # buffer's cap has dropped, so the reader knows the history is partial.
 _CREATE_ATTEMPT_LOG_TRUNCATION_MARKER: Final[str] = (
-    f"[minds] (earlier output omitted: only the most recent {CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES} log lines are kept)"
+    f"[Imbue Studio] (earlier output omitted: only the most recent {CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES} log lines are kept)"
 )
 
 

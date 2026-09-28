@@ -199,7 +199,7 @@ export const FLOW: Record<StepId, FlowStep> = {
   auth: {
     ask:
       "A cloud workspace runs on our machines, so it needs an Imbue account. " +
-      "Sign in with the account you downloaded Mind with.",
+      "Sign in with the account you downloaded Imbue Studio with.",
     choices: [
       { id: "signup", label: "Create an account", said: "", ack: "You're in.", isEmphasized: false },
       { id: "signin", label: "Sign in", said: "", ack: "Welcome back.", isEmphasized: true },

@@ -156,7 +156,7 @@ def should_enroll_suspect_for_backend_failure(
     The plugin emits a failure envelope for every non-2xx response, for
     connection-level failures (which carry no status code), and -- as
     ``STALLED`` -- for a request still in flight that the backend has not
-    answered within the plugin's stall window. Minds acts only on the ones that
+    answered within the plugin's stall window. Imbue Studio acts only on the ones that
     suggest the backend is unreachable: anything without a status code
     (``CONNECT_ERROR`` / ``TUNNEL_SETUP_FAILED`` / ``POOL_EXHAUSTED`` /
     ``BACKEND_NOT_LISTENING`` / ``SSE_EOF`` / ``STALLED``) or an infrastructure

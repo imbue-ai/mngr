@@ -277,7 +277,7 @@ export function isPathSyncLive(row: UiSharedPath): boolean {
 /** What connecting a service actually does. Latchkey signs most services in
  * through a browser; the rest (AWS, Coolify, ...) are connected by typing in
  * the credentials they ask for. A service with neither -- no browser sign-in
- * and no command Mind can turn into inputs -- cannot be connected from here,
+ * and no command Imbue Studio can turn into inputs -- cannot be connected from here,
  * so its row says so rather than opening a form nothing can submit. */
 export type ConnectAction =
   "browser_sign_in" | "credential_form" | "unconnectable";
