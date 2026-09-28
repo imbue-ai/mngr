@@ -11,6 +11,8 @@ from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.primitives import ByteSize
 from imbue.mngr.primitives import InvalidByteSizeError
+from imbue.mngr.providers.start_arg_flags import flag_value_at
+from imbue.mngr.providers.start_arg_flags import strip_flags
 from imbue.mngr_lima.data_types import LimaSizeRequest
 from imbue.mngr_lima.data_types import LimaVmSize
 from imbue.mngr_lima.data_types import ResolvedLimaVmSize
@@ -26,22 +28,6 @@ LIMA_DEFAULT_MEMORY_GIB: Final[float] = 4.0
 LIMA_DEFAULT_BOOT_DISK_GIB: Final[float] = 100.0
 
 _BYTES_PER_GIB: Final[int] = 1024**3
-
-
-@pure
-def _flag_value_at(start_args: Sequence[str], idx: int, flag: str) -> tuple[str | None, int]:
-    """The value ``flag`` carries at ``idx`` and how many tokens it spans (0 when not a match).
-
-    Handles the ``--flag=value`` and ``--flag value`` forms limactl accepts.
-    """
-    token = start_args[idx]
-    if token == flag:
-        if idx + 1 < len(start_args):
-            return start_args[idx + 1], 2
-        return None, 1
-    if token.startswith(f"{flag}="):
-        return token[len(flag) + 1 :], 1
-    return None, 0
 
 
 @pure
@@ -66,20 +52,20 @@ def parse_vm_size_start_args(start_args: Sequence[str]) -> LimaVmSize:
     boot_disk_gib: float | None = None
     idx = 0
     while idx < len(start_args):
-        cpus_value, cpus_span = _flag_value_at(start_args, idx, _CPUS_FLAG)
+        cpus_value, cpus_span = flag_value_at(start_args, idx, (_CPUS_FLAG,))
         if cpus_span:
             if cpus_value is not None:
                 parsed_cpus = _parse_positive_number_or_warn(cpus_value, _CPUS_FLAG)
                 cpus = int(parsed_cpus) if parsed_cpus is not None else None
             idx += cpus_span
             continue
-        memory_value, memory_span = _flag_value_at(start_args, idx, _MEMORY_FLAG)
+        memory_value, memory_span = flag_value_at(start_args, idx, (_MEMORY_FLAG,))
         if memory_span:
             if memory_value is not None:
                 memory_gib = _parse_positive_number_or_warn(memory_value, _MEMORY_FLAG)
             idx += memory_span
             continue
-        disk_value, disk_span = _flag_value_at(start_args, idx, _DISK_FLAG)
+        disk_value, disk_span = flag_value_at(start_args, idx, (_DISK_FLAG,))
         if disk_span:
             if disk_value is not None:
                 boot_disk_gib = _parse_positive_number_or_warn(disk_value, _DISK_FLAG)
@@ -101,20 +87,7 @@ def strip_size_start_args(
         stripped_flags.append(_CPUS_FLAG)
     if is_memory_stripped:
         stripped_flags.append(_MEMORY_FLAG)
-    kept: list[str] = []
-    idx = 0
-    while idx < len(start_args):
-        span = 0
-        for flag in stripped_flags:
-            _value, span = _flag_value_at(start_args, idx, flag)
-            if span:
-                break
-        if span:
-            idx += span
-            continue
-        kept.append(start_args[idx])
-        idx += 1
-    return tuple(kept)
+    return strip_flags(start_args, stripped_flags)
 
 
 @pure

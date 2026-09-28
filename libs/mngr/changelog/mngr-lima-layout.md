@@ -5,3 +5,5 @@
 - The backend-scoped host resolver behind `mngr docker resize` (discover only that backend's providers, refuse when none is enabled) moved to `cli/backend_hosts.py` and is shared with `mngr lima resize`.
 
 - The hosts concept doc's "Sizing" section names `mngr lima resize` alongside the imbue_cloud and docker commands.
+
+- The start-argument flag scanner the docker provider used to read and strip its recorded `--cpus` / `--memory` args (`flag_value_at`, `strip_flags`) moved to `providers/start_arg_flags.py`, so the lima provider reads its recorded size through the same code.

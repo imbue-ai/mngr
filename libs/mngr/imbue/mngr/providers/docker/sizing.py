@@ -14,6 +14,8 @@ from imbue.mngr.primitives import InvalidDockerMemorySizeError
 from imbue.mngr.providers.docker.data_types import ContainerSize
 from imbue.mngr.providers.docker.data_types import ContainerSizeRequest
 from imbue.mngr.providers.docker.data_types import DockerDaemonTotals
+from imbue.mngr.providers.start_arg_flags import flag_value_at
+from imbue.mngr.providers.start_arg_flags import strip_flags
 
 _CPUS_FLAG: Final[str] = "--cpus"
 _MEMORY_FLAG: Final[str] = "--memory"
@@ -30,27 +32,6 @@ _UNLIMITED_SWAP_VALUE: Final[str] = "-1"
 
 
 @pure
-def _flag_value_at(start_args: Sequence[str], idx: int, flags: Sequence[str]) -> tuple[str | None, int]:
-    """The value one of ``flags`` carries at ``idx``, and how many tokens it spans (0 when not a match).
-
-    Handles ``--flag=value``, ``--flag value``, and for a single-letter flag the
-    glued ``-mvalue`` form.
-    """
-    token = start_args[idx]
-    for flag in flags:
-        if token == flag:
-            if idx + 1 < len(start_args):
-                return start_args[idx + 1], 2
-            return None, 1
-        if token.startswith(f"{flag}="):
-            return token[len(flag) + 1 :], 1
-        is_short_flag = not flag.startswith("--")
-        if is_short_flag and token.startswith(flag) and len(token) > len(flag):
-            return token[len(flag) :], 1
-    return None, 0
-
-
-@pure
 def parse_container_size(start_args: Sequence[str]) -> ContainerSize:
     """The caps a ``docker run`` argument list sets; the last spelling of each flag wins, like docker's CLI.
 
@@ -63,19 +44,19 @@ def parse_container_size(start_args: Sequence[str]) -> ContainerSize:
     is_swap_unlimited = False
     idx = 0
     while idx < len(start_args):
-        cpus_value, cpus_span = _flag_value_at(start_args, idx, _CPUS_FLAGS)
+        cpus_value, cpus_span = flag_value_at(start_args, idx, _CPUS_FLAGS)
         if cpus_span:
             if cpus_value is not None:
                 cpus = _parse_cpus_or_warn(cpus_value)
             idx += cpus_span
             continue
-        memory_value, memory_span = _flag_value_at(start_args, idx, _MEMORY_FLAGS)
+        memory_value, memory_span = flag_value_at(start_args, idx, _MEMORY_FLAGS)
         if memory_span:
             if memory_value is not None:
                 memory = _parse_memory_or_warn(memory_value, _MEMORY_FLAG)
             idx += memory_span
             continue
-        swap_value, swap_span = _flag_value_at(start_args, idx, _MEMORY_SWAP_FLAGS)
+        swap_value, swap_span = flag_value_at(start_args, idx, _MEMORY_SWAP_FLAGS)
         if swap_span:
             if swap_value is not None:
                 is_swap_unlimited = swap_value == _UNLIMITED_SWAP_VALUE
@@ -124,16 +105,7 @@ def strip_size_start_args(
     if is_memory_stripped:
         stripped_flags.extend(_MEMORY_FLAGS)
         stripped_flags.extend(_MEMORY_SWAP_FLAGS)
-    kept: list[str] = []
-    idx = 0
-    while idx < len(start_args):
-        _value, span = _flag_value_at(start_args, idx, stripped_flags)
-        if span:
-            idx += span
-            continue
-        kept.append(start_args[idx])
-        idx += 1
-    return tuple(kept)
+    return strip_flags(start_args, stripped_flags)
 
 
 @pure
