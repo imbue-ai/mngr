@@ -82,7 +82,9 @@ def test_apply_size_request_replaces_the_requested_dimension_and_keeps_the_rest(
     start_args = ("--cpus=2", "--memory=4g", "--memory-swap=4g", "--workdir=/")
     resized = apply_size_request(start_args, ContainerSizeRequest(memory=DockerMemorySize("16g")))
     assert resized == ("--cpus=2", "--workdir=/", "--memory=16g", "--memory-swap=16g")
-    assert parse_container_size(resized) == ContainerSize(cpus=2.0, memory="16g", memory_swap="16g")
+    assert parse_container_size(resized) == ContainerSize(
+        cpus=2.0, memory=DockerMemorySize("16g"), memory_swap=DockerMemorySize("16g")
+    )
 
 
 def test_apply_size_request_adds_caps_to_an_uncapped_container() -> None:
