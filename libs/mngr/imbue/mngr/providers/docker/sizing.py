@@ -88,11 +88,14 @@ def parse_container_size(start_args: Sequence[str]) -> ContainerSize:
 
 @pure
 def _parse_cpus_or_warn(value: str) -> float | None:
-    """A recorded ``--cpus`` value, or None when it is docker's ``0`` (no limit) or not a number."""
+    """A recorded ``--cpus`` value, or None when it is docker's ``0`` (no limit) or not a positive finite number."""
     try:
         cpus = float(value)
     except ValueError:
         logger.warning("Ignored an unparseable recorded --cpus value: {!r}", value)
+        return None
+    if cpus < 0 or not math.isfinite(cpus):
+        logger.warning("Ignored a recorded --cpus value docker does not accept: {!r}", value)
         return None
     return cpus if cpus > 0 else None
 

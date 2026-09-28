@@ -61,9 +61,10 @@ def test_container_size_refuses_a_swap_cap_together_with_unlimited_swap() -> Non
         ContainerSize(memory=DockerMemorySize("4g"), memory_swap=DockerMemorySize("6g"), is_swap_unlimited=True)
 
 
-def test_parse_container_size_ignores_values_docker_could_not_have_accepted() -> None:
+@pytest.mark.parametrize("cpus_value", ["lots", "-1", "inf", "nan"])
+def test_parse_container_size_ignores_values_docker_could_not_have_accepted(cpus_value: str) -> None:
     with allow_warnings():
-        size = parse_container_size(("--cpus=lots", "--memory=plenty", "--memory-swap=some"))
+        size = parse_container_size((f"--cpus={cpus_value}", "--memory=plenty", "--memory-swap=some"))
     assert size == ContainerSize()
 
 
