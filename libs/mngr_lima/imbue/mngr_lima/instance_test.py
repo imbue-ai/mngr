@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -798,29 +799,30 @@ def _install_fake_limactl_reporting(
     memory_gib: int,
     disk_name: str,
     disk_gib: int,
+    failing_subcommand: str | None = None,
 ) -> Path:
-    """A limactl whose ``list`` and ``disk list`` report one instance and one disk, logging every other call."""
+    """A limactl whose ``list`` and ``disk list`` report one instance and one disk, logging every other call.
+
+    ``failing_subcommand`` names a subcommand that fails with a message on
+    stderr instead, the way lima refuses a value.
+    """
     invocation_log = tmp_path / "invocations.log"
-    memory_bytes = memory_gib * 1024**3
-    disk_bytes = disk_gib * 1024**3
+    instance_line = json.dumps(
+        {"name": instance_name, "status": status, "cpus": cpus, "memory": memory_gib * 1024**3, "disk": 20 * 1024**3}
+    )
+    disk_line = json.dumps({"name": disk_name, "size": disk_gib * 1024**3})
+    failure_line = (
+        f'if [ "$1" = "{failing_subcommand}" ]; then echo "lima refused it" >&2; exit 1; fi\n'
+        if failing_subcommand is not None
+        else ""
+    )
     install_fake_limactl(
         tmp_path / "bin",
         f'echo "$@" >> "{invocation_log}"\n'
         'if [ "$1" = "--version" ]; then echo "limactl version 2.1.2"; exit 0; fi\n'
-        'if [ "$1" = "list" ]; then echo \'{"name": "'
-        f"{instance_name}"
-        '", "status": "'
-        f"{status}"
-        '", "cpus": '
-        f"{cpus}"
-        ', "memory": '
-        f"{memory_bytes}"
-        ', "disk": 21474836480}\'; exit 0; fi\n'
-        'if [ "$1" = "disk" ] && [ "$2" = "list" ]; then echo \'{"name": "'
-        f"{disk_name}"
-        '", "size": '
-        f"{disk_bytes}"
-        "}'; exit 0; fi\n"
+        f"if [ \"$1\" = \"list\" ]; then echo '{instance_line}'; exit 0; fi\n"
+        f"if [ \"$1\" = \"disk\" ] && [ \"$2\" = \"list\" ]; then echo '{disk_line}'; exit 0; fi\n"
+        f"{failure_line}"
         "exit 0\n",
         monkeypatch,
     )
@@ -950,13 +952,8 @@ def test_resize_host_leaves_the_record_alone_when_lima_refuses(
     host_id = _write_sized_record(lima_provider, "refused-host", ("--cpus=2",), "mngr-x-data", "100GiB", recorded)
     record = lima_provider._host_store.read_host_record(host_id)
     assert record is not None and record.config is not None
-    install_fake_limactl(
-        tmp_path / "bin",
-        'if [ "$1" = "list" ]; then echo \'{"name": "'
-        f"{record.config.instance_name}"
-        '", "status": "Stopped", "cpus": 2, "memory": 4294967296, "disk": 1}\'; exit 0; fi\n'
-        'if [ "$1" = "edit" ]; then echo "memory too large" >&2; exit 1; fi\nexit 0\n',
-        monkeypatch,
+    _install_fake_limactl_reporting(
+        tmp_path, monkeypatch, record.config.instance_name, "Stopped", 2, 4, "mngr-x-data", 100, failing_subcommand="edit"
     )
 
     with pytest.raises(MngrError, match="Lima refused the recorded size"):
