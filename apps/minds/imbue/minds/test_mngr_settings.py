@@ -97,7 +97,8 @@ def test_ensure_cleans_legacy_state(monkeypatch: pytest.MonkeyPatch, tmp_path: P
             ]
         )
     )
-    data_dir = tmp_path / f".{_ROOT_NAME}"
+    # The state root, which is where the reconciler now looks for this residue.
+    data_dir = _ROOT.state_dir
     dynamic_hosts_path = data_dir / "ssh" / "dynamic_hosts.toml"
     dynamic_hosts_path.parent.mkdir(parents=True, exist_ok=True)
     dynamic_hosts_path.write_text("[hosts]\n")

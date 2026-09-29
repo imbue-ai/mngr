@@ -33,6 +33,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.imbue_common.conftest_hooks import register_marker
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.minds.bootstrap import MINDS_DATA_HOME_ENV_VAR
 from imbue.minds.deployment_tests.helpers import create_verified_user_via_admin_api
 from imbue.minds.deployment_tests.helpers import delete_user_via_admin_api
 from imbue.minds.testing import SYNC_E2E_CONNECTOR_URL_ENV
@@ -91,6 +92,21 @@ register_marker(
 )
 register_conftest_hooks(globals())
 register_plugin_test_fixtures(globals())
+
+
+@pytest.fixture(autouse=True)
+def isolated_minds_data_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point this test's three minds roots (state / cache / logs) at a directory of its own.
+
+    `setup_test_mngr_env` already redirects HOME, so this is not what keeps a test off real user
+    data; it is what gives every test the same three roots under one collectable directory,
+    rather than whichever layout the host platform resolves. Autouse because `mngr_host_dir_for`
+    reaches almost every test through `apply_bootstrap`.
+    """
+    # The space mirrors the real state root (~/Library/Application Support/...).
+    # Without it the suite runs entirely on space-free paths and cannot see the
+    # shell-quoting and whitespace-splitting failures that layout provokes.
+    monkeypatch.setenv(MINDS_DATA_HOME_ENV_VAR, str(tmp_path / "minds data home"))
 
 
 @pytest.fixture

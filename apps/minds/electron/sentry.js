@@ -39,7 +39,7 @@ const SENTRY_FRONTEND_DSN_DEV = 'https://ddc0f18beba95166b72eacd9d4b48bf0@o45043
  */
 function readUserConfig() {
   try {
-    const configPath = path.join(paths.getDataDir(), 'config.toml');
+    const configPath = path.join(paths.getStateDir(), 'config.toml');
     return parseToml(fs.readFileSync(configPath, 'utf8'));
   } catch {
     return {};
@@ -78,7 +78,7 @@ const ANONYMOUS_USER_ID_PATTERN = /^[0-9a-f]{32}$/;
  * Returns null (rather than throwing) if the id cannot be read or written, so Sentry setup never fails.
  */
 function getOrCreateAnonymousUserId() {
-  const idFilePath = path.join(paths.getDataDir(), ANONYMOUS_USER_ID_FILENAME);
+  const idFilePath = path.join(paths.getStateDir(), ANONYMOUS_USER_ID_FILENAME);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     let existing = '';
     try {
@@ -371,7 +371,7 @@ function collectSystemBasics() {
     memory: { total_bytes: os.totalmem(), free_bytes: os.freemem() },
   };
   try {
-    const stat = fs.statfsSync(paths.getDataDir());
+    const stat = fs.statfsSync(paths.getStateDir());
     basics.disk = { total_bytes: stat.blocks * stat.bsize, free_bytes: stat.bavail * stat.bsize };
   } catch (err) {
     console.warn(`[report-error] could not stat data dir for disk usage: ${err && err.message}`);

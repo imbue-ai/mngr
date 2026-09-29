@@ -8,7 +8,7 @@
 # Under `set -e` a single unguarded failure (e.g. a `df`/`find` pipe, a
 # `defaults read`) aborts the script and SKIPS the remaining cleanup, leaking
 # Lima VMs / disk. So instead: run every step best-effort, then VERIFY the end
-# state (no surviving minds-host VMs / data disks, no ~/.minds, app removed) and exit
+# state (no surviving minds-host VMs / data disks, no data roots, app removed) and exit
 # non-zero if the runner is not actually clean -- otherwise a leaked VM rots
 # the runner silently. Callers surface that exit code (the post-test cleanup
 # step no longer swallows it with `|| true`). The install block fails loud too.
@@ -18,8 +18,9 @@ log() { printf '[reset] %s\n' "$*" >&2; }
 
 # Old bundles are quit and removed too, so an install from before the rename
 # cannot survive a reset and claim the deeplink scheme beside the new one.
-# CLEANUP: drop the Mind and Minds names once the runner has been reset after
-# the rename (specs/imbue-studio-rename/05_cleanup.md).
+# CLEANUP: drop ImbueStudio, Mind and Minds once every runner has been reset
+# past them; "Imbue Studio" is the current name and stays
+# (specs/imbue-studio-rename/05_cleanup.md).
 log "asking Imbue Studio to quit"
 for bundle_name in "Imbue Studio" ImbueStudio Mind Minds; do
   [[ -d "/Applications/$bundle_name.app" ]] || continue
@@ -110,20 +111,41 @@ log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # scripts that no longer exist.
 rm -f /tmp/minds-electron.log 2>/dev/null || true
 
-log "removing ~/.minds and the installed app bundles"
-# `rm -rf` can race against a not-yet-fully-dead backend process that
-# is still writing to ~/.minds/Cache or ~/.minds/Code Cache. Retry a few
-# times with a short backoff before giving up.
-for attempt in 1 2 3 4 5; do
-  if rm -rf "$HOME/.minds" 2>/dev/null; then
-    break
-  fi
-  log "  rm ~/.minds attempt $attempt failed (likely still being written); waiting 2s"
-  sleep 2
-  if [[ $attempt -eq 5 ]]; then
-    log "  forcing one more pass with verbose errors"
-    rm -rf "$HOME/.minds" || true
-  fi
+# Every root an install writes to: the canonical three, plus the legacy
+# dotfolder older builds used and the current one migrates off. A runner that
+# has run both needs all of them gone to be reproducible. The pre-rename names
+# are here for the same reason the old bundles are: crash reporting can write
+# under the product name before the app narrows its own userData path.
+# CLEANUP: drop the ImbueStudio, Mind and Minds roots once every runner has
+# been reset past them; "Imbue Studio" is the current name and stays
+# (specs/imbue-studio-rename/05_cleanup.md).
+DATA_ROOTS=()
+for app_name in "Imbue Studio" ImbueStudio Mind Minds; do
+  DATA_ROOTS+=(
+    "$HOME/Library/Application Support/$app_name"
+    "$HOME/Library/Caches/$app_name"
+    "$HOME/Library/Logs/$app_name"
+  )
+done
+DATA_ROOTS+=("$HOME/.minds")
+
+log "removing the data roots and the installed app bundles"
+# `rm -rf` can race against a not-yet-fully-dead backend process that is still
+# writing to the state root's Chromium cache. Retry a few times with a short
+# backoff before giving up.
+for root in "${DATA_ROOTS[@]}"; do
+  [[ -e "$root" ]] || continue
+  for attempt in 1 2 3 4 5; do
+    if rm -rf "$root" 2>/dev/null; then
+      break
+    fi
+    log "  rm '$root' attempt $attempt failed (likely still being written); waiting 2s"
+    sleep 2
+    if [[ $attempt -eq 5 ]]; then
+      log "  forcing one more pass with verbose errors"
+      rm -rf "$root" || true
+    fi
+  done
 done
 sudo rm -rf "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"
 
@@ -146,10 +168,12 @@ if [[ "$surviving_disks" -gt 0 ]]; then
   log "ERROR: $surviving_disks mngr-*-data disk(s) survived cleanup under ~/.lima/_disks"
   cleanup_failed=1
 fi
-if [[ -e "$HOME/.minds" ]]; then
-  log "ERROR: ~/.minds survived cleanup"
-  cleanup_failed=1
-fi
+for root in "${DATA_ROOTS[@]}"; do
+  if [[ -e "$root" ]]; then
+    log "ERROR: '$root' survived cleanup"
+    cleanup_failed=1
+  fi
+done
 for bundle in "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"; do
   if [[ -z "$URL" && -e "$bundle" ]]; then
     log "ERROR: $bundle survived cleanup"

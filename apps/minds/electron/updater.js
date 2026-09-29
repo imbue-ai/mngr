@@ -116,7 +116,7 @@ function resolveFeed(channel) {
  * the only thing that can produce one.
  */
 function storedChannel() {
-  return channels.readChannel(paths.getDataDir(), readFeedBaseUrl());
+  return channels.readChannel(paths.getStateDir(), readFeedBaseUrl());
 }
 
 function setStatus(status) {
@@ -411,7 +411,7 @@ async function setChannel(channel) {
     autoUpdater.autoInstallOnAppQuit = false;
     await discardStagedUpdate();
     downloadedVersion = null;
-    channels.writeChannel(paths.getDataDir(), channel);
+    channels.writeChannel(paths.getStateDir(), channel);
   });
   return check();
 }

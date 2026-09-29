@@ -25,7 +25,7 @@ Electron owns whether the intro has played (`intro-seen.json` in the data root, 
 
 ### The app's two names
 
-`productName` in `package.json` is `ImbueStudio`, with no space, because electron-builder derives every packaging path from it: the macOS bundle (`Imbue Studio.app`, executable `Contents/MacOS/ImbueStudio`), the Linux install directory (`/opt/Imbue Studio`) and the AppArmor profile path inside the `.deb`, and Electron's own scratch directories (`~/Library/Application Support/ImbueStudio` and its XDG equivalents). ToDesktop exposes no separate Linux install path, so a space there would land in all of them. The name a person reads, `Imbue Studio`, is `PRODUCT_DISPLAY_NAME` in `electron/product-name.js` and is used for window titles, the menu bar label, notifications, and the loading and error screens; `todesktop.js` also writes it into `CFBundleName` and `CFBundleDisplayName` through `mac.extendInfo`, so the menu bar and the About panel show it. Finder, the Dock, and the browser's open-external-app prompt read the on-disk bundle name and show `ImbueStudio`. The npm package `name` stays `minds`: it names the updater cache and the Linux executable.
+`productName` in `package.json` is `Imbue Studio`, and electron-builder derives every packaging path from it: the macOS bundle (`Imbue Studio.app`, executable `Contents/MacOS/Imbue Studio`) and its helper bundles, the Linux install directory (`/opt/Imbue Studio`), and the canonical data roots keyed on `MINDS_APP_NAME`. `CFBundleName` is deliberately left to default to it: Electron resolves the helper apps as `<CFBundleName> Helper.app`, so an override that differs by even a space makes every launch abort with "Unable to find helper app". The display name a person reads is `PRODUCT_DISPLAY_NAME` in `electron/product-name.js`, used for window titles, the menu bar label, notifications, and the loading and error screens, and written into `CFBundleDisplayName`. The package `name` is `imbue-studio`, which names the Linux executable, the `.deb` package, and the updater cache.
 
 An install that predates the rename and takes this build through the updater: whether its bundle path changes from `/Applications/Mind.app` to `/Applications/Imbue Studio.app` is unconfirmed. At the previous rename the path stayed as it was while the app showed the new name; confirm on one machine on the alpha build of the release that carries the rename and record the answer here (`specs/imbue-studio-rename/04_cutover_rollout.md`, Stage F step 16). On its first launch the new build removes the scratch directories the previous names owned (`electron/legacy-name-cleanup.js`).
 
@@ -133,8 +133,8 @@ The accent is a **pure function of the window's current route**, not a remembere
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
-- `MINDS_ROOT_NAME`: Selects the data root for the running backend. Default `minds` (i.e. production at `~/.minds/`). Must match `minds(-<env-name>)?`.
-- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load; passing `--config-file` to `minds run` overrides it. When neither is set and `MINDS_ROOT_NAME` is unset (or `minds`), the backend loads the in-repo production `client.toml`. It refuses to start only when `MINDS_ROOT_NAME` names another env and nothing says where that env's config lives.
+- `MINDS_ROOT_NAME`: Selects the tier whose roots the running backend uses. Default `minds` (i.e. the `production` tier). Must match `minds(-<env-name>)?`. Activated by `minds-admin env activate <name>`; a legacy value such as `devminds` raises rather than being coerced to production.
+- `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds-admin env activate`; passing `--config-file` to `minds run` overrides it. When neither is set and `MINDS_ROOT_NAME` is unset (or `minds`), the backend loads the in-repo production `client.toml`. It refuses to start only when `MINDS_ROOT_NAME` names another env and nothing says where that env's config lives.
 
 ## Output and logging conventions
 
@@ -231,33 +231,63 @@ git tracks upstream security releases, so the pinned dugite-native payload needs
 
 ## Data directory
 
-Every Imbue Studio env owns one data root. Production lives at `~/.minds/`;
-every other env lives at `~/.minds-<env-name>/`. The contents are the
-same shape:
+Every Imbue Studio env owns three roots, one per role, each with the env's tier
+name as its first subdirectory. macOS treats the three differently, which
+is the reason for the split: Time Machine excludes `~/Library/Caches` and
+`~/Library/Logs` but backs up `~/Library/Application Support`, and the OS
+may reclaim anything under Caches.
+
+| Role | Path | Backed up? |
+|---|---|---|
+| State | `~/Library/Application Support/Imbue Studio/<tier>/` | yes |
+| Cache | `~/Library/Caches/Imbue Studio/<tier>/` | no -- and the OS may delete it |
+| Logs | `~/Library/Logs/Imbue Studio/<tier>/` | no |
+
+`<tier>` is `production`, `staging`, or the dev env name (`dev-<your-user>`).
+Setting `MINDS_DATA_HOME` overrides all three, collecting them under
+`$MINDS_DATA_HOME/<tier>/{state,cache,logs}/`; tests and CI use it to keep a
+run self-contained.
 
 ```
-~/.minds-<env-name>/
+~/Library/Application Support/Imbue Studio/<tier>/
   .venv/                  # uv-managed Python virtual environment
-  .uv-cache/              # uv package cache
   .uv-python/             # uv-managed Python installations
-  logs/
-    minds.log             # Combined stdout/stderr log from the backend
-    minds-events.jsonl    # Structured JSONL event log
   auth/                   # Cookie signing key, one-time codes
   config.toml             # Optional Imbue Studio user preferences (default account, etc.)
   client.toml             # Per-env public config (URLs only; dev envs only -- staging/production source from in-repo)
   secrets.toml            # Per-env chmod-0600 secrets (Neon DSN, SuperTokens API key; dev envs only)
   window-state.json       # Per-window content URLs + bounds, restored on launch and on a macOS reopen
   display-zoom.json       # The zoom percent from Settings > Display, applied to every window by the Electron shell
+  latchkey/               # Shared latchkey credential store
   mngr/                   # mngr host directory (MNGR_HOST_DIR)
     agents/               # per-agent state managed by mngr
   <agent-id>/             # Per-agent workspace directories
+  Cookies, Local Storage, ...   # Electron's userData, redirected here per tier
+
+~/Library/Caches/Imbue Studio/<tier>/
+  .uv-cache/              # uv package cache
+  template-cache/         # cached workspace-template clone
+
+~/Library/Logs/Imbue Studio/<tier>/
+  minds.log               # Combined stdout/stderr log from the backend
+  minds-events.jsonl      # Structured JSONL event log
 ```
 
-`MINDS_ROOT_NAME` selects which data root the backend uses: unset or
-`minds` is production, `minds-<env-name>` is another env, with the derived
-`MNGR_HOST_DIR` / `MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` exported
-alongside it. Two envs
+The virtualenv and the downloaded interpreter are regenerable but live
+under **state**, not cache: the backend cannot boot without them, so a
+low-disk purge would otherwise leave the app unable to start.
+
+Older installs kept all of this in `~/.minds/` (or `~/.minds-<env-name>/`).
+The desktop app moves it on first launch, in one pass, and leaves the old
+directory behind rather than deleting it. The move is recorded by a
+`.migrated-from-dotfolder` marker in the state root; if it fails partway it
+re-runs on the next launch rather than booting with files split across both
+layouts.
+
+`MINDS_ROOT_NAME` selects which data root the backend uses. Activation
+(`minds-admin env activate <name>`) sets it to `minds-<env-name>` (or just
+`minds` for production) and exports the derived `MNGR_HOST_DIR` /
+`MNGR_PREFIX` / `MINDS_CLIENT_CONFIG_PATH` alongside. Two envs
 activated in parallel shells (or by two Electron instances pointed at
 two different bundled configs) never share state. Standalone `mngr`
 invocations ignore `MINDS_ROOT_NAME`.

@@ -45,6 +45,7 @@ from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.minds.bootstrap import env_name_from_root_name
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.config.data_types import InstallationPaths
 from imbue.minds.config.data_types import MNGR_BINARY
@@ -69,6 +70,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import UPDATE_RESULT_MA
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
 from imbue.minds.desktop_client.e2e_workspace_runner import _DEFAULT_MINDS_ROOT_NAME
+from imbue.minds.desktop_client.e2e_workspace_runner import _E2E_DATA_HOME_DIR_NAME
 from imbue.minds.desktop_client.e2e_workspace_runner import _REPO_ROOT
 from imbue.minds.desktop_client.e2e_workspace_runner import await_chat_reply
 from imbue.minds.desktop_client.e2e_workspace_runner import configure_logging
@@ -358,6 +360,24 @@ def _ensure_dockerd_after_snapshot_resume(snapshot_sandbox_dockerd: None) -> Non
 # mark also satisfies the `test_prevent_hardcoded_guarded_binary`
 # ratchet, which inspects this test file's source from the local host
 # regardless of where the test ultimately executes.
+def _baked_mngr_host_dir(root_name: str, real_home: Path) -> Path:
+    """Where the snapshot's desktop-side mngr host dir was baked.
+
+    Resolved the way the shell that baked it resolved it, rather than as
+    ``~/.<root_name>/mngr``: ``_build_electron_env`` gives the Linux harness a
+    ``MINDS_DATA_HOME`` for a throwaway root per run, so the baked tree hangs
+    off that override rather than off the dotfolder the shell would use.
+
+    Deliberately ignores the ambient ``MINDS_DATA_HOME``. This is a fact about
+    the image, fixed when it was baked, while the running test has its own
+    throwaway value from the autouse ``isolated_minds_data_home`` fixture --
+    reading the variable here finds an empty tmp directory instead of the
+    snapshot.
+    """
+    tier = env_name_from_root_name(root_name)
+    return real_home / _E2E_DATA_HOME_DIR_NAME / tier / "state" / "mngr"
+
+
 @pytest.mark.minds_snapshot_resume
 @pytest.mark.docker
 @pytest.mark.timeout(60)
@@ -616,7 +636,7 @@ def _point_desktop_mngr_at_the_baked_workspace(tmp_path: Path, monkeypatch: pyte
     """
     root_name = os.environ.get("MINDS_ROOT_NAME", _DEFAULT_MINDS_ROOT_NAME)
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    baked_mngr_host_dir = real_home / f".{root_name}" / "mngr"
+    baked_mngr_host_dir = _baked_mngr_host_dir(root_name, real_home)
     assert baked_mngr_host_dir.is_dir(), f"No baked desktop-side mngr host dir at {baked_mngr_host_dir}"
     baked_profile_dir = find_profile_dir_lightweight(baked_mngr_host_dir)
     assert baked_profile_dir is not None, f"No mngr profile under {baked_mngr_host_dir} in the snapshot"

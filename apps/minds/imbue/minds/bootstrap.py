@@ -2,14 +2,20 @@
 
 This must run before any ``imbue.mngr.*`` module is imported, because mngr reads ``MNGR_HOST_DIR`` and ``MNGR_PREFIX`` during its own module-level initialization (plugin manager construction, config discovery, etc.).
 
-Kept intentionally minimal -- stdlib only -- so it stays cheap to import and cannot accidentally pull in mngr before translation happens.
+Kept intentionally minimal -- stdlib plus ``imbue.imbue_common.enums`` -- so it stays cheap to import and cannot accidentally pull in mngr before translation happens.
+The repo-root ``pyproject.toml``'s import-linter contract "minds bootstrap layer stays mngr-free and import-cheap" declares this, and forbids ``pydantic`` here as well as ``imbue.mngr`` -- which is why :class:`MindsRoot` is a plain class and why path resolution is a function rather than a value object.
 The settings-file machinery that shares this constraint lives in :mod:`imbue.minds.mngr_settings`.
 """
 
 import os
 import re
+import sys
+from enum import auto
 from pathlib import Path
 from typing import Final
+from typing import assert_never
+
+from imbue.imbue_common.enums import UpperCaseStrEnum
 
 MINDS_ROOT_NAME_ENV_VAR: Final[str] = "MINDS_ROOT_NAME"
 DEFAULT_MINDS_ROOT_NAME: Final[str] = "minds"
@@ -29,6 +35,30 @@ DYNAMIC_ENV_NAME_PATTERN: Final[str] = r"(?:dev|ci)-[a-z0-9][a-z0-9_-]{0,34}[a-z
 _ENV_NAME_PATTERN: Final[str] = rf"(?:{_STAGING_SUFFIX_PATTERN}|{DYNAMIC_ENV_NAME_PATTERN})"
 # The full set of legal MINDS_ROOT_NAME values is ``minds`` (production), ``minds-staging``, ``minds-dev-<rest>``, or ``minds-ci-<rest>``.
 MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
+
+# The application name the platform-canonical roots are keyed on, e.g. ``~/Library/Application Support/Imbue Studio``.
+# Matches ``productName`` in ``apps/minds/package.json``, which is what Electron derives its own default ``userData`` path from.
+MINDS_APP_NAME: Final[str] = "Imbue Studio"
+
+# Points all three roots at one throwaway directory, for tests and the CI runner.
+MINDS_DATA_HOME_ENV_VAR: Final[str] = "MINDS_DATA_HOME"
+
+# The per-role roots a parent process can hand this one, which win over anything resolved here.
+# The Electron shell is the intended setter: it creates the virtualenv before any Python exists to ask, so it owns resolution (see specs/minds-platform-canonical-dirs/spec.md, F7).
+MINDS_STATE_DIR_ENV_VAR: Final[str] = "MINDS_STATE_DIR"
+MINDS_CACHE_DIR_ENV_VAR: Final[str] = "MINDS_CACHE_DIR"
+MINDS_LOG_DIR_ENV_VAR: Final[str] = "MINDS_LOG_DIR"
+_INJECTED_ROOT_ENV_VARS: Final[tuple[str, ...]] = (
+    MINDS_STATE_DIR_ENV_VAR,
+    MINDS_CACHE_DIR_ENV_VAR,
+    MINDS_LOG_DIR_ENV_VAR,
+)
+
+# The one platform with its own canonical roots; everywhere else keeps the single dotfolder.
+_APPLE_PLATFORM: Final[str] = "darwin"
+
+# The logs subdirectory of a dotfolder root. Matches LOGS_ENTRY_NAME in electron/platform-roots.js.
+_DOTFOLDER_LOGS_SUBDIR: Final[str] = "logs"
 
 
 class BootstrapError(ValueError):
@@ -108,18 +138,182 @@ def root_name_for_env_name(env_name: str) -> str:
 
 
 def minds_data_dir_for(root_name: str) -> Path:
-    """Return the Imbue Studio data directory for a given root name (e.g. ~/.minds)."""
+    """Return the ``~/.<root_name>`` dotfolder root (e.g. ~/.minds).
+
+    On macOS this is the pre-migration root, which only the migration still reads; everywhere else it is the live root.
+    """
     return Path.home() / ".{}".format(root_name)
 
 
 def mngr_host_dir_for(root_name: str) -> Path:
-    """Return the mngr host directory for a given root name (e.g. ~/.minds/mngr)."""
-    return minds_data_dir_for(root_name) / "mngr"
+    """Return the mngr host directory for a given root name, under the tier's state root."""
+    return minds_dir_for_role(MindsPathRole.STATE, root_name) / "mngr"
 
 
 def mngr_prefix_for(root_name: str) -> str:
     """Return the mngr prefix for a given root name (e.g. minds-)."""
     return "{}-".format(root_name)
+
+
+class MindsPathRole(UpperCaseStrEnum):
+    """One of the platform-canonical roots a minds tier keeps its files under.
+
+    Three roles, not four: macOS files data, config, and state under one ``Application Support`` directory, so a config/state split is unobservable on the only platform minds ships.
+    """
+
+    STATE = auto()
+    CACHE = auto()
+    LOGS = auto()
+
+
+# The variable the Electron shell hands each already-resolved, already-tier-qualified root down through.
+_INJECTED_ENV_VAR_BY_ROLE: Final[dict[MindsPathRole, str]] = {
+    MindsPathRole.STATE: MINDS_STATE_DIR_ENV_VAR,
+    MindsPathRole.CACHE: MINDS_CACHE_DIR_ENV_VAR,
+    MindsPathRole.LOGS: MINDS_LOG_DIR_ENV_VAR,
+}
+
+# Each role's directory name under a ``MINDS_DATA_HOME`` tier root.
+_DATA_HOME_SUBDIR_BY_ROLE: Final[dict[MindsPathRole, str]] = {
+    MindsPathRole.STATE: "state",
+    MindsPathRole.CACHE: "cache",
+    MindsPathRole.LOGS: "logs",
+}
+
+
+def _check_injected_roots_are_complete() -> None:
+    """Reject a partial set of injected roots; all three or none.
+
+    A partial set means the shell and the backend disagree about the layout, which would scatter one tier's files across two of them. That is a bug in the launcher rather than something to paper over by filling the gaps in from the platform default.
+    """
+    present = tuple(name for name in _INJECTED_ROOT_ENV_VARS if os.environ.get(name))
+    if not present:
+        return
+    missing = tuple(name for name in _INJECTED_ROOT_ENV_VARS if not os.environ.get(name))
+    if missing:
+        raise BootstrapError(
+            f"{', '.join(present)} set but {', '.join(missing)} missing. "
+            "The Electron shell injects all three together; a partial set would split this tier's files "
+            "across two layouts. Set all of them or none."
+        )
+
+
+def _check_injected_roots_are_for(root_name: str) -> None:
+    """Reject an injected root set when a different tier's directory is the one asked for.
+
+    The injected roots are already qualified for the tier the injecting parent was launched as, so answering another tier with them would hand back the active tier's directory under that tier's name -- silently merging the two. Falling back to the platform default for the odd tier out would be the other half of the same split, so the mismatch has to raise.
+    """
+    active_root_name = resolve_minds_root_name()
+    if root_name == active_root_name:
+        return
+    raise BootstrapError(
+        f"{', '.join(_INJECTED_ROOT_ENV_VARS)} are set for {MINDS_ROOT_NAME_ENV_VAR}={active_root_name!r}, "
+        f"but {root_name!r} was asked for. Injected roots are already tier-qualified, so they cannot answer "
+        "for another tier."
+    )
+
+
+def _apple_root_for_role(role: MindsPathRole) -> Path:
+    """Return the Apple-canonical root for a role, e.g. ``~/Library/Caches/Imbue Studio``.
+
+    Written out rather than read from ``platformdirs``, whose macOS class layers ``$XDG_DATA_HOME`` / ``$XDG_CACHE_HOME`` over these paths (and has no XDG counterpart for the log dir). ``electron/platform-roots.js`` names the same three segments, so on a host that exports those variables the library would move the backend's state and cache off the roots the shell still writes to, and leave logs behind on a third.
+    """
+    library = Path.home() / "Library"
+    match role:
+        case MindsPathRole.STATE:
+            return library / "Application Support" / MINDS_APP_NAME
+        case MindsPathRole.CACHE:
+            return library / "Caches" / MINDS_APP_NAME
+        case MindsPathRole.LOGS:
+            return library / "Logs" / MINDS_APP_NAME
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _dotfolder_root_for_role(role: MindsPathRole, root_name: str) -> Path:
+    """Return the dotfolder root for a role, e.g. ``~/.minds`` for state and cache and ``~/.minds/logs`` for logs.
+
+    The layout every platform but macOS keeps: one dotfolder per tier holding all three roles, with the tier in the dotfolder's own name rather than a segment below it.
+    """
+    dotfolder = minds_data_dir_for(root_name)
+    match role:
+        case MindsPathRole.STATE | MindsPathRole.CACHE:
+            return dotfolder
+        case MindsPathRole.LOGS:
+            return dotfolder / _DOTFOLDER_LOGS_SUBDIR
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def minds_dir_for_role(role: MindsPathRole, root_name: str, platform: str = sys.platform) -> Path:
+    """Return one platform-canonical root for a tier, e.g. ``~/Library/Caches/Imbue Studio/production``.
+
+    Precedence: an injected ``MINDS_*_DIR`` root, then the ``MINDS_DATA_HOME`` throwaway-directory override, then the platform default.
+    The injected root wins because the shell already applied ``MINDS_DATA_HOME`` when it resolved it, so honoring the override again here could point the backend somewhere the shell is not looking.
+    An injected root answers only for the tier this process was launched as; any other ``root_name`` raises while one is set.
+
+    ``platform`` is a parameter rather than a read of ``sys.platform`` so one platform's layout can be asserted from another: darwin's from the Linux CI host that runs these tests, and the non-darwin guard from a darwin developer machine.
+    """
+    _check_injected_roots_are_complete()
+    injected = os.environ.get(_INJECTED_ENV_VAR_BY_ROLE[role])
+    if injected:
+        _check_injected_roots_are_for(root_name)
+        return Path(injected)
+    tier = env_name_from_root_name(root_name)
+    data_home = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
+    if data_home:
+        return Path(data_home) / tier / _DATA_HOME_SUBDIR_BY_ROLE[role]
+    if platform != _APPLE_PLATFORM:
+        return _dotfolder_root_for_role(role, root_name)
+    return _apple_root_for_role(role) / tier
+
+
+def _tier_names_under(parent: Path) -> tuple[str, ...]:
+    """Return the names of ``parent``'s immediate subdirectories, which are the tier names under the Apple and ``MINDS_DATA_HOME`` layouts."""
+    if not parent.is_dir():
+        return ()
+    return tuple(child.name for child in parent.iterdir() if child.is_dir())
+
+
+def _dotfolder_tier_names() -> tuple[str, ...]:
+    """Return the tier of every ``~/.minds`` / ``~/.minds-<tier>`` directory in the home directory.
+
+    A dotfolder whose name is not a root name -- ``~/.mindsomething``, or a hand-made ``~/.minds-backup-copy`` -- contributes nothing, so a name that is not a tier never reaches the caller.
+    """
+    home = Path.home()
+    if not home.is_dir():
+        return ()
+    tier_names = []
+    for child in home.iterdir():
+        if not child.is_dir():
+            continue
+        root_name = child.name.removeprefix(".")
+        if root_name != DEFAULT_MINDS_ROOT_NAME and not root_name.startswith(f"{_MINDS_PREFIX}-"):
+            continue
+        tier_names.append(env_name_from_root_name(root_name))
+    return tuple(tier_names)
+
+
+def list_state_tier_names(platform: str = sys.platform) -> tuple[str, ...]:
+    """Return the tier of every state directory on disk, unordered, e.g. ``("production", "staging")``.
+
+    Reads whichever directory the layout keeps its tiers in, because the two nest the tier and the role in opposite orders: the Apple layout and ``MINDS_DATA_HOME`` both give tiers a shared parent, while a dotfolder carries its tier in its own name.
+    Filtering these down to legal env names is the caller's job; this only reports what is on disk.
+    Injected roots are resolved for one tier only, so they cannot answer for the set of tiers and raise instead.
+    """
+    _check_injected_roots_are_complete()
+    injected = os.environ.get(MINDS_STATE_DIR_ENV_VAR)
+    if injected:
+        raise BootstrapError(
+            f"{MINDS_STATE_DIR_ENV_VAR}={injected!r} is resolved for one tier, so it cannot name where every "
+            "tier's state lives. Enumerate tiers from a process that was not handed injected roots."
+        )
+    data_home = os.environ.get(MINDS_DATA_HOME_ENV_VAR)
+    if data_home:
+        return _tier_names_under(Path(data_home))
+    if platform == _APPLE_PLATFORM:
+        return _tier_names_under(_apple_root_for_role(MindsPathRole.STATE))
+    return _dotfolder_tier_names()
 
 
 def resolve_effective_mngr_host_dir() -> Path:
@@ -147,8 +341,30 @@ class MindsRoot:
         return self._root_name
 
     @property
-    def data_dir(self) -> Path:
+    def tier(self) -> str:
+        return env_name_from_root_name(self._root_name)
+
+    @property
+    def legacy_data_dir(self) -> Path:
+        """The pre-migration ``~/.<root_name>`` root, read by the migration and nothing else."""
         return minds_data_dir_for(self._root_name)
+
+    @property
+    def state_dir(self) -> Path:
+        """Secrets, sessions, agent records, the virtualenv -- anything whose loss costs the user something."""
+        return minds_dir_for_role(MindsPathRole.STATE, self._root_name)
+
+    @property
+    def cache_dir(self) -> Path:
+        """Regenerable files the OS is free to delete at any time.
+
+        The virtualenv and the downloaded interpreter do NOT belong here: they are regenerable but the backend cannot boot without them, so a low-disk purge would brick the app.
+        """
+        return minds_dir_for_role(MindsPathRole.CACHE, self._root_name)
+
+    @property
+    def log_dir(self) -> Path:
+        return minds_dir_for_role(MindsPathRole.LOGS, self._root_name)
 
     @property
     def mngr_host_dir(self) -> Path:

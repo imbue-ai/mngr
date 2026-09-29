@@ -57,8 +57,8 @@ def _remove_legacy_leased_host_artifacts(root: MindsRoot) -> None:
     Best-effort: log + continue on any FS error.
     """
     legacy_paths = (
-        root.data_dir / "ssh" / "dynamic_hosts.toml",
-        root.data_dir / "ssh" / "keys" / "leased_host",
+        root.state_dir / "ssh" / "dynamic_hosts.toml",
+        root.state_dir / "ssh" / "keys" / "leased_host",
     )
     for path in legacy_paths:
         if not path.exists():

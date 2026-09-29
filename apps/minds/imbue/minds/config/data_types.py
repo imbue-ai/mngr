@@ -39,9 +39,21 @@ MNGR_BINARY: Final[str] = "mngr"
 
 
 class InstallationPaths(FrozenModel):
-    """Resolved filesystem paths of one Imbue Studio installation (one data directory on one device)."""
+    """Resolved filesystem paths of one Imbue Studio installation (one data directory on one device).
 
-    data_dir: Path = Field(description="Root directory for Imbue Studio data (e.g. ~/.minds)")
+    ``data_dir`` is the state root, which macOS backs up, and logs live on a
+    root of their own that it does not; see
+    ``imbue.minds.bootstrap.minds_dir_for_role`` for how the Electron shell
+    resolves them.
+    """
+
+    data_dir: Path = Field(
+        description="State root: secrets, sessions, agent records (e.g. ~/Library/Application Support/Imbue Studio/production)"
+    )
+    log_root: Path | None = Field(
+        default=None,
+        description="Log root; None lays it out under data_dir",
+    )
 
     @property
     def auth_dir(self) -> Path:
@@ -50,21 +62,19 @@ class InstallationPaths(FrozenModel):
 
     @property
     def mngr_host_dir(self) -> Path:
-        """Directory where mngr stores agent state for this Imbue Studio install (e.g. ~/.minds/mngr)."""
+        """Directory where mngr stores agent state for this Imbue Studio install."""
         return self.data_dir / "mngr"
 
     @property
     def log_dir(self) -> Path:
-        """Directory for log files (e.g. ~/.minds/logs).
+        """Directory for log files.
 
-        Mirrors the Electron shell's ``getLogDir()``: the Python backend's JSONL
-        log (``minds-events.jsonl``, via ``--log-file``) and the Electron
-        main-process log (``minds.log``) both live here.
+        Both the backend's JSONL log (``minds-events.jsonl``, via ``--log-file``) and the Electron main-process log (``minds.log``) live here.
         """
-        return self.data_dir / "logs"
+        return self.log_root if self.log_root is not None else self.data_dir / "logs"
 
     def workspace_dir(self, agent_id: AgentId) -> Path:
-        """Directory for a specific workspace's repo (e.g. ~/.minds/<agent-id>/)."""
+        """Directory for a specific workspace's repo."""
         return self.data_dir / str(agent_id)
 
 

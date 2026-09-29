@@ -33,8 +33,9 @@ import click
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import MindsRoot
-from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
@@ -213,9 +214,14 @@ def run(
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
     root_name = resolve_minds_root_name()
-    data_directory = minds_data_dir_for(root_name)
+    # The state root, not the legacy ~/.minds: caches and logs are separate roots
+    # so macOS can exclude them from Time Machine and reclaim the cache.
+    data_directory = minds_dir_for_role(MindsPathRole.STATE, root_name)
     minds_config = MindsConfig(data_dir=data_directory)
-    paths = InstallationPaths(data_dir=data_directory)
+    paths = InstallationPaths(
+        data_dir=data_directory,
+        log_root=minds_dir_for_role(MindsPathRole.LOGS, root_name),
+    )
 
     # Initialize Sentry for the Imbue Studio backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.

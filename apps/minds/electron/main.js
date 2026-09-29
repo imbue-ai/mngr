@@ -6,6 +6,7 @@ const paths = require('./paths');
 const { initElectronLogging, closeElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
 const { initSentry, captureManualReport } = require('./sentry');
+const { migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
 const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
@@ -74,8 +75,33 @@ const { registerContextMenuFor } = require('./context-menu');
 // IPC channel. Main owns the backend lifecycle, native dialogs/menus,
 // session restore, deeplinks, and the quit sequence.
 
-// Tee console output into ~/.minds/logs/electron.log and record uncaught
-// main-process failures BEFORE anything else runs.
+// Point Electron's own userData at this tier's state root, replacing the
+// per-productName default, so that dev, staging, and production installs stay
+// fully isolated from each other (cookies, sessions, Local Storage). Assignment
+// only -- nothing is created yet -- so it is safe to do before the migration
+// below, and it must precede initSentry(): Sentry starts a Crashpad handler that
+// resolves userData once, and would otherwise put crash dumps and the unsent
+// event queue outside the tier directory, shared across every tier.
+app.setPath('userData', paths.getStateDir());
+
+// Move this tier's files off the legacy ~/.<MINDS_ROOT_NAME> root, once. Runs
+// before logging and Sentry because both open files under the roots it moves.
+// Deliberately allowed to throw: a half-migrated tier has some files at the new
+// roots and some at the old, and booting on top of that is worse than not
+// booting. Neither of those two reporting channels exists yet, so the failure
+// gets written to the log root and shown before the throw takes the launch down.
+const legacyDataDir = paths.getLegacyDataDir();
+const platformRoots = paths.getPlatformRoots();
+try {
+  migrateLegacyDataDir({ legacyDir: legacyDataDir, roots: platformRoots });
+} catch (err) {
+  const detail = recordMigrationFailure({ roots: platformRoots, legacyDir: legacyDataDir, error: err });
+  dialog.showErrorBox('Minds could not move its data', detail);
+  throw err;
+}
+
+// Tee console output into the tier's log root and record uncaught main-process
+// failures BEFORE anything else runs.
 initElectronLogging();
 
 // A Linux launch with a --no-sandbox the sandbox did not need (see
@@ -153,10 +179,6 @@ if (app.isPackaged) {
   }
 }
 
-// Redirect Electron's userData directory to ~/.<MINDS_ROOT_NAME>/ so that dev
-// and production installs are fully isolated (cookies, sessions, caches, etc.).
-app.setPath('userData', paths.getDataDir());
-
 const isMac = process.platform === 'darwin';
 
 // A popout follows the cursor on a timer (Electron cannot hand a live drag
@@ -220,14 +242,14 @@ const recentShellEventKeys = new Map(); // key -> timestamp
 const SHELL_EVENT_DEDUPE_WINDOW_MS = 3000;
 
 function getSessionStatePath() {
-  return path.join(paths.getDataDir(), 'window-state.json');
+  return path.join(paths.getStateDir(), 'window-state.json');
 }
 
 // The loading document's first-launch intro plays once per install. Electron
 // owns this marker because Electron is the only thing that plays the film; the
 // backend separately owns whether onboarding is complete.
 function getIntroSeenPath() {
-  return path.join(paths.getDataDir(), 'intro-seen.json');
+  return path.join(paths.getStateDir(), 'intro-seen.json');
 }
 
 function hasSeenIntro() {
@@ -242,7 +264,7 @@ function hasSeenIntro() {
 // Written when the film STARTS, so a quit during it still counts as seen.
 function markIntroSeen() {
   try {
-    fs.mkdirSync(paths.getDataDir(), { recursive: true });
+    fs.mkdirSync(paths.getStateDir(), { recursive: true });
     fs.writeFileSync(getIntroSeenPath(), JSON.stringify({ has_seen_intro: true }));
   } catch (err) {
     console.warn('[startup] could not write the intro-seen marker:', err.message);
@@ -477,7 +499,7 @@ let displayZoomPercent = null;
 
 function currentDisplayZoomPercent() {
   if (displayZoomPercent === null) {
-    const read = displayZoom.readZoomPercent(paths.getDataDir());
+    const read = displayZoom.readZoomPercent(paths.getStateDir());
     if (read.reason !== null) {
       console.warn(`[display-zoom] falling back to ${read.percent}%: stored preference ${read.reason}`);
     }
@@ -2686,7 +2708,7 @@ ipcMain.handle('set-display-zoom', (_event, percent) => {
   if (normalized === null) {
     throw new Error(`Unknown display zoom ${JSON.stringify(percent)}`);
   }
-  displayZoom.writeZoomPercent(paths.getDataDir(), normalized);
+  displayZoom.writeZoomPercent(paths.getStateDir(), normalized);
   displayZoomPercent = normalized;
   applyDisplayZoomToAllWindows();
   return normalized;

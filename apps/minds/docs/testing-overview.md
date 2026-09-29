@@ -82,8 +82,10 @@ is the only thing that runs them.
 
 - **Node unit** (`test/unit/*.test.js`): `node --test` suites for the pure
   Electron-shell helpers (startup routing, the loading document's intro
-  schedule, surface routing, deeplinks, session persistence, log handling, the
-  embed contract, release channels). Run alone via `pnpm test:unit`.
+  schedule, surface routing, deeplinks, session persistence, log handling,
+  platform roots, the data-directory migration, the embed contract, release
+  channels) and for the `paths.js` export surface the Electron-only modules
+  consume. Run alone via `pnpm test:unit`.
 - **Frontend unit** (`frontend/src/**/*.test.ts`): vitest suites for the SPA's
   models and views, rendered without a DOM through the `renderRoot` helper in
   `frontend/src/testing.ts`. Run alone via `pnpm -C frontend test`.

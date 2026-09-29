@@ -47,6 +47,22 @@ function latchkeyCurlEnv() {
   return { LATCHKEY_CURL: router };
 }
 
+/**
+ * The three platform-canonical roots, as the env vars the Python backend reads
+ * ahead of its own resolver.
+ *
+ * Always all three: the backend rejects a partial set rather than filling the
+ * gaps in from its own resolver, which would split one tier across two layouts.
+ */
+function platformRootEnv() {
+  const roots = paths.getPlatformRoots();
+  return {
+    MINDS_STATE_DIR: roots.state,
+    MINDS_CACHE_DIR: roots.cache,
+    MINDS_LOG_DIR: roots.logs,
+  };
+}
+
 // Backend stdout JSONL event fields that carry secrets and must be masked
 // before the raw line is written to minds.log (which is uploaded with bug
 // reports). Keyed by event type; each value lists the fields to redact.
@@ -315,6 +331,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
           MNGR_PREFIX: mngrPrefix,
+          ...platformRootEnv(),
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           // The prestart hook (ensure-binaries.js) stages resources/desync/ before the
@@ -351,7 +368,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
         uvBin = uvPath;
         args = [
           'run', '--project', pyprojectDir,
-          // --active makes uv use VIRTUAL_ENV (~/.minds/.venv) instead of
+          // --active makes uv use VIRTUAL_ENV (the venv under the state root) instead of
           // <project>/.venv, which is inside the signed .app bundle and
           // read-only on macOS. Without this, `uv run` tries to create
           // .venv inside the bundle and fails with "Operation not permitted".
@@ -392,6 +409,7 @@ function startBackend(onProgress, onNotification, onAuthEvent, onMngrForwardStar
           MINDS_ROOT_NAME: mindsRootName,
           MNGR_HOST_DIR: mngrHostDir,
           MNGR_PREFIX: mngrPrefix,
+          ...platformRootEnv(),
           MINDS_LATCHKEY_BINARY: paths.getLatchkeyPath(),
           MINDS_LATCHKEY_DIRECTORY: paths.getLatchkeyDirectory(),
           MINDS_RESTIC_BINARY: paths.getResticPath(),

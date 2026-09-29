@@ -47,7 +47,8 @@ from test_snapshot_resume import _isolated_host_config_root
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.secret_wrapping import SecretWrappingError
-from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import MindsPathRole
+from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.minds.bootstrap import mngr_prefix_for
 from imbue.minds.desktop_client.backup_export import export_zip_path_for_host
@@ -108,7 +109,7 @@ class _SyncE2ERuntime(FrozenModel):
     """Per-test app runtime: the private minds root and how to reach everything."""
 
     root_name: str
-    data_root: Path
+    state_root: Path
     mngr_prefix: str
     host_config_root: Path
     template_path: Path
@@ -138,7 +139,7 @@ def _prepare_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync_e2e_e
     ensure_minds_env_defaults(setenv=monkeypatch.setenv)
     return _SyncE2ERuntime(
         root_name=root_name,
-        data_root=minds_data_dir_for(root_name),
+        state_root=minds_dir_for_role(MindsPathRole.STATE, root_name),
         mngr_prefix=mngr_prefix_for(root_name),
         host_config_root=_isolated_host_config_root(tmp_path),
         template_path=resolve_default_workspace_template_path(),
@@ -233,9 +234,9 @@ def _kill_processes_referencing(unique_marker: str) -> None:
 
 def _wipe_local_install(runtime: _SyncE2ERuntime) -> None:
     """Simulate total machine loss: no minds data, no mngr host dir, no processes, no containers."""
-    logger.info("Wiping local install: {} and containers with prefix {}", runtime.data_root, runtime.mngr_prefix)
+    logger.info("Wiping local install: {} and containers with prefix {}", runtime.state_root, runtime.mngr_prefix)
     _kill_processes_referencing(runtime.root_name)
-    shutil.rmtree(runtime.data_root, ignore_errors=True)
+    shutil.rmtree(runtime.state_root, ignore_errors=True)
     container_ids = _run_docker(["ps", "-aq", "--filter", f"name={runtime.mngr_prefix}"]).split()
     if container_ids:
         _run_docker(["rm", "-f", *container_ids], timeout=120)
@@ -937,13 +938,13 @@ def test_legacy_association_files_migrate_into_synced_records(
         agent_id = _create_unassociated_workspace(runtime)
 
         # Fabricate the pre-sync generation's on-disk state (setup, pre-start).
-        runtime.data_root.mkdir(parents=True, exist_ok=True)
-        (runtime.data_root / "workspace_associations.json").write_text(
+        runtime.state_root.mkdir(parents=True, exist_ok=True)
+        (runtime.state_root / "workspace_associations.json").write_text(
             json.dumps({sync_e2e_account.user_id: [agent_id]})
         )
-        (runtime.data_root / "backup_password").write_text(legacy_password + "\n")
-        (runtime.data_root / "backup_password_hash").write_text(PasswordHasher().hash(legacy_password))
-        backup_envs_dir = runtime.data_root / "backup_envs"
+        (runtime.state_root / "backup_password").write_text(legacy_password + "\n")
+        (runtime.state_root / "backup_password_hash").write_text(PasswordHasher().hash(legacy_password))
+        backup_envs_dir = runtime.state_root / "backup_envs"
         backup_envs_dir.mkdir(parents=True, exist_ok=True)
         (backup_envs_dir / f"{agent_id}.env").write_text(
             f"RESTIC_REPOSITORY={tmp_path / 'legacy-repo'}\nRESTIC_PASSWORD=ws-{get_short_random_string()}\n"
@@ -964,12 +965,12 @@ def test_legacy_association_files_migrate_into_synced_records(
                 _unwrapped_dek(bundle, "not-the-legacy-password")
 
             # The legacy files were retired, not deleted.
-            assert not (runtime.data_root / "workspace_associations.json").exists()
-            assert (runtime.data_root / "workspace_associations.json.pre-sync").exists()
-            assert not (runtime.data_root / "backup_password").exists()
-            assert (runtime.data_root / "backup_password.pre-sync").exists()
-            assert not (runtime.data_root / "backup_password_hash").exists()
-            assert (runtime.data_root / "backup_password_hash.pre-sync").exists()
+            assert not (runtime.state_root / "workspace_associations.json").exists()
+            assert (runtime.state_root / "workspace_associations.json.pre-sync").exists()
+            assert not (runtime.state_root / "backup_password").exists()
+            assert (runtime.state_root / "backup_password.pre-sync").exists()
+            assert not (runtime.state_root / "backup_password_hash").exists()
+            assert (runtime.state_root / "backup_password_hash.pre-sync").exists()
 
             # The workspace shows as associated in the real settings UI: the
             # Account group renders the linked state (never the associate

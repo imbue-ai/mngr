@@ -99,6 +99,8 @@ from pydantic import ConfigDict
 from pydantic import Field
 from pydantic import SecretStr
 
+from imbue.minds.bootstrap import MindsPathRole
+from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.desktop_client.e2e_workspace_runner import descendant_frames
 from imbue.minds.desktop_client.e2e_workspace_runner import sign_in_via_provider_chooser
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
@@ -147,14 +149,23 @@ def _bundled_root_name() -> str:
     return "minds"
 
 
-MINDS_HOME = Path(os.environ.get("HOME", "/Users/macrunner")) / f".{_bundled_root_name()}"
-EVENTS_LOG = MINDS_HOME / "logs" / "minds-events.jsonl"
-ONE_TIME_CODES = MINDS_HOME / "auth" / "one_time_codes.json"
+def _minds_roots() -> tuple[Path, Path]:
+    """The app's ``(state, logs)`` roots, resolved by the same helper the app's own backend uses."""
+    root_name = _bundled_root_name()
+    return (
+        minds_dir_for_role(MindsPathRole.STATE, root_name),
+        minds_dir_for_role(MindsPathRole.LOGS, root_name),
+    )
+
+
+MINDS_STATE_HOME, MINDS_LOG_HOME = _minds_roots()
+EVENTS_LOG = MINDS_LOG_HOME / "minds-events.jsonl"
+ONE_TIME_CODES = MINDS_STATE_HOME / "auth" / "one_time_codes.json"
 SCREENSHOT_DIR = Path(os.environ.get("LAUNCH_TO_MSG_SHOTS_DIR", "/tmp/launch-to-msg-screenshots"))
 SLACK_MOCK_STATE = Path("/tmp/slack-mock")
 # Plain HTTP; socat terminates TLS on :443.
 SLACK_MOCK_PORT = 8443
-LATCHKEY_DIR = MINDS_HOME / "latchkey"
+LATCHKEY_DIR = MINDS_STATE_HOME / "latchkey"
 # The latchkey-gateway extension writes pending permission request files
 # here. Iter 10 reads this directory directly to verify that Claude
 # re-submits a permission request after a deny (rather than infer it
@@ -2074,7 +2085,7 @@ def run_e2e() -> int:
             # tile check above (which scrapes the same discovery layer the
             # destroy handler does).
             logger.info("=== mngr CLI list: cross-check W1 present, W2 removed ===")
-            bundled_mngr = MINDS_HOME / ".venv" / "bin" / "mngr"
+            bundled_mngr = MINDS_STATE_HOME / ".venv" / "bin" / "mngr"
             if bundled_mngr.exists():
                 # mngr's lima provider shells out to ``limactl list --json``
                 # without going through the bundled-binary env vars (those
@@ -2087,7 +2098,7 @@ def run_e2e() -> int:
                 bundled_lima_bin = minds_resources / "lima" / "bin"
                 mngr_env = {
                     **os.environ,
-                    "MNGR_HOST_DIR": str(MINDS_HOME / "mngr"),
+                    "MNGR_HOST_DIR": str(MINDS_STATE_HOME / "mngr"),
                     "PATH": f"{bundled_lima_bin}:{os.environ.get('PATH', '')}",
                 }
                 # ``--on-error continue`` puts each provider's discovery error

@@ -86,8 +86,8 @@ class DevEnvName(NonEmptyStr):
     followed by ``-`` and a 2-36 char suffix of lowercase alphanumerics
     / ``-`` / ``_`` (no leading or trailing punctuation). The name flows
     into Modal environment names, Neon DB names, SuperTokens app names,
-    OVH IAM tags, and filesystem paths under ``~/.minds-<name>/``, so we
-    keep it conservative.
+    OVH IAM tags, and the env's own tier directory under each of the
+    canonical roots, so we keep it conservative.
 
     The reserved tier names ``staging`` and ``production`` are also
     accepted so the same type can carry the activated env name through

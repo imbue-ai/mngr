@@ -402,8 +402,9 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    # Both are the ported Sentry loguru ``logging.Handler`` subclasses, which
-    # need ``__init__`` to set up their executor / flags around super().__init__.
+    # ``bootstrap.MindsRoot``, which cannot be a pydantic model: the
+    # import-linter contract "minds bootstrap layer stays mngr-free and
+    # import-cheap" forbids pydantic at that layer.
     rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(1))
 
 
