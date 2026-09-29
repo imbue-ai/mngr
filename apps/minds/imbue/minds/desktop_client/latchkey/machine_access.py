@@ -212,7 +212,7 @@ class MachineAccess(MutableModel):
         info = self.backend_resolver.get_agent_display_info(parsed)
         if info is None or not info.provider_name:
             raise MachineUnreachableError(
-                f"Minds does not know which provider workspace {workspace_agent_id} runs on yet, so it cannot "
+                f"Imbue Studio does not know which provider workspace {workspace_agent_id} runs on yet, so it cannot "
                 "reach its machine. Try again in a moment."
             )
         return info.provider_name

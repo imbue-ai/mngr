@@ -11,6 +11,7 @@ from typing import IO
 from typing import cast
 
 import pytest
+from pydantic import PrivateAttr
 
 from imbue.concurrency_group.errors import ProcessError
 from imbue.concurrency_group.errors import ProcessTimeoutError
@@ -24,6 +25,7 @@ from imbue.concurrency_group.subprocess_utils import _shutdown_popen
 from imbue.concurrency_group.subprocess_utils import _start_exit_waiter
 from imbue.concurrency_group.subprocess_utils import run_local_command_modern_version
 from imbue.concurrency_group.test_utils import LONG_SLEEP_SECONDS
+from imbue.concurrency_group.test_utils import make_idle_child_script
 
 
 def test_check_raises_process_timeout_error_when_timed_out() -> None:
@@ -580,3 +582,71 @@ def test_run_local_command_returns_the_exit_code_of_a_child_that_closed_its_pipe
 
     assert finished.is_timed_out is False
     assert finished.returncode == 7
+
+
+# An idle child's whole lifetime: long enough for a reintroduced timer to fire
+# repeatedly inside it, short enough to keep this a unit test, and unusual enough
+# not to collide with other tests' sleeps.
+_IDLE_CHILD_LIFETIME_SECONDS: Final[str] = "0.53"
+# A healthy run measures six or nine consultations -- two or three passes of the
+# loop -- and the same count whether the child idles for half a second or for two,
+# since the loop wakes for the child's exit and nothing else. The bound trips on a
+# timer with a period under about 70ms (measured: a 60ms poll reaches 36, an 80ms
+# poll only 27), and the 10ms poll this loop replaced reaches 159.
+_MAX_SHUTDOWN_EVENT_CONSULTATIONS_WHILE_IDLE: Final[int] = 30
+
+
+class _CountingShutdownEvent(ShutdownEvent):
+    """A real ShutdownEvent that records how often it was consulted.
+
+    The read loop consults it a fixed number of times per pass, so the count rises
+    with the number of times the loop woke.
+    """
+
+    _consultation_count: int = PrivateAttr(default=0)
+
+    @property
+    def consultation_count(self) -> int:
+        return self._consultation_count
+
+    def is_set(self) -> bool:
+        self._consultation_count += 1
+        return super().is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self._consultation_count += 1
+        return super().wait(timeout)
+
+
+@pytest.mark.parametrize(
+    "is_closing_its_pipes",
+    [
+        pytest.param(False, id="child_keeps_its_pipes_open"),
+        pytest.param(True, id="child_closed_its_pipes"),
+    ],
+)
+def test_run_local_command_does_not_wake_while_its_child_sits_idle(is_closing_its_pipes: bool) -> None:
+    """The read loop must block until the child speaks, exits, or shutdown is requested.
+
+    Waking on a timer instead is the regression this loop was written to remove: a
+    poll per child per 10ms was most of what a handful of idle background processes
+    cost. ``test_waiting_on_idle_background_processes_uses_almost_no_cpu`` bounds that
+    cost end to end but cannot resolve it finely; counting the loop's wakeups pins the
+    property exactly.
+    """
+    shutdown_event = _CountingShutdownEvent()
+
+    finished = run_local_command_modern_version(
+        ["sh", "-c", make_idle_child_script(_IDLE_CHILD_LIFETIME_SECONDS, is_closing_its_pipes=is_closing_its_pipes)],
+        is_checked=False,
+        shutdown_event=shutdown_event,
+    )
+
+    assert finished.returncode == 0
+    assert shutdown_event.consultation_count >= 1, (
+        "the read loop never consulted its shutdown event, so this test can no longer see its wakeups"
+    )
+    assert shutdown_event.consultation_count <= _MAX_SHUTDOWN_EVENT_CONSULTATIONS_WHILE_IDLE, (
+        f"the read loop woke {shutdown_event.consultation_count} times (counted as shutdown-event "
+        f"consultations) while waiting {_IDLE_CHILD_LIFETIME_SECONDS}s on a child that did nothing"
+    )

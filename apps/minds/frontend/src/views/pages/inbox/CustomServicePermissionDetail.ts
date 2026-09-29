@@ -89,7 +89,7 @@ function summary(detail: Detail, isHeaderOpen: boolean, onToggleHeader: () => vo
     m(
       "p",
       { class: "type-body text-primary" },
-      "Approving this request will keep the credentials in Mind's encrypted credential store without exposing them " +
+      "Approving this request will keep the credentials in Imbue Studio's encrypted credential store without exposing them " +
         "to the agent directly. You can always revoke the agent's access.",
     ),
   );

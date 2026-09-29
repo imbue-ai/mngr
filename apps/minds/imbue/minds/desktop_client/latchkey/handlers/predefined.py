@@ -231,7 +231,7 @@ def _build_manual_credentials_form(
             prompt=UiManualCredentialsPrompt(
                 parameters=(),
                 message=(
-                    f"{service_display_name} does not support browser sign-in, and Minds cannot work out "
+                    f"{service_display_name} does not support browser sign-in, and Imbue Studio cannot work out "
                     "which credentials to ask for. It has to be connected some other way."
                 ),
             ),
@@ -241,7 +241,7 @@ def _build_manual_credentials_form(
         prompt=UiManualCredentialsPrompt(
             parameters=parsed_command.parameters,
             message=(
-                f"{service_display_name} does not support browser sign-in, so Minds needs its credentials. "
+                f"{service_display_name} does not support browser sign-in, so Imbue Studio needs its credentials. "
                 "Get them from the provider and fill them in -- Approve stores them and grants the permission."
             ),
         ),
@@ -527,7 +527,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
     ``deny`` writes a ``DENIED`` response and notifies; nothing else.
     """
 
-    data_dir: Path = Field(frozen=True, description="Minds data directory (typically ~/.minds).")
+    data_dir: Path = Field(frozen=True, description="Imbue Studio data directory (typically ~/.minds).")
     latchkey: Latchkey = Field(description="Latchkey wrapper used to probe credentials and run sign-in flows.")
     services_catalog: ServicesCatalog = Field(
         description=(
@@ -733,7 +733,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 chosen.credential_status,
             )
             # ``auth_browser`` owns all of the auth-flow logic, including the
-            # Minds Google OAuth client preference for ``google-*`` services.
+            # Imbue Studio Google OAuth client preference for ``google-*`` services.
             is_success, detail = machine_latchkey.auth_browser(service_info.name, account=chosen.account)
         elif accounts_before:
             logger.info("Adding a new {} account through the permission dialog", service_info.name)
@@ -871,7 +871,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             return _manual_credentials_result(
                 message=(
                     f"{service_info.display_name} did not accept those credentials. They may be mistyped or "
-                    f"no longer valid (revoked, rotated or expired), or Minds could not reach "
+                    f"no longer valid (revoked, rotated or expired), or Imbue Studio could not reach "
                     f"{service_info.display_name} to check them."
                 ),
                 prompt=prompt,

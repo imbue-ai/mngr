@@ -45,7 +45,7 @@ export interface NoticePayload {
 }
 
 const DISCOVERY_BLOCKED_MESSAGE =
-  "Mind lost contact with your machines and can't reconnect on its own. Your work is safe.";
+  "Imbue Studio lost contact with your machines and can't reconnect on its own. Your work is safe.";
 
 /** The conditions with a line to say: a measured, confirmed block. */
 type EnvironmentBlock = Exclude<EnvironmentCondition, "NONE" | "UNKNOWN">;
@@ -81,7 +81,7 @@ function discoveryBlockedNotice(isRestartAppAvailable: boolean): NoticePayload {
     key: "discovery-blocked",
     variant: "error",
     message: DISCOVERY_BLOCKED_MESSAGE,
-    action: isRestartAppAvailable ? { label: "Restart Mind", kind: "restart-app" } : null,
+    action: isRestartAppAvailable ? { label: "Restart Imbue Studio", kind: "restart-app" } : null,
   };
 }
 
@@ -291,7 +291,7 @@ function standingNotice(notice: StandingUpdateNotice): NoticePayload | null {
       return {
         key: "workspace-out-of-date",
         variant: "warn",
-        message: "This machine is running an older version of Mind.",
+        message: "This machine is running an older version of Imbue Studio.",
         action: SEE_UPDATE,
       };
     case "needs-recreation":

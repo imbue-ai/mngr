@@ -77,7 +77,7 @@ function getDesyncBinDir() {
  * scripts/download-binaries.js. In dev, ``pnpm start`` runs the
  * ``prestart`` hook (``node scripts/download-binaries.js``) so the
  * binary is present before Electron boots, mirroring the bundled-app
- * UX -- a Minds end user (or dev) should never have to install restic
+ * UX -- an Imbue Studio end user (or dev) should never have to install restic
  * separately.
  */
 function getResticPath() {

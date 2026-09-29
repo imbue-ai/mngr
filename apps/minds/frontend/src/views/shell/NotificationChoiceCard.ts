@@ -30,7 +30,7 @@ export function NotificationChoiceCard(): m.Component<{
           m(
             "h2",
             { class: "type-label text-primary" },
-            "How should Mind notify you?",
+            "How should Imbue Studio notify you?",
           ),
           m(
             "p",

@@ -347,7 +347,7 @@ def _handle_test_notification() -> Response:
         return _error_response("Notification dispatch is not configured", 503)
     dispatcher.dispatch(
         NotificationRequest(
-            title="Mind",
+            title="Imbue Studio",
             subtitle="Test notification",
             body="System notifications are reaching you.",
         )

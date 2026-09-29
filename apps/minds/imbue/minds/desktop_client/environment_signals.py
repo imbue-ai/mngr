@@ -1,6 +1,6 @@
 """Laptop-side environment signals: sleep, and connectivity from this device.
 
-Minds convicts a workspace of being stuck by watching it fail to answer, and
+Imbue Studio convicts a workspace of being stuck by watching it fail to answer, and
 then acts on that conviction by restarting it. Both steps quietly assume the
 laptop was awake and on a working network the whole time. On a laptop neither
 holds often enough to matter: the lid closes mid-outage-check and every

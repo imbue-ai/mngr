@@ -48,7 +48,7 @@ from imbue.mngr.utils.testing import get_short_random_string
 
 # Point ``MINDS_RESTIC_BINARY`` at the bundled ``resources/restic/restic``
 # binary so restic_cli tests don't require a system-wide restic install.
-# Mirrors what Electron's backend.js does at runtime: a Minds end user --
+# Mirrors what Electron's backend.js does at runtime: an Imbue Studio end user --
 # or a dev running tests -- should never have to ``brew install restic``.
 # Run unconditionally before any test module is imported; restic_cli.py
 # reads the env var lazily, so a late-setting fixture would also work,
@@ -98,7 +98,7 @@ def mngr_test_prefix() -> str:
     """Override the shared mngr_test_prefix to use `mngr_test-YYYY-MM-DD-HH-MM-SS-`.
 
     The shared fixture defaults to `mngr_<hex>-`, which the Modal backend guards
-    reject when used to create a Modal env under pytest. Minds tests spawn real
+    reject when used to create a Modal env under pytest. Imbue Studio tests spawn real
     mngr subprocesses that can create Modal envs, so the prefix needs to match
     the timestamped format the guards AND the CI cleanup script recognize.
 

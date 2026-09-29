@@ -1,4 +1,4 @@
-"""Minds application configuration stored in ``~/.minds/config.toml``.
+"""Imbue Studio application configuration stored in ``~/.minds/config.toml``.
 
 Provides a thread-safe interface for reading and writing user preferences
 that persist across sessions, such as the default account for new workspaces

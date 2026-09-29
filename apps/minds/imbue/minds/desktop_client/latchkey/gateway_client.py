@@ -125,11 +125,11 @@ class PredefinedRequestPayload(FrozenModel):
     )
 
 
-# The rationale stored on a request Minds files for itself. The request is
+# The rationale stored on a request Imbue Studio files for itself. The request is
 # approved in the same breath so nobody reads it in the UI, but the gateway
 # requires one and a reader of the permissions file deserves to know the grant
 # did not come from an agent asking.
-_MINDS_SHARE_RATIONALE: Final[str] = "Shared by the user from Minds."
+_MINDS_SHARE_RATIONALE: Final[str] = "Shared by the user from Imbue Studio."
 
 
 class FileSharingAccess(UpperCaseStrEnum):
@@ -670,13 +670,13 @@ class LatchkeyGatewayClient(MutableModel):
     ) -> str:
         """File a file-sharing permission request against ``target`` and return its id.
 
-        Normally an *agent* files these and the user answers; Minds files one
+        Normally an *agent* files these and the user answers; Imbue Studio files one
         itself when the user shares a path from the Local files pane, having
         decided already. Approving it right after is what turns it into a grant.
 
         ``target`` is the workspace's own permissions file. Naming it is
         necessary and privileged: the gateway otherwise writes an approved
-        effect into whichever file the *caller's* context names, which for Minds
+        effect into whichever file the *caller's* context names, which for Imbue Studio
         is its own admin file -- and a file-sharing grant landing there wedges
         the gateway, since that file declares no ``latchkey-self`` scope. The
         extension only honours the override for the desktop client.

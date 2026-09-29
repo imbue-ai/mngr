@@ -62,7 +62,7 @@ const NOTIFICATION_STYLE_OPTIONS: {
     value: "os",
     label: "System notifications",
     description:
-      "Banners from your operating system, even when Mind is in the background.",
+      "Banners from your operating system, even when Imbue Studio is in the background.",
   },
   {
     value: "both",
@@ -87,7 +87,7 @@ function notificationOsPermissionNotice(model: SettingsModel): m.Vnode {
         "span",
         {},
         "System banners come from your operating system. If they don't " +
-          "appear, check its notification settings for minds.",
+          "appear, check its notification settings for Imbue Studio.",
       ),
       m("span", { class: "flex shrink-0 items-center gap-2" }, [
         m(
@@ -124,7 +124,7 @@ function notificationOsPermissionNotice(model: SettingsModel): m.Vnode {
           "span",
           { class: "type-helper", role: "alert" },
           "Couldn't open System Settings automatically — check your OS's " +
-            "notification settings for minds.",
+            "notification settings for Imbue Studio.",
         )
       : null,
   );
@@ -415,7 +415,7 @@ function machineUpdatesSection(model: SettingsModel): m.Children {
     m(
       "p",
       { class: "type-body text-secondary mb-3" },
-      "When you schedule an update for a machine, Mind runs it inside this window. A machine that " +
+      "When you schedule an update for a machine, Imbue Studio runs it inside this window. A machine that " +
         "isn't reachable or has agents working in it when the window comes is skipped and tried again " +
         "in the next one.",
     ),
@@ -588,7 +588,7 @@ function updateStatusLine(model: SettingsModel): m.Children {
     );
   }
   if (status.type === "update-downloaded") {
-    return m(Notice, { variant: "info" }, `Mind ${status.version} is downloaded. ${installInstruction(state)}`);
+    return m(Notice, { variant: "info" }, `Imbue Studio ${status.version} is downloaded. ${installInstruction(state)}`);
   }
   return null;
 }
@@ -704,7 +704,7 @@ function channelSwitchDialog(model: SettingsModel): m.Children {
         ? m(
             "p",
             { class: "type-body text-secondary mb-3" },
-            `Mind ${stagedVersion} is already downloaded and will still install when you ` +
+            `Imbue Studio ${stagedVersion} is already downloaded and will still install when you ` +
               `restart -- you will stay on it until ${label} passes it.`,
           )
         : null,
@@ -891,7 +891,7 @@ function updatesPanel(model: SettingsModel): m.Children {
     m(
       "p",
       { class: "type-body text-secondary" },
-      `You're on Mind ${state.currentVersion}.`,
+      `You're on Imbue Studio ${state.currentVersion}.`,
     ),
     updateStandingLine(model),
     updateStatusLine(model),

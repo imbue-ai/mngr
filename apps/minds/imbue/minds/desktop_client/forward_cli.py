@@ -1,4 +1,4 @@
-"""Minds-side wrapper around the ``mngr forward`` plugin subprocess.
+"""The wrapper Imbue Studio puts around the ``mngr forward`` plugin subprocess.
 
 Phase 2 deletes minds' in-process subdomain-forwarding, auth, and observe-
 spawning code; this file replaces them with a thin consumer that:

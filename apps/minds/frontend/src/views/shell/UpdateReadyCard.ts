@@ -54,16 +54,16 @@ export function updateInstallingCopy(
 ): { title: string; detail: string; action: string } {
   if (installPolicy === "on-quit") {
     return {
-      title: `Restarting into Mind ${version}`,
-      detail: "Mind will be back in a moment",
+      title: `Restarting into Imbue Studio ${version}`,
+      detail: "Imbue Studio will be back in a moment",
       action: "Restarting...",
     };
   }
   return {
-    title: `Installing Mind ${version}`,
+    title: `Installing Imbue Studio ${version}`,
     detail: needsPassword
-      ? "Enter your password when asked; Mind restarts when it's done"
-      : "Mind restarts when it's done",
+      ? "Enter your password when asked; Imbue Studio restarts when it's done"
+      : "Imbue Studio restarts when it's done",
     action: "Installing...",
   };
 }
@@ -77,7 +77,7 @@ export function UpdateReadyCard(): m.Component<UpdateReadyCardAttrs> {
       // dismiss, since dismissing would hide the one surface saying so.
       const copy = isInstalling
         ? updateInstallingCopy(version, installPolicy, needsPassword)
-        : { title: `Mind ${version} is ready`, ...updateReadyCopy(installPolicy, needsPassword) };
+        : { title: `Imbue Studio ${version} is ready`, ...updateReadyCopy(installPolicy, needsPassword) };
       return m(
         "div",
         {

@@ -24,7 +24,7 @@ _AGENT_ID = "agent-000102030405060708090a0b0c0d0e0f"
 _DEVICE_ID = "host-0f0e0d0c0b0a09080706050403020100"
 _HOST_ID = "host-92ed9fcbce9a4b0fb1340cf39ef15799"
 _TARGET = _WorkspaceTarget(path="/home/agent/synced_folders/host-dev/home/someone/notes", is_resumed=True)
-# The same directory, but one Minds had to create -- no shared history to read.
+# The same directory, but one Imbue Studio had to create -- no shared history to read.
 _FRESH_TARGET = _WorkspaceTarget(path=_TARGET.path, is_resumed=False)
 
 
@@ -75,7 +75,7 @@ def test_pair_argv_names_the_machine_and_both_paths() -> None:
 
 
 def test_pair_argv_never_starts_a_stopped_machine() -> None:
-    """Restoring syncs is Minds' own doing, and must not be what bills for a machine."""
+    """Restoring syncs is Imbue Studio's own doing, and must not be what bills for a machine."""
     assert "--no-start" in _build_pair_argv("mngr", _spec(), _TARGET)
     assert "--start" not in _build_pair_argv("mngr", _spec(), _TARGET)
 
@@ -188,7 +188,7 @@ def test_paths_overlap_when_one_is_the_other_or_inside_it(candidate: str, other:
 
 
 def test_a_shared_file_is_refused(tmp_path: Path) -> None:
-    """unison has no native single-file sync, so Minds does not offer one."""
+    """unison has no native single-file sync, so Imbue Studio does not offer one."""
     shared = tmp_path / "corpus.jsonl"
     shared.write_text("{}\n")
     with pytest.raises(FolderSyncError, match="Only folders can be synced"):
@@ -347,7 +347,7 @@ def test_turning_a_sync_off_sets_the_copy_aside_rather_than_deleting_it() -> Non
 
 
 def test_setting_a_copy_aside_clears_whatever_is_in_its_way() -> None:
-    """Nothing but Minds writes there, so something in the way is a mistake, not a file to keep."""
+    """Nothing but Imbue Studio writes there, so something in the way is a mistake, not a file to keep."""
     script = _build_workspace_deactivate_argv("mngr", _AGENT_ID, _spec())[3]
     assert 'rm -rf "$HOME"/inactive_synced_folders/notes' in script
     assert script.index('rm -rf "$HOME"/inactive_synced_folders/notes') < script.index("  mv ")
