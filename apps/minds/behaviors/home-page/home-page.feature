@@ -10,6 +10,15 @@ Feature: Home page routing
     When they answer the consent question
     Then no later visit to "/" ever shows the consent screen again
 
+  @consent-reporting-choice
+  Scenario: The consent question is a checkbox that starts checked, and its answer is the reporting setting
+    Given an authenticated user on the consent screen
+    Then its one question, "Is it ok if we report anonymized data to help improve Studio?", is a checkbox that starts checked
+    When they continue without unchecking it
+    Then error reporting stays on
+    When a user unchecks it and continues instead
+    Then error reporting is turned off, as Settings -> Error reporting then shows
+
   @discovering
   Scenario: While the first workspace discovery is still running, show progress
     Given an authenticated user who has answered the consent question

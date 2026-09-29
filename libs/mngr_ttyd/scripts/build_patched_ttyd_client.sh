@@ -29,6 +29,7 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _RESOURCES_DIR="$_SCRIPT_DIR/../imbue/mngr_ttyd/resources"
 _PATCH="$_SCRIPT_DIR/ttyd_clipboard_provider.patch"
 _FOCUS_PATCH="$_SCRIPT_DIR/ttyd_host_focus.patch"
+_REFIT_PATCH="$_SCRIPT_DIR/ttyd_refit_on_connect.patch"
 _BUILD_DIR="$(mktemp -d -t ttyd_client_build.XXXXXX)"
 trap 'rm -rf "$_BUILD_DIR"' EXIT
 
@@ -46,6 +47,9 @@ git -C "$_BUILD_DIR/ttyd" apply "$_PATCH"
 echo "Applying host-driven focus patch ..."
 git -C "$_BUILD_DIR/ttyd" apply "$_FOCUS_PATCH"
 
+echo "Applying refit-on-connect patch ..."
+git -C "$_BUILD_DIR/ttyd" apply "$_REFIT_PATCH"
+
 echo "Building the html client ..."
 corepack enable
 (cd "$_BUILD_DIR/ttyd/html" && yarn install && yarn build)
@@ -57,6 +61,10 @@ if ! grep -q "isSystemSelection" "$_BUILT"; then
 fi
 if ! grep -q "ttyd-focus" "$_BUILT"; then
     echo "error: built client is missing the host-driven focus patch" >&2
+    exit 1
+fi
+if ! grep -q 'websocket connection opened");const{[^}]*fitAddon' "$_BUILT"; then
+    echo "error: built client is missing the refit-on-connect patch" >&2
     exit 1
 fi
 

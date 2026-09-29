@@ -3,23 +3,25 @@ import { jsonResponse } from "../testing";
 import { OnboardingProgress, acknowledgeErrorReportingConsent, markOnboardingComplete } from "./onboarding";
 
 describe("onboarding transitions", () => {
-  it("posts the consent acknowledgement and reports success", async () => {
-    const calls: Array<{ url: string; method?: string }> = [];
-    const ok = await acknowledgeErrorReportingConsent((url, init) => {
-      calls.push({ url, method: init?.method });
+  it("posts the consent answer and reports success", async () => {
+    const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
+    const ok = await acknowledgeErrorReportingConsent(false, (url, init) => {
+      calls.push({ url, method: init?.method, body: init?.body });
       return Promise.resolve(jsonResponse({}));
     });
     expect(ok).toBe(true);
-    expect(calls).toEqual([{ url: "/ui/api/onboarding/consent", method: "POST" }]);
+    expect(calls).toEqual([
+      { url: "/ui/api/onboarding/consent", method: "POST", body: JSON.stringify({ report_unexpected_errors: false }) },
+    ]);
   });
 
   it("reports failure (without throwing) when the consent post fails", async () => {
-    const ok = await acknowledgeErrorReportingConsent(() => Promise.reject(new Error("offline")));
+    const ok = await acknowledgeErrorReportingConsent(true, () => Promise.reject(new Error("offline")));
     expect(ok).toBe(false);
   });
 
   it("reports a non-ok consent response as unsuccessful", async () => {
-    const ok = await acknowledgeErrorReportingConsent(() => Promise.resolve(new Response("", { status: 403 })));
+    const ok = await acknowledgeErrorReportingConsent(true, () => Promise.resolve(new Response("", { status: 403 })));
     expect(ok).toBe(false);
   });
 

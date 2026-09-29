@@ -183,6 +183,33 @@ export function disclosureList(attrs: {
   );
 }
 
+/**
+ * The error-reporting checkbox, on the user's side just above a question's answers: it starts checked, so
+ * answering as it stands keeps reporting on, and unchecking it first turns reporting off.
+ */
+export function reportingConsentRow(
+  attrs: ArrivalAttrs & { question: string; isAllowed: boolean; onChange: (isAllowed: boolean) => void },
+): m.Children {
+  return m(
+    "label",
+    {
+      key: attrs.key,
+      class: "mt-10 flex cursor-pointer items-start justify-end gap-2 type-body text-secondary" + arrivalClass(attrs),
+      style: arrivalStyle(attrs),
+    },
+    [
+      m("input", {
+        id: "start-reporting-consent",
+        type: "checkbox",
+        checked: attrs.isAllowed,
+        class: "mt-1 cursor-pointer",
+        onchange: (event: Event) => attrs.onChange((event.target as HTMLInputElement).checked),
+      }),
+      m("span", attrs.question),
+    ],
+  );
+}
+
 export interface AnswerButton {
   id: string;
   label: string;

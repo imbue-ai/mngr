@@ -31,11 +31,11 @@
  *      install that has never made a workspace. (A bare `/` window survives
  *      restore-filtering because it isn't a workspace URL, so without this
  *      clause it would silently win over the start flow.)
- *   3. The error-reporting notice was never acknowledged -> consent. Sits
- *      after the start branches and before the landing content, matching
- *      the legacy server-side gate. ConsentPage's accept action records the
- *      acknowledgement (POST /ui/api/onboarding/consent) and lands home, so
- *      the route never recurs.
+ *   3. The error-reporting consent screen was never answered -> consent.
+ *      Sits after the start branches and before the landing content, matching
+ *      the legacy server-side gate. ConsentPage's continue action records the
+ *      answer (POST /ui/api/onboarding/consent) and lands home, so the route
+ *      never recurs.
  *   4. Nothing restorable -> the home/create page.
  *   5. Otherwise -> restore the saved windows.
  *

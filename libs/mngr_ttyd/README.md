@@ -34,5 +34,10 @@ selection target that tmux emits. To rebuild it, run
 `scripts/build_patched_ttyd_client.sh` (the patch lives in
 `scripts/ttyd_clipboard_provider.patch`).
 
+The same client also fits the terminal to its frame whenever it reconnects
+(`scripts/ttyd_refit_on_connect.patch`). Stock ttyd drops its resize listener
+while disconnected and reports the old size on reconnect, so a terminal resized
+during a dropped connection stayed at its old width.
+
 OSC 52 clipboard writes require a secure browser context (HTTPS or `localhost`)
 and a focused tab.

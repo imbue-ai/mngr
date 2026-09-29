@@ -131,6 +131,9 @@ export interface FlowStep {
   choices: FlowChoice[];
   /** The quieter, agent-side way out under the question, when there is one. */
   aside?: { label: string };
+  /** The question that also carries the error-reporting checkbox: the last press before a first workspace is
+   *  created or an existing account is signed in to, so every new install answers it during onboarding. */
+  asksReportingConsent?: boolean;
 }
 
 const CLOUD_CHOICE: FlowChoice = {
@@ -192,6 +195,7 @@ export const FLOW: Record<StepId, FlowStep> = {
     prompt: "How do you want to run it?",
     choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
     aside: { label: EXISTING_LOGIN_LABEL },
+    asksReportingConsent: true,
   },
   // Sign in leads: the app is downloaded from a page that already required an
   // Imbue account, so the account step is a sign-in for nearly everyone. The
