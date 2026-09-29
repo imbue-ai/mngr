@@ -101,20 +101,16 @@ export function isWorkspaceOverlayPath(path: string): boolean {
 }
 
 /** App-level modal routes the Shell floats as a centered overlay over the
- * surface they were opened from (Imbue Studio settings, Accounts, Get help, the
- * request-review popup, and the AI-keys mint dialog)
- * instead of a full breadcrumbed page. The AI-keys mint dialog is
- * workspace-triggered ("Sign in with Imbue" inside a machine) and floats over
- * that machine, mirroring Get help. The request popup ("/inbox") hangs from
- * the titlebar's key tab rather than centering, but is otherwise the same
- * kind of route-driven overlay. (The bell's notification feed is a separate,
- * non-route overlay -- it is not in this Set -- see Shell.ts.) */
+ * surface they were opened from instead of a full breadcrumbed page. The
+ * request popup ("/inbox") hangs from the titlebar's key tab rather than
+ * centering, but is otherwise the same kind of route-driven overlay. (The
+ * bell's notification feed is a separate, non-route overlay -- it is not in
+ * this Set -- see Shell.ts.) */
 const APP_OVERLAY_PATHS = new Set([
   "/settings",
   "/accounts",
   "/help",
   "/inbox",
-  "/settings/ai-keys",
 ]);
 
 export function isAppOverlayPath(path: string): boolean {
@@ -130,20 +126,16 @@ export function isTitlebarPopupRoutePath(path: string): boolean {
   return isWorkspaceOverlayPath(path) || path === "/inbox" || path === "/help";
 }
 
-/** The workspace kept mounted behind an app-overlay modal: the ?workspace= that
- * Get help, the request-review popup, the New machine
- * template flow, and the AI-keys mint dialog forward, so those overlays float
- * over the live workspace they were opened from (kept mounted, no reload). The AI-keys dialog forwards
- * the machine's HOST id (the mint endpoint keys on it); the others forward the
- * agent id. Settings / Accounts are launched from Home and carry none, a popup
- * opened from Home carries none, and a template link with no machine open
- * redirects to the full create form -- so their overlay floats over Home /
- * never renders (returns null). */
+/** The workspace kept mounted behind an app-overlay modal: the ?workspace= these
+ * routes forward, so their overlays float over the live workspace they were
+ * opened from (kept mounted, no reload). Settings / Accounts are launched from
+ * Home and carry none, a popup opened from Home carries none, and a template
+ * link with no machine open redirects to the full create form -- so their
+ * overlay floats over Home / never renders (returns null). */
 const OVERLAY_BEHIND_WORKSPACE_PATHS = new Set([
   "/help",
   "/inbox",
   "/create/template",
-  "/settings/ai-keys",
 ]);
 
 export function overlayBehindWorkspaceId(
@@ -203,10 +195,9 @@ export function classifyRoute(path: string, search = ""): TitlebarContext {
     return pageContext("New machine");
   }
   if (isAppOverlayPath(path)) {
-    // Imbue Studio settings / Accounts / Get help / the request popup / the AI-keys
-    // mint dialog float as a centered modal over the surface they were opened
-    // from; the titlebar keeps that surface's context (the workspace behind Get
-    // help / the popup / AI-keys, else Home) rather than a standalone page.
+    // App overlays float as a centered modal over the surface they were opened
+    // from; the titlebar keeps that surface's context (the workspace behind the
+    // overlay, else Home) rather than a standalone page.
     const behind = overlayBehindWorkspaceId(path, search);
     return behind !== null ? workspaceContext(behind, null) : HOME_CONTEXT;
   }

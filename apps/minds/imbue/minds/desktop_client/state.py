@@ -45,11 +45,14 @@ from imbue.minds.desktop_client.machine_stop_kinds import MachineStopKindTracker
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.notification import NotificationDispatcher
 from imbue.minds.desktop_client.notification_feed import NotificationFeed
+from imbue.minds.desktop_client.provider_relay import ProviderRelayRegistry
 from imbue.minds.desktop_client.region_preference import GeoLocationCache
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_materials_injection import MachineSharingLockRegistry
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
+from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
+from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
@@ -108,8 +111,16 @@ class DesktopClientState(MutableModel):
     api_v1_paths: InstallationPaths | None = Field(
         default=None, frozen=True, description="Workspace data paths; gates the /api/v1 mount"
     )
-    minds_config: MindsConfig | None = Field(
-        default=None, frozen=True, description="Per-user Imbue Studio config store"
+    minds_config: MindsConfig | None = Field(default=None, frozen=True, description="Per-user Imbue Studio config store")
+    provider_relay_registry: ProviderRelayRegistry = Field(
+        default_factory=ProviderRelayRegistry,
+        frozen=True,
+        description="Provider sign-in relays armed on this machine, one per callback port",
+    )
+    sign_in_browsers: SignInBrowsersInterface = Field(
+        default_factory=InstalledSignInBrowsers,
+        frozen=True,
+        description="The browsers a provider sign-in can open in, and opening one there",
     )
     geo_location_cache: GeoLocationCache = Field(
         default_factory=GeoLocationCache, description="One-shot IP-geolocation cache for region defaults"

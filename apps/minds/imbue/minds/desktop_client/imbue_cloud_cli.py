@@ -278,13 +278,6 @@ class MachineSizeCliInfo(WireModel):
 _MACHINES_LISTING_ADAPTER: Final = TypeAdapter(list[MachineSizeCliInfo])
 
 
-class LiteLLMKeyMaterial(WireModel):
-    """Result of `mngr imbue_cloud keys litellm create`."""
-
-    key: SecretStr
-    base_url: AnyUrl
-
-
 class ShareCliRelayEndpoint(WireModel):
     """One relay a shared workspace tunnels to (from `shares create` / `shares status`)."""
 
@@ -564,8 +557,6 @@ class ImbueCloudCli(MutableModel):
         plain_exc.stderr = result.stderr
         raise plain_exc
 
-    # Auth
-
     def auth_login(
         self,
         success_redirect_url: str | None = None,
@@ -664,8 +655,6 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "auth is-verified")
         return _expect_bool_field(body, "verified", "auth is-verified")
 
-    # Hosts (list / release)
-
     def list_hosts(self, account: str) -> list[LeasedHost]:
         result = self._run(
             ["hosts", "list", "--account", account],
@@ -739,36 +728,6 @@ class ImbueCloudCli(MutableModel):
         )
         return False
 
-    # LiteLLM keys
-
-    def create_litellm_key(
-        self,
-        *,
-        account: str,
-        alias: str | None = None,
-        max_budget: float | None = None,
-        budget_duration: str | None = None,
-        metadata: Mapping[str, str] | None = None,
-        # Rotate (delete + re-create) an existing key holding ``alias`` inside
-        # the single CLI invocation, instead of dead-ending on LiteLLM's
-        # unique-alias rejection. Requires ``alias``.
-        is_rotate_on_exists: bool = False,
-    ) -> LiteLLMKeyMaterial:
-        args: list[str] = ["keys", "litellm", "create", "--account", account]
-        if alias is not None:
-            args.extend(["--alias", alias])
-        if max_budget is not None:
-            args.extend(["--max-budget", str(max_budget)])
-        if budget_duration is not None:
-            args.extend(["--budget-duration", budget_duration])
-        if metadata is not None:
-            args.extend(["--metadata", _json.dumps(dict(metadata))])
-        if is_rotate_on_exists:
-            args.append("--rotate-on-exists")
-        result = self._run(args, cg_name="imbue-cloud-keys-create", timeout_seconds=_KEY_OP_TIMEOUT_SECONDS)
-        body = self._expect_success(result, "keys litellm create")
-        return LiteLLMKeyMaterial.model_validate(body)
-
     def list_litellm_keys(self, account: str) -> list[dict[str, Any]]:
         result = self._run(
             ["keys", "litellm", "list", "--account", account],
@@ -810,8 +769,6 @@ class ImbueCloudCli(MutableModel):
             timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
         )
         return self._expect_success(result, "keys litellm show")
-
-    # Shares (self-hosted relays)
 
     def create_share(
         self,
@@ -974,8 +931,6 @@ class ImbueCloudCli(MutableModel):
         body = self._expect_success(result, "bucket roll-key")
         return R2BucketKeyMaterial.model_validate(body)
 
-    # Users + contacts (identity records)
-
     def _identity_or_none_on_miss(self, result: MngrCallResult, command_repr: str) -> UserIdentityCliInfo | None:
         """Parse an identity record, mapping the plugin's ``user_not_found`` refusal to None."""
         if result.returncode != 0:
@@ -1014,8 +969,6 @@ class ImbueCloudCli(MutableModel):
             cg_name="imbue-cloud-contacts-add",
         )
         self._expect_success(result, "contacts add")
-
-    # Account (plan + entitlements + usage)
 
     def get_account_info(self, account: str) -> dict[str, Any]:
         """Return the account's plan, entitlement values, and live usage as a raw dict."""
@@ -1061,8 +1014,6 @@ class ImbueCloudCli(MutableModel):
             timeout_seconds=_KEY_OP_TIMEOUT_SECONDS,
         )
         return self._expect_success(result, "account recheck-storage")
-
-    # Workspace sync (records + key bundle)
 
     def sync_records_pull(self, account: str) -> SyncRecordsPullResult:
         """The account's records plus its shared agent ids (absent against a CLI too old to report them)."""

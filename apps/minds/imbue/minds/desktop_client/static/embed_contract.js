@@ -29,9 +29,7 @@
 // contract by ADDING types, never by changing the meaning or payload of an
 // existing one. CONTRACT_VERSION below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "6";
-
-// Message types
+export const CONTRACT_VERSION = "7";
 
 // workspace -> embedder: open the shell's permission-request modal focused on
 // one request. Payload: { requestId }.
@@ -39,11 +37,10 @@ export const OPEN_REQUEST_MODAL = "minds:open-request-modal";
 // workspace -> embedder: open the shell's get-help / report-a-bug modal.
 // Payload: { agentId? } -- optional, scopes the report to that workspace.
 export const OPEN_HELP = "minds:open-help";
-// workspace -> embedder: open the shell's AI-key mint page for this
-// workspace. Payload: { hostId? }. The embedder replies with
-// OPEN_AI_KEYS_ACK so the workspace can tell "an Imbue Studio chrome is present"
-// (with no chrome -- e.g. a direct share visit -- no ack ever arrives and
-// the workspace shows its fallback text).
+// workspace -> embedder: retired in v7 (the AI-key mint it opened is gone).
+// Kept so older workspaces that import it still build; chromes ignore it and
+// send no OPEN_AI_KEYS_ACK, so the workspace shows its fallback text.
+// Payload: { hostId? }.
 export const OPEN_AI_KEYS_PAGE = "minds:open-ai-keys-page";
 // workspace -> embedder: OAuth finished in the external browser; ask the
 // shell to bring the app window back to the front. A no-op in plain-browser
@@ -58,6 +55,16 @@ export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // cannot tell a loaded frame from one whose page has not run its listener
 // yet, since a send into a not-yet-listening document is simply lost.
 export const WORKSPACE_READY = "minds:workspace-ready";
+// workspace -> embedder: a provider sign-in (Claude, ChatGPT) is waiting on
+// the user in a browser; relay its loopback callback into the workspace and
+// open the sign-in page. Payload: { url, flowId } -- the provider's
+// authorize URL, and the id of the workspace's sign-in flow the callback
+// belongs to. The embedder replies with PROVIDER_SIGN_IN_ACK.
+export const PROVIDER_SIGN_IN = "minds:provider-sign-in";
+// workspace -> embedder: the sign-in PROVIDER_SIGN_IN asked to relay has ended
+// (finished, failed, or abandoned), so the embedder can stop listening on its
+// port. Payload: { flowId }. Fire-and-forget (no ack).
+export const PROVIDER_SIGN_IN_END = "minds:provider-sign-in-end";
 // workspace -> embedder: open one of the workspace's windows in a desktop
 // window of its own, placed beside the chrome window (the pull-out-window
 // spec). Payload: { windowId, title, width, height }; `width` / `height` are
@@ -86,7 +93,7 @@ export const DETACHED_WINDOWS = "minds:detached-windows";
 // embedder -> workspace: the user pressed the close-tab shortcut while this
 // workspace was displayed; close the focused window. Payload: {}.
 export const CLOSE_ACTIVE_TAB = "minds:close-active-tab";
-// embedder -> workspace: ack for OPEN_AI_KEYS_PAGE (see above). Payload: {}.
+// embedder -> workspace: retired in v7 with OPEN_AI_KEYS_PAGE; no chrome sends it. Payload: {}.
 export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
 // embedder -> workspace: permission-request verdicts, each entry
 // { requestId, resolution: "granted" | "denied" }. Sent two ways with one
@@ -103,6 +110,11 @@ export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
 // does; a workspace on an older template announces nothing, never receives
 // the ask, and the user just lands on the workspace.
 export const FOCUS_CHAT = "minds:focus-chat";
+// embedder -> workspace: ack for PROVIDER_SIGN_IN. Payload: { relay } --
+// true when the embedder is listening for the callback and opened the page,
+// false when it cannot relay (the workspace falls back to its manual flow).
+// With no chrome no ack arrives, which the workspace treats as false.
+export const PROVIDER_SIGN_IN_ACK = "minds:provider-sign-in-ack";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut }. A workspace that never receives it
 // (an older chrome, a plain browser) keeps its pull-out gesture off.
@@ -131,8 +143,6 @@ export const MAX_DETACHED_WINDOW_ENTRIES = 128;
 // The shell's own bound on a window title.
 export const MAX_WINDOW_TITLE_LENGTH = 256;
 
-// Payload validation
-
 // Request ids are server-issued (`evt-<uuid hex>`). Only a conservative
 // charset + length is accepted so a malicious page cannot smuggle path or
 // query characters into URLs the receiver builds from the id.
@@ -145,6 +155,18 @@ export const HOST_ID_PATTERN = /^host-[a-f0-9]{1,64}$/i;
 // Superset (plus a length cap) of the canonical registry rule, mngr_latchkey's
 // SERVICE_NAME_PATTERN; an alignment test keeps the two in step.
 export const SERVICE_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+// Sign-in flow ids are chat-app-issued (uuid hex). Same conservative shape as
+// request ids: the embedder builds a URL path from the id.
+export const FLOW_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+// A provider authorize URL carries a PKCE challenge and a state, so it is
+// long, but not unboundedly so. Only its shape is checked here; the
+// embedder's relay re-validates the host and the callback it names.
+export const MAX_SIGN_IN_URL_LENGTH = 8192;
+
+function isSignInUrlShapeValid(value) {
+  return typeof value === 'string' && value.length <= MAX_SIGN_IN_URL_LENGTH && value.startsWith('https://');
+}
+
 // Window ids are minted by the workspace shell (`win-<hex>`).
 export const WINDOW_ID_PATTERN = /^win-[a-f0-9]{1,64}$/i;
 // The phases of an embedder-watched drag (see TEAR_OUT).
@@ -209,6 +231,12 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [WORKSPACE_READY]: function () {
     return true;
   },
+  [PROVIDER_SIGN_IN]: function (data) {
+    return isSignInUrlShapeValid(data.url) && typeof data.flowId === 'string' && FLOW_ID_PATTERN.test(data.flowId);
+  },
+  [PROVIDER_SIGN_IN_END]: function (data) {
+    return typeof data.flowId === 'string' && FLOW_ID_PATTERN.test(data.flowId);
+  },
   [POP_OUT_WINDOW]: function (data) {
     return isWindowIdValid(data.windowId) && isTitleValid(data.title) && isSizeValid(data);
   },
@@ -248,6 +276,9 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     // A chat's id is its first agent's id, so it takes the agent-id shape.
     return typeof data.chatId === 'string' && AGENT_ID_PATTERN.test(data.chatId);
   },
+  [PROVIDER_SIGN_IN_ACK]: function (data) {
+    return typeof data.relay === 'boolean';
+  },
   [EMBEDDER_CAPABILITIES]: function (data) {
     return typeof data.canPopOut === 'boolean';
   },
@@ -258,8 +289,6 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
     return isWindowIdValid(data.windowId) && TEAR_OUT_PHASES.indexOf(data.phase) !== -1;
   },
 };
-
-// Debug logging
 
 function isDebugLoggingEnabled() {
   try {
@@ -276,8 +305,6 @@ function debugLog(side, direction, type, origin) {
   // eslint-disable-next-line no-console
   console.debug('[embed-contract ' + side + '] ' + direction + ' ' + type + (origin ? ' (' + origin + ')' : ''));
 }
-
-// Endpoints
 
 function dispatchValidated(validators, handlers, data, side, origin) {
   const validator = validators[data.type];

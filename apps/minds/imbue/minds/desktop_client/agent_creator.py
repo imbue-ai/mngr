@@ -2094,9 +2094,8 @@ class AgentCreator(MutableModel):
         association after a crash mid-create.
 
         No AI credentials are chosen or injected at create time: the
-        workspace boots unauthenticated and its in-UI sign-in modal is the
-        sole auth surface (subscription setup-token, Imbue LiteLLM key, or
-        raw API key -- all written into the shared Claude settings env).
+        workspace boots unauthenticated and its owner signs in to an AI
+        provider from the workspace's own chat, which is the sole auth surface.
         ``account_email`` still selects the imbue_cloud account for compute
         leasing and backups.
 

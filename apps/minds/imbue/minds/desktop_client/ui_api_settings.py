@@ -1,11 +1,8 @@
-"""/ui/api routes owned by tranche T2 (Settings / Accounts / AI keys).
+"""/ui/api routes for the Settings and Accounts pages.
 
-JSON twins of the data that used to be server-rendered into the Settings,
-Accounts, and AI-keys pages, plus the settings writes the SPA performs
-directly (the error-reporting opt-out and the notification preferences).
-Mutating flows the legacy POST routes already implement (permission revokes,
-connector add/disconnect, plan switch, trim, set-default, logout, key mint,
-master-password change) are reused by the SPA as-is and stay in ``app.py``.
+JSON twins of the Settings and Accounts data, plus the settings writes the SPA
+performs directly. Mutating flows the legacy POST routes already implement are
+reused by the SPA as-is and stay in ``app.py``.
 
 The error-reporting and notification-prefs writes are records Imbue Studio owns,
 so each carries the optimistic-concurrency contract: ``GET /ui/api/settings``
@@ -28,7 +25,6 @@ from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.account_plan_view import build_account_plan_view
-from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.backup_trim import BackupTrimStatus
 from imbue.minds.desktop_client.dek_store import is_master_password_set_for_account
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
@@ -70,6 +66,13 @@ class UiTestNotificationResult(FrozenModel):
     )
 
 
+class UiSignInBrowserOption(FrozenModel):
+    """One browser provider sign-ins can open in."""
+
+    browser_id: str = Field(description="The id the setting stores")
+    label: str = Field(description="The browser's name")
+
+
 class UiSettingsOverview(FrozenModel):
     """Everything the SPA settings page renders, in one response.
 
@@ -88,12 +91,24 @@ class UiSettingsOverview(FrozenModel):
     )
     update_window_start_hour: int = Field(description="Local hour scheduled machine updates may start running at")
     update_window_end_hour: int = Field(description="Local hour scheduled machine updates stop running at")
+    sign_in_browsers: tuple[UiSignInBrowserOption, ...] = Field(
+        default=(), description="The installed browsers provider sign-ins can open in"
+    )
+    sign_in_browser_id: str | None = Field(
+        default=None, description="The browser provider sign-ins open in; None for the default browser"
+    )
 
 
 class UiErrorReportingWrite(FrozenModel):
     """Body of the error-reporting opt-out write."""
 
     report_unexpected_errors: bool = Field(description="New value for the per-machine flag")
+
+
+class UiSignInBrowserWrite(FrozenModel):
+    """Body of the sign-in browser write."""
+
+    browser_id: str | None = Field(description="An installed browser's id, or None for the default browser")
 
 
 class UiUpdateWindowWrite(FrozenModel):
@@ -138,15 +153,6 @@ class UiAccountPlanResponse(FrozenModel):
     privacy_policy_url: str = Field(
         description="The tier's privacy-policy page (for the plan selector's Learn-more link); '' when unknown"
     )
-
-
-class UiAiKeysContext(FrozenModel):
-    """Context for the workspace AI-key mint page."""
-
-    workspace_id: str = Field(description="The workspace coordinate the mint page was opened with")
-    workspace_display_name: str = Field(description="Display name of the workspace")
-    account_email: str = Field(description="The billed account's email")
-    error_message: str = Field(description="Non-empty when minting is impossible; explains why")
 
 
 def _json_response(payload: FrozenModel, status_code: int = 200) -> Response:
@@ -225,6 +231,8 @@ def _handle_settings_overview() -> Response:
     minds_config = get_state().minds_config
     report_unexpected_errors = minds_config.get_report_unexpected_errors() if minds_config else True
     update_window = minds_config.get_update_window() if minds_config is not None else DEFAULT_UPDATE_WINDOW
+    browsers = get_state().sign_in_browsers.list_browsers()
+    stored_browser_id = minds_config.get_sign_in_browser_id() if minds_config is not None else None
     overview = UiSettingsOverview(
         is_master_password_set=_is_any_account_master_password_set(),
         report_unexpected_errors=report_unexpected_errors,
@@ -232,6 +240,13 @@ def _handle_settings_overview() -> Response:
         notification_prefs=_current_notification_prefs(),
         update_window_start_hour=update_window[0],
         update_window_end_hour=update_window[1],
+        sign_in_browsers=tuple(
+            UiSignInBrowserOption(browser_id=browser.browser_id, label=browser.label) for browser in browsers
+        ),
+        # A chosen browser that has since been removed reads as the default, which is what opens.
+        sign_in_browser_id=(
+            stored_browser_id if any(browser.browser_id == stored_browser_id for browser in browsers) else None
+        ),
     )
     return _json_response(overview)
 
@@ -379,6 +394,30 @@ def _handle_update_window_write() -> Response:
     return _json_response(UiUpdateWindowWrite(start_hour=write.start_hour, end_hour=write.end_hour))
 
 
+def _handle_sign_in_browser_write() -> Response:
+    """POST /ui/api/settings/sign-in-browser: choose the browser provider sign-ins open in."""
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    state = get_state()
+    minds_config = state.minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    body = request.get_json(silent=True, force=True)
+    if not isinstance(body, dict):
+        return _error_response("Invalid JSON body", 400)
+    try:
+        write = UiSignInBrowserWrite.model_validate(body)
+    except ValidationError as e:
+        logger.debug("Rejected a malformed sign-in browser write body: {}", e)
+        return _error_response("Invalid JSON body", 400)
+    if write.browser_id is not None and all(
+        browser.browser_id != write.browser_id for browser in state.sign_in_browsers.list_browsers()
+    ):
+        return _error_response("That browser is not installed", 400)
+    minds_config.set_sign_in_browser_id(write.browser_id)
+    return _json_response(write)
+
+
 def _trim_status_payload(trim_status: BackupTrimStatus | None) -> UiTrimStatus | None:
     if trim_status is None:
         return None
@@ -430,52 +469,6 @@ def _handle_account_plan(user_id: str) -> Response:
     )
 
 
-def _handle_ai_keys_context() -> Response:
-    """GET /ui/api/ai-keys?workspace=<workspace_id>: context for the mint page.
-
-    A machine's host id is also accepted as the coordinate while in-workspace
-    deep links (written before workspace ids) transition.
-    """
-    if not is_ui_request_authenticated():
-        return _unauthenticated_response()
-    workspace_coordinate = request.args.get("workspace", "").strip()
-    if not workspace_coordinate:
-        return _json_response(
-            UiAiKeysContext(
-                workspace_id="",
-                workspace_display_name="",
-                account_email="",
-                error_message=(
-                    "This page needs to be opened from a machine: use the Sign in with Imbue "
-                    "option in the machine's Claude sign-in dialog."
-                ),
-            )
-        )
-    sync_scheduler = get_state().sync_scheduler
-    record_store = None if sync_scheduler is None else sync_scheduler.record_store
-    resolved = resolve_workspace_account(workspace_coordinate, record_store, get_state().session_store)
-    if resolved is None:
-        return _json_response(
-            UiAiKeysContext(
-                workspace_id=workspace_coordinate,
-                workspace_display_name="",
-                account_email="",
-                error_message=(
-                    "This machine has no associated Imbue account. Associate an account on the "
-                    "machine's settings page, then come back here."
-                ),
-            )
-        )
-    return _json_response(
-        UiAiKeysContext(
-            workspace_id=resolved.workspace_id,
-            workspace_display_name=resolved.workspace_display_name,
-            account_email=resolved.account_email,
-            error_message="",
-        )
-    )
-
-
 def register_settings_routes(blueprint: Blueprint) -> None:
     """Register this area's /ui/api routes on the shared /ui blueprint."""
     blueprint.add_url_rule("/api/settings", view_func=_handle_settings_overview)
@@ -483,5 +476,5 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/sign-in-browser", view_func=_handle_sign_in_browser_write, methods=["POST"])
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)
-    blueprint.add_url_rule("/api/ai-keys", view_func=_handle_ai_keys_context)

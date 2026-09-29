@@ -928,7 +928,7 @@ def test_resolve_canonical_path_resolves_symlinks(codex_agent: CodexAgent, tmp_p
 def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     command = str(codex_agent.assemble_command(codex_agent.host, (), None))
     codex_home = str(codex_agent._get_codex_home())
-    # The socket lives under a short /tmp path (NOT under CODEX_HOME) to stay under the unix-socket
+    # The socket lives at a short /tmp path (NOT under CODEX_HOME) to stay under the unix-socket
     # SUN_LEN limit; every client resolves it via get_codex_app_server_socket_path.
     socket_path = str(get_codex_app_server_socket_path(codex_agent._get_codex_home()))
     # Backgrounded supervisor, scoped to `&` so codex is the foreground process.
@@ -938,10 +938,8 @@ def test_assemble_command_structure(codex_agent: CodexAgent) -> None:
     assert f"cd {codex_agent.work_dir}" in command
     # CODEX_HOME injected only on the codex process.
     assert f"env CODEX_HOME={codex_home}" in command
-    # The agent's private socket directory exists, and the stale socket is cleaned, before the
-    # daemon binds.
-    socket_dir = str(get_codex_app_server_socket_path(codex_agent._get_codex_home()).parent)
-    assert f"mkdir -p -m 700 {socket_dir} && rm -f {socket_path}" in command
+    # The stale socket is cleaned before the daemon binds.
+    assert f"rm -f {socket_path}" in command
     # The daemon runs in a detached sidecar window; the visible TUI is `codex --remote`.
     assert "tmux new-window -d" in command
     assert "app-server --listen" in command

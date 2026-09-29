@@ -309,3 +309,54 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
     ['reattach', 'win-abc', false],
   ]);
 });
+
+test('embedder endpoint validates a provider sign-in request before dispatch', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: {
+      [contract.PROVIDER_SIGN_IN]: (msg) => seen.push([msg.url, msg.flowId]),
+    },
+  });
+  const from = (data) => win.deliver({ source: frameWin, origin: 'o', data });
+  const url = 'https://claude.ai/oauth/authorize?state=s-1';
+  from({ type: contract.PROVIDER_SIGN_IN, url, flowId: '../../etc' });
+  from({ type: contract.PROVIDER_SIGN_IN, url: 'http://claude.ai/oauth/authorize', flowId: 'flow-1' });
+  from({ type: contract.PROVIDER_SIGN_IN, url: 'https://claude.ai/' + 'a'.repeat(8192), flowId: 'flow-1' });
+  from({ type: contract.PROVIDER_SIGN_IN, url });
+  assert.deepStrictEqual(seen, []);
+  from({ type: contract.PROVIDER_SIGN_IN, url, flowId: '5e0a9f6c1b2d4e8fa7c3b19d0e6f2a41' });
+  assert.deepStrictEqual(seen, [[url, '5e0a9f6c1b2d4e8fa7c3b19d0e6f2a41']]);
+});
+
+test('embedder endpoint takes a provider sign-in end only with a well-formed flow id', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: {
+      [contract.PROVIDER_SIGN_IN_END]: (msg) => seen.push(msg.flowId),
+    },
+  });
+  const from = (data) => win.deliver({ source: frameWin, origin: 'o', data });
+  from({ type: contract.PROVIDER_SIGN_IN_END });
+  from({ type: contract.PROVIDER_SIGN_IN_END, flowId: '../../etc' });
+  from({ type: contract.PROVIDER_SIGN_IN_END, flowId: '9b1f04d2c6e84a7d' });
+  assert.deepStrictEqual(seen, ['9b1f04d2c6e84a7d']);
+});
+
+test('workspace endpoint takes a provider sign-in ack only with a boolean relay', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.PROVIDER_SIGN_IN_ACK]: (msg) => seen.push(msg.relay) },
+  });
+  const fromParent = (data) => win.deliver({ source: parentWin, origin: 'o', data });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: 'true' });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: true });
+  fromParent({ type: contract.PROVIDER_SIGN_IN_ACK, relay: false });
+  assert.deepStrictEqual(seen, [true, false]);
+});

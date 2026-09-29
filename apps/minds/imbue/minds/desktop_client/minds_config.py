@@ -183,6 +183,25 @@ class MindsConfig(MutableModel):
                 pass
             self._write_raw(data)
 
+    def get_sign_in_browser_id(self) -> str | None:
+        """Return the browser provider sign-ins open in (see ``sign_in_browser``), or None for the default."""
+        with self._lock:
+            data = self._read_raw()
+            value = data.get("sign_in_browser")
+            return str(value) if value is not None else None
+
+    def set_sign_in_browser_id(self, browser_id: str | None) -> None:
+        """Set the browser provider sign-ins open in, or None to go back to the default."""
+        with self._lock:
+            data = self._read_raw()
+            if browser_id is not None:
+                data["sign_in_browser"] = browser_id
+            elif "sign_in_browser" in data:
+                del data["sign_in_browser"]
+            else:
+                pass
+            self._write_raw(data)
+
     def get_region(self, provider_name: str) -> str | None:
         """Return the last-used region for a provider, or None if never set.
 

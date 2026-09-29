@@ -216,14 +216,15 @@ export class ShellState {
     this.webLogin = webLoginModel;
   }
 
+  /** Whether this window's workspace frame is showing the workspace named. */
+  isWorkspaceFrameOn(agentScopedId: string): boolean {
+    const armed = this.workspaceFrame?.armedWorkspaceAnyId() ?? null;
+    return armed !== null && this.stores.workspaces.toAgentScopedId(armed) === agentScopedId;
+  }
+
   /** Rebuild this window's workspace view, if its frame is showing the one named. */
   reloadWorkspaceFrame(agentScopedId: string): void {
-    const frame = this.workspaceFrame;
-    if (frame === null) return;
-    const armed = frame.armedWorkspaceAnyId();
-    if (armed === null) return;
-    if (this.stores.workspaces.toAgentScopedId(armed) !== agentScopedId) return;
-    frame.reload();
+    if (this.isWorkspaceFrameOn(agentScopedId)) this.workspaceFrame?.reload();
   }
 
   currentRoutePath(): string {

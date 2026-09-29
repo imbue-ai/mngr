@@ -60,8 +60,6 @@ from imbue.minds.desktop_client.agent_creator import run_mngr_aws_prepare
 from imbue.minds.desktop_client.agent_creator import run_mngr_create
 from imbue.minds.desktop_client.agent_creator import sweep_orphaned_scratch_clones
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
-from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
-from imbue.minds.desktop_client.conftest import RecordingImbueCloudCli
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRecord
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptRequest
 from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAttemptState
@@ -987,9 +985,6 @@ def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path:
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
 
 
-# Times out at the 10s per-test budget while shelling out to git under a loaded parallel
-# run, as its sibling clone tests above do; passes alone in under a second.
-@pytest.mark.flaky
 def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
     """``clone_git_repo`` materialises a checked-out, tracked working tree --
     exactly what ``git clone`` produces.
@@ -1514,31 +1509,12 @@ def test_wait_for_workspace_ready_publishes_anyway_on_timeout(tmp_path) -> None:
     assert any("did not become ready" in line for line in drained)
 
 
-# Create-time credential regression tests
-#
-# AI-provider selection moved out of the create flow entirely: workspaces boot
-# unauthenticated and sign in through the workspace's own provider chooser. These
-# guard the removal -- create attempt must never mint a LiteLLM key (the mint moved
-# to the desktop app's /settings/ai-keys page; see ai_keys_test.py).
-
-
 def _make_fake_repo(tmp_path: Path) -> Path:
     """Create a directory that ``_create_agent_background`` will accept as a local
     repo (it just needs to exist and not look like a git worktree)."""
     repo_dir = tmp_path / "fake-repo"
     repo_dir.mkdir()
     return repo_dir
-
-
-def _make_creator_with_cli(tmp_path: Path, cli: RecordingImbueCloudCli) -> AgentCreator:
-    cg = ConcurrencyGroup(name="agent-creator-test")
-    cg.__enter__()
-    return AgentCreator(
-        paths=InstallationPaths(data_dir=tmp_path),
-        root_concurrency_group=cg,
-        imbue_cloud_cli=cli,
-        system_interface_health_tracker=SystemInterfaceHealthTracker(),
-    )
 
 
 def _wait_until_finished(
@@ -1558,27 +1534,6 @@ def _wait_until_finished(
             return
         threading.Event().wait(0.05)
     raise AssertionError(f"create attempt {create_attempt_id} did not finish within {deadline_seconds}s")
-
-
-@pytest.mark.timeout(30)
-def test_start_create_attempt_never_mints_a_litellm_key(tmp_path: Path) -> None:
-    """CreateAttempt injects no Anthropic credentials: even with an imbue_cloud
-    account supplied (for compute/backups), no LiteLLM key is minted -- the
-    machine signs in through its own modal after boot."""
-    cli = RecordingImbueCloudCli(
-        connector_url=FAKE_CONNECTOR_URL,
-    )
-    creator = _make_creator_with_cli(tmp_path, cli)
-
-    create_attempt_id = creator.start_create_attempt(
-        repo_source=str(_make_fake_repo(tmp_path)),
-        host_name="my-workspace",
-        launch_mode=LaunchMode.DOCKER,
-        account_email="alice@imbue.com",
-    )
-    _wait_until_finished(creator, create_attempt_id)
-
-    assert cli.create_calls == []
 
 
 def test_checkout_existing_branch_is_noop_when_already_on_branch_without_fetch_head(tmp_path: Path) -> None:

@@ -17,7 +17,6 @@ import {
 import type { ShellState } from "./views/shell/shell-state";
 import { DevStyleguide } from "./views/pages/DevStyleguide";
 import { AccountsPage } from "./views/pages/AccountsPage";
-import { AiKeysPage } from "./views/pages/AiKeysPage";
 import { ConsentPage } from "./views/pages/ConsentPage";
 import { CreateTemplatePage } from "./views/pages/CreateTemplatePage";
 import { CreatePage } from "./views/pages/CreatePage";
@@ -47,7 +46,6 @@ const ROUTE_ENTRIES: RouteEntry[] = [
   { path: "/create/template", component: CreateTemplatePage },
   { path: "/creating/:agentId", component: CreatingPage },
   { path: "/settings", component: SettingsPage },
-  { path: "/settings/ai-keys", component: AiKeysPage },
   { path: "/accounts", component: AccountsPage },
   { path: "/workspaces/destroyed", component: DestroyedWorkspacesPage },
   // The workspace content surface (SPA twin of the deleted /_chrome wrapper).

@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v6)
+## Message inventory (v7)
 
 ### workspace -> embedder
 
@@ -54,10 +54,12 @@ see the `*_PATTERN` constants in the module.
 |---|---|---|
 | `minds:open-request-modal` | `{ requestId }` | Open the shell's permission-request modal focused on this request. |
 | `minds:open-help` | `{ agentId? }` | Open the get-help / report-a-bug modal, optionally scoped to a workspace. |
-| `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
+| `minds:open-ai-keys-page` | `{ hostId? }` | Retired in v7: chromes from v7 on ignore it and send no ack, so the workspace shows its fallback text. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
 | `minds:open-share-settings` | `{ serviceName }` | Open the shell's workspace-options panel on its Share tab, focused on that service. Fire-and-forget (no ack). |
 | `minds:workspace-ready` | `{}` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. |
+| `minds:provider-sign-in` | `{ url, flowId }` | A provider sign-in is waiting on the user in a browser. The embedder listens for the sign-in's loopback callback, relays it into the workspace's flow `flowId`, and opens `url`. It replies with `minds:provider-sign-in-ack`. |
+| `minds:provider-sign-in-end` | `{ flowId }` | The sign-in `flowId` has ended (signed in, failed, or abandoned); the embedder stops listening on its port. Fire-and-forget (no ack). |
 | `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Imbue Studio window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
 | `minds:window-drag-started` | `{ windowId, title, width, height, grabX, grabY }` | A drag of the window's title bar began (or the dragged window changed size mid-drag); `grabX`, `grabY` are where inside the window the pointer holds it. The embedder watches the cursor from here and reports each step with `minds:tear-out`, since the shell's own pointer events stop at the Imbue Studio window's edge on some platforms. |
 | `minds:window-drag-ended` | `{ windowId, isDetached }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out), false when the drag was released inside or cancelled, which drops any popout being dragged. |
@@ -68,15 +70,19 @@ see the `*_PATTERN` constants in the module.
 | Type | Payload | Meaning |
 |---|---|---|
 | `minds:close-active-tab` | `{}` | The close-tab shortcut fired while this workspace was displayed; close the focused window. |
-| `minds:open-ai-keys-ack` | `{}` | An Imbue Studio chrome is present and has opened (or will open) the mint modal. With no chrome (direct share visit) no ack arrives and the workspace shows its fallback text. |
+| `minds:open-ai-keys-ack` | `{}` | Retired in v7 (see `minds:open-ai-keys-page`). |
 | `minds:permission-resolutions` | `{ resolutions }` | Permission-request verdicts, `{ requestId, resolution }` each. Sent as the workspace's recent-verdicts snapshot when its frame (re)loads, and with one entry the moment the user resolves a request. |
+| `minds:provider-sign-in-ack` | `{ relay }` | Answer to `minds:provider-sign-in`: `relay` is true when the embedder is listening for the callback and opened the page, false when it cannot relay. With no chrome no ack arrives; the workspace treats that as false and offers its manual flow. |
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
 | `minds:embedder-capabilities` | `{ canPopOut }` | What this chrome can do, sent right after `minds:workspace-ready`. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the backdrop, clamped by the receiver) when a re-dock drag dropped it there, else at its kept frame. |
 
-The ack's semantic is "an Imbue Studio chrome is present" -- NOT "the desktop app is
-present". Plain-browser chrome acks too.
+`minds:provider-sign-in-ack` answers whether THIS chrome can relay: the relay
+binds a loopback port on the machine the chrome's backend runs on, which is
+also where the browser it opens runs. A chrome that cannot bind the port acks
+with `relay: false` rather than staying silent, so the workspace moves to its
+manual flow at once instead of waiting out its timeout.
 
 `permission-resolutions` is a display channel, not a decision channel: it
 flips the workspace's in-chat cards to their verdicts without waiting for the
@@ -172,3 +178,13 @@ payloads -- to the console.
   a frame as four finite numbers the receiver clamps. A shell whose vendored snapshot predates v6
   never sees `embedder-capabilities`, so its gesture stays off; a v6 shell
   facing an older chrome sends messages the chrome ignores.
+- **7** -- added `provider-sign-in` (workspace -> embedder) and its
+  `provider-sign-in-ack` (embedder -> workspace): the workspace hands the
+  chrome a provider's authorize URL, and the chrome relays the sign-in's
+  loopback callback into the workspace's flow, so signing in to Claude or
+  ChatGPT needs no pasted code. `provider-sign-in-end` (workspace ->
+  embedder) says the sign-in is over, so the chrome frees its port. The chrome re-validates the URL (provider
+  host, loopback `redirect_uri`, `state`) before it listens or opens anything.
+  Retired `open-ai-keys-page` and its ack: the Imbue key mint they opened is
+  gone, v7 chromes ignore the ask, and workspaces show their fallback text.
+  Both strings are retired -- never reuse them with a different meaning.

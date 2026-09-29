@@ -35,7 +35,6 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
-from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
@@ -219,8 +218,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
             raise ImbueCloudCliError("fake auth signout failure")
         self.accounts_to_return = [a for a in self.accounts_to_return if a.email != account]
 
-    # In-memory machine shares (drives the teardown tests)
-
     def add_share(self, account: str, host_id: str) -> None:
         self.shares_by_account.setdefault(account, {})[host_id] = "active"
 
@@ -266,8 +263,6 @@ class FakeImbueCloudCli(ImbueCloudCli):
     def create_storage_cleanup_grant(self, account: str) -> dict[str, object]:
         self.cleanup_grant_call_count += 1
         return dict(self.cleanup_grant_result)
-
-    # In-memory machine listing (drives the stop-kind tracker)
 
     machines: list[MachineSizeCliInfo] = Field(
         default_factory=list, description="The machines list_machines and show_machine answer from, every account"
@@ -417,42 +412,6 @@ class SucceedingCreateShareCli(FakeImbueCloudCli):
             relay_endpoints=TEST_RELAY_ENDPOINTS,
             relay_token=SecretStr("relay-token-xyz"),
             chrome_origin=self.chrome_origin_to_return,
-        )
-
-
-class RecordingImbueCloudCli(FakeImbueCloudCli):
-    """``FakeImbueCloudCli`` that records ``create_litellm_key`` calls.
-
-    Returns a stub :class:`LiteLLMKeyMaterial` instead of spawning the real
-    ``mngr imbue_cloud keys litellm create`` subprocess so tests can run
-    fully offline.
-    """
-
-    create_calls: list[dict[str, object]] = Field(default_factory=list)
-
-    def create_litellm_key(
-        self,
-        *,
-        account: str,
-        alias: str | None = None,
-        max_budget: float | None = None,
-        budget_duration: str | None = None,
-        metadata: Mapping[str, str] | None = None,
-        is_rotate_on_exists: bool = False,
-    ) -> LiteLLMKeyMaterial:
-        self.create_calls.append(
-            {
-                "account": account,
-                "alias": alias,
-                "max_budget": max_budget,
-                "budget_duration": budget_duration,
-                "metadata": dict(metadata) if metadata is not None else None,
-                "is_rotate_on_exists": is_rotate_on_exists,
-            }
-        )
-        return LiteLLMKeyMaterial(
-            key=SecretStr("sk-fake-litellm-key"),
-            base_url=AnyUrl("https://litellm.example.com"),
         )
 
 

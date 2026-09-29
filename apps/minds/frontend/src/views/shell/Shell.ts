@@ -129,9 +129,8 @@ function anchoredOverlayAttrs(
  * height -- its two columns scroll within it, and a card that resized itself
  * per section would move the section list out from under the cursor -- capped
  * to the window by the same min() the others' max uses. Accounts is a short
- * list and the AI-keys mint dialog a compact form, so those grow to their
- * content. The placed surfaces (the request popup, the feed, Get help) name
- * their own box where they are rendered. */
+ * list, so it grows to its content. The placed surfaces name their own box
+ * where they are rendered. */
 function appOverlayCardClass(path: string): string {
   if (path === "/settings") return "w-[880px] h-[min(660px,calc(100%-64px))]";
   if (path === "/accounts") return "w-[520px] min-h-0";

@@ -150,6 +150,7 @@ def _shutdown_desktop_client(state: DesktopClientState, is_externally_managed_cl
     # writing to the user's folders after the app is gone.
     if state.folder_sync_manager is not None:
         state.folder_sync_manager.stop_all()
+    state.provider_relay_registry.stop_all()
     # Tear down any hub-brokered cross-workspace SSH tunnels (paramiko reverse
     # forwards + their connections) so their threads don't outlive the app.
     state.ssh_tunnel_manager.cleanup()

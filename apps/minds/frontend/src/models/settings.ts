@@ -42,10 +42,20 @@ export interface SettingsOverview {
   version: string;
   update_window_start_hour: number;
   update_window_end_hour: number;
+  /** Optional only for version skew with a backend from before sign-in relaying; absent reads as
+   * "no browsers found" (the default browser is all there is to pick). */
+  sign_in_browsers?: SignInBrowserOption[];
+  sign_in_browser_id?: string | null;
+}
+
+/** An installed browser provider sign-ins can open in. */
+export interface SignInBrowserOption {
+  browser_id: string;
+  label: string;
 }
 
 export type SettingsSection =
-  "notifications" | "display" | "error-reporting" | "updates" | "backups";
+  "notifications" | "display" | "error-reporting" | "updates" | "sign-ins" | "backups";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -56,6 +66,7 @@ export const SETTINGS_SECTIONS: {
   { name: "display", label: "Display", group: "Other" },
   { name: "error-reporting", label: "Error reporting", group: "Other" },
   { name: "updates", label: "Updates", group: "Other" },
+  { name: "sign-ins", label: "Sign-ins", group: "Other" },
   { name: "backups", label: "Master password", group: "Other" },
 ];
 
@@ -121,7 +132,7 @@ export class SettingsModel {
   isLoadFailed = false;
   activeSection: SettingsSection = "notifications";
 
-  // -- Release channels (desktop only) --
+  // Release channels (desktop only)
   updateState: UpdateState | null = null;
   peekedChannels: Record<string, PeekedChannel> = {};
   /** Set when a switch would park the user; cleared by confirm or cancel. */
@@ -134,13 +145,14 @@ export class SettingsModel {
   isUpdateInstalling = false;
   updateError = "";
 
-  // -- Display zoom (desktop only) --
+  // Display zoom (desktop only)
   /** The stored zoom percent; null in the browser build, where the panel
    * points at the browser's own zoom instead. */
   displayZoomPercent: number | null = null;
   displayZoomError = "";
   errorReportingError = "";
   updateWindowError = "";
+  signInBrowserError = "";
   notificationPrefsError = "";
   /** Set after a failed openNotificationOsSettings() call (e.g. no known
    * settings command found on this Linux desktop environment), so the panel
@@ -254,6 +266,37 @@ export class SettingsModel {
       // snapping the checkbox back silently.
       this.errorReportingError =
         "Could not update error reporting (network error).";
+    }
+    this.redraw();
+  }
+
+  /** Persist the browser provider sign-ins open in (null for the default);
+   * a refused write keeps the current choice and shows why. */
+  async setSignInBrowser(browserId: string | null): Promise<void> {
+    if (this.overview === null) return;
+    this.signInBrowserError = "";
+    try {
+      const response = await this.fetchImpl("/ui/api/settings/sign-in-browser", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ browser_id: browserId }),
+      });
+      if (response.ok) {
+        const latest = this.overview;
+        if (latest === null) return;
+        this.overview = { ...latest, sign_in_browser_id: browserId };
+      } else {
+        const data = (await response.json().catch(() => ({}))) as {
+          error?: string;
+        };
+        this.signInBrowserError =
+          data.error ??
+          `Could not change the sign-in browser (HTTP ${response.status}).`;
+      }
+    } catch {
+      this.signInBrowserError =
+        "Could not change the sign-in browser (network error).";
     }
     this.redraw();
   }

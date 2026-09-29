@@ -452,6 +452,54 @@ function machineUpdatesSection(model: SettingsModel): m.Children {
   ]);
 }
 
+/** The select's value for "the default browser"; no installed browser's id is empty. */
+const DEFAULT_BROWSER_VALUE = "";
+
+function signInsPanel(model: SettingsModel): m.Children {
+  const overview = model.overview;
+  if (overview === null) return null;
+  const browsers = overview.sign_in_browsers ?? [];
+  return m("section", [
+    m("h2", { class: "type-heading-lg text-primary mb-2" }, "Sign-ins"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      "When a machine connects to Claude or ChatGPT, Imbue Studio opens the sign-in page in this browser. " +
+        "Pick the one you're signed in to your AI account with.",
+    ),
+    m("div", { class: "flex items-center gap-2 py-3 border-b border-subtle" }, [
+      m(
+        "label",
+        { class: "type-body text-primary", for: "sign-in-browser" },
+        "Open sign-ins in",
+      ),
+      m(
+        "select",
+        {
+          id: "sign-in-browser",
+          class: "h-[34px] px-2 rounded-md type-body bg-fill-subtle text-primary",
+          value: overview.sign_in_browser_id ?? DEFAULT_BROWSER_VALUE,
+          onchange: (event: Event) => {
+            const value = (event.target as HTMLSelectElement).value;
+            void model.setSignInBrowser(value === DEFAULT_BROWSER_VALUE ? null : value);
+          },
+        },
+        [
+          m("option", { value: DEFAULT_BROWSER_VALUE }, "Default browser"),
+          ...browsers.map((browser) => m("option", { value: browser.browser_id }, browser.label)),
+        ],
+      ),
+    ]),
+    model.signInBrowserError
+      ? m(
+          "p",
+          { class: "type-helper text-important mt-3", role: "alert" },
+          model.signInBrowserError,
+        )
+      : null,
+  ]);
+}
+
 interface MasterPasswordState {
   newPassword: string;
   confirmPassword: string;
@@ -1001,6 +1049,7 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
               ? errorReportingPanel(model)
               : null,
             model.activeSection === "updates" ? updatesPanel(model) : null,
+            model.activeSection === "sign-ins" ? signInsPanel(model) : null,
             model.activeSection === "backups"
               ? masterPasswordPanel(model, masterPasswordState)
               : null,

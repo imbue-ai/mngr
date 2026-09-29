@@ -1,9 +1,7 @@
-// The one overlay. Every surface the shell floats over the page -- Imbue Studio
-// settings, Accounts, the AI-keys dialog, the New machine stepper, the docked
-// machine-options panel, the permission-request popup, the notification feed,
-// Get help -- is this component with a different `placement` and a different
-// card class. There is one backdrop, one card, one close X, and one raised
-// titlebar strip, written once.
+// The one overlay. Every surface the shell floats over the page is this
+// component with a different `placement` and a different card class. There is
+// one backdrop, one card, one close X, and one raised titlebar strip, written
+// once.
 //
 // Three placements, which is the whole of what those surfaces disagree about:
 //

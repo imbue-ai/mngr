@@ -749,14 +749,12 @@ describe("Shell app-overlay card chrome", () => {
   });
 
   it("leaves every other overlay scrolling its card as a whole", () => {
-    // Accounts, the request popup, the AI-keys dialog and the template stepper
-    // are single columns that depend on the card scrolling. (Get help does not
-    // come through here -- it takes the right-hand popover's own box, and its
-    // own suite pins the scrolling body it gets there.)
+    // These are single columns that depend on the card scrolling. (Get help
+    // does not come through here -- it takes the right-hand popover's own box,
+    // and its own suite pins the scrolling body it gets there.)
     for (const routePath of [
       "/accounts",
       "/inbox",
-      "/settings/ai-keys",
       "/create/template",
     ]) {
       expect(String(overlayAttrsAt(routePath).bodyClass), routePath).toContain(

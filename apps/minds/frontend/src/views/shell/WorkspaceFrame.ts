@@ -11,6 +11,7 @@
 import m from "mithril";
 import { electronBridge } from "../../electron-bridge";
 import { fetchJson } from "../../models/create";
+import { armProviderRelay, stopProviderRelay } from "../../models/providerRelay";
 import type {
   DetachedWindowEntry,
   FocusChatSender,
@@ -27,9 +28,10 @@ import type { PopoutOpenRequest, TearOutReport, WorkspaceWindowDragRequest } fro
 interface EmbedContractModule {
   OPEN_REQUEST_MODAL: string;
   OPEN_HELP: string;
-  OPEN_AI_KEYS_PAGE: string;
-  OPEN_AI_KEYS_ACK: string;
   BRING_APP_TO_FRONT: string;
+  PROVIDER_SIGN_IN: string;
+  PROVIDER_SIGN_IN_ACK: string;
+  PROVIDER_SIGN_IN_END: string;
   OPEN_SHARE_SETTINGS: string;
   CLOSE_ACTIVE_TAB: string;
   PERMISSION_RESOLUTIONS: string;
@@ -103,6 +105,10 @@ export interface EmbedHandlerDeps {
   navigate: (path: string, params?: Record<string, string>) => void;
   sendAck: (type: string, payload?: Record<string, unknown>) => void;
   bringAppToFront: () => void;
+  /** Arm the desktop relay for a sign-in of the mounted workspace; whether it is relaying. */
+  armProviderRelay: (flowId: string, url: string) => Promise<boolean>;
+  /** Stop the desktop relay for a sign-in of the mounted workspace that has ended. */
+  stopProviderRelay: (flowId: string) => void;
   /** The mounted workspace's id, for the ?workspace= an overlay floats
    * over. */
   workspaceAgentId: () => string;
@@ -133,6 +139,8 @@ export function buildEmbedHandlers(
     navigate,
     sendAck,
     bringAppToFront,
+    armProviderRelay: armRelay,
+    stopProviderRelay: stopRelay,
     workspaceAgentId,
     openRequestPopup,
     onWorkspaceReady,
@@ -149,20 +157,17 @@ export function buildEmbedHandlers(
     // bug button, rather than tearing the frame down to a page.
     navigate("/help", { workspace: workspaceAgentId() });
   };
-  handlers[contract.OPEN_AI_KEYS_PAGE] = (message) => {
-    // Float the AI-keys mint dialog over this workspace (kept mounted),
-    // matching OPEN_HELP above. The mint page keys on the workspace id
-    // (ai_keys.py dual-accepts a legacy host id too, which is what workspaces
-    // running pre-workspace-id template code still send in `hostId`): prefer
-    // the coordinate the workspace sent, else this surface's workspace id.
-    const messageCoordinate =
-      typeof message.hostId === "string" && message.hostId
-        ? message.hostId
-        : null;
-    navigate("/settings/ai-keys", {
-      workspace: messageCoordinate ?? workspaceAgentId(),
-    });
-    sendAck(contract.OPEN_AI_KEYS_ACK);
+  handlers[contract.PROVIDER_SIGN_IN] = (message) => {
+    // The contract validated the shapes; the relay re-validates the URL itself. The ack always
+    // goes, so the workspace never waits out its timeout to fall back to manual sign-in.
+    const flowId = String(message.flowId);
+    const url = String(message.url);
+    void armRelay(flowId, url).then((isRelaying) =>
+      sendAck(contract.PROVIDER_SIGN_IN_ACK, { relay: isRelaying }),
+    );
+  };
+  handlers[contract.PROVIDER_SIGN_IN_END] = (message) => {
+    stopRelay(String(message.flowId));
   };
   handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
     // Float the options panel's Share tab over this machine (kept mounted),
@@ -353,6 +358,17 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           navigate: (path, params) => m.route.set(path, params),
           sendAck: (type, payload) => endpoint?.send(type, payload),
           bringAppToFront: () => electronBridge.bringAppToFront(),
+          armProviderRelay: (flowId, url) =>
+            armProviderRelay(
+              shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
+              flowId,
+              url,
+            ),
+          stopProviderRelay: (flowId) =>
+            stopProviderRelay(
+              shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
+              flowId,
+            ),
           workspaceAgentId: () =>
             shell.stores.workspaces.toAgentScopedId(mountedAnyId()),
           openRequestPopup: (requestId) => {

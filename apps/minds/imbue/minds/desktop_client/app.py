@@ -36,9 +36,6 @@ from imbue.minds.desktop_client.agent_address import build_agent_address
 from imbue.minds.desktop_client.agent_creator import AgentCreator
 from imbue.minds.desktop_client.agent_creator import make_workspace_probe_client
 from imbue.minds.desktop_client.agent_creator import probe_workspace_through_plugin
-from imbue.minds.desktop_client.ai_keys import AiKeyMintError
-from imbue.minds.desktop_client.ai_keys import mint_workspace_credential_blob
-from imbue.minds.desktop_client.ai_keys import resolve_workspace_account
 from imbue.minds.desktop_client.api_schema import create_api_schema_blueprint
 from imbue.minds.desktop_client.api_v1 import create_api_v1_blueprint
 from imbue.minds.desktop_client.assist_chat import ASSIST_SKILL_NAME
@@ -104,6 +101,8 @@ from imbue.minds.desktop_client.responses import safe_local_redirect_path
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.sharing_handler import delete_share_for_host
+from imbue.minds.desktop_client.sign_in_browser import InstalledSignInBrowsers
+from imbue.minds.desktop_client.sign_in_browser import SignInBrowsersInterface
 from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
 from imbue.minds.desktop_client.skill_chat import launch_skill_chat
@@ -214,7 +213,6 @@ def _get_mngr_forward_origin() -> str:
     return f"https://localhost:{port}"
 
 
-# Auth helpers
 def _required_one_time_code() -> OneTimeCode:
     """Parse the required ``one_time_code`` query param, aborting 422 when absent.
 
@@ -244,7 +242,6 @@ def _is_request_authenticated() -> bool:
     )
 
 
-# Route handlers (module-level; deps read from get_state())
 def _handle_forward_bridge() -> Response:
     """Bounce an authenticated browser into a forward-plugin session.
 
@@ -1341,8 +1338,6 @@ def _build_requests_payload(
     return {"count": len(request_ids), "request_ids": request_ids, "workspace_agent_ids": sorted(workspace_ids)}
 
 
-# System-interface health probing
-#
 # The probe loop's own timeout is all that lives here. The recovery page's route
 # is registered with the rest of the SPA routes further down, and its data calls
 # are served elsewhere: the recovery actions by the versioned surface (POST
@@ -1356,7 +1351,6 @@ def _build_requests_payload(
 _WORKSPACE_PROBE_TIMEOUT_SECONDS: Final[float] = 2.0
 
 
-# Account management routes
 def _handle_account_trim_backups(user_id: str) -> Response:
     """Start the over-quota backup trim flow for one account (idempotent while running)."""
     if not _is_request_authenticated():
@@ -1511,63 +1505,6 @@ def _find_predefined_permission_handler() -> LatchkeyPermissionGrantHandler | No
     return None
 
 
-def _workspace_record_store() -> WorkspaceRecordStore | None:
-    """The workspace-record store, when the sync machinery is configured."""
-    sync_scheduler = get_state().sync_scheduler
-    return None if sync_scheduler is None else sync_scheduler.record_store
-
-
-def _handle_mint_ai_key() -> Response:
-    """Mint a LiteLLM key for a workspace (POST /settings/ai-keys/mint).
-
-    JSON body: ``{"workspace": "<workspace_id>"}`` (a machine's host id is
-    also accepted while in-workspace deep links transition). Returns
-    ``{"credentials": ...}`` (the env-var-style blob the workspace modal
-    expects) on success, or ``{"error": ...}`` with a matching status code.
-    """
-    if not _is_request_authenticated():
-        return make_response(status_code=403, content='{"error": "Not authenticated"}', media_type="application/json")
-    body = request.get_json(silent=True, force=True) or {}
-    workspace_coordinate = str(body.get("workspace", "")).strip()
-    if not workspace_coordinate:
-        return make_response(
-            status_code=400,
-            content=json.dumps({"error": "Missing 'workspace' (the workspace id)"}),
-            media_type="application/json",
-        )
-    resolved = resolve_workspace_account(workspace_coordinate, _workspace_record_store(), get_state().session_store)
-    if resolved is None:
-        return make_response(
-            status_code=400,
-            content=json.dumps(
-                {
-                    "error": "This machine has no associated Imbue account. Associate one on the "
-                    "machine's settings page first."
-                }
-            ),
-            media_type="application/json",
-        )
-    imbue_cloud_cli = get_state().imbue_cloud_cli
-    if imbue_cloud_cli is None:
-        return make_response(
-            status_code=501,
-            content=json.dumps({"error": "Imbue Cloud is not configured on this install"}),
-            media_type="application/json",
-        )
-    try:
-        credential_blob = mint_workspace_credential_blob(
-            workspace_id=resolved.workspace_id,
-            account_email=resolved.account_email,
-            imbue_cloud_cli=imbue_cloud_cli,
-        )
-    except AiKeyMintError as exc:
-        logger.warning("LiteLLM key mint failed for workspace {}: {}", resolved.workspace_id, exc)
-        return make_response(status_code=502, content=json.dumps({"error": str(exc)}), media_type="application/json")
-    return make_response(
-        status_code=200, content=json.dumps({"credentials": credential_blob}), media_type="application/json"
-    )
-
-
 def _handle_set_default_account() -> Response:
     """Set the default account for new workspaces."""
     if not _is_request_authenticated():
@@ -1683,7 +1620,6 @@ def _dispatch_request_action(
     return make_json_error_response(f"Unsupported action '{action}'", status_code=500)
 
 
-# /ui channel publisher wiring
 def _ui_workspace_entry_from_legacy_dict(entry: Mapping[str, str]) -> UiWorkspaceEntry:
     """Convert one ``_build_workspace_list`` row into the typed channel entry.
 
@@ -2232,7 +2168,6 @@ def _ui_health_message(tracker: SystemInterfaceHealthTracker, agent_id: str, sta
     )
 
 
-# App factory
 def create_desktop_client(
     auth_store: AuthStoreInterface,
     backend_resolver: BackendResolverInterface,
@@ -2264,6 +2199,7 @@ def create_desktop_client(
     sync_scheduler: WorkspaceSyncScheduler | None = None,
     connectivity_detector: ConnectivityDetector | None = None,
     host_probe: HostProbeInterface | None = None,
+    sign_in_browsers: SignInBrowsersInterface | None = None,
     sleep_tracker: SleepTracker | None = None,
     folder_sync_manager: FolderSyncManager | None = None,
     device_id: str = "",
@@ -2473,6 +2409,7 @@ def create_desktop_client(
             else SubprocessHostProbe(concurrency_group=root_concurrency_group)
         ),
         mngr_caller=mngr_caller,
+        sign_in_browsers=sign_in_browsers if sign_in_browsers is not None else InstalledSignInBrowsers(),
         sync_scheduler=sync_scheduler,
         folder_sync_manager=folder_sync_manager,
         ui_channel_broadcaster=ui_channel_broadcaster,
@@ -2589,7 +2526,6 @@ def create_desktop_client(
         "/create/template",
         "/creating/<agent_id>",
         "/settings",
-        "/settings/ai-keys",
         "/accounts",
         "/workspaces/destroyed",
         # The workspace-display route: renders the shell around the sandboxed
@@ -2628,7 +2564,6 @@ def create_desktop_client(
     app.add_url_rule("/post-login", view_func=_handle_post_login_redirect)
 
     # Account management action routes
-    app.add_url_rule("/settings/ai-keys/mint", view_func=_handle_mint_ai_key, methods=["POST"])
     app.add_url_rule("/accounts/set-default", view_func=_handle_set_default_account, methods=["POST"])
     app.add_url_rule("/accounts/<user_id>/plan", view_func=_handle_account_set_plan, methods=["POST"])
     app.add_url_rule(

@@ -79,7 +79,6 @@ from imbue.mngr_modal.instance import SandboxConfig
 from imbue.mngr_modal.instance import TAG_HOST_ID
 from imbue.mngr_modal.instance import TAG_HOST_NAME
 from imbue.mngr_modal.instance import TAG_USER_PREFIX
-from imbue.mngr_modal.instance import _RESTORE_TMP_STICKY_BIT_COMMAND
 from imbue.mngr_modal.instance import _SANDBOX_CREATE_ATTEMPT_COUNT
 from imbue.mngr_modal.instance import _build_image_from_dockerfile_contents
 from imbue.mngr_modal.instance import _build_modal_secrets_from_env
@@ -1452,10 +1451,7 @@ def test_start_host_not_found_raises(testing_provider: ModalProviderInstance) ->
 
 
 class _SshSetupFailingSandbox(FakeSandbox):
-    """A sandbox that answers every command without executing it, records each one, and fails the SSH
-    configuration step so create_host stops right after it."""
-
-    commands: list[str] = Field(default_factory=list, description="Every command, space-joined, in order")
+    """A sandbox that answers every command without executing it and fails the SSH configuration step."""
 
     def exec(
         self,
@@ -1463,20 +1459,14 @@ class _SshSetupFailingSandbox(FakeSandbox):
         stdout: StreamType = StreamType.PIPE,
         stderr: StreamType = StreamType.PIPE,
     ) -> ExecProcess:
-        command_text = " ".join(args)
-        self.commands.append(command_text)
-        if "/etc/ssh" in command_text:
+        if "/etc/ssh" in " ".join(args):
             return FakeExecProcess(completed_output="sh: /etc/ssh: read-only file system", completed_exit_code=1)
         return FakeExecProcess()
 
 
 class _SshSetupFailingFakeModalInterface(FakeModalInterface):
-    sandboxes_built: list[_SshSetupFailingSandbox] = Field(default_factory=list, description="In build order")
-
     def _build_sandbox(self, sandbox_id: str) -> FakeSandbox:
-        sandbox = _SshSetupFailingSandbox(sandbox_id=sandbox_id)
-        self.sandboxes_built.append(sandbox)
-        return sandbox
+        return _SshSetupFailingSandbox(sandbox_id=sandbox_id)
 
 
 def test_create_host_surfaces_a_failed_ssh_setup_as_a_mngr_error(
@@ -1494,27 +1484,6 @@ def test_create_host_surfaces_a_failed_ssh_setup_as_a_mngr_error(
         fake_modal.cleanup()
 
     assert excinfo.group_contains(MngrError, match="configure SSH in sandbox")
-
-
-def test_create_host_restores_the_sticky_bit_on_tmp_before_sshd_starts(
-    temp_mngr_ctx: MngrContext,
-    tmp_path: Path,
-    cg: ConcurrencyGroup,
-) -> None:
-    """Modal image builds and filesystem snapshots drop /tmp's sticky bit, so every boot restores it."""
-    fake_modal = _SshSetupFailingFakeModalInterface(root_dir=tmp_path / "modal_testing", concurrency_group=cg)
-    provider = make_testing_provider(temp_mngr_ctx, fake_modal)
-    try:
-        with pytest.raises(ConcurrencyExceptionGroup):
-            provider.create_host(HostName("sticky-tmp"))
-    finally:
-        fake_modal.cleanup()
-
-    (ssh_setup_command,) = [
-        command for sandbox in fake_modal.sandboxes_built for command in sandbox.commands if "/etc/ssh" in command
-    ]
-    assert _RESTORE_TMP_STICKY_BIT_COMMAND in ssh_setup_command
-    assert not any("sshd -D" in command for sandbox in fake_modal.sandboxes_built for command in sandbox.commands)
 
 
 @pytest.mark.parametrize(

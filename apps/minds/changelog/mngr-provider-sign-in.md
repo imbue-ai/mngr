@@ -1,0 +1,7 @@
+- Connecting a machine to Claude or ChatGPT no longer needs a pasted code. The machine hands the app the provider's sign-in URL (embed contract v7: `minds:provider-sign-in`, its ack, and `minds:provider-sign-in-end`), and the app listens on the sign-in's loopback callback port on this computer, relays the callback into the machine's sign-in flow through the local forward channel, opens the page in the chosen browser, and raises the window showing that machine once the machine has answered. The browser ends on a page from the app saying how the sign-in went (signed in, didn't finish and why, still finishing, out of date, no longer waiting, or couldn't reach the machine), never on anything the machine sent.
+
+- The relay only listens for a provider URL on a known host with a loopback callback on a port the provider CLIs use, and refuses URLs a browser could read as another host. It never takes a port another program holds or another machine's sign-in is still waiting on (a relay whose callback was answered gives its port to the next sign-in), keeps at most one port per machine, opens pages at most once a second per machine, and gives the port up 15 minutes after arming, 60 seconds after the callback, or when the machine says the sign-in ended.
+
+- New **Settings > Sign-ins** setting, "Open sign-ins in": the default browser or any browser found installed.
+
+- The Imbue AI-key mint for Claude Code is gone: the `/settings/ai-keys` page and its mint route, the `/ui/api/ai-keys` context, and the chrome's handling of `minds:open-ai-keys-page`.

@@ -117,19 +117,6 @@ describe("classifyRoute", () => {
     expect(accentSourceForRoute("/inbox", "workspace=agent-ab12")).toBe(
       "agent-ab12",
     );
-    // The AI-keys mint dialog floats over the machine that opened it (a
-    // host-scoped ?workspace), keeping that machine's context + accent; opened
-    // without one it floats over Home.
-    expect(
-      classifyRoute("/settings/ai-keys", "workspace=host-99aa"),
-    ).toMatchObject({
-      kind: "workspace",
-      workspaceAnyId: "host-99aa",
-    });
-    expect(
-      accentSourceForRoute("/settings/ai-keys", "workspace=host-99aa"),
-    ).toBe("host-99aa");
-    expect(classifyRoute("/settings/ai-keys").kind).toBe("home");
   });
 
   it("keeps the workspace accent on destroying and recovery routes", () => {
@@ -149,12 +136,12 @@ describe("app overlay routing", () => {
     expect(isAppOverlayPath("/inbox")).toBe(true);
     // The notification feed is a state-keyed popover, not a route.
     expect(isAppOverlayPath("/notifications")).toBe(false);
-    expect(isAppOverlayPath("/settings/ai-keys")).toBe(true);
+    expect(isAppOverlayPath("/settings/ai-keys")).toBe(false);
     expect(isAppOverlayPath("/settings")).toBe(true);
     expect(isAppOverlayPath("/workspace/agent-ab12")).toBe(false);
   });
 
-  it("reads the workspace behind /help, /inbox, the template modal, and AI-keys from ?workspace only", () => {
+  it("reads the workspace behind /help, /inbox, and the template modal from ?workspace only", () => {
     expect(overlayBehindWorkspaceId("/help", "workspace=agent-ab12")).toBe(
       "agent-ab12",
     );
@@ -174,12 +161,6 @@ describe("app overlay routing", () => {
       overlayBehindWorkspaceId("/create/template", "workspace=agent-ab12"),
     ).toBe("agent-ab12");
     expect(overlayBehindWorkspaceId("/create/template", "")).toBeNull();
-    // The AI-keys mint dialog floats over the machine that opened it, keyed by
-    // that machine's HOST id (the mint endpoint resolves the account from it).
-    expect(
-      overlayBehindWorkspaceId("/settings/ai-keys", "workspace=host-99aa"),
-    ).toBe("host-99aa");
-    expect(overlayBehindWorkspaceId("/settings/ai-keys", "")).toBeNull();
     // Settings / Accounts never carry a behind-workspace -> float over Home.
     expect(
       overlayBehindWorkspaceId("/settings", "workspace=agent-ab12"),

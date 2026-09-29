@@ -508,6 +508,13 @@ class UiReloadMessage(FrozenModel):
     type: Literal["reload_ui"] = "reload_ui"
 
 
+class UiBringAppToFrontMessage(FrozenModel):
+    """A provider sign-in finished in the browser; raise the window showing its workspace (a no-op outside Electron)."""
+
+    type: Literal["bring_app_to_front"] = "bring_app_to_front"
+    agent_id: str = Field(description="Workspace agent id whose sign-in finished")
+
+
 class UiClientStateMessage(FrozenModel):
     """Client -> server registration: which window this is and what it is viewing."""
 
@@ -537,7 +544,8 @@ UiServerMessage = Annotated[
     | UiWorkspaceStoppedMessage
     | UiOpenHelpMessage
     | UiWorkspaceRefreshMessage
-    | UiReloadMessage,
+    | UiReloadMessage
+    | UiBringAppToFrontMessage,
     Field(discriminator="type"),
 ]
 
@@ -947,6 +955,7 @@ class UiWireSchema(FrozenModel):
     open_help: UiOpenHelpMessage = Field(description="open_help frame")
     workspace_refresh: UiWorkspaceRefreshMessage = Field(description="workspace_refresh frame")
     reload_ui: UiReloadMessage = Field(description="reload_ui frame")
+    bring_app_to_front: UiBringAppToFrontMessage = Field(description="bring_app_to_front frame")
     client_state: UiClientStateMessage = Field(description="client_state frame (client to server)")
     bootstrap: UiBootstrap = Field(description="bootstrap document")
     workspace_permissions: UiWorkspacePermissions = Field(description="workspace permissions payload")
