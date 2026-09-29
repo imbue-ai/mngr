@@ -987,6 +987,9 @@ def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path:
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
 
 
+# Times out at the 10s per-test budget while shelling out to git under a loaded parallel
+# run, as its sibling clone tests above do; passes alone in under a second.
+@pytest.mark.flaky
 def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
     """``clone_git_repo`` materialises a checked-out, tracked working tree --
     exactly what ``git clone`` produces.
