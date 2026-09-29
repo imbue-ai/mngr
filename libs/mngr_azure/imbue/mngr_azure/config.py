@@ -133,7 +133,7 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
     material -- and is the only required field.
 
     Exception: when ``client_id`` + ``tenant_id`` + ``client_secret`` are set
-    (the Minds bring-your-own-account paste flow), a service-principal
+    (the Imbue Studio bring-your-own-account paste flow), a service-principal
     ``ClientSecretCredential`` is built from them and used instead of
     ``DefaultAzureCredential``. Mirrors the OVH/Vultr providers holding
     ``SecretStr`` key material.
@@ -217,7 +217,7 @@ class AzureProviderConfig(PublicIpVpsProviderConfig):
         description=(
             "Service-principal (app registration) client id. When set together with tenant_id and "
             "client_secret, a ClientSecretCredential is used instead of DefaultAzureCredential. Used "
-            "by the Minds bring-your-own-account paste flow. A plain identifier, not a secret."
+            "by the Imbue Studio bring-your-own-account paste flow. A plain identifier, not a secret."
         ),
     )
     tenant_id: str | None = Field(

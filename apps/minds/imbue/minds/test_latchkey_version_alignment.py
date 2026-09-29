@@ -41,7 +41,7 @@ def test_bundled_latchkey_is_at_least_the_minimum_version_mngr_latchkey_accepts(
     bundled_floor = Version(match.group(1))
     minimum = Version(LATCHKEY_MIN_VERSION)
     assert bundled_floor >= minimum, (
-        f"The minds app bundles latchkey {specifier}, but mngr_latchkey requires at least "
+        f"The Imbue Studio app bundles latchkey {specifier}, but mngr_latchkey requires at least "
         f"{LATCHKEY_MIN_VERSION} (LATCHKEY_MIN_VERSION); Latchkey.initialize() would reject the "
         "bundled binary. Bump the package.json dependency (and refresh pnpm-lock.yaml)."
     )

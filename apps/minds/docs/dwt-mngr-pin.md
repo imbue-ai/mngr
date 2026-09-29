@@ -135,7 +135,7 @@ clone of the DEFAULT_WORKSPACE_TEMPLATE branch named like the current mngr branc
 (else `main`). The workspace it builds runs the mngr that clone pins. With the paired
 branch pinned to this branch's commit on mngr-internal, or to its public export, that
 is this checkout's mngr inside a workspace, verified on the PR; with a mirror-of-main
-pin, it is the released mngr and the run verifies this checkout's *minds app* against
+pin, it is the released mngr and the run verifies this checkout's *Imbue Studio app* against
 a workspace.
 
 ## `system/vendor/tk`

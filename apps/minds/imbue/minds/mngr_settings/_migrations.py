@@ -1,4 +1,4 @@
-"""One-way cleanups of state left behind by older minds builds.
+"""One-way cleanups of state left behind by older Imbue Studio builds.
 
 Each migration is a named, idempotent function; they run on every reconcile and no-op once the legacy state is gone.
 Steady-state desired configuration lives in ``reconcile.py`` -- only historical teardown belongs here.
@@ -41,8 +41,8 @@ def _remove_legacy_ssh_provider_block(providers_section: Table | tomlkit.TOMLDoc
 def _remove_legacy_ambient_aws_region_blocks(providers_section: Table | tomlkit.TOMLDocument) -> bool:
     """Old builds wrote one ambient ``[providers.aws-<region>]`` block per configured region; remove them.
 
-    The machine-credential AWS path was a prototype; bring-your-own-key ``byok-aws-<slug>`` accounts (which this prefix match deliberately excludes) are the only AWS path in minds now.
-    mngr CLI users' own settings are unaffected -- this is minds' profile settings file.
+    The machine-credential AWS path was a prototype; bring-your-own-key ``byok-aws-<slug>`` accounts (which this prefix match deliberately excludes) are the only AWS path in Imbue Studio now.
+    mngr CLI users' own settings are unaffected -- this is Imbue Studio's profile settings file.
     """
     legacy_names = [name for name in providers_section if name.startswith(AWS_PROVIDER_NAME_PREFIX)]
     for name in legacy_names:

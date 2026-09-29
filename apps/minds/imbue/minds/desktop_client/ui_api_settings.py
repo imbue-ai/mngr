@@ -7,7 +7,7 @@ Mutating flows the legacy POST routes already implement (permission revokes,
 connector add/disconnect, plan switch, trim, set-default, logout, key mint,
 master-password change) are reused by the SPA as-is and stay in ``app.py``.
 
-The error-reporting and notification-prefs writes are minds-owned records,
+The error-reporting and notification-prefs writes are records Imbue Studio owns,
 so each carries the optimistic-concurrency contract: ``GET /ui/api/settings``
 returns a per-record ``version`` derived from that record's stored values,
 and the write requires that version in ``If-Match`` (412 on mismatch, 428
@@ -246,7 +246,7 @@ def _handle_if_match_write(
     ``apply_versioned_write`` performs the version check AND the persistence (plus any
     side effects) atomically -- under one MindsConfig lock hold, not two separate calls --
     and returns the record's new version, or None on a version mismatch. Shared across
-    every minds-owned settings record so each one doesn't reimplement the same
+    every settings record Imbue Studio owns so each one doesn't reimplement the same
     parse/validate/If-Match/compare-and-swap skeleton.
     """
     body = request.get_json(silent=True, force=True)

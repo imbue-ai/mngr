@@ -1,9 +1,9 @@
-"""Run the local ``restic`` binary from the minds app.
+"""Run the local ``restic`` binary from the Imbue Studio app.
 
-minds initializes each workspace's restic repository itself (so the
+Imbue Studio initializes each workspace's restic repository itself (so the
 workspace never needs the master password or any repo-init logic) and
 queries repositories for backup status. Both require ``restic`` on the
-machine running minds. Repository address + backend credentials are passed
+computer running Imbue Studio. Repository address + backend credentials are passed
 to restic via the environment (``RESTIC_REPOSITORY`` plus e.g. ``AWS_*``);
 the password is passed as ``RESTIC_PASSWORD``, or via the global
 ``--insecure-no-password`` flag when the password is empty.
@@ -87,7 +87,7 @@ _PRUNE_TIMEOUT_SECONDS: Final[float] = 1800.0
 
 
 class ResticNotInstalledError(BackupProvisioningError):
-    """Raised when the ``restic`` binary is not available on the minds machine."""
+    """Raised when the ``restic`` binary is not available on the computer running Imbue Studio."""
 
 
 class ResticTransientAuthError(BackupProvisioningError):
@@ -113,7 +113,7 @@ def ensure_restic_available() -> None:
     binary = _get_restic_binary()
     if shutil.which(binary) is None:
         raise ResticNotInstalledError(
-            f"restic binary not found at {binary!r}. The minds build is supposed "
+            f"restic binary not found at {binary!r}. The Imbue Studio build is supposed "
             "to bundle it; run `pnpm build` in apps/minds/ to download "
             "resources/restic/restic, or set MINDS_RESTIC_BINARY explicitly."
         )

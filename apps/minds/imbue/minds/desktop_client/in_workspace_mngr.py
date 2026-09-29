@@ -188,7 +188,7 @@ def exec_verdict_detail(result: MngrCallResult) -> str:
 
     mngr's own ``exec_error`` event first, then the in-workspace refusal behind the outer
     mngr's chatter. Nothing else is read: when neither is there, the only text left is that
-    chatter, or minds' own words about a run it never got an answer from, and both read like
+    chatter, or Imbue Studio's own words about a run it never got an answer from, and both read like
     a cause without being one.
     """
     return exec_failure_reason(result.stdout) or (
@@ -200,7 +200,7 @@ def exec_verdict_detail(result: MngrCallResult) -> str:
 def exec_log_detail(result: MngrCallResult) -> str:
     """Why an ``mngr exec`` run fell short of a verdict, for a log line; '' when nothing said why.
 
-    The workspace's own account first (:func:`exec_verdict_detail`), then minds' own words
+    The workspace's own account first (:func:`exec_verdict_detail`), then Imbue Studio's own words
     about a run it got no answer from, which is a last resort for logs and no part of what a
     user is shown.
     """

@@ -458,7 +458,7 @@ def test_build_ssh_command_is_empty_without_ssh_info() -> None:
 
 # -- _resolve_workspace_coordinate_to_agent_id ------------------------------
 #
-# Workspace content URLs are keyed by host id while minds' records stay
+# Workspace content URLs are keyed by host id while Imbue Studio's records stay
 # agent-keyed; the resolver translates between the two coordinates for the
 # recovery page.
 

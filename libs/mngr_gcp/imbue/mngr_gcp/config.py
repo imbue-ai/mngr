@@ -204,7 +204,7 @@ class GcpProviderConfig(OfflineCapableVpsProviderConfig):
         description=(
             "Full JSON contents of a GCP service-account key. When set, credentials are built from "
             "it directly (bypassing Application Default Credentials) and its embedded project_id is "
-            "used as the resolved-project fallback. Used by the Minds bring-your-own-account paste "
+            "used as the resolved-project fallback. Used by the Imbue Studio bring-your-own-account paste "
             "flow. Leave unset to use ADC."
         ),
     )

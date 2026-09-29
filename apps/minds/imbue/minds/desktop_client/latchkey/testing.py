@@ -38,7 +38,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     """Write ``content`` to ``path`` atomically (tmp file + ``os.replace``).
 
     Mirrors the real gateway ``permissions`` extension, which never leaves a
-    partially-written file behind. This matters because minds revokes across
+    partially-written file behind. This matters because Imbue Studio revokes across
     workspaces on a background thread while other code (and tests) may read the
     same file concurrently; a plain ``write_text`` truncates first, so a racing
     reader could observe an empty file and fail to parse it.

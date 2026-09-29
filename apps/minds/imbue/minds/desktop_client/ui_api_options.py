@@ -8,7 +8,7 @@ association, destroy, and the machine-sharing document all ride the existing
 cookie-authed ``/api/v1`` routes, which already carry the concurrency story
 those records support (sharing writes are whole-document replaces serialized
 client-side; name/color/account are pass-throughs to mngr labels guarded by
-mngr's own host/agent locks, so there is no minds-owned version to If-Match).
+mngr's own host/agent locks, so there is no version owned by Imbue Studio to If-Match).
 
 The small context helpers here are the successors of ``app.py``'s private
 ``_build_workspace_context`` family, deleted with the legacy pages. The

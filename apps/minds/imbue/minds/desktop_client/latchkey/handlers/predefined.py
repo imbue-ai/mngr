@@ -25,7 +25,7 @@ back to a manual flow: the grant is refused (the request stays pending)
 and the dialog is handed the service's suggested ``latchkey auth set``
 invocation split into one labeled input per ``<placeholder>`` (see
 :mod:`imbue.mngr_latchkey.credential_commands`). The next Approve click
-carries the typed values, which minds substitutes into the command and
+carries the typed values, which Imbue Studio substitutes into the command and
 runs itself -- pinned to the account the dialog selected -- before
 re-checking the credential status and continuing the grant. An example
 that has no placeholders (or is not a latchkey command at all) yields a

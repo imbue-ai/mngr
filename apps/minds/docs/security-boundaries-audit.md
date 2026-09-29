@@ -1,4 +1,4 @@
-# Security Boundaries Audit: Minds Electron App
+# Security Boundaries Audit: Imbue Studio Electron App
 
 Audit date: 2026-04-23
 
@@ -16,7 +16,7 @@ Audit date: 2026-04-23
 
 ## Architecture summary
 
-The minds desktop app uses a layered proxy architecture:
+The Imbue Studio desktop app uses a layered proxy architecture:
 
 1. **Electron shell** (`electron/main.js`): Creates `BaseWindow` with multiple `WebContentsView` instances (chromeView, contentView, modalView -- the modalView hosts both the sidebar page and the inbox page). Manages window lifecycle and IPC.
 
@@ -44,7 +44,7 @@ Previously, the desktop client proxy (`_forward_workspace_http`) forwarded all r
 
 Note: Content views now use a separate Electron session partition (`persist:workspace-content`), while the chrome and modal views (the modal hosts the sidebar and inbox pages) use the default session. Even without this partition, web storage would still be scoped by origin per Chromium's standard behavior. The partition adds defense-in-depth by fully separating the content cookie jar from chrome-level cookies.
 
-## Question 3: Can agents access cookies/localStorage used by the outer minds app?
+## Question 3: Can agents access cookies/localStorage used by the outer Imbue Studio app?
 
 **Cookies: NO.** The desktop client's session cookie is set on the bare `localhost:PORT` origin as a host-only cookie (no `Domain` attribute). The code explicitly documents why `Domain=localhost` is not used:
 

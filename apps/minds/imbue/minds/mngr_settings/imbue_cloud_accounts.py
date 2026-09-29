@@ -22,7 +22,7 @@ def set_imbue_cloud_provider_for_account(
 ) -> bool:
     """Register ``[providers.imbue_cloud_<slug>]`` in mngr's settings.toml.
 
-    Called by minds when a SuperTokens session for ``email`` is created (signin/signup/oauth-success) and from the bootstrap reconcile.
+    Called by Imbue Studio when a SuperTokens session for ``email`` is created (signin/signup/oauth-success) and from the bootstrap reconcile.
     Idempotent: a no-op if an equivalent entry already exists.
 
     ``connector_url`` is the URL of the ``remote_service_connector`` the provider should talk to; callers source it from the loaded ``ClientEnvConfig``.
@@ -32,9 +32,9 @@ def set_imbue_cloud_provider_for_account(
 
     Returns ``True`` when the file was modified, so callers know whether to bounce ``mngr observe`` (the running process needs a restart to see the new provider instance).
 
-    Always (re-)runs :func:`ensure_mngr_settings` first: at minds startup the mngr profile dir may not have existed yet (making the startup ensure a no-op), but by the time a signin fires, mngr has been initialized and the ensure lands the overrides the startup call missed.
+    Always (re-)runs :func:`ensure_mngr_settings` first: at Imbue Studio startup the mngr profile dir may not have existed yet (making the startup ensure a no-op), but by the time a signin fires, mngr has been initialized and the ensure lands the overrides the startup call missed.
     """
-    # Fold the minds-side-overrides write into the returned "modified" flag: if this call (rather than the startup bootstrap) is what first landed the suppression blocks, the observe process needs a bounce for them too.
+    # Fold the Imbue Studio overrides write into the returned "modified" flag: if this call (rather than the startup bootstrap) is what first landed the suppression blocks, the observe process needs a bounce for them too.
     is_settings_modified = ensure_mngr_settings(root)
     store = settings_store_for(root)
     if store is None:
@@ -52,7 +52,7 @@ def set_imbue_cloud_provider_for_account(
 def unset_imbue_cloud_provider_for_account(email: str, *, root: MindsRoot) -> bool:
     """Remove ``[providers.imbue_cloud_<slug>]`` from mngr's settings.toml.
 
-    Called by minds on signout.
+    Called by Imbue Studio on signout.
     Idempotent: a no-op if no such entry exists.
     Returns ``True`` when the file was modified.
     """
@@ -96,7 +96,7 @@ def reconcile_imbue_cloud_providers_from_sessions(connector_url: str, *, root: M
 
     The mngr_imbue_cloud plugin owns the SuperTokens session list (``accounts.json``), which mngr updates on every signin/signup/oauth and on signout.
     The provider-instance registration in settings.toml is only written by the signin *event*, which does not fire on cookie-resumed startups, so the on-disk state can drift to "signed in per the plugin, but no provider block" -- at which point ``mngr create`` fails with ``Unknown provider backend``.
-    Walking the accounts index on every minds startup and ensuring each email has a registered provider entry costs essentially nothing (the set call is a no-op when the entry already matches) and makes the bootstrap idempotent over arbitrary settings.toml drift.
+    Walking the accounts index on every Imbue Studio startup and ensuring each email has a registered provider entry costs essentially nothing (the set call is a no-op when the entry already matches) and makes the bootstrap idempotent over arbitrary settings.toml drift.
 
     No-op when the accounts file doesn't exist yet (fresh install with no signins).
     """

@@ -39,9 +39,9 @@ MNGR_BINARY: Final[str] = "mngr"
 
 
 class InstallationPaths(FrozenModel):
-    """Resolved filesystem paths of one minds installation (one data directory on one device)."""
+    """Resolved filesystem paths of one Imbue Studio installation (one data directory on one device)."""
 
-    data_dir: Path = Field(description="Root directory for minds data (e.g. ~/.minds)")
+    data_dir: Path = Field(description="Root directory for Imbue Studio data (e.g. ~/.minds)")
 
     @property
     def auth_dir(self) -> Path:
@@ -50,7 +50,7 @@ class InstallationPaths(FrozenModel):
 
     @property
     def mngr_host_dir(self) -> Path:
-        """Directory where mngr stores agent state for this minds install (e.g. ~/.minds/mngr)."""
+        """Directory where mngr stores agent state for this Imbue Studio install (e.g. ~/.minds/mngr)."""
         return self.data_dir / "mngr"
 
     @property

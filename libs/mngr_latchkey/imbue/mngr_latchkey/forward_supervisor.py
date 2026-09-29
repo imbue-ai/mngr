@@ -233,7 +233,7 @@ class LatchkeyForwardSupervisor(MutableModel):
         frozen=True,
         description=(
             "Path to the ``mngr`` CLI used to launch the supervisor and (inside the "
-            "supervisor) to drive ``mngr observe``. Bundled callers like the minds "
+            "supervisor) to drive ``mngr observe``. Bundled callers like the Imbue Studio "
             "desktop client pass an absolute path; others fall back to ``mngr`` on PATH."
         ),
     )
@@ -254,7 +254,7 @@ class LatchkeyForwardSupervisor(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Working directory for the spawned ``mngr latchkey forward`` process. The minds "
+            "Working directory for the spawned ``mngr latchkey forward`` process. The Imbue Studio "
             "desktop client passes ``$HOME`` so the supervisor (a laptop-side ``mngr`` "
             "invocation) does not resolve project config from a transient cwd such as a dev "
             "checkout's ``.mngr/settings.toml``. ``None`` inherits the caller's cwd."
@@ -267,7 +267,7 @@ class LatchkeyForwardSupervisor(MutableModel):
             "Extra environment variables to set on the spawned ``mngr latchkey forward`` "
             "process (in addition to the supervisor's own ``os.environ``). The forward "
             "process inherits these into the ``latchkey gateway`` subprocess it owns and "
-            "from there into any gateway extension's ``process.env``. The minds desktop "
+            "from there into any gateway extension's ``process.env``. The Imbue Studio desktop "
             "client uses this to publish the current ``LATCHKEY_EXTENSION_MINDS_API_URL`` "
             "to the bundled ``minds-api-proxy`` extension on every supervisor restart, so "
             "the proxy always points at the live Minds API port without any cross-process "

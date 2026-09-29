@@ -3,7 +3,7 @@
 This module is the third sibling handler under
 :mod:`imbue.minds.desktop_client.latchkey.handlers`. It owns the flow for
 *workspace* permission requests: an agent in one workspace asking to act on the
-minds cross-workspace management API (``/api/v1/workspaces/...``) -- listing,
+Imbue Studio cross-workspace management API (``/api/v1/workspaces/...``) -- listing,
 reading, creating, destroying, starting/stopping, exporting backups, and
 establishing SSH access against *other* workspaces.
 

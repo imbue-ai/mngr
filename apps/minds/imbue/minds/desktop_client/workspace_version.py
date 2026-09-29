@@ -1,10 +1,10 @@
-"""Read a workspace's version history from its own git, from the minds hub.
+"""Read a workspace's version history from its own git, from the Imbue Studio hub.
 
 A workspace is created from the default-workspace-template at a pinned ref (the
 immutable ``original_minds_version`` label). Later upgrades are ``git pull``s
 from the ``upstream`` remote (the ``update-self`` skill), which land as merge
 commits on the workspace's primary branch. So the *current* version and the
-*upgrade history* live in the workspace's git, not in any minds-side record.
+*upgrade history* live in the workspace's git, not in any Imbue Studio record.
 
 Two things in that git can name the current version: the ``update-self:``
 merge subject the skill writes (which outranks, unless the tag names a newer
@@ -12,7 +12,7 @@ release) and the nearest reachable ``minds-v*`` tag. The tag can be missing
 from a clone that holds the commit it points at -- a workspace created from a
 published template carries the template's whole history but none of its tags
 -- so a read that finds neither, in a workspace whose tree came from the
-template and holds enough history for a tag to describe it, adds minds'
+template and holds enough history for a tag to describe it, adds Imbue Studio's
 ``official`` remote, fetches the release tags from it and describes again.
 That is the one thing the read writes into the workspace.
 

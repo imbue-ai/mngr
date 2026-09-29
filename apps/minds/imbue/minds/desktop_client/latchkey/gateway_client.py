@@ -83,7 +83,7 @@ _FOLLOW_READ_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(connect=10.0, read=2.
 # Short timeout for one-shot POST / DELETE / GET calls.
 _ONE_SHOT_TIMEOUT_SECONDS: Final[float] = 10.0
 
-# How long minds is willing to wait for ``mngr latchkey forward`` to
+# How long Imbue Studio is willing to wait for ``mngr latchkey forward`` to
 # bind its gateway port and stamp the port onto its on-disk supervisor
 # record. Long enough to tolerate a cold gateway-binary start on a
 # slow box but short enough to keep ``minds run`` from blocking
@@ -183,7 +183,7 @@ class FileSharingRequestPayload(FrozenModel):
 class WorkspaceRequestPayload(FrozenModel):
     """Payload for ``type == "workspace"`` permission requests.
 
-    Grants access to the minds cross-workspace management API under the
+    Grants access to the Imbue Studio cross-workspace management API under the
     ``minds-workspaces`` detent scope. ``permissions`` are the verb schema
     names the agent wants; ``target_workspace_id`` is the workspace the
     targeted verbs (destroy / lifecycle / backups-export / ssh) act on, or
@@ -451,7 +451,7 @@ class LatchkeyGatewayClient(MutableModel):
 
         The cached ``_base_url`` is built once from the record naming the
         forward that owns the latchkey directory. If the supervisor
-        restarts mid-session -- or if minds startup raced the
+        restarts mid-session -- or if Imbue Studio startup raced the
         supervisor restart and cached the previous gateway's port --
         every subsequent connection attempt will fail with a
         transport-level error (typically ``[Errno 111] Connection
@@ -500,11 +500,11 @@ class LatchkeyGatewayClient(MutableModel):
         the ownership lock, carrying no port yet, and rewrites that record once
         it has bound the shared ``latchkey gateway`` subprocess to a free TCP
         port. We poll until the port becomes non-None (or the timeout expires)
-        so subsequent minds startup steps can build the gateway URL
+        so subsequent Imbue Studio startup steps can build the gateway URL
         deterministically without racing the supervisor's own startup.
 
         What is polled is the *live* owner's record, never one a departed
-        forward left behind: minds terminates and respawns the supervisor on
+        forward left behind: Imbue Studio terminates and respawns the supervisor on
         every start (see ``_restart_mngr_latchkey_forward_supervisor``), and the
         record only names the new forward once that forward claims the
         directory -- an ``mngr`` cold start later. A caller arriving in that

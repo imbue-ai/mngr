@@ -67,7 +67,7 @@ const {
 const { registerContextMenuFor } = require('./context-menu');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
-// page is the minds SPA (titlebar + hub pages + the sandboxed workspace
+// page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
 // iframe + in-DOM modals, all Mithril-rendered). The main process no longer
 // consumes any event stream of its own: each renderer owns a /ui/ws
 // WebSocket and relays the few events main acts on over the 'shell-event'
@@ -256,7 +256,7 @@ function toAbsoluteUrl(url) {
 }
 
 // Classify a URL as "external" (open in the user's default browser). All
-// in-app navigation (the minds backend, the mngr_forward plugin, and every
+// in-app navigation (the Imbue Studio backend, the mngr_forward plugin, and every
 // `host-<id>.localhost` workspace origin) lives on localhost.
 function isExternalUrl(url) {
   let parsed;
@@ -276,7 +276,7 @@ function isExternalUrl(url) {
 }
 
 // Coordinate aliases from the relayed ``workspaces`` shell events: content
-// URLs are HOST-keyed while minds records and channel events stay
+// URLs are HOST-keyed while Imbue Studio records and channel events stay
 // AGENT-keyed.
 const workspaceHostIdByAgentId = new Map();
 const workspaceAgentIdByHostId = new Map();
@@ -2611,7 +2611,7 @@ ipcMain.handle('open-notification-settings', () => {
 
 // Trust the forward proxy's CA-signed leaf certs for its loopback origins.
 // The CA is local to this machine (under the plugin state dir) and only
-// minds' own loopback origins use it; every real https origin still gets
+// Imbue Studio's own loopback origins use it; every real https origin still gets
 // Chromium's default verification (cb(-3)).
 function isLoopbackHostname(hostname) {
   return hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '127.0.0.1';

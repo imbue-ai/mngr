@@ -2,7 +2,7 @@
 state-container routes (``/api/v1/desktop/...``, reached here with the session
 cookie) and the landing-page Start/Stop controls.
 
-Mind liveness is derived from the discovery snapshot's host state (folded into the
+Machine liveness is derived from the discovery snapshot's host state (folded into the
 resolver as ``host_state_by_host_id``) plus the resolver's optimistic
 ``set_host_state_override``; tests seed host state on the resolver rather than
 poking a separate tracker.
@@ -132,7 +132,7 @@ def test_running_minds_requires_authentication(tmp_path: Path) -> None:
 
 
 def test_running_minds_empty_when_no_capable_minds(tmp_path: Path) -> None:
-    """The quit-prompt lookup returns an empty list when discovery has no capable minds."""
+    """The quit-prompt lookup returns an empty list when discovery has no capable machines."""
     client, auth_store = _make_client(tmp_path, MngrCliBackendResolver())
     _authenticate(client, auth_store)
     response = client.get("/api/v1/desktop/running-workspaces")
@@ -156,10 +156,10 @@ def test_stop_state_container_noop_without_concurrency_group(tmp_path: Path) -> 
 
 
 def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> None:
-    """The running-workspaces lookup returns running minds straight from discovery host state.
+    """The running-workspaces lookup returns running machines straight from discovery host state.
 
     No ``root_concurrency_group`` is wired here, so if the endpoint tried to shell
-    out to ``mngr list`` it would degrade to empty; returning the running mind
+    out to ``mngr list`` it would degrade to empty; returning the running machine
     proves it reads the in-memory discovery state (instant, no subprocess). This
     also pins the per-entry ``{id, name}`` shape the Electron quit flow consumes.
     """
@@ -173,17 +173,17 @@ def test_running_minds_reads_discovery_without_subprocess(tmp_path: Path) -> Non
 
     assert response.status_code == 200
     running = response.get_json()["running"]
-    # Only the RUNNING mind is listed; the STOPPED one is excluded.
+    # Only the RUNNING machine is listed; the STOPPED one is excluded.
     assert [entry["id"] for entry in running] == [str(running_agent)]
     # The per-entry shape the Electron quit flow reads: id + human name.
     assert set(running[0].keys()) == {"id", "name"}
 
 
 def test_running_minds_omits_running_cloud_workspaces(tmp_path: Path) -> None:
-    """The quit prompt is about the user's own machine, so cloud minds stay out of it.
+    """The quit prompt is about the user's own computer, so cloud machines stay out of it.
 
     imbue_cloud (like aws / gcp / azure) is shutdown-capable -- its workspace row
-    carries a Start/Stop control -- but a cloud mind goes on running with the app
+    carries a Start/Stop control -- but a cloud machine goes on running with the app
     closed, so quitting must not list it as something the user is leaving behind.
     """
     cloud_agent = AgentId.generate()
@@ -227,7 +227,7 @@ def test_running_minds_omits_running_cloud_workspaces(tmp_path: Path) -> None:
 
 
 def test_running_minds_reflects_optimistic_override(tmp_path: Path) -> None:
-    """A just-issued Stop override hides a still-RUNNING-in-discovery mind from the prompt."""
+    """A just-issued Stop override hides a still-RUNNING-in-discovery machine from the prompt."""
     agent = AgentId.generate()
     resolver = _resolver_with_running_capable_agent(agent)
     resolver.set_host_state_override(_HOST_A, HostState.STOPPED)

@@ -27,8 +27,8 @@ let backendProcess = null;
 
 /**
  * Env var that points the latchkey gateway at the bundled curl router.
- * Set on the minds backend process so it flows -- via ``dict(os.environ)``
- * inheritance -- to the minds process's own latchkey calls, the detached
+ * Set on the Imbue Studio backend process so it flows -- via ``dict(os.environ)``
+ * inheritance -- to that process's own latchkey calls, the detached
  * ``mngr latchkey forward`` supervisor, and the gateway subprocess it
  * spawns.
  *

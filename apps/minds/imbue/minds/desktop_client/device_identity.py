@@ -10,7 +10,7 @@ from imbue.minds.errors import DeviceIdError
 from imbue.minds.primitives import DeviceId
 
 DEVICE_ID_FILENAME: Final[str] = "device_id"
-# Installs that predate the minds-owned device id file used the mngr local
+# Installs that predate Imbue Studio's own device id file used the mngr local
 # provider's host id (``<mngr_host_dir>/host_id``) as their device identity.
 _LEGACY_MNGR_HOST_ID_FILENAME: Final[str] = "host_id"
 
@@ -29,7 +29,7 @@ def get_or_create_device_id(data_dir: Path, mngr_host_dir: Path) -> DeviceId:
     single id and a visible file always holds complete contents.
 
     Raises ``DeviceIdError`` when either file is unreadable or holds an invalid
-    value, or when the id file cannot be created -- minds must never run
+    value, or when the id file cannot be created -- Imbue Studio must never run
     without a valid identity.
     """
     device_id_path = data_dir / DEVICE_ID_FILENAME

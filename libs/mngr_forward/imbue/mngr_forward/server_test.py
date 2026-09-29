@@ -2489,7 +2489,7 @@ def test_subdomain_forward_websocket_emits_failure_on_ssh_tunnel_setup_error(
     before ``accept()``.
 
     Regression test: the websocket forward path used to close the socket
-    without emitting a failure envelope, unlike the HTTP path. A mind whose
+    without emitting a failure envelope, unlike the HTTP path. An agent whose
     only live channel is a websocket -- an already-loaded SPA after its system
     interface dies -- would then leave minds blind to the dead backend: the
     agent was never enrolled as a probe suspect, so it never reached STUCK and

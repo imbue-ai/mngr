@@ -1,12 +1,12 @@
 # Checking sleep/wake handling on a real laptop
 
-A laptop sleep kills every connection Minds holds to a workspace. How the app
+A laptop sleep kills every connection Imbue Studio holds to a workspace. How the app
 behaves in the minutes after the wake cannot be checked in CI: it depends on
 real clocks stopping, real sockets going half-open, and a real network that may
 or may not deliver the peer's reset. Two scripts in `scripts/` cover this on a
 spare Mac:
 
-- `sleep_wake_drill.py` stages the incident against running Minds apps and
+- `sleep_wake_drill.py` stages the incident against running Imbue Studio apps and
   reports what each app did. This is the one to run after changing the
   forward's tunnels, the health tracker's thresholds, the recovery dispatch,
   the connectivity gate, or the sleep tracker.
@@ -25,7 +25,7 @@ the laptop you are working from.
 
 - A Mac you can leave alone for about fifteen minutes, with `sudo` access. The
   drill takes the password once, up front, and holds root for the run.
-- One or more Minds apps running on it, each signed in, each with a window open
+- One or more Imbue Studio apps running on it, each signed in, each with a window open
   on a workspace for the whole run. The health probe loop only polls a
   workspace that a failed request has enrolled, and those requests come from an
   open window. A workspace nobody is looking at is never probed, never

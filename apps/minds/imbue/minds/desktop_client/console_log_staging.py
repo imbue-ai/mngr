@@ -1,7 +1,7 @@
 """Read the Electron shell's captured console output for a bug report.
 
-The Electron main process records every renderer console message -- the minds SPA's own output and the
-workspace iframe's -- into a rolling log file in the minds log dir (``electron/console-capture.js``).
+The Electron main process records every renderer console message -- the Imbue Studio SPA's own output and the
+workspace iframe's -- into a rolling log file in the Imbue Studio log dir (``electron/console-capture.js``).
 That file rotates at 10MB keeping 10 gzipped rotations, the same bound ``electron.log`` and the Python
 backend logs carry, and its name is one no Sentry attachment group globs.
 

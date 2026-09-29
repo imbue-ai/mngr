@@ -38,7 +38,7 @@ from wsgidav.wsgidav_app import WsgiDAVApp
 
 from imbue.minds.desktop_client.api_key_auth import is_request_authenticated
 
-# Callable that resolves the current central minds API key. Wrapped so
+# Callable that resolves the current central Imbue Studio API key. Wrapped so
 # the WebDAV gate can look it up fresh on every request via
 # ``get_state().minds_api_key`` instead of capturing a stale value at
 # gate-build time.
@@ -48,7 +48,7 @@ _UNAUTHORIZED_BODY: Final[bytes] = b'{"error": "Unauthorized"}'
 
 
 def _build_bearer_auth_gate(inner: WSGIApplication, expected_key_provider: ExpectedKeyProvider) -> WSGIApplication:
-    """Wrap ``inner`` so every request must carry the central minds API key.
+    """Wrap ``inner`` so every request must carry the central Imbue Studio API key.
 
     ``expected_key_provider`` resolves the live ``get_state().minds_api_key``
     on each request rather than capturing the value at gate-build time;

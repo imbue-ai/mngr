@@ -6,7 +6,7 @@ backend (``serve_spa_index`` in ``desktop_client/ui_api.py``) reports its own
 JavaScript errors to Sentry too, using the vendored ``@sentry/browser`` bundle
 (``static/sentry.browser.min.js``) booted by ``static/sentry_init.js``.
 
-The Python backend reports to its own (Python) Sentry projects; all of minds'
+The Python backend reports to its own (Python) Sentry projects; all of Imbue Studio's
 **JavaScript** -- both this browser web UI and the Electron main process
 (``electron/sentry.js``) -- reports to one shared set of **JavaScript** Sentry
 projects (production / staging / dev). Backend and frontend stay on separate

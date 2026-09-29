@@ -133,7 +133,7 @@ function getLatchkeyPath() {
 }
 
 /**
- * Directory where all minds-managed Latchkey gateways keep their shared
+ * Directory where all Latchkey gateways Imbue Studio manages keep their shared
  * credential/config state (``LATCHKEY_DIRECTORY``). Sharing one directory
  * across gateways lets the user authenticate with each third-party service
  * once for all their agents, instead of once per agent.

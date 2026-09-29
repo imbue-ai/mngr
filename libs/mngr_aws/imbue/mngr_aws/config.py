@@ -213,7 +213,7 @@ class AwsProviderConfig(PublicIpVpsProviderConfig):
         description=(
             "Explicit AWS access key id. When set together with aws_secret_access_key, these are "
             "passed directly to boto3 and take precedence over the ambient credential chain. Used by "
-            "the Minds bring-your-own-account paste flow. Leave unset to use the ambient chain."
+            "the Imbue Studio bring-your-own-account paste flow. Leave unset to use the ambient chain."
         ),
     )
     aws_secret_access_key: SecretStr | None = Field(

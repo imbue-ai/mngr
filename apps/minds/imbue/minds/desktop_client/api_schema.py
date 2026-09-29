@@ -204,7 +204,7 @@ _SECURITY_SCHEMES: Final[Mapping[str, object]] = {
     "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Central minds API key, injected by the latchkey gateway's minds-api-proxy. Agents never hold it directly.",
+        "description": "Central Imbue Studio API key, injected by the latchkey gateway's minds-api-proxy. Agents never hold it directly.",
     },
     "cookieAuth": {
         "type": "apiKey",

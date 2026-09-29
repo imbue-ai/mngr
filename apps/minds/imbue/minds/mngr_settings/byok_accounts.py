@@ -45,7 +45,7 @@ def set_cloud_account_provider(
     """Register a bring-your-own-key cloud account as ``[providers.byok-<backend>-<slug>]``.
 
     ``credentials`` are the backend's pasted-credential config fields verbatim; they land as plaintext TOML the same way the imbue_cloud session store persists its secrets (0600-class local files).
-    The block also pins the minds workspace shape (instance type + gVisor hardening).
+    The block also pins the Imbue Studio workspace shape (instance type + gVisor hardening).
     Returns the block name (the mngr provider-instance name that creates will target).
 
     Raises ``MindsSettingsError`` for an unsupported backend, an unusable alias, a duplicate account name, or an uninitialized mngr profile.
@@ -130,7 +130,7 @@ def _cloud_account_identifier(block: Mapping[str, object]) -> str:
 
 
 def delete_cloud_account_provider(provider_name: str, *, root: MindsRoot) -> bool:
-    """Remove a cloud account block from minds' settings.
+    """Remove a cloud account block from Imbue Studio's settings.
 
     Only deletes ``byok-*`` blocks -- never the ambient/reconciled providers.
     Cloud-side resources (security group, state bucket) are deliberately left in place; ``mngr <backend> cleanup`` is the explicit teardown for those.

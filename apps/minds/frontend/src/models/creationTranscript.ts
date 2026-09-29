@@ -40,7 +40,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
       "You can keep what you make private, invite people to work with you in the same workspace, or share a " +
       "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
       "works in the same place. Sharing a copy gives someone the app without giving them your data.\n\n" +
-      "When Imbue Studio needs an account, it’ll ask you to connect it. You can see and remove that access later.",
+      "When your agent needs an account, it’ll ask you to connect it. You can see and remove that access later.",
   },
   {
     id: "data",
@@ -86,7 +86,7 @@ export const START_OPTIONS: StartOption[] = [
   {
     title: "Connect your data",
     detail:
-      "Connect your email, calendar, Slack, GitHub, or another service so Imbue Studio can help with the information " +
+      "Connect your email, calendar, Slack, GitHub, or another service so your agent can help with the information " +
       "already there.",
   },
   {

@@ -344,7 +344,7 @@ def test_check_script_fetches_missing_minimum_tag_from_the_official_remote(tmp_p
 
 
 def test_check_script_repoints_a_wrong_official_remote(tmp_path: Path) -> None:
-    # minds owns the `official` remote name: an existing remote pointing
+    # Imbue Studio owns the `official` remote name: an existing remote pointing
     # elsewhere is idempotently repointed at the given URL.
     template_parent = tmp_path / "template-parent"
     template_parent.mkdir()
@@ -868,10 +868,10 @@ def _snapshot_entries(restic_repo: Path) -> list[dict]:
 def _restore_args(
     restic_repo: Path, snapshot_id: str, *, subpath: str | None = None, extra: tuple[str, ...] = ()
 ) -> tuple[str, ...]:
-    """Build the restore script's argv, standing in for what minds resolves and passes.
+    """Build the restore script's argv, standing in for what Imbue Studio resolves and passes.
 
     In production the snapshot's subpath (the directory inside the snapshot
-    that corresponds to the host dir) and time come from minds' own view of
+    that corresponds to the host dir) and time come from Imbue Studio's own view of
     the repository (``backup_update._resolve_restore_snapshot``); the script
     only consumes them, so these tests read them straight from restic. The
     default subpath is the snapshot's recorded root (the plain-docker shape);
@@ -984,7 +984,7 @@ def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(
     # On btrfs providers the hourly backup snapshots the whole unified host
     # volume: the snapshot root carries volume-level `agents/` +
     # `host_state.json` next to a `host_dir/` child that holds the actual
-    # workspace. minds resolves the nested subpath and passes it in; the
+    # workspace. Imbue Studio resolves the nested subpath and passes it in; the
     # restore must land that subtree at the host dir root, without the
     # volume-level entries.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
@@ -1024,7 +1024,7 @@ def test_restore_script_restores_the_nested_host_dir_of_a_volume_level_snapshot(
 @pytest.mark.timeout(120)
 def test_restore_script_restores_a_snapshot_stored_at_the_tree_root(tmp_path: Path) -> None:
     # host_backup backs up `.` from inside the backup root, so the snapshot
-    # holds the host dir's tree at its root and minds passes `/` as the subpath.
+    # holds the host dir's tree at its root and Imbue Studio passes `/` as the subpath.
     host, code, restic_repo = _make_restore_workspace(tmp_path)
     restic_backup_a_file(str(restic_repo), _RESTIC_TEST_PASSWORD, host, is_tree_at_snapshot_root=True)
     entry = _snapshot_entries(restic_repo)[0]
@@ -1050,7 +1050,7 @@ def test_restore_script_restores_a_snapshot_stored_at_the_tree_root(tmp_path: Pa
 
 @pytest.mark.timeout(120)
 def test_restore_script_reports_failure_when_the_restored_tree_lacks_a_checkout(tmp_path: Path) -> None:
-    # minds validates the subpath before dispatch, so this is a backstop: a
+    # Imbue Studio validates the subpath before dispatch, so this is a backstop: a
     # restore that leaves no workspace/ (or legacy code/) checkout must report
     # failure (and restart the services) rather than declare success over a
     # wrecked workspace.
@@ -1392,7 +1392,7 @@ def test_restore_script_resumes_services_when_uv_sync_fails_after_the_restore(tm
 
 @pytest.mark.timeout(120)
 def test_restore_script_fails_cleanly_without_a_snapshot_subpath(tmp_path: Path) -> None:
-    # minds resolves the snapshot subpath and passes it in; a dispatch that
+    # Imbue Studio resolves the snapshot subpath and passes it in; a dispatch that
     # omits it must fail before anything is stopped or mutated, rather than
     # guessing.
     host, code, restic_repo = _make_restore_workspace(tmp_path)

@@ -263,7 +263,7 @@ def build_stub_connectivity_detector(
     the rounds the app actually runs. The ``root_concurrency_group`` fixture is
     one.
 
-    ``workspace_ssh_endpoints`` are the endpoints minds itself would dial -- the
+    ``workspace_ssh_endpoints`` are the endpoints Imbue Studio itself would dial -- the
     ones the SSH facet asks about first. Empty (the default) leaves that facet on
     the public quorum alone, which is what an app with no remote machines has.
 
@@ -890,7 +890,7 @@ def scripted_workspace_probe_server(
     readiness poll -- the create attempt's wait and the recovery worker's -- so
     both exercise the same stand-in.
 
-    Speaks TLS with the proxy's own CA-backed cert helpers: minds always runs
+    Speaks TLS with the proxy's own CA-backed cert helpers: Imbue Studio always runs
     ``mngr forward`` with HTTP/2, so a readiness probe dials https and would fail
     the handshake against a plain-HTTP socket.
     """

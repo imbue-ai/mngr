@@ -150,7 +150,7 @@ def test_start_state_container_real_failure_raises_unwrapped_docker_cleanup_erro
     # surface as a plain DockerCleanupError -- NOT a ConcurrencyExceptionGroup
     # wrapping it. The launch path in run.py catches DockerCleanupError to keep
     # startup going; if the error escaped wrapped, that catch would miss it and
-    # minds would crash with "Failed to start minds".
+    # Imbue Studio would crash with "Failed to start Imbue Studio".
     _install_fake_docker(monkeypatch, tmp_path, exit_code=1, stderr=_PAUSED_DAEMON_STDERR)
     with pytest.raises(DockerCleanupError):
         start_state_container(

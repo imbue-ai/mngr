@@ -91,7 +91,7 @@ def test_prune_expired_grant_lines_empty_content_stays_empty() -> None:
 
 
 def test_prune_expired_grant_lines_drops_grant_with_corrupt_expiry() -> None:
-    # A minds-owned grant whose ``expires=`` marker is unparseable is treated as
+    # A grant Imbue Studio owns whose ``expires=`` marker is unparseable is treated as
     # expired (the epoch sentinel) and dropped. ``now`` is timezone-aware, so the
     # sentinel must be aware too, or the comparison would raise TypeError.
     live = build_authorized_keys_line(

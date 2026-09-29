@@ -3,7 +3,7 @@
 The connector holds one record per (account, workspace): plaintext metadata (name,
 color, provider, location, lifecycle state) plus an opaque secrets blob
 encrypted under the account's DEK (see ``dek_store``). This module owns the
-minds side of that: a per-account on-disk replica (the offline cache and
+Imbue Studio side of that: a per-account on-disk replica (the offline cache and
 dirty-queue), record assembly from discovery + the canonical restic env +
 best-effort SSH key material, CAS push/pull through the ``mngr imbue_cloud
 sync`` CLI, and the post-discovery reconcile (one-shot legacy-association
@@ -98,7 +98,7 @@ def is_cloud_provider_kind(provider_kind: str) -> bool:
 
 # File names inside an imbue_cloud provider instance's per-host state dir
 # (``providers/imbue_cloud/<instance>/hosts/<host_id>/``). Mirrored from the
-# plugin's layout by convention -- minds deliberately talks to the plugin only
+# plugin's layout by convention -- Imbue Studio deliberately talks to the plugin only
 # via the CLI, so these names are duplicated rather than imported.
 _SSH_KEY_FILENAME = "ssh_key"
 _SSH_PUBLIC_KEY_FILENAME = "ssh_key.pub"
@@ -114,7 +114,7 @@ class WorkspaceSecretsPayload(FrozenModel):
     """Decrypted contents of a record's encrypted_secrets blob."""
 
     # Unknown fields are tolerated (unlike FrozenModel's extra="forbid") so a
-    # future minds version can add payload fields without making THIS version
+    # future Imbue Studio version can add payload fields without making THIS version
     # reject the whole blob -- which would cost an old install not just the new
     # fields but everything, including the DR-critical restic env.
     model_config = ConfigDict(extra="ignore")
@@ -274,7 +274,7 @@ def resolve_mngr_profile_dir(mngr_host_dir: Path) -> Path | None:
     """Resolve ``<host_dir>/profiles/<active-profile>``, or None when mngr is uninitialized.
 
     Mirrors the plugin's ``get_active_profile_dir`` without importing the
-    plugin (minds deliberately talks to it only via the CLI).
+    plugin (Imbue Studio deliberately talks to it only via the CLI).
     """
     config_path = mngr_host_dir / "config.toml"
     if not config_path.is_file():

@@ -45,7 +45,7 @@ def test_get_signing_key_persists_across_instances(tmp_path: Path) -> None:
 def test_get_signing_key_is_consistent_under_concurrent_first_access(tmp_path: Path) -> None:
     """Concurrent first-time callers must all converge on a single signing key.
 
-    Regression test for a race that surfaced in the minds Electron e2e CI job:
+    Regression test for a race that surfaced in the Imbue Studio Electron e2e CI job:
     FastAPI runs sync route handlers on a threadpool, so on a fresh data
     directory the startup burst of requests all reached signing-key generation
     at once. The old lazy implementation let each thread generate a *different*

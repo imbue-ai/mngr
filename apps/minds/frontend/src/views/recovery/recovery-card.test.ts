@@ -223,7 +223,7 @@ describe("RecoveryCardBody", () => {
   it("names the backend and withholds the restart when the backend is unreachable", () => {
     // The restart is dispatched through the same provider, so offering it here
     // would be offering an action that cannot work. The provider's own error is
-    // shown verbatim rather than collapsed into copy minds authored.
+    // shown verbatim rather than collapsed into copy Imbue Studio authored.
     const text = renderCard({
       ...UNRESPONSIVE,
       is_backend_unreachable: true,
@@ -246,7 +246,7 @@ describe("RecoveryCardBody", () => {
 
   it("still reports a machine that is answering, whatever its provider's last poll did", () => {
     // A provider poll can error while its machines keep answering through the
-    // forward, so an erroring provider is not by itself a machine minds cannot
+    // forward, so an erroring provider is not by itself a machine Imbue Studio cannot
     // reach. The band withholds the same verdict on a healthy machine; the card
     // has to agree, and it is the surface that owes the user the ending.
     const text = renderCard({

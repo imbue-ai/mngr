@@ -1,6 +1,6 @@
 """Tests for the desktop-side backup operation workers.
 
-The restore worker resolves its target snapshot from minds' own view of the
+The restore worker resolves its target snapshot from Imbue Studio's own view of the
 repository before it touches the machine, so these run against a real local
 restic repo and never need a reachable machine.
 """

@@ -1,4 +1,4 @@
-"""Characterization tests for the minds-side mngr settings reconciliation.
+"""Characterization tests for the Imbue Studio side of mngr settings reconciliation.
 
 These pin the exact settings.toml structure the bootstrap produces from
 representative starting states, so the refactor of the reconciliation
@@ -42,7 +42,7 @@ _BASE_RECONCILED_SHAPE = snapshot(
         },
         "plugins": {"recursive": {"enabled": False}},
         # Destroyed mngr host records age out with the 30-day backup retention
-        # window in minds-managed profiles (mngr's own default is 7 days).
+        # window in profiles Imbue Studio manages (mngr's own default is 7 days).
         "default_destroyed_host_persisted_seconds": 60 * 60 * 24 * 30,
     }
 )

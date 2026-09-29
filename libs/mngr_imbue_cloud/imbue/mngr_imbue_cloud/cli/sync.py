@@ -52,7 +52,7 @@ def _read_json_payload(model_name: str, input_file: str | None) -> dict[str, obj
 
 @click.group(name="sync")
 def sync() -> None:
-    """Workspace-record and key-bundle sync (transport for the minds app)."""
+    """Workspace-record and key-bundle sync (transport for the Imbue Studio app)."""
 
 
 @sync.group(name="records")

@@ -68,7 +68,7 @@ _RETENTION_POLICY_PATH: Final[str] = "/policies/destroyed-workspace-backups"
 _RETENTION_FETCH_TIMEOUT_SECONDS: Final[float] = 10.0
 _RETENTION_CACHE_TTL_SECONDS: Final[float] = 60.0 * 60.0
 
-# Events land under events/<source>/events.jsonl in the minds data dir.
+# Events land under events/<source>/events.jsonl in the Imbue Studio data dir.
 _EVENT_SOURCE: Final[str] = "backup_reaper"
 
 # The CLI writes the raising exception's class name into its stderr JSON;
@@ -228,7 +228,7 @@ class BackupReaperManager(MutableModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    paths: InstallationPaths = Field(frozen=True, description="The minds data-dir layout")
+    paths: InstallationPaths = Field(frozen=True, description="The Imbue Studio data-dir layout")
     record_store: WorkspaceRecordStore = Field(frozen=True, description="The workspace-record replica")
     imbue_cloud_cli: ImbueCloudCli | None = Field(
         frozen=True, default=None, description="CLI for bucket destroys; None disables bucket reaping"

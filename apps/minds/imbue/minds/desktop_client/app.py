@@ -205,7 +205,7 @@ def _get_mngr_forward_origin() -> str:
     """Build the bare-origin URL of the ``mngr forward`` plugin.
 
     Used by templates to construct ``/goto/<agent>/`` URLs that target the
-    plugin (which owns subdomain forwarding) rather than minds. minds always
+    plugin (which owns subdomain forwarding) rather than Imbue Studio. Imbue Studio always
     runs the proxy with TLS + HTTP/2, so the scheme is ``https`` and the
     rendered links reach it rather than failing a plaintext request against
     the TLS listener.
@@ -250,7 +250,7 @@ def _handle_forward_bridge() -> Response:
 
     The chrome page's iframe cannot be pre-set a cookie the way the Electron
     shell pre-sets the preauth cookie, so browser-mode workspace entry routes
-    through here first: minds verifies its own session, then 302s to the
+    through here first: Imbue Studio verifies its own session, then 302s to the
     plugin's ``/_bridge`` with the spawn-time secret, which sets the plugin's
     bare-origin session cookie and redirects onward to ``next`` (normally a
     ``/goto/<workspace-id>/`` workspace entry).
@@ -1015,26 +1015,26 @@ def _finalize_destroyed_workspace(
     delete_destroying(agent_id, paths)
 
 
-# Provider names that are always hidden from minds' providers panel:
+# Provider names that are always hidden from Imbue Studio's providers panel:
 # - ``local``: always present, always healthy; nothing actionable.
 # - ``imbue_cloud``: the default singleton instance is non-functional. Imbue Studio
 #   uses the multi-account variant (``imbue_cloud_<slug>`` per signed-in
 #   account), so the default block is dead weight and surfacing it would
 #   confuse users into thinking they need to enable / disable it.
 # Other consumers (e.g. `mngr list` CLI) keep showing both normally -- the
-# hide applies only to minds' panel.
+# hide applies only to Imbue Studio's panel.
 _HIDDEN_PROVIDER_NAMES_IN_PANEL: Final[frozenset[str]] = frozenset({"local", "imbue_cloud"})
 
 
 def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -> dict[str, Any]:
-    """Build the providers panel SSE payload from resolver state + minds' settings file.
+    """Build the providers panel SSE payload from resolver state + Imbue Studio's settings file.
 
     Combines three sources:
     - ``backend_resolver.list_providers()`` -- providers that loaded
       successfully in the most recent discovery snapshot.
     - ``backend_resolver.get_provider_errors()`` -- providers whose discovery
       raised.
-    - ``list_disabled_provider_names()`` -- providers minds' settings file
+    - ``list_disabled_provider_names()`` -- providers Imbue Studio's settings file
       explicitly disables. These are skipped by discovery and so don't appear
       in the snapshot, but the panel needs them for the Enable button.
 
@@ -1065,7 +1065,7 @@ def _build_providers_state_payload(backend_resolver: BackendResolverInterface) -
 
     # De-duplicate by name with priority disabled > error > ok. A provider can
     # appear in multiple source buckets during the window between a Disable click
-    # (writes to minds' settings) and mngr observe's restart (rewrites the snapshot
+    # (writes to Imbue Studio's settings) and mngr observe's restart (rewrites the snapshot
     # to drop the now-disabled provider). In that window the same name shows up in
     # both `disabled_names` and the resolver's errored or healthy set. The user's
     # explicitly recorded intent (disabled-in-settings) wins; transient error state
@@ -1193,12 +1193,12 @@ def _build_workspace_list(
     the same reason: the band would otherwise report a machine that is probably
     running fine as lost.
 
-    Shutdown-capable minds (those on a provider whose host minds can stop/start,
+    Shutdown-capable machines (those on a provider whose host Imbue Studio can stop/start,
     see :func:`provider_backend_supports_shutdown`) additionally carry
     ``supports_shutdown="true"`` and a ``liveness`` of RUNNING / STOPPED /
     STOPPING / STARTING / UNKNOWN. Container liveness rides here rather than
     on a separate SSE channel: a liveness change makes the entry differ, so
-    the existing ``workspaces`` diff pushes it. Non-capable minds carry
+    the existing ``workspaces`` diff pushes it. Non-capable machines carry
     neither field.
     """
     liveness_by_agent_id = compute_mind_liveness_by_agent_id(backend_resolver)
@@ -2270,10 +2270,10 @@ def create_desktop_client(
     identity_cache: IdentityCache | None = None,
     forward_identity: ForwardIdentityPublisher | None = None,
 ) -> Flask:
-    """Create the bare-origin minds Flask application.
+    """Create the bare-origin Imbue Studio Flask application.
 
     The agent-subdomain forwarding lives in the ``mngr_forward`` plugin
-    (``libs/mngr_forward``) now; this app only serves minds-specific routes
+    (``libs/mngr_forward``) now; this app only serves routes specific to Imbue Studio
     on the bare origin (login, landing, accounts, workspace settings,
     sharing, agent create / destroy). Workspace links go to the proxy's
     ``localhost:<mngr_forward_port>/goto/<agent>/`` route (``https`` when the
@@ -2732,13 +2732,13 @@ class _ConnectedFocusedWorkspaceAgentIdsReader(FrozenModel):
 
 
 class _MindsApiKeyProvider(FrozenModel):
-    """Resolves the live central minds API key from an app's state for the WebDAV gate.
+    """Resolves the live central Imbue Studio API key from an app's state for the WebDAV gate.
 
     A small callable (rather than a closure/partial) so the WebDAV bearer gate can
-    look the key up fresh on each request without minds capturing a stale value.
+    look the key up fresh on each request without Imbue Studio capturing a stale value.
     """
 
-    app: Flask = Field(frozen=True, description="The Flask app whose state holds the current minds API key.")
+    app: Flask = Field(frozen=True, description="The Flask app whose state holds the current Imbue Studio API key.")
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
 
@@ -2779,7 +2779,7 @@ def start_system_interface_health_probe_loop(
     through probe failures observed here.
 
     Probing is skipped entirely when the plugin port or preauth cookie are
-    unset (e.g. minds running without the plugin) -- without a working
+    unset (e.g. Imbue Studio running without the plugin) -- without a working
     plugin route there is no way to ask whether the workspace is reachable.
 
     Each pass ticks ``sleep_tracker`` before it reads anything, so the failure

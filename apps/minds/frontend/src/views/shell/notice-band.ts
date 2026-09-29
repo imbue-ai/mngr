@@ -64,9 +64,9 @@ function isEnvironmentBlock(condition: EnvironmentCondition): condition is Envir
  *
  * Each line reports only this device, because this device is all that was
  * measured. Reassuring the user that their machines are still running would be
- * a claim about the far side of a connection nothing here can make: minds
- * stopped being able to look at exactly the moment it went offline, so a
- * machine that died a second earlier would be described as fine.
+ * a claim about the far side of a connection nothing here can make:
+ * Imbue Studio stopped being able to look at exactly the moment it went
+ * offline, so a machine that died a second earlier would be described as fine.
  */
 const ENVIRONMENT_BLOCKED_MESSAGE: Record<EnvironmentBlock, string> = {
   OFFLINE: "No network connection.",
@@ -106,7 +106,7 @@ export interface NoticeBandContext {
   /** This one connection failed on this device, on a network that works. */
   isDeviceCannotConnect?: boolean;
   /** The machine's lifecycle liveness (RUNNING / STOPPED / STOPPING / STARTING /
-   * UNKNOWN), "" when the machine's host cannot be stopped from minds. */
+   * UNKNOWN), "" when the machine's host cannot be stopped from Imbue Studio. */
   liveness?: string;
   /** Why the machine's current stop happened (owner / maintenance / idle /
    * suspension / unknown), "" while running or when not known. */
@@ -132,7 +132,7 @@ export interface NoticeBandContext {
  * This device having no usable network is the widest: it takes down the
  * provider poll as well, so naming the provider under it would blame a backend
  * that is fine. An unreachable backend is next -- this machine reads stuck
- * because minds cannot reach the provider that hosts it, so the band names the
+ * because Imbue Studio cannot reach the provider that hosts it, so the band names the
  * provider rather than the machine. A connection that failed on this device,
  * on a network that otherwise works, is the narrowest: this one machine reads
  * stuck because the app could not build a connection to it, not because
@@ -220,7 +220,7 @@ export function noticeBandFor(
   //
   // The provider's name is the cause alone: one line over the machine's own
   // screen has room for the condition, not for what it means for this machine
-  // or what minds is doing about it. The device-side line likewise says whose
+  // or what Imbue Studio is doing about it. The device-side line likewise says whose
   // fault it is and nothing else -- its remedy is an app restart, a real
   // interruption, offered from the card next to the error that justifies it.
   //

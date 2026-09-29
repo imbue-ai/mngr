@@ -326,7 +326,7 @@ def test_rename_host_raises_when_lease_not_found() -> None:
 # per-host authorized key and the served host key) survives a docker stop/start,
 # so only sshd -- a process launched via ``docker exec``, never the entrypoint --
 # must be relaunched. Without (1), start_host is never reached; without (2), the
-# container comes back with no sshd. Either way a stopped leased mind is left
+# container comes back with no sshd. Either way a stopped leased host is left
 # unrecoverable.
 
 
@@ -469,7 +469,7 @@ def test_get_host_returns_offline_host_when_container_stopped(tmp_path: Path, te
     ``start_host`` when ``get_host`` returns a non-online host. The previous
     implementation returned an online ``Host`` unconditionally, so ``mngr
     start`` skipped ``start_host`` and SSHed straight into the dead container,
-    leaving a stopped leased mind unrecoverable.
+    leaving a stopped leased host unrecoverable.
     """
     host_id = HostId.generate()
     lease = _make_lease(host_id)

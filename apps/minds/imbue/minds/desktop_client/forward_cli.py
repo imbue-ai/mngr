@@ -1,6 +1,6 @@
 """The wrapper Imbue Studio puts around the ``mngr forward`` plugin subprocess.
 
-Phase 2 deletes minds' in-process subdomain-forwarding, auth, and observe-
+Phase 2 deletes Imbue Studio's in-process subdomain-forwarding, auth, and observe-
 spawning code; this file replaces them with a thin consumer that:
 
 - spawns ``mngr forward --observe-via-file`` as a subprocess so it tails the
@@ -88,7 +88,7 @@ def _parse_backend_failure_reason(raw_reason: str) -> SystemInterfaceBackendFail
     not reach a backend, so it is read as the generic connection-class failure
     rather than dropped. Producer and consumer ship pinned to the same commit,
     so this should never fire -- it exists so that if the pinning ever slips,
-    the cost is a coarser verdict rather than a workspace whose outage minds
+    the cost is a coarser verdict rather than a workspace whose outage Imbue Studio
     never hears about at all.
     """
     try:
@@ -164,7 +164,7 @@ class _PreStartErrorDropLogger(MutableModel):
     """Collapses the dropped pre-start provider errors into one line per distinct error.
 
     The events-file backlog holds one snapshot per discovery cycle for however
-    long minds was closed, and a wedged provider errors on every one of them, so
+    long Imbue Studio was closed, and a wedged provider errors on every one of them, so
     logging each drop scales with the downtime. Route every dropped error
     through :meth:`record_dropped_error`, which only tallies, and end each
     provider's replay with :meth:`flush_provider`, which logs one counted line
@@ -380,7 +380,7 @@ class _ForwardStderrCollapser(MutableModel):
 class EnvelopeStreamConsumer(MutableModel):
     """Owns the ``mngr forward`` subprocess and dispatches its envelope JSONL stream.
 
-    Every public method is safe to call from minds' request-handling threads;
+    Every public method is safe to call from Imbue Studio's request-handling threads;
     internal state is guarded by ``_lock``.
     """
 
@@ -391,7 +391,7 @@ class EnvelopeStreamConsumer(MutableModel):
         description=(
             "When this consumer came up. Snapshots finished before this instant "
             "are events-file replay (the pre-start backlog), whose provider "
-            "errors describe the gap while minds was closed rather than the "
+            "errors describe the gap while Imbue Studio was closed rather than the "
             "present, and are dropped by the observe handler."
         ),
     )
@@ -477,7 +477,7 @@ class EnvelopeStreamConsumer(MutableModel):
         verbatim error text when the plugin had an exception to quote.
         ``STALLED`` is the one reason that does not report a failed request: it
         means the backend has not answered yet, and the request may still
-        succeed. Used by minds to feed its ``SystemInterfaceHealthTracker``.
+        succeed. Used by Imbue Studio to feed its ``SystemInterfaceHealthTracker``.
         """
         with self._lock:
             self._on_system_interface_backend_failure_callbacks.append(callback)
@@ -490,7 +490,7 @@ class EnvelopeStreamConsumer(MutableModel):
         The callback receives ``(agent_id, status_code)``: the workspace whose
         shell backend answered a forwarded request, and the 2xx it answered
         with (``None`` for an accepted websocket). The plugin sends at most one
-        per agent per few seconds. Used by minds to let a live renderer clear a
+        per agent per few seconds. Used by Imbue Studio to let a live renderer clear a
         health verdict the tracker's own probes cannot.
         """
         with self._lock:
@@ -500,7 +500,7 @@ class EnvelopeStreamConsumer(MutableModel):
         """Register a callback fired once when the plugin subprocess exits unexpectedly.
 
         The callback receives the subprocess exit code. It fires only for an
-        exit minds did not ask for (i.e. not after :meth:`terminate`), and at
+        exit Imbue Studio did not ask for (i.e. not after :meth:`terminate`), and at
         most once per consumer. The discovery-health watchdog registers here so
         a dead consumer transitions the app-global state straight to BLOCKED.
         """
@@ -610,7 +610,7 @@ class EnvelopeStreamConsumer(MutableModel):
         if process is None:
             return
         exit_code = process.wait()
-        # If minds asked the subprocess to stop (lifespan shutdown), the exit is
+        # If Imbue Studio asked the subprocess to stop (lifespan shutdown), the exit is
         # expected -- not a dead pipeline.
         if self._intentional_shutdown:
             logger.debug("mngr forward exited with code {} after intentional shutdown", exit_code)
@@ -673,10 +673,10 @@ class EnvelopeStreamConsumer(MutableModel):
         if event is None:
             return
         # The legacy global snapshot is superseded by per-provider snapshots, which
-        # the shared aggregator reconciles; minds drops the legacy event here too
+        # the shared aggregator reconciles; Imbue Studio drops the legacy event here too
         # (consuming both would double-count agents during the transition window).
         if isinstance(event, FullDiscoverySnapshotEvent):
-            logger.trace("Ignoring legacy full discovery snapshot; minds consumes per-provider snapshots")
+            logger.trace("Ignoring legacy full discovery snapshot; Imbue Studio consumes per-provider snapshots")
             return
         # SSH info carries no agent/host membership, so the aggregator does not
         # model it; record it here before folding the event in so the agents view
@@ -689,11 +689,11 @@ class EnvelopeStreamConsumer(MutableModel):
             # logs a recovery line if its error was previously logged).
             self._error_log_suppressor.record_provider_snapshot(event)
             # A pre-start snapshot is events-file replay, and its error describes
-            # the gap while minds was closed, not the present: the detached
+            # the gap while Imbue Studio was closed, not the present: the detached
             # discovery producer keeps polling after the quit flow stops the
             # docker state container, so the backlog's last docker snapshot
             # reliably carries "state container is stopped" -- already outdated,
-            # since minds restarts that container before this consumer runs.
+            # since Imbue Studio restarts that container before this consumer runs.
             # Drop the stale error (a genuinely-broken provider re-asserts it on
             # the first fresh cycle); the snapshot's topology still merges below.
             # The backlog holds one snapshot per cycle of downtime, so the drops
@@ -833,7 +833,7 @@ class EnvelopeStreamConsumer(MutableModel):
             with self._lock:
                 self._ssh_by_host_id.pop(host_id_str, None)
         for instance_key in delta.removed_agent_instances:
-            # minds' own mirrors stay keyed by the bare agent id (its workspace
+            # Imbue Studio's own mirrors stay keyed by the bare agent id (its workspace
             # identity); the delta is instance-scoped, so extract the id here.
             agent_id = instance_key.agent_id
             with self._lock:
@@ -1044,7 +1044,7 @@ def _build_forward_command(
     preauth_cookie: str,
     browser_bridge_token: str,
 ) -> list[str]:
-    """Build the ``mngr forward`` argv for the subprocess minds spawns."""
+    """Build the ``mngr forward`` argv for the subprocess Imbue Studio spawns."""
     command: list[str] = [
         config.mngr_binary,
         "forward",
@@ -1082,7 +1082,7 @@ def _redact_secrets(command: list[str]) -> list[str]:
 
     The actual ``Popen`` call uses the unredacted list so the plugin still
     receives the real values. Today we redact the ``--preauth-cookie`` value
-    (a freshly-minted shared secret between minds, the plugin, and the
+    (a freshly-minted shared secret between Imbue Studio, the plugin, and the
     Electron shell); future secret-bearing flags can be added to
     ``_SECRET_BEARING_FLAGS``.
     """

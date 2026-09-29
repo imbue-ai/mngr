@@ -110,8 +110,8 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
-# Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
-# import graph -- minds spawns the plugin as a subprocess and otherwise has
+# Inlined to avoid pulling the ``imbue-mngr-forward`` package into Imbue Studio's
+# import graph -- Imbue Studio spawns the plugin as a subprocess and otherwise has
 # no Python-level dependency on it. The constant is a stable wire-format
 # contract; if the plugin ever renames its session cookie, both sides update
 # together.
@@ -124,7 +124,7 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
-# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# Scheme of the `mngr forward` proxy origin. Imbue Studio always runs the proxy with
 # `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
 # side builds are always `https`.
 _MNGR_FORWARD_SCHEME: Final[str] = "https"
@@ -164,7 +164,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
     of *why* a probe never saw a 200, and a probe that fails while the
     renderer is connected through the same plugin cannot be diagnosed without
     it. Module-private helper used by ``probe_workspace_through_plugin``;
-    hoisted out to satisfy the minds project's no-inner-functions ratchet.
+    hoisted out to satisfy the Imbue Studio project's no-inner-functions ratchet.
     """
     try:
         response = probe_client.get(probe_url, headers={"Host": host_header})
@@ -189,7 +189,7 @@ def probe_workspace_through_plugin(
     Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Reports the HTTP status
     observed (a 200 means some web server is up and answering on the inner
     port), or the transport failure that produced no response (connect error,
-    mid-stream EOF, read timeout). This is the one definition of "ready" minds
+    mid-stream EOF, read timeout). This is the one definition of "ready" Imbue Studio
     has, which is what makes every readiness check in it agree on the answer.
 
     ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
@@ -385,7 +385,7 @@ class AgentCreateAttemptInfo(FrozenModel):
     handle returned synchronously from :py:meth:`AgentCreator.start_create_attempt`)
     because the canonical ``AgentId`` is only known *after* the inner
     ``mngr create`` returns -- for imbue_cloud agents the id is dictated
-    by the leased pool host's pre-baked agent, not by minds. ``agent_id``
+    by the leased pool host's pre-baked agent, not by Imbue Studio. ``agent_id``
     is therefore ``None`` until the inner ``mngr create`` emits its
     ``"event": "created"`` JSONL line; consumers that need to redirect
     to ``/goto/<agent_id>/`` should poll ``redirect_url`` instead, which
@@ -636,7 +636,7 @@ def _git_noninteractive_env() -> dict[str, str]:
 
     Git prompts for a username/password on the controlling terminal when a
     remote needs auth and no credential is available -- but the desktop client
-    has no terminal for the user to answer on, and when minds is launched from
+    has no terminal for the user to answer on, and when Imbue Studio is launched from
     a dev shell the prompt would hang the create attempt thread forever. With
     ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
     for fails fast with git's stable "could not read Username ... terminal
@@ -865,7 +865,7 @@ def _rsync_worktree_over_clone(
         rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
 
 
-# Constant agent name for every minds-created agent. Imbue Studio runs one agent
+# Constant agent name for every agent Imbue Studio creates. Imbue Studio runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
 # constant so callers can pass it to ``mngr`` without re-validating. The
@@ -882,7 +882,7 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # ``error_class`` of the imbue_cloud provider's ``FastPathUnavailableError``,
 # emitted by ``mngr create --format jsonl`` as a structured
 # ``{"event": "error", "error_class": ...}`` line when ``fast_mode=require``
-# finds no exact-attribute pool match. minds matches on this (not on
+# finds no exact-attribute pool match. Imbue Studio matches on this (not on
 # human-formatted error text) to fall back to the slow path. Kept in sync with
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
@@ -980,7 +980,7 @@ def provider_instance_name_for_launch(
     Kept as the single source of truth for that mapping so the create command and
     the create form's availability check (which must agree on what "taken" means)
     never drift apart. ``imbue_cloud_account`` is the account *email* (slugified to
-    match the provider block minds registers); ``region`` is required for AWS.
+    match the provider block Imbue Studio registers); ``region`` is required for AWS.
 
     ``cloud_account`` is a bring-your-own-key account's provider block name
     (``byok-<backend>-<slug>``, written by ``bootstrap.set_cloud_account_provider``).
@@ -998,7 +998,7 @@ def provider_instance_name_for_launch(
             return "vultr"
         case LaunchMode.AWS:
             # BYOK-only (like GCP/AZURE): the ambient per-region ``aws-<region>``
-            # path was removed from minds; the ``cloud_account`` short-circuit
+            # path was removed from Imbue Studio; the ``cloud_account`` short-circuit
             # above is the only way to resolve an AWS provider instance.
             raise MngrCommandError("AWS mode requires a cloud account")
         case LaunchMode.IMBUE_CLOUD:
@@ -1010,7 +1010,7 @@ def provider_instance_name_for_launch(
             # token (``modal token new``).
             return "modal"
         case LaunchMode.GCP | LaunchMode.AZURE:
-            # GCP / Azure have no ambient provider instances in minds -- they are
+            # GCP / Azure have no ambient provider instances in Imbue Studio -- they are
             # reachable only through a bring-your-own-key account block, which the
             # ``cloud_account`` short-circuit above already returned.
             raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
@@ -1052,7 +1052,7 @@ def _build_mngr_create_command(
 
     ``--format jsonl`` is appended so the caller can
     parse the canonical ``AgentId`` out of the trailing ``"event":
-    "created"`` line; minds no longer pre-generates an id because for
+    "created"`` line; Imbue Studio no longer pre-generates an id because for
     imbue_cloud the lease forces it back to the pool host's pre-baked
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
@@ -1065,7 +1065,7 @@ def _build_mngr_create_command(
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
         --template aws (runs in a runsc Docker container on an EC2 instance;
-        the region-specific provider block is written by minds at startup)
+        the region-specific provider block is written by Imbue Studio at startup)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
@@ -1073,7 +1073,7 @@ def _build_mngr_create_command(
 
     Every mode creates a separate host, so the agent address uses
     ``system-services@<host_name>`` -- the agent name is constant across
-    every minds workspace; the host name (the user's input from the
+    every Imbue Studio workspace; the host name (the user's input from the
     create-project form) is the workspace identifier. Only IMBUE_CLOUD
     passes ``--reuse`` (to satisfy the pre-baked services-agent on the
     pool host); the other modes rely on ``--new-host`` for fresh-host
@@ -1085,7 +1085,7 @@ def _build_mngr_create_command(
     flags here -- ``run_mngr_create`` populates them in the subprocess env
     when needed and the template-declared forwards pick them up. Keeping the
     forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
-    create`` invocations from outside minds too.
+    create`` invocations from outside Imbue Studio too.
 
     ``create_attempt_id_label`` is the opaque pending-create-attempt id stamped on the
     new HOST as a ``create-attempt-id`` host label (LIMA and DOCKER only -- the
@@ -1140,7 +1140,7 @@ def _build_mngr_create_command(
         # ``normalize_workspace_color`` call on the create-route side.
         color_label_args = ["--label", f"color={color}"]
 
-    # Stamp the minds version the workspace was created at as an immutable
+    # Stamp the Imbue Studio version the workspace was created at as an immutable
     # label. This is the resolved template ref (a ``minds-v*`` tag in prod,
     # or a branch/``main`` in dev); the workspace's own git history records
     # any later upgrades. Read back by the ``/api/v1/workspaces/<id>/version``
@@ -1285,7 +1285,7 @@ def _build_mngr_create_command(
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
             # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
-            # (slow, but always works). minds tries ``require`` first and falls
+            # (slow, but always works). Imbue Studio tries ``require`` first and falls
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
             if imbue_cloud_fast_mode:
@@ -1336,7 +1336,7 @@ def _build_mngr_create_command(
 def _slugify_account(account: str) -> str:
     """Mirror ``slugify_account`` from the plugin so the provider instance name lines up.
 
-    Inlined (rather than imported from ``imbue.mngr_imbue_cloud``) because minds
+    Inlined (rather than imported from ``imbue.mngr_imbue_cloud``) because Imbue Studio
     invokes ``mngr`` as a subprocess and is not allowed to depend on the
     plugin Python API.
     """
@@ -1368,7 +1368,7 @@ def _remote_host_env_flags() -> list[str]:
 
 
 # The two release-tag schemes a template repo may carry: the ``minds-v*`` tags
-# every minds release cuts, and plain ``v*`` semver tags. When both exist the
+# every Imbue Studio release cuts, and plain ``v*`` semver tags. When both exist the
 # ``minds-v*`` scheme wins outright -- the plain tags on the default template
 # predate it and are older than the in-place update floor, so "latest" across
 # both schemes would pick a template no current app can run.
@@ -1572,7 +1572,7 @@ def run_mngr_create(
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
     ``mngr create`` emits as its final stdout record; the host id is
-    what minds keys per-host latchkey state (permissions, opaque handle
+    what Imbue Studio keys per-host latchkey state (permissions, opaque handle
     symlink target) by.
 
     Raises ``MngrCommandError`` if the command fails or never emits a
@@ -1696,7 +1696,7 @@ def run_mngr_aws_prepare(
     privileged create/authorize when the group (or a rule) is missing.
 
     ``AwsProvider.create_host`` refuses to launch an instance when the security
-    group is absent (it looks it up read-only), so minds runs this first for the
+    group is absent (it looks it up read-only), so Imbue Studio runs this first for the
     chosen region. Failures -- missing credentials, or a missing group the key
     cannot create -- raise ``MngrCommandError`` so the create attempt flow surfaces a
     clear message on the creating page rather than a deferred opaque create
@@ -1824,7 +1824,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # production, a local clone path in dev). The provider canonicalizes it
         # -- resolving a local path to its ``origin`` remote -- so the fast path
         # adopts a pool host only when the request's repo *and* branch genuinely
-        # match what was baked. minds must not canonicalize here (it shells out
+        # match what was baked. Imbue Studio must not canonicalize here (it shells out
         # to ``mngr`` and cannot import the plugin).
         imbue_cloud_repo_url=(params.repo_source if is_imbue_cloud and params.repo_source else None),
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
@@ -1871,7 +1871,7 @@ class AgentCreator(MutableModel):
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
-    paths: InstallationPaths = Field(frozen=True, description="Filesystem paths for minds data")
+    paths: InstallationPaths = Field(frozen=True, description="Filesystem paths for Imbue Studio data")
     server_port: int = Field(
         default=0,
         frozen=True,
@@ -1889,7 +1889,7 @@ class AgentCreator(MutableModel):
             "Wrapper around `mngr imbue_cloud …`. Used by IMBUE_CLOUD-mode create attempts to mint "
             "a LiteLLM virtual key before the standard ``mngr create`` invocation, and by "
             "destruction to release the lease. The lease + SSH bootstrap + agent rename "
-            "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so minds "
+            "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so Imbue Studio "
             "no longer maintains its own SuperTokens session, host pool, or LiteLLM key code. "
             "Other launch modes do not consult this client."
         ),
@@ -2085,7 +2085,7 @@ class AgentCreator(MutableModel):
         Raises ``WorkspaceNameInUseError`` when a live (non-terminal) create attempt
         on the same provider instance already holds the requested name --
         mngr's own conflict pre-flight cannot see a create that has not yet
-        reserved its host name, so two concurrent minds create attempts would
+        reserved its host name, so two concurrent Imbue Studio create attempts would
         otherwise race.
 
         ``account_id`` is the owning account's user id (empty for a private
@@ -2109,7 +2109,7 @@ class AgentCreator(MutableModel):
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
         and the rest of mngr's create pipeline adopts the pool host's
         pre-baked agent under the requested name. The plugin owns the
-        SuperTokens session, so minds only needs to know which account to
+        SuperTokens session, so Imbue Studio only needs to know which account to
         ask for.
 
         When ``on_created`` is provided, it is called with the canonical
@@ -2510,7 +2510,7 @@ class AgentCreator(MutableModel):
                 # IMBUE_CLOUD this clone is "wasted" in the sense that the
                 # leased pool host has its own pre-baked checkout, but it's
                 # what gives the local mngr a place to read the per-mode
-                # template + agent_types from -- the alternative was minds
+                # template + agent_types from -- the alternative was Imbue Studio
                 # inlining all those flags as command-line args, which let
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
@@ -2832,7 +2832,7 @@ class AgentCreator(MutableModel):
                 # The redirect URL is *absolute* and points at the plugin's
                 # bare origin. The SPA creating page does
                 # ``window.location.href = data.redirect_url`` directly; a
-                # relative ``/goto/...`` would navigate to the minds origin
+                # relative ``/goto/...`` would navigate to the Imbue Studio origin
                 # (port :8420) where ``/goto/`` is unrouted -- the user
                 # would land on FastAPI's default ``{"detail":"Not Found"}``
                 # response instead of being bridged into the agent
@@ -3007,7 +3007,7 @@ class AgentCreator(MutableModel):
         If none is available the provider raises ``FastPathUnavailableError``,
         which ``mngr create --format jsonl`` surfaces as a structured
         ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
-        minds matches on that ``error_class`` and retries with
+        Imbue Studio matches on that ``error_class`` and retries with
         ``fast_mode=prevent``, which leases any available host and rebuilds it
         from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
@@ -3115,7 +3115,7 @@ class AgentCreator(MutableModel):
         """Build the absolute URL the UI should navigate to after the create attempt.
 
         Always points at the plugin's ``/goto/<workspace-id>/`` route, never
-        minds' bare origin -- minds doesn't serve ``/goto/`` and would 404.
+        Imbue Studio's bare origin -- Imbue Studio doesn't serve ``/goto/`` and would 404.
         When ``mngr_forward_port`` isn't configured (test fixtures, etc.),
         falls back to the relative form so legacy callers that don't set the
         field keep working.

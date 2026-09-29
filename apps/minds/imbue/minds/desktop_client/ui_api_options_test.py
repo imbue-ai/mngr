@@ -221,7 +221,7 @@ def _leased_machine_options_data(
 
 def test_options_data_names_a_leased_machines_owner_from_its_provider_when_it_has_no_link(tmp_path: Path) -> None:
     """The owner line a leased machine shows needs no association record: the provider instance
-    it runs under is the one minds registered for its account."""
+    it runs under is the one Imbue Studio registered for its account."""
     cli = make_fake_imbue_cloud_cli()
     cli.add_account(user_id="user-bob", email="bob@example.com")
     cli.add_account(user_id="user-alice", email="alice@example.com")

@@ -1,7 +1,7 @@
 """Export a workspace's latest restic snapshot as a downloadable zip.
 
-minds holds the canonical ``restic.env`` for each workspace, so it can build a
-zip of the latest snapshot from the minds machine -- without the workspace
+Imbue Studio holds the canonical ``restic.env`` for each workspace, so it can build a
+zip of the latest snapshot from the Imbue Studio machine -- without the workspace
 being reachable -- by restoring the snapshot to a temporary directory and
 zipping it. (``restic restore`` downloads in parallel and is ~50x faster than
 ``restic dump --archive zip``, which fetches blobs sequentially.) The zip is

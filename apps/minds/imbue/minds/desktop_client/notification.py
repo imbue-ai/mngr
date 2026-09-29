@@ -1,4 +1,4 @@
-"""OS-banner dispatch for the minds desktop client.
+"""OS-banner dispatch for the Imbue Studio desktop client.
 
 The one delivery channel is the Electron main process: a ``notification``
 JSONL event on stdout, which main renders as a native notification and routes

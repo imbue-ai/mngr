@@ -4,7 +4,7 @@ IMBUE_CLOUD-mode lease/rename/env-injection no longer happens in this
 module: it runs inside ``ImbueCloudProvider.create_host``, reached
 through the standard ``mngr create`` invocation. The plugin's own test
 suite (``libs/mngr_imbue_cloud``) covers the lease + adopt path; this
-file covers minds' command-building and helpers.
+file covers Imbue Studio's command-building and helpers.
 """
 
 import json
@@ -537,7 +537,7 @@ def test_build_mngr_create_command_omits_branch_label_when_unset() -> None:
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
-    There is now exactly one ``MINDS_API_KEY`` per minds installation;
+    There is now exactly one ``MINDS_API_KEY`` per Imbue Studio installation;
     the latchkey gateway's ``minds-api-proxy`` extension adds it as
     ``Authorization: Bearer <key>`` on every forwarded request, and the
     agent itself never sees the value. ``_build_mngr_create_command``
@@ -831,7 +831,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--template" in command
     assert "main" in command
     assert "--message" not in command
-    # minds no longer pre-generates an agent id; mngr generates one and we
+    # Imbue Studio no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
     # We always emit JSONL so the canonical agent id can be parsed from the
@@ -888,7 +888,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
-    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not minds. The command line never carries
+    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not Imbue Studio. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
@@ -1193,7 +1193,7 @@ def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> N
 def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> None:
     """Annotated tags resolve through `git fetch` + `checkout -B name FETCH_HEAD` just like branches.
 
-    This is the FALLBACK_BRANCH="minds-v0.3.1" path used by the released minds
+    This is the FALLBACK_BRANCH="minds-v0.3.1" path used by the released Imbue Studio
     binary: the input is a tag, not a branch.
     """
     origin = tmp_path / "origin"

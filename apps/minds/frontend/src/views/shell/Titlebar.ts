@@ -68,7 +68,7 @@ function startTitlebar(shell: ShellState): m.Children {
         id: "start-mark",
         class: "start-chrome-mark absolute left-1/2 top-1/2 h-4 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
         src: lockupUrl,
-        alt: "mind",
+        alt: "Imbue Studio",
         draggable: false,
       }),
       m("div", { class: "flex" + (shell.isMac ? " hidden" : "") }, [

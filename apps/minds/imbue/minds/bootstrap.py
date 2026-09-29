@@ -32,7 +32,7 @@ MINDS_ROOT_NAME_PATTERN: Final[str] = rf"{_MINDS_PREFIX}(-{_ENV_NAME_PATTERN})?"
 
 
 class BootstrapError(ValueError):
-    """Raised when the minds bootstrap layer can't compute a derived value.
+    """Raised when the Imbue Studio bootstrap layer can't compute a derived value.
 
     Defined here instead of in ``minds.errors`` because this module has to stay free of any ``imbue.mngr.*`` / ``click`` imports (see the module docstring).
     """
@@ -108,7 +108,7 @@ def root_name_for_env_name(env_name: str) -> str:
 
 
 def minds_data_dir_for(root_name: str) -> Path:
-    """Return the minds data directory for a given root name (e.g. ~/.minds)."""
+    """Return the Imbue Studio data directory for a given root name (e.g. ~/.minds)."""
     return Path.home() / ".{}".format(root_name)
 
 
@@ -172,7 +172,7 @@ def apply_bootstrap() -> None:
     """Set MNGR_HOST_DIR and MNGR_PREFIX in os.environ from MINDS_ROOT_NAME.
 
     Must be called before any ``imbue.mngr.*`` module is imported.
-    When ``MINDS_ROOT_NAME`` is set to a valid value, the derived ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` values unconditionally override any pre-existing values -- otherwise an inherited ``MNGR_HOST_DIR`` from a parent process (e.g. a Claude Code agent's tmux env) would silently win and minds would read a different mngr settings.toml than the bootstrap wrote to.
+    When ``MINDS_ROOT_NAME`` is set to a valid value, the derived ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` values unconditionally override any pre-existing values -- otherwise an inherited ``MNGR_HOST_DIR`` from a parent process (e.g. a Claude Code agent's tmux env) would silently win and Imbue Studio would read a different mngr settings.toml than the bootstrap wrote to.
 
     When ``MINDS_ROOT_NAME`` is unset, leaves ``MNGR_HOST_DIR`` / ``MNGR_PREFIX`` untouched -- naming a non-production env is an explicit step, so an unactivated shell has nothing to seed.
     Production-only entry points (the bundled Electron build, and the ``minds`` CLI via :func:`default_root_name_to_production`) always set ``MINDS_ROOT_NAME`` before invoking us, so an unset value here genuinely means "the user has not activated any env yet" -- which is what ``minds-admin`` relies on.

@@ -135,7 +135,7 @@ function workspaceDiagnosticsChoices(model: HelpModel): m.Children {
   // the report is scoped to one.
   if (!model.launch.workspaceAgentId) return null;
   return [
-    // "workspace logs", not "logs": minds' own app logs (backend, Electron, and
+    // "workspace logs", not "logs": Imbue Studio's own app logs (backend, Electron, and
     // their rotations) ride on every Sentry event whatever this is set to, so a
     // bare "Include logs" would promise a scope the checkbox cannot honor.
     diagnosticsChoice(model, {

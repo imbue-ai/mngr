@@ -1,4 +1,4 @@
-"""Account sign-in plumbing for the minds desktop client.
+"""Account sign-in plumbing for the Imbue Studio desktop client.
 
 Sign-up/sign-in itself happens on the connector's hosted accounts pages in
 the system browser: the desktop client just launches ``mngr imbue_cloud auth
@@ -134,12 +134,12 @@ def _get_connector_url() -> str:
 
 def _bounce_forward_observe() -> None:
     """Bounce the single discovery observer so a freshly-written provider entry
-    takes effect within the same minds session.
+    takes effect within the same Imbue Studio session.
 
     Sends ``SIGHUP`` to the detached ``mngr latchkey forward`` supervisor via
     ``LatchkeyForwardSupervisor.bounce()``, restarting only its ``mngr observe``
     child (the shared gateway, reverse tunnels, and per-agent state stay up). Its
-    next snapshot is written to the shared discovery log that minds' ``mngr forward
+    next snapshot is written to the shared discovery log that Imbue Studio's ``mngr forward
     --observe-via-file`` tails, so no separate ``mngr forward`` bounce is needed.
     """
     bounce_latchkey_forward_supervisor(get_state().latchkey_forward_supervisor)

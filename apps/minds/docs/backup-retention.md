@@ -12,7 +12,7 @@ A destroyed workspace's backup consists of three things:
 
 - its synced **workspace record** (the tombstone, `state = destroyed`, stamped with `destroyed_at` by the connector),
 
-- the local canonical **`restic.env`** under the minds data dir.
+- the local canonical **`restic.env`** under the Imbue Studio data dir.
 
 Reaping deletes them in strict order -- bucket first (emptied client-side, then destroyed), then the record, then the env -- so a failed bucket delete always leaves the row for a retry, and nothing is ever half-deleted from the user's point of view.
 
@@ -20,7 +20,7 @@ Bring-your-own backends (your own S3 bucket via an API key) are never reaped at 
 
 ## The two reapers
 
-- **Client-side** (all workspace types: docker, lima, imbue_cloud, BYO-cloud): a reap pass runs every 30 minutes inside the desktop client's sync loop (plus once shortly after startup), capped at a handful of reaps per pass. It skips any backup with an in-flight download. Reap and eviction events are recorded under `events/backup_reaper/events.jsonl` in the minds data dir.
+- **Client-side** (all workspace types: docker, lima, imbue_cloud, BYO-cloud): a reap pass runs every 30 minutes inside the desktop client's sync loop (plus once shortly after startup), capped at a handful of reaps per pass. It skips any backup with an in-flight download. Reap and eviction events are recorded under `events/backup_reaper/events.jsonl` in the Imbue Studio data dir.
 
 - **Server-side backstop** (imbue_cloud only): the connector runs an hourly reap cron so leftovers are reclaimed even when no client is running. It also ages *orphan* buckets (workspace-backup buckets no record references) from a first-seen stamp -- which doubles as a rollout grace period for pre-existing leftovers.
 
@@ -52,6 +52,6 @@ Restoring is not offered -- these workspaces no longer exist; the download is th
 
 ## Related knobs
 
-- minds-managed mngr profiles set `default_destroyed_host_persisted_seconds = 30 days` (mngr's own default is 7), so destroyed mngr host records age out together with the backups.
+- The mngr profiles Imbue Studio manages set `default_destroyed_host_persisted_seconds = 30 days` (mngr's own default is 7), so destroyed mngr host records age out together with the backups.
 
 - Ops: `POST /admin/sweep/backup-retention` on the connector runs a reap pass on demand (`?dry_run=1` lists candidates; `?window_seconds=0` reaps fresh tombstones -- used by the deployment test). `mngr imbue_cloud bucket destroy <name> --force` is the manual per-bucket lever.

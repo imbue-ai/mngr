@@ -17,7 +17,7 @@ const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 //
 // The Electron main process reports to the SAME JavaScript Sentry projects as
 // the browser web UI -- one JS project set (production / staging / dev) for all
-// of minds' JavaScript. A "vanilla JS" Sentry project ingests events from both
+// of Imbue Studio's JavaScript. A "vanilla JS" Sentry project ingests events from both
 // the @sentry/browser SDK and this @sentry/electron SDK fine, so there is no
 // need for a separate Electron project. The three DSNs below are therefore the
 // same values configured in imbue/minds/utils/sentry/frontend.py; the
@@ -106,7 +106,7 @@ function getOrCreateAnonymousUserId() {
 }
 
 /**
- * Select the Sentry environment from the resolved minds root name, mirroring
+ * Select the Sentry environment from the resolved Imbue Studio root name, mirroring
  * imbue.minds.utils.sentry.core.resolve_sentry_environment: only the exact
  * production / staging roots get their own target; everything else (dev-*,
  * ci-*, or no activated env -> the 'minds' default) maps to development.

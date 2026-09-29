@@ -179,10 +179,10 @@ def test_apply_bootstrap_sets_env_vars_when_root_name_set(monkeypatch: pytest.Mo
 def test_apply_bootstrap_overrides_inherited_mngr_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     """Explicit MINDS_ROOT_NAME wins over an inherited MNGR_HOST_DIR/MNGR_PREFIX.
 
-    Without this, a minds process spawned from a parent that already set
+    Without this, an Imbue Studio process spawned from a parent that already set
     MNGR_HOST_DIR (e.g. a Claude Code agent's tmux) would silently keep the
     parent's host_dir and read a different mngr settings.toml than the one
-    minds bootstrap writes to.
+    Imbue Studio bootstrap writes to.
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv(MINDS_ROOT_NAME_ENV_VAR, "minds-dev-josh-3")

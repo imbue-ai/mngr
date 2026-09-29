@@ -144,8 +144,8 @@ mngr imbue_cloud auth login [OPTIONS]
 | `--callback-port` | integer | Bind the local callback listener to a specific port (default: auto-pick free port). | None |
 | `--no-browser` | boolean | Print the sign-in URL instead of launching the browser. The URL only works in a browser on THIS machine (it redirects back to a localhost listener); on a headless machine use `auth signin` instead. | `False` |
 | `--success-redirect-url` | text | URL the success page links to once the callback lands (e.g. an imbue-studio:// deeplink so a click returns the user to the desktop app). Default: no link; the page just says to close the tab. | None |
-| `--url-file` | file | Write the sign-in URL to this file once the callback listener is up. Lets an embedder (the minds desktop client) offer a copy-the-link fallback without parsing stderr. | None |
-| `--listen-timeout` | float range | Seconds to keep waiting for the browser to finish signing in. A browser that finishes after this lands on a closed local port, so embedders that stay open (the minds desktop app) pass a long window. | `600.0` |
+| `--url-file` | file | Write the sign-in URL to this file once the callback listener is up. Lets an embedder (the Imbue Studio desktop client) offer a copy-the-link fallback without parsing stderr. | None |
+| `--listen-timeout` | float range | Seconds to keep waiting for the browser to finish signing in. A browser that finishes after this lands on a closed local port, so embedders that stay open (the Imbue Studio desktop app) pass a long window. | `600.0` |
 | `--connector-url` | text | Override connector URL | None |
 | `--accounts-url` | text | Override the browser accounts-origin URL the login page is opened on (default: $MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL, else the connector URL). Tiers with a dedicated accounts domain (e.g. production) only complete Google sign-in and session cookies on that origin. | None |
 

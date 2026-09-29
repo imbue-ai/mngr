@@ -1,4 +1,4 @@
-"""Unit tests for the minds desktop client's supertokens_routes helpers.
+"""Unit tests for the Imbue Studio desktop client's supertokens_routes helpers.
 
 Sign-in lives entirely on the connector's hosted browser page, driven by
 ``mngr imbue_cloud auth login``; the desktop server only spawns that

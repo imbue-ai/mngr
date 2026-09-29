@@ -1,4 +1,4 @@
-"""Project-specific ratchets for the minds app.
+"""Project-specific ratchets for the Imbue Studio app.
 
 Lives outside ``test_ratchets.py`` because that file must define the same
 test set across every project (enforced by ``test_meta_ratchets.py``).

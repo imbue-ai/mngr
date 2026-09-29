@@ -69,7 +69,7 @@ _BACKEND_ORIGIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(http://localhos
 # ``system_interface`` is reachable. The desktop client wraps that origin in
 # the mngr_forward plugin, so the port may differ from the bare backend. The
 # scheme is ``https`` when the proxy serves TLS + HTTP/2 (the default) and
-# ``http`` otherwise, so accept both. (The bare minds backend origin stays
+# ``http`` otherwise, so accept both. (The bare Imbue Studio backend origin stays
 # plain ``http`` -- see ``_BACKEND_ORIGIN_PATTERN``.) New origins carry the
 # workspace id (``agent-<hex>``); ``host-<hex>`` covers pre-existing
 # workspaces still on the legacy machine-keyed origin.
@@ -273,7 +273,7 @@ def _build_electron_env(workspace_git_url: Path, extra_env: Mapping[str, str] | 
     env["MINDS_USE_LOCAL_WORKSPACE_DEFAULTS"] = "1"
     # Pin MNGR_ROOT_NAME back to "mngr" for the Electron child so the
     # spawned `mngr create` subprocess finds DEFAULT_WORKSPACE_TEMPLATE's .mngr/settings.toml
-    # (which defines the `main` + `docker` create templates). The minds
+    # (which defines the `main` + `docker` create templates). The Imbue Studio
     # project conftest sets MNGR_ROOT_NAME=mngr-test-<timestamp> for test
     # isolation, but that would make mngr look for
     # .mngr-test-<timestamp>/settings.toml inside the DEFAULT_WORKSPACE_TEMPLATE clone -- a file
@@ -396,7 +396,7 @@ def _launched_electron(
     profile's single-instance lock, so the next relaunch would bind its
     debug port, fail ``requestSingleInstanceLock()``, and quit immediately
     (the CDP port then refusing every connection). The grace window is
-    intentionally generous (30s) because the minds backend that Electron
+    intentionally generous (30s) because the Imbue Studio backend that Electron
     spawns needs a few seconds to drain mngr_forward streams cleanly --
     shorter grace periods routinely escalate to SIGKILL and leave the
     workspace in a half-shutdown state.
@@ -626,7 +626,7 @@ def destroy_agent_best_effort(workspace_name: str, config_project_dir: Path | No
 class WorkspaceCreateAttemptFailedError(RuntimeError):
     """Raised when the Electron create flow surfaces its failure view.
 
-    Carries the human-readable text minds rendered into the loading
+    Carries the human-readable text Imbue Studio rendered into the loading
     screen's ``#error-message`` element (whatever ``mngr create`` reported)
     so a create attempt failure fails the run *fast* with the real cause, instead
     of blocking until the full create-form navigation budget elapses. The
@@ -636,7 +636,7 @@ class WorkspaceCreateAttemptFailedError(RuntimeError):
 
 
 def _read_failure_message(page: Page) -> str:
-    """Return the text minds rendered into the failure view's '#error-message' element."""
+    """Return the text Imbue Studio rendered into the failure view's '#error-message' element."""
     message_element = page.query_selector("#error-message")
     if message_element is None:
         return "unknown error: the '#error-message' element was not present"

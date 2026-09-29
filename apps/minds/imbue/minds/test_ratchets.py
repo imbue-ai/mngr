@@ -118,7 +118,7 @@ def test_prevent_silent_decode_error_catches() -> None:
 def test_prevent_inline_imports() -> None:
     # The one allowed inline import is ``from imbue.mngr.main import cli`` inside
     # ``utils/mngr_caller.py``'s warm-server entry point. Importing it at module
-    # scope would pay mngr's multi-second import cost inside the minds backend
+    # scope would pay mngr's multi-second import cost inside the Imbue Studio backend
     # process, defeating the entire purpose of the warm process (which imports it
     # out-of-process, off the request path). See that module's docstring.
     rc.check_inline_imports(_DIR, snapshot(1))
@@ -151,7 +151,7 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # The minds backend is synchronous (Flask) and uses no asyncio. The only remaining import is in
+    # The Imbue Studio backend is synchronous (Flask) and uses no asyncio. The only remaining import is in
     # ``scripts/launch_to_msg_e2e.py``, a standalone Playwright e2e driver that runs its own event
     # loop in a separate process.
     rc.check_asyncio_import(_DIR, snapshot(0))
@@ -314,7 +314,7 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 def test_prevent_direct_subprocess() -> None:
     # ``latchkey/_spawn.py`` intentionally uses ``subprocess.Popen`` with
     # ``start_new_session=True`` so that the spawned ``latchkey gateway``
-    # outlives the minds desktop client. That is the opposite of what the
+    # outlives the Imbue Studio desktop client. That is the opposite of what the
     # ratchet is designed to enforce (managed cleanup via ConcurrencyGroup),
     # so we exclude that tiny helper specifically; see its module docstring
     # for the full justification.
@@ -336,7 +336,7 @@ def test_prevent_direct_subprocess() -> None:
         "*/latchkey/_spawn.py",
         "*/desktop_client/forward_cli.py",
         # ``destroying.py`` spawns a detached ``sh -c '<mngr destroy ...>'`` so
-        # the destroy survives a minds-backend exit; same justification as
+        # the destroy survives an Imbue Studio backend exit; same justification as
         # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md. The
         # create-attempt discard (``create_attempt_discard.py``) spawns through
         # the same helper.
@@ -348,7 +348,7 @@ def test_prevent_direct_subprocess() -> None:
         # different filename for the deployment_tests subpackage.
         "*/deployment_tests/helpers.py",
         # ``desktop_client/e2e_workspace_runner.py`` is the shared driver
-        # for the minds Electron e2e test and the Modal snapshot script
+        # for the Imbue Studio Electron e2e test and the Modal snapshot script
         # (``scripts/snapshot_minds_e2e_state.py``). It necessarily shells
         # out to ``electron``, ``git``, and ``uv run mngr destroy`` --
         # operator-tool subprocesses that have no ConcurrencyGroup-managed

@@ -1,4 +1,4 @@
-"""Authorize temporary SSH access into a workspace, from the minds hub.
+"""Authorize temporary SSH access into a workspace, from the Imbue Studio hub.
 
 The "source workspace is still online" recovery route: a calling workspace
 generates its own keypair and sends only its *public* key here. The hub appends
@@ -13,7 +13,7 @@ grants can be pruned. ``prune_expired_grant_lines`` implements that pruning over
 an ``authorized_keys`` body, and ``compose_pruned_authorized_keys`` combines it
 with the new grant line in a single rewrite. The grant flow (see the route)
 reads the target's ``authorized_keys`` back over ``mngr exec``, prunes expired
-minds-owned lines, and writes the pruned body plus the new grant, so stale
+lines it owns, and writes the pruned body plus the new grant, so stale
 grants never accumulate across repeated requests.
 
 For a *remote* target (Modal / AWS / Vultr / imbue_cloud), the returned host is
@@ -35,7 +35,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 # grant is meant to cover a single "pull my changes over" session, not linger.
 DEFAULT_SSH_GRANT_TTL: timedelta = timedelta(hours=24)
 
-# Marker that tags every key minds injects, so we own exactly the lines we
+# Marker that tags every key Imbue Studio injects, so we own exactly the lines we
 # wrote and can prune them without touching keys the user added by hand. The
 # comment carries the requesting workspace and the expiry (UTC ISO 8601).
 _GRANT_MARKER: str = "minds-ssh-grant"
@@ -87,7 +87,7 @@ def build_authorized_keys_line(*, public_key: str, requester_workspace_id: str, 
 
     Keeps only the key type + material (dropping any comment the caller's key
     carried) and appends our own marker comment carrying the requester id and
-    expiry, so the line is unambiguously minds-owned and prunable.
+    expiry, so the line is unambiguously owned by Imbue Studio and prunable.
     """
     validated = _validate_public_key(public_key)
     validated_requester = _validate_requester_workspace_id(requester_workspace_id)
@@ -97,10 +97,10 @@ def build_authorized_keys_line(*, public_key: str, requester_workspace_id: str, 
 
 
 def _marker_token_value(line: str, token_key: str) -> str | None:
-    """Return the value of the ``<token_key>=`` token in a minds-owned grant line, else None.
+    """Return the value of the ``<token_key>=`` token in a grant line Imbue Studio owns, else None.
 
     Lines without our marker (keys the user added by hand) return None, as do
-    minds-owned lines that simply lack the requested token. This is the single
+    lines Imbue Studio owns that simply lack the requested token. This is the single
     place that knows how grant marker tokens are encoded.
     """
     if _GRANT_MARKER not in line:
@@ -113,14 +113,14 @@ def _marker_token_value(line: str, token_key: str) -> str | None:
 
 
 def _parse_grant_expiry(line: str) -> datetime | None:
-    """Return the expiry encoded in a minds-owned authorized_keys line, else None.
+    """Return the expiry encoded in an authorized_keys line Imbue Studio owns, else None.
 
     Lines without our marker (keys the user added by hand) return None and are
     never pruned. A marker with an unparseable *or* timezone-naive expiry is
     treated as expired (returns the epoch) so a corrupt grant doesn't linger
     forever and so the comparison against an aware ``now`` can never raise. The
     epoch sentinel is timezone-aware so it compares cleanly against an aware
-    ``now``; minds only ever writes aware (``...+00:00``) expiries.
+    ``now``; Imbue Studio only ever writes aware (``...+00:00``) expiries.
     """
     if _GRANT_MARKER not in line:
         return None
@@ -136,7 +136,7 @@ def _parse_grant_expiry(line: str) -> datetime | None:
 
 
 def _grant_requester(line: str) -> str | None:
-    """Return the requester id encoded in a minds-owned grant line, else None.
+    """Return the requester id encoded in a grant line Imbue Studio owns, else None.
 
     Lines without our marker (keys the user added by hand) return None so they
     are never treated as belonging to any requester and thus never superseded.
@@ -145,9 +145,9 @@ def _grant_requester(line: str) -> str | None:
 
 
 def prune_expired_grant_lines(authorized_keys_content: str, *, now: datetime) -> str:
-    """Drop minds-owned grant lines whose expiry has passed; keep everything else.
+    """Drop the grant lines Imbue Studio owns whose expiry has passed; keep everything else.
 
-    Non-minds lines (no marker) and unexpired grants are preserved verbatim,
+    Lines Imbue Studio does not own (no marker) and unexpired grants are preserved verbatim,
     including blank/comment lines, so we never disturb keys the user manages.
     """
     kept: list[str] = []
@@ -165,8 +165,8 @@ def compose_pruned_authorized_keys(
 ) -> str:
     """Return the full ``authorized_keys`` body to write back for a grant.
 
-    Prunes expired minds-owned grants from the existing body and also drops any
-    still-valid minds-owned grant belonging to ``requester_workspace_id`` (the
+    Prunes the expired grants Imbue Studio owns from the existing body and also drops any
+    still-valid grant Imbue Studio owns belonging to ``requester_workspace_id`` (the
     new grant supersedes it, so a re-request *refreshes* rather than *stacks*),
     then appends the new grant line. Every user-managed key and every grant from
     a *different* requester is preserved verbatim. The result is newline-
