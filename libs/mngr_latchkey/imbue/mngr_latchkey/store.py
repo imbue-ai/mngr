@@ -12,11 +12,6 @@ Three kinds of state live there:
   ``{plugin_data_dir}/latchkey_forward.lock``, plus the gateway port it
   has bound. Stored beside that lock at
   ``{plugin_data_dir}/latchkey_forward.owner``.
-* ``LatchkeyForwardInfo`` -- the record a ``mngr latchkey forward`` from
-  before the ownership lock wrote to announce itself (pid, started_at).
-  Read only by :mod:`imbue.mngr_latchkey._pre_lock_migration`. Stored at
-  ``{plugin_data_dir}/latchkey_forward.json``.
-  CLEANUP: remove with ``_pre_lock_migration``.
 * ``LatchkeyPermissionsConfig`` -- the contents of latchkey's permissions
   config, in detent's rule format. Stored on disk per-host as
   ``{plugin_data_dir}/hosts/{host_id}/latchkey_permissions.json``
@@ -51,7 +46,6 @@ is what :attr:`Latchkey.plugin_data_dir` returns.
 import os
 import sqlite3
 import uuid
-from datetime import datetime
 from pathlib import Path
 from typing import Final
 
@@ -76,7 +70,6 @@ from imbue.mngr.utils.polling import poll_for_value
 # upstream ``latchkey`` CLI writes under ``LATCHKEY_DIRECTORY``.
 PLUGIN_DATA_SUBDIR_NAME: Final[str] = "mngr_latchkey"
 
-_FORWARD_RECORD_FILENAME: Final[str] = "latchkey_forward.json"
 _FORWARD_LOG_FILENAME: Final[str] = "latchkey_forward.log"
 # Exclusive-ownership lock for the directory's ``mngr latchkey forward``, held
 # for that process's whole life. Never deleted, so the next holder locks the
@@ -119,68 +112,6 @@ def plugin_data_dir(latchkey_directory: Path) -> Path:
 
 class LatchkeyStoreError(Exception):
     """Base exception for this package's on-disk persistence failures."""
-
-
-# -- Pre-lock forward record ---------------------------------------------------
-
-
-class LatchkeyForwardInfo(FrozenModel):
-    """The record a ``mngr latchkey forward`` from before the ownership lock wrote.
-
-    CLEANUP: remove with ``_pre_lock_migration``, the only reader left.
-    """
-
-    pid: int = Field(description="PID of the ``mngr latchkey forward`` process")
-    started_at: datetime = Field(description="UTC timestamp when the supervisor was started")
-    gateway_port: int | None = Field(
-        default=None,
-        description=(
-            "TCP port the shared ``latchkey gateway`` subprocess had bound, if any. Read by "
-            "nothing; present because every record on disk carries the key and this model "
-            "forbids extra ones, so dropping the field would make those records unparseable."
-        ),
-    )
-
-
-def forward_info_path(data_dir: Path) -> Path:
-    """Return the path to the pre-lock forward record."""
-    return data_dir / _FORWARD_RECORD_FILENAME
-
-
-def save_forward_info(data_dir: Path, info: LatchkeyForwardInfo) -> None:
-    """Write the forward supervisor info record, overwriting any existing one."""
-    path = forward_info_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(info.model_dump_json(indent=2))
-    logger.debug("Saved mngr latchkey forward info at {}", path)
-
-
-def load_forward_info(data_dir: Path) -> LatchkeyForwardInfo | None:
-    """Read the forward supervisor info, or None if missing or malformed."""
-    path = forward_info_path(data_dir)
-    if not path.is_file():
-        return None
-    try:
-        raw = path.read_text()
-    except OSError as e:
-        logger.warning("Failed to read mngr latchkey forward info at {}: {}", path, e)
-        return None
-    try:
-        return LatchkeyForwardInfo.model_validate_json(raw)
-    except ValueError as e:
-        logger.warning("Malformed mngr latchkey forward info at {}: {}", path, e)
-        return None
-
-
-def delete_forward_info(data_dir: Path) -> None:
-    """Remove the stored forward supervisor info (no-op if absent)."""
-    path = forward_info_path(data_dir)
-    if path.is_file():
-        try:
-            path.unlink()
-            logger.debug("Deleted mngr latchkey forward info at {}", path)
-        except OSError as e:
-            logger.warning("Failed to delete mngr latchkey forward info at {}: {}", path, e)
 
 
 # -- Forward ownership lock ----------------------------------------------------

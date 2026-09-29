@@ -52,7 +52,6 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
-from imbue.mngr_latchkey._pre_lock_migration import pre_lock_forward_pid
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
 from imbue.mngr_latchkey.agent_setup import prepare_agent_latchkey
@@ -71,7 +70,6 @@ from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.sentry import setup_forward_sentry
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import acquire_forward_lock
-from imbue.mngr_latchkey.store import delete_forward_info
 from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import probe_forward_lock
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
@@ -639,18 +637,6 @@ def _run_forward_supervisor(
     Extracted from :func:`_forward_command` so the latter can wrap it in a single error-logging +
     Sentry-flush boundary; see that function for why an unhandled error is logged through loguru.
     """
-    # CLEANUP: a forward predating the ownership lock holds none, so the lock
-    # below would be taken uncontended beside it, and its record is the only
-    # thing that can announce it. A record surviving the refusal names no live
-    # forward, so it goes. Remove the whole block with ``_pre_lock_migration``.
-    pre_lock_pid = pre_lock_forward_pid(latchkey.plugin_data_dir)
-    if pre_lock_pid is not None:
-        raise click.ClickException(
-            f"A ``mngr latchkey forward`` from an earlier build is still running for this latchkey "
-            f"directory (pid={pre_lock_pid}); stop it before starting a new one.",
-        )
-    delete_forward_info(latchkey.plugin_data_dir)
-
     # Exclusive ownership of this directory, held until the shutdown ``finally``
     # releases it -- or, on a path that never reaches it, until this process exits.
     try:

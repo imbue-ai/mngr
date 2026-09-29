@@ -31,7 +31,6 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr_latchkey._pre_lock_migration import migrate_pre_lock_forward
 from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -216,22 +215,6 @@ def _terminate_process_and_descendants(forward_process: psutil.Process) -> None:
         _terminate_process(descendant_process)
 
 
-def _terminate_pid_and_descendants(pid: int) -> None:
-    """Terminate the forward at ``pid`` and every descendant it owns.
-
-    CLEANUP: remove with ``_pre_lock_migration``, whose migration is its only caller.
-
-    Resolves the pid to a process here, so callers must have just established
-    that it is the intended one; a caller already holding a handle keeps its
-    captured identity by calling :func:`_terminate_process_and_descendants`.
-    """
-    try:
-        forward_process = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-    _terminate_process_and_descendants(forward_process)
-
-
 class LatchkeyForwardSupervisor(MutableModel):
     """Ensure exactly one detached ``mngr latchkey forward`` is running.
 
@@ -344,10 +327,6 @@ class LatchkeyForwardSupervisor(MutableModel):
         """
         plugin_dir = self.plugin_data_dir
         with self._lock:
-            # CLEANUP: remove this call with ``_pre_lock_migration``. A forward
-            # predating the lock holds none, so it cannot be adopted and would
-            # run beside the one spawned below.
-            migrate_pre_lock_forward(plugin_dir, _terminate_pid_and_descendants)
             owned = _owning_forward(plugin_dir)
             if owned is not None:
                 _, owner = owned
