@@ -251,3 +251,30 @@ def test_warm_process_exits_when_parent_disconnects(mngr_caller: MngrCaller) -> 
         error_message="warm mngr process did not exit after its parent disconnected",
     )
     assert warm_process.running_process.is_finished()
+
+
+@pytest.mark.timeout(60)
+def test_prewarmed_process_is_stored_as_idle(mngr_caller: MngrCaller) -> None:
+    """The process pre-warmed by ``initialize`` is parked as the idle one and left running."""
+    wait_for(
+        lambda: mngr_caller._warm_process is not None,
+        timeout=30.0,
+        poll_interval=0.05,
+        error_message="pre-warmed mngr process was never stored as the idle process",
+    )
+    idle_process = mngr_caller._warm_process
+    assert idle_process is not None
+    assert not idle_process.running_process.is_finished()
+
+
+@pytest.mark.timeout(60)
+def test_warm_process_spawned_across_stop_is_terminated_not_stored(mngr_caller: MngrCaller) -> None:
+    """A spawn still in flight when ``stop`` runs is terminated, not parked as the idle process.
+
+    Parked, nothing would terminate it and the owning group's exit would time
+    out waiting on it.
+    """
+    warm_process = mngr_caller._spawn_warm_process()
+    mngr_caller.stop()
+    mngr_caller._store_or_terminate_warm_process(warm_process)
+    assert warm_process.running_process.is_finished()

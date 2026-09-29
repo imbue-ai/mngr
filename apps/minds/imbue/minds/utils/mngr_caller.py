@@ -276,6 +276,7 @@ class _WarmMngrProcess(MutableModel):
 
     connection: Connection = Field(description="Parent end of the anonymous socketpair to the warm process.")
     running_process: RunningProcess = Field(description="The spawned warm-server subprocess.")
+    concurrency_group: ConcurrencyGroup = Field(description="The group that spawned and tracks this process.")
 
     model_config = {"arbitrary_types_allowed": True, "frozen": False, "extra": "forbid"}
 
@@ -360,6 +361,7 @@ class MngrCaller(MutableModel):
         the moment the child is forked, so there is nothing to wait for: a request
         sent now simply buffers until the child finishes importing ``mngr``.
         """
+        concurrency_group = self._get_concurrency_group()
         parent_connection, child_connection = Pipe(duplex=True)
         is_spawn_successful = False
         try:
@@ -371,10 +373,12 @@ class MngrCaller(MutableModel):
             # not group-checked. ``run_process_in_background`` returns only after
             # the child has been forked (and thus has inherited ``child_fd``), so
             # closing the parent's copy below is race-free.
-            running_process = self._get_concurrency_group().run_process_in_background(
+            running_process = concurrency_group.run_process_in_background(
                 command, is_checked_by_group=False, pass_fds=(child_fd,)
             )
-            warm_process = _WarmMngrProcess(connection=parent_connection, running_process=running_process)
+            warm_process = _WarmMngrProcess(
+                connection=parent_connection, running_process=running_process, concurrency_group=concurrency_group
+            )
             is_spawn_successful = True
             return warm_process
         finally:
@@ -386,10 +390,16 @@ class MngrCaller(MutableModel):
                 parent_connection.close()
 
     def _store_or_terminate_warm_process(self, warm_process: _WarmMngrProcess) -> None:
-        """Keep ``warm_process`` as the idle one, or terminate it if one already exists."""
+        """Keep ``warm_process`` as the idle one, or terminate it if it is not wanted.
+
+        It is not wanted when an idle one already exists, or when the caller is no
+        longer attached to the group that spawned it: a spawn that was in flight
+        when :meth:`stop` ran would otherwise be stored after ``stop`` cleared the
+        idle slot, and nothing would ever terminate it.
+        """
         process_to_terminate: _WarmMngrProcess | None = None
         with self._lock:
-            if self._warm_process is None:
+            if self._warm_process is None and self._concurrency_group is warm_process.concurrency_group:
                 self._warm_process = warm_process
             else:
                 process_to_terminate = warm_process
