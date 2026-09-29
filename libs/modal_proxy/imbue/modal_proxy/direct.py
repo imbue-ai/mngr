@@ -3,7 +3,10 @@
 # All modal.exception.* errors are translated to ModalProxy* errors at the
 # boundary so that callers never need to import the modal package.
 # Calls that are safe to issue twice wait out a transient Modal failure; see
-# _retry_transient.
+# _retry_transient. Where a method carries both decorators, `@_translate_exceptions`
+# goes innermost and `@retry` above it, so every retry predicate here decides on
+# ModalProxy* types rather than keeping its own list of the Modal classes they
+# came from.
 
 import io
 import os
@@ -56,6 +59,8 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import ModalProxyServiceError
+from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
@@ -89,6 +94,8 @@ def _translate_modal_error(e: modal.exception.Error) -> ModalProxyError:
         return ModalProxyInvalidError(str(e))
     if isinstance(e, modal.exception.InternalError):
         return ModalProxyInternalError(str(e))
+    if isinstance(e, modal.exception.ServiceError):
+        return ModalProxyServiceError(str(e))
     if isinstance(e, modal.exception.ResourceExhaustedError):
         return ModalProxyRateLimitError(str(e))
     # Checked before RemoteError, which it subclasses.
@@ -175,18 +182,18 @@ def _unwrap_secret(iface: SecretInterface) -> modal.Secret:
 def _is_transient_modal_error(e: BaseException) -> bool:
     """Decide whether a Modal failure is a blip worth re-issuing the call for.
 
-    Names Modal's own exception classes rather than the ModalProxy* ones: this
-    runs inside the retry, which sits under ``_translate_exceptions``.
+    Runs above ``_translate_exceptions``, so it reads our own vocabulary:
+    ``ModalProxyTransientError`` already states which Modal failures are
+    transient, and asking for the base covers a new subclass without an edit
+    here. ``StreamTerminatedError`` / ``ProtocolError`` come from grpclib beneath
+    the SDK, so they are not ``modal.exception.Error`` and arrive untranslated.
 
     A not-found answer is a verdict, not a blip: an environment that does not
     exist stays missing for the whole budget, and the one case where it is
     about to appear (a host create that just made it) is retried by the
     caller that created it.
     """
-    return isinstance(
-        e,
-        (modal.exception.InternalError, StreamTerminatedError, ProtocolError, modal.exception.ResourceExhaustedError),
-    )
+    return isinstance(e, (ModalProxyTransientError, StreamTerminatedError, ProtocolError))
 
 
 # How long Modal is allowed to keep failing a call before we stop waiting it
@@ -209,12 +216,12 @@ _RATE_LIMIT_WAIT = wait_exponential(multiplier=5, min=5, max=30) + _RETRY_JITTER
 def _transient_wait(retry_state: RetryCallState) -> float:
     """Pick the backoff for a transient-failure retry based on the failure kind.
 
-    A rate limit (ResourceExhaustedError: "VolumeListFiles rate limit exceeded.
-    Please wait and retry.") is shared across every concurrent client, so
-    retrying one as eagerly as an ordinary transient keeps it exhausted.
+    A rate limit ("VolumeListFiles rate limit exceeded. Please wait and retry.")
+    is shared across every concurrent client, so retrying one as eagerly as an
+    ordinary transient keeps it exhausted.
     """
     exception = retry_state.outcome.exception() if retry_state.outcome is not None else None
-    if isinstance(exception, modal.exception.ResourceExhaustedError):
+    if isinstance(exception, ModalProxyRateLimitError):
         return _RATE_LIMIT_WAIT(retry_state)
     return _TRANSIENT_WAIT(retry_state)
 
@@ -273,13 +280,13 @@ DEPLOY_MAX_DURATION_SECONDS = (
 
 # Looking up a function immediately after deploying it can lose a
 # deploy-then-lookup eventual-consistency race: the freshly-deployed function is
-# not yet registered/propagated, so Modal raises NotFoundError when get_web_url
+# not yet registered/propagated, so the lookup fails not-found when get_web_url
 # hydrates the object. The function shows up within a few seconds, so retry with
 # backoff. min=1/max=4 over 5 attempts gives ~11s of headroom, which keeps a
 # genuinely-missing function failing reasonably fast. The retry lives on
 # get_web_url rather than function_from_name because the latter is lazy: the
 # server lookup (and thus the NotFoundError) surfaces when get_web_url hydrates.
-_LOOKUP_RETRY = retry_if_exception_type(modal.exception.NotFoundError)
+_LOOKUP_RETRY = retry_if_exception_type(ModalProxyNotFoundError)
 _LOOKUP_STOP = stop_after_attempt(5)
 _LOOKUP_WAIT = wait_exponential(multiplier=1, min=1, max=4)
 
@@ -362,8 +369,8 @@ class DirectFunction(FunctionInterface):
 
     function: modal.Function = Field(description="The underlying modal.Function", repr=False)
 
-    @_translate_exceptions
     @retry(retry=_LOOKUP_RETRY, stop=_LOOKUP_STOP, wait=_LOOKUP_WAIT, reraise=True)
+    @_translate_exceptions
     def get_web_url(self) -> str | None:
         return self.function.get_web_url()
 
@@ -428,16 +435,16 @@ class DirectVolume(VolumeInterface):
     def get_name(self) -> str | None:
         return self.volume_name
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def get_object_id(self) -> str:
         # from_name hands back an unhydrated handle, so hydrating is what actually
         # asks the server to resolve the name -- and raises NotFoundError if it cannot.
         self.volume.hydrate()
         return self.volume.object_id
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def listdir(self, path: str) -> list[FileEntry]:
         entries = self.volume.listdir(path)
         return [
@@ -450,18 +457,18 @@ class DirectVolume(VolumeInterface):
             for e in entries
         ]
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def read_file(self, path: str) -> bytes:
         return b"".join(self.volume.read_file(path))
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def remove_file(self, path: str, *, recursive: bool = False) -> None:
         self.volume.remove_file(path, recursive=recursive)
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
         with self.volume.batch_upload(force=True) as batch:
             for path, file_data in file_contents_by_path.items():
@@ -500,14 +507,14 @@ class DirectSandbox(SandboxInterface):
         )
         return DirectExecProcess.model_construct(process=process)
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def tunnels(self, *, timeout: int = 50) -> dict[int, TunnelInfo]:
         raw_tunnels = self.sandbox.tunnels(timeout=timeout)
         return {port: TunnelInfo(tcp_socket=tunnel.tcp_socket) for port, tunnel in raw_tunnels.items()}
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def get_tags(self) -> dict[str, str]:
         return self.sandbox.get_tags()
 
@@ -520,8 +527,8 @@ class DirectSandbox(SandboxInterface):
         image = self.sandbox.snapshot_filesystem(timeout=timeout)
         return DirectImage.model_construct(image=image)
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def poll(self) -> int | None:
         return self.sandbox.poll()
 
@@ -596,8 +603,8 @@ class DirectModalInterface(ModalInterface):
     def app_create(self, name: str) -> AppInterface:
         return DirectApp.model_construct(app=modal.App(name))
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def app_lookup(
         self,
         name: str,
@@ -659,13 +666,13 @@ class DirectModalInterface(ModalInterface):
             raise _translate_modal_error(e) from e
         return DirectSandbox.model_construct(sandbox=sandbox)
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def sandbox_list(self, *, app_id: str) -> list[SandboxInterface]:
         return [DirectSandbox.model_construct(sandbox=sb) for sb in modal.Sandbox.list(app_id=app_id)]
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def sandbox_from_id(self, sandbox_id: str) -> SandboxInterface:
         return DirectSandbox.model_construct(sandbox=modal.Sandbox.from_id(sandbox_id))
 
@@ -697,8 +704,8 @@ class DirectModalInterface(ModalInterface):
             raise _translate_modal_error(e) from e
         return DirectVolume.model_construct(volume=vol, volume_name=name)
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def volume_list(self, *, environment_name: str) -> list[VolumeInterface]:
         return [
             DirectVolume.model_construct(volume=vol, volume_name=vol.name)
@@ -729,8 +736,8 @@ class DirectModalInterface(ModalInterface):
         func = modal.Function.from_name(name=name, app_name=app_name, environment_name=environment_name)
         return DirectFunction.model_construct(function=func)
 
-    @_translate_exceptions
     @_retry_transient
+    @_translate_exceptions
     def is_function_deployed(
         self,
         name: str,

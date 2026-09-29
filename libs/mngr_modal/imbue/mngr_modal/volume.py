@@ -12,9 +12,8 @@ from imbue.mngr.interfaces.volume import BaseVolume
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.modal_proxy.data_types import FileEntry as ProxyFileEntry
 from imbue.modal_proxy.data_types import FileEntryType as ProxyFileEntryType
-from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
-from imbue.modal_proxy.errors import ModalProxyRateLimitError
+from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.interface import VolumeInterface
 
 _P = ParamSpec("_P")
@@ -24,17 +23,17 @@ _R = TypeVar("_R")
 def _translate_transient_proxy_errors(func: Callable[_P, _R]) -> Callable[_P, _R]:
     """Translate transient ModalProxy errors to ModalMngrError at the mngr_modal boundary.
 
-    Rate-limit and internal errors that survive retry are translated so that
-    the mngr layer's ``except (MngrError, OSError)`` guards can catch them
-    instead of letting them crash the process.  Semantic errors like
-    ModalProxyNotFoundError are left untouched.
+    A transient failure that survives retry is translated so that the mngr
+    layer's ``except (MngrError, OSError)`` guards can catch it instead of
+    letting it crash the process. Semantic errors like ModalProxyNotFoundError
+    are left untouched.
     """
 
     @wraps(func)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         try:
             return func(*args, **kwargs)
-        except (ModalProxyRateLimitError, ModalProxyInternalError) as e:
+        except ModalProxyTransientError as e:
             raise ModalMngrError(str(e)) from e
 
     return wrapper

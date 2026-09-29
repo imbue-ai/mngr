@@ -58,11 +58,34 @@ class ModalProxyInvalidError(ModalProxyError):
     """Raised when an invalid argument is passed to Modal."""
 
 
-class ModalProxyInternalError(ModalProxyError):
+class ModalProxyTransientError(ModalProxyError):
+    """Raised when Modal failed the request rather than answering it.
+
+    The single statement of which Modal failures are transient, so consumers
+    catch this base rather than each restating a tuple of concrete classes.
+
+    Subclasses share the one property callers act on: the request did not take
+    effect, so it is safe to re-issue, and what Modal holds is unknown rather
+    than known-bad.
+    """
+
+
+class ModalProxyInternalError(ModalProxyTransientError):
     """Raised on transient Modal internal errors."""
 
 
-class ModalProxyRateLimitError(ModalProxyError):
+class ModalProxyServiceError(ModalProxyTransientError):
+    """Raised when Modal's control plane failed to serve the request.
+
+    Modal routes CANCELLED, UNKNOWN, DEADLINE_EXCEEDED and UNAVAILABLE to a
+    single ``modal.exception.ServiceError``; with INTERNAL, those are exactly
+    the statuses Modal's own client retries. Modal never processed the request,
+    so this is the "Modal is erroring" shape rather than a verdict on what was
+    asked.
+    """
+
+
+class ModalProxyRateLimitError(ModalProxyTransientError):
     """Raised when a Modal API rate limit is exceeded."""
 
 

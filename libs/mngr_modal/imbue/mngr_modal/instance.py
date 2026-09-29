@@ -134,10 +134,10 @@ from imbue.modal_proxy.direct import DEPLOY_MAX_DURATION_SECONDS
 from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
-from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecProcess
 from imbue.modal_proxy.interface import ImageInterface
@@ -2409,7 +2409,7 @@ log "=== Shutdown script completed ==="
                 logger.debug("Deleted host volume: {}", host_volume_name)
             except ModalProxyNotFoundError:
                 logger.trace("Host volume {} already deleted", host_volume_name)
-            except (ModalProxyInvalidError, ModalProxyInternalError) as e:
+            except (ModalProxyInvalidError, ModalProxyTransientError) as e:
                 logger.warning("Failed to delete host volume {}: {}", host_volume_name, e)
                 failures.append(
                     CleanupFailure(

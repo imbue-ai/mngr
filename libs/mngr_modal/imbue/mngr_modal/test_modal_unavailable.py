@@ -35,6 +35,8 @@ from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.plugin import MODAL_BUILD_ARGS_HELP
 from imbue.mngr_modal.plugin import MODAL_START_ARGS_HELP
 from imbue.modal_proxy.interface import ModalInterface
+from imbue.modal_proxy.testing import ControlPlaneErroringModalInterface
+from imbue.modal_proxy.testing import MODAL_CONTROL_PLANE_ERROR_MESSAGE
 from imbue.modal_proxy.testing import MODAL_UNREACHABLE_MESSAGE
 from imbue.modal_proxy.testing import UnreachableModalInterface
 
@@ -102,6 +104,11 @@ def unreachable_modal(tmp_path: Path, cg: ConcurrencyGroup) -> UnreachableModalI
     return UnreachableModalInterface(root_dir=tmp_path / "unreachable_modal", concurrency_group=cg)
 
 
+@pytest.fixture
+def erroring_modal(tmp_path: Path, cg: ConcurrencyGroup) -> ControlPlaneErroringModalInterface:
+    return ControlPlaneErroringModalInterface(root_dir=tmp_path / "erroring_modal", concurrency_group=cg)
+
+
 def test_provider_enumeration_keeps_going_when_modal_cannot_be_reached(
     temp_mngr_ctx: MngrContext, unreachable_modal: UnreachableModalInterface
 ) -> None:
@@ -122,6 +129,26 @@ def test_provider_enumeration_keeps_going_when_modal_cannot_be_reached(
     assert skipped[0].is_empty is False
     assert MODAL_UNREACHABLE_MESSAGE in skipped[0].error_message
     # The providers that *are* reachable still came through, which is the point.
+    assert LOCAL_PROVIDER_NAME in [provider.name for provider in providers]
+
+
+def test_provider_enumeration_keeps_going_when_modal_errors_rather_than_answering(
+    temp_mngr_ctx: MngrContext, erroring_modal: ControlPlaneErroringModalInterface
+) -> None:
+    """A Modal that errors costs the user Modal, exactly as an unreachable one does.
+
+    Modal routes the statuses its own client retries to a single ServiceError, so
+    a control-plane blip arrives here as a failure of Modal rather than a verdict
+    from it. Which means the same thing for the user's other providers, and must
+    cost them the same: nothing.
+    """
+    with _registered_unreachable_modal_backend(erroring_modal):
+        providers, skipped = get_all_provider_instances_and_skipped(temp_mngr_ctx)
+
+    assert [str(entry.provider_name) for entry in skipped] == [str(_UNREACHABLE_MODAL_PROVIDER_NAME)]
+    # Modal erred, so what it holds is unknown -- not empty.
+    assert skipped[0].is_empty is False
+    assert MODAL_CONTROL_PLANE_ERROR_MESSAGE in skipped[0].error_message
     assert LOCAL_PROVIDER_NAME in [provider.name for provider in providers]
 
 

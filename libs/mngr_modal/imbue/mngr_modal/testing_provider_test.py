@@ -108,6 +108,8 @@ from imbue.modal_proxy.errors import ModalProxyInternalError
 from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
+from imbue.modal_proxy.errors import ModalProxyServiceError
+from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
 from imbue.modal_proxy.interface import ExecProcess
@@ -125,26 +127,28 @@ from imbue.modal_proxy.testing import FakeSandboxRefusedHostProvisioningError
 from imbue.modal_proxy.testing import FakeVolume
 
 
-class _RateLimitingVolumeStub(VolumeInterface):
-    """Stub that raises ModalProxyRateLimitError on every operation."""
+class _TransientlyFailingVolumeStub(VolumeInterface):
+    """Stub whose every operation fails with a caller-chosen transient proxy error."""
+
+    error_class: type[ModalProxyTransientError] = Field(description="The transient failure every operation raises")
 
     def get_name(self) -> str | None:
         return None
 
     def get_object_id(self) -> str:
-        raise ModalProxyRateLimitError("rate limit exceeded")
+        raise self.error_class("Modal failed this request")
 
     def listdir(self, path: str) -> list[FileEntry]:
-        raise ModalProxyRateLimitError("rate limit exceeded")
+        raise self.error_class("Modal failed this request")
 
     def read_file(self, path: str) -> bytes:
-        raise ModalProxyRateLimitError("rate limit exceeded")
+        raise self.error_class("Modal failed this request")
 
     def remove_file(self, path: str, *, recursive: bool = False) -> None:
-        raise ModalProxyRateLimitError("rate limit exceeded")
+        raise self.error_class("Modal failed this request")
 
     def write_files(self, file_contents_by_path: Mapping[str, bytes]) -> None:
-        raise ModalProxyRateLimitError("rate limit exceeded")
+        raise self.error_class("Modal failed this request")
 
     def reload(self) -> None:
         pass
@@ -1886,10 +1890,20 @@ def test_modal_volume_wrapper(testing_provider: ModalProviderInstance) -> None:
     vol.remove_directory("/rmdir")
 
 
-def test_modal_volume_translates_rate_limit_error_to_mngr_error() -> None:
-    """ModalProxyRateLimitError from the proxy layer is translated to ModalMngrError."""
-    vol = ModalVolume.model_construct(modal_volume=_RateLimitingVolumeStub())
-    with pytest.raises(ModalMngrError, match="rate limit exceeded"):
+@pytest.mark.parametrize(
+    "error_class",
+    [ModalProxyRateLimitError, ModalProxyInternalError, ModalProxyServiceError],
+)
+def test_modal_volume_translates_every_transient_proxy_error_to_mngr_error(
+    error_class: type[ModalProxyTransientError],
+) -> None:
+    """Callers guard volume reads with ``except (MngrError, OSError)``.
+
+    A transient proxy error that skips the translation is not a MngrError, so it
+    escapes those guards and crashes the caller instead of degrading.
+    """
+    vol = ModalVolume.model_construct(modal_volume=_TransientlyFailingVolumeStub(error_class=error_class))
+    with pytest.raises(ModalMngrError, match="Modal failed this request"):
         vol.listdir("/any")
 
 

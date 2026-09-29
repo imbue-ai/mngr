@@ -12,8 +12,11 @@ from uuid import uuid4
 import modal
 import modal.exception
 import pytest
+from grpclib import Status
 from grpclib.exceptions import ProtocolError
 from grpclib.exceptions import StreamTerminatedError
+from modal._grpc_client import _STATUS_TO_EXCEPTION
+from modal._utils.grpc_utils import RETRYABLE_GRPC_STATUS_CODES
 from modal.config import config
 from modal.stream_type import StreamType as ModalStreamType
 from modal.types import FileEntryType as ModalFileEntryType
@@ -55,6 +58,8 @@ from imbue.modal_proxy.errors import ModalProxyInvalidError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
 from imbue.modal_proxy.errors import ModalProxyRateLimitError
 from imbue.modal_proxy.errors import ModalProxyRemoteError
+from imbue.modal_proxy.errors import ModalProxyServiceError
+from imbue.modal_proxy.errors import ModalProxyTransientError
 from imbue.modal_proxy.errors import ModalProxyTypeError
 from imbue.modal_proxy.errors import is_app_locked_error
 from imbue.modal_proxy.errors import is_deploy_function_vanished_error
@@ -284,26 +289,60 @@ def test_translate_modal_error_maps_each_branch_to_its_proxy_type(
 @pytest.mark.parametrize(
     ("exc", "expected"),
     [
-        pytest.param(modal.exception.InternalError("server error"), True, id="internal_error"),
-        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), True, id="resource_exhausted"),
+        # Every transient subclass qualifies by the base alone, so the predicate
+        # needs no per-class branch and cannot fall behind a new subclass.
+        pytest.param(ModalProxyInternalError("server error"), True, id="internal_error"),
+        pytest.param(ModalProxyServiceError("deadline exceeded"), True, id="service_error"),
+        pytest.param(ModalProxyRateLimitError("rate limit"), True, id="rate_limit"),
+        # grpclib raises these below the SDK, so they are not modal.exception.Error
+        # and reach the predicate untranslated.
         pytest.param(StreamTerminatedError("stream dropped"), True, id="stream_terminated"),
         pytest.param(ProtocolError("protocol error"), True, id="protocol_error"),
         # A missing environment is a verdict, not a blip.
         pytest.param(
-            modal.exception.NotFoundError("Environment 'mngr-abc123' not found"),
+            ModalProxyNotFoundError("Environment 'mngr-abc123' not found"),
             False,
             id="environment_not_found",
         ),
         pytest.param(
-            modal.exception.NotFoundError("File '/hosts/foo.json' not found"),
+            ModalProxyNotFoundError("File '/hosts/foo.json' not found"),
             False,
             id="path_not_found",
         ),
-        pytest.param(modal.exception.AuthError("bad token"), False, id="auth_error"),
+        pytest.param(ModalProxyAuthError("bad token"), False, id="auth_error"),
+        # The raw SDK exception never reaches the predicate: translation happens
+        # beneath the retry, so seeing one would mean the boundary moved.
+        pytest.param(modal.exception.InternalError("server error"), False, id="untranslated_modal_error"),
     ],
 )
 def test_is_transient_modal_error(exc: BaseException, expected: bool) -> None:
     assert _is_transient_modal_error(exc) is expected
+
+
+@pytest.mark.parametrize("status", sorted(RETRYABLE_GRPC_STATUS_CODES, key=lambda s: s.name))
+def test_every_status_modal_retries_is_transient_on_our_side_too(status: Status) -> None:
+    """Modal's retryable statuses must arrive as ModalProxyTransientError, and be retried.
+
+    Modal decides which gRPC statuses are transient (``RETRYABLE_GRPC_STATUS_CODES``)
+    and which exception each status becomes (``_STATUS_TO_EXCEPTION``); both are read
+    here rather than restated, so this fails if Modal adds a status or moves one.
+    Four of the five once arrived as the generic ModalProxyError, which every caller
+    reads as a verdict from Modal rather than a failure of Modal.
+    """
+    modal_exc = _STATUS_TO_EXCEPTION[status]("transient failure")
+    # Modal's table promises only the grpclib wrapper type, so this is both the
+    # narrowing the call below needs and the premise it rests on: a status that
+    # stopped arriving as a modal.exception.Error would bypass the translation
+    # boundary entirely.
+    assert isinstance(modal_exc, modal.exception.Error)
+    translated = _translate_modal_error(modal_exc)
+    assert isinstance(translated, ModalProxyTransientError)
+    assert _is_transient_modal_error(translated) is True
+
+
+def test_a_modal_failure_that_is_not_transient_is_not_treated_as_one() -> None:
+    """The transient base must not swallow the errors Modal answered definitively with."""
+    assert not isinstance(_translate_modal_error(modal.exception.AuthError("bad token")), ModalProxyTransientError)
 
 
 def _make_retry_state(exception: BaseException | None, attempt_number: int) -> RetryCallState:
@@ -320,12 +359,12 @@ def _make_retry_state(exception: BaseException | None, attempt_number: int) -> R
         # Rate limits get the long curve (5/10/20/30s): the limit is shared
         # across every concurrent client, so a burst can outlast the ordinary
         # curve's ~15s of total backoff.
-        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), 1, 5.0, id="rate_limit_first"),
-        pytest.param(modal.exception.ResourceExhaustedError("rate limit"), 4, 30.0, id="rate_limit_capped"),
+        pytest.param(ModalProxyRateLimitError("rate limit"), 1, 5.0, id="rate_limit_first"),
+        pytest.param(ModalProxyRateLimitError("rate limit"), 4, 30.0, id="rate_limit_capped"),
         # Ordinary transient errors keep the original fast curve (1/2/4/8s) so
         # genuine failures still surface quickly.
-        pytest.param(modal.exception.InternalError("server error"), 1, 1.0, id="transient_first"),
-        pytest.param(modal.exception.InternalError("server error"), 4, 8.0, id="transient_fourth"),
+        pytest.param(ModalProxyInternalError("server error"), 1, 1.0, id="transient_first"),
+        pytest.param(ModalProxyServiceError("deadline exceeded"), 4, 8.0, id="transient_fourth"),
         # No recorded outcome falls back to the ordinary curve.
         pytest.param(None, 1, 1.0, id="no_outcome"),
     ],

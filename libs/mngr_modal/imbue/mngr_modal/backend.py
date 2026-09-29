@@ -42,6 +42,7 @@ from imbue.modal_proxy.errors import ModalProxyAuthError
 from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
+from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ModalInterface
 from imbue.modal_proxy.interface import VolumeInterface
@@ -578,23 +579,25 @@ class ModalProviderBackend(ProviderBackendInterface):
                     f"It will be created the first time you run `mngr create @.{name}`."
                 ),
             ) from e
-        except ModalProxyConnectionError as e:
-            # Modal was never reached (a dropped network, a Modal outage), so what
-            # it holds is unknown rather than absent. ProviderUnavailableError is
-            # one of only two construction failures provider enumeration will skip
-            # and record, which is what keeps an offline laptop from failing every
-            # mngr command on a provider the command may not even be about. Paths
-            # that genuinely target Modal do not tolerate it: `mngr create @.modal`
-            # surfaces this straight from its bootstrap, and an agent lookup that
-            # matches nothing re-raises it naming this provider rather than
-            # claiming the agent does not exist.
+        except (ModalProxyConnectionError, ModalProxyServiceError) as e:
+            # Modal did not answer -- either never reached (a dropped network) or
+            # reached and erroring (a control-plane blip) -- so what it holds is
+            # unknown rather than absent. This consumer does not branch on which:
+            # both leave the same gap. ProviderUnavailableError is one of only two
+            # construction failures provider enumeration will skip and record,
+            # which is what keeps an offline laptop from failing every mngr command
+            # on a provider the command may not even be about. Paths that genuinely
+            # target Modal do not tolerate it: `mngr create @.modal` surfaces this
+            # straight from its bootstrap, and an agent lookup that matches nothing
+            # re-raises it naming this provider rather than claiming the agent does
+            # not exist.
             raise ProviderUnavailableError(
                 name,
-                reason=f"could not reach Modal ({e})",
-                short_reason="Modal is unreachable",
-                short_remediation="check your network connection",
+                reason=f"Modal did not answer ({e})",
+                short_reason="Modal is not answering",
+                short_remediation="check your network and https://status.modal.com",
                 user_help_text=(
-                    "Could not reach Modal: check your network connection and try again "
+                    "Modal did not answer: check your network connection and try again "
                     "(https://status.modal.com reports whether Modal itself is down), or "
                     f"disable this provider with `mngr config set --scope local providers.{name}.is_enabled false`."
                 ),

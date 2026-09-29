@@ -32,6 +32,7 @@ from imbue.modal_proxy.errors import ModalProxyConnectionError
 from imbue.modal_proxy.errors import ModalProxyError
 from imbue.modal_proxy.errors import ModalProxyImageBuildError
 from imbue.modal_proxy.errors import ModalProxyNotFoundError
+from imbue.modal_proxy.errors import ModalProxyServiceError
 from imbue.modal_proxy.interface import AppInterface
 from imbue.modal_proxy.interface import ExecOutput
 from imbue.modal_proxy.interface import ExecProcess
@@ -641,3 +642,36 @@ class UnreachableModalInterface(FakeModalInterface):
         environment_name: str,
     ) -> AppInterface:
         raise ModalProxyConnectionError(MODAL_UNREACHABLE_MESSAGE)
+
+
+# What Modal's control plane says when it fails to serve a request rather than
+# answering it: the message is the server's, so a test double reads like the
+# real thing to whatever renders the failure to a user.
+MODAL_CONTROL_PLANE_ERROR_MESSAGE: Final[str] = (
+    "Authorization check failed: <AioRpcError ... status = StatusCode.DEADLINE_EXCEEDED>"
+)
+
+
+class ControlPlaneErroringModalInterface(FakeModalInterface):
+    """A Modal that is reachable but fails every call it is asked to serve.
+
+    The sibling of :class:`UnreachableModalInterface`: nothing is reached there,
+    whereas here Modal is reached and errors. Both leave what Modal holds
+    unknown, so mngr owes them the same treatment -- which is what this double
+    exists to hold it to.
+    """
+
+    def environment_create(self, name: str) -> None:
+        raise ModalProxyServiceError(MODAL_CONTROL_PLANE_ERROR_MESSAGE)
+
+    def app_create(self, name: str) -> AppInterface:
+        raise ModalProxyServiceError(MODAL_CONTROL_PLANE_ERROR_MESSAGE)
+
+    def app_lookup(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        environment_name: str,
+    ) -> AppInterface:
+        raise ModalProxyServiceError(MODAL_CONTROL_PLANE_ERROR_MESSAGE)

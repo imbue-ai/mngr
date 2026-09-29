@@ -134,6 +134,9 @@ def test_get_host_by_id(real_modal_provider: ModalProviderInstance) -> None:
 
 
 @pytest.mark.acceptance
+# Creating the host can lose to a Modal control-plane failure that outlasts its
+# retries; offload retries the test while MIND-274 is open.
+@pytest.mark.flaky
 @pytest.mark.timeout(180)
 def test_get_host_by_name(real_modal_provider: ModalProviderInstance) -> None:
     """Should be able to get a host by its name."""
