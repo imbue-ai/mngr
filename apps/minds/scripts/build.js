@@ -32,6 +32,9 @@ const {
 } = require('./download-binaries.js');
 
 const ROOT = path.resolve(__dirname, '..');
+// The pnpm filter for this workspace package. Read rather than spelled out:
+// a rename otherwise fails deep inside `pnpm deploy`, long after config checks.
+const PACKAGE_NAME = require(path.join(ROOT, 'package.json')).name;
 const RESOURCES_DIR = path.join(ROOT, 'resources');
 const SHARED_RESOURCES_DIR = path.join(RESOURCES_DIR, 'shared');
 
@@ -55,7 +58,9 @@ const WORKSPACE_PACKAGES = {
   'minds':                  'apps/minds',
   'imbue-mngr':             'libs/mngr',
   'imbue-mngr-aws':         'libs/mngr_aws',
+  'imbue-mngr-azure':       'libs/mngr_azure',
   'imbue-mngr-claude':      'libs/mngr_claude',
+  'imbue-mngr-gcp':         'libs/mngr_gcp',
   'imbue-mngr-codex':       'libs/mngr_codex',
   'imbue-mngr-forward':     'libs/mngr_forward',
   'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
@@ -175,8 +180,8 @@ function dereferenceSymlinksInPlace(root) {
  *   packages=true`` (modern, non-legacy mode) it uses the workspace
  *   lockfile to pin every transitive, so the bundled
  *   ``playwright`` / ``playwright-core`` match exactly what
- *   ``pnpm-lock.yaml`` resolved. We deploy the ``minds`` workspace
- *   package itself with ``--prod`` to exclude minds' devDeps (the e2e
+ *   ``pnpm-lock.yaml`` resolved. We deploy this workspace
+ *   package itself with ``--prod`` to exclude its devDeps (the e2e
  *   playwright + electron) and copy the resulting ``node_modules`` into
  *   the bundle directory.
  *
@@ -222,7 +227,7 @@ function bundleLatchkey() {
     execFileSync(
       'pnpm',
       [
-        '--filter', 'minds',
+        '--filter', PACKAGE_NAME,
         'deploy',
         '--prod',
         '--config.node-linker=hoisted',

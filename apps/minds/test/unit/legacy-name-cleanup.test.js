@@ -34,21 +34,31 @@ test('Linux legacy dirs follow XDG, honoring overrides, for each old name', () =
     '/home/someone/.cache/Mind',
   ]);
   const overridden = { ...LINUX, env: { XDG_CONFIG_HOME: '/cfg', XDG_CACHE_HOME: '/cache' } };
-  assert.deepEqual(legacyNameDirs(overridden), ['/cfg/Minds', '/cache/Minds', '/cfg/Mind', '/cache/Mind']);
+  assert.deepEqual(legacyNameDirs(overridden), [
+    '/cfg/Minds',
+    '/cache/Minds',
+    '/cfg/Mind',
+    '/cache/Mind',
+  ]);
 });
 
 test('the current name owns no legacy directory', () => {
+  // Read from package.json rather than spelled out, so a rename cannot leave
+  // this guard testing a name the app no longer uses. Listing the current name
+  // here would make the next launch delete live user data.
+  const { productName } = require('../../package.json');
   for (const dir of [...legacyNameDirs(MAC), ...legacyNameDirs(LINUX)]) {
-    assert.ok(!dir.endsWith('/ImbueStudio') && !dir.endsWith('/Imbue Studio'), dir);
+    assert.ok(!dir.endsWith(`/${productName}`), dir);
   }
 });
 
 test('the updater cache is not a legacy directory', () => {
-  // electron-builder derives updaterCacheDirName from the package name, which
-  // the rename does not touch, so ~/Library/Caches/minds-updater is still live
-  // and may hold a staged update.
+  // electron-builder derives updaterCacheDirName from the package name, so the
+  // live cache is ~/Library/Caches/imbue-studio-updater. It is not a legacy
+  // name directory either way: a staged update lives there, and this sweep must
+  // never take it.
   const dirs = legacyNameDirs(MAC);
-  assert.ok(!dirs.some((dir) => dir.includes('minds-updater')), dirs.join(', '));
+  assert.ok(!dirs.some((dir) => dir.includes('-updater')), dirs.join(', '));
 });
 
 /** A throwaway HOME with the legacy directories populated. */
@@ -66,7 +76,7 @@ test('it removes the legacy directories and leaves nothing behind', () => {
   const { home, environment } = makeHome();
   try {
     const removed = removeLegacyNameDirs(environment);
-    assert.equal(removed.length, 6);
+    assert.equal(removed.length, legacyNameDirs(environment).length);
     for (const dir of legacyNameDirs(environment)) {
       assert.ok(!fs.existsSync(dir), `${dir} survived`);
     }

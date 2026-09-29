@@ -39,6 +39,19 @@ test('the entry launches the AppImage with the URL argument and claims both sche
   assert.ok(entry.endsWith('\n'));
 });
 
+test('a product name containing a space survives into the entry', () => {
+  // productName is "Imbue Studio", so the AppImage path and StartupWMClass both
+  // carry a space: Exec must stay quoted and the WM class must not be split.
+  const { productName } = require('../../package.json');
+  const lines = renderDesktopEntry({
+    appImagePath: '/home/alice/Apps/Imbue Studio 0.8.0.AppImage',
+    productName,
+    displayName: 'Imbue Studio',
+  }).split('\n');
+  assert.ok(lines.includes('Exec="/home/alice/Apps/Imbue Studio 0.8.0.AppImage" %U'));
+  assert.ok(lines.includes(`StartupWMClass=${productName}`));
+});
+
 test('a relative or unquotable path, or a missing name, is refused rather than written', () => {
   const render = (appImagePath) =>
     renderDesktopEntry({ appImagePath, productName: 'ImbueStudio', displayName: 'Imbue Studio' });

@@ -67,10 +67,10 @@ test('a .deb restarts its executable with the arguments this process was started
     relaunchTargetFor({
       packageType: 'deb',
       appImagePath: null,
-      executablePath: '/opt/ImbueStudio/minds',
+      executablePath: '/opt/Imbue Studio/imbue-studio',
       args: ['--minds-sandbox-relaunched'],
     }),
-    { executablePath: '/opt/ImbueStudio/minds', args: ['--minds-sandbox-relaunched'] },
+    { executablePath: '/opt/Imbue Studio/imbue-studio', args: ['--minds-sandbox-relaunched'] },
   );
 });
 

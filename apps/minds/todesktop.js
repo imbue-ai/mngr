@@ -5,7 +5,7 @@ const { PRODUCT_DISPLAY_NAME } = require('./electron/product-name');
 module.exports = {
   schemaVersion: 1,
   id: '26032588hqdzk',
-  // The file-system name (ImbueStudio.app, /opt/ImbueStudio): passed
+  // The file-system name (Imbue Studio.app, /opt/Imbue Studio): passed
   // explicitly so the dashboard's app name can never override package.json.
   productName: pkg.productName,
   // Registers imbue-studio:// as this app's URL scheme (CFBundleURLTypes on
@@ -58,11 +58,11 @@ module.exports = {
   // second copy of its subtree in app.asar.
   mac: {
     entitlements: 'entitlements.mac.plist',
-    // The menu bar and the About panel read these; the bundle on disk keeps
-    // the spaceless productName, which Finder, the Dock, and the browser's
-    // open-external-app prompt show.
+    // Finder, the Dock and Get Info read this. CFBundleName is deliberately
+    // absent so it defaults to productName: Electron resolves the helper apps
+    // as `<CFBundleName> Helper.app` while the builder names them from
+    // productName, and any override lets the two drift apart again.
     extendInfo: {
-      CFBundleName: PRODUCT_DISPLAY_NAME,
       CFBundleDisplayName: PRODUCT_DISPLAY_NAME,
     },
   },

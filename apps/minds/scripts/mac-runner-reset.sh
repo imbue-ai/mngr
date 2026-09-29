@@ -21,22 +21,22 @@ log() { printf '[reset] %s\n' "$*" >&2; }
 # CLEANUP: drop the Mind and Minds names once the runner has been reset after
 # the rename (specs/imbue-studio-rename/05_cleanup.md).
 log "asking Imbue Studio to quit"
-for bundle_name in ImbueStudio Mind Minds; do
+for bundle_name in "Imbue Studio" ImbueStudio Mind Minds; do
   [[ -d "/Applications/$bundle_name.app" ]] || continue
   osascript -e "tell application \"$bundle_name\" to quit" 2>/dev/null || true
 done
 for _ in 1 2 3 4 5; do
-  pids=$(pgrep -f '/Applications/(ImbueStudio|Minds?)\.app/Contents/' || true)
+  pids=$(pgrep -f '/Applications/(Imbue Studio|ImbueStudio|Minds?)\.app/Contents/' || true)
   [[ -z "$pids" ]] && break
   sleep 1
 done
-pids=$(pgrep -f '/Applications/(ImbueStudio|Minds?)\.app/Contents/' || true)
+pids=$(pgrep -f '/Applications/(Imbue Studio|ImbueStudio|Minds?)\.app/Contents/' || true)
 for pid in $pids; do
   log "force-kill straggler $pid"
   kill -9 "$pid" 2>/dev/null || true
 done
 
-BUNDLED_LIMACTL="/Applications/ImbueStudio.app/Contents/Resources/lima/bin/limactl"
+BUNDLED_LIMACTL="/Applications/Imbue Studio.app/Contents/Resources/lima/bin/limactl"
 LIMACTL=""
 if [[ -x "$BUNDLED_LIMACTL" ]]; then
   LIMACTL="$BUNDLED_LIMACTL"
@@ -125,7 +125,7 @@ for attempt in 1 2 3 4 5; do
     rm -rf "$HOME/.minds" || true
   fi
 done
-sudo rm -rf /Applications/ImbueStudio.app /Applications/Mind.app /Applications/Minds.app
+sudo rm -rf "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"
 
 URL="${1:-}"
 
@@ -150,7 +150,7 @@ if [[ -e "$HOME/.minds" ]]; then
   log "ERROR: ~/.minds survived cleanup"
   cleanup_failed=1
 fi
-for bundle in /Applications/ImbueStudio.app /Applications/Mind.app /Applications/Minds.app; do
+for bundle in "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"; do
   if [[ -z "$URL" && -e "$bundle" ]]; then
     log "ERROR: $bundle survived cleanup"
     cleanup_failed=1
@@ -168,15 +168,15 @@ if [[ -n "$URL" ]]; then
   # Install must fail loud: a run must never proceed against a stale app.
   curl -fSL --silent --show-error -o "$TMP/minds.zip" "$URL" || { log "ERROR: app download failed"; exit 1; }
   unzip -q -d "$TMP" "$TMP/minds.zip" || { log "ERROR: app unzip failed"; exit 1; }
-  sudo mv "$TMP/ImbueStudio.app" /Applications/ImbueStudio.app || { log "ERROR: app install (mv) failed"; exit 1; }
+  sudo mv "$TMP/Imbue Studio.app" "/Applications/Imbue Studio.app" || { log "ERROR: app install (mv) failed"; exit 1; }
   # xattr -dr returns non-zero when some signed-bundle internals refuse the
   # delete with "Operation not permitted"; we only care about the top-level
   # quarantine bit so Gatekeeper lets the app launch. Per-file failures
   # inside signed frameworks are harmless.
-  sudo xattr -dr com.apple.quarantine /Applications/ImbueStudio.app 2>/dev/null || true
-  sudo xattr -d com.apple.quarantine /Applications/ImbueStudio.app 2>/dev/null || true
-  version=$(defaults read /Applications/ImbueStudio.app/Contents/Info.plist CFBundleShortVersionString)
-  build=$(defaults read /Applications/ImbueStudio.app/Contents/Info.plist CFBundleVersion)
+  sudo xattr -dr com.apple.quarantine "/Applications/Imbue Studio.app" 2>/dev/null || true
+  sudo xattr -d com.apple.quarantine "/Applications/Imbue Studio.app" 2>/dev/null || true
+  version=$(defaults read "/Applications/Imbue Studio.app/Contents/Info.plist" CFBundleShortVersionString)
+  build=$(defaults read "/Applications/Imbue Studio.app/Contents/Info.plist" CFBundleVersion)
   log "installed $version ($build)"
 fi
 

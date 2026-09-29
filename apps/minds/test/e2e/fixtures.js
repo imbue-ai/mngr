@@ -1,4 +1,4 @@
-// Playwright fixture: launches the installed /Applications/ImbueStudio.app.
+// Playwright fixture: launches the installed /Applications/Imbue Studio.app.
 //
 // Note on isolation: the signed bundle's `getMindsRootName()` reads the
 // baked-in `resources/pyproject/imbue/minds/config/envs/_bundled/root_name`
@@ -8,7 +8,7 @@
 // Specs are responsible for cleaning up any workspaces they create
 // (`mngr destroy` or the destroy button) before exiting.
 //
-// To run cleanly, quit any user-launched ImbueStudio.app first -- Playwright's
+// To run cleanly, quit any user-launched Imbue Studio.app first -- Playwright's
 // `electron.launch()` will deadlock-exit silently on Electron's
 // requestSingleInstanceLock if a prior Minds is still alive (we hit this
 // in early iterations: PID 28024 lingered after Cmd-Q).
@@ -18,7 +18,7 @@ const fs = require('fs');
 const { _electron: electron } = require('playwright');
 const base = require('@playwright/test');
 
-const DEFAULT_APP_PATH = '/Applications/ImbueStudio.app/Contents/MacOS/ImbueStudio';
+const DEFAULT_APP_PATH = '/Applications/Imbue Studio.app/Contents/MacOS/Imbue Studio';
 
 // Each app window is a single web context now (the chrome page, which hosts
 // hub pages, the sandboxed workspace iframe, and the in-DOM modals), so
@@ -69,7 +69,7 @@ const test = base.test.extend({
     const execPath = process.env.MINDS_APP_PATH || DEFAULT_APP_PATH;
     if (!fs.existsSync(execPath)) {
       throw new Error(
-        `ImbueStudio.app binary not found at ${execPath}. Install it to /Applications/ or ` +
+        `Imbue Studio.app binary not found at ${execPath}. Install it to /Applications/ or ` +
           `set MINDS_APP_PATH to a downloaded build.`
       );
     }
@@ -134,7 +134,7 @@ const test = base.test.extend({
     // ephemeral GHA Mac, so a broad minds-scoped pkill is safe.)
     try {
       execSync(
-        'pkill -9 -if "(imbuestudio|minds?)\\.app|/\\.minds/|mngr latchkey|mngr observe|(imbuestudio|minds?)/crashpad" 2>/dev/null || true',
+        'pkill -9 -if "(imbue ?studio|minds?)\\.app|/\\.minds/|mngr latchkey|mngr observe|(imbue ?studio|minds?)/crashpad" 2>/dev/null || true',
         { stdio: 'ignore', timeout: 10000 },
       );
     } catch (e) {
