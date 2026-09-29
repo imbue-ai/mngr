@@ -17,7 +17,7 @@ set -euo pipefail
 mngr create
 # the defaults are the following: agent=your configured default (stored under `[commands.create] type`
 # in user settings; `scripts/install.sh` interactively prompts you to pick one as part of
-# `mngr extras -i`, and you can re-run `mngr extras config` later to pick or change it),
+# `mngr config wizard`, which you can re-run later to pick or change it),
 # provider=local, project=current dir
 
 # you can run the agent in-place (directly in your source directory) without any transfer:
