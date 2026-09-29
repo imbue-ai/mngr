@@ -97,13 +97,11 @@ export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
 // review popup, flipping the card ahead of the transcript's own notice.
 export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
 // embedder -> workspace: the user opened a chat's notification; show that
-// chat. Payload: { chatId } -- the chat's id (its first agent's id). The
-// workspace raises a window already showing the chat, wherever it is, else
-// points the viewer's pinned chat window at it, else opens it in a window of
-// its own. Sent only to a workspace that has announced WORKSPACE_READY, which
-// every workspace handling this type does; a workspace on an older template
-// announces nothing, never receives the ask, and the user just lands on the
-// workspace.
+// chat. Payload: { chatId } -- the chat's id (its first agent's id). Which
+// window it lands in is the workspace's choice. Sent only to a workspace that
+// has announced WORKSPACE_READY, which every workspace handling this type
+// does; a workspace on an older template announces nothing, never receives
+// the ask, and the user just lands on the workspace.
 export const FOCUS_CHAT = "minds:focus-chat";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut }. A workspace that never receives it
