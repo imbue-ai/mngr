@@ -18,7 +18,11 @@ def test_prevent_todos() -> None:
 
 
 def test_prevent_exec() -> None:
-    rc.check_exec(_DIR, snapshot(0))
+    # Count is 1 because of a regex misfire: the gen-2 meminfo publisher
+    # (``slices/gen2_scripts/guest.py``) is a perl program held in a Python
+    # string, and its perl ``exec('docker', ...)`` starts docker in a forked
+    # child. There is no Python ``exec()`` in this package.
+    rc.check_exec(_DIR, snapshot(1))
 
 
 def test_prevent_eval() -> None:

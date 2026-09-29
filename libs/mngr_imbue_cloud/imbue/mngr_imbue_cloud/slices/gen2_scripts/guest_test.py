@@ -123,7 +123,7 @@ def test_user_data_installs_the_every_boot_units() -> None:
     # The meminfo publisher is a long-running service that docker's restarts do not end.
     publisher_unit = content_by_path["/etc/systemd/system/mngr-publish-container-meminfo.service"]
     assert "Restart=always" in publisher_unit
-    assert "/usr/local/sbin/mngr-publish-container-meminfo.sh" in content_by_path
+    assert "/usr/local/sbin/mngr-publish-container-meminfo.pl" in content_by_path
     # All three units are enabled and first-run by cloud-init.
     enable_command = " ".join(parsed["runcmd"][-1])
     assert (
@@ -313,10 +313,11 @@ def test_reconciler_leaves_a_container_already_on_the_cap_alone(tmp_path: Path) 
     assert not any(call.startswith(("update", "restart")) for call in calls)
 
 
-# A stub docker for the publisher: one running labeled container whose
-# /mngr-vol volume's bind device is $FAKE_VOLUME_DIR.
+# A stub docker for the publisher, logging each call: one running labeled
+# container whose /mngr-vol volume's bind device is $FAKE_VOLUME_DIR.
 _PUBLISHER_FAKE_DOCKER = """\
 #!/bin/bash
+echo "$1" >> "$FAKE_DOCKER_LOG"
 case "$1" in
     ps) echo "$FAKE_CONTAINER_ID" ;;
     inspect) echo mngr-host-vol-feed ;;
@@ -348,22 +349,29 @@ def _read_published_meminfo(target: Path, timeout_seconds: float) -> dict[str, i
 
 
 @contextmanager
-def _running_publisher(tmp_path: Path, container_id: str, cgroup_parent: Path, volume_dir: Path) -> Iterator[None]:
-    """Run the rendered publisher against one fake container until the block exits."""
+def _running_publisher(tmp_path: Path, container_id: str, cgroup_parent: Path, volume_dir: Path) -> Iterator[Path]:
+    """Run the rendered publisher against one fake container until the block exits, yielding its docker call log.
+
+    Its PATH holds only the fake docker, so any other program it tried to start would fail.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "docker").write_text(_PUBLISHER_FAKE_DOCKER)
     (bin_dir / "docker").chmod(0o755)
-    script = tmp_path / "publish.sh"
+    docker_log = tmp_path / "docker-calls.log"
+    docker_log.touch()
+    script = tmp_path / "publish.pl"
     script.write_text(render_guest_container_meminfo_publisher_script(str(cgroup_parent)))
+    script.chmod(0o755)
     env = {
-        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "PATH": str(bin_dir),
         "FAKE_CONTAINER_ID": container_id,
         "FAKE_VOLUME_DIR": str(volume_dir),
+        "FAKE_DOCKER_LOG": str(docker_log),
     }
-    publisher = subprocess.Popen(["bash", str(script)], env=env, stderr=subprocess.PIPE, text=True)
+    publisher = subprocess.Popen([str(script)], env=env, stderr=subprocess.PIPE, text=True)
     try:
-        yield
+        yield docker_log
         exit_code = publisher.poll()
     finally:
         publisher.kill()
@@ -425,3 +433,23 @@ def test_meminfo_publisher_never_writes_through_a_symlink_the_container_planted(
     assert published["MemTotal"] == 6415 * 1024
     assert vm_file.read_text() == "owned by VM root\n"
     assert list(vm_dir.iterdir()) == []
+
+
+def test_meminfo_publisher_starts_no_process_between_container_lookups(tmp_path: Path) -> None:
+    # It rewrites the file four times a second on every VM, so each rewrite
+    # must cost no process start; only a lookup (every 10 s) runs docker.
+    container_id = "d0d0" * 16
+    cgroup_parent = tmp_path / "cgroup"
+    volume_dir = tmp_path / "volume"
+    volume_dir.mkdir()
+    _write_container_cgroup(cgroup_parent, container_id, limit=str(6415 * _MIB), usage=6000 * _MIB, stat="")
+    target = volume_dir / ".host-meminfo"
+
+    # Each file that reappears after a removal is a fresh rewrite. (Distinct
+    # inodes would not show it: ext4 hands the replaced file's inode to the next.)
+    with _running_publisher(tmp_path, container_id, cgroup_parent, volume_dir) as docker_log:
+        for _ in range(4):
+            _read_published_meminfo(target, timeout_seconds=5)
+            target.unlink()
+
+    assert docker_log.read_text().split() == ["ps", "inspect", "volume"]

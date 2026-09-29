@@ -34,7 +34,7 @@ GUEST_CONTAINER_MEMORY_UNIT_NAME: Final[str] = "mngr-reconcile-container-memory.
 GUEST_CONTAINER_MEMINFO_UNIT_NAME: Final[str] = "mngr-publish-container-meminfo.service"
 _GUEST_GROW_DATA_FS_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-grow-data-fs.sh"
 _GUEST_CONTAINER_MEMORY_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-reconcile-container-memory.sh"
-_GUEST_CONTAINER_MEMINFO_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-publish-container-meminfo.sh"
+_GUEST_CONTAINER_MEMINFO_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-publish-container-meminfo.pl"
 _GUEST_SYSTEMD_UNIT_DIR: Final[str] = "/etc/systemd/system"
 
 _GUEST_MEMINFO_PATH: Final[str] = "/proc/meminfo"
@@ -50,6 +50,102 @@ _MINDS_AUTOSTART_UNIT_NAME: Final[str] = "minds-autostart.service"
 _MEMINFO_PUBLISH_INTERVAL_SECONDS: Final[str] = "0.25"
 # How many rewrites apart the publisher looks the containers up again.
 _MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY: Final[int] = 40
+
+
+_MEMINFO_PUBLISHER_BODY: Final[str] = r"""
+# docker's output, or undef if it fails. Its stderr is dropped: a container
+# that stops mid-discovery fails its inspect.
+sub docker_output {
+    my $pid = open(my $out, '-|') // return undef;
+    if ($pid == 0) {
+        open(STDERR, '>', '/dev/null');
+        exec('docker', @_) or exit 127;
+    }
+    my $output = do { local $/; <$out> } // '';
+    close($out) or return undef;
+    chomp $output;
+    return $output;
+}
+
+# [cgroup directory, published file] for each running agent host container.
+sub discover {
+    my @targets;
+    my $ids = docker_output('ps', '-q', '--no-trunc', '--filter', "label=$host_id_label") // return ();
+    for my $container_id (split ' ', $ids) {
+        my $volume_name = docker_output(
+            'inspect', '--format',
+            '{{range .Mounts}}{{if eq .Destination "' . $volume_mount_path . '"}}{{.Name}}{{end}}{{end}}',
+            $container_id,
+        );
+        next unless defined $volume_name && $volume_name ne '';
+        my $volume_dir = docker_output('volume', 'inspect', '--format', '{{.Options.device}}', $volume_name);
+        next unless defined $volume_dir && $volume_dir ne '' && -d $volume_dir;
+        push @targets, ["$cgroup_parent/docker-$container_id.scope", "$volume_dir/$file_name"];
+    }
+    return @targets;
+}
+
+sub read_first_line {
+    my ($path) = @_;
+    open(my $fh, '<', $path) or return undef;
+    my $line = <$fh>;
+    close($fh);
+    return undef unless defined $line;
+    chomp $line;
+    return $line;
+}
+
+# Replaces $path by rename from a fresh temp file beside it, created so that
+# no planted name can be written through.
+sub write_replacing {
+    my ($path, $content) = @_;
+    my ($fh, $tmp);
+    for (1 .. 100) {
+        $tmp = sprintf('%s.%08x', $path, int(rand(4294967296)));
+        last if sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+        undef $fh;
+    }
+    return unless defined $fh;
+    print {$fh} $content;
+    close($fh) or do { unlink $tmp; return };
+    rename($tmp, $path) or unlink $tmp;
+}
+
+sub publish {
+    my ($cgroup_dir, $target_file) = @_;
+    # A container can stop, and its cgroup vanish, between any two reads.
+    my $limit = read_first_line("$cgroup_dir/memory.max") // return;
+    if ($limit eq 'max') {
+        unlink $target_file;
+        return;
+    }
+    return unless $limit =~ /^\d+$/;
+    my $usage = read_first_line("$cgroup_dir/memory.current") // return;
+    return unless $usage =~ /^\d+$/;
+    open(my $stat, '<', "$cgroup_dir/memory.stat") or return;
+    my $reclaimable = 0;
+    while (my $line = <$stat>) {
+        my ($key, $value) = split ' ', $line;
+        next unless defined $value && $value =~ /^\d+$/;
+        $reclaimable += $value if $key eq 'active_file' || $key eq 'inactive_file' || $key eq 'slab_reclaimable';
+    }
+    close($stat);
+    my $available = $limit - $usage + $reclaimable;
+    $available = 0 if $available < 0;
+    $available = $limit if $available > $limit;
+    write_replacing(
+        $target_file,
+        sprintf("MemTotal: %d kB\nMemAvailable: %d kB\nTimestamp: %d\n", $limit / 1024, $available / 1024, time),
+    );
+}
+
+my @targets;
+for (my $round = 0; ; $round++) {
+    @targets = discover() if $round % $rounds_per_discovery == 0;
+    publish(@$_) for @targets;
+    select(undef, undef, undef, $interval_seconds);
+}
+"""
 
 
 @pure
@@ -192,74 +288,24 @@ def render_guest_container_meminfo_publisher_script(cgroup_parent: str) -> str:
     its named volume's bind device, which exists whether or not the container
     runs; a container without a limit gets no file.
     """
-    return f"""\
-#!/bin/bash
+    header = f"""\
+#!/usr/bin/perl
 # Managed by mngr (gen-2 slices).
-# No -e: one container's vanished cgroup or volume must not stop the loop.
-set -uo pipefail
-cgroup_dirs=()
-target_files=()
+# One long-running process, so a rewrite starts none. perl, because every write
+# into the container's volume must refuse a symlink the container planted
+# there, and bash cannot open with O_NOFOLLOW.
+use strict;
+use warnings;
+use Fcntl qw(O_WRONLY O_CREAT O_EXCL O_NOFOLLOW);
 
-discover() {{
-    cgroup_dirs=()
-    target_files=()
-    local container_id volume_name volume_dir
-    for container_id in $(docker ps -q --no-trunc --filter "label={GEN2_HOST_ID_CONTAINER_LABEL}" 2>/dev/null); do
-        volume_name=$(docker inspect --format '{{{{range .Mounts}}}}{{{{if eq .Destination "{GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH}"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}' "$container_id" 2>/dev/null) || continue
-        [ -n "$volume_name" ] || continue
-        volume_dir=$(docker volume inspect --format '{{{{.Options.device}}}}' "$volume_name" 2>/dev/null) || continue
-        [ -n "$volume_dir" ] && [ -d "$volume_dir" ] || continue
-        cgroup_dirs+=("{cgroup_parent}/docker-$container_id.scope")
-        target_files+=("$volume_dir/{GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME}")
-    done
-}}
-
-publish() {{
-    local cgroup_dir=$1 target_file=$2 limit usage key value reclaimable=0 available
-    # A container can stop, and its cgroup vanish, between any two reads.
-    read -r limit 2>/dev/null < "$cgroup_dir/memory.max" || return 0
-    if [ "$limit" = max ]; then
-        rm -f "$target_file"
-        return 0
-    fi
-    read -r usage 2>/dev/null < "$cgroup_dir/memory.current" || return 0
-    while read -r key value; do
-        case "$key" in
-            active_file | inactive_file | slab_reclaimable) reclaimable=$(( reclaimable + value )) ;;
-        esac
-    done 2>/dev/null < "$cgroup_dir/memory.stat" || return 0
-    available=$(( limit - usage + reclaimable ))
-    [ "$available" -ge 0 ] || available=0
-    [ "$available" -le "$limit" ] || available=$limit
-    # The container can plant a symlink at any name in its volume, which a shell
-    # redirect or mv would follow as root; bash cannot open with O_NOFOLLOW.
-    perl -MFcntl -e '
-        my ($path, $total_kib, $available_kib) = @ARGV;
-        my ($fh, $tmp);
-        for (1 .. 100) {{
-            $tmp = sprintf("%s.%08x", $path, int(rand(4294967296)));
-            last if sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
-            undef $fh;
-        }}
-        defined $fh or exit 1;
-        printf {{$fh}} "MemTotal: %d kB\\nMemAvailable: %d kB\\nTimestamp: %d\\n", $total_kib, $available_kib, time;
-        close($fh) or do {{ unlink $tmp; exit 1 }};
-        rename($tmp, $path) or do {{ unlink $tmp; exit 1 }};
-    ' "$target_file" $(( limit / 1024 )) $(( available / 1024 ))
-}}
-
-round=0
-while true; do
-    if [ $(( round % {_MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY} )) -eq 0 ]; then
-        discover
-    fi
-    for idx in "${{!cgroup_dirs[@]}}"; do
-        publish "${{cgroup_dirs[$idx]}}" "${{target_files[$idx]}}"
-    done
-    round=$(( round + 1 ))
-    sleep {_MEMINFO_PUBLISH_INTERVAL_SECONDS}
-done
+my $cgroup_parent = '{cgroup_parent}';
+my $host_id_label = '{GEN2_HOST_ID_CONTAINER_LABEL}';
+my $volume_mount_path = '{GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH}';
+my $file_name = '{GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME}';
+my $interval_seconds = {_MEMINFO_PUBLISH_INTERVAL_SECONDS};
+my $rounds_per_discovery = {_MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY};
 """
+    return header + _MEMINFO_PUBLISHER_BODY
 
 
 @pure
