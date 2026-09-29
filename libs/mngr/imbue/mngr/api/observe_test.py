@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -65,6 +66,7 @@ from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
 from imbue.mngr.errors import MngrError
+from imbue.mngr.interfaces.data_types import AgentDetails
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentLifecycleState
 from imbue.mngr.primitives import AgentName
@@ -80,7 +82,7 @@ from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
 
-# === Path Helper Tests ===
+# Path Helper Tests
 
 
 def test_get_default_events_base_dir_expands_home(temp_config: MngrConfig) -> None:
@@ -115,7 +117,7 @@ def test_get_observe_lock_path_returns_correct_path(temp_host_dir: Path) -> None
     assert lock_path == temp_host_dir / "observe_lock"
 
 
-# === Event Construction Tests ===
+# Event Construction Tests
 
 
 def test_make_agent_state_event_has_correct_fields() -> None:
@@ -169,7 +171,7 @@ def test_make_agent_state_change_event_with_none_old_state() -> None:
     assert event.new_host_state == "RUNNING"
 
 
-# === File I/O Tests ===
+# File I/O Tests
 
 
 def test_append_observe_event_creates_file_and_writes_valid_json(temp_host_dir: Path) -> None:
@@ -237,7 +239,7 @@ def test_append_agent_state_change_event_creates_parent_directories(temp_host_di
     assert events_path.parent.exists()
 
 
-# === History Loading Tests ===
+# History Loading Tests
 
 
 def test_load_base_state_from_history_returns_empty_when_no_file(temp_host_dir: Path) -> None:
@@ -323,7 +325,7 @@ def test_load_base_state_from_history_silent_on_partial_last_line(temp_host_dir:
     assert log_output.getvalue() == ""
 
 
-# === Lock Tests ===
+# Lock Tests
 
 
 def test_acquire_and_release_observe_lock(temp_host_dir: Path) -> None:
@@ -371,7 +373,7 @@ def test_separate_dirs_can_lock_independently(tmp_path: Path) -> None:
     release_observe_lock(fd_b)
 
 
-# === Serialization Roundtrip Tests ===
+# Serialization Roundtrip Tests
 
 
 def test_agent_state_event_serializes_to_valid_json() -> None:
@@ -414,7 +416,7 @@ def test_agent_state_change_event_serializes_to_valid_json() -> None:
     assert parsed["agent"]["name"] == "test-agent"
 
 
-# === AgentObserver Tests ===
+# AgentObserver Tests
 
 
 def _make_observer(temp_mngr_ctx: MngrContext, noop_binary: str) -> AgentObserver:
@@ -867,7 +869,7 @@ def test_agent_observer_does_not_stream_activity_from_a_host_a_snapshot_lists_as
         assert str(host.host_id) not in observer._events_processes
 
 
-# === UNKNOWN State Tests ===
+# UNKNOWN State Tests
 
 
 def _make_provider(name: str) -> DiscoveredProvider:
@@ -1098,7 +1100,7 @@ def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
     assert _details_instance_key(healthy_agent) not in observer._last_known_details_by_instance
 
 
-# === Observe-event parsing (agents stream) ===
+# Observe-event parsing (agents stream)
 
 
 def test_parse_observe_event_line_round_trips_agent_state() -> None:
@@ -1139,7 +1141,7 @@ def test_parse_observe_event_line_returns_none_for_state_change_and_unknown() ->
     assert parse_observe_event_line("   ") is None
 
 
-# === agents_event_sink forwarding (drives --stream-events) ===
+# agents_event_sink forwarding (drives --stream-events)
 
 
 def _make_observer_with_sink(
@@ -1193,7 +1195,7 @@ def test_no_sink_does_not_error(temp_mngr_ctx: MngrContext, noop_binary: str) ->
     assert get_observe_events_path(observer.events_base_dir).exists()
 
 
-# === Agent membership deltas (AGENT_REMOVED + added enqueues host) ===
+# Agent membership deltas (AGENT_REMOVED + added enqueues host)
 
 
 def test_discovery_added_agent_enqueues_its_host_for_reprobe(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
@@ -1238,7 +1240,90 @@ def test_discovery_removed_agent_emits_agent_removed_and_drops_tracking(
     assert str(agent.instance_key) not in observer._last_tracked_state_by_instance
 
 
-# === PID watchers (local agents) ===
+def _listed_details_of(agent: DiscoveredAgent) -> AgentDetails:
+    """What a host listing reports for a discovered agent's instance: the agent, stopped by its destroy."""
+    details = make_test_agent_details(
+        name=str(agent.agent_name), host_id=agent.host_id, state=AgentLifecycleState.STOPPED
+    )
+    return details.model_copy_update(to_update(details.field_ref().id, agent.agent_id))
+
+
+def _agents_stream_events_naming(observer: AgentObserver, agent_id: AgentId) -> list[str]:
+    """The agents-stream event types that carry ``agent_id``, in the order they were written."""
+    types: list[str] = []
+    for line in get_observe_events_path(observer.events_base_dir).read_text().splitlines():
+        if not line.strip():
+            continue
+        data = json.loads(line)
+        named_ids = {data.get("agent_id"), (data.get("agent") or {}).get("id")}
+        named_ids.update(listed["id"] for listed in data.get("agents", ()))
+        if str(agent_id) in named_ids:
+            types.append(data["type"])
+    return types
+
+
+@pytest.mark.parametrize(
+    "emit_listing",
+    [AgentObserver._emit_listed_agent_states, AgentObserver._process_listed_snapshot],
+    ids=["host_reprobe", "full_snapshot"],
+)
+def test_a_listing_begun_before_an_agent_was_removed_does_not_bring_it_back(
+    emit_listing: Callable[[AgentObserver, Sequence[AgentDetails], int], None],
+    temp_mngr_ctx: MngrContext,
+    noop_binary: str,
+) -> None:
+    """A destroy kills the agent's process, whose PID watcher re-probes the host; that listing (or a
+    periodic full one) can read the agent before its state dir is gone and finish after the discovery
+    stream removed it. Emitting what it read would announce the destroyed agent again, after its
+    AGENT_REMOVED."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        with observer._listing() as listing_start:
+            _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+            emit_listing(observer, [_listed_details_of(agent)], listing_start)
+
+    assert _agents_stream_events_naming(observer, agent.agent_id) == ["AGENT_REMOVED"]
+    assert not get_agent_states_events_path(observer.events_base_dir).exists()
+    assert str(agent.instance_key) not in observer._last_tracked_state_by_instance
+
+
+def test_a_listing_still_open_when_an_overlapping_one_closes_still_drops_the_removed_agent(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """The activity worker's host re-probe and the snapshot loop's full listing overlap; the one that
+    finishes first must not take the removal record the other still needs."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        with observer._listing() as still_open_listing_start:
+            with observer._listing():
+                _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+            observer._emit_listed_agent_states([_listed_details_of(agent)], still_open_listing_start)
+
+    assert _agents_stream_events_naming(observer, agent.agent_id) == ["AGENT_REMOVED"]
+
+
+def test_an_agent_listed_after_its_removal_is_emitted(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """Only a listing already under way when the removal landed is stale: one begun afterwards that
+    still finds the agent is reporting a real agent, and must emit it."""
+    observer = _make_observer(temp_mngr_ctx, noop_binary)
+    agent = make_test_discovered_agent()
+
+    with observer._concurrency_group:
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[agent])
+        _feed_provider_snapshot(observer, ProviderInstanceName("local"), agents=[])
+        with observer._listing() as listing_start:
+            observer._emit_listed_agent_states([_listed_details_of(agent)], listing_start)
+
+    assert _agents_stream_events_naming(observer, agent.agent_id) == ["AGENT_REMOVED", "AGENT_STATE"]
+
+
+# PID watchers (local agents)
 
 
 def _drain_activity_queue(observer: AgentObserver) -> set[str]:
@@ -1417,7 +1502,7 @@ def test_wait_for_pid_exit_via_pidfd_stop_pipe_close_unblocks() -> None:
         proc.wait()
 
 
-# === Follower Tests ===
+# Follower Tests
 
 # Backstop so a wedged-sink test cannot leave a thread blocked forever if it fails
 # before releasing the sink itself. Never reached on the passing path.
