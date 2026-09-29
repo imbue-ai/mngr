@@ -7,7 +7,10 @@ from imbue.mngr_imbue_cloud.providers.listing import CONTAINER_MISSING_NOTE
 from imbue.mngr_imbue_cloud.providers.listing import INNER_UNREADABLE_NOTE
 from imbue.mngr_imbue_cloud.providers.listing import derive_host_state_from_raw
 from imbue.mngr_imbue_cloud.providers.listing import derive_offline_note_from_raw
+from imbue.mngr_imbue_cloud.providers.listing import host_resources_for_machine
 from imbue.mngr_imbue_cloud.providers.listing import map_docker_status_to_host_state
+from imbue.mngr_imbue_cloud.providers.testing import make_workspace_info
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStatus
 
 
 @pytest.mark.parametrize(
@@ -81,6 +84,35 @@ def test_derive_host_state_running_without_certified_data_is_unknown_with_note()
     raw = {"container_state": "running"}
     assert derive_host_state_from_raw(raw) == HostState.UNKNOWN
     assert derive_offline_note_from_raw(raw) == INNER_UNREADABLE_NOTE
+
+
+def test_host_resources_for_machine_prefers_the_row_sizing_columns_over_the_bake_time_attributes() -> None:
+    resources = host_resources_for_machine(
+        {"cpus": 4, "memory_gb": 8},
+        make_workspace_info(WorkspaceStatus.STOPPED, with_placement=False, memory_units=16, disk_gb=56),
+    )
+
+    assert resources.memory_gb == 16.0
+    assert resources.disk_gb == 56.0
+    assert resources.cpu.count == 4
+
+
+def test_host_resources_for_machine_falls_back_to_the_lease_attributes_without_sizing_columns() -> None:
+    resources = host_resources_for_machine(
+        {"cpus": 2, "memory_gb": 8}, make_workspace_info(WorkspaceStatus.STOPPED, with_placement=False)
+    )
+
+    assert resources.memory_gb == 8.0
+    assert resources.disk_gb is None
+    assert resources.cpu.count == 2
+
+
+def test_host_resources_for_machine_reports_the_placeholder_when_nothing_is_recorded() -> None:
+    resources = host_resources_for_machine({}, None)
+
+    assert resources.cpu.count == 1
+    assert resources.memory_gb == 1.0
+    assert resources.disk_gb is None
 
 
 def test_derive_host_state_missing_container_is_failed_with_note() -> None:

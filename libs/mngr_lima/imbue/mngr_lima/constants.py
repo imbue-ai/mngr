@@ -2,6 +2,7 @@ from typing import Final
 
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import ProviderBackendName
+from imbue.mngr_lima.primitives import LimaDiskSize
 
 LIMA_BACKEND_NAME: Final[ProviderBackendName] = ProviderBackendName("lima")
 
@@ -10,16 +11,22 @@ LIMA_INSTANCE_PREFIX: Final[str] = "mngr-"
 # Minimum supported Lima version (major, minor, patch)
 MINIMUM_LIMA_VERSION: Final[tuple[int, int, int]] = (1, 0, 0)
 
-# Default image URLs for Lima VMs (Debian 12 "bookworm" genericcloud images).
+# Default image URLs for Lima VMs (Debian 13 "trixie" genericcloud images).
 # Debian's genericcloud variant is a minimal cloud image; the provisioning
 # script is apt-based, so it works on Debian unchanged and installs any missing
-# mngr dependencies. Pinned to a specific dated snapshot for reproducibility;
-# bump the snapshot id (in both URLs) to pick up a newer point release.
+# mngr dependencies. Pinned to a specific dated release for reproducibility;
+# bump the release id (in both URLs) to pick up a newer point release.
+#
+# Served from imbue's public artifact mirror rather than cloud.debian.org, which
+# prunes old releases and would eventually break every create pinned to one.
+# The mirror holds each release under artifacts/debian-cloud-image/<release>/;
+# the ``default_image_url_*`` provider config fields override these for anyone
+# who wants another source.
 DEFAULT_IMAGE_URL_AARCH64: Final[str] = (
-    "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-arm64-20260601-2496.qcow2"
+    "https://apt.imbuepackages.com/artifacts/debian-cloud-image/20260722-2547/debian-13-genericcloud-arm64-20260722-2547.qcow2"
 )
 DEFAULT_IMAGE_URL_X86_64: Final[str] = (
-    "https://cloud.debian.org/images/cloud/bookworm/20260601-2496/debian-12-genericcloud-amd64-20260601-2496.qcow2"
+    "https://apt.imbuepackages.com/artifacts/debian-cloud-image/20260722-2547/debian-13-genericcloud-amd64-20260722-2547.qcow2"
 )
 
 # Default host directory inside the VM
@@ -33,7 +40,7 @@ CLOUD_INIT_TIMEOUT_SECONDS: Final[float] = 300.0
 
 # Default logical size of the btrfs additional disk. qcow2 is sparse so this
 # is a logical cap visible to the guest, not upfront host disk usage.
-DEFAULT_HOST_DATA_DISK_SIZE: Final[str] = "100GiB"
+DEFAULT_HOST_DATA_DISK_SIZE: Final[LimaDiskSize] = LimaDiskSize("100GiB")
 
 
 def lima_host_data_disk_mount_path(disk_name: str) -> str:

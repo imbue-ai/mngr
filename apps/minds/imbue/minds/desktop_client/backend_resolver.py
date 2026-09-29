@@ -36,7 +36,7 @@ from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 
 SERVICES_EVENT_SOURCE_NAME: Final[str] = "services"
 
-# Every minds workspace runs a constant-named ``main``-type agent whose
+# Every Imbue Studio workspace runs a constant-named ``main``-type agent whose
 # bootstrap execs supervisord (and thus owns the system interface). This is the
 # canonical definition of that name; ``agent_creator._DEFAULT_AGENT_NAME``
 # is the ``AgentName``-typed form built from it.
@@ -695,7 +695,7 @@ def _warn_if_agent_id_spans_machines(agent_id: AgentId, sorted_host_ids: Sequenc
     """Warn when a workspace agent id resolves to more than one machine.
 
     Agent ids are unique per host, not globally, so an id can span machines
-    (e.g. mid-migration). minds has no workspace-level policy for that yet, so
+    (e.g. mid-migration). Imbue Studio has no workspace-level policy for that yet, so
     callers pick the first machine of the sorted list deterministically and
     this warns rather than silently first-matching. No-op for a single (or no)
     machine.
@@ -734,7 +734,7 @@ def _read_last_good_agent_topology(path: Path) -> _LastGoodAgentTopology:
 
     Returns an empty topology for a missing file, a malformed file, or any
     content that fails validation; we never want a corrupt cache to break
-    minds startup. The next complete discovery snapshot rewrites the file.
+    Imbue Studio startup. The next complete discovery snapshot rewrites the file.
     """
     try:
         raw = path.read_text(encoding="utf-8")
@@ -913,7 +913,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # not yet discovered. Errored snapshots never land here, and neither do the
     # errored pre-start replay and the errored sleep-straddling poll, whose
     # errors (and state-current claims) ``forward_cli`` drops; a CLEAN pre-start
-    # replay does land here -- it is a real poll from while minds was closed, so
+    # replay does land here -- it is a real poll from while Imbue Studio was closed, so
     # it postdates every host this client could hold a destroy marker for -- and
     # so does a clean sleep-straddling poll, which completed after the wake.
     _clean_snapshot_host_ids_by_provider: dict[ProviderInstanceName, frozenset[str]] = PrivateAttr(
@@ -1226,7 +1226,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
             # sleep-straddling poll -- see ``forward_cli``) carries no usable
             # state -- either would let absence be mistaken for gone-ness. A
             # clean pre-start replay stays eligible: it is a real enumeration
-            # from while minds was closed.
+            # from while Imbue Studio was closed.
             if error is None and clean_snapshot_host_ids is not None and is_snapshot_state_current:
                 self._clean_snapshot_host_ids_by_provider[provider_name] = frozenset(clean_snapshot_host_ids)
             if self._last_event_at is None or last_snapshot_at > self._last_event_at:
@@ -1439,7 +1439,7 @@ class MngrCliBackendResolver(BackendResolverInterface):
         provider's destroyed-host persistence window -- is genuinely gone and
         must not be restored. This mirrors the DESTROYED filter in
         :meth:`list_active_workspace_ids`. The last-good set is the persisted
-        topology's system-services agents (the minds' primary agents, which
+        topology's system-services agents (the machines' primary agents, which
         carry that label live); ``_merge_last_good_topology_locked`` has already
         pruned any DESTROYED host from it. Unioning them means a workspace that
         exists but hasn't been re-discovered this session yet -- a slow provider

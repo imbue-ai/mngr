@@ -1,6 +1,6 @@
 # Latchkey permissions
 
-Minds-managed agents access third-party services (Slack, GitHub, Google Drive,
+Imbue Studio's agents access third-party services (Slack, GitHub, Google Drive,
 ...) through [Latchkey](https://github.com/imbue-ai/latchkey). This page
 describes how the desktop client surfaces permission decisions to the user
 and how the agent receives the answer.
@@ -18,13 +18,13 @@ remote workspace whose container predates the `host.docker.internal` mapping,
 such as one adopted from a pool host baked by an older mngr, is pointed at
 `http://127.0.0.1:1989` when it is created and reaches the same VPS-resident
 gateway over a reverse SSH tunnel instead.) This keeps the permission queue,
-permissions files, and Minds API on the user's computer without requiring a
+permissions files, and the Imbue Studio API on the user's computer without requiring a
 second gateway URL or a different agent skill.
 
 ## End-to-end flow
 
 1. **Agent makes a call.** The agent issues an HTTP request to the
-   workspace's minds-managed `latchkey gateway` (or to `latchkey curl`
+   `latchkey gateway` Imbue Studio manages for the workspace (or to `latchkey curl`
    directly). The agent's environment carries the gateway URL, a shared
    password (sent in `X-Latchkey-Gateway-Password`) and a permissions
    override JWT (sent in `X-Latchkey-Gateway-Permissions-Override`) that
@@ -115,10 +115,10 @@ second gateway URL or a different agent skill.
       treated as the legacy fallback), runs `latchkey auth browser <service>`
       synchronously (transparently running the one-off `latchkey auth
       browser-prepare <service>` step first when latchkey asks for it).
-      Two kinds of service get a Minds-specific preparation on the way: a
-      `google-*` service is signed in against the Minds-provided OAuth
-      client, and Notion MCP, which registers its OAuth client at sign-in,
-      first has its redirect URI pinned to the Minds-hosted callback page
+      Two kinds of service get a preparation of Imbue Studio's own on the way:
+      a `google-*` service is signed in against the OAuth client Imbue Studio
+      provides, and Notion MCP, which registers its OAuth client at sign-in,
+      first has its redirect URI pinned to the callback page Imbue Studio hosts
       (`latchkey auth prepare notion-mcp '{"redirectUri": ...}'`, latchkey
       >= 3.15) so the sign-in returns through that page rather than
       latchkey's loopback callback. The pin only applies to a sign-in that
@@ -133,7 +133,7 @@ second gateway URL or a different agent skill.
       `browser` auth option (e.g. AWS or Coolify, where `authOptions =
       ["set"]`), the grant is **refused for now** and the request stays
       pending while the dialog collects the credentials (see
-      [Manual credential entry](#manual-credential-entry) below). Minds
+      [Manual credential entry](#manual-credential-entry) below). Imbue Studio
       never asks the user to open a terminal.
    4. Atomically rewrites the agent's `latchkey_permissions.json` so the gateway
       enforces the chosen schemas on the next request.
@@ -173,7 +173,7 @@ second gateway URL or a different agent skill.
 
 ## Creating a connection an agent asks for
 
-Most third-party services come from Minds' shipped catalog. When an agent needs
+Most third-party services come from Imbue Studio's shipped catalog. When an agent needs
 a domain that catalog has no entry for, it can ask for the connection to be
 *created*: it submits a `custom-service` permission request naming the domain
 and, optionally, how the service signs in through a browser. One Approve both creates
@@ -262,7 +262,7 @@ absent. The gateway and the desktop hold it to the same rule as `token-capture`'
 `header` -- an RFC 7230 header name, a colon, the placeholder after it -- and
 refuse `Host`, any `X-Latchkey-*` header, and a `header` sent alongside `login`,
 since a login flow supplies its own credential shape. It rides the service's
-`registeredServices` entry under a key of Minds' own (`mindsCredentialHeader`),
+`registeredServices` entry under a key of Imbue Studio's own (`mindsCredentialHeader`),
 so a second workspace asking for the origin sees the registration's header
 rather than its own guess, and the credential form stores the typed token under
 that header rather than as a bearer. The dialog shows the header behind a
@@ -273,9 +273,9 @@ disclosure.
 Such a service may also carry `credential_instructions`: the agent's note on
 where the user finds the credential (the settings page, which scopes to tick),
 at most 500 characters and refused alongside `login`, since a sign-in has
-nothing to paste. The credential form shows it between Mind's own instruction
+nothing to paste. The credential form shows it between Imbue Studio's own instruction
 and the inputs, under "From the agent", as plain text -- markup and links stay
-inert, because it is the agent's claim inside Mind's own dialog, like the
+inert, because it is the agent's claim inside Imbue Studio's own dialog, like the
 rationale -- and keeps it up after a rejected attempt. Unlike `header` it is not
 stored on the registration: it belongs to the request that asked.
 
@@ -290,7 +290,7 @@ line is worded as "make sure you know what this is", since a private network
 calls its services what it likes.
 
 An agent is not supposed to ask for a domain some *other* service already
-covers, and does not need Minds to stop it: Latchkey answers that question
+covers, and does not need Imbue Studio to stop it: Latchkey answers that question
 first. A request to a domain no service covers fails with `No service matches
 URL`, and that is the only error the workspace's `connect-external-service`
 skill (its latchkey reference) treats as grounds for asking to create a
@@ -325,14 +325,14 @@ credentials.
 A service latchkey cannot sign in to through a browser advertises an
 example of the command that stores its credentials, with each value the
 user has to supply written as an angle-bracketed placeholder -- e.g.
-`latchkey auth set-nocurl aws <access-key-id> <secret-access-key>`. Minds
+`latchkey auth set-nocurl aws <access-key-id> <secret-access-key>`. Imbue Studio
 parses that example (`imbue.mngr_latchkey.credential_commands`) and turns
 it into **one labeled input per placeholder**, which the detail payload
 carries (`manual_credentials`) so the dialog renders the form at the top
 immediately -- no first Approve needed to discover that credentials are
 required. Approve then substitutes the typed values, runs the command
 itself with `--account <selected account>` (a global latchkey option, so
-it precedes the subcommand) and Minds' own `LATCHKEY_DIRECTORY`, re-reads
+it precedes the subcommand) and Imbue Studio's own `LATCHKEY_DIRECTORY`, re-reads
 `latchkey services info`, and continues the grant. One click, no terminal,
 and the credentials land in the store the desktop client actually reads.
 
@@ -369,7 +369,7 @@ Details worth knowing:
     (`latchkey auth set-nocurl` exits non-zero, e.g. "doesn't look like an
     AWS access key ID"). Its explanation is surfaced verbatim, minus the
     usage lines latchkey appends: those either restate a terminal command
-    Minds never shows or, for AWS, print the bare `<access-key-id>`
+    Imbue Studio never shows or, for AWS, print the bare `<access-key-id>`
     placeholder as the "example", which is worse than nothing next to an
     input already labelled that way. `describe_credential_command_failure`
     does that trimming (and caps a crash dump).
@@ -377,9 +377,9 @@ Details worth knowing:
   * The value is **well-formed but wrong** -- mistyped within the accepted
     shape, or revoked, rotated or expired. `auth set` only validates the
     shape, so these store fine and only fail when latchkey actually calls
-    the service. Minds therefore re-reads the *online* `services info`
+    the service. Imbue Studio therefore re-reads the *online* `services info`
     after storing and refuses to grant unless the account's credentials
-    come back usable. Note that a service Minds cannot reach reads the same
+    come back usable. Note that a service Imbue Studio cannot reach reads the same
     way (latchkey reports any failed check as `invalid`), so the message
     names that possibility too. The credentials stay stored either way, so
     a later Approve re-checks them.
@@ -399,7 +399,7 @@ Details worth knowing:
 
 ## Per-agent isolation
 
-Minds runs a single shared `latchkey gateway` subprocess for every
+Imbue Studio runs a single shared `latchkey gateway` subprocess for every
 agent rather than one per agent. The gateway is locked down with two
 latchkey 2.8.0 features:
 
@@ -408,13 +408,13 @@ latchkey 2.8.0 features:
   that does not present the same value in the
   `X-Latchkey-Gateway-Password` header. The password is derived
   deterministically from the desktop client's Latchkey encryption key:
-  minds calls `latchkey gateway create-jwt --no-validate` against a
+  Imbue Studio calls `latchkey gateway create-jwt --no-validate` against a
   hard-coded sentinel path and SHA-256-hashes the resulting JWT. That
   way the password is stable across desktop-client restarts without
-  minds having to persist it in plaintext anywhere.
-* **Per-agent permissions.** When an agent is created, minds allocates an
+  Imbue Studio having to persist it in plaintext anywhere.
+* **Per-agent permissions.** When an agent is created, Imbue Studio allocates an
   opaque `~/.minds/latchkey/permissions/<uuid>.json` handle and materializes it
-  with the deny-by-default baseline. For a desktop-gateway workspace, minds
+  with the deny-by-default baseline. For a desktop-gateway workspace, Imbue Studio
   mints a permissions-override JWT pointing at that handle and injects it as
   `LATCHKEY_GATEWAY_PERMISSIONS_OVERRIDE` at `mngr create` time. For a
   VPS-gateway workspace, the environment omits that override: native requests
@@ -422,23 +422,23 @@ latchkey 2.8.0 features:
   Its desktop-forwarding extension holds a separate desktop-target JWT and
   replaces the override header only on requests it forwards.
 
-  After `mngr create` returns the canonical agent id, minds replaces
+  After `mngr create` returns the canonical agent id, Imbue Studio replaces
   the opaque file with a symlink pointing at
   `~/.minds/agents/<agent_id>/latchkey_permissions.json`. The agent-id
   path is the canonical location -- the desktop client's permission-grant
   flow writes to it as before -- and the gateway reads through the
-  symlink to see those grants. This indirection lets minds mint and
+  symlink to see those grants. This indirection lets Imbue Studio mint and
   inject the JWT before the agent id is known, eliminating a
   previously-fragile post-create injection step.
 
-## Minds API access through the gateway
+## Imbue Studio API access through the gateway
 
-Minds itself exposes a small REST API on the desktop-client bare
+Imbue Studio itself exposes a small REST API on the desktop-client bare
 origin (`/api/v1/...`: agent notifications, workspace view refresh,
 and the WebDAV file-sharing mount). Agents reach it through the same latchkey
 gateway they use for every other outbound HTTP call, via the bundled
 `minds-api-proxy` extension at `/minds-api-proxy/api/v1/...`. There is
-no per-agent reverse SSH tunnel for the Minds API anymore.
+no per-agent reverse SSH tunnel for the Imbue Studio API anymore.
 
 Authentication uses one central `MINDS_API_KEY` per `minds run`,
 freshly generated in memory at startup and never handed to agents.
@@ -448,7 +448,7 @@ by `minds run`, which restarts the supervisor on every startup so the
 current key always wins) and injects `Authorization: Bearer <key>` on
 every forwarded request, overwriting any header the agent supplied.
 The desktop client matches the same value on the inbound side. The
-key rotates per minds startup; nothing else in the monorepo reads it
+key rotates per Imbue Studio startup; nothing else in the monorepo reads it
 from disk, so there is no on-disk copy to keep in sync.
 
 Three routes are *not* agent-scoped and are granted to every agent by the
@@ -499,7 +499,7 @@ Registration adds an agent id to the unauthorized *scope schema's*
 `not.anyOf` list, lifting it out of the reject shortcut. It is driven off the
 *discovery* stream, not agent creation, so it covers agents the
 workspace creates for itself (chat, worktree, worker) as well as the
-primary one minds creates. Because discovery can see a brand-new agent
+primary one Imbue Studio creates. Because discovery can see a brand-new agent
 before creation has linked the host's permissions file into place, a
 registration with no file to write to is retried on later resolver
 changes rather than dropped. A new `/api/v1/agents/<id>/*` route
@@ -531,7 +531,7 @@ its local workspaces, and each remote workspace's VPS has one of its own (see
 
 ## Cross-workspace management API permissions
 
-Minds exposes a cross-workspace management API (`/api/v1/workspaces/...`)
+Imbue Studio exposes a cross-workspace management API (`/api/v1/workspaces/...`)
 that lets an agent in one workspace act on *other* workspaces -- listing,
 reading detail/version/backups, creating, destroying, starting/stopping,
 exporting and managing backups, establishing SSH access, updating settings,
@@ -612,26 +612,26 @@ Each entry has the shape:
   group; it is never preselected, but the user can opt into it
   explicitly.
 
-The minds desktop client caches the response in-process on first access
+The Imbue Studio desktop client caches the response in-process on first access
 so each request renders without re-fetching. To add a new builtin
 service, edit `services.json` in the gateway extension package (see its
 README); those schemas must already exist in detent.
 
 ## Additional (custom) services
 
-Beyond detent's builtin catalog, minds ships a small hardcoded list of
+Beyond detent's builtin catalog, Imbue Studio ships a small hardcoded list of
 *additional* services in
 [`libs/mngr_latchkey/imbue/mngr_latchkey/additional_services.json`](../../../libs/mngr_latchkey/imbue/mngr_latchkey/additional_services.json).
 Their catalog entries are folded into `services.json` by that package's
 generator, so the dialog and the gateway extensions treat them exactly like a
-builtin service. These are third-party services minds supports itself, using
+builtin service. These are third-party services Imbue Studio supports itself, using
 three latchkey features:
 
-* **Registration.** minds writes each additional service into the
+* **Registration.** Imbue Studio writes each additional service into the
   `registeredServices` block of latchkey's own `config.json` -- the same
   place `latchkey services register` would -- so latchkey can match the
   service's domain and inject the user's stored credentials for it. Every
-  gateway that serves minds agents gets this: the desktop one (at
+  gateway that serves Imbue Studio agents gets this: the desktop one (at
   `Latchkey.initialize()` and again at each gateway spawn) and each
   VPS-resident one (during remote provisioning, before its gateway starts).
   A VPS needs it as much as the desktop does -- the credentials
@@ -885,7 +885,7 @@ The toggle is per service and per desktop:
 The toggle is offered only when both of these hold. When either of them does
 not, the row is not drawn at all.
 
-1. Minds knows this computer's device id.
+1. Imbue Studio knows this computer's device id.
 2. The workspace has a machine of its own, meaning a machine encryption key is
    recorded for its host on this computer. A workspace that runs on this
    computer already sends its requests from here.
@@ -954,7 +954,7 @@ Each shared path is one card, drawn as bands: the path, then one band per
 setting, divided by rules that reach both edges of the card.
 
 The **access** band is the WebDAV file server, reachable only while this
-computer is awake and Minds is running. Its dropdown completes the sentence
+computer is awake and Imbue Studio is running. Its dropdown completes the sentence
 "Agents on this machine may": *Read only*, or *Read and write*. There is no
 write-without-read, because `WRITE` is a strict superset of `READ` in the
 gateway's own model. The card's remove button revokes this grant, and names
@@ -964,7 +964,7 @@ when the machine is holding one.
 The **sync** band is a checkbox, "Keep a synchronized copy on the machine", and
 an `mngr pair` sync behind it. The machine gets its own copy, so agents can
 still reach it while this computer is asleep or offline; changes only move
-between the two while Minds is running, since the sync is a process it owns. A
+between the two while Imbue Studio is running, since the sync is a process it owns. A
 checkbox rather than the other arm of a radio, because it is additive: ticking
 it revokes nothing, and the on-demand grant above stays exactly where it was.
 
@@ -977,7 +977,7 @@ single-file sync; a shared file says so in place of the option.
 **Which way changes travel is not a question.** It is the access, said again:
 read-only access means this computer to the machine, read and write means both
 ways. The band states which, in the same words the dropdown above uses --
-"Since agents on this machine may both **read and write** the folder, Minds
+"Since agents on this machine may both **read and write** the folder, Imbue Studio
 synchronizes changes between your computer and this machine in both
 directions." Changing the access moves a running sync onto it.
 
@@ -1022,7 +1022,7 @@ pointed at. Outside the desktop app there is no picker, so the buttons are
 replaced by the line that names the other route.
 
 Adding a path, and changing one's access, both go through the gateway rather
-than being computed here: Minds files a file-sharing permission request and
+than being computed here: Imbue Studio files a file-sharing permission request and
 approves it in the same breath. The gateway owns how a path becomes a
 permission -- the URL pattern over a percent-encoded WebDAV path, the verb set,
 the traversal and mount-root checks -- and a second copy of that in Python
@@ -1030,7 +1030,7 @@ would be a security decision free to drift.
 
 Doing so needs the request to name its **target**: the gateway otherwise writes
 an approved effect into whichever permissions file the *caller's* extension
-context names, which for Minds is its own admin file. A file-sharing grant
+context names, which for Imbue Studio is its own admin file. A file-sharing grant
 landing there wedges the gateway, because that file declares no
 `latchkey-self` scope schema and every later request against it then fails the
 permission check. `POST /permission-requests` therefore accepts an optional
@@ -1053,7 +1053,7 @@ Four more constraints are worth knowing:
   under different machines' home directories and unison keys each pairing's
   archive by both roots, so the two cannot see each other. What is refused is
   two *overlapping* folders in the **same** workspace, where the copies nest.
-* A sync runs only while Minds does, but the choice to keep a folder synced is
+* A sync runs only while Imbue Studio does, but the choice to keep a folder synced is
   remembered in `<data_dir>/folder_syncs/<agent_id>.json` and started again at
   launch. Restoring never starts a stopped machine: a sync whose machine is off
   lands on its row saying so.
@@ -1082,11 +1082,11 @@ Four more constraints are worth knowing:
   point of setting a copy aside is that turning syncing back on resumes from
   it.
 * Anything already sitting where a copy is being set aside is deleted first.
-  Nothing but Minds writes under `~/inactive_synced_folders`, so something
+  Nothing but Imbue Studio writes under `~/inactive_synced_folders`, so something
   there is a mistake rather than a file to preserve, and refusing instead would
   strand the copy being set aside. The agent-facing `file-sharing` skill says
   so, in default-workspace-template.
-* The last two states are what Minds last did, not what is certainly on the
+* The last two states are what Imbue Studio last did, not what is certainly on the
   machine: an agent owns its own filesystem and may have deleted the copy
   itself. Every path that acts on one tolerates finding the opposite -- turning
   sync on with the copy gone just creates an empty directory and re-fetches,
@@ -1097,7 +1097,7 @@ Four more constraints are worth knowing:
   no row, no button, and nothing that would ever mention it again -- it would
   simply sit on the machine's disk. This is a destination like any other, so
   the same converger walks to it, stopping a running sync on the way; a copy
-  that only a store record knows about (a sync turned off before Minds last
+  that only a store record knows about (a sync turned off before Imbue Studio last
   quit) is reached from that record.
 * Pairing always runs with `--no-require-git`, so syncing never checks out a
   branch, fetches, or stashes on either side.

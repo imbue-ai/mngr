@@ -17,16 +17,16 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "what",
     label: "What a workspace is",
     detail:
-      "A workspace is a private computer where you and your Mind work together. It holds your files, apps, " +
+      "A workspace is a private computer where you and your agent work together. It holds your files, apps, " +
       "tools, and the memory you build together. It keeps your work in one place from one conversation to the " +
       "next, so you don’t have to start over.\n\n" +
-      "When you hand off a task or set a routine, your Mind can keep working while you’re away.",
+      "When you hand off a task or set a routine, your agent can keep working while you’re away.",
   },
   {
     id: "now",
     label: "What’s happening right now",
     detail:
-      "We’re setting up your workspace on its own computer. We’re installing the tools your Mind needs to make " +
+      "We’re setting up your workspace on its own computer. We’re installing the tools your agent needs to make " +
       "apps, work with your files and accounts, and keep tasks running while you’re away.\n\n" +
       "The last step connects your workspace to this app so you can start using it.\n\n" +
       "Want more detail? The setup log shows each part as it happens.",
@@ -35,12 +35,12 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     id: "do",
     label: "What you can do with it",
     detail:
-      "Start with a problem you want to solve or an app you want to make. Your Mind can build tools around the " +
+      "Start with a problem you want to solve or an app you want to make. Your agent can build tools around the " +
       "way you work, use the files and accounts you connect, handle a task, or run a routine on a schedule.\n\n" +
       "You can keep what you make private, invite people to work with you in the same workspace, or share a " +
       "clean copy they can make their own. Working in the same workspace is like sharing a Google Doc: everyone " +
       "works in the same place. Sharing a copy gives someone the app without giving them your data.\n\n" +
-      "When Mind needs an account, it’ll ask you to connect it. You can see and remove that access later.",
+      "When your agent needs an account, it’ll ask you to connect it. You can see and remove that access later.",
   },
   {
     id: "data",
@@ -48,7 +48,7 @@ export const SETUP_SECTIONS: DisclosurePoint[] = [
     detail:
       "Your workspace keeps its own files, apps, memory, and settings. Imbue never sells that data or uses it to " +
       "train AI models for other people.\n\n" +
-      "When Mind uses an outside AI model or connected service, that company’s data rules apply too.\n\n" +
+      "When Imbue Studio uses an outside AI model or connected service, that company’s data rules apply too.\n\n" +
       "We’re working toward full end-to-end encryption. Once that’s ready, no one but you—not even Imbue—will " +
       "be able to read what’s in your workspace.\n\n" +
       "Your workspace is backed up as you use it, much like version history in a document. It’s built to move " +
@@ -80,22 +80,22 @@ export const START_OPTIONS: StartOption[] = [
   {
     title: "Make something new",
     detail:
-      "Tell your Mind about a problem you want to solve or an app you want to make. It’ll help you shape it, " +
+      "Tell your agent about a problem you want to solve or an app you want to make. It’ll help you shape it, " +
       "build it, and improve it as you use it.",
   },
   {
     title: "Connect your data",
     detail:
-      "Connect your email, calendar, Slack, GitHub, or another service so Mind can help with the information " +
+      "Connect your email, calendar, Slack, GitHub, or another service so your agent can help with the information " +
       "already there.",
   },
   {
     title: "Hand off some work",
-    detail: "Give your Mind a task to do now, or set something to run on a schedule.",
+    detail: "Give your agent a task to do now, or set something to run on a schedule.",
   },
   {
-    title: "Learn how Mind works",
-    detail: "Ask your Mind to explain what it can do, how your workspace works, and what you control.",
+    title: "Learn how Imbue Studio works",
+    detail: "Ask your agent to explain what it can do, how your workspace works, and what you control.",
   },
 ];
 

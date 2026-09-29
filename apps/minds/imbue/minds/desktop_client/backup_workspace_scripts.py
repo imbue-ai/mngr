@@ -1,7 +1,7 @@
-"""Self-contained python3 scripts minds runs inside a workspace via ``mngr exec``.
+"""Self-contained python3 scripts Imbue Studio runs inside a workspace via ``mngr exec``.
 
 Four scripts, all stdlib-only (they run under the workspace's system python3
-with no access to minds code), all parameterized via argv and all reporting a
+with no access to Imbue Studio code), all parameterized via argv and all reporting a
 single marker-prefixed JSON line on stdout so the caller can parse a verdict
 out of arbitrarily noisy output:
 
@@ -9,7 +9,7 @@ out of arbitrarily noisy output:
   *minimum required* ``minds-v*`` tag (fetching tags from the ``official``
   remote only when the tag is missing locally), reports the supervisord state
   of the ``host-backup`` program and the current ``data/.secrets/restic.env``
-  (sha256 + content, so minds can compare against its canonical copy and adopt
+  (sha256 + content, so Imbue Studio can compare against its canonical copy and adopt
   externally configured envs).
 - the *gate probe* script: reports which chat agents are actively RUNNING
   (agents sharing the repo-root work_dir, excluding the ``main``-type
@@ -36,8 +36,8 @@ out of arbitrarily noisy output:
   then ``uv sync --all-packages`` and a restart of every supervisord service. Every exit
   path after the service stop restarts the services (best-effort). The
   snapshot's subpath (the directory inside the snapshot that corresponds to
-  the backup root) and timestamp are resolved by minds and passed in via argv,
-  so the script never queries restic for metadata minds already holds. The
+  the backup root) and timestamp are resolved by Imbue Studio and passed in via argv,
+  so the script never queries restic for metadata Imbue Studio already holds. The
   in-place restore needs restic >= 0.17; when the workspace's restic is
   older, the script downloads the pinned, sha256-verified build and installs
   it persistently (shadowing the distro binary, so the whole workspace
@@ -59,7 +59,7 @@ GATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_GATE_JSON:"
 UPDATE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_UPDATE_JSON:"
 RESTORE_RESULT_MARKER: Final[str] = "MINDS_BACKUP_RESTORE_JSON:"
 
-# The one repository backup-service code is fetched from. minds owns the
+# The one repository backup-service code is fetched from. Imbue Studio owns the
 # ``official`` remote on every workspace: the scripts create it (or repoint it)
 # at this URL, deliberately ignoring ``parent.toml`` -- workspaces created from
 # private template clones still receive the official backup code, and the
@@ -106,7 +106,7 @@ TICK_COMPLETION_TYPES = (
     "TICK_ERROR",
     "SNAPSHOT_FAILED",
 )
-# minds already waited (unboundedly, cancellably) for a quiet workspace before
+# Imbue Studio already waited (unboundedly, cancellably) for a quiet workspace before
 # dispatching a mutating script; this bounded wait only covers a tick that
 # started in between, and must stay well inside the caller's outer exec
 # timeout so a structured "timed out waiting" payload beats the exec being
@@ -186,7 +186,7 @@ def _official_url():
 def _ensure_official_remote():
     """Idempotently point the `official` remote at the official template URL.
 
-    minds owns this remote name: a missing remote is added and a remote
+    Imbue Studio owns this remote name: a missing remote is added and a remote
     pointing anywhere else is repointed, so the fetch below always talks to
     the official repository regardless of what the workspace was created from.
     """
@@ -710,7 +710,7 @@ _main()
 # dir itself on legacy /mngr workspaces) to one restic snapshot, in place.
 # Parameterized via argv: --agent-id, --snapshot-id, --snapshot-subpath (the
 # directory inside the snapshot that corresponds to the backup root, resolved
-# by minds from its own view of the repository) and --source-time, plus the
+# by Imbue Studio from its own view of the repository) and --source-time, plus the
 # optional flags --stop-chats, --skip-chat-gate (an explicit user "force
 # restore" on a workspace that can no longer answer `mngr list`) and
 # --skip-safety-snapshot (an explicit user "restore without backing up first"
@@ -769,7 +769,7 @@ _DEFAULT_SNAPSHOT_EXCLUDES = (
 )
 # Paths the in-place restore never touches, whatever the snapshot holds.
 # Snapshots never carry authorized_keys, so a restore would delete it; on
-# remote workspaces it holds minds' key for the container's sshd (root's home
+# remote workspaces it holds Imbue Studio's key for the container's sshd (root's home
 # is the backup root). Nor do they reliably carry the fallback restic, which
 # this restore is running and still needs for the restored-state snapshot.
 _RESTORE_PRESERVED_PATHS = ("**/.ssh/authorized_keys", _FALLBACK_RESTIC_EXCLUDE)
@@ -1102,7 +1102,7 @@ def _restic_step_with_unlock_retry(args, env_map, restic_binary):
 def _main():
     agent_id = _arg_value("--agent-id")
     snapshot_id = _arg_value("--snapshot-id")
-    # Resolved by minds from its own view of the repository and passed in, so
+    # Resolved by Imbue Studio from its own view of the repository and passed in, so
     # this script never queries restic for snapshot metadata.
     snapshot_subpath = _arg_value("--snapshot-subpath")
     source_time = _arg_value("--source-time")
@@ -1202,7 +1202,7 @@ def _main():
     # rewritten, files the snapshot lacks are deleted, and nothing is staged
     # -- so no double disk, and a restore that fails midway converges when
     # simply re-run. The subpath maps the snapshot's layout onto the backup
-    # root; minds resolved and validated it before dispatch.
+    # root; Imbue Studio resolved and validated it before dispatch.
     _progress("Restoring the selected backup into place...")
     # The restore may rewrite or delete this process's original cwd entries.
     _os.chdir("/")

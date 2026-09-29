@@ -106,7 +106,7 @@ def test_claude_code_version_matches_default_workspace_template_pin() -> None:
     """The Dockerfile's CLAUDE_CODE_VERSION default must match the pin in
     default-workspace-template/.mngr/settings.toml [agent_types.claude].version.
 
-    A mismatch causes the minds desktop-client e2e tests to fail during agent
+    A mismatch causes the Imbue Studio desktop-client e2e tests to fail during agent
     provisioning with "Claude version mismatch".
     """
     dockerfile_version = _parse_dockerfile_claude_version(_DOCKERFILE_PATH.read_text())

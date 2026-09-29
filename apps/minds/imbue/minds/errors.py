@@ -2,9 +2,9 @@ import click
 
 
 class MindError(click.ClickException):
-    """Base exception for all minds errors.
+    """Base exception for all Imbue Studio errors.
 
-    Inherits from click.ClickException so that minds errors are
+    Inherits from click.ClickException so that Imbue Studio errors are
     automatically formatted and displayed by click without needing
     manual re-raising as ClickException at every call site.
     """
@@ -86,7 +86,7 @@ class InvalidJsonBodyError(MindError, ValueError):
 
 
 class MindsConfigError(MindError):
-    """Raised when minds config cannot be parsed or validated."""
+    """Raised when Imbue Studio config cannot be parsed or validated."""
 
     ...
 
@@ -102,7 +102,7 @@ class WorkspaceNameInUseError(MindError, ValueError):
 
     The mngr-side ``HostNameConflictError`` pre-flight only sees hosts that
     already exist; this guards the window before the provider reserves the
-    name, where two concurrent minds create attempts could otherwise race.
+    name, where two concurrent Imbue Studio create attempts could otherwise race.
     """
 
     ...

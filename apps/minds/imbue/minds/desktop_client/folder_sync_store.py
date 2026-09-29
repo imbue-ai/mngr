@@ -5,7 +5,7 @@ One atomically-written JSON file per workspace, mirroring
 touching the disk. What is recorded is only what the user chose -- the path,
 which way changes move, and which side wins a conflict. Nothing about how a
 sync is *going*: a sync's state belongs to the running ``mngr pair``, and a
-persisted "SYNCING" would be a lie the moment Minds is not running.
+persisted "SYNCING" would be a lie the moment Imbue Studio is not running.
 
 The record outlives the sync. Turning sync off does not delete it, because the
 machine is still holding the copy that sync produced: the record is what
@@ -15,7 +15,7 @@ record, since a path nobody shares is not one anybody can sync.
 
 Three states, in :class:`FolderSyncActivity`: ACTIVE (running), INACTIVE (not
 running, copy set aside on the machine), DISCARDED (not running, copy deleted).
-The last two are Minds' belief rather than ground truth -- an agent owns its
+The last two are Imbue Studio's belief rather than ground truth -- an agent owns its
 own filesystem and may have deleted the copy itself -- so every code path that
 acts on one tolerates finding the opposite.
 

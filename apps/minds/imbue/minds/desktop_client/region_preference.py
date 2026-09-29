@@ -36,7 +36,7 @@ from imbue.minds.primitives import DEFAULT_AWS_REGION
 # ``[providers.<name>]`` section names in ``~/.minds/config.toml`` and the
 # provider instance names mngr uses (``imbue_cloud`` leases an OVH-US host;
 # ``vultr`` is the cloud-VM provider). ``aws`` is the create-form-level key for
-# the AWS provider: minds collapses the per-region ``aws-<region>`` mngr
+# the AWS provider: Imbue Studio collapses the per-region ``aws-<region>`` mngr
 # provider instances behind this single key (the chosen region is selected
 # explicitly in the form, not encoded in the key).
 IMBUE_CLOUD_PROVIDER_KEY: Final[str] = "imbue_cloud"
@@ -46,7 +46,7 @@ AWS_PROVIDER_KEY: Final[str] = "aws"
 # Approximate (latitude, longitude) of each provider's regions, used for the
 # coarse nearest-region geolocation default. The imbue_cloud pool lands hosts in
 # the two OVH-US datacenters; these region codes MUST stay a subset of
-# ``KNOWN_OVH_US_REGIONS`` in ``imbue.mngr_imbue_cloud.primitives``. minds keeps
+# ``KNOWN_OVH_US_REGIONS`` in ``imbue.mngr_imbue_cloud.primitives``. Imbue Studio keeps
 # its own copy rather than importing the plugin, which it does not depend on.
 _IMBUE_CLOUD_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
     "US-EAST-VA": (38.76, -77.61),
@@ -98,7 +98,7 @@ _VULTR_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {
 # region's datacenter, used only to pick a sensible default nearest the user
 # (the user can override). The keys MUST stay in sync with
 # ``CONFIGURED_AWS_REGIONS`` in ``imbue.minds.primitives`` (the single source of
-# truth for which AWS regions minds offers); a region missing here just won't be
+# truth for which AWS regions Imbue Studio offers); a region missing here just won't be
 # considered for the geo-nearest default. Cities, in declaration order: N.
 # Virginia, Ohio, N. California, Oregon, Ireland, Frankfurt, Singapore, Tokyo.
 _AWS_REGION_COORDINATES: Final[dict[str, tuple[float, float]]] = {

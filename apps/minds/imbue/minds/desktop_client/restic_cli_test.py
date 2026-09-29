@@ -1,6 +1,6 @@
-"""Unit + local-restic integration tests for the minds restic wrapper.
+"""Unit + local-restic integration tests for the Imbue Studio restic wrapper.
 
-restic is a required dependency of the minds app (and is installed in the
+restic is a required dependency of the Imbue Studio app (and is installed in the
 test images), so the integration tests run unconditionally and FAIL -- not
 skip -- if the ``restic`` binary is missing.
 """

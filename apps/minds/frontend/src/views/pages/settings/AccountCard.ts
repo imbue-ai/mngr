@@ -24,7 +24,7 @@ interface AccountCardAttrs {
 const PLAN_DESCRIPTION_BY_NAME: Record<string, string> = {
   explorer:
     "2 free cloud workspaces. You agree to share product data from those workspaces with Imbue " +
-    "to help improve Mind.",
+    "to help improve Imbue Studio.",
   free:
     "1 free cloud workspace. Your workspace may be temporarily paused when idle or when capacity " +
     "is low. Our goal is to make your data private and secure.",

@@ -13,6 +13,12 @@ const path = require('path');
 
 // Every name the app has shipped under before this one, each of which owned
 // its own set of per-user directories.
+//
+// Only ever names the app no longer runs under. Under the platform-canonical
+// layout (platform-roots.js) the current name's directories are the live data
+// root -- secrets, sessions, agent records, the virtualenv -- so appending it
+// here on the next rename would recursively delete all of it. A rename moves
+// that root; it never adds to this list.
 const LEGACY_APP_NAMES = Object.freeze(['Minds', 'Mind']);
 
 function defaultEnvironment() {
@@ -43,7 +49,8 @@ function legacyNameDirs({ platform, homeDir, env } = defaultEnvironment()) {
  *
  * Nothing is moved: `initSentry` opens the Crashpad database and the Sentry
  * queue at the new paths before this runs, so there is no empty destination to
- * move into. What is left behind is crash-reporter scratch.
+ * move into. What is left behind is crash-reporter scratch: these names
+ * predate the platform-canonical layout, so they never held user data.
  *
  * Repeating this is free once the directories are gone, so it needs no record
  * of having run, and a removal that fails is simply retried on the next launch.

@@ -1,4 +1,4 @@
-"""Primitives + errors for the minds deployment / services test suite.
+"""Primitives + errors for the Imbue Studio deployment / services test suite.
 
 Kept small and focused: a strongly-typed handle on the run id the
 orchestrator stamps into every CI-created resource, the role name for a

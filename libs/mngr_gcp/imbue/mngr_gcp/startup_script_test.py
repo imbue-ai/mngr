@@ -2,8 +2,10 @@
 
 from imbue.mngr_gcp.startup_script import generate_gce_startup_script
 from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps.host_setup import MNGR_SSHD_DROP_IN_PATH
 from imbue.mngr_vps.host_setup import PINNED_DOCKER_VERSION
 from imbue.mngr_vps.host_setup import PINNED_GVISOR_RELEASE
+from imbue.mngr_vps.host_setup import render_sshd_drop_in_stage_script
 
 _SAMPLE_PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nline-one\nline-two\n-----END OPENSSH PRIVATE KEY-----"
 _SAMPLE_PUBLIC_KEY = "ssh-ed25519 AAAATESTKEY comment"
@@ -39,6 +41,33 @@ def test_startup_script_installs_host_key_and_restarts_sshd_first() -> None:
     assert host_key_index < restart_index < docker_index
 
 
+def test_startup_script_restarts_sshd_only_when_the_host_key_or_drop_in_changes() -> None:
+    """The guest agent re-runs the script on every boot; an unconditional restart would reset the
+    connection ``mngr start`` opens as soon as the (already installed) expected key is served."""
+    result = generate_gce_startup_script(
+        host_private_key=_SAMPLE_PRIVATE_KEY,
+        host_public_key=_SAMPLE_PUBLIC_KEY,
+        install_gvisor_runtime=False,
+    )
+    guard_index = result.index('if ! cmp -s "$MNGR_SSH_STAGE/host_key" /etc/ssh/ssh_host_ed25519_key')
+    install_index = result.index('install -m 0600 "$MNGR_SSH_STAGE/host_key" /etc/ssh/ssh_host_ed25519_key')
+    restart_index = result.index("systemctl restart ssh")
+    guard_end_index = result.index('fi\nrm -rf "$MNGR_SSH_STAGE"')
+    assert guard_index < install_index < restart_index < guard_end_index
+    assert "/etc/ssh/sshd_config.d/60-mngr.conf" in result[guard_index:guard_end_index]
+    # The three cmp checks reach the shell as one command joined by real line continuations.
+    assert result[guard_index:guard_end_index].startswith(
+        'if ! cmp -s "$MNGR_SSH_STAGE/host_key" /etc/ssh/ssh_host_ed25519_key \\\n'
+        '    || ! cmp -s "$MNGR_SSH_STAGE/host_key.pub" /etc/ssh/ssh_host_ed25519_key.pub \\\n'
+        '    || ! cmp -s "$MNGR_SSH_STAGE/60-mngr.conf" /etc/ssh/sshd_config.d/60-mngr.conf; then\n'
+    )
+    # Only the GCE-only prelude is this script's own; the shared host-setup steps
+    # that follow guard their own restarts.
+    prelude = result[: result.index("# Forward the provider key into root")]
+    restart_line = "systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart"
+    assert prelude.count(restart_line) == 1, "the prelude restarts sshd only inside the cmp guard"
+
+
 def test_startup_script_disables_password_auth_and_allows_root_login() -> None:
     result = generate_gce_startup_script(
         host_private_key="k",
@@ -47,6 +76,21 @@ def test_startup_script_disables_password_auth_and_allows_root_login() -> None:
     )
     assert "PasswordAuthentication no" in result
     assert "PermitRootLogin prohibit-password" in result
+
+
+def test_startup_script_prelude_stages_the_same_sshd_drop_in_the_shared_step_installs() -> None:
+    """Both writers stage identical content, so the shared step finds the file in place and never
+    restarts sshd a second time on a boot (the guest agent re-runs this script every boot)."""
+    result = generate_gce_startup_script(
+        host_private_key="k",
+        host_public_key="ssh-ed25519 AAAA fake",
+        install_gvisor_runtime=False,
+    )
+    prelude = result[: result.index("# Forward the provider key into root")]
+    assert render_sshd_drop_in_stage_script("$MNGR_SSH_STAGE/60-mngr.conf") in prelude
+    assert f'"$MNGR_SSH_STAGE/60-mngr.conf" {MNGR_SSHD_DROP_IN_PATH}' in prelude
+    assert "MaxSessions 100" in prelude
+    assert "PerSourcePenalties no" in prelude
 
 
 def test_startup_script_forwards_default_user_key_to_root() -> None:

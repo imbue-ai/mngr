@@ -6,10 +6,10 @@ from imbue.minds.mngr_settings.file_store import settings_store_for
 
 
 def list_disabled_provider_names(*, root: MindsRoot) -> list[str]:
-    """Return provider names that minds' active settings file marks ``is_enabled = false``.
+    """Return provider names that Imbue Studio's active settings file marks ``is_enabled = false``.
 
     Used by the providers panel to enumerate the disabled set (which discovery skips and so are absent from the per-provider discovery snapshots).
-    Reads only minds' active settings file -- providers disabled solely in mngr's own settings.toml are not surfaced here.
+    Reads only Imbue Studio's active settings file -- providers disabled solely in mngr's own settings.toml are not surfaced here.
     Returns an empty list when the file does not exist yet (fresh install).
     """
     store = settings_store_for(root)
@@ -26,13 +26,13 @@ def list_disabled_provider_names(*, root: MindsRoot) -> list[str]:
 
 
 def set_provider_is_enabled(provider_name: str, is_enabled: bool, *, root: MindsRoot) -> bool:
-    """Set ``is_enabled`` for the named provider in minds' active settings file.
+    """Set ``is_enabled`` for the named provider in Imbue Studio's active settings file.
 
-    Generic over any provider name -- used by minds' providers panel toggle to let the user disable an errored provider (silencing its noise) or re-enable a previously-disabled one.
+    Generic over any provider name -- used by Imbue Studio's providers panel toggle to let the user disable an errored provider (silencing its noise) or re-enable a previously-disabled one.
     If ``[providers.<provider_name>]`` does not exist, creates it with just ``is_enabled`` as an override on top of mngr's merged config.
 
     Idempotent: returns ``True`` only when the file was actually modified.
-    Returns ``False`` (and does nothing) when the minds root is not yet set up.
+    Returns ``False`` (and does nothing) when the Imbue Studio root is not yet set up.
     """
     store = settings_store_for(root)
     if store is None:

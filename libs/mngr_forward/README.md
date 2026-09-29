@@ -10,7 +10,7 @@ origins from older persisted URLs are redirected to it).
 the matching backend. The bare `agent-<hex>.localhost` origin maps to the
 configured backend (`--service NAME`, the default workflow, or a fixed remote
 port via `--forward-port REMOTE_PORT`); `<service>.agent-<hex>.localhost`
-origins map to that agent-registered service (a minds workspace's chat is
+origins map to that agent-registered service (an Imbue Studio workspace's chat is
 one: a registered app served at its own `chat` origin), and deeper labels
 (`sub.<service>.agent-<hex>.localhost`) route to the same service -- they are
 the service's own sub-origin space. Remote agents are reached via a per-host
@@ -67,7 +67,7 @@ session cookie and redirects onward -- no OTP consumed.
 ## Embedding (iframes)
 
 Workspace origins are designed to be embeddable in an iframe by a trusted
-host application (the minds chrome). Two pieces make this work:
+host application (the Imbue Studio chrome). Two pieces make this work:
 
 - **Cookies**: on the TLS path (`--use-http2`) session cookies are
   `SameSite=None; Secure; Partitioned` so they are sent from inside a
@@ -128,8 +128,8 @@ mngr forward --trust-ca
 
 once to install that CA into your platform's trust stores (macOS login
 keychain; Linux per-user NSS database used by Chrome), after which browsers
-accept every workspace origin without certificate warnings. The Electron
-minds app trusts the proxy programmatically and does not need this.
+accept every workspace origin without certificate warnings. The Imbue Studio
+Electron app trusts the proxy programmatically and does not need this.
 
 ## Status
 

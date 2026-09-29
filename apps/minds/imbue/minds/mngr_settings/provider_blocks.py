@@ -13,7 +13,7 @@ IMBUE_CLOUD_DOCKER_RUNTIME: Final[str] = "runsc"
 IMBUE_CLOUD_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 IMBUE_CLOUD_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--workdir=/", "--security-opt=no-new-privileges")
 
-# The user-data layout knobs written into every minds-authored vps-based provider block (imbue_cloud, byok aws/gcp/azure), mirroring the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` settings.
+# The user-data layout knobs written into every vps-based provider block Imbue Studio authors (imbue_cloud, byok aws/gcp/azure), mirroring the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` settings.
 # The container's /home/user symlinks onto the unified volume's home/ subdir (the ONE persistent, backed-up tree), mngr's data dir hides inside it, and mngr's plain-text service logs stay off the volume.
 WORKSPACE_HOST_DIR: Final[str] = "/home/user/.mngr"
 WORKSPACE_VOLUME_HOME_PATH: Final[str] = "/home/user"
@@ -23,21 +23,15 @@ AWS_BACKEND_NAME: Final[str] = "aws"
 GCP_BACKEND_NAME: Final[str] = "gcp"
 AZURE_BACKEND_NAME: Final[str] = "azure"
 
-# Container-hardening knobs written into each bring-your-own-key ``[providers.byok-aws-<slug>]`` account block (the only AWS path in minds).
-# The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` bake settings so the EC2 outer host runs the agent in a runsc-hardened container; the matching ``docker run`` start args live in the template ``[create_templates.aws]``.
-AWS_DOCKER_RUNTIME: Final[str] = "runsc"
-AWS_INSTALL_GVISOR_RUNTIME: Final[bool] = True
+# Container-hardening knobs written into every bring-your-own-key ``[providers.byok-<backend>-<slug>]`` account block (AWS, GCP, and Azure alike).
+# The gVisor/runsc settings mirror the default-workspace-template ``[providers.ovh]`` / ``[providers.vultr]`` bake settings so the cloud VM runs the agent in a runsc-hardened container; the matching ``docker run`` start args live in the template's per-cloud ``[create_templates.*]`` blocks, and mngr_vps itself mounts /run and /tmp on tmpfs whenever the runtime is runsc.
+BYOK_DOCKER_RUNTIME: Final[str] = "runsc"
+BYOK_INSTALL_GVISOR_RUNTIME: Final[bool] = True
 AWS_PROVIDER_NAME_PREFIX: Final[str] = "aws-"
 
-# EC2 instance size for minds AWS workspaces.
-# The mngr_aws default (t3.small, 2 GB) is too small for the full default-workspace-template build (uv sync + npm ci/build OOMs/thrashes on 2 GB); minds workspaces default to t3.large (8 GB).
+# EC2 instance size for Imbue Studio AWS workspaces.
+# The mngr_aws default (t3.small, 2 GB) is too small for the full default-workspace-template build (uv sync + npm ci/build OOMs/thrashes on 2 GB); Imbue Studio workspaces default to t3.large (8 GB).
 AWS_DEFAULT_INSTANCE_TYPE: Final[str] = "t3.large"
-# Mount /run as a tmpfs in the AWS workspace container.
-# mngr_aws leaves the container rootfs (and thus /run) on gVisor's gofer-backed 9p filesystem, which returns EOPNOTSUPP for os.link() of a socket inode.
-# supervisord installs its control socket via a hard link (bind a temp socket, then os.link it into place at /var/run/supervisor.sock); on AWS that link fails, supervisord misreads it as a stale socket and loops forever ("Unlinking stale socket") without ever starting system_interface / the browser service -- so the workspace reports "unresponsive".
-# A tmpfs /run supports the hard link (verified: os.link of a socket succeeds on a tmpfs but fails on the gofer rootfs), so the control socket comes up.
-# The ovh/vultr/imbue_cloud paths already get a tmpfs /run via their host setup, which is why this only bites AWS.
-AWS_DEFAULT_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run")
 
 # The single ``[providers.modal]`` instance for "Modal (1-day ephemeral)" (DIRECT mode): the local machine authenticates to Modal with its own token (``modal token new``).
 # Written unconditionally at startup so the option works as soon as a token exists; if none is present the provider just reports unavailable during discovery.
@@ -74,16 +68,16 @@ def _slugify_imbue_cloud_account(email: str) -> str:
 
 
 def imbue_cloud_provider_name_for_account(email: str) -> str:
-    """Return the provider instance name minds writes for ``email``."""
+    """Return the provider instance name Imbue Studio writes for ``email``."""
     return f"imbue_cloud_{_slugify_imbue_cloud_account(email)}"
 
 
 def imbue_cloud_account_provider_block(*, email: str, connector_url: str) -> dict[str, object]:
-    """Return the ``[providers.imbue_cloud_<slug>]`` block minds writes for a signed-in account.
+    """Return the ``[providers.imbue_cloud_<slug>]`` block Imbue Studio writes for a signed-in account.
 
     The single definition of that field set: the imbue_cloud slow (rebuild)
     create path carves and runs the container off these knobs, so a second copy
-    that falls behind rebuilds onto a different layout than minds configures.
+    that falls behind rebuilds onto a different layout than Imbue Studio configures.
 
     Excludes ``is_enabled``, whose value is not fixed: it depends on the caller's
     ``force_enable`` and on what is already on disk.

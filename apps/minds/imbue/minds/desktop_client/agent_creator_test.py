@@ -4,7 +4,7 @@ IMBUE_CLOUD-mode lease/rename/env-injection no longer happens in this
 module: it runs inside ``ImbueCloudProvider.create_host``, reached
 through the standard ``mngr create`` invocation. The plugin's own test
 suite (``libs/mngr_imbue_cloud``) covers the lease + adopt path; this
-file covers minds' command-building and helpers.
+file covers Imbue Studio's command-building and helpers.
 """
 
 import json
@@ -537,7 +537,7 @@ def test_build_mngr_create_command_omits_branch_label_when_unset() -> None:
 def test_build_mngr_create_command_does_not_inject_minds_api_key() -> None:
     """The per-agent ``MINDS_API_KEY`` is gone.
 
-    There is now exactly one ``MINDS_API_KEY`` per minds installation;
+    There is now exactly one ``MINDS_API_KEY`` per Imbue Studio installation;
     the latchkey gateway's ``minds-api-proxy`` extension adds it as
     ``Authorization: Bearer <key>`` on every forwarded request, and the
     agent itself never sees the value. ``_build_mngr_create_command``
@@ -831,7 +831,7 @@ def test_build_mngr_create_command_non_imbue_cloud_passes_new_host_without_reuse
     assert "--template" in command
     assert "main" in command
     assert "--message" not in command
-    # minds no longer pre-generates an agent id; mngr generates one and we
+    # Imbue Studio no longer pre-generates an agent id; mngr generates one and we
     # parse it out of the JSONL ``created`` event in run_mngr_create.
     assert "--id" not in command
     # We always emit JSONL so the canonical agent id can be parsed from the
@@ -888,7 +888,7 @@ def test_build_mngr_create_command_imbue_cloud_targets_account_provider() -> Non
 
 
 def test_build_mngr_create_command_never_inlines_secret_env_flags() -> None:
-    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not minds. The command line never carries
+    """Secret forwarding lives in DEFAULT_WORKSPACE_TEMPLATE, not Imbue Studio. The command line never carries
     ``--pass-(host-)env`` flags or secret values for any compute mode."""
     for mode, account in (
         (LaunchMode.DOCKER, None),
@@ -987,6 +987,9 @@ def test_clone_then_checkout_branch_is_non_shallow_and_mirror_pushable(tmp_path:
     assert _git(bare, "for-each-ref", "--format=%(refname:short)", "refs/heads") == "testing"
 
 
+# Times out at the 10s per-test budget while shelling out to git under a loaded parallel
+# run, as its sibling clone tests above do; passes alone in under a second.
+@pytest.mark.flaky
 def test_clone_git_repo_checks_out_working_tree(tmp_path: Path) -> None:
     """``clone_git_repo`` materialises a checked-out, tracked working tree --
     exactly what ``git clone`` produces.
@@ -1193,7 +1196,7 @@ def test_clone_then_checkout_branch_accepts_full_commit_sha(tmp_path: Path) -> N
 def test_clone_then_checkout_branch_accepts_annotated_tag(tmp_path: Path) -> None:
     """Annotated tags resolve through `git fetch` + `checkout -B name FETCH_HEAD` just like branches.
 
-    This is the FALLBACK_BRANCH="minds-v0.3.1" path used by the released minds
+    This is the FALLBACK_BRANCH="minds-v0.3.1" path used by the released Imbue Studio
     binary: the input is a tag, not a branch.
     """
     origin = tmp_path / "origin"
@@ -2315,7 +2318,7 @@ def test_sweep_reclaims_stale_scratch_clones_but_spares_live_ones(tmp_path: Path
     Per-attempt directories are removed in the attempt's ``finally``, which a
     force-quit skips (the create worker is a daemon thread), and a full clone is
     ~240MB. The age guard is what keeps the sweep from deleting a clone belonging
-    to a concurrently running second Minds instance -- i.e. from reintroducing the
+    to a concurrently running second Imbue Studio instance -- i.e. from reintroducing the
     very race this change removes.
     """
     stale = make_scratch_clone_root("default-workspace-template", temp_dir=tmp_path)

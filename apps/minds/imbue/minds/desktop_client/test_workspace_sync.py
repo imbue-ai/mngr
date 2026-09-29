@@ -1,6 +1,6 @@
 """End-to-end workspace-sync flows across two simulated devices.
 
-Two minds data dirs share one (fake, in-memory) connector backend: device A
+Two Imbue Studio data dirs share one (fake, in-memory) connector backend: device A
 provisions and pushes; device B pulls, sees the remote workspace, unlocks
 with the master password, decrypts the synced secrets, and materializes the
 backup env. This is the whole cross-device story minus live HTTP -- the wire

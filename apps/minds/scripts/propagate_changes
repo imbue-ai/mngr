@@ -32,7 +32,7 @@ if [[ ! -d "${TEMPLATE_DIR}" ]]; then
 fi
 
 # Require an activated minds env -- no implicit default to production.
-# Without activation we'd silently talk to ~/.minds/ (production), which
+# Without activation we'd silently talk to the production tier, which
 # is almost never what an iteration-loop script should be doing. Mirrors
 # the `minds-admin env deploy` / `destroy` activation check
 # (`is_env_activated` in imbue.minds.bootstrap).

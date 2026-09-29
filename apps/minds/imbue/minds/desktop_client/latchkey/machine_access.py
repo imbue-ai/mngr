@@ -212,7 +212,7 @@ class MachineAccess(MutableModel):
         info = self.backend_resolver.get_agent_display_info(parsed)
         if info is None or not info.provider_name:
             raise MachineUnreachableError(
-                f"Minds does not know which provider workspace {workspace_agent_id} runs on yet, so it cannot "
+                f"Imbue Studio does not know which provider workspace {workspace_agent_id} runs on yet, so it cannot "
                 "reach its machine. Try again in a moment."
             )
         return info.provider_name
@@ -317,11 +317,11 @@ def _load_provider_context(concurrency_group: ConcurrencyGroup) -> MngrContext:
     Read non-strictly, because the settings are the whole CLI's while the
     plugins are only the ones this app depends on: the layers include the
     project settings of whatever checkout the app was launched from, which may
-    configure a backend no minds build ships. Strictly, one such block fails
+    configure a backend no Imbue Studio build ships. Strictly, one such block fails
     the load, and every workspace loses the machine behind it over a provider
     this app would never open. Non-strict skips the block with a warning, and
     drops any settings field this build does not know; a malformed value in a
-    block minds does use still fails the load.
+    block Imbue Studio does use still fails the load.
 
     Raises:
         MachineUnreachableError: when the settings cannot be loaded.

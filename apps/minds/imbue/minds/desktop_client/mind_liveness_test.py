@@ -74,7 +74,7 @@ def _resolver_with_capable_agent(
 
 def test_provider_backend_supports_shutdown_gates_on_capable_backends() -> None:
     # Local backends, the cloud-VM backends, and imbue_cloud workspaces
-    # expose host shutdown to minds; remote backends without a real
+    # expose host shutdown to Imbue Studio; remote backends without a real
     # host-stop (modal, ovh leases) stay out.
     assert provider_backend_supports_shutdown("docker") is True
     assert provider_backend_supports_shutdown("lima") is True
@@ -89,7 +89,7 @@ def test_provider_backend_supports_shutdown_gates_on_capable_backends() -> None:
 def _resolver_with_a_cloud_and_a_local_mind(
     cloud_agent: AgentId, local_agent: AgentId, cloud_backend: str, local_backend: str
 ) -> MngrCliBackendResolver:
-    """One RUNNING cloud mind and one RUNNING local mind, on separate hosts."""
+    """One RUNNING cloud machine and one RUNNING local machine, on separate hosts."""
     resolver = MngrCliBackendResolver()
     seed_provider_snapshots(
         resolver,
@@ -142,7 +142,7 @@ def test_compute_covers_cloud_and_local_minds_alike() -> None:
 @pytest.mark.parametrize("local_backend", ["docker", "lima"])
 @pytest.mark.parametrize("cloud_backend", ["imbue_cloud", "aws", "gcp", "azure"])
 def test_local_liveness_drops_shutdown_capable_cloud_minds(cloud_backend: str, local_backend: str) -> None:
-    """Cloud minds are shutdown-capable but not local, so the quit prompt's map excludes them.
+    """Cloud machines are shutdown-capable but not local, so the quit prompt's map excludes them.
 
     Every cloud backend that joined the shutdown gate is covered: each one is a
     machine that keeps running (and keeps serving its agents) with the app
@@ -228,7 +228,7 @@ def test_compute_reflects_discovery_host_state() -> None:
 
 
 def test_compute_unknown_when_host_state_absent() -> None:
-    """Before discovery has the host's state, the mind is UNKNOWN (not assumed stopped)."""
+    """Before discovery has the host's state, the machine is UNKNOWN (not assumed stopped)."""
     agent = AgentId.generate()
     states = compute_mind_liveness_by_agent_id(_resolver_with_capable_agent(agent, None))
     assert states == {str(agent): MindLiveness.UNKNOWN}
@@ -257,7 +257,7 @@ def test_compute_excludes_non_capable_minds() -> None:
 
     states = compute_mind_liveness_by_agent_id(resolver)
 
-    # Only the shutdown-capable (docker) mind is computed; the remote one never appears.
+    # Only the shutdown-capable (docker) machine is computed; the remote one never appears.
     assert states == {str(capable_agent): MindLiveness.RUNNING}
 
 

@@ -159,6 +159,13 @@ def test_listing_script_keeps_the_configured_host_dir_when_no_candidate_has_a_re
     assert result["certified_data"] == {}
 
 
+def test_outer_listing_script_follows_the_host_dir_symlink_out_of_a_stopped_container() -> None:
+    """A VPS container's host_dir is a symlink into its volume; ``docker cp`` without ``-L`` copies the link."""
+    script = build_outer_listing_collection_script("host-abc", "/mngr", "mngr-")
+    assert 'docker cp -L "$CID":"$_mngr_candidate"' in script
+    assert 'docker cp "$CID"' not in script
+
+
 def test_parse_listing_collection_output_basic() -> None:
     output = "\n".join(
         [

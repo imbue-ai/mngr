@@ -48,6 +48,11 @@ LABEL_PROVIDER: Final[str] = f"{LABEL_PREFIX}provider"
 LABEL_HOST_ID: Final[str] = f"{LABEL_PREFIX}host-id"
 LABEL_HOST_NAME: Final[str] = f"{LABEL_PREFIX}host-name"
 LABEL_TAGS: Final[str] = f"{LABEL_PREFIX}tags"
+# Marks a container whose memory cap mngr derives from the VM's RAM (the
+# every-boot reconciler in host_setup follows it). Absent when the caller set
+# an explicit ``--memory``, which the reconciler must then leave alone.
+LABEL_MEMORY_CAP: Final[str] = f"{LABEL_PREFIX}memory-cap"
+MEMORY_CAP_FOLLOWS_VM_LABEL_VALUE: Final[str] = "vm"
 
 # Default image when no user customization
 DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
@@ -60,9 +65,8 @@ DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
 OUTER_HOST_ADD_HOST_ARGS: Final[tuple[str, str]] = ("--add-host", f"{OUTER_HOST_HOSTNAME_IN_CONTAINER}:host-gateway")
 
 # Path inside the agent container where the unified host volume is mounted.
-# The container sees three top-level entries under this mount: host_state.json,
-# agents/, and host_dir/. The container's mngr host_dir symlink resolves into
-# the host_dir/ subdirectory so all of the agent's writes end up on the volume.
+# The container's mngr host_dir resolves into the volume, so all of the agent's
+# writes end up on it.
 HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 
 # Subdirectory inside the unified volume that backs the agent's mngr host_dir.
@@ -82,6 +86,126 @@ HOST_VOLUME_HOME_PATH: Final[str] = f"{HOST_VOLUME_MOUNT_PATH}/{HOME_SUBPATH}"
 # waiting for `mngr start`. Also traps SIGTERM and stays alive until SIGTERM
 # arrives so `docker stop` (idle timeout, manual stop) exits cleanly.
 CONTAINER_ENTRYPOINT_CMD: Final[str] = build_self_healing_host_entrypoint_command()
+
+# The runtime name gVisor registers with the Docker daemon (``docker run --runtime runsc``).
+_GVISOR_DOCKER_RUNTIME_NAME: Final[str] = "runsc"
+
+# Under runsc with ``--overlay2=none`` the container rootfs sits on gVisor's
+# gofer-backed filesystem, which refuses to hard-link a unix socket: supervisord
+# installs its control socket that way and loops forever on "Unlinking stale
+# socket", so the agent container never comes up. /run rides a tmpfs instead
+# whenever the container runs under runsc. /tmp does too (runsc mounts its own,
+# unbounded, in-memory tmpfs on an empty /tmp regardless), but capped: a tmpfs is
+# memory charged to the container's cgroup that no process kill frees, so an
+# uncapped one lets a single large write (an 8 GB copy of an app store) OOM-kill
+# the whole sandbox, while a capped one turns that into ENOSPC confined to /tmp.
+# The cap is one eighth of the VM's RAM (512 MiB on a 4 GB VM, about 1 GiB on
+# 8 GB), never below the floor, in absolute units because a percentage resolves
+# against the host's RAM rather than the container's limit. ``exec`` because
+# Docker mounts a bare ``--tmpfs`` noexec and a workspace runs what it writes there.
+CONTAINER_TMP_TMPFS_RAM_DIVISOR: Final[int] = 8
+CONTAINER_TMP_TMPFS_MIN_MIB: Final[int] = 256
+_RUNSC_RUN_TMPFS_PATH: Final[str] = "/run"
+_RUNSC_TMP_TMPFS_PATH: Final[str] = "/tmp"
+
+
+@pure
+def container_tmp_tmpfs_size_mib(mem_total_kib: int) -> int:
+    """The size cap of the container's /tmp tmpfs for a VM with this much RAM."""
+    return max(CONTAINER_TMP_TMPFS_MIN_MIB, mem_total_kib // 1024 // CONTAINER_TMP_TMPFS_RAM_DIVISOR)
+
+
+@pure
+def runsc_tmp_tmpfs_mount_spec(mem_total_kib: int) -> str:
+    """The ``--tmpfs`` value for the container's capped, executable /tmp."""
+    return f"{_RUNSC_TMP_TMPFS_PATH}:exec,size={container_tmp_tmpfs_size_mib(mem_total_kib)}m"
+
+
+@pure
+def tmpfs_mount_paths_in_start_args(start_args: Sequence[str]) -> set[str]:
+    """The mount points ``docker run`` tmpfs flags in ``start_args`` target, in either flag spelling.
+
+    Accepts both ``--tmpfs PATH`` (two tokens) and ``--tmpfs=PATH[:options]``.
+    """
+    paths: set[str] = set()
+    is_next_arg_path = False
+    for arg in start_args:
+        if is_next_arg_path:
+            paths.add(arg.split(":", 1)[0])
+            is_next_arg_path = False
+        elif arg == "--tmpfs":
+            is_next_arg_path = True
+        elif arg.startswith("--tmpfs="):
+            paths.add(arg.removeprefix("--tmpfs=").split(":", 1)[0])
+        else:
+            pass
+    return paths
+
+
+@pure
+def runsc_tmpfs_start_args(
+    docker_runtime: str | None, configured_start_args: Sequence[str], mem_total_kib: int
+) -> tuple[str, ...]:
+    """The tmpfs flags a runsc container needs that ``configured_start_args`` does not already carry.
+
+    Empty for any other runtime. A mount the caller already configured (e.g. the
+    gen-2 slice bake's own ``--tmpfs /run``) is not repeated, so the caller's
+    options for it win. ``mem_total_kib`` sizes the /tmp cap.
+    """
+    if docker_runtime != _GVISOR_DOCKER_RUNTIME_NAME:
+        return ()
+    present_paths = tmpfs_mount_paths_in_start_args(configured_start_args)
+    mount_spec_by_path = {
+        _RUNSC_RUN_TMPFS_PATH: _RUNSC_RUN_TMPFS_PATH,
+        _RUNSC_TMP_TMPFS_PATH: runsc_tmp_tmpfs_mount_spec(mem_total_kib),
+    }
+    return tuple(
+        arg
+        for path, mount_spec in mount_spec_by_path.items()
+        if path not in present_paths
+        for arg in ("--tmpfs", mount_spec)
+    )
+
+
+# Docker brings the container back after an out-of-band exit (an OOM kill, a
+# daemon restart, a VM reboot) but not after an explicit ``docker stop``, which
+# is what ``mngr stop --stop-host`` and the idle stop issue, so a stopped host
+# stays stopped. The self-healing entrypoint relaunches sshd on the restart.
+_CONTAINER_RESTART_POLICY_START_ARG: Final[str] = "--restart=unless-stopped"
+
+
+@pure
+def has_memory_limit_start_arg(start_args: Sequence[str]) -> bool:
+    """Whether ``start_args`` sets a ``docker run`` memory limit (``--memory``, ``--memory=``, or ``-m``)."""
+    return any(arg in ("--memory", "-m") or arg.startswith("--memory=") for arg in start_args)
+
+
+@pure
+def memory_cap_labels(effective_start_args: Sequence[str]) -> dict[str, str]:
+    """The label marking a container as VM-sized, or nothing when the caller chose its own ``--memory``."""
+    if has_memory_limit_start_arg(effective_start_args):
+        return {}
+    return {LABEL_MEMORY_CAP: MEMORY_CAP_FOLLOWS_VM_LABEL_VALUE}
+
+
+@pure
+def has_restart_policy_start_arg(start_args: Sequence[str]) -> bool:
+    """Whether ``start_args`` already sets a ``docker run`` restart policy, in either flag spelling."""
+    return any(arg == "--restart" or arg.startswith("--restart=") for arg in start_args)
+
+
+@pure
+def restart_policy_start_args(configured_start_args: Sequence[str]) -> tuple[str, ...]:
+    """The restart policy every container gets unless ``configured_start_args`` already chose one.
+
+    A caller that already sets a policy (the gen-2 slice create template passes
+    the same ``--restart=unless-stopped``) is not repeated, so its composed
+    ``docker run`` line stays unchanged.
+    """
+    if has_restart_policy_start_arg(configured_start_args):
+        return ()
+    return (_CONTAINER_RESTART_POLICY_START_ARG,)
+
 
 # In-container path the host_backup service writes / reads snapshot
 # request and result JSON to. Backed by the per-host docker volume
@@ -143,12 +267,27 @@ def ensure_depot_token_available(builder: DockerBuilder) -> None:
         raise MngrError(_DEPOT_TOKEN_REQUIRED_MESSAGE)
 
 
-# Absolute path on the outer where rsync stashes partial files between
-# attempts. Lives outside the build context (``/tmp/mngr-build-<id>/``) so
-# partial-transfer state never gets included in the docker build context
-# or copied back to the local repo. Persists across retries so subsequent
-# attempts can resume rather than re-uploading completed bytes.
-_RSYNC_PARTIAL_DIR_REMOTE: Final[str] = "/tmp/mngr-rsync-partial"
+# Build contexts are staged under docker's own data root on the outer rather
+# than /tmp: that root is on the disk docker builds into on every host (the
+# cloud VM's root disk, a gen-2 slice's data disk), while /tmp on a Debian 13
+# VM is a RAM-backed tmpfs that a multi-hundred-MB checkout would eat into. The
+# rsync partial directory sits beside the per-host build directories, outside
+# every build context, so partial-transfer state never lands in an image or is
+# copied back to the local repo, and persists across retries so they resume.
+_REMOTE_BUILD_ROOT_SUBDIR: Final[str] = "mngr-build"
+_RSYNC_PARTIAL_SUBDIR: Final[str] = ".rsync-partial"
+
+
+def resolve_remote_build_root(outer: OuterHostInterface) -> str:
+    """The directory under docker's data root that holds this outer's build staging."""
+    result = outer.execute_idempotent_command("docker info -f '{{.DockerRootDir}}'", timeout_seconds=60.0)
+    docker_root = result.stdout.strip()
+    if not result.success or not docker_root.startswith("/"):
+        raise MngrError(
+            f"Failed to read docker's data root on the outer: stderr={result.stderr.strip()!r} stdout={result.stdout.strip()!r}"
+        )
+    return posixpath.join(docker_root, _REMOTE_BUILD_ROOT_SUBDIR)
+
 
 # How many trailing lines of EACH stream a failed docker build reports (the two
 # streams are tailed separately so one stream's noise cannot hide the other's error).
@@ -1076,6 +1215,7 @@ def upload_directory_to_outer(
     cg: ConcurrencyGroup,
     local_path: Path,
     remote_path: str,
+    partial_dir_remote: str,
     timeout_seconds: float = 900.0,
 ) -> None:
     """Upload a local directory to outer via rsync over SSH.
@@ -1092,7 +1232,7 @@ def upload_directory_to_outer(
         "rsync",
         "-az",
         "--delete",
-        f"--partial-dir={_RSYNC_PARTIAL_DIR_REMOTE}",
+        f"--partial-dir={partial_dir_remote}",
         "--exclude=__pycache__",
         "--exclude=.venv",
         "--exclude=node_modules",
@@ -1402,9 +1542,11 @@ def build_image_on_outer_from_build_args(
     specified, the clone uses --depth.
     """
     build_tag = f"mngr-build-{host_id}"
-    remote_build_dir = f"/tmp/mngr-build-{host_id.get_uuid().hex}"
 
     _raise_if_cwd_deleted_for_relative_context(docker_build_args)
+
+    remote_build_root = resolve_remote_build_root(outer)
+    remote_build_dir = posixpath.join(remote_build_root, host_id.get_uuid().hex)
 
     # Separate the build context path from other docker build args.
     # Docker build expects the last positional arg to be the context path.
@@ -1451,7 +1593,13 @@ def build_image_on_outer_from_build_args(
                     )
                 upload_cg = ConcurrencyGroup(name="rsync-build-context")
                 with translate_outer_concurrency_errors("upload the build context to the host"), upload_cg:
-                    upload_directory_to_outer(outer, upload_cg, upload_context, remote_build_dir)
+                    upload_directory_to_outer(
+                        outer,
+                        upload_cg,
+                        upload_context,
+                        remote_build_dir,
+                        partial_dir_remote=posixpath.join(remote_build_root, _RSYNC_PARTIAL_SUBDIR),
+                    )
 
             # Rewrite --file/--dockerfile paths to absolute paths on the outer.
             resolved_build_args = resolve_dockerfile_paths(non_context_args, remote_build_dir)

@@ -1678,7 +1678,7 @@ class Latchkey(MutableModel):
         if service_name not in MINDS_GOOGLE_OAUTH_SERVICES:
             return False, detail
         logger.info(
-            "Adding a Google account for {} via the Minds client did not succeed; "
+            "Adding a Google account for {} via the Imbue Studio client did not succeed; "
             "running a fresh 'auth browser-prepare' and retrying",
             service_name,
         )

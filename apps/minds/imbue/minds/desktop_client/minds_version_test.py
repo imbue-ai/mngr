@@ -6,7 +6,7 @@ from imbue.minds.desktop_client.minds_version import parse_minds_version
 
 def _version(tag: str) -> MindsVersion:
     parsed = parse_minds_version(tag)
-    assert parsed is not None, f"{tag} should parse as a minds version"
+    assert parsed is not None, f"{tag} should parse as an Imbue Studio version"
     return parsed
 
 

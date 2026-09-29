@@ -99,13 +99,13 @@ def resolver() -> MngrCliBackendResolver:
 def test_registers_existing_agents_on_start(
     tmp_path: Path, resolver: MngrCliBackendResolver, root_concurrency_group: ConcurrencyGroup
 ) -> None:
-    """``start()`` registers every agent already in the resolver on minds-managed hosts."""
+    """``start()`` registers every agent already in the resolver on hosts Imbue Studio manages."""
     host_id = HostId.generate()
     seed_agent = AgentId.generate()
     new_agent = AgentId.generate()
     latchkey = make_full_fake_latchkey(tmp_path)
     # Pre-create the host's permissions file with one agent already
-    # registered so the host counts as "minds-managed" -- the auto-register
+    # registered so the host counts as managed by Imbue Studio -- the auto-register
     # callback only touches hosts that already have a permissions file.
     register_agent_for_host(latchkey.plugin_data_dir, host_id, seed_agent)
     _push_agents(resolver, _make_discovered(host_id, new_agent))
@@ -152,7 +152,7 @@ def test_does_not_conjure_a_permissions_file_for_an_unmanaged_host(
 
     The file is materialized at host-creation time by
     :func:`finalize_host_permissions`; its absence means the host is not
-    minds-managed and we must not conjure one from a discovery event alone.
+    managed by Imbue Studio and we must not conjure one from a discovery event alone.
     """
     host_id = HostId.generate()
     agent_id = AgentId.generate()

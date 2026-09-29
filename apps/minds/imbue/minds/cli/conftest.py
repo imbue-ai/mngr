@@ -14,7 +14,7 @@ def isolate_mind_tests(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Generator[None, None, None]:
-    """Isolate mind CLI tests from the real mngr environment.
+    """Isolate minds CLI tests from the real mngr environment.
 
     Sets HOME, MNGR_HOST_DIR, and MNGR_PREFIX to temp/unique values so that
     tests do not create agents in the real ~/.mngr or pollute the real tmux

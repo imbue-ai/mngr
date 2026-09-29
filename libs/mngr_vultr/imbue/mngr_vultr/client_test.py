@@ -17,7 +17,7 @@ from imbue.mngr_vultr.client import VultrVpsClient
 
 @pytest.fixture()
 def client() -> VultrVpsClient:
-    return VultrVpsClient(api_key=SecretStr("test-api-key"), os_id=2136)
+    return VultrVpsClient(api_key=SecretStr("test-api-key"), os_id=2625)
 
 
 def _mock_response(

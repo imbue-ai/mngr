@@ -1,6 +1,6 @@
-# Terminal persistence in minds workspaces
+# Terminal persistence in Imbue Studio workspaces
 
-The terminals on the minds desktop are backed by named [tmux](https://github.com/tmux/tmux/wiki) sessions. Each terminal window attaches to (or creates) its own session, so the terminal's shell, working directory, running processes, and in-memory scrollback survive:
+The terminals on the Imbue Studio desktop are backed by named [tmux](https://github.com/tmux/tmux/wiki) sessions. Each terminal window attaches to (or creates) its own session, so the terminal's shell, working directory, running processes, and in-memory scrollback survive:
 
 - closing the window and reopening it,
 - reloading the workspace,

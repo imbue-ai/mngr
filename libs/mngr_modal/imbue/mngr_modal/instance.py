@@ -176,6 +176,15 @@ SSH_CONNECT_TIMEOUT: Final[int] = 60
 # (readiness probes included) must authenticate as this user.
 DEFAULT_SSH_USER: Final[str] = "root"
 
+# Gives /tmp back the sticky bit (the conventional 1777) on every sandbox boot. Modal loses it
+# twice over: an image build step that writes under /tmp without chmodding it drops the bit, and
+# `snapshot_filesystem()` drops sticky/setuid/setgid on every entry changed since the image, which
+# /tmp always is by the time a host stops. Software that checks its socket or lock directory can
+# refuse a world-writable /tmp without it (codex >= 0.157 will not bind its app-server socket
+# there). Only /tmp is restored: other special bits a snapshot dropped stay dropped. Best-effort,
+# so an image whose default user cannot chmod /tmp still boots.
+_RESTORE_TMP_STICKY_BIT_COMMAND: Final[str] = "{ chmod +t /tmp 2>/dev/null || true; }"
+
 # Tag key constants for sandbox metadata stored in Modal tags.
 # Only host_id and host_name are stored as tags (for discovery). All other
 # metadata is stored on the Modal Volume for persistence and sharing.
@@ -1149,6 +1158,8 @@ class ModalProviderInstance(BaseProviderInstance):
                 add_authorized_keys_cmd = build_add_authorized_keys_command(ssh_user, tuple(authorized_keys))
                 if add_authorized_keys_cmd is not None:
                     setup_parts.append(add_authorized_keys_cmd)
+
+            setup_parts.append(_RESTORE_TMP_STICKY_BIT_COMMAND)
 
             # Ensure the logs directory exists before sshd starts writing to it
             sshd_log_path = f"{self.host_dir}/logs/sshd.log"

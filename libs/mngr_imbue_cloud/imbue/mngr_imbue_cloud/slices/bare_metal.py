@@ -44,17 +44,16 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import is_same_ssh_public
 # remote_service_connector can ship it.
 
 # Gen-2 agent host containers run under gVisor from the bake (a property of the
-# fleet, like trixie), with /run and /tmp as tmpfs: runsc is registered with
+# fleet, like trixie), with /run as tmpfs: runsc is registered with
 # --overlay2=none, which leaves the container rootfs on gVisor's gofer-backed
 # filesystem, and that filesystem refuses the hard link supervisord installs its
 # control socket with (it would wedge on "Unlinking stale socket" forever).
-# Ephemeral dirs on tmpfs also never ride a backup. Applied by the bake's per-box
-# `-S providers.imbue_cloud_slice.*` overrides and the slow-path rebuild alike.
-# /tmp says `exec` because Docker mounts a bare `--tmpfs` noexec, and a workspace
-# runs what it writes there: a test's stub executable on PATH is skipped at a
-# noexec /tmp, so the real binary it stands in for runs instead.
+# Applied by the bake's per-box `-S providers.imbue_cloud_slice.*` overrides and
+# the slow-path rebuild alike. /tmp is not here: mngr_vps mounts it under runsc,
+# executable and capped at a share of the slice VM's RAM
+# (``runsc_tmpfs_start_args``).
 GEN2_CONTAINER_RUNTIME: Final[SliceContainerRuntime] = SliceContainerRuntime.RUNSC
-GEN2_CONTAINER_TMPFS_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run", "--tmpfs", "/tmp:exec")
+GEN2_CONTAINER_TMPFS_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run")
 
 
 @pure
@@ -191,26 +190,31 @@ _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({SERVER_STATUS_READY, SERV
 
 
 @pure
-def compute_slice_container_memory_cap_mib(slice_memory_mib: int) -> int:
-    """The workspace container's hard memory cap: the slice VM's RAM minus the VM-side reserve."""
-    cap_mib = slice_memory_mib - SLICE_CONTAINER_MEMORY_RESERVE_MIB
+def compute_slice_container_memory_cap_mib(guest_mem_total_mib: int) -> int:
+    """The workspace container's hard memory cap: the VM's visible RAM (its MemTotal) minus the VM-side reserve.
+
+    The VM's every-boot reconcile oneshot computes the same value from the same
+    MemTotal, which is below the RAM qemu gives the guest (the kernel keeps a
+    share).
+    """
+    cap_mib = guest_mem_total_mib - SLICE_CONTAINER_MEMORY_RESERVE_MIB
     if cap_mib <= 0:
         raise BareMetalConfigError(
-            f"slice_memory_mib={slice_memory_mib} leaves no container memory after the "
+            f"a guest MemTotal of {guest_mem_total_mib}MiB leaves no container memory after the "
             f"{SLICE_CONTAINER_MEMORY_RESERVE_MIB}MiB VM reserve"
         )
     return cap_mib
 
 
 @pure
-def build_slice_container_memory_start_args(slice_memory_mib: int) -> tuple[str, ...]:
+def build_slice_container_memory_start_args(guest_mem_total_mib: int) -> tuple[str, ...]:
     """The ``docker run`` args that hard-cap the workspace container's memory.
 
     ``--memory-swap`` equals ``--memory`` (memcg ``swap.max=0``) so the container can
     never swap: under pressure it is shed fast (earlyoom, then the cgroup OOM killer,
     both steered by the workspace's ``oom_score_adj`` bands) instead of thrashing.
     """
-    cap_mib = compute_slice_container_memory_cap_mib(slice_memory_mib)
+    cap_mib = compute_slice_container_memory_cap_mib(guest_mem_total_mib)
     return (f"--memory={cap_mib}m", f"--memory-swap={cap_mib}m")
 
 

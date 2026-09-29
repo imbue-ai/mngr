@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 import imbue.mngr.resources as mngr_resources
+from imbue.mngr.providers.ssh_host_setup import JOURNALD_DROP_IN_PATH
+from imbue.mngr.providers.ssh_host_setup import JOURNALD_SYSTEM_MAX_USE
 from imbue.mngr.providers.ssh_host_setup import RequiredHostPackage
 from imbue.mngr.providers.ssh_host_setup import SSHD_PROVISIONED_MARKER_PATH
 from imbue.mngr.providers.ssh_host_setup import SSHD_START_OPTIONS
@@ -19,6 +21,7 @@ from imbue.mngr.providers.ssh_host_setup import WARNING_PREFIX
 from imbue.mngr.providers.ssh_host_setup import _build_package_check_snippet
 from imbue.mngr.providers.ssh_host_setup import build_add_authorized_keys_command
 from imbue.mngr.providers.ssh_host_setup import build_add_known_hosts_command
+from imbue.mngr.providers.ssh_host_setup import build_cap_journald_command
 from imbue.mngr.providers.ssh_host_setup import build_check_and_install_packages_command
 from imbue.mngr.providers.ssh_host_setup import build_configure_ssh_command
 from imbue.mngr.providers.ssh_host_setup import build_self_healing_host_entrypoint_command
@@ -231,9 +234,7 @@ def test_build_add_known_hosts_command_escapes_quotes() -> None:
     assert "'\"'\"'" in cmd
 
 
-# =============================================================================
 # build_add_authorized_keys_command tests
-# =============================================================================
 
 
 def test_build_add_authorized_keys_command_empty() -> None:
@@ -277,12 +278,10 @@ def test_build_add_authorized_keys_command_is_idempotent(tmp_path: Path) -> None
     assert lines.count(key_b) == 1
 
 
-# =============================================================================
 # Activity Watcher Shell Function Tests
 #
 # These tests source the activity_watcher.sh script and exercise individual
 # functions in isolation via bash subprocess calls.
-# =============================================================================
 
 
 def _get_activity_watcher_script_path() -> str:
@@ -470,9 +469,7 @@ def test_get_activity_sources_returns_sources_when_configured(tmp_path: Path) ->
     assert "agent" in sources
 
 
-# =========================================================================
 # sshd start + self-healing entrypoint commands
-# =========================================================================
 
 
 def test_self_healing_entrypoint_is_valid_shell_and_backgrounds_only_idle() -> None:
@@ -599,3 +596,10 @@ def test_build_start_volume_sync_command_with_custom_log_dir() -> None:
     assert "mkdir -p '/var/log/mngr'" in cmd
     assert "> '/var/log/mngr/volume_sync.log'" in cmd
     assert "/mngr/logs" not in cmd
+
+
+def test_cap_journald_command_installs_the_drop_in_and_restarts_only_on_change() -> None:
+    command = build_cap_journald_command()
+    assert f"SystemMaxUse={JOURNALD_SYSTEM_MAX_USE}" in command
+    assert JOURNALD_DROP_IN_PATH in command
+    assert command.index("cmp -s") < command.index("systemctl restart systemd-journald")

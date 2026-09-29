@@ -132,7 +132,7 @@ def _build_bootstrap_json() -> str:
     seed = UiBootstrapSeed(
         accent=_sanitize_accent(request.args.get("accent")),
         is_mac="Macintosh" in user_agent or "Mac OS" in user_agent,
-        # minds always runs the forward proxy with TLS, so the scheme is https.
+        # Imbue Studio always runs the forward proxy with TLS, so the scheme is https.
         mngr_forward_origin=f"https://localhost:{state.mngr_forward_port or 8421}",
         is_onboarding_complete=resolve_is_onboarding_complete(state.minds_config, state.backend_resolver),
     )
@@ -211,7 +211,7 @@ def _handle_app_status() -> Response:
     authenticated; workspace ids are disclosed only with a valid session.
     ``restorable_workspace_ids`` carries BOTH coordinates of each workspace
     (agent-keyed and host-keyed) because persisted window URLs are host-keyed
-    while minds records are agent-keyed, and the shell's restore filter does
+    while Imbue Studio records are agent-keyed, and the shell's restore filter does
     plain membership checks.
     """
     if not is_ui_request_authenticated():

@@ -14,7 +14,7 @@ class RemoteWorkspaceKind(LowerCaseStrEnum):
     The lowercase values are the wire strings the landing page branches on.
     """
 
-    # Hosted by another minds install (a docker / lima machine on another device).
+    # Hosted by another Imbue Studio install (a docker / lima machine on another device).
     OTHER_DEVICE = auto()
     # A cloud workspace any signed-in device could reach, that this device's
     # discovery does not currently report (provider signed out, errored, or

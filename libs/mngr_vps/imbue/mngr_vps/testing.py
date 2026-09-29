@@ -10,6 +10,7 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.providers.provider_release_testing import ProviderReleaseProfile
+from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.instance import VpsProvider
 from imbue.mngr_vps.primitives import IsolationMode
@@ -72,6 +73,7 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
         # NONE isolation runs the agent on the VM's OS (no container), so Trip 1 runs its bare-shape
         # assertion -- the coverage the retired per-provider bare lifecycle tests used to own.
         self.is_bare_host = isolation is IsolationMode.NONE
+        self.supports_out_of_band_container_stop = isolation is IsolationMode.CONTAINER
 
     def auto_shutdown_create_args(self) -> Sequence[str]:
         # Drive the idle watcher: with no SSH connection the in-host watcher sees no activity and
@@ -82,6 +84,16 @@ class VpsCloudReleaseProfile(ProviderReleaseProfile):
     @abstractmethod
     def find_launched_host_handle(self, host_name: str) -> str | None:
         """Return the cloud id of the host this test launched (via its pytest-launched label)."""
+
+    def out_of_band_container_stop_command(self) -> str:
+        return f"docker stop $(docker ps -q --filter label={LABEL_HOST_ID})"
+
+    def out_of_band_container_kill_command(self) -> str:
+        # SIGKILL the container's init from the VM, as the memcg OOM killer does. A `docker kill`
+        # would not do: Docker treats it as a manual stop and skips the restart policy.
+        return (
+            f"kill -9 $(docker inspect --format '{{{{.State.Pid}}}}' $(docker ps -q --filter label={LABEL_HOST_ID}))"
+        )
 
     def is_host_compute_running(self, handle: str) -> bool:
         return self._client.get_instance_status(VpsInstanceId(handle)) == VpsInstanceStatus.ACTIVE

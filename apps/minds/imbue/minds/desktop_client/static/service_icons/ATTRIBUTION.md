@@ -1,4 +1,4 @@
-# Third-party artwork shipped with Minds
+# Third-party artwork shipped with Imbue Studio
 
 The brand marks in this directory come from two Iconify icon sets. They are
 copied verbatim: each file is one icon body from the set, wrapped as a

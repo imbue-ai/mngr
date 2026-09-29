@@ -215,7 +215,8 @@ Provider: aws
     --aws-instance-type=TYPE    EC2 instance type (default: t3.small)
     --aws-ami=AMI-ID            Override the per-host AMI for this create only
                                 (default: provider config's default_ami_id, or the
-                                pinned per-region default for the chosen region)
+                                newest Debian 13 AMI in the region for the instance
+                                type's architecture, resolved from EC2 at create time)
     --aws-spot                  Run on EC2 spot capacity (presence-only flag).
                                 AWS may reclaim with ~2 min notice; the host is
                                 terminated, not stopped, on reclaim. Opt-in only.
@@ -276,10 +277,12 @@ Provider: lima
   Start args are passed directly to 'limactl start'. Common options:
     --cpus=N              Number of CPU cores (default: 4)
     --memory=N            Memory in GiB (default: 4)
-    --disk=N              Disk in GiB (default: 100)
+    --disk=N              Boot disk in GiB (default: 100); the btrfs data disk is sized by
+                          the provider's host_data_disk_size setting instead
     --vm-type=TYPE        VM type: qemu or vz (default: auto-detected)
     --mount-writable      Make default mounts writable
-  Run 'limactl start --help' for the full list.
+  Run 'limactl start --help' for the full list. Change a host's size later with
+  'mngr lima resize'.
 
 Provider: local
   No build arguments are supported for the local provider.

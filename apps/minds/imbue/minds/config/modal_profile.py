@@ -1,6 +1,6 @@
 """Modal-workspace selection derived from a tier's committed deploy config.
 
-Lives in minds (not the operator-only admin CLI) because the public
+Lives in Imbue Studio (not the operator-only admin CLI) because the public
 deployment-test helpers also need to derive the right Modal workspace for a
 tier -- ``imbue.minds.deployment_tests.helpers`` builds subprocess envs that
 pin ``MODAL_PROFILE`` exactly like a deploy-mode env activation does.

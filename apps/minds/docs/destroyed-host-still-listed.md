@@ -2,7 +2,7 @@
 
 ## Symptom
 
-After destroying a workspace, the minds desktop client may still show the row
+After destroying a workspace, the Imbue Studio desktop client may still show the row
 and report the destroy as **failed** — even though the underlying host/VM is
 genuinely gone (e.g. a Lima workspace whose VM is destroyed and absent from
 `limactl list`, with `mngr list` showing `HOST STATE = DESTROYED`).
@@ -12,7 +12,7 @@ genuinely gone (e.g. a Lima workspace whose VM is destroyed and absent from
 The destroy itself succeeds. The "failed" marker is a false negative in how the
 front end derives destroy status.
 
-- minds runs the destroy as a detached subprocess and **computes** the status
+- Imbue Studio runs the destroy as a detached subprocess and **computes** the status
   rather than reading an exit code (`desktop_client/destroying.py:read_destroying`):
   - pid alive → `RUNNING`
   - pid dead **and agent no longer in discovery** → `DONE`
@@ -24,7 +24,7 @@ front end derives destroy status.
   window (`default_destroyed_host_persisted_seconds` / per-provider
   `destroyed_host_persisted_seconds`) so you can see that a host *was* destroyed.
 - So after the destroy subprocess exits (pid dead), the host is still listed as
-  `DESTROYED` for that window → `agent_in_resolver = True` → minds computes
+  `DESTROYED` for that window → `agent_in_resolver = True` → Imbue Studio computes
   `FAILED`, and the Landing list keeps rendering the row.
 
 The same gap means the active workspace list can't distinguish a `DESTROYED`
@@ -36,7 +36,7 @@ The steady-state discovery snapshot the front end runs on
 (`ParsedAgentsResult`) keeps only `agent_ids`, `discovered_agents`
 (`DiscoveredAgent` — which has **no** `host_state`), and ssh info. The discovery
 stream *does* carry host state via `DiscoveredHost.host_state` (and it's in
-`mngr list --format json`), but minds drops it from the snapshot.
+`mngr list --format json`), but Imbue Studio drops it from the snapshot.
 
 Host state **is** already reachable on the front end — the recovery surfaces
 read it from the resolver (`backend_resolver.get_host_state`, sourced from the
@@ -92,4 +92,4 @@ active-only set.
   separate problem).
 - Not a leaked/orphaned VM — the Lima VM is genuinely destroyed.
 - Not introduced by the host-setup consolidation branch; this is a pre-existing
-  minds discovery/destroy-status interaction.
+  Imbue Studio discovery/destroy-status interaction.

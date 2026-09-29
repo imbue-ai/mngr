@@ -1453,6 +1453,7 @@ _IMBUE_CLOUD_TERMINOLOGY_EXEMPT: tuple[str, ...] = (
     "primitives.py",
     "bake/*.py",
     "slices/*.py",
+    "slices/*/*.py",
     "cli/*.py",
     "connector/*.py",
 )
@@ -1497,10 +1498,10 @@ def _mngr_level_terminology_chunks(rule: RegexRatchetRule) -> list[RatchetMatchC
 def test_prevent_workspace_vocabulary_in_mngr_level_code() -> None:
     """Keep the minds-level 'workspace' vocabulary out of mngr-level code (count may only fall)."""
     chunks = _mngr_level_terminology_chunks(_PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE)
-    assert len(chunks) <= snapshot(308), _PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))
+    assert len(chunks) <= snapshot(288), _PREVENT_WORKSPACE_VOCABULARY_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))
 
 
 def test_prevent_minds_references_in_mngr_level_code() -> None:
     """Keep minds / default-workspace-template references out of mngr-level code (count may only fall)."""
     chunks = _mngr_level_terminology_chunks(_PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE)
-    assert len(chunks) <= snapshot(308), _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))
+    assert len(chunks) <= snapshot(305), _PREVENT_MINDS_REFERENCES_IN_MNGR_LEVEL_CODE.format_failure(tuple(chunks))

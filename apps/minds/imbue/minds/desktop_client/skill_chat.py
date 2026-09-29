@@ -65,7 +65,7 @@ _SPAWN_TIMEOUT_SECONDS: Final[float] = 120.0
 # and the 30s the script spends retrying a chat app that is not ready yet -- because the
 # inner 504 is the only answer that can tell the user the chat is still coming. Cut the
 # wait short here instead and the create runs on regardless, the chat's window opens moments
-# later, and all the user was given is minds' own word that the spawn failed.
+# later, and all the user was given is Imbue Studio's own word that the spawn failed.
 _SCRIPT_SPAWN_TIMEOUT_SECONDS: Final[float] = 360.0
 
 # The launch runs the chat app's create and, behind a script with no create mode, the bare

@@ -10,12 +10,12 @@ pre-declutter workspaces) against the *minimum required* ``minds-v*`` tag
 locally), reports the supervisord state of the ``host-backup`` program, and
 returns the workspace's ``restic.env`` (sha256 + content).
 
-minds then classifies the result into problems. At-or-above the minimum is
+Imbue Studio then classifies the result into problems. At-or-above the minimum is
 fine: content matching the minimum tag, the minimum tag being an ancestor of
 the workspace HEAD (which also silently accepts user edits on top), or an
 installed ``backup-update:`` identity at or above the minimum all produce no
 warning. A workspace with a working, hand-configured ``restic.env`` and no
-minds-side canonical env is *adopted*: the env is pulled into the canonical
+canonical env on the Imbue Studio side is *adopted*: the env is pulled into the canonical
 store during the check so status and management just start working.
 
 Offline workspaces report ``OFFLINE`` (no badge); workspaces with verification
@@ -66,7 +66,7 @@ CHECK_EXEC_TIMEOUT_SECONDS: Final[float] = 360.0
 
 # The minimum required backup-service version. Workspaces at or above it are
 # never flagged; the update action still converges to the tag matching the
-# running minds release. Bumped manually only when a newer backup service is
+# running Imbue Studio release. Bumped manually only when a newer backup service is
 # actually required -- this deliberately avoids re-flagging every workspace on
 # every release. Overridable via MINDS_MINIMUM_BACKUP_TAG for dev/testing.
 MINIMUM_BACKUP_SERVICE_TAG: Final[str] = "minds-v0.3.4"
@@ -170,7 +170,7 @@ def is_backup_history_stale(
 def update_target_backup_tag() -> str:
     """The minds-v* tag the update action converges to (the running release).
 
-    Display-only on the minds side: the update script itself re-resolves the
+    Display-only on the Imbue Studio side: the update script itself re-resolves the
     version (falling back to the highest available tag for dev builds).
     """
     return f"minds-v{resolve_release_id()}"
@@ -198,7 +198,7 @@ def classify_check_payload(
 ) -> tuple[BackupServiceCheck, str | None]:
     """Classify the check script's payload; returns (check, env_to_adopt).
 
-    ``env_to_adopt`` is the workspace env content when minds holds no canonical
+    ``env_to_adopt`` is the workspace env content when Imbue Studio holds no canonical
     env but the workspace has a complete one (the caller persists it). Pure so
     the classification rules are directly testable.
     """
@@ -318,7 +318,7 @@ def check_backup_service_for_workspace(
     check, env_to_adopt = classify_check_payload(payload, canonical_env=canonical_env)
     if env_to_adopt is not None:
         # Adopt an externally-configured env into the canonical store so
-        # status and management start working (also covers a second minds
+        # status and management start working (also covers a second Imbue Studio
         # install managing the same workspace).
         logger.info("Adopting externally-configured restic.env for machine {}", agent_id)
         write_canonical_env(paths, agent_id, env_to_adopt)

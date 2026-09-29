@@ -1,6 +1,6 @@
 """Typed wrapper around the ``mngr imbue_cloud …`` CLI surface.
 
-Every operation that minds previously did via direct HTTP calls into the
+Every operation that Imbue Studio previously did via direct HTTP calls into the
 ``remote_service_connector`` (auth, host pool, LiteLLM keys, workspace
 shares) now runs as an invocation of ``mngr imbue_cloud …`` handed to a
 :class:`~imbue.minds.utils.mngr_caller.MngrCaller`, which runs it in a
@@ -434,13 +434,13 @@ class ImbueCloudCli(MutableModel):
         # Layer the connector URL onto the warm process's inherited env so the
         # `mngr imbue_cloud` plugin reaches the right backend without a
         # baked-in default. The warm process already inherits HOME / PATH /
-        # MNGR_HOST_DIR etc. from the minds backend, so only this override is
+        # MNGR_HOST_DIR etc. from the Imbue Studio backend, so only this override is
         # needed.
         env_overrides = {_CONNECTOR_URL_SUBPROCESS_ENV: str(self.connector_url).rstrip("/")}
         if self.accounts_base_url is not None:
             env_overrides[_ACCOUNTS_URL_SUBPROCESS_ENV] = str(self.accounts_base_url).rstrip("/")
         # Run from $HOME like every other laptop-side mngr invocation, so this
-        # does not resolve project config from minds' cwd (the monorepo root in
+        # does not resolve project config from Imbue Studio's cwd (the monorepo root in
         # a dev checkout). Otherwise `mngr imbue_cloud auth list` loads
         # `<repo>/.mngr/settings.toml`, which under the e2e test trips mngr's
         # pytest config guard and the account-discovery poll fails every cycle.
@@ -622,7 +622,7 @@ class ImbueCloudCli(MutableModel):
 
         Wraps ``mngr imbue_cloud auth list`` and parses its JSON array
         output into typed records. The plugin owns the SuperTokens
-        session store on disk; minds calls this whenever it needs
+        session store on disk; Imbue Studio calls this whenever it needs
         identity (UI rendering, bootstrap reconciliation, sharing
         editor) instead of mirroring email/display_name into its own
         files.

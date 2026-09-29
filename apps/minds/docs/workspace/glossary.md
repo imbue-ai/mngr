@@ -1,6 +1,6 @@
 # Glossary
 
-Key concepts in the minds system:
+Key concepts in the Imbue Studio system:
 
 - **workspace**: the logical unit a user works out of: a collection of permissions (what the agent can access, which outside users can access it), apps, data, and customizations.
   A workspace is identified by its primary agent's id (its *workspace id*, which never changes for the life of the workspace) and discovered via that agent's `is_primary` label; the *machine* it currently runs on is a swappable attribute.
@@ -29,9 +29,9 @@ Key concepts in the minds system:
   The scheduling primitive is landing separately; until then skills run when invoked.
 
 - **customization**: a user's change to any existing part of the workspace -- a modified app, an edited skill, a tweaked chat behavior.
-  Not a standalone kind of creation; everything in minds can be modified.
+  Not a standalone kind of creation; everything in Imbue Studio can be modified.
 
-- **template**: a publishable, reusable, *bootable* snapshot of the creations a mind has built, pushed to a GitHub repo so another mind can be created from it or adopt it (one repo can accumulate several templates).
+- **template**: a publishable, reusable, *bootable* snapshot of the creations an agent has built, pushed to a GitHub repo so another workspace can be created from it or adopt it (one repo can accumulate several templates).
   A template can include zero or more creations plus customizations to existing things.
   See the workspace's publish-template / use-template skills.
 
@@ -79,7 +79,7 @@ Key concepts in the minds system:
   Replaces the old custom service manager that watched `services.toml` and ran services in tmux windows.
 
 - **app watcher**: a background service that monitors `data/.state/apps.toml` and writes service events to `events/services/events.jsonl` so the desktop client can discover an agent's apps.
-  (Forwarding reconciliation happens on the minds side, via the `mngr forward` plumbing -- not in the watcher.)
+  (Forwarding reconciliation happens on the Imbue Studio side, via the `mngr forward` plumbing -- not in the watcher.)
 
 - **to publish**: to make a workspace reachable in a browser at its share URL through the self-hosted relay, for as long as it stays published.
   Publishing is workspace-level and is started from the desktop client's Share tab by a signed-in account associated with the workspace: it provisions the relay materials and certificate that the share-gateway runs the share stack from, and unpublishing drops the tunnel, cutting off anyone connected.
@@ -113,7 +113,7 @@ Key concepts in the minds system:
 - **invitee**: a grantee of a user grant or an email grant who has been invited, meaning an invitation exists for their grant.
 
 - **registered address**: an email address that is the verified email of an imbue account; *unregistered* otherwise.
-  Registration is what invitation routing checks, whatever the grant's kind says; it says nothing about whether minds is installed.
+  Registration is what invitation routing checks, whatever the grant's kind says; it says nothing about whether Imbue Studio is installed.
 
 - **share panel**: the granter's surface for creating grants and inviting: the "Share machine: <name>" panel in the desktop client's workspace options.
 
@@ -124,7 +124,7 @@ Key concepts in the minds system:
 
 - **invitation content** [future]: the one content model behind every invitation (who granted access, which workspace, which app, the share URL, and how to stop receiving mail), rendered once per channel. It carries no message written by the granter.
 
-- **channel** [future]: how a delivery reaches an invitee: email, or an in-app notification in the minds notification feed.
+- **channel** [future]: how a delivery reaches an invitee: email, or an in-app notification in the Imbue Studio notification feed.
   Imbue selects the channel from the invitee's registration and notification preferences; the granter never chooses. In-app is modelled now and implemented later.
 
 - **delivery** [future]: one attempt to deliver an invitation over one channel, with a delivery outcome.
@@ -163,7 +163,7 @@ Key concepts in the minds system:
 
 - **machine size**: how big a remote (imbue_cloud) machine is, in two independent factors (specs/slice-fleet). *Units* are the single compute knob -- 1 unit = 1GiB of machine RAM, with vCPUs and fair-share bandwidth scaling proportionally; allowed sizes are multiples of 8 units up to 128. *Disk* is a second, grow-only factor, sized once at creation (3.5GiB per unit) and grown independently afterwards; it never shrinks. Resizing is record-then-restart: `mngr imbue_cloud machines resize` stamps the desired size, and the machine's next restart applies it (in place when its box has room, otherwise via a restore onto a box that does). Every new workspace starts at the default 8-unit size.
 
-- **environment**: an environment is a single deployed instance of the minds system.
+- **environment**: an environment is a single deployed instance of the Imbue Studio system.
   It owns, among other things, a data root, a Modal environment, a Neon project, and a SuperTokens app.
   Every environment belongs to exactly one tier, and takes its account credentials and deploy configuration from it.
   Production and staging are environments whose names are identical to their tier names, while dev-<user> and ci-<timestamp>-<uuid> are dynamic environments that developers and CI create and destroy within their tiers.

@@ -32,8 +32,8 @@ class VultrProviderConfig(VpsProviderConfig):
         description="Default Vultr plan",
     )
     default_os_id: int = Field(
-        default=2136,
-        description="Default Vultr OS ID (Debian 12 x64)",
+        default=2625,
+        description="Default Vultr OS ID (Debian 13 x64 'trixie'; list ids with `GET https://api.vultr.com/v2/os`)",
     )
 
     def get_api_key(self) -> str:

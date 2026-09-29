@@ -1,13 +1,13 @@
-# Minds testing overview
+# Imbue Studio testing overview
 
-This is a map of every kind of test the minds app has, where each kind runs, and
+This is a map of every kind of test the Imbue Studio app has, where each kind runs, and
 a backlog of end-to-end (e2e) tests worth adding -- with emphasis on tests that
 fit the modal-snapshot CI stage (a pre-baked workspace-in-Docker image that lets
 e2e tests fan out in parallel through offload).
 
 The test taxonomy and locations follow the repo `style_guide.md` ("Types of
 tests"): unit (`*_test.py`), integration (`test_*.py`, unmarked), acceptance
-(`@pytest.mark.acceptance`), and release (`@pytest.mark.release`). Minds adds a
+(`@pytest.mark.acceptance`), and release (`@pytest.mark.release`). Imbue Studio adds a
 few app-specific markers (below).
 
 Tests that verify a behavior unit declare it with the
@@ -59,8 +59,8 @@ An importable helper package, excluded from all offload runs and `test-quick`;
 driven only by `just minds-test-deployment` and siblings (orchestrator
 `apps/minds_admin/scripts/test_deployments.py`). Every test here carries
 `@pytest.mark.release` (so it is part of the shared release suite, discoverable
-by tag) in addition to its capability mark; all minds release tests run from the
-minds jobs (`test-minds-release`), never from the mngr release workflow, which
+by tag) in addition to its capability mark; all Imbue Studio release tests run from
+the Imbue Studio jobs (`test-minds-release`), never from the mngr release workflow, which
 excludes the whole `apps/minds` tree by path.
 
 - `@pytest.mark.minds_deployment` (each mints its own ephemeral CI env):
@@ -82,13 +82,15 @@ is the only thing that runs them.
 
 - **Node unit** (`test/unit/*.test.js`): `node --test` suites for the pure
   Electron-shell helpers (startup routing, the loading document's intro
-  schedule, surface routing, deeplinks, session persistence, log handling, the
-  embed contract, release channels). Run alone via `pnpm test:unit`.
+  schedule, surface routing, deeplinks, session persistence, log handling,
+  platform roots, the data-directory migration, the embed contract, release
+  channels) and for the `paths.js` export surface the Electron-only modules
+  consume. Run alone via `pnpm test:unit`.
 - **Frontend unit** (`frontend/src/**/*.test.ts`): vitest suites for the SPA's
   models and views, rendered without a DOM through the `renderRoot` helper in
   `frontend/src/testing.ts`. Run alone via `pnpm -C frontend test`.
 - **Playwright e2e** (`test/e2e/`, `playwright.config.js`, `pnpm test:e2e`):
-  - `macos-launch.spec.js` -- launches the installed `/Applications/ImbueStudio.app`
+  - `macos-launch.spec.js` -- launches the installed `/Applications/Imbue Studio.app`
     via the `mindsApp` fixture. **The only JS spec** (wired into CI in
     `minds-launch-to-msg.yml`). The legacy renderer-contract specs were
     deleted with the pre-SPA shell scripts they drove.
@@ -129,9 +131,9 @@ is the only thing that runs them.
 - **`cleanup-modal-environments`** -- sweeps old Modal test envs + leaked
   snapshot images.
 - **`test-minds-release`** (manual only -- `workflow_dispatch` +
-  `run_minds_release_tests`) -- the home for **all** minds release tests. Runs
+  `run_minds_release_tests`) -- the home for **all** Imbue Studio release tests. Runs
   the `minds_deployment` group via the deployment orchestrator (each mints +
-  destroys its own ephemeral ci env), then the plain minds `@release` tests that
+  destroys its own ephemeral ci env), then the plain Imbue Studio `@release` tests that
   need no ci env, selected by tag: `-m 'release and not minds_deployment and not
   minds_services and not minds_snapshot_resume'`. That is where
   `test_claude_version_alignment.py`, `test_sse_redirect.py` (Chromium installed
@@ -139,8 +141,8 @@ is the only thing that runs them.
 
 `.github/workflows/release-tests.yml` (`workflow_dispatch` + `v*` tags) -- the
 *mngr* release suite only. Both jobs exclude the whole `apps/minds` tree by path
-(`--ignore apps/minds`); all minds release tests run from `test-minds-release`
-above (the minds release procedure is a manual dispatch, not a `v*` tag):
+(`--ignore apps/minds`); all Imbue Studio release tests run from `test-minds-release`
+above (the Imbue Studio release procedure is a manual dispatch, not a `v*` tag):
 
 - **`test-mngr-release-docker`** -- `(docker or docker_sdk) and release`, with
   `--ignore apps/minds`.
@@ -206,7 +208,7 @@ actually run), but these tests do **not** require an imbue_cloud login.
   `find_free_port`.
 - **Deployment/services** (`deployment_tests/conftest.py`): `shared_env(role)`,
   `verified_user`, `ephemeral_env`, `signup_email` (mail.tm).
-- **General minds helpers** (`imbue/minds/testing.py`): `make_git_repo`,
+- **General Imbue Studio helpers** (`imbue/minds/testing.py`): `make_git_repo`,
   `init_and_commit_git_repo`,
   `stub_mngr_host_dir`, `extract_response`; `desktop_client/testing.py`
   (`restic_backup_a_file`); `utils/testing.py` (`RecordingMngrCaller`);

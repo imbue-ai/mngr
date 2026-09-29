@@ -214,7 +214,7 @@ def test_a_launch_cut_off_after_reaching_the_workspace_is_a_failure_not_unreacha
 def test_a_launch_mngr_never_answered_is_not_mistaken_for_one_that_never_ran(result: MngrCallResult) -> None:
     """It may have made the chat before it was cut off, so a caller that retried would make a second one.
 
-    Its stderr is minds' own line (a timeout's quotes the seed message), so none of it is shown as the machine's words."""
+    Its stderr is Imbue Studio's own line (a timeout's quotes the seed message), so none of it is shown as the machine's words."""
     caller = RecordingMngrCaller(result=result)
 
     launch = launch_skill_chat(caller, "agent-1", skill_name="assist", chat_name="assist-1", message="/assist x")

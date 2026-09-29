@@ -841,7 +841,7 @@ def build_login_url(login_base_url: str, callback_url: str, code_challenge: str,
     type=click.Path(dir_okay=False),
     help=(
         "Write the sign-in URL to this file once the callback listener is up. Lets an "
-        "embedder (the minds desktop client) offer a copy-the-link fallback without "
+        "embedder (the Imbue Studio desktop client) offer a copy-the-link fallback without "
         "parsing stderr."
     ),
 )
@@ -852,7 +852,7 @@ def build_login_url(login_base_url: str, callback_url: str, code_challenge: str,
     show_default=True,
     help=(
         "Seconds to keep waiting for the browser to finish signing in. A browser that finishes "
-        "after this lands on a closed local port, so embedders that stay open (the minds desktop "
+        "after this lands on a closed local port, so embedders that stay open (the Imbue Studio desktop "
         "app) pass a long window."
     ),
 )

@@ -1,8 +1,8 @@
-# Running minds on a Raspberry Pi
+# Running Imbue Studio on a Raspberry Pi
 
-A 64-bit Raspberry Pi 5 can host the production-tier minds desktop client, run
+A 64-bit Raspberry Pi 5 can host the production-tier Imbue Studio desktop client, run
 from source, as an always-on box you reach over VNC. This is useful when your
-main machine is the one you *develop* minds on: the Pi runs the real thing,
+main machine is the one you *develop* Imbue Studio on: the Pi runs the real thing,
 against production, with its own `~/.minds/` data root, and never collides with
 a dev checkout.
 
@@ -86,7 +86,7 @@ and listens on every interface, so keep the Pi on a network you trust or
 tunnel it (`ssh -N -L 5901:127.0.0.1:5900 <user>@<pi>` and connect to
 `localhost:5901`).
 
-The minds window is already open (or launch it from the menu). First launch
+The Imbue Studio window is already open (or launch it from the menu). First launch
 walks through the normal sign-in; create workspaces in DOCKER mode. The
 workspace image is built on the Pi from the public
 `default-workspace-template` at the pinned `minds-v*` tag, so the first

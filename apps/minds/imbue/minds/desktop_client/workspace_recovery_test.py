@@ -423,7 +423,7 @@ def test_run_mngr_falls_back_to_the_stderr_tail_when_mngr_printed_no_verdict(tmp
 def test_provider_error_message_for_workspace_keys_on_this_workspaces_provider() -> None:
     """The provider error message is attributed by exact provider name.
 
-    This is the per-provider keying that keeps a docker mind's recovery from
+    This is the per-provider keying that keeps a docker machine's recovery from
     being misclassified during a simultaneous imbue_cloud outage: only an error
     whose provider name matches this machine's is used.
     """
@@ -1602,7 +1602,7 @@ def test_recovery_step_failure_names_the_step_when_the_machines_provider_is_unkn
 def test_backend_unreachable_verdict_surfaces_the_providers_own_error() -> None:
     """A surfaced provider error is the verdict, carrying that provider's own words.
 
-    The message is shown verbatim precisely so minds never has to hand-author a
+    The message is shown verbatim precisely so Imbue Studio never has to hand-author a
     sentence per provider failure mode.
     """
     workspace_agent = AgentId.generate()
@@ -3363,7 +3363,7 @@ def _resolver_with_errored_provider(provider_name: str, backend: str) -> MngrCli
 def test_an_unreachable_remote_provider_measures_the_network_with_nothing_convicted(
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """The cold-start case: minds opened on a dead network, before anything is clicked.
+    """The cold-start case: Imbue Studio opened on a dead network, before anything is clicked.
 
     Nothing has been asked to load, so no machine is a probe suspect and none can
     go STUCK -- the gate that would otherwise ask about the network never runs.
@@ -3623,7 +3623,7 @@ def test_a_host_discovery_cannot_describe_is_still_asked_about() -> None:
 
     A reading taken when nothing is *known* to be running still has to be able
     to ask about something, or the facet would fall through to the public quorum
-    exactly when minds' own endpoints are the more informative answer.
+    exactly when Imbue Studio's own endpoints are the more informative answer.
     """
     unknown_agent = AgentId.generate()
     resolver = build_resolver_with_provider_backends(

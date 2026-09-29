@@ -15,7 +15,7 @@ account = "alice@imbue.com"
 
 There is no baked-in default connector URL: it comes from the per-instance `connector_url` field, or, when that is unset, the `MNGR__PROVIDERS__IMBUE_CLOUD__CONNECTOR_URL` environment variable. If neither is set, the provider raises.
 
-On tiers with a dedicated browser accounts origin (e.g. production's accounts.imbue.com), `auth login` opens the hosted login page there instead of on the connector host: pass `--accounts-url` or set the `MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL` environment variable (the minds desktop client sets it automatically from its `client.toml`). When neither is set, the login page opens on the connector host itself, which is correct on dev/CI tiers.
+On tiers with a dedicated browser accounts origin (e.g. production's accounts.imbue.com), `auth login` opens the hosted login page there instead of on the connector host: pass `--accounts-url` or set the `MNGR__PROVIDERS__IMBUE_CLOUD__ACCOUNTS_URL` environment variable (the Imbue Studio desktop client sets it automatically from its `client.toml`). When neither is set, the login page opens on the connector host itself, which is correct on dev/CI tiers.
 
 ## Sign in
 
@@ -75,7 +75,7 @@ The slow path needs a usable build context: run `mngr create` from (or `--projec
 
 If a step fails after a successful lease, the lease is released back to the pool before the error propagates. When the pool is empty, even the slow-path lease returns `ImbueCloudLeaseUnavailableError`.
 
-minds drives this automatically: it tries `fast_mode=require` first and, on `FastPathUnavailableError`, retries with `fast_mode=prevent`.
+Imbue Studio drives this automatically: it tries `fast_mode=require` first and, on `FastPathUnavailableError`, retries with `fast_mode=prevent`.
 
 ## Destroy / delete / stop
 
@@ -112,6 +112,11 @@ mngr imbue_cloud machines show my-workspace
 mngr imbue_cloud machines resize my-workspace --units 16
 mngr imbue_cloud machines resize my-workspace --disk-gb 56
 ```
+
+The current recorded size is also what `mngr list` reports for the machine's host, running
+or stopped: `host.resource.memory_gb` (units) and `host.resource.disk_gb`. The vCPU count in
+`host.resource.cpu.count` is the one recorded when the machine was created and does not follow
+a resize (the connector does not re-report it). A pending target only shows in `machines show`.
 
 Units and disk are metered by two plan quotas: `max_active_machine_units` caps the units
 summed across your running machines, and `max_total_machine_disk_gb` caps data-disk GB
@@ -210,7 +215,7 @@ Two rules protect workspace backups (buckets whose short name is their workspace
 
 - `bucket create` reserves the `host-` short-name prefix: creating such a name is refused unless a workspace record with that host id exists for your account, so a generic bucket can never collide with a backup bucket.
 
-- `bucket destroy` (with or without `--force`) refuses to destroy a workspace-backup bucket whose workspace record is still ACTIVE -- destroy the workspace first. Destroyed workspaces' backups are retained for 30 days and then reaped automatically by the connector (see the minds backup-retention docs).
+- `bucket destroy` (with or without `--force`) refuses to destroy a workspace-backup bucket whose workspace record is still ACTIVE -- destroy the workspace first. Destroyed workspaces' backups are retained for 30 days and then reaped automatically by the connector (see the Imbue Studio backup-retention docs).
 
 **Note:** total storage across all your buckets is capped by your plan's quota. While over the cap, an hourly server-side sweep turns your bucket keys read-only (the same credentials keep working for reads); they are restored automatically once you are back under quota, and an account over its storage quota cannot create new buckets.
 

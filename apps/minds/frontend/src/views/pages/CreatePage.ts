@@ -466,7 +466,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
             ? m("div", { id: "backup-api-key-row", class: "mt-2" }, [
                 m(FormLabel, { target: "backup_api_key_env" }, "restic environment"),
                 m("p", { class: "mb-1 type-helper text-tertiary" }, [
-                  "Written verbatim to restic.env. Don't set RESTIC_PASSWORD -- minds assigns each machine its ",
+                  "Written verbatim to restic.env. Don't set RESTIC_PASSWORD -- Imbue Studio assigns each machine its ",
                   "own. See the ",
                   m(
                     Link,
@@ -508,7 +508,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
           m(
             "p",
             { class: "mt-1 type-helper text-tertiary" },
-            "Make the machine reachable from the minds web client (only you are granted). Requires an account.",
+            "Make the machine reachable from the Imbue Studio web client (only you are granted). Requires an account.",
           ),
           model.enableWebAccess && model.accountId === ""
             ? m(

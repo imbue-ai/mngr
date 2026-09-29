@@ -12,7 +12,9 @@ from imbue.mngr_vps.config import VpsProviderConfig
 _DEFAULT_ENDPOINT: Final[str] = "ovh-us"
 _DEFAULT_PLAN: Final[str] = "vps-2025-model1"
 _DEFAULT_REGION: Final[str] = "US-EAST-VA"
-_DEFAULT_IMAGE_NAME: Final[str] = "Debian 12 - Docker"
+# Plain Debian 13: OVH offers no Docker-preinstalled trixie image, and the shared
+# mngr_vps host setup installs the pinned Docker Engine regardless.
+_DEFAULT_IMAGE_NAME: Final[str] = "Debian 13"
 # OVH images install the rebuild SSH key into the image's default non-root
 # user, not into /root. mngr operates as root downstream so we sudo-copy the
 # key to root during provisioning; this is the user the rebuild key lands on.
@@ -76,7 +78,7 @@ class OvhProviderConfig(VpsProviderConfig):
     )
     default_image_name: str = Field(
         default=_DEFAULT_IMAGE_NAME,
-        description="Default OS image name (Docker pre-installed).",
+        description="Default OS image name, as listed in OVH's catalog (Docker is installed by the shared host setup).",
     )
     bootstrap_ssh_user: str = Field(
         default=_DEFAULT_BOOTSTRAP_SSH_USER,

@@ -1,5 +1,5 @@
-// The minds embed contract: the ONLY sanctioned postMessage channel between
-// the trusted minds chrome (the embedder) and untrusted workspace content
+// The Imbue Studio embed contract: the ONLY sanctioned postMessage channel between
+// the trusted Imbue Studio chrome (the embedder) and untrusted workspace content
 // (the embedded cross-origin iframe).
 //
 // This module is the single source of truth for that boundary, on both sides:
@@ -41,7 +41,7 @@ export const OPEN_REQUEST_MODAL = "minds:open-request-modal";
 export const OPEN_HELP = "minds:open-help";
 // workspace -> embedder: open the shell's AI-key mint page for this
 // workspace. Payload: { hostId? }. The embedder replies with
-// OPEN_AI_KEYS_ACK so the workspace can tell "a minds chrome is present"
+// OPEN_AI_KEYS_ACK so the workspace can tell "an Imbue Studio chrome is present"
 // (with no chrome -- e.g. a direct share visit -- no ack ever arrives and
 // the workspace shows its fallback text).
 export const OPEN_AI_KEYS_PAGE = "minds:open-ai-keys-page";
@@ -97,13 +97,11 @@ export const OPEN_AI_KEYS_ACK = "minds:open-ai-keys-ack";
 // review popup, flipping the card ahead of the transcript's own notice.
 export const PERMISSION_RESOLUTIONS = "minds:permission-resolutions";
 // embedder -> workspace: the user opened a chat's notification; show that
-// chat. Payload: { chatId } -- the chat's id (its first agent's id). The
-// workspace raises a window already showing the chat, wherever it is, else
-// points the viewer's pinned chat window at it, else opens it in a window of
-// its own. Sent only to a workspace that has announced WORKSPACE_READY, which
-// every workspace handling this type does; a workspace on an older template
-// announces nothing, never receives the ask, and the user just lands on the
-// workspace.
+// chat. Payload: { chatId } -- the chat's id (its first agent's id). Which
+// window it lands in is the workspace's choice. Sent only to a workspace that
+// has announced WORKSPACE_READY, which every workspace handling this type
+// does; a workspace on an older template announces nothing, never receives
+// the ask, and the user just lands on the workspace.
 export const FOCUS_CHAT = "minds:focus-chat";
 // embedder -> workspace: what this chrome can do, sent right after
 // WORKSPACE_READY. Payload: { canPopOut }. A workspace that never receives it
@@ -336,7 +334,7 @@ export function createWorkspaceEndpoint(options) {
 }
 
 /**
- * The embedder side of the contract (runs in the trusted minds chrome page).
+ * The embedder side of the contract (runs in the trusted Imbue Studio chrome page).
  *
  * `getFrameWindow` returns the content iframe's `contentWindow` (or null
  * when no workspace is mounted); `isExpectedOrigin(origin)` confirms the

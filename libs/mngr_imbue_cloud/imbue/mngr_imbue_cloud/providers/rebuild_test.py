@@ -5,16 +5,19 @@ from pathlib import Path
 import pytest
 
 from imbue.imbue_common.primitives import PositiveFloat
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import ActivitySource
 from imbue.mngr.primitives import DockerBuilder
 from imbue.mngr.primitives import IdleMode
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr_imbue_cloud.config import ImbueCloudProviderConfig
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 from imbue.mngr_imbue_cloud.providers.rebuild import _DELEGATED_FIELDS
 from imbue.mngr_imbue_cloud.providers.rebuild import _SLICE_DELEGATED_FIELDS
 from imbue.mngr_imbue_cloud.providers.rebuild import _build_delegated_vps_config
 from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_config
+from imbue.mngr_imbue_cloud.providers.rebuild import build_slice_rebuild_provider
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import GUEST_RAM_HOLDBACK_MIB
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_vps.primitives import IsolationMode
@@ -146,14 +149,29 @@ def test_slice_rebuild_config_runs_the_container_under_the_account_runtime_with_
         "--security-opt=no-new-privileges",
         "--tmpfs",
         "/run",
-        "--tmpfs",
-        "/tmp:exec",
     )
     # The cap is sized from the guest's RAM exactly as the bake sizes it: the
     # guest boots with its units minus the holdback, so the rebuilt container is
     # capped like the original (and like the guest's own reconcile oneshot caps it).
     assert slice_config.slice_memory_mib == 8 * 1024 - GUEST_RAM_HOLDBACK_MIB
     assert slice_config.box_public_address == "51.81.208.81"
+
+
+def test_rebuilt_slice_container_gets_one_exec_tmp_capped_at_an_eighth_of_the_guest_ram(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    provider = build_slice_rebuild_provider(
+        name=ProviderInstanceName("imbue-cloud-rebuild-test"),
+        config=_runsc_account_config(),
+        mngr_ctx=temp_mngr_ctx,
+        lease_result=_lease(),
+    )
+    guest_mem_total_kib = 7_946_812
+
+    start_args = provider._compose_effective_start_args(None, guest_mem_total_kib)
+
+    tmpfs_specs = [start_args[idx + 1] for idx, arg in enumerate(start_args) if arg == "--tmpfs"]
+    assert sorted(tmpfs_specs) == ["/run", "/tmp:exec,size=970m"]
 
 
 def test_slice_rebuild_config_refuses_a_lease_without_a_machine_size() -> None:

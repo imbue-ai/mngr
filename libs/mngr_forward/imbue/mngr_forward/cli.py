@@ -274,7 +274,7 @@ def _bind_listen_socket(host: str, requested_port: int | None) -> socket.socket:
         "Terminate TLS and negotiate HTTP/2 (via ALPN) instead of serving plain HTTP/1.1. "
         "Removes Chromium's ~6-connection-per-origin ceiling for the workspace UI. Server leaf "
         "certs are minted per startup from a persistent local CA under the plugin state dir; "
-        "trust the CA once via --trust-ca to browse without cert warnings (the minds desktop "
+        "trust the CA once via --trust-ca to browse without cert warnings (the Imbue Studio desktop "
         "app trusts programmatically and needs no install)."
     ),
 )

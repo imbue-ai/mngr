@@ -129,7 +129,7 @@ def test_a_gap_both_clocks_saw_still_records_an_interval() -> None:
 
     The monotonic reading is a diagnostic label on the gap, never a condition on
     recording it: requiring the freeze would leave a SIGSTOP'd (or hypervisor-
-    paused) minds convicting workspaces for seconds it never probed.
+    paused) Imbue Studio convicting workspaces for seconds it never probed.
     """
     clocks = _Clocks(_T0)
     tracker, wakes = _make_tracker(clocks)
@@ -738,7 +738,7 @@ _WORKSPACE_ENDPOINT = SshEndpoint(host="box.example", port=22131)
 def test_a_reachable_workspace_endpoint_settles_the_ssh_facet_without_the_public_quorum(
     root_concurrency_group: ConcurrencyGroup,
 ) -> None:
-    """The endpoints minds dials are the only ones whose answer is the question.
+    """The endpoints Imbue Studio dials are the only ones whose answer is the question.
 
     A network that blocks port 22 in particular -- an ordinary anti-tunnelling
     policy -- says nothing about the high port an imbue_cloud machine's host
@@ -754,7 +754,7 @@ def test_a_reachable_workspace_endpoint_settles_the_ssh_facet_without_the_public
 
     assert reading.ssh is ConnectivityFacet.ONLINE
     assert reading.environment_block is EnvironmentBlock.NONE
-    # Settled by minds' own endpoint; the public hosts were never asked on SSH.
+    # Settled by Imbue Studio's own endpoint; the public hosts were never asked on SSH.
     assert [call for call in prober.probed_endpoints if call.startswith("ssh://")] == [
         f"ssh://{_WORKSPACE_ENDPOINT.host}:22131"
     ]
@@ -1127,7 +1127,7 @@ def test_a_host_is_reached_on_whichever_of_its_addresses_answers() -> None:
     stops one multi-homed host from spending the budget once per address. What
     it would take with it, done wrong, is the fallback that makes a host
     reachable at all when the address its resolver hands back first is not the
-    one answering -- an ordinary shape for minds' own endpoints on any machine
+    one answering -- an ordinary shape for Imbue Studio's own endpoints on any machine
     with both address families configured.
 
     The listener is bound to the address ``localhost`` resolves to *last*, so

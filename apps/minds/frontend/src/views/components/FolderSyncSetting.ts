@@ -85,12 +85,12 @@ function renderDirectionSentence(access: FileSharingAccess): m.Children {
       ? [
           "Since agents on this machine may both ",
           m("strong", { class: "font-semibold" }, "read and write"),
-          " the folder, Mind synchronizes changes between your computer and this machine in both directions.",
+          " the folder, Imbue Studio synchronizes changes between your computer and this machine in both directions.",
         ]
       : [
           "Since agents on this machine may only ",
           m("strong", { class: "font-semibold" }, "read"),
-          " the folder, Mind synchronizes changes from your computer to this machine in one direction.",
+          " the folder, Imbue Studio synchronizes changes from your computer to this machine in one direction.",
         ];
   return m("p", { class: "type-helper text-secondary m-0" }, clause);
 }
@@ -185,8 +185,8 @@ export function renderFolderSyncSetting(
         : m(
             "p",
             { class: "type-helper text-secondary m-0" },
-            "Mind will synchronize the folder when it's running, and agents can continue to access the " +
-              "synchronized folder when Mind is not running or your computer is offline.",
+            "Imbue Studio will synchronize the folder when it's running, and agents can continue to access the " +
+              "synchronized folder when Imbue Studio is not running or your computer is offline.",
           ),
       attrs.isOn ? renderDirectionSentence(attrs.access) : null,
       !attrs.isOn ||

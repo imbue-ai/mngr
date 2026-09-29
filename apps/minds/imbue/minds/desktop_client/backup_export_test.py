@@ -1,6 +1,6 @@
 """Unit + local-restic integration tests for backup_export.
 
-restic is a required dependency of the minds app, so the integration test runs
+restic is a required dependency of the Imbue Studio app, so the integration test runs
 unconditionally and FAILS (not skips) if ``restic`` is missing.
 """
 

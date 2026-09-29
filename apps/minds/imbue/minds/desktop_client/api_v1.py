@@ -1,6 +1,6 @@
-"""REST API v1 blueprint for the minds desktop client.
+"""REST API v1 blueprint for the Imbue Studio desktop client.
 
-The central minds API key is the ``Authorization: Bearer <key>`` credential
+The central Imbue Studio API key is the ``Authorization: Bearer <key>`` credential
 where ``<key>`` is from :mod:`api_key_store`. The latchkey gateway's bundled
 ``minds-api-proxy`` extension injects that header on every forwarded request,
 so an agent in a workspace reaches us by hitting
@@ -281,7 +281,7 @@ def _handle_app_version() -> AppVersionResponse:
 # ``minds-workspaces`` detent scope (see ``mngr_latchkey.agent_setup``); the
 # scope's per-verb permissions decide which of these a given caller may reach.
 # A workspace is addressed by its primary (``is_primary``) agent id, matching
-# minds discovery.
+# Imbue Studio discovery.
 
 
 def _serialize_workspace(agent_id: AgentId) -> WorkspaceSummary:
@@ -1018,7 +1018,7 @@ def _handle_create_workspace() -> tuple[OperationHandleResponse, int] | Response
     if launch_mode in (LaunchMode.AWS, LaunchMode.GCP, LaunchMode.AZURE) and not cloud_account:
         # BYOK-only modes (all three clouds): without an account the create
         # would fail minutes later in the background thread with an opaque
-        # provider error. Ambient machine-credential AWS was removed from minds.
+        # provider error. Ambient machine-credential AWS was removed from Imbue Studio.
         return _json_field_error(f"{launch_mode.value} requires a configured cloud account.", "cloud_account")
     matching = None
     if cloud_account:
@@ -1917,7 +1917,7 @@ def _handle_backup_service_configure(agent_id: str) -> tuple[OperationHandleResp
 def _handle_backup_service_disable(agent_id: str) -> tuple[OperationHandleResponse, int] | Response:
     """Turn a workspace's backups off; return a handle to poll.
 
-    Archives the canonical env minds-side (old snapshots stay reachable
+    Archives the canonical env on the Imbue Studio side (old snapshots stay reachable
     through the archive) and rotates the workspace's ``restic.env`` aside so
     the backup service goes idle. Env-only -- no chat gate, and no master
     password is needed to turn backups off. The verification check will
@@ -2034,7 +2034,7 @@ def _sse(payload: dict[str, object]) -> str:
 # Emitted at the start of a log replay whose earliest lines the create-attempt-log
 # buffer's cap has dropped, so the reader knows the history is partial.
 _CREATE_ATTEMPT_LOG_TRUNCATION_MARKER: Final[str] = (
-    f"[minds] (earlier output omitted: only the most recent {CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES} log lines are kept)"
+    f"[Imbue Studio] (earlier output omitted: only the most recent {CREATE_ATTEMPT_LOG_REPLAY_MAX_LINES} log lines are kept)"
 )
 
 
@@ -2179,7 +2179,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     Body: ``{"public_key": "<openssh public key>", "requester_workspace_id":
     "<caller's own id>"}``. The caller's private key never leaves the caller.
     The hub reads the target's ``authorized_keys`` back over ``mngr exec``,
-    prunes any expired minds-owned grant lines, drops any still-valid grant the
+    prunes any expired grant lines Imbue Studio owns, drops any still-valid grant the
     same requester already holds (so a re-request refreshes rather than stacks),
     appends the new (TTL-tagged) public key, writes the result back in one
     rewrite, and returns SSH connection info. Pruning on every grant means
@@ -2215,7 +2215,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # The hub must have an SSH endpoint it can reach for the target. Discovery
     # provides one for every real provider (a remote address for remote hosts; a
     # ``127.0.0.1:<published port>`` loopback for local Docker/Lima); only the
-    # bare local provider, which minds workspaces never use, lacks one.
+    # bare local provider, which Imbue Studio workspaces never use, lacks one.
     ssh_info = backend_resolver.get_ssh_info(parsed_id)
     if ssh_info is None:
         return _json_error("Target machine has no SSH endpoint that this desktop client can resolve", 501)
@@ -2234,7 +2234,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     mngr_binary = get_state().mngr_binary
 
     # Read the target's current authorized_keys (absent file -> empty), prune any
-    # expired minds-owned grant lines, append the new grant, and write the whole
+    # expired grant lines Imbue Studio owns, append the new grant, and write the whole
     # body back in one rewrite. Read + write are two mngr exec round-trips; the
     # prune logic lives in workspace_ssh so it stays unit-tested.
     #
@@ -2250,7 +2250,7 @@ def _handle_establish_ssh(agent_id: str) -> SshConnectionResponse | Response:
     # ``mngr exec`` appends a ``Command succeeded on agent <name>`` status line to
     # stdout after the command's output; reading that raw would write the status
     # line straight back into the target's authorized_keys -- and, because the
-    # prune step only drops minds-owned grant lines, it would accumulate another
+    # prune step only drops grant lines Imbue Studio owns, it would accumulate another
     # copy on every re-grant. The JSON envelope keeps the captured body clean.
     target_address = build_agent_address(parsed_id, backend_resolver)
     read_argv = [
@@ -3140,7 +3140,7 @@ def _handle_create_cloud_account() -> CloudAccountSummary | Response:
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(OkResponse))
 def _handle_delete_cloud_account(account_name: str) -> OkResponse | Response:
-    """Remove a cloud account from minds (keys forgotten; cloud resources kept).
+    """Remove a cloud account from Imbue Studio (keys forgotten; cloud resources kept).
 
     Refuses (409) while the account still has active workspaces -- deleting the
     provider block would drop them off discovery with no way to manage them.
@@ -3167,7 +3167,7 @@ def _handle_running_workspaces() -> Response:
 
     Scoped to local workspaces because the sole caller is the quit-time shutdown
     prompt, and quitting the app is only a reason to stop the workspaces running
-    on the user's own machine (see ``running_local_workspace_entries``).
+    on the user's own computer (see ``running_local_workspace_entries``).
     """
     running = desktop_control.running_local_workspace_entries(get_state().backend_resolver)
     logger.info("running-workspaces query (quit-time shutdown prompt): {}", running)

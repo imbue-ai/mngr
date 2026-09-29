@@ -71,7 +71,7 @@ public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICDn/NBtT5XWAmOSPj2S6kXsvEPAoO
 # (`wg genkey | tee ~/.mindsadmin/dev/wireguard.key | wg pubkey`) and each
 # box generates its own at prep.
 #
-# Addressing plan (MANAGEMENT_OVERLAY_CIDR_BY_TIER in the minds config; every
+# Addressing plan (MANAGEMENT_OVERLAY_CIDR_BY_TIER in the Imbue Studio config; every
 # tier gets a disjoint carve of the reserved 10.64.0.0/10 supernet, so one
 # operator machine can hold several tiers' tunnels at once). The dev tier's
 # overlay is 10.112.0.0/16:

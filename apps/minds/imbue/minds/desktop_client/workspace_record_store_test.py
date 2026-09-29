@@ -650,7 +650,7 @@ def test_reconcile_does_not_tombstone_unenriched_create_seed_rows(paths: Install
 
 def test_reconcile_never_tombstones_rows_with_empty_provenance(paths: InstallationPaths) -> None:
     """Bug-era rows pushed with ``hosting_device_id=""`` (an install whose first
-    session predated the minds-owned device id) attribute to no install, so
+    session predated the device id Imbue Studio owns) attribute to no install, so
     absent-host tombstoning must leave them alone."""
     cli = make_fake_imbue_cloud_cli()
     store = _make_store(paths, cli)
@@ -756,7 +756,7 @@ def test_collect_ssh_key_material_returns_none_when_uninitialized(tmp_path: Path
 
 
 def test_workspace_secrets_payload_tolerates_unknown_fields() -> None:
-    """A payload written by a future minds version must still parse here -- rejecting
+    """A payload written by a future Imbue Studio version must still parse here -- rejecting
     the whole blob would cost this install everything in it, including restic_env."""
     payload = WorkspaceSecretsPayload.model_validate_json(
         '{"restic_env": "RESTIC_REPOSITORY=s3:bucket", "future_field": {"nested": 1}}'

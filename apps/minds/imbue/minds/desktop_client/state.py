@@ -108,7 +108,9 @@ class DesktopClientState(MutableModel):
     api_v1_paths: InstallationPaths | None = Field(
         default=None, frozen=True, description="Workspace data paths; gates the /api/v1 mount"
     )
-    minds_config: MindsConfig | None = Field(default=None, frozen=True, description="Per-user minds config store")
+    minds_config: MindsConfig | None = Field(
+        default=None, frozen=True, description="Per-user Imbue Studio config store"
+    )
     geo_location_cache: GeoLocationCache = Field(
         default_factory=GeoLocationCache, description="One-shot IP-geolocation cache for region defaults"
     )
@@ -212,7 +214,7 @@ class DesktopClientState(MutableModel):
         description="Serializes each workspace's color label writes, dropping picks a newer one replaced",
     )
     minds_api_key: str | None = Field(
-        default=None, frozen=True, description="Central minds API key for /api/v1 + WebDAV"
+        default=None, frozen=True, description="Central Imbue Studio API key for /api/v1 + WebDAV"
     )
     latchkey_forward_supervisor: LatchkeyForwardSupervisor | None = Field(
         default=None, frozen=True, description="Detached mngr latchkey forward supervisor handle"

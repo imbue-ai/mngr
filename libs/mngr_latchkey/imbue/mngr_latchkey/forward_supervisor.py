@@ -31,7 +31,6 @@ from pydantic import PrivateAttr
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.utils.polling import poll_for_value
-from imbue.mngr_latchkey._pre_lock_migration import migrate_pre_lock_forward
 from imbue.mngr_latchkey._spawn import spawn_detached_mngr_latchkey_forward
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LatchkeyError
@@ -216,22 +215,6 @@ def _terminate_process_and_descendants(forward_process: psutil.Process) -> None:
         _terminate_process(descendant_process)
 
 
-def _terminate_pid_and_descendants(pid: int) -> None:
-    """Terminate the forward at ``pid`` and every descendant it owns.
-
-    CLEANUP: remove with ``_pre_lock_migration``, whose migration is its only caller.
-
-    Resolves the pid to a process here, so callers must have just established
-    that it is the intended one; a caller already holding a handle keeps its
-    captured identity by calling :func:`_terminate_process_and_descendants`.
-    """
-    try:
-        forward_process = psutil.Process(pid)
-    except psutil.NoSuchProcess:
-        return
-    _terminate_process_and_descendants(forward_process)
-
-
 class LatchkeyForwardSupervisor(MutableModel):
     """Ensure exactly one detached ``mngr latchkey forward`` is running.
 
@@ -250,7 +233,7 @@ class LatchkeyForwardSupervisor(MutableModel):
         frozen=True,
         description=(
             "Path to the ``mngr`` CLI used to launch the supervisor and (inside the "
-            "supervisor) to drive ``mngr observe``. Bundled callers like the minds "
+            "supervisor) to drive ``mngr observe``. Bundled callers like the Imbue Studio "
             "desktop client pass an absolute path; others fall back to ``mngr`` on PATH."
         ),
     )
@@ -271,7 +254,7 @@ class LatchkeyForwardSupervisor(MutableModel):
         default=None,
         frozen=True,
         description=(
-            "Working directory for the spawned ``mngr latchkey forward`` process. The minds "
+            "Working directory for the spawned ``mngr latchkey forward`` process. The Imbue Studio "
             "desktop client passes ``$HOME`` so the supervisor (a laptop-side ``mngr`` "
             "invocation) does not resolve project config from a transient cwd such as a dev "
             "checkout's ``.mngr/settings.toml``. ``None`` inherits the caller's cwd."
@@ -284,7 +267,7 @@ class LatchkeyForwardSupervisor(MutableModel):
             "Extra environment variables to set on the spawned ``mngr latchkey forward`` "
             "process (in addition to the supervisor's own ``os.environ``). The forward "
             "process inherits these into the ``latchkey gateway`` subprocess it owns and "
-            "from there into any gateway extension's ``process.env``. The minds desktop "
+            "from there into any gateway extension's ``process.env``. The Imbue Studio desktop "
             "client uses this to publish the current ``LATCHKEY_EXTENSION_MINDS_API_URL`` "
             "to the bundled ``minds-api-proxy`` extension on every supervisor restart, so "
             "the proxy always points at the live Minds API port without any cross-process "
@@ -344,10 +327,6 @@ class LatchkeyForwardSupervisor(MutableModel):
         """
         plugin_dir = self.plugin_data_dir
         with self._lock:
-            # CLEANUP: remove this call with ``_pre_lock_migration``. A forward
-            # predating the lock holds none, so it cannot be adopted and would
-            # run beside the one spawned below.
-            migrate_pre_lock_forward(plugin_dir, _terminate_pid_and_descendants)
             owned = _owning_forward(plugin_dir)
             if owned is not None:
                 _, owner = owned

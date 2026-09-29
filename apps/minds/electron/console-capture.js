@@ -1,7 +1,7 @@
 // Rolling capture of the RENDERER console, for bug reports.
 //
 // logger.js tees the main process's own console into electron.log, but nothing
-// on disk carried what the *pages* printed -- the minds SPA, and the workspace
+// on disk carried what the *pages* printed -- the Imbue Studio SPA, and the workspace
 // iframe and nested service frames that share its webContents. So a UI problem
 // arrived in a report with no front-end console behind it. This module records
 // every console message from every frame of every window into a log file under

@@ -555,7 +555,7 @@ def test_iter_permission_requests_invalidates_on_connect_error() -> None:
 def test_ensure_initialized_waits_out_a_supervisor_restart(tmp_path: Path) -> None:
     """A caller arriving while the supervisor is being restarted waits for the new gateway.
 
-    minds terminates and respawns ``mngr latchkey forward`` on every start, and
+    Imbue Studio terminates and respawns ``mngr latchkey forward`` on every start, and
     the terminated forward's record -- bound port and all -- stays on disk until
     the new one claims the directory an ``mngr`` cold start later. A gateway
     read landing in that window is early, not broken, so it has to wait for the

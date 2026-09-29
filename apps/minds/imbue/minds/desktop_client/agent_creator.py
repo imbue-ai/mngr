@@ -110,8 +110,8 @@ from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 
-# Inlined to avoid pulling the ``imbue-mngr-forward`` package into minds'
-# import graph -- minds spawns the plugin as a subprocess and otherwise has
+# Inlined to avoid pulling the ``imbue-mngr-forward`` package into Imbue Studio's
+# import graph -- Imbue Studio spawns the plugin as a subprocess and otherwise has
 # no Python-level dependency on it. The constant is a stable wire-format
 # contract; if the plugin ever renames its session cookie, both sides update
 # together.
@@ -124,7 +124,7 @@ _MNGR_FORWARD_SESSION_COOKIE_NAME: Final[str] = "mngr_forward_session"
 # assumption about which app that is or which routes it implements.
 _WORKSPACE_PROBE_PATH: Final[str] = "/"
 
-# Scheme of the `mngr forward` proxy origin. minds always runs the proxy with
+# Scheme of the `mngr forward` proxy origin. Imbue Studio always runs the proxy with
 # `--use-http2`, so it terminates TLS and the probe/redirect URLs the Python
 # side builds are always `https`.
 _MNGR_FORWARD_SCHEME: Final[str] = "https"
@@ -164,7 +164,7 @@ def _probe_once(probe_client: httpx.Client, probe_url: str, host_header: str) ->
     of *why* a probe never saw a 200, and a probe that fails while the
     renderer is connected through the same plugin cannot be diagnosed without
     it. Module-private helper used by ``probe_workspace_through_plugin``;
-    hoisted out to satisfy the minds project's no-inner-functions ratchet.
+    hoisted out to satisfy the Imbue Studio project's no-inner-functions ratchet.
     """
     try:
         response = probe_client.get(probe_url, headers={"Host": host_header})
@@ -189,7 +189,7 @@ def probe_workspace_through_plugin(
     Probes ``/`` (see ``_WORKSPACE_PROBE_PATH``). Reports the HTTP status
     observed (a 200 means some web server is up and answering on the inner
     port), or the transport failure that produced no response (connect error,
-    mid-stream EOF, read timeout). This is the one definition of "ready" minds
+    mid-stream EOF, read timeout). This is the one definition of "ready" Imbue Studio
     has, which is what makes every readiness check in it agree on the answer.
 
     ``workspace_id`` is the workspace's id (``agent-<hex>``, its services
@@ -385,14 +385,16 @@ class AgentCreateAttemptInfo(FrozenModel):
     handle returned synchronously from :py:meth:`AgentCreator.start_create_attempt`)
     because the canonical ``AgentId`` is only known *after* the inner
     ``mngr create`` returns -- for imbue_cloud agents the id is dictated
-    by the leased pool host's pre-baked agent, not by minds. ``agent_id``
+    by the leased pool host's pre-baked agent, not by Imbue Studio. ``agent_id``
     is therefore ``None`` until the inner ``mngr create`` emits its
     ``"event": "created"`` JSONL line; consumers that need to redirect
     to ``/goto/<agent_id>/`` should poll ``redirect_url`` instead, which
     is populated atomically with the ``DONE`` status.
     """
 
-    create_attempt_id: CreateAttemptId = Field(description="Minds-internal handle for this in-flight create attempt")
+    create_attempt_id: CreateAttemptId = Field(
+        description="Internal handle, used only inside Imbue Studio, for this in-flight create attempt"
+    )
     agent_id: AgentId | None = Field(
         default=None,
         description="Canonical mngr agent id; populated once ``mngr create`` returns, ``None`` while in-flight",
@@ -485,7 +487,7 @@ def sweep_orphaned_scratch_clones(temp_dir: Path) -> None:
     next create for that repo deleted it.
 
     Only roots untouched for a day are removed, so a clone belonging to a
-    *concurrently running* second Minds instance is never deleted out from under
+    *concurrently running* second Imbue Studio instance is never deleted out from under
     it, which is the exact failure this whole change is about.
     """
     cutoff = time.time() - ORPHANED_SCRATCH_CLONE_AGE_SECONDS
@@ -634,7 +636,7 @@ def _git_noninteractive_env() -> dict[str, str]:
 
     Git prompts for a username/password on the controlling terminal when a
     remote needs auth and no credential is available -- but the desktop client
-    has no terminal for the user to answer on, and when minds is launched from
+    has no terminal for the user to answer on, and when Imbue Studio is launched from
     a dev shell the prompt would hang the create attempt thread forever. With
     ``GIT_TERMINAL_PROMPT=0``, cloning a repo this machine lacks credentials
     for fails fast with git's stable "could not read Username ... terminal
@@ -863,7 +865,7 @@ def _rsync_worktree_over_clone(
         rsync_worktree_over_clone(worktree_dir, clone_dir, cg=cg, on_output=on_output)
 
 
-# Constant agent name for every minds-created agent. Minds runs one agent
+# Constant agent name for every agent Imbue Studio creates. Imbue Studio runs one agent
 # per host, so the agent name carries no per-workspace information; the
 # workspace is identified by its host name. Kept as a SafeName-typed
 # constant so callers can pass it to ``mngr`` without re-validating. The
@@ -880,7 +882,7 @@ _FAST_MODE_PREVENT: Final[str] = "prevent"
 # ``error_class`` of the imbue_cloud provider's ``FastPathUnavailableError``,
 # emitted by ``mngr create --format jsonl`` as a structured
 # ``{"event": "error", "error_class": ...}`` line when ``fast_mode=require``
-# finds no exact-attribute pool match. minds matches on this (not on
+# finds no exact-attribute pool match. Imbue Studio matches on this (not on
 # human-formatted error text) to fall back to the slow path. Kept in sync with
 # ``imbue.mngr_imbue_cloud.errors.FastPathUnavailableError``.
 _FAST_PATH_UNAVAILABLE_ERROR_CLASS: Final[str] = "FastPathUnavailableError"
@@ -949,7 +951,7 @@ class _PrebakedImageProgressReporter(MutableModel):
         if fetched_bytes - self.last_logged_bytes < _PREBAKED_IMAGE_PROGRESS_LOG_STEP_BYTES:
             return
         self.last_logged_bytes = fetched_bytes
-        self.log_line(f"[minds] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
+        self.log_line(f"[Imbue Studio] Downloading pre-baked Lima image... {fetched_bytes / 1e9:.1f} GB")
 
 
 class _PrebakedImageFallbackReporter(MutableModel):
@@ -958,7 +960,7 @@ class _PrebakedImageFallbackReporter(MutableModel):
     log_line: Callable[[str], None] = Field(frozen=True, description="Sink for one create-log line")
 
     def __call__(self, reason: str) -> None:
-        self.log_line(f"[minds] Building the workspace in the VM (slower): {reason}.")
+        self.log_line(f"[Imbue Studio] Building the workspace in the VM (slower): {reason}.")
 
 
 def provider_instance_name_for_launch(
@@ -978,7 +980,7 @@ def provider_instance_name_for_launch(
     Kept as the single source of truth for that mapping so the create command and
     the create form's availability check (which must agree on what "taken" means)
     never drift apart. ``imbue_cloud_account`` is the account *email* (slugified to
-    match the provider block minds registers); ``region`` is required for AWS.
+    match the provider block Imbue Studio registers); ``region`` is required for AWS.
 
     ``cloud_account`` is a bring-your-own-key account's provider block name
     (``byok-<backend>-<slug>``, written by ``bootstrap.set_cloud_account_provider``).
@@ -996,7 +998,7 @@ def provider_instance_name_for_launch(
             return "vultr"
         case LaunchMode.AWS:
             # BYOK-only (like GCP/AZURE): the ambient per-region ``aws-<region>``
-            # path was removed from minds; the ``cloud_account`` short-circuit
+            # path was removed from Imbue Studio; the ``cloud_account`` short-circuit
             # above is the only way to resolve an AWS provider instance.
             raise MngrCommandError("AWS mode requires a cloud account")
         case LaunchMode.IMBUE_CLOUD:
@@ -1008,7 +1010,7 @@ def provider_instance_name_for_launch(
             # token (``modal token new``).
             return "modal"
         case LaunchMode.GCP | LaunchMode.AZURE:
-            # GCP / Azure have no ambient provider instances in minds -- they are
+            # GCP / Azure have no ambient provider instances in Imbue Studio -- they are
             # reachable only through a bring-your-own-key account block, which the
             # ``cloud_account`` short-circuit above already returned.
             raise MngrCommandError(f"{launch_mode.value} mode requires a cloud account")
@@ -1050,7 +1052,7 @@ def _build_mngr_create_command(
 
     ``--format jsonl`` is appended so the caller can
     parse the canonical ``AgentId`` out of the trailing ``"event":
-    "created"`` line; minds no longer pre-generates an id because for
+    "created"`` line; Imbue Studio no longer pre-generates an id because for
     imbue_cloud the lease forces it back to the pool host's pre-baked
     id anyway, and pre-generating one led to bugs (e.g. keying gateway
     state under a fictional id).
@@ -1063,7 +1065,7 @@ def _build_mngr_create_command(
     VULTR mode: --template main --template vultr (runs in Docker on a Vultr VPS)
     AWS mode: --new-host on the aws-<region> provider, --template main
         --template aws (runs in a runsc Docker container on an EC2 instance;
-        the region-specific provider block is written by minds at startup)
+        the region-specific provider block is written by Imbue Studio at startup)
     IMBUE_CLOUD mode: --new-host on the imbue_cloud_<slug> provider (the
         plugin's create_host adopts the pool's pre-baked agent under
         the lease's baked name); ``imbue_cloud_*`` arguments encode the
@@ -1071,7 +1073,7 @@ def _build_mngr_create_command(
 
     Every mode creates a separate host, so the agent address uses
     ``system-services@<host_name>`` -- the agent name is constant across
-    every minds workspace; the host name (the user's input from the
+    every Imbue Studio workspace; the host name (the user's input from the
     create-project form) is the workspace identifier. Only IMBUE_CLOUD
     passes ``--reuse`` (to satisfy the pre-baked services-agent on the
     pool host); the other modes rely on ``--new-host`` for fresh-host
@@ -1083,7 +1085,7 @@ def _build_mngr_create_command(
     flags here -- ``run_mngr_create`` populates them in the subprocess env
     when needed and the template-declared forwards pick them up. Keeping the
     forwarding declaration in DEFAULT_WORKSPACE_TEMPLATE means the same template works for ``mngr
-    create`` invocations from outside minds too.
+    create`` invocations from outside Imbue Studio too.
 
     ``create_attempt_id_label`` is the opaque pending-create-attempt id stamped on the
     new HOST as a ``create-attempt-id`` host label (LIMA and DOCKER only -- the
@@ -1138,7 +1140,7 @@ def _build_mngr_create_command(
         # ``normalize_workspace_color`` call on the create-route side.
         color_label_args = ["--label", f"color={color}"]
 
-    # Stamp the minds version the workspace was created at as an immutable
+    # Stamp the Imbue Studio version the workspace was created at as an immutable
     # label. This is the resolved template ref (a ``minds-v*`` tag in prod,
     # or a branch/``main`` in dev); the workspace's own git history records
     # any later upgrades. Read back by the ``/api/v1/workspaces/<id>/version``
@@ -1283,7 +1285,7 @@ def _build_mngr_create_command(
             # ``fast_mode`` selects the imbue_cloud create path: ``require``
             # adopts an exact-attribute pre-baked pool host (fast); ``prevent``
             # leases any available host and rebuilds it from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile
-            # (slow, but always works). minds tries ``require`` first and falls
+            # (slow, but always works). Imbue Studio tries ``require`` first and falls
             # back to ``prevent`` on FastPathUnavailableError (see
             # ``_run_imbue_cloud_create_with_fallback``).
             if imbue_cloud_fast_mode:
@@ -1334,7 +1336,7 @@ def _build_mngr_create_command(
 def _slugify_account(account: str) -> str:
     """Mirror ``slugify_account`` from the plugin so the provider instance name lines up.
 
-    Inlined (rather than imported from ``imbue.mngr_imbue_cloud``) because minds
+    Inlined (rather than imported from ``imbue.mngr_imbue_cloud``) because Imbue Studio
     invokes ``mngr`` as a subprocess and is not allowed to depend on the
     plugin Python API.
     """
@@ -1366,7 +1368,7 @@ def _remote_host_env_flags() -> list[str]:
 
 
 # The two release-tag schemes a template repo may carry: the ``minds-v*`` tags
-# every minds release cuts, and plain ``v*`` semver tags. When both exist the
+# every Imbue Studio release cuts, and plain ``v*`` semver tags. When both exist the
 # ``minds-v*`` scheme wins outright -- the plain tags on the default template
 # predate it and are older than the in-place update floor, so "latest" across
 # both schemes would pick a template no current app can run.
@@ -1570,7 +1572,7 @@ def run_mngr_create(
     Returns ``(canonical_agent_id, canonical_host_id)``. Both canonical
     ids are parsed out of the ``"event": "created"`` JSONL line that
     ``mngr create`` emits as its final stdout record; the host id is
-    what minds keys per-host latchkey state (permissions, opaque handle
+    what Imbue Studio keys per-host latchkey state (permissions, opaque handle
     symlink target) by.
 
     Raises ``MngrCommandError`` if the command fails or never emits a
@@ -1694,7 +1696,7 @@ def run_mngr_aws_prepare(
     privileged create/authorize when the group (or a rule) is missing.
 
     ``AwsProvider.create_host`` refuses to launch an instance when the security
-    group is absent (it looks it up read-only), so minds runs this first for the
+    group is absent (it looks it up read-only), so Imbue Studio runs this first for the
     chosen region. Failures -- missing credentials, or a missing group the key
     cannot create -- raise ``MngrCommandError`` so the create attempt flow surfaces a
     clear message on the creating page rather than a deferred opaque create
@@ -1822,7 +1824,7 @@ def _attempt_mngr_create(fast_mode: str | None, params: _MngrCreateAttemptParams
         # production, a local clone path in dev). The provider canonicalizes it
         # -- resolving a local path to its ``origin`` remote -- so the fast path
         # adopts a pool host only when the request's repo *and* branch genuinely
-        # match what was baked. minds must not canonicalize here (it shells out
+        # match what was baked. Imbue Studio must not canonicalize here (it shells out
         # to ``mngr`` and cannot import the plugin).
         imbue_cloud_repo_url=(params.repo_source if is_imbue_cloud and params.repo_source else None),
         imbue_cloud_branch_or_tag=(params.branch_or_tag if is_imbue_cloud and params.branch_or_tag else None),
@@ -1869,7 +1871,7 @@ class AgentCreator(MutableModel):
     Thread-safe: all status reads/writes are guarded by an internal lock.
     """
 
-    paths: InstallationPaths = Field(frozen=True, description="Filesystem paths for minds data")
+    paths: InstallationPaths = Field(frozen=True, description="Filesystem paths for Imbue Studio data")
     server_port: int = Field(
         default=0,
         frozen=True,
@@ -1887,7 +1889,7 @@ class AgentCreator(MutableModel):
             "Wrapper around `mngr imbue_cloud …`. Used by IMBUE_CLOUD-mode create attempts to mint "
             "a LiteLLM virtual key before the standard ``mngr create`` invocation, and by "
             "destruction to release the lease. The lease + SSH bootstrap + agent rename "
-            "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so minds "
+            "themselves run inside the plugin's ``ImbueCloudProvider.create_host``, so Imbue Studio "
             "no longer maintains its own SuperTokens session, host pool, or LiteLLM key code. "
             "Other launch modes do not consult this client."
         ),
@@ -2083,7 +2085,7 @@ class AgentCreator(MutableModel):
         Raises ``WorkspaceNameInUseError`` when a live (non-terminal) create attempt
         on the same provider instance already holds the requested name --
         mngr's own conflict pre-flight cannot see a create that has not yet
-        reserved its host name, so two concurrent minds create attempts would
+        reserved its host name, so two concurrent Imbue Studio create attempts would
         otherwise race.
 
         ``account_id`` is the owning account's user id (empty for a private
@@ -2107,7 +2109,7 @@ class AgentCreator(MutableModel):
         ``ImbueCloudProvider.create_host`` runs the lease + SSH bootstrap
         and the rest of mngr's create pipeline adopts the pool host's
         pre-baked agent under the requested name. The plugin owns the
-        SuperTokens session, so minds only needs to know which account to
+        SuperTokens session, so Imbue Studio only needs to know which account to
         ask for.
 
         When ``on_created`` is provided, it is called with the canonical
@@ -2508,7 +2510,7 @@ class AgentCreator(MutableModel):
                 # IMBUE_CLOUD this clone is "wasted" in the sense that the
                 # leased pool host has its own pre-baked checkout, but it's
                 # what gives the local mngr a place to read the per-mode
-                # template + agent_types from -- the alternative was minds
+                # template + agent_types from -- the alternative was Imbue Studio
                 # inlining all those flags as command-line args, which let
                 # the imbue_cloud command-construction drift from the other
                 # modes' (and was hard to keep in sync with the bake's view
@@ -2538,7 +2540,7 @@ class AgentCreator(MutableModel):
                         # container's bare receiver also rejects shallow source
                         # packs with "shallow update not allowed". Cloning
                         # deeply avoids both. Local file:// clones are cheap.
-                        log_sink.put("[minds] Cloning local worktree: {}".format(resolved_path))
+                        log_sink.put("[Imbue Studio] Cloning local worktree: {}".format(resolved_path))
                         repo_name = extract_repo_name(repo_source)
                         scratch_clone_root = make_scratch_clone_root(repo_name)
                         clone_target = scratch_clone_root / repo_name
@@ -2569,12 +2571,12 @@ class AgentCreator(MutableModel):
                     else:
                         workspace_dir = resolved_path
                         is_workspace_dir_scratch_clone = False
-                        log_sink.put("[minds] Using local directory: {}".format(workspace_dir))
+                        log_sink.put("[Imbue Studio] Using local directory: {}".format(workspace_dir))
                 else:
                     repo_name = extract_repo_name(repo_source)
                     scratch_clone_root = make_scratch_clone_root(repo_name)
                     clone_target = scratch_clone_root / repo_name
-                    log_sink.put("[minds] Cloning {}...".format(_redact_url_credentials(repo_source)))
+                    log_sink.put("[Imbue Studio] Cloning {}...".format(_redact_url_credentials(repo_source)))
                     # Clone only the requested branch (non-shallow) when one is
                     # given: cheaper than a full clone, yet keeps the complete
                     # ancestry that the downstream mirror-push into the agent
@@ -2599,7 +2601,7 @@ class AgentCreator(MutableModel):
                 if branch:
                     with self._lock:
                         self._statuses[cid_str] = AgentCreateAttemptStatus.CHECKING_OUT_BRANCH
-                    log_sink.put("[minds] Checking out branch '{}'...".format(branch))
+                    log_sink.put("[Imbue Studio] Checking out branch '{}'...".format(branch))
                     # Scratch clones were just fetched into, so FETCH_HEAD is the
                     # requested ref; a plain local directory has no such fetch, and
                     # is the user's own checkout whose branch tip must not be reset.
@@ -2639,7 +2641,7 @@ class AgentCreator(MutableModel):
                 #
                 # ``prepare_agent_latchkey`` raises on infrastructure
                 # failures (latchkey CLI broken, on-disk write failed,
-                # etc.). Minds tolerates those by falling back to an
+                # etc.). Imbue Studio tolerates those by falling back to an
                 # empty setup so the agent still comes up -- it just
                 # won't authenticate to a password-protected gateway and
                 # won't have its own permissions file. The user can
@@ -2656,7 +2658,7 @@ class AgentCreator(MutableModel):
                 # no pre-created scaffolding at all.
 
                 parsed_host = HostName(host_name)
-                log_sink.put("[minds] Creating machine '{}' (mode: {})...".format(host_name, launch_mode.value))
+                log_sink.put("[Imbue Studio] Creating machine '{}' (mode: {})...".format(host_name, launch_mode.value))
 
                 # A dead (interrupted / failed) earlier create attempt holding this
                 # same name on this provider is implicitly discarded before the
@@ -2680,7 +2682,7 @@ class AgentCreator(MutableModel):
                 if self.lima_image_gate is not None:
                     is_lima = launch_mode is LaunchMode.LIMA
                     if is_lima:
-                        log_sink.put("[minds] Checking for a pre-baked Lima image...")
+                        log_sink.put("[Imbue Studio] Checking for a pre-baked Lima image...")
                     prebaked_lima_image_raw_path = self.lima_image_gate.resolve_image_for_create(
                         is_lima_launch_mode=is_lima,
                         repo_url=repo_source or "",
@@ -2696,7 +2698,7 @@ class AgentCreator(MutableModel):
                         else None,
                     )
                     if prebaked_lima_image_raw_path is not None:
-                        log_sink.put("[minds] Using pre-baked Lima image (fast create).")
+                        log_sink.put("[Imbue Studio] Using pre-baked Lima image (fast create).")
 
                 # ``fast_mode`` is the only knob that varies between the fast-
                 # path and slow-path attempts; bundle the rest of the per-
@@ -2784,12 +2786,12 @@ class AgentCreator(MutableModel):
                             link_error,
                         )
                         log_sink.put(
-                            "[minds] Warning: could not link latchkey permissions handle to "
+                            "[Imbue Studio] Warning: could not link latchkey permissions handle to "
                             f"canonical path for host {canonical_host_id}; this will be repaired "
                             f"automatically the first time the agent requests a permission. Reason: {link_error}"
                         )
 
-                log_sink.put("[minds] Agent created successfully.")
+                log_sink.put("[Imbue Studio] Agent created successfully.")
 
                 # Wait for the agent's system_interface to actually answer 200
                 # through the plugin before publishing the redirect. Without
@@ -2830,7 +2832,7 @@ class AgentCreator(MutableModel):
                 # The redirect URL is *absolute* and points at the plugin's
                 # bare origin. The SPA creating page does
                 # ``window.location.href = data.redirect_url`` directly; a
-                # relative ``/goto/...`` would navigate to the minds origin
+                # relative ``/goto/...`` would navigate to the Imbue Studio origin
                 # (port :8420) where ``/goto/`` is unrouted -- the user
                 # would land on FastAPI's default ``{"detail":"Not Found"}``
                 # response instead of being bridged into the agent
@@ -2883,7 +2885,7 @@ class AgentCreator(MutableModel):
             OSError,
         ) as e:
             logger.opt(exception=e).error("Failed to create agent for create attempt {}", create_attempt_id)
-            log_sink.put("[minds] ERROR: {}".format(e))
+            log_sink.put("[Imbue Studio] ERROR: {}".format(e))
             error_kind = classify_create_attempt_error(repo_source, e)
             # Snapshot the failure (and the create attempt log's tail) into the
             # pending-create-attempt record BEFORE publishing the in-memory
@@ -2956,7 +2958,7 @@ class AgentCreator(MutableModel):
                     "Could not list {} hosts to discard a dead create attempt: {}", provider_instance_name, e
                 )
                 log_sink.put(
-                    "[minds] Warning: could not check for a leftover host from a previous attempt; "
+                    "[Imbue Studio] Warning: could not check for a leftover host from a previous attempt; "
                     f"continuing anyway: {e}"
                 )
                 return
@@ -2965,7 +2967,7 @@ class AgentCreator(MutableModel):
             leftover = find_host_by_create_attempt_id_label(leftover_hosts, record.create_attempt_id)
             if leftover is not None:
                 log_sink.put(
-                    f"[minds] Cleaning up the previous attempt's unfinished host '{leftover.name}' ({leftover.id})..."
+                    f"[Imbue Studio] Cleaning up the previous attempt's unfinished host '{leftover.name}' ({leftover.id})..."
                 )
                 destroy_argv = [self.mngr_binary, "destroy", f"@{leftover.id}.{leftover.provider}", "--force"]
                 try:
@@ -2982,7 +2984,9 @@ class AgentCreator(MutableModel):
                         record.create_attempt_id,
                         e,
                     )
-                    log_sink.put(f"[minds] Warning: could not remove the previous attempt's host {leftover.id}: {e}")
+                    log_sink.put(
+                        f"[Imbue Studio] Warning: could not remove the previous attempt's host {leftover.id}: {e}"
+                    )
                     continue
             self.pending_create_attempt_store.delete_record(record.create_attempt_id)
             self.forget_create_attempt(CreateAttemptId(record.create_attempt_id))
@@ -3003,12 +3007,12 @@ class AgentCreator(MutableModel):
         If none is available the provider raises ``FastPathUnavailableError``,
         which ``mngr create --format jsonl`` surfaces as a structured
         ``{"event": "error", "error_class": "FastPathUnavailableError"}`` line;
-        minds matches on that ``error_class`` and retries with
+        Imbue Studio matches on that ``error_class`` and retries with
         ``fast_mode=prevent``, which leases any available host and rebuilds it
         from the DEFAULT_WORKSPACE_TEMPLATE Dockerfile (full client-side setup). Any other failure
         (including a genuinely empty pool) propagates unchanged.
         """
-        log_sink.put("[minds] Trying fast path (adopt a matching pre-baked pool host)...")
+        log_sink.put("[Imbue Studio] Trying fast path (adopt a matching pre-baked pool host)...")
         try:
             return _attempt_mngr_create(_FAST_MODE_REQUIRE, attempt_params)
         except MngrCommandError as exc:
@@ -3016,7 +3020,7 @@ class AgentCreator(MutableModel):
                 raise
             logger.info("imbue_cloud fast path unavailable; retrying with the slow path (full rebuild)")
             log_sink.put(
-                "[minds] No matching pre-baked pool host; falling back to slow path (leasing any host "
+                "[Imbue Studio] No matching pre-baked pool host; falling back to slow path (leasing any host "
                 "and rebuilding it). This is slower but always works when the pool has free hosts..."
             )
             return _attempt_mngr_create(_FAST_MODE_PREVENT, attempt_params)
@@ -3029,7 +3033,7 @@ class AgentCreator(MutableModel):
         """Run :func:`prepare_agent_latchkey` and downgrade its errors to warnings.
 
         The plugin raises on infrastructure failures so the caller can
-        decide. Minds's policy is to fall back to an empty setup -- the
+        decide. Imbue Studio's policy is to fall back to an empty setup -- the
         agent still comes up without latchkey wiring, and the user can
         fix the latchkey installation and re-create the agent.
         """
@@ -3041,11 +3045,11 @@ class AgentCreator(MutableModel):
             )
         except LatchkeyError as e:
             logger.warning("Failed to prepare latchkey wiring: {}", e)
-            log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            log_sink.put("[Imbue Studio] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
         except LatchkeyStoreError as e:
             logger.warning("Failed to materialize latchkey permissions handle: {}", e)
-            log_sink.put("[minds] Warning: latchkey wiring skipped: {}".format(e))
+            log_sink.put("[Imbue Studio] Warning: latchkey wiring skipped: {}".format(e))
             return AgentLatchkeySetup(env={}, opaque_permissions_path=None)
 
     def _provision_backups(
@@ -3111,7 +3115,7 @@ class AgentCreator(MutableModel):
         """Build the absolute URL the UI should navigate to after the create attempt.
 
         Always points at the plugin's ``/goto/<workspace-id>/`` route, never
-        minds' bare origin -- minds doesn't serve ``/goto/`` and would 404.
+        Imbue Studio's bare origin -- Imbue Studio doesn't serve ``/goto/`` and would 404.
         When ``mngr_forward_port`` isn't configured (test fixtures, etc.),
         falls back to the relative form so legacy callers that don't set the
         field keep working.
@@ -3148,7 +3152,7 @@ class AgentCreator(MutableModel):
             return
 
         deadline = time.monotonic() + timeout_seconds
-        log_sink.put("[minds] Waiting for system interface to be ready...")
+        log_sink.put("[Imbue Studio] Waiting for system interface to be ready...")
         last_outcome: WorkspaceProbeOutcome | None = None
         attempt = 0
         with make_workspace_probe_client(
@@ -3167,7 +3171,7 @@ class AgentCreator(MutableModel):
                 last_outcome = outcome
                 if outcome.is_ready:
                     logger.debug("Machine ready for {} after {} probe(s)", agent_id, attempt)
-                    log_sink.put("[minds] System interface is ready.")
+                    log_sink.put("[Imbue Studio] System interface is ready.")
                     # Propagate the success into the shared health tracker,
                     # clearing the suspect flag and probe-failure run that
                     # the warmup failures enrolled, so the chrome does not
@@ -3185,6 +3189,6 @@ class AgentCreator(MutableModel):
             last_outcome.summary if last_outcome is not None else "never probed",
         )
         log_sink.put(
-            "[minds] Warning: machine did not become ready within "
+            "[Imbue Studio] Warning: machine did not become ready within "
             f"{timeout_seconds:.0f}s; you may see a retry page on first load."
         )

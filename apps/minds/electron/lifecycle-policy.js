@@ -31,7 +31,7 @@ function shouldQuitOnWindowAllClosed({ isMac, isShuttingDown, isQuitSequenceRunn
 
 /**
  * Whether a window's `close` event should be intercepted to run the quit
- * sequence *before* the window disappears (so the local-mind shutdown prompt
+ * sequence *before* the window disappears (so the local-machine shutdown prompt
  * can appear while a window is still visible).
  *
  * Only the last live window triggers a quit, and only off macOS: on macOS

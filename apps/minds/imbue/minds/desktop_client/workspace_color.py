@@ -5,7 +5,7 @@ Figma source at node 356:4113), plus the WCAG luminance contrast picker
 and the lenient hex normalizer the picker UI needs.
 
 Pure black (``#000000``) and pure white (``#ffffff``) are intentionally
-*not* in the palette: non-workspace minds screens now paint themselves
+*not* in the palette: non-workspace Imbue Studio screens now paint themselves
 pure white (or pure black in dark mode) per the system theme, so a
 workspace whose accent was black or white would be indistinguishable
 from the neutral, workspace-less chrome. Users who really want one can

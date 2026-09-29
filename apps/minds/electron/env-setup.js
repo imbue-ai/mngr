@@ -35,7 +35,7 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
     // release. Their PEP 440 version (e.g. minds-0.1.0) stays the same
     // across releases, so without an explicit reinstall hint uv considers
     // them already-installed and skips updating them on upgrade -- the
-    // user keeps running the OLD code in ~/.minds/.venv even after the
+    // user keeps running the OLD code in the state root's .venv even after the
     // signed .app bundle has been replaced. Forcing --reinstall-package
     // for each one makes `uv sync` re-extract our wheels every launch,
     // while PyPI deps stay cached. This list is mirrored in
@@ -47,7 +47,9 @@ function runEnvSetup(onProgress, onLogLine = () => {}) {
       'minds',
       'imbue-mngr',
       'imbue-mngr-aws',
+      'imbue-mngr-azure',
       'imbue-mngr-claude',
+      'imbue-mngr-gcp',
       'imbue-mngr-codex',
       'imbue-mngr-forward',
       'imbue-mngr-imbue-cloud',

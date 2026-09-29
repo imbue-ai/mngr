@@ -746,7 +746,7 @@ describe("PermissionsTab add connection and self panels", () => {
     );
     const connect = withAttr(root, "data-perm-connect")[0];
     expect(attrsOf(connect).disabled).toBe(true);
-    expect(String(attrsOf(connect).title)).toContain("Mind can't work out which credentials AWS needs");
+    expect(String(attrsOf(connect).title)).toContain("Imbue Studio can't work out which credentials AWS needs");
   });
 
   it("says so when every service already has an account", async () => {
@@ -1066,7 +1066,7 @@ describe("PermissionsTab shared paths", () => {
     const { root, remove } = await renderLocalFiles(permissionsView({ shared_paths: [sharedPath()] }));
     const text = allText(root);
     expect(text).toContain("Keep a synchronized copy on the machine");
-    expect(text).toContain("when Mind is not running or your computer is offline");
+    expect(text).toContain("when Imbue Studio is not running or your computer is offline");
     remove();
   });
 

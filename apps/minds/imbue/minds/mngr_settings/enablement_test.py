@@ -38,7 +38,7 @@ def test_set_provider_is_enabled_flips_is_enabled_on_existing_block(
 def test_set_provider_is_enabled_creates_override_block_for_missing_provider(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """When [providers.<name>] doesn't exist in minds' settings, it's created with just is_enabled."""
+    """When [providers.<name>] doesn't exist in Imbue Studio's settings, it's created with just is_enabled."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
 
     changed = set_provider_is_enabled("docker", False, root=MindsRoot("minds-dev-tname"))
@@ -56,7 +56,7 @@ def test_set_provider_is_enabled_creates_override_block_for_missing_provider(
 def test_set_provider_is_enabled_creates_settings_file_when_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """If minds' active settings file does not yet exist, it is created."""
+    """If Imbue Studio's active settings file does not yet exist, it is created."""
     settings_path = stub_mngr_host_dir(monkeypatch, tmp_path, "minds-dev-tname")
     # Make sure no file exists yet
     if settings_path.exists():

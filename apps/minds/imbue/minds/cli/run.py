@@ -1,4 +1,4 @@
-"""``minds run``: spawn ``mngr forward`` and serve the bare-origin minds UI.
+"""``minds run``: spawn ``mngr forward`` and serve the bare-origin Imbue Studio UI.
 
 Replaces the deleted ``desktop_client/runner.py``. The auth + subdomain-
 forwarding logic lives in the ``mngr_forward`` plugin now; this command:
@@ -6,14 +6,14 @@ forwarding logic lives in the ``mngr_forward`` plugin now; this command:
 1. Spawns ``mngr forward --service system_interface --preauth-cookie ...`` as
    a subprocess via ``EnvelopeStreamConsumer`` (which feeds the surviving
    ``MngrCliBackendResolver`` from the plugin's envelope stream).
-2. Builds the slimmed minds-side bare-origin Flask app and runs it on
+2. Builds the slimmed Imbue Studio bare-origin Flask app and runs it on
    ``--port`` (default 8420).
 3. Emits a ``mngr_forward_started`` JSONL event on stdout carrying the
    preauth cookie value, so the Electron shell can pre-set
    ``mngr_forward_session=<value>`` on ``localhost:<mngr-forward-port>``
    before the first agent-subdomain navigation.
 
-Agents reach the Minds API via the latchkey gateway's bundled
+Agents reach the Imbue Studio API via the latchkey gateway's bundled
 ``minds-api-proxy`` extension rather than over a per-agent reverse SSH
 tunnel; the supervisor wires a gateway into each agent's container (the
 desktop gateway reverse-tunneled in, or the VPS-resident gateway
@@ -33,8 +33,9 @@ import click
 from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.minds.bootstrap import MindsPathRole
 from imbue.minds.bootstrap import MindsRoot
-from imbue.minds.bootstrap import minds_data_dir_for
+from imbue.minds.bootstrap import minds_dir_for_role
 from imbue.minds.bootstrap import resolve_effective_mngr_host_dir
 from imbue.minds.bootstrap import resolve_minds_root_name
 from imbue.minds.build_info import resolve_git_sha
@@ -151,16 +152,16 @@ _MNGR_FORWARD_LISTEN_TIMEOUT_SECONDS: Final[float] = 120.0
 # Env var read by the bundled ``minds-api-proxy`` gateway extension to
 # decide where to forward inbound proxy requests. Published to the
 # detached ``mngr latchkey forward`` supervisor (and from there to the
-# gateway, and from there to the extension) on every minds startup so
+# gateway, and from there to the extension) on every Imbue Studio startup so
 # the proxy always points at the current bare-origin port, even when
-# minds re-binds to a different port across restarts.
+# Imbue Studio re-binds to a different port across restarts.
 MINDS_API_PROXY_URL_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_URL"
 
 # Env var read by the bundled ``minds-api-proxy`` gateway extension on
 # each request; the proxy injects this value as ``Authorization: Bearer
 # <key>`` on every forwarded request. Freshly generated per ``minds
 # run`` and never persisted to disk -- the supervisor is restarted on
-# every minds startup and gets the current value in its env, the bare-
+# every Imbue Studio startup and gets the current value in its env, the bare-
 # origin server sees the same in-memory value, and the agent itself
 # never sees the key at all.
 MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
@@ -171,19 +172,19 @@ MINDS_API_PROXY_KEY_ENV_VAR: Final[str] = "LATCHKEY_EXTENSION_MINDS_API_KEY"
     "--host",
     default=DEFAULT_DESKTOP_CLIENT_HOST,
     show_default=True,
-    help="Host to bind the minds bare-origin server to",
+    help="Host to bind the Imbue Studio bare-origin server to",
 )
 @click.option(
     "--port",
     default=DEFAULT_DESKTOP_CLIENT_PORT,
     show_default=True,
-    help="Port to bind the minds bare-origin server to",
+    help="Port to bind the Imbue Studio bare-origin server to",
 )
 @click.option(
     "--no-browser",
     is_flag=True,
     default=False,
-    help="Do not open the minds UI in the system browser",
+    help="Do not open the Imbue Studio UI in the system browser",
 )
 @click.option(
     "--config-file",
@@ -207,17 +208,22 @@ def run(
     no_browser: bool,
     config_file: Path | None,
 ) -> None:
-    """Run the minds bare-origin server with `mngr forward` as a subprocess."""
+    """Run the Imbue Studio bare-origin server with `mngr forward` as a subprocess."""
     try:
         client_config_path = resolve_client_config_path(config_file)
     except EnvConfigError as exc:
         raise click.ClickException(str(exc)) from exc
     root_name = resolve_minds_root_name()
-    data_directory = minds_data_dir_for(root_name)
+    # The state root, not the legacy ~/.minds: caches and logs are separate roots
+    # so macOS can exclude them from Time Machine and reclaim the cache.
+    data_directory = minds_dir_for_role(MindsPathRole.STATE, root_name)
     minds_config = MindsConfig(data_dir=data_directory)
-    paths = InstallationPaths(data_dir=data_directory)
+    paths = InstallationPaths(
+        data_dir=data_directory,
+        log_root=minds_dir_for_role(MindsPathRole.LOGS, root_name),
+    )
 
-    # Initialize Sentry for the minds backend process. ``setup_logging`` already ran
+    # Initialize Sentry for the Imbue Studio backend process. ``setup_logging`` already ran
     # in the CLI group callback, so the loguru sinks Sentry layers on top of exist.
     #
     # Sentry always initializes, but what it actually sends is gated live by a single per-machine user
@@ -282,14 +288,14 @@ def run(
     )
     latchkey.initialize()
 
-    # Mint a fresh central minds API key for this process. The same
+    # Mint a fresh central Imbue Studio API key for this process. The same
     # value is handed to the latchkey gateway's ``minds-api-proxy``
     # extension (via the supervisor restart below, so it can inject
     # ``Authorization: Bearer <key>`` on every forwarded request) and
     # to the desktop client's own bearer-auth gates (so they accept
     # the header the proxy just injected). Generated in memory rather
     # than persisted because the supervisor is always restarted on
-    # minds startup and there is no other cross-process consumer.
+    # Imbue Studio startup and there is no other cross-process consumer.
     minds_api_key = generate_api_key()
 
     root_concurrency_group = ConcurrencyGroup(name="minds-run")
@@ -312,12 +318,12 @@ def run(
         logger.warning("Could not start the Docker state container at launch: {}", exc)
 
     # Spawn a detached ``mngr latchkey forward`` supervisor. It owns the
-    # shared latchkey gateway + per-agent reverse tunnels. On every minds
+    # shared latchkey gateway + per-agent reverse tunnels. On every Imbue Studio
     # start it is terminated and respawned (see
     # ``_restart_mngr_latchkey_forward_supervisor``) so it always runs the
     # current code with the current env; the reverse tunnels are
     # re-established as discovery re-fires. We do *not* terminate it on
-    # minds shutdown -- it keeps running detached so agents in
+    # Imbue Studio shutdown -- it keeps running detached so agents in
     # containers/VMs keep working across desktop-client restarts.
     gateway_client = LatchkeyGatewayClient.from_latchkey(latchkey)
 
@@ -328,7 +334,7 @@ def run(
     # Build the supervisor once and keep the handle: the startup restart runs on
     # the background thread below, and the same instance is held in the app state
     # so the provider-change request handlers can ``bounce()`` it mid-session
-    # (mirroring the SIGHUP minds already sends its own ``mngr forward`` observe).
+    # (mirroring the SIGHUP Imbue Studio already sends its own ``mngr forward`` observe).
     latchkey_forward_supervisor = LatchkeyForwardSupervisor(
         mngr_binary=MNGR_BINARY,
         latchkey_binary=latchkey.latchkey_binary,
@@ -336,7 +342,7 @@ def run(
         # Spawn the detached supervisor (and its `mngr observe` discovery
         # producer grandchild) from $HOME, like every other laptop-side mngr
         # invocation -- notably the `mngr forward` consumer below. Without this
-        # it inherits minds' cwd, which in a dev checkout is the monorepo root:
+        # it inherits Imbue Studio's cwd, which in a dev checkout is the monorepo root:
         # its mngr children then load `<repo>/.mngr/settings.toml`, and under
         # the e2e test that trips mngr's pytest config guard so the supervisor
         # never starts. A dead producer means no discovery snapshots, which the
@@ -359,7 +365,7 @@ def run(
         },
     )
 
-    # Seed the daemon's live consent file from minds' current consent before it is (re)spawned, so the
+    # Seed the daemon's live consent file from Imbue Studio's current consent before it is (re)spawned, so the
     # daemon's gates have a value to read immediately. It is rewritten whenever the user toggles
     # consent (see the error-reporting endpoints), which is what propagates a change to the daemon.
     write_latchkey_forward_sentry_consent(
@@ -399,7 +405,7 @@ def run(
     # depends on it, and repeatedly only while a bad answer is outstanding. A wake
     # invalidates whatever it last found -- the laptop may be somewhere else now.
     connectivity_detector = ConnectivityDetector(
-        # Measured against the endpoints minds itself dials rather than port 22:
+        # Measured against the endpoints Imbue Studio itself dials rather than port 22:
         # an imbue_cloud machine's host answers on a box-forwarded port in the
         # 22000-32000 range, so :22 says nothing about whether this device can
         # reach it.
@@ -561,7 +567,7 @@ def run(
     # Spawn the plugin and attach the envelope consumer that feeds the
     # surviving resolver from the plugin's stdout stream. We no longer
     # ask the plugin to set up a per-agent reverse SSH tunnel for the
-    # Minds API: agents reach it through the latchkey gateway's bundled
+    # Imbue Studio API: agents reach it through the latchkey gateway's bundled
     # ``minds-api-proxy`` extension instead, so no ``--reverse`` specs
     # are needed here.
     # `mngr forward` and every other laptop-side mngr invocation (including the
@@ -575,7 +581,7 @@ def run(
     forward_config = ForwardSubprocessConfig(
         mngr_host_dir=mngr_host_dir,
         # The chrome page embeds workspace origins in an iframe, so the proxy's
-        # frame-ancestors policy must allow the minds origin. Both loopback
+        # frame-ancestors policy must allow the Imbue Studio origin. Both loopback
         # spellings are listed: Electron navigates by 127.0.0.1 while the
         # printed browser login URL uses localhost.
         embedder_origins=(f"http://localhost:{port}", f"http://127.0.0.1:{port}"),
@@ -614,7 +620,7 @@ def run(
     system_interface_health_tracker = SystemInterfaceHealthTracker(sleep_tracker=sleep_tracker)
     sleep_tracker.add_on_wake_callback(system_interface_health_tracker.invalidate_recovery_progress_after_wake)
 
-    # The plugin reports every backend failure it observes; minds decides which
+    # The plugin reports every backend failure it observes; Imbue Studio decides which
     # ones count. Only envelopes carrying no status code, or an infrastructure
     # 5xx, enroll a suspect -- application errors (and UNRESOLVED, a routeless
     # warm-up) are left alone. STALLED enrolls despite not reporting a failed
@@ -754,7 +760,7 @@ def run(
         is_checked=False,
     )
 
-    # Every newly-discovered agent on a minds-managed host gets
+    # Every newly-discovered agent on a host Imbue Studio manages gets
     # its id appended to the host's ``latchkey_permissions.json``
     # allowed-agent list, and a remote host's machine is handed the result.
     LatchkeyAutoRegister(
@@ -766,7 +772,7 @@ def run(
 
     # Emit the started event so Electron can pre-set the cookie before the
     # first navigation. ``minds run`` itself does not open the browser at
-    # the agent subdomain — it opens the minds bare-origin URL.
+    # the agent subdomain — it opens the Imbue Studio bare-origin URL.
     emit_event(
         "mngr_forward_started",
         {
@@ -776,12 +782,12 @@ def run(
         output_format,
     )
 
-    # Mint a one-time code for the minds bare-origin auth flow (the plugin
+    # Mint a one-time code for the Imbue Studio bare-origin auth flow (the plugin
     # uses its own ``mngr_forward_session`` cookie on the agent subdomains).
     code = OneTimeCode(secrets.token_urlsafe(32))
     auth_store.add_one_time_code(code=code)
     minds_login_url = f"http://localhost:{port}/login?one_time_code={code}"
-    logger.info("Minds login URL (one-time use): {}", minds_login_url)
+    logger.info("Imbue Studio login URL (one-time use): {}", minds_login_url)
     emit_event("login_url", {"login_url": minds_login_url, "message": minds_login_url}, output_format)
 
     app = create_desktop_client(
@@ -925,7 +931,7 @@ def _build_latchkey(data_directory: Path) -> Latchkey:
     # The latchkey-binary path is supplied by the Electron shell (which
     # bundles its own copy of latchkey under the app resources) via
     # ``MINDS_LATCHKEY_BINARY``. We fall back to ``"latchkey"`` on PATH
-    # when the env var is not set, e.g. when minds is invoked outside
+    # when the env var is not set, e.g. when Imbue Studio is invoked outside
     # the Electron shell.
     binary_override = os.environ.get("MINDS_LATCHKEY_BINARY")
     latchkey_binary = binary_override if binary_override else LATCHKEY_BINARY
@@ -975,7 +981,7 @@ def _restart_supervisor_then_prewarm_gateway_client(
     baked into its ``extra_env``; it's threaded through to the
     supervisor as ``LATCHKEY_EXTENSION_MINDS_API_URL`` so the gateway's
     bundled ``minds-api-proxy`` extension knows where to forward agent
-    traffic. Restarting the supervisor on every minds start is what
+    traffic. Restarting the supervisor on every Imbue Studio start is what
     makes this work across port changes: the env var is re-read at
     spawn time, not cached anywhere. ``minds_api_key`` is published
     alongside as ``LATCHKEY_EXTENSION_MINDS_API_KEY`` so the proxy
@@ -993,24 +999,24 @@ def _restart_supervisor_then_prewarm_gateway_client(
 
 
 def _restart_mngr_latchkey_forward_supervisor(supervisor: LatchkeyForwardSupervisor) -> None:
-    """Restart the detached ``mngr latchkey forward`` supervisor on minds startup.
+    """Restart the detached ``mngr latchkey forward`` supervisor on Imbue Studio startup.
 
     Uses :meth:`LatchkeyForwardSupervisor.restart` rather than
-    ``ensure_running`` so that minds upgrades run with a freshly-spawned
+    ``ensure_running`` so that Imbue Studio upgrades run with a freshly-spawned
     supervisor: an older supervisor running stale code from a previous
-    minds version is terminated and replaced on every minds start, unless
-    another minds claims the directory first in the gap between the two. A running supervisor that minds is happy
+    Imbue Studio version is terminated and replaced on every Imbue Studio start, unless
+    another Imbue Studio claims the directory first in the gap between the two. A running supervisor that Imbue Studio is happy
     to adopt does not exist in practice -- the supervisor's lifetime
-    is tied to the gateway it owns, and the gateway is a minds-only
-    consumer today. Restarting on every minds start is also what
+    is tied to the gateway it owns, and the gateway has only Imbue Studio as a
+    consumer today. Restarting on every Imbue Studio start is also what
     keeps ``LATCHKEY_EXTENSION_MINDS_API_URL`` in sync with the
-    current bare-origin port -- minds re-binds its server on every
+    current bare-origin port -- Imbue Studio re-binds its server on every
     start, and the supervisor restart re-publishes the env var (baked
     into the supervisor's ``extra_env`` at construction time in ``run``).
 
     Failures are logged as warnings rather than raised: a broken
     supervisor degrades latchkey to "unreachable from inside agents"
-    but should not prevent minds itself from starting.
+    but should not prevent Imbue Studio itself from starting.
     """
     try:
         info = supervisor.restart()

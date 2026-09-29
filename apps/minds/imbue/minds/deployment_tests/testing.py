@@ -148,7 +148,7 @@ def parse_error_event_class(stdout: str) -> str | None:
 
     The human-formatted message on stderr carries no type, so callers that
     need to branch on which error occurred read it from here -- the same
-    ``{"event": "error", "error_class": ...}`` line minds branches on (see
+    ``{"event": "error", "error_class": ...}`` line Imbue Studio branches on (see
     ``agent_creator``).
     """
     for line in stdout.splitlines():

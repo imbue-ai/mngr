@@ -225,7 +225,7 @@ export function progressForElapsed(elapsedSeconds: number, expectedDurationSecon
   return 80 + 20 * (1 - Math.exp(-(elapsedSeconds - T) / T));
 }
 
-// ---- Optimistic mind Start/Stop tracking (port of the Landing page's
+// ---- Optimistic machine Start/Stop tracking (port of the Landing page's
 // pendingMindActionByAgent machinery). The channel's workspaces message
 // carries the authoritative liveness -- including backend-observed
 // STARTING/STOPPING transitions (e.g. a stop issued from another device),

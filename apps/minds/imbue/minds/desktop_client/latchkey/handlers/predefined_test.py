@@ -957,7 +957,7 @@ def test_grant_re_shows_the_form_when_the_stored_credentials_are_rejected(tmp_pa
 
 
 def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path: Path) -> None:
-    """Simulate the user establishing credentials outside minds between two Approve clicks.
+    """Simulate the user establishing credentials outside Imbue Studio between two Approve clicks.
 
     The fake binary flips its ``credentials`` object from empty (no accounts) to
     a single valid account after a sentinel file appears, modelling credentials
@@ -1004,7 +1004,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
     )
     assert first.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
 
-    # Credentials appear from outside minds -- modelled by writing the sentinel.
+    # Credentials appear from outside Imbue Studio -- modelled by writing the sentinel.
     sentinel.write_text("")
 
     second = handler.grant(

@@ -205,8 +205,8 @@ export const LandingPage: m.ClosureComponent = () => {
 
   function deleteCloudAccount(name: string): void {
     const isConfirmed = window.confirm(
-      `Delete "${name}" from minds? The stored keys are forgotten. ` +
-        "Your cloud resources (and anything created outside minds) are untouched.",
+      `Delete "${name}" from Imbue Studio? The stored keys are forgotten. ` +
+        "Your cloud resources (and anything created outside Imbue Studio) are untouched.",
     );
     if (!isConfirmed) return;
     fetch(`/api/v1/desktop/cloud-accounts/${encodeURIComponent(name)}`, {
@@ -890,7 +890,7 @@ export const LandingPage: m.ClosureComponent = () => {
                 "flex items-center gap-2 h-8 px-2 rounded-md cursor-pointer type-body text-secondary hover:text-primary hover:bg-fill-hover bg-transparent border-0 text-left",
               onclick: () => m.route.set("/settings"),
             },
-            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Mind Settings")],
+            [m(Icon16, { name: "settings", extra: "shrink-0" }), m("span", "Imbue Studio Settings")],
           ),
           m(
             "button",

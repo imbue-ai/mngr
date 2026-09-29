@@ -1,5 +1,5 @@
-"""Derives container liveness of minds whose host can be shut down (and started)
-from minds, for the landing-page Start/Stop controls and the quit-time shutdown
+"""Derives container liveness of machines whose host can be shut down (and started)
+from Imbue Studio, for the landing-page Start/Stop controls and the quit-time shutdown
 prompt.
 
 The global discovery snapshot already carries each host's lifecycle state (it is
@@ -8,24 +8,24 @@ into :class:`MngrCliBackendResolver` as ``host_state_by_host_id``), and the
 resolver also applies a short-lived *optimistic override* on ``get_host_state``
 when a UI Start/Stop fires (see ``set_host_state_override``). So this module owns
 no state machinery of its own; it just classifies the resolver's host state and
-scopes it to shutdown-capable minds:
+scopes it to shutdown-capable machines:
 
 - ``provider_backend_supports_shutdown`` -- the *single* gate for "can this
-  provider's host be stopped/started from minds today?" The local (docker /
+  provider's host be stopped/started from Imbue Studio today?" The local (docker /
   lima) backends, the cloud-VM backends (aws / gcp / azure), and imbue_cloud
   workspaces qualify; widen this one predicate when other providers gain host
   shutdown support.
-- ``provider_backend_is_local`` -- whether a mind runs on the user's own
-  machine, which is a narrower question than shutdown capability and the one
+- ``provider_backend_is_local`` -- whether a machine runs on the user's own
+  computer, which is a narrower question than shutdown capability and the one
   the quit prompt asks.
 - ``classify_host_state`` -- maps a discovery ``HostState`` to the coarse
   RUNNING / STOPPED / STOPPING / STARTING / UNKNOWN the UI shows.
 - ``get_shutdown_capable_workspace_agent_ids`` -- which active workspaces sit on
   a shutdown-capable provider.
-- ``compute_mind_liveness_by_agent_id`` -- the per-mind liveness map the
+- ``compute_mind_liveness_by_agent_id`` -- the per-machine liveness map the
   workspace list reads (one resolver walk).
 - ``compute_local_mind_liveness_by_agent_id`` -- the same map narrowed to local
-  minds, which is what the quit prompt reads.
+  machines, which is what the quit prompt reads.
 
 ``--discovery-only`` drops only the per-*agent* lifecycle/activity streams (the
 agent process's own state); it keeps host/container state, which is exactly what
@@ -46,8 +46,8 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 
-# Provider backends whose hosts can currently be stopped and started from minds.
-# Local backends (docker / lima) consume the user's own machine while alive, and
+# Provider backends whose hosts can currently be stopped and started from Imbue Studio.
+# Local backends (docker / lima) consume the user's own computer while alive, and
 # the cloud-VM backends (aws / gcp / azure) support real VM-level stop/start via
 # ``mngr stop --stop-host`` (EC2 stop / GCE stop / Azure deallocate) -- for the
 # bring-your-own-key-account flow, stopping is what halts the user's own cloud
@@ -66,18 +66,18 @@ _SHUTDOWN_CAPABLE_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset(
     {"docker", "lima", "aws", "gcp", "azure", "imbue_cloud"}
 )
 
-# Provider backends that run a mind on the user's own machine. A strict subset of
+# Provider backends that run a machine on the user's own computer. A strict subset of
 # the shutdown-capable set above, and a separate question: shutdown capability is
-# "can minds stop this host at all?", locality is "does this mind cost the user's
-# own machine while the app is closed?". Only local minds do, so only they are
-# offered for shutdown at quit -- a cloud mind goes on running (and serving its
+# "can Imbue Studio stop this host at all?", locality is "does this machine cost the user's
+# own computer while the app is closed?". Only local machines do, so only they are
+# offered for shutdown at quit -- a cloud machine goes on running (and serving its
 # agents) whether or not the app is open, which is the point of running one, and
 # it is stopped deliberately from its Start/Stop control instead.
 _LOCAL_PROVIDER_BACKENDS: Final[frozenset[str]] = frozenset({"docker", "lima"})
 
 
 class MindLiveness(UpperCaseStrEnum):
-    """Container liveness of a mind, surfaced to the landing page + quit prompt.
+    """Container liveness of a machine, surfaced to the landing page + quit prompt.
 
     STOPPING / STARTING are the *backend-observed* transitional states (e.g. an
     imbue_cloud workspace whose stop upload is still in flight); the frontend
@@ -93,7 +93,7 @@ class MindLiveness(UpperCaseStrEnum):
 
 
 def provider_backend_supports_shutdown(backend: str) -> bool:
-    """Whether a provider on ``backend`` exposes host stop/start to minds today.
+    """Whether a provider on ``backend`` exposes host stop/start to Imbue Studio today.
 
     The single gate behind every Start / Stop surface and the quit-time prompt.
     Local (docker / lima), BYO-cloud VM (aws / gcp / azure), and imbue_cloud
@@ -103,7 +103,7 @@ def provider_backend_supports_shutdown(backend: str) -> bool:
 
 
 def provider_backend_is_local(backend: str) -> bool:
-    """Whether a provider on ``backend`` runs its minds on the user's own machine."""
+    """Whether a provider on ``backend`` runs its machines on the user's own computer."""
     return backend in _LOCAL_PROVIDER_BACKENDS
 
 
@@ -177,7 +177,7 @@ def _liveness_by_agent_id(
 ) -> dict[str, MindLiveness]:
     """Classify each walked workspace's host state into the map the UI surfaces read.
 
-    Liveness reads each mind's host state via ``get_host_state``, which already
+    Liveness reads each machine's host state via ``get_host_state``, which already
     layers any short-lived optimistic override (set by a Start/Stop action) over
     the discovery snapshot -- so a just-issued action shows up here immediately
     and reconciles back to discovery on its own.
@@ -189,18 +189,18 @@ def _liveness_by_agent_id(
 
 
 def compute_mind_liveness_by_agent_id(backend_resolver: BackendResolverInterface) -> dict[str, MindLiveness]:
-    """Return ``{agent_id_str: MindLiveness}`` for every active shutdown-capable mind.
+    """Return ``{agent_id_str: MindLiveness}`` for every active shutdown-capable machine.
 
-    One resolver walk. This is the workspace list's scope: every mind whose host
-    minds can stop or start, local and cloud alike.
+    One resolver walk. This is the workspace list's scope: every machine whose host
+    Imbue Studio can stop or start, local and cloud alike.
     """
     return _liveness_by_agent_id(backend_resolver, _walk_shutdown_capable_workspaces(backend_resolver))
 
 
 def compute_local_mind_liveness_by_agent_id(backend_resolver: BackendResolverInterface) -> dict[str, MindLiveness]:
-    """Return ``{agent_id_str: MindLiveness}`` for the active local (docker / lima) minds.
+    """Return ``{agent_id_str: MindLiveness}`` for the active local (docker / lima) machines.
 
-    The quit prompt's narrower scope: the minds that hold the user's own machine
+    The quit prompt's narrower scope: the machines that hold the user's own computer
     for as long as they are up. See ``provider_backend_is_local``.
     """
     local_workspaces = [

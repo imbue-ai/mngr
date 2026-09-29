@@ -1,6 +1,6 @@
 """Host-name derivation for the workspace create flow.
 
-Minds derives a short, pretty host-name slug from the user's arbitrary
+Imbue Studio derives a short, pretty host-name slug from the user's arbitrary
 display name, and falls back to an automatic ``workspace-N`` name when the
 user leaves the create form's "Name" field empty.
 """

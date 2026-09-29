@@ -25,7 +25,7 @@ from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.compute import models as compute_models
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.network import models as network_models
-from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.resource.resources import ResourceManagementClient
 from azure.mgmt.resource.resources.models import ResourceGroup
 from loguru import logger
 from pydantic import ConfigDict
@@ -34,6 +34,7 @@ from pydantic import PrivateAttr
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
+from imbue.imbue_common.pure import pure
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.primitives import ProviderInstanceName
@@ -44,6 +45,7 @@ from imbue.mngr_azure.config import DEFAULT_IMAGE_OFFER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_PUBLISHER
 from imbue.mngr_azure.config import DEFAULT_IMAGE_SKU
 from imbue.mngr_azure.config import DEFAULT_IMAGE_VERSION
+from imbue.mngr_azure.errors import AzureVmSizeUnavailableError
 from imbue.mngr_azure.errors import InvalidAzureIdentifierError
 from imbue.mngr_vps.errors import VpsApiError
 from imbue.mngr_vps.errors import VpsProvisioningError
@@ -211,6 +213,22 @@ class AzureNetworkPrepareResult(FrozenModel):
     )
 
 
+_SKU_NOT_AVAILABLE_CODE: Final[str] = "SkuNotAvailable"
+
+
+@pure
+def is_sku_unavailable_error(error: HttpResponseError) -> bool:
+    """Whether an Azure error is the ``SkuNotAvailable`` refusal of a VM size.
+
+    A long-running VM create surfaces the code either on the parsed ARM error
+    body or only inside the message text, depending on which layer failed, so
+    both are checked.
+    """
+    if error.error is not None and error.error.code == _SKU_NOT_AVAILABLE_CODE:
+        return True
+    return _SKU_NOT_AVAILABLE_CODE in (error.message or "")
+
+
 class AzureVpsClient(VpsClientInterface):
     """Azure VM client implementing the VPS provider interface via the azure-mgmt SDK.
 
@@ -276,13 +294,11 @@ class AzureVpsClient(VpsClientInterface):
     _cached_resource_client: Any = PrivateAttr(default=None)
     _cached_authorization_client: Any = PrivateAttr(default=None)
 
-    # =========================================================================
     # Management clients
     #
     # Built lazily and cached on first use. Defined as methods (not inlined) so
     # the test-only subclass in testing.py can override them to inject fakes --
     # the same seam as the aws/gcp provider clients.
-    # =========================================================================
 
     def _compute(self) -> Any:
         if self._cached_compute_client is None:
@@ -318,12 +334,30 @@ class AzureVpsClient(VpsClientInterface):
             status_code = e.status_code if isinstance(e.status_code, int) else 0
             raise VpsApiError(status_code, e.message or str(e)) from e
 
+    @contextmanager
+    def _translate_vm_create_errors(self, vm_size: str) -> Iterator[None]:
+        """Translate a VM-create ``HttpResponseError`` like ``_translate_azure_errors``, with a curated ``SkuNotAvailable``.
+
+        Azure's own text for a size the subscription may not use reads like a
+        passing capacity shortage ("Capacity Restrictions"), so the user retries
+        the same size instead of picking another; ``AzureVmSizeUnavailableError``
+        names the size and region and says what to change.
+        """
+        try:
+            yield
+        except HttpResponseError as e:
+            status_code = e.status_code if isinstance(e.status_code, int) else 0
+            azure_message = e.message or str(e)
+            if is_sku_unavailable_error(e):
+                raise AzureVmSizeUnavailableError(
+                    vm_size=vm_size, region=self.region, status_code=status_code, azure_message=azure_message
+                ) from e
+            raise VpsApiError(status_code, azure_message) from e
+
     def _base_tags(self) -> dict[str, str]:
         return {AZURE_MANAGED_BY_TAG_KEY: AZURE_MANAGED_BY_TAG_VALUE}
 
-    # =========================================================================
     # Network management (idempotent; the privileged `mngr azure prepare` path)
-    # =========================================================================
 
     def _register_resource_providers(self) -> None:
         """Register the Compute/Network/Storage resource providers and wait until ready.
@@ -504,9 +538,7 @@ class AzureVpsClient(VpsClientInterface):
             raise
         return subnet.id
 
-    # =========================================================================
     # Instance Operations
-    # =========================================================================
 
     def create_instance(
         self,
@@ -570,7 +602,7 @@ class AzureVpsClient(VpsClientInterface):
         # destroy_instance's delete cascades them via delete_option=Delete.
         vm_created = False
         try:
-            with self._translate_azure_errors():
+            with self._translate_vm_create_errors(plan):
                 self._compute().virtual_machines.begin_create_or_update(
                     self.resource_group, vm_name, vm_model
                 ).result()
@@ -1154,9 +1186,7 @@ class AzureVpsClient(VpsClientInterface):
         logger.info("Deleted Azure resource group {} in region {}", self.resource_group, self.region)
         return self.resource_group
 
-    # =========================================================================
     # SSH Key Operations (no native Azure per-key resource; in-memory map)
-    # =========================================================================
 
     def upload_ssh_key(self, name: str, public_key: str) -> str:
         """Stash the public key in memory under ``name``; return ``name`` as the key ID.

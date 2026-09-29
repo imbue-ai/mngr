@@ -103,7 +103,7 @@ def test_build_destroy_command_targets_the_whole_host_via_its_provider() -> None
     # Whole-host shape: the host itself is the destroy target, so teardown
     # completeness does not depend on an agent-listing snapshot being complete
     # at that moment. There is deliberately no single-agent path, so destroying
-    # a minds workspace tears down the whole host (workspace agent +
+    # an Imbue Studio workspace tears down the whole host (workspace agent +
     # system-services). The @id.provider address (the startup reconcile's
     # shape) scopes resolution to the owning provider; --force keeps a retry
     # idempotent when the host is already gone.

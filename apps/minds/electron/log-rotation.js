@@ -10,7 +10,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
 
-// 10MB, matching the Python backend jsonl sink so all of minds' logs behave
+// 10MB, matching the Python backend jsonl sink so all of Imbue Studio's logs behave
 // consistently.
 const DEFAULT_MAX_SIZE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_ROTATED_COUNT = 10;

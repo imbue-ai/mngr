@@ -105,10 +105,13 @@ from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import check_file_exists_on_outer
 from imbue.mngr_vps.container_setup import delete_btrfs_subvolume_on_outer
 from imbue.mngr_vps.container_setup import ensure_depot_token_available
+from imbue.mngr_vps.container_setup import has_memory_limit_start_arg
 from imbue.mngr_vps.container_setup import host_volume_name_for
 from imbue.mngr_vps.container_setup import remove_container
 from imbue.mngr_vps.container_setup import remove_host_from_known_hosts
 from imbue.mngr_vps.container_setup import remove_volume
+from imbue.mngr_vps.container_setup import restart_policy_start_args
+from imbue.mngr_vps.container_setup import runsc_tmpfs_start_args
 from imbue.mngr_vps.container_setup import snapshot_trigger_volume_name_for
 from imbue.mngr_vps.data_types import ContainerFile
 from imbue.mngr_vps.data_types import PlacementHandle
@@ -120,7 +123,15 @@ from imbue.mngr_vps.docker_realizer import CONTAINER_SSH_KEY_NAME
 from imbue.mngr_vps.docker_realizer import DockerRealizer
 from imbue.mngr_vps.errors import BareIsolationNotSupportedError
 from imbue.mngr_vps.errors import VpsApiError
+from imbue.mngr_vps.errors import VpsError
+from imbue.mngr_vps.errors import VpsProvisioningError
+from imbue.mngr_vps.host_setup import CONTAINER_MEMORY_CAP_COMMAND_TIMEOUT_SECONDS
+from imbue.mngr_vps.host_setup import MEM_TOTAL_PROBE_COMMAND
 from imbue.mngr_vps.host_setup import MNGR_READY_MARKER_PATH
+from imbue.mngr_vps.host_setup import build_apply_container_memory_cap_command
+from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
+from imbue.mngr_vps.host_setup import parse_container_memory_cap_probe
+from imbue.mngr_vps.host_setup import parse_mem_total_kib
 from imbue.mngr_vps.host_store import VpsHostConfig
 from imbue.mngr_vps.host_store import VpsHostRecord
 from imbue.mngr_vps.host_store import VpsHostStore
@@ -138,6 +149,11 @@ from imbue.mngr_vps.primitives import per_host_key_dir
 from imbue.mngr_vps.vps_client import VpsClientInterface
 
 ParsedVpsBuildOptionsT = TypeVar("ParsedVpsBuildOptionsT", bound=ParsedVpsBuildOptions)
+
+
+def _is_keep_failed_hosts_requested() -> bool:
+    """Whether ``MNGR_KEEP_FAILED_HOSTS=1`` asks create to leave a failed host's cloud resources for debugging."""
+    return os.environ.get("MNGR_KEEP_FAILED_HOSTS", "0") == "1"
 
 
 class _VpsDiscoveryData(FrozenModel):
@@ -247,7 +263,7 @@ def _is_mngr_ready_marker_present_or_none(outer: OuterHostInterface) -> bool | N
 
     A ``HostConnectionError`` counts as "not ready yet" (None): the bootstrap runs
     ``apt-get install`` and Docker setup which can momentarily disrupt SSH (e.g.
-    ``systemctl restart ssh`` after writing the sshd tuning).
+    ``systemctl restart ssh`` after installing the sshd drop-in).
     """
     try:
         return True if check_file_exists_on_outer(outer, Path(MNGR_READY_MARKER_PATH)) else None
@@ -624,12 +640,15 @@ class VpsProvider(BaseProviderInstance):
     def _create_offline_host(
         self,
         host_record: VpsHostRecord,
+        observed_state: HostState | None,
     ) -> OfflineHost:
         """Create an OfflineHost from a host record.
 
         Wrapped so the offline host is readable (file reads served from its
         persisted volume) whether reached via ``get_host`` or
         ``to_offline_host``; the volume is resolved lazily, so this is free.
+        ``observed_state`` is what discovery saw directly (a reachable VPS with an
+        exited container is STOPPED, not the CRASHED the record alone would derive).
         """
         host_id = HostId(host_record.certified_host_data.host_id)
         vps_ip = host_record.vps_ip or ""
@@ -638,6 +657,7 @@ class VpsProvider(BaseProviderInstance):
             OfflineHost(
                 id=host_id,
                 certified_host_data=host_record.certified_host_data,
+                observed_state=observed_state,
                 provider_instance=self,
                 mngr_ctx=self.mngr_ctx,
                 on_updated_host_data=lambda callback_host_id, certified_data: self._on_certified_host_data_updated(
@@ -791,14 +811,20 @@ class VpsProvider(BaseProviderInstance):
             return host
 
         except Exception:
-            keep_failed = os.environ.get("MNGR_KEEP_FAILED_HOSTS", "0") == "1"
-            if keep_failed:
-                logger.error(
-                    "Host creation failed. MNGR_KEEP_FAILED_HOSTS=1 is set, "
-                    "skipping cleanup so you can debug. VPS instance: {}, IP: {}",
-                    vps_instance_id,
-                    vps_ip,
-                )
+            if _is_keep_failed_hosts_requested():
+                # An instance whose boot wait failed was already reported (and
+                # kept) by ``_provision_vps``; its id never reaches this frame.
+                if vps_instance_id is None:
+                    logger.error(
+                        "Host creation failed. MNGR_KEEP_FAILED_HOSTS=1 is set, skipping cleanup so you can debug."
+                    )
+                else:
+                    logger.error(
+                        "Host creation failed. MNGR_KEEP_FAILED_HOSTS=1 is set, "
+                        "skipping cleanup so you can debug. VPS instance: {}, IP: {}",
+                        vps_instance_id,
+                        vps_ip,
+                    )
             else:
                 logger.error("Host creation failed, attempting cleanup...")
                 try:
@@ -852,7 +878,9 @@ class VpsProvider(BaseProviderInstance):
         ``_finalize_host_creation`` writes ``host_state.json``.
         """
         base_image = str(image) if image else self.config.default_image
-        effective_start_args = self._compose_effective_start_args(start_args)
+        with log_span("Reading the VM's RAM"):
+            mem_total_kib = self._read_vm_mem_total_kib(outer)
+        effective_start_args = self._compose_effective_start_args(start_args, mem_total_kib)
         parsed = self._parse_build_args(build_args)
 
         realized = self._realizer.realize_placement(
@@ -872,6 +900,15 @@ class VpsProvider(BaseProviderInstance):
                 extra_ssh_config_files=extra_ssh_config_files,
             ),
         )
+
+        if realized.handle.container_name is not None:
+            if has_memory_limit_start_arg(effective_start_args):
+                logger.debug(
+                    "Leaving container {} at the memory cap its start args set", realized.handle.container_name
+                )
+            else:
+                with log_span("Capping the container's memory from the VM's RAM"):
+                    self._apply_container_memory_cap(outer, realized.handle.container_name)
 
         # Wait for the agent sshd here (not in the realizer) so subclasses can
         # override ``_wait_for_container_sshd`` to wait on a dynamically
@@ -1068,6 +1105,23 @@ class VpsProvider(BaseProviderInstance):
                 tags=vps_tags,
             )
 
+        # From here on the instance exists and bills, but ``create_host`` only
+        # learns its id from this method's return value, so a boot wait that
+        # gives up must destroy the instance itself or it leaks running.
+        is_vps_ready = False
+        try:
+            vps_ip = self._wait_for_vps_ready(host_id, vps_instance_id, vps_host_public_key)
+            is_vps_ready = True
+        finally:
+            if not is_vps_ready:
+                self._destroy_vps_that_never_became_ready(vps_instance_id)
+        return vps_instance_id, vps_ip
+
+    def _wait_for_vps_ready(self, host_id: HostId, vps_instance_id: VpsInstanceId, vps_host_public_key: str) -> str:
+        """Wait for a freshly created VPS to boot, serve our SSH host key, and finish its first-boot host setup.
+
+        Returns the VPS's SSH address.
+        """
         logger.log(LogLevel.BUILD.value, "Waiting for VPS to become active...", source="vps")
         with log_span("Waiting for VPS to become active"):
             vps_ip = self.vps_client.wait_for_instance_active(
@@ -1104,8 +1158,24 @@ class VpsProvider(BaseProviderInstance):
             with self._make_outer_for_vps_ip(vps_ip) as outer:
                 self._wait_for_cloud_init(outer, timeout_seconds=self.config.docker_install_timeout)
         logger.log(LogLevel.BUILD.value, "Host bootstrap complete, Docker is ready", source="vps")
+        return vps_ip
 
-        return vps_instance_id, vps_ip
+    def _destroy_vps_that_never_became_ready(self, vps_instance_id: VpsInstanceId) -> None:
+        """Best-effort destroy of an instance whose boot wait failed, unless the user asked to keep failed hosts."""
+        if _is_keep_failed_hosts_requested():
+            logger.error(
+                "VPS instance {} never became ready. MNGR_KEEP_FAILED_HOSTS=1 is set, skipping its cleanup so you "
+                "can debug.",
+                vps_instance_id,
+            )
+            return
+        logger.error("VPS instance {} never became ready, destroying it...", vps_instance_id)
+        try:
+            self.vps_client.destroy_instance(vps_instance_id)
+        except VpsError as cleanup_err:
+            logger.warning(
+                "Failed to destroy VPS instance {} that never became ready: {}", vps_instance_id, cleanup_err
+            )
 
     def _finalize_host_creation(
         self,
@@ -1273,31 +1343,87 @@ class VpsProvider(BaseProviderInstance):
         """
         self._write_shutdown_script(host, f"#!/bin/bash\n{self._realizer.idle_shutdown_command}\n")
 
-    def _compose_effective_start_args(self, start_args: Sequence[str] | None) -> tuple[str, ...]:
+    def _read_vm_mem_total_kib(self, outer: OuterHostInterface) -> int:
+        """The VM's RAM, which sizes the container's /tmp tmpfs and any provider-computed memory cap.
+
+        Raises ``VpsProvisioningError`` when unreadable.
+        """
+        result = outer.execute_idempotent_command(MEM_TOTAL_PROBE_COMMAND, timeout_seconds=30.0)
+        if not result.success:
+            raise VpsProvisioningError(f"Failed to read the VM's MemTotal: stderr={result.stderr.strip()!r}")
+        return parse_mem_total_kib(result.stdout)
+
+    def _compose_effective_start_args(self, start_args: Sequence[str] | None, mem_total_kib: int) -> tuple[str, ...]:
         """The full ``docker run`` args for the container: config-derived args, then the caller's.
 
         Order matters under docker's last-one-wins semantics: the configured
-        runtime, then ``default_start_args``, then provider-computed args
+        runtime, the tmpfs mounts runsc needs (/tmp capped from ``mem_total_kib``)
+        and the restart policy (each skipped when the configured args already
+        carry it), then ``default_start_args``, then provider-computed args
         (``_compute_extra_start_args``), then the caller's ``start_args`` last so
         an explicit caller flag always wins.
         """
         # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
         runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
-        return (
-            runtime_args
-            + tuple(self.config.default_start_args)
-            + self._compute_extra_start_args()
+        configured_args = (
+            tuple(self.config.default_start_args)
+            + self._compute_extra_start_args(mem_total_kib)
             + tuple(start_args or ())
         )
+        tmpfs_args = runsc_tmpfs_start_args(self.config.docker_runtime, configured_args, mem_total_kib)
+        restart_args = restart_policy_start_args(configured_args)
+        return runtime_args + tmpfs_args + restart_args + configured_args
 
-    def _compute_extra_start_args(self) -> tuple[str, ...]:
+    def _compute_extra_start_args(self, mem_total_kib: int) -> tuple[str, ...]:
         """Provider-computed ``docker run`` args appended after ``default_start_args``.
 
-        Subclasses that derive run args from provider-known instance shape (e.g.
-        the imbue_cloud slice provider's per-slice container memory cap) override
-        this; the base provider adds nothing.
+        Subclasses that derive run args from the VM the container will run on
+        (``mem_total_kib`` is its MemTotal; e.g. the imbue_cloud slice provider's
+        container memory cap) override this; the base provider adds nothing.
         """
         return ()
+
+    def _apply_container_memory_cap(self, outer: OuterHostInterface, container_name: str) -> None:
+        """Run the every-boot memory reconciler once so the new container is capped now, and verify it took.
+
+        The reconciler (installed by the shared host setup) caps every VM-sized
+        mngr container (one without an explicit ``--memory``) at the VM's RAM
+        minus a reserve; at boot it re-applies the cap, so this create-time run
+        is the same mechanism, not a second sizing path.
+        A host whose setup never installed the unit is left alone. Raises
+        ``VpsProvisioningError`` when the cap should have applied but did not:
+        an uncapped container can wedge the whole VM, so the create must not
+        report success with one.
+        """
+        result = outer.execute_idempotent_command(
+            build_apply_container_memory_cap_command(container_name),
+            timeout_seconds=CONTAINER_MEMORY_CAP_COMMAND_TIMEOUT_SECONDS,
+        )
+        if not result.success:
+            raise VpsProvisioningError(
+                f"Failed to cap the memory of container {container_name}: "
+                f"stderr={result.stderr.strip()!r} stdout={result.stdout.strip()!r}"
+            )
+        probe = parse_container_memory_cap_probe(result.stdout)
+        if probe is None:
+            logger.debug(
+                "Left container {} uncapped: the memory reconciler is not installed on this host", container_name
+            )
+            return
+        expected_bytes = expected_container_memory_cap_bytes(probe.mem_total_kib)
+        if expected_bytes is None:
+            logger.warning(
+                "Left container {} uncapped: the VM has only {} KiB of RAM, too little to cap after the reserve",
+                container_name,
+                probe.mem_total_kib,
+            )
+            return
+        if probe.container_memory_bytes != expected_bytes:
+            raise VpsProvisioningError(
+                f"Container {container_name} memory cap is {probe.container_memory_bytes} bytes, "
+                f"expected {expected_bytes} bytes (VM MemTotal {probe.mem_total_kib} KiB)"
+            )
+        logger.debug("Capped container {} memory at {} bytes", container_name, expected_bytes)
 
     @abstractmethod
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
@@ -1567,14 +1693,18 @@ class VpsProvider(BaseProviderInstance):
                     return self._create_host_object(
                         host_id, HostName(host_record.certified_host_data.host_name), vps_ip, realizer
                     )
+            # The VPS answered and its placement is merely not running: a clean stop
+            # (`mngr stop --stop-host`, the idle stop, or a container that exited behind
+            # mngr's back), which `mngr start` revives; the record alone would say CRASHED.
+            return self._create_offline_host(host_record, observed_state=HostState.STOPPED)
 
-        return self._create_offline_host(host_record)
+        return self._create_offline_host(host_record, observed_state=None)
 
     def to_offline_host(self, host_id: HostId) -> OfflineHost:
         host_record = self._find_host_record(host_id)
         if host_record is None:
             raise HostNotFoundError(self.name, host_id)
-        return self._create_offline_host(host_record)
+        return self._create_offline_host(host_record, observed_state=None)
 
     def discover_hosts(
         self,
@@ -1608,9 +1738,10 @@ class VpsProvider(BaseProviderInstance):
                     if realizer.is_placement_running(outer, PlacementHandle.from_record(record)):
                         self._create_host_object(host_id, host_name, record.vps_ip, realizer)
                     else:
-                        self._create_offline_host(record)
+                        # Reachable VPS, placement not running: a clean stop, as in ``get_host``.
+                        self._create_offline_host(record, observed_state=HostState.STOPPED)
             else:
-                self._create_offline_host(record)
+                self._create_offline_host(record, observed_state=None)
 
         return discovered
 
@@ -1699,7 +1830,7 @@ class VpsProvider(BaseProviderInstance):
                 self._create_host_object(host_id, host_name, record.vps_ip, self._realizer_for_record(record))
             elif is_cleanly_stopped:
                 host_state = HostState.STOPPED
-                self._create_offline_host(record)
+                self._create_offline_host(record, observed_state=host_state)
             else:
                 host_state = derive_offline_host_state(
                     certified_data=record.certified_host_data,
@@ -1707,7 +1838,7 @@ class VpsProvider(BaseProviderInstance):
                     supports_snapshots=self.supports_snapshots,
                     has_snapshots=has_snapshots,
                 )
-                self._create_offline_host(record)
+                self._create_offline_host(record, observed_state=None)
 
             host_ref = DiscoveredHost(
                 host_id=host_id,
@@ -2439,6 +2570,12 @@ class MinimalVpsProvider(VpsProvider):
     still passes the old shape gets a clear pointer rather than having the
     arg silently land in docker.
     """
+
+    def _apply_container_memory_cap(self, outer: OuterHostInterface, container_name: str) -> None:
+        # An externally provisioned VPS is sized by whoever provisioned it, so the
+        # create neither triggers nor verifies a cap here. Any reconciler the shared
+        # host setup installed on the VPS still applies its cap on the next boot.
+        del outer, container_name
 
     def _parse_build_args(self, build_args: Sequence[str] | None) -> ParsedVpsBuildOptions:
         # Composed from the shared helpers rather than hand-rolling the same

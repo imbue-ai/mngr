@@ -254,7 +254,7 @@ uv tool upgrade imbue-mngr
 git clone git@github.com:imbue-ai/mngr.git && cd mngr && uv sync --all-packages
 ```
 
-To run the [minds](https://github.com/imbue-ai/mngr/blob/main/apps/minds/README.md) desktop app from source on Linux, one script installs its prerequisites (Docker, uv, the pinned Node and pnpm) and launches it; see [apps/minds/docs/dev-setup.md](https://github.com/imbue-ai/mngr/blob/main/apps/minds/docs/dev-setup.md):
+To run the [Imbue Studio](https://github.com/imbue-ai/mngr/blob/main/apps/minds/README.md) desktop app from source on Linux, one script installs its prerequisites (Docker, uv, the pinned Node and pnpm) and launches it; see [apps/minds/docs/dev-setup.md](https://github.com/imbue-ai/mngr/blob/main/apps/minds/docs/dev-setup.md):
 ```bash
 curl -fsSL https://raw.githubusercontent.com/imbue-ai/mngr/main/apps/minds/scripts/install-linux.sh | bash
 ```
@@ -305,6 +305,8 @@ mngr <command> [options]
 - [`clone`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/aliases/clone.md): Create a copy of an existing agent
 - [`migrate`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/aliases/migrate.md): Move an agent to a different host
 - [`limit`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/limit.md): Configure limits for agents and hosts
+- [`docker`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/docker.md): Docker-provider-specific commands (resize a container's CPU and memory caps)
+- [`lima`](https://github.com/imbue-ai/mngr/blob/main/libs/mngr/docs/commands/secondary/lima.md): Lima-provider-specific commands (resize a VM's CPUs, memory, and data disk)
 
 ### For moving data in and out:
 
