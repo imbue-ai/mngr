@@ -150,9 +150,8 @@ def runsc_tmpfs_start_args(
     """The tmpfs flags a runsc container needs that ``configured_start_args`` does not already carry.
 
     Empty for any other runtime. A mount the caller already configured (e.g. the
-    gen-2 slice bake's own ``--tmpfs`` pair) is not repeated, so the composed
-    ``docker run`` line and the recorded start args stay unchanged for callers
-    that were already correct. ``mem_total_kib`` sizes the /tmp cap.
+    gen-2 slice bake's own ``--tmpfs /run``) is not repeated, so the caller's
+    options for it win. ``mem_total_kib`` sizes the /tmp cap.
     """
     if docker_runtime != _GVISOR_DOCKER_RUNTIME_NAME:
         return ()

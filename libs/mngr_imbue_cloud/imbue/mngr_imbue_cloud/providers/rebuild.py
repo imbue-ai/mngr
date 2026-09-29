@@ -45,7 +45,7 @@ def _slice_memory_mib_from_lease(lease_result: LeaseResult) -> int:
 # any knob it does not name).
 _DELEGATED_FIELDS: Final[frozenset[str]] = frozenset(VpsProviderConfig.model_fields) - {"backend"}
 # The slice guest ships runsc in its image, so the runsc host setup is never
-# run on a slice VM and the start args gain the slice tmpfs mounts (see
+# run on a slice VM and the start args gain the slice /run tmpfs (see
 # build_slice_rebuild_config).
 _SLICE_DELEGATED_FIELDS: Final[frozenset[str]] = _DELEGATED_FIELDS - {
     "install_gvisor_runtime",
@@ -118,7 +118,7 @@ def build_slice_rebuild_config(
     slice's guest ships the gVisor runtime in its image, so the rebuilt container
     runs under the account config's ``docker_runtime`` (the per-account block
     sets ``runsc``) with its hardening ``default_start_args`` plus the slice
-    tmpfs mounts -- exactly the shape the bake creates.
+    ``/run`` tmpfs -- exactly the shape the bake creates.
     """
     # The guest's RAM (from the lease's sizing column) sizes the rebuilt
     # container's memory cap, exactly as the bake sizes the original container's.

@@ -44,17 +44,16 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import is_same_ssh_public
 # remote_service_connector can ship it.
 
 # Gen-2 agent host containers run under gVisor from the bake (a property of the
-# fleet, like trixie), with /run and /tmp as tmpfs: runsc is registered with
+# fleet, like trixie), with /run as tmpfs: runsc is registered with
 # --overlay2=none, which leaves the container rootfs on gVisor's gofer-backed
 # filesystem, and that filesystem refuses the hard link supervisord installs its
 # control socket with (it would wedge on "Unlinking stale socket" forever).
-# Ephemeral dirs on tmpfs also never ride a backup. Applied by the bake's per-box
-# `-S providers.imbue_cloud_slice.*` overrides and the slow-path rebuild alike.
-# /tmp says `exec` because Docker mounts a bare `--tmpfs` noexec, and a workspace
-# runs what it writes there: a test's stub executable on PATH is skipped at a
-# noexec /tmp, so the real binary it stands in for runs instead.
+# Applied by the bake's per-box `-S providers.imbue_cloud_slice.*` overrides and
+# the slow-path rebuild alike. /tmp is not here: mngr_vps mounts it under runsc,
+# executable and capped at a share of the slice VM's RAM
+# (``runsc_tmpfs_start_args``).
 GEN2_CONTAINER_RUNTIME: Final[SliceContainerRuntime] = SliceContainerRuntime.RUNSC
-GEN2_CONTAINER_TMPFS_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run", "--tmpfs", "/tmp:exec")
+GEN2_CONTAINER_TMPFS_START_ARGS: Final[tuple[str, ...]] = ("--tmpfs", "/run")
 
 
 @pure
