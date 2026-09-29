@@ -1227,12 +1227,16 @@ def test_bounce_skips_sighup_while_forward_is_still_starting(tmp_path: Path) -> 
         _terminate_orphan(fake)
 
 
+@pytest.mark.flaky
 def test_bounce_sighups_forward_once_gateway_port_is_stamped(tmp_path: Path) -> None:
     """Once the record carries a gateway port, ``bounce()`` delivers the SIGHUP.
 
     The fake forward's SIGHUP handler writes a delivery sentinel -- the
     counterpart to the still-starting skip above, proving the readiness guard
     does not suppress bounces for fully-started supervisors.
+
+    Marked flaky: on a heavily loaded machine the spawned fake forward has been
+    seen not to take the ownership lock within the spawn helper's poll.
     """
     fake_binary = _make_fake_mngr_binary(tmp_path)
     latchkey_directory = tmp_path / f"latchkey-{uuid4().hex}"

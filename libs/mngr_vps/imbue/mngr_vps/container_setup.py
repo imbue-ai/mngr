@@ -65,9 +65,8 @@ DEFAULT_IMAGE: Final[str] = "debian:bookworm-slim"
 OUTER_HOST_ADD_HOST_ARGS: Final[tuple[str, str]] = ("--add-host", f"{OUTER_HOST_HOSTNAME_IN_CONTAINER}:host-gateway")
 
 # Path inside the agent container where the unified host volume is mounted.
-# The container sees three top-level entries under this mount: host_state.json,
-# agents/, and host_dir/. The container's mngr host_dir symlink resolves into
-# the host_dir/ subdirectory so all of the agent's writes end up on the volume.
+# The container's mngr host_dir resolves into the volume, so all of the agent's
+# writes end up on it.
 HOST_VOLUME_MOUNT_PATH: Final[str] = "/mngr-vol"
 
 # Subdirectory inside the unified volume that backs the agent's mngr host_dir.

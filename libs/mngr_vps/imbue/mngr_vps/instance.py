@@ -1344,7 +1344,10 @@ class VpsProvider(BaseProviderInstance):
         self._write_shutdown_script(host, f"#!/bin/bash\n{self._realizer.idle_shutdown_command}\n")
 
     def _read_vm_mem_total_kib(self, outer: OuterHostInterface) -> int:
-        """The VM's RAM, which sizes the container's /tmp tmpfs. Raises ``VpsProvisioningError`` when unreadable."""
+        """The VM's RAM, which sizes the container's /tmp tmpfs and any provider-computed memory cap.
+
+        Raises ``VpsProvisioningError`` when unreadable.
+        """
         result = outer.execute_idempotent_command(MEM_TOTAL_PROBE_COMMAND, timeout_seconds=30.0)
         if not result.success:
             raise VpsProvisioningError(f"Failed to read the VM's MemTotal: stderr={result.stderr.strip()!r}")
@@ -1363,18 +1366,20 @@ class VpsProvider(BaseProviderInstance):
         # Prepend `--runtime <value>` (e.g. 'runsc' for gVisor) when configured; absent by default.
         runtime_args = ("--runtime", self.config.docker_runtime) if self.config.docker_runtime is not None else ()
         configured_args = (
-            tuple(self.config.default_start_args) + self._compute_extra_start_args() + tuple(start_args or ())
+            tuple(self.config.default_start_args)
+            + self._compute_extra_start_args(mem_total_kib)
+            + tuple(start_args or ())
         )
         tmpfs_args = runsc_tmpfs_start_args(self.config.docker_runtime, configured_args, mem_total_kib)
         restart_args = restart_policy_start_args(configured_args)
         return runtime_args + tmpfs_args + restart_args + configured_args
 
-    def _compute_extra_start_args(self) -> tuple[str, ...]:
+    def _compute_extra_start_args(self, mem_total_kib: int) -> tuple[str, ...]:
         """Provider-computed ``docker run`` args appended after ``default_start_args``.
 
-        Subclasses that derive run args from provider-known instance shape (e.g.
-        the imbue_cloud slice provider's per-slice container memory cap) override
-        this; the base provider adds nothing.
+        Subclasses that derive run args from the VM the container will run on
+        (``mem_total_kib`` is its MemTotal; e.g. the imbue_cloud slice provider's
+        container memory cap) override this; the base provider adds nothing.
         """
         return ()
 

@@ -21,13 +21,12 @@ from imbue.mngr_vps.vps_client import ExternallyManagedVpsClient
 
 @pure
 def _slice_memory_mib_from_lease(lease_result: LeaseResult) -> int:
-    """The RAM the leased machine's guest actually has, in MiB.
+    """The RAM the leased machine's guest boots with (its units minus the per-machine holdback), in MiB.
 
-    The container cap is derived from this exactly as the bake derives it: the
-    guest boots with its units minus the per-machine holdback (what its own
-    reconcile oneshot sees in MemTotal). A lease that carries no size cannot
-    be capped like the baked machine, so it is refused rather than left
-    uncapped.
+    Its presence is what makes the rebuilt container capped like the baked one;
+    the cap itself comes from the guest's MemTotal, read when the container is
+    created, as the bake reads it. A lease that carries no size cannot be
+    capped like the baked machine, so it is refused rather than left uncapped.
     """
     units = lease_result.memory_units
     if units is None or units <= 0:
@@ -120,8 +119,8 @@ def build_slice_rebuild_config(
     sets ``runsc``) with its hardening ``default_start_args`` plus the slice
     ``/run`` tmpfs -- exactly the shape the bake creates.
     """
-    # The guest's RAM (from the lease's sizing column) sizes the rebuilt
-    # container's memory cap, exactly as the bake sizes the original container's.
+    # A sized machine gets its rebuilt container capped, exactly as the bake caps
+    # the original one (from the guest's MemTotal).
     return SliceVpsDockerProviderConfig(
         **_delegated_vps_fields(config, _SLICE_DELEGATED_FIELDS),
         box_public_address=lease_result.vps_address,

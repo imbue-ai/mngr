@@ -190,26 +190,31 @@ _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({SERVER_STATUS_READY, SERV
 
 
 @pure
-def compute_slice_container_memory_cap_mib(slice_memory_mib: int) -> int:
-    """The workspace container's hard memory cap: the slice VM's RAM minus the VM-side reserve."""
-    cap_mib = slice_memory_mib - SLICE_CONTAINER_MEMORY_RESERVE_MIB
+def compute_slice_container_memory_cap_mib(guest_mem_total_mib: int) -> int:
+    """The workspace container's hard memory cap: the VM's visible RAM (its MemTotal) minus the VM-side reserve.
+
+    The VM's every-boot reconcile oneshot computes the same value from the same
+    MemTotal, which is below the RAM qemu gives the guest (the kernel keeps a
+    share).
+    """
+    cap_mib = guest_mem_total_mib - SLICE_CONTAINER_MEMORY_RESERVE_MIB
     if cap_mib <= 0:
         raise BareMetalConfigError(
-            f"slice_memory_mib={slice_memory_mib} leaves no container memory after the "
+            f"a guest MemTotal of {guest_mem_total_mib}MiB leaves no container memory after the "
             f"{SLICE_CONTAINER_MEMORY_RESERVE_MIB}MiB VM reserve"
         )
     return cap_mib
 
 
 @pure
-def build_slice_container_memory_start_args(slice_memory_mib: int) -> tuple[str, ...]:
+def build_slice_container_memory_start_args(guest_mem_total_mib: int) -> tuple[str, ...]:
     """The ``docker run`` args that hard-cap the workspace container's memory.
 
     ``--memory-swap`` equals ``--memory`` (memcg ``swap.max=0``) so the container can
     never swap: under pressure it is shed fast (earlyoom, then the cgroup OOM killer,
     both steered by the workspace's ``oom_score_adj`` bands) instead of thrashing.
     """
-    cap_mib = compute_slice_container_memory_cap_mib(slice_memory_mib)
+    cap_mib = compute_slice_container_memory_cap_mib(guest_mem_total_mib)
     return (f"--memory={cap_mib}m", f"--memory-swap={cap_mib}m")
 
 

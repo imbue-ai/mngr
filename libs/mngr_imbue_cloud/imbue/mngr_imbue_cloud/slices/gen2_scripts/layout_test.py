@@ -1,6 +1,7 @@
 import pytest
 
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.errors import InvalidSliceOrdinalError
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_HOST_QUOTA_QGROUP
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_HOST_ID_CONTAINER_LABEL
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_MAX_SLICE_COUNT
@@ -13,6 +14,7 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_tap_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_unit_name
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import slice_unix_user
 from imbue.mngr_vps.container_setup import HOST_QUOTA_QGROUP
+from imbue.mngr_vps.container_setup import HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 
 
@@ -65,6 +67,7 @@ def test_instance_dir_and_disk_name_follow_the_instance_name() -> None:
 
 def test_guest_contract_constants_match_the_mngr_vps_originals() -> None:
     # The subpackage ships into the connector container without mngr_vps, so it
-    # carries copies of the two contracts the in-guest scripts depend on.
+    # carries copies of the contracts the in-guest scripts depend on.
     assert GEN2_HOST_ID_CONTAINER_LABEL == LABEL_HOST_ID
     assert GEN2_GUEST_HOST_QUOTA_QGROUP == HOST_QUOTA_QGROUP
+    assert GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH == HOST_VOLUME_MOUNT_PATH

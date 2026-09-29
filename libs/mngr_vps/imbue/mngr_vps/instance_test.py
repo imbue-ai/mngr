@@ -811,8 +811,9 @@ class _ExtraStartArgsMinimalProvider(MinimalVpsProvider):
     ``_compute_extra_start_args`` injects the per-slice container memory cap.
     """
 
-    def _compute_extra_start_args(self) -> tuple[str, ...]:
-        return ("--memory=7168m", "--memory-swap=7168m")
+    def _compute_extra_start_args(self, mem_total_kib: int) -> tuple[str, ...]:
+        cap_mib = mem_total_kib // 1024 - 1024
+        return (f"--memory={cap_mib}m", f"--memory-swap={cap_mib}m")
 
 
 def test_effective_start_args_compose_in_last_one_wins_order(temp_mngr_ctx: MngrContext) -> None:
@@ -843,8 +844,8 @@ def test_effective_start_args_compose_in_last_one_wins_order(temp_mngr_ctx: Mngr
         "/tmp:exec,size=993m",
         "--restart=unless-stopped",
         "--cap-add=SYS_PTRACE",
-        "--memory=7168m",
-        "--memory-swap=7168m",
+        "--memory=6921m",
+        "--memory-swap=6921m",
         "--memory=4096m",
     )
 

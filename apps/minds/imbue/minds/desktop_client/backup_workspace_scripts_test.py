@@ -596,6 +596,8 @@ def test_apply_update_commits_tag_content_and_restores_stash(tmp_path: Path) -> 
     assert (repo / "untracked.txt").read_text() == "scratch\n"
 
 
+# Flaky for the reason noted above test_check_script_reports_matches_when_tag_equals_worktree.
+@pytest.mark.flaky
 def test_apply_update_converges_new_layout_code_to_the_tag(tmp_path: Path) -> None:
     # On a decluttered-template workspace the update must converge
     # system/libs/host_backup (a stale libs/host_backup checkout would fail or

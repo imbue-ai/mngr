@@ -6,6 +6,8 @@ from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME
+from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_CONTAINERD_CONTENT_SUBVOLUME
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_CONTAINERD_ROOT
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.layout import GEN2_GUEST_CONTAINERD_SNAPSHOTS_SUBVOLUME
@@ -20,18 +22,34 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_PRINCIPAL_V
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import SSH_CA_ROOT_USER
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.ssh_ca import ssh_ca_trust_files
 
-# In-guest sizing oneshots (installed by cloud-init; run on EVERY boot)
-
-# The two root-owned every-boot units that make a machine's size self-applying
-# with no management-plane access into the guest (specs/slice-fleet): the data
-# filesystem grows to fill its (possibly qemu-img-resized) disk, and the agent
-# host container's memory cap follows the VM's own RAM. Installed via
-# cloud-init write_files at carve; being every-boot units, a restore or an
-# in-place resize applies the new size on boot with no cloud-init involvement.
+# The root-owned every-boot units cloud-init installs at carve. Two oneshots
+# make a machine's size self-applying with no management-plane access into the
+# guest (specs/slice-fleet): the data filesystem grows to fill its (possibly
+# qemu-img-resized) disk, and the agent host container's memory cap follows the
+# VM's own RAM; being every-boot units, a restore or an in-place resize applies
+# the new size on boot with no cloud-init involvement. A long-running service
+# publishes the container's memory headroom into its volume.
 GUEST_GROW_DATA_FS_UNIT_NAME: Final[str] = "mngr-grow-data-fs.service"
 GUEST_CONTAINER_MEMORY_UNIT_NAME: Final[str] = "mngr-reconcile-container-memory.service"
+GUEST_CONTAINER_MEMINFO_UNIT_NAME: Final[str] = "mngr-publish-container-meminfo.service"
 _GUEST_GROW_DATA_FS_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-grow-data-fs.sh"
 _GUEST_CONTAINER_MEMORY_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-reconcile-container-memory.sh"
+_GUEST_CONTAINER_MEMINFO_SCRIPT_PATH: Final[str] = "/usr/local/sbin/mngr-publish-container-meminfo.sh"
+_GUEST_SYSTEMD_UNIT_DIR: Final[str] = "/etc/systemd/system"
+
+_GUEST_MEMINFO_PATH: Final[str] = "/proc/meminfo"
+# Where docker (systemd cgroup driver, cgroup v2) puts each container's memory cgroup.
+_GUEST_DOCKER_CGROUP_PARENT: Final[str] = "/sys/fs/cgroup/system.slice"
+
+# What starts the workspace container after a boot. default-workspace-template's
+# pool_host template installs it, so it exists on baked slices only.
+_MINDS_AUTOSTART_UNIT_NAME: Final[str] = "minds-autostart.service"
+
+# How often the publisher rewrites each container's file: well inside the
+# staleness the earlyoom reading it tolerates.
+_MEMINFO_PUBLISH_INTERVAL_SECONDS: Final[str] = "0.25"
+# How many rewrites apart the publisher looks the containers up again.
+_MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY: Final[int] = 40
 
 
 @pure
@@ -92,14 +110,20 @@ WantedBy=multi-user.target
 
 
 @pure
-def render_guest_container_memory_script() -> str:
+def render_guest_container_memory_script(meminfo_path: str) -> str:
     """The every-boot in-guest script that follows the VM's RAM with the container's memory cap.
 
     Computes the cap from the guest's own visible RAM minus the VM-side reserve
-    (mirroring the bake-time cap) and ``docker update``s every mngr-labeled
-    container whose recorded cap differs. A failed update is logged, not fatal:
-    the kernel can refuse to shrink a cgroup below its current usage, and the
-    memory pressure resolves itself (earlyoom / the cgroup OOM killer) either way.
+    (as the bake computes it) and ``docker update``s every mngr-labeled
+    container whose recorded cap differs. gVisor sizes a sandbox's MemTotal
+    from the cap in force when the sandbox starts, and ``docker update``
+    changes only the host cgroup, so a container that is already running is
+    restarted onto the new cap. At boot only docker's own restart policy can have
+    started one, and nothing runs in it yet: the unit is ordered before
+    minds-autostart, which starts the workspace's services.
+    A failed update is logged, not fatal: the kernel can refuse to shrink a
+    cgroup below its current usage, and the memory pressure resolves itself
+    (earlyoom / the cgroup OOM killer) either way.
     """
     return f"""\
 #!/bin/bash
@@ -112,7 +136,7 @@ done
 if ! docker info >/dev/null 2>&1; then
     exit 0
 fi
-total_kib=$(awk '/^MemTotal:/{{print $2}}' /proc/meminfo)
+total_kib=$(awk '/^MemTotal:/{{print $2}}' "{meminfo_path}")
 cap_mib=$(( total_kib / 1024 - {SLICE_CONTAINER_MEMORY_RESERVE_MIB} ))
 if [ "$cap_mib" -le 0 ]; then
     exit 0
@@ -120,9 +144,16 @@ fi
 cap_bytes=$(( cap_mib * 1024 * 1024 ))
 for container_id in $(docker ps -aq --filter "label={GEN2_HOST_ID_CONTAINER_LABEL}"); do
     current=$(docker inspect --format '{{{{.HostConfig.Memory}}}}' "$container_id")
-    if [ "$current" != "$cap_bytes" ]; then
-        docker update --memory "${{cap_mib}}m" --memory-swap "${{cap_mib}}m" "$container_id" \\
-            || echo "WARNING: could not update the memory cap of $container_id" >&2
+    if [ "$current" = "$cap_bytes" ]; then
+        continue
+    fi
+    if ! docker update --memory "${{cap_mib}}m" --memory-swap "${{cap_mib}}m" "$container_id" >/dev/null; then
+        echo "WARNING: could not update the memory cap of $container_id" >&2
+        continue
+    fi
+    if [ "$(docker inspect --format '{{{{.State.Running}}}}' "$container_id")" = true ]; then
+        docker restart "$container_id" >/dev/null \\
+            || echo "WARNING: could not restart $container_id onto its new memory cap" >&2
     fi
 done
 """
@@ -130,12 +161,13 @@ done
 
 @pure
 def render_guest_container_memory_unit() -> str:
-    """The systemd unit for the container-memory reconciler (needs a running dockerd)."""
+    """The systemd unit for the container-memory reconciler: after dockerd, before the container's autostart."""
     return f"""\
 [Unit]
 Description=mngr: reconcile the agent host container's memory cap with the VM's RAM
 After=docker.service
 Wants=docker.service
+Before={_MINDS_AUTOSTART_UNIT_NAME}
 
 [Service]
 Type=oneshot
@@ -147,8 +179,147 @@ WantedBy=multi-user.target
 
 
 @pure
-def guest_sizing_oneshot_write_files() -> list[dict[str, str]]:
-    """The cloud-init ``write_files`` entries installing the two sizing oneshots."""
+def render_guest_container_meminfo_publisher_script(cgroup_parent: str) -> str:
+    """The in-guest loop publishing each agent host container's memory headroom into its volume.
+
+    Under gVisor the container's own /proc/meminfo cannot see the memory the
+    runtime is charged, so an earlyoom inside run with ``--host-meminfo``
+    reads this file too. It holds the container cgroup's limit as MemTotal
+    and, as MemAvailable, the limit minus the usage plus what the kernel can
+    reclaim (page cache and reclaimable slab; shmem, where gVisor keeps the
+    sandbox's memory, is not page cache here). It is replaced by rename, since
+    the reader rereads it on every poll. Each container's volume directory is
+    its named volume's bind device, which exists whether or not the container
+    runs; a container without a limit gets no file.
+    """
+    return f"""\
+#!/bin/bash
+# Managed by mngr (gen-2 slices).
+# No -e: one container's vanished cgroup or volume must not stop the loop.
+set -uo pipefail
+cgroup_dirs=()
+target_files=()
+
+discover() {{
+    cgroup_dirs=()
+    target_files=()
+    local container_id volume_name volume_dir
+    for container_id in $(docker ps -q --no-trunc --filter "label={GEN2_HOST_ID_CONTAINER_LABEL}" 2>/dev/null); do
+        volume_name=$(docker inspect --format '{{{{range .Mounts}}}}{{{{if eq .Destination "{GEN2_CONTAINER_HOST_VOLUME_MOUNT_PATH}"}}}}{{{{.Name}}}}{{{{end}}}}{{{{end}}}}' "$container_id" 2>/dev/null) || continue
+        [ -n "$volume_name" ] || continue
+        volume_dir=$(docker volume inspect --format '{{{{.Options.device}}}}' "$volume_name" 2>/dev/null) || continue
+        [ -n "$volume_dir" ] && [ -d "$volume_dir" ] || continue
+        cgroup_dirs+=("{cgroup_parent}/docker-$container_id.scope")
+        target_files+=("$volume_dir/{GEN2_CONTAINER_HOST_MEMINFO_FILE_NAME}")
+    done
+}}
+
+publish() {{
+    local cgroup_dir=$1 target_file=$2 limit usage key value reclaimable=0 available
+    # A container can stop, and its cgroup vanish, between any two reads.
+    read -r limit 2>/dev/null < "$cgroup_dir/memory.max" || return 0
+    if [ "$limit" = max ]; then
+        rm -f "$target_file"
+        return 0
+    fi
+    read -r usage 2>/dev/null < "$cgroup_dir/memory.current" || return 0
+    while read -r key value; do
+        case "$key" in
+            active_file | inactive_file | slab_reclaimable) reclaimable=$(( reclaimable + value )) ;;
+        esac
+    done 2>/dev/null < "$cgroup_dir/memory.stat" || return 0
+    available=$(( limit - usage + reclaimable ))
+    [ "$available" -ge 0 ] || available=0
+    [ "$available" -le "$limit" ] || available=$limit
+    # The container can plant a symlink at any name in its volume, which a shell
+    # redirect or mv would follow as root; bash cannot open with O_NOFOLLOW.
+    perl -MFcntl -e '
+        my ($path, $total_kib, $available_kib) = @ARGV;
+        my ($fh, $tmp);
+        for (1 .. 100) {{
+            $tmp = sprintf("%s.%08x", $path, int(rand(4294967296)));
+            last if sysopen($fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0644);
+            undef $fh;
+        }}
+        defined $fh or exit 1;
+        printf {{$fh}} "MemTotal: %d kB\\nMemAvailable: %d kB\\nTimestamp: %d\\n", $total_kib, $available_kib, time;
+        close($fh) or do {{ unlink $tmp; exit 1 }};
+        rename($tmp, $path) or do {{ unlink $tmp; exit 1 }};
+    ' "$target_file" $(( limit / 1024 )) $(( available / 1024 ))
+}}
+
+round=0
+while true; do
+    if [ $(( round % {_MEMINFO_PUBLISH_ROUNDS_PER_DISCOVERY} )) -eq 0 ]; then
+        discover
+    fi
+    for idx in "${{!cgroup_dirs[@]}}"; do
+        publish "${{cgroup_dirs[$idx]}}" "${{target_files[$idx]}}"
+    done
+    round=$(( round + 1 ))
+    sleep {_MEMINFO_PUBLISH_INTERVAL_SECONDS}
+done
+"""
+
+
+@pure
+def render_guest_container_meminfo_publisher_unit() -> str:
+    """The systemd unit keeping the container-meminfo publisher running."""
+    return f"""\
+[Unit]
+Description=mngr: publish the agent host container's memory headroom into its volume
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart={_GUEST_CONTAINER_MEMINFO_SCRIPT_PATH}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+class GuestManagedFile(FrozenModel):
+    """One file mngr installs on a gen-2 slice VM."""
+
+    path: str = Field(description="Absolute path on the VM")
+    permissions: str = Field(description="Octal mode, as cloud-init's write_files takes it")
+    content: str = Field(description="The file's content")
+
+
+@pure
+def guest_container_memory_files() -> tuple[GuestManagedFile, ...]:
+    """The container-memory reconciler and the meminfo publisher, scripts and units, as a gen-2 slice VM carries them."""
+    return (
+        GuestManagedFile(
+            path=_GUEST_CONTAINER_MEMORY_SCRIPT_PATH,
+            permissions="0755",
+            content=render_guest_container_memory_script(_GUEST_MEMINFO_PATH),
+        ),
+        GuestManagedFile(
+            path=f"{_GUEST_SYSTEMD_UNIT_DIR}/{GUEST_CONTAINER_MEMORY_UNIT_NAME}",
+            permissions="0644",
+            content=render_guest_container_memory_unit(),
+        ),
+        GuestManagedFile(
+            path=_GUEST_CONTAINER_MEMINFO_SCRIPT_PATH,
+            permissions="0755",
+            content=render_guest_container_meminfo_publisher_script(_GUEST_DOCKER_CGROUP_PARENT),
+        ),
+        GuestManagedFile(
+            path=f"{_GUEST_SYSTEMD_UNIT_DIR}/{GUEST_CONTAINER_MEMINFO_UNIT_NAME}",
+            permissions="0644",
+            content=render_guest_container_meminfo_publisher_unit(),
+        ),
+    )
+
+
+@pure
+def guest_every_boot_units_write_files() -> list[dict[str, str]]:
+    """The cloud-init ``write_files`` entries installing the sizing oneshots and the meminfo publisher."""
     return [
         {
             "path": _GUEST_GROW_DATA_FS_SCRIPT_PATH,
@@ -156,31 +327,26 @@ def guest_sizing_oneshot_write_files() -> list[dict[str, str]]:
             "content": render_guest_grow_data_fs_script(),
         },
         {
-            "path": f"/etc/systemd/system/{GUEST_GROW_DATA_FS_UNIT_NAME}",
+            "path": f"{_GUEST_SYSTEMD_UNIT_DIR}/{GUEST_GROW_DATA_FS_UNIT_NAME}",
             "permissions": "0644",
             "content": render_guest_grow_data_fs_unit(),
         },
-        {
-            "path": _GUEST_CONTAINER_MEMORY_SCRIPT_PATH,
-            "permissions": "0755",
-            "content": render_guest_container_memory_script(),
-        },
-        {
-            "path": f"/etc/systemd/system/{GUEST_CONTAINER_MEMORY_UNIT_NAME}",
-            "permissions": "0644",
-            "content": render_guest_container_memory_unit(),
-        },
+        *(
+            {"path": managed.path, "permissions": managed.permissions, "content": managed.content}
+            for managed in guest_container_memory_files()
+        ),
     ]
 
 
 @pure
-def guest_sizing_oneshot_enable_command() -> list[str]:
-    """The cloud-init ``runcmd`` entry that enables + first-runs the sizing oneshots."""
+def guest_every_boot_units_enable_command() -> list[str]:
+    """The cloud-init ``runcmd`` entry that enables + first-runs the sizing oneshots and the publisher."""
     return [
         "bash",
         "-c",
         "systemctl daemon-reload && "
-        f"systemctl enable --now {GUEST_GROW_DATA_FS_UNIT_NAME} {GUEST_CONTAINER_MEMORY_UNIT_NAME}",
+        f"systemctl enable --now {GUEST_GROW_DATA_FS_UNIT_NAME} {GUEST_CONTAINER_MEMORY_UNIT_NAME} "
+        f"{GUEST_CONTAINER_MEMINFO_UNIT_NAME}",
     ]
 
 
@@ -395,11 +561,11 @@ def build_qemu_slice_user_data(
                 "permissions": "0755",
                 "content": _build_firstboot_script(host_dir),
             },
-            *guest_sizing_oneshot_write_files(),
+            *guest_every_boot_units_write_files(),
         ],
         "runcmd": [
             ["bash", "/usr/local/sbin/mngr-slice-firstboot.sh"],
-            guest_sizing_oneshot_enable_command(),
+            guest_every_boot_units_enable_command(),
         ],
     }
     return "#cloud-config\n" + yaml.safe_dump(config, default_flow_style=False, sort_keys=False)

@@ -241,20 +241,23 @@ def test_remove_authorized_key_command_keeps_the_other_authorized_keys(tmp_path:
     assert authorized_keys.read_text() == f"{kept_key}\n"
 
 
-def test_extra_start_args_cap_container_memory_from_the_slice_size() -> None:
+def test_extra_start_args_cap_container_memory_from_the_vms_own_memtotal() -> None:
     # Both container-creation paths (bake and slow-path rebuild) flow through
     # create_host_on_existing_vps, whose extra-start-args seam must hard-cap the
-    # container at the slice's RAM minus the VM-side reserve -- swap pinned equal
-    # so the workspace is shed under pressure instead of thrashing the VM.
-    provider = SliceVpsDockerProvider.model_construct(slice_config=SliceVpsDockerProviderConfig(slice_memory_mib=8192))
-    assert provider._compute_extra_start_args() == ("--memory=7168m", "--memory-swap=7168m")
+    # container at the VM's visible RAM minus the VM-side reserve -- the value
+    # its every-boot reconcile oneshot computes (MemTotal rounded down to MiB),
+    # not the RAM qemu was given (7680 MiB here, of which the guest kernel shows
+    # 7439) -- with swap pinned equal so the workspace is shed under pressure
+    # instead of thrashing the VM.
+    provider = SliceVpsDockerProvider.model_construct(slice_config=SliceVpsDockerProviderConfig(slice_memory_mib=7680))
+    assert provider._compute_extra_start_args(7617536) == ("--memory=6415m", "--memory-swap=6415m")
 
 
 def test_extra_start_args_are_empty_when_the_slice_size_is_unknown() -> None:
     # A config without the sizing knob keeps the container uncapped rather than
     # guessing a cap.
     provider = SliceVpsDockerProvider.model_construct(slice_config=SliceVpsDockerProviderConfig())
-    assert provider._compute_extra_start_args() == ()
+    assert provider._compute_extra_start_args(7617536) == ()
 
 
 class _FailingRecordingOuter(_RecordingOuter):
