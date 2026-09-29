@@ -16,8 +16,20 @@ ipcRenderer.on('open-notification', (_event, entry) => {
 // dialogs, the renderer-to-main shell-event relay, the release-channel and
 // update-status calls (there is no binary to update in a browser), and the
 // startup/error/quitting shell.html channels.
+// Main resolves which window controls the bar draws (window-controls.js) and
+// passes it as a switch; a sandboxed preload can neither require that module
+// nor read main's environment.
+const WINDOW_CONTROLS_SWITCH_PREFIX = '--minds-window-controls=';
+const windowControlsArgument = process.argv.find((argument) => argument.startsWith(WINDOW_CONTROLS_SWITCH_PREFIX));
+const windowControls = windowControlsArgument
+  ? windowControlsArgument.slice(WINDOW_CONTROLS_SWITCH_PREFIX.length)
+  : null;
+
 contextBridge.exposeInMainWorld('mindsNative', {
   platform: process.platform,
+  // 'native-mac', 'drawn-mac' or 'buttons' (window-controls.js); null when
+  // main did not say, which the SPA reads as the platform's own controls.
+  windowControls,
 
   // Startup / error / quitting screens (shell.html).
   onStatusUpdate: (callback) => {
@@ -41,7 +53,7 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // Reload after the window's renderer showed the crash strip.
   reloadChrome: () => ipcRenderer.send('reload-chrome'),
 
-  // Window controls (non-macOS custom titlebar buttons).
+  // Window controls (the bar's own buttons or drawn traffic lights, off macOS).
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),

@@ -53,6 +53,7 @@ const {
 } = require('./session-persistence');
 const updater = require('./updater');
 const displayZoom = require('./display-zoom');
+const { resolveWindowControls, windowControlsSwitch } = require('./window-controls');
 const { removeLegacyNameDirs } = require('./legacy-name-cleanup');
 const { PRODUCT_DISPLAY_NAME } = require('./product-name');
 // Window / quit lifecycle decisions live in ./lifecycle-policy so they can be
@@ -180,6 +181,8 @@ if (app.isPackaged) {
 }
 
 const isMac = process.platform === 'darwin';
+// Resolved once, before any window: a bad setting fails the launch outright.
+const windowControls = resolveWindowControls(process.platform, process.env);
 
 // A popout follows the cursor on a timer (Electron cannot hand a live drag
 // to a new native window): once per frame is smooth enough and cheap.
@@ -605,6 +608,9 @@ function buildBundleWindowOptions(kind, bounds) {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // The preload cannot see main's environment, so the window controls the
+      // bar should draw travel to it as a switch.
+      additionalArguments: [windowControlsSwitch(windowControls)],
     },
   };
   if (kind === 'popout') {
@@ -621,7 +627,8 @@ function buildBundleWindowOptions(kind, bounds) {
   }
   // The SPA draws every window's bar. On macOS it sits under the native
   // traffic lights (the bar leaves room for them); elsewhere the window is
-  // frameless and the bar carries the controls itself.
+  // frameless and the bar carries the controls itself (its own buttons, or
+  // traffic lights it draws when MINDS_WINDOW_CONTROLS asks for them).
   if (isMac) {
     windowOptions.titleBarStyle = 'hiddenInset';
     windowOptions.trafficLightPosition = { x: 12, y: (TITLEBAR_HEIGHT - 16) / 2 };

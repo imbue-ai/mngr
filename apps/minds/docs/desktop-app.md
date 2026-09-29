@@ -133,6 +133,7 @@ The accent is a **pure function of the window's current route**, not a remembere
 ### Environment variables
 
 - `MINDS_HIDE_MENU=1`: Hides the application menu bar (macOS only; Linux/Windows frameless windows have no menu bar).
+- `MINDS_WINDOW_CONTROLS=mac`: Off macOS, has every window's bar draw macOS-style traffic lights at its left (wired to the same window controls) instead of its own minimize, maximize and close buttons at the right; the demo box sets it so the app matches its mac-styled desktop. Ignored on macOS, where the native traffic lights are there anyway; any other value refuses to launch (`electron/window-controls.js`).
 - `MINDS_ROOT_NAME`: Selects the tier whose roots the running backend uses. Default `minds` (i.e. the `production` tier). Must match `minds(-<env-name>)?`. Activated by `minds-admin env activate <name>`; a legacy value such as `devminds` raises rather than being coerced to production.
 - `MINDS_CLIENT_CONFIG_PATH`: Path to the per-env `client.toml` the backend should load. Set by `minds-admin env activate`; passing `--config-file` to `minds run` overrides it. When neither is set and `MINDS_ROOT_NAME` is unset (or `minds`), the backend loads the in-repo production `client.toml`. It refuses to start only when `MINDS_ROOT_NAME` names another env and nothing says where that env's config lives.
 

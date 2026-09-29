@@ -13,7 +13,7 @@
 import m from "mithril";
 import { Icon12 } from "../components/Icon";
 import { TitlebarButton } from "../components/TitlebarButton";
-import { CHROME_BAR_CLASS, CHROME_BAR_STYLE, trafficLightSpacer } from "./Titlebar";
+import { CHROME_BAR_CLASS, CHROME_BAR_STYLE, isMacLayout, leftWindowControls } from "./Titlebar";
 import { electronBridge } from "../../electron-bridge";
 import type { ShellState } from "./shell-state";
 
@@ -80,7 +80,7 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
         },
         [
           m("div", { class: "flex-1 flex items-center gap-1 min-w-0 pl-2" }, [
-            shell.isMac ? trafficLightSpacer() : null,
+            leftWindowControls(shell),
             m(
               "span#popout-workspace-name",
               { class: "type-label text-secondary truncate max-w-[180px] shrink-0" },
@@ -109,7 +109,7 @@ export function PopoutChrome(): m.Component<PopoutChromeAttrs> {
                 id: "popout-close-btn",
                 "aria-label": "Close",
                 "data-tooltip": "Close (returns the window to the desktop)",
-                hidden: !electronBridge.isDesktop || shell.isMac,
+                hidden: !electronBridge.isDesktop || isMacLayout(shell),
                 onclick: () => electronBridge.close(),
               },
               m(Icon12, { name: "close" }),

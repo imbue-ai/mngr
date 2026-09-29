@@ -4,6 +4,7 @@ import { RequestsStore } from "../../models/requests";
 import { NotificationsStore } from "../../models/notifications";
 import type { ShellState } from "./shell-state";
 import { Titlebar } from "./Titlebar";
+import { TrafficLights } from "./TrafficLights";
 import type { AnyVnode } from "../../testing";
 import {
   attrsOf,
@@ -46,6 +47,9 @@ interface RenderTitlebarOptions {
   afterFirstRender?: (root: AnyVnode) => void;
   /** The route the second render runs under; defaults to `routePath`. */
   rerenderRoutePath?: string;
+  /** The shell's platform flags; a Mac by default, as the other cases assume. */
+  isMac?: boolean;
+  isTrafficLightsDrawn?: boolean;
 }
 
 /** Render the titlebar without a DOM. `window` is stubbed because the Electron
@@ -60,7 +64,8 @@ function renderTitlebar(
     `/workspace/${WORKSPACE_ID}${routeSearch ? `?${routeSearch}` : ""}`,
   );
   const shell = {
-    isMac: true,
+    isMac: options.isMac ?? true,
+    isTrafficLightsDrawn: options.isTrafficLightsDrawn ?? false,
     panelRouteBehindOverlay: options.panelRouteBehindOverlay ?? null,
     stores: {
       workspaces: {
@@ -456,5 +461,37 @@ describe("Titlebar breadcrumb", () => {
       );
       expect(ids, routePath).not.toContain("back-btn");
     }
+  });
+});
+
+/** The div holding the bar's own minimize / maximize / close buttons as its direct children. */
+function windowButtonCluster(root: AnyVnode): AnyVnode {
+  const cluster = collectVnodes(root).find(
+    (vnode) =>
+      Array.isArray(vnode.children) &&
+      (vnode.children as AnyVnode[]).some((child) => child !== null && attrsOf(child).id === "close-btn"),
+  );
+  expect(cluster, "no window button cluster").toBeDefined();
+  return cluster as AnyVnode;
+}
+
+describe("Titlebar window controls", () => {
+  it("draws its own traffic lights, and none of its buttons, when the platform has no native ones but asks for them", () => {
+    const root = renderTitlebar("", { isMac: false, isTrafficLightsDrawn: true });
+    const lights = collectVnodes(root).find((vnode) => vnode.tag === TrafficLights);
+    expect(lights).toBeDefined();
+    const lightIds = collectVnodes(renderComponentVnode(lights as AnyVnode).children).map((vnode) => attrsOf(vnode).id);
+    expect(lightIds).toEqual(["traffic-light-close", "traffic-light-minimize", "traffic-light-maximize"]);
+    const buttonCluster = windowButtonCluster(root);
+    expect(classTokensOf(buttonCluster)).toContain("hidden");
+    // No spacer either: the lights take that room themselves.
+    expect(collectVnodes(root).find((vnode) => classTokensOf(vnode).includes("w-[72px]") && vnode.tag === "div" && attrsOf(vnode).id === undefined)).toBeUndefined();
+  });
+
+  it("keeps its own buttons, and draws no lights, off macOS by default", () => {
+    const root = renderTitlebar("", { isMac: false });
+    expect(collectVnodes(root).find((vnode) => vnode.tag === TrafficLights)).toBeUndefined();
+    const buttonCluster = windowButtonCluster(root);
+    expect(classTokensOf(buttonCluster)).not.toContain("hidden");
   });
 });

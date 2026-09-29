@@ -17,6 +17,7 @@ import { Button } from "../components/Button";
 import { Icon12, Icon16 } from "../components/Icon";
 import { Modal } from "../components/Modal";
 import { TitlebarButton } from "../components/TitlebarButton";
+import { TrafficLights } from "./TrafficLights";
 import { electronBridge } from "../../electron-bridge";
 import type { OptionsTab } from "../../models/workspaceOptions";
 import type { ShellState } from "./shell-state";
@@ -42,6 +43,19 @@ export function trafficLightSpacer(): m.Children {
   return m("div", { class: "w-[72px] shrink-0", "aria-hidden": "true" });
 }
 
+/** Whether the bar takes the Mac layout: the window controls at its left
+ * (native, or drawn by the bar) and none of its own buttons at the right. */
+export function isMacLayout(shell: ShellState): boolean {
+  return shell.isMac || shell.isTrafficLightsDrawn;
+}
+
+/** What the bar puts at its left for the window controls: the drawn traffic
+ * lights, the room under the native ones, or nothing. */
+export function leftWindowControls(shell: ShellState): m.Children {
+  if (shell.isTrafficLightsDrawn) return m(TrafficLights);
+  return shell.isMac ? trafficLightSpacer() : null;
+}
+
 /** What each tab's dialog says on a creation page, where the workspace does not exist yet. */
 export const NOT_YET_CREATED_MESSAGE_BY_TAB: Record<OptionsTab, string> = {
   permissions: "Check back here after the workspace is created to manage its permissions.",
@@ -63,6 +77,7 @@ function startTitlebar(shell: ShellState): m.Children {
       "data-titlebar-kind": "start",
     },
     [
+      leftWindowControls(shell),
       m("div", { class: "flex-1" }),
       m("img", {
         id: "start-mark",
@@ -71,7 +86,7 @@ function startTitlebar(shell: ShellState): m.Children {
         alt: "Imbue Studio",
         draggable: false,
       }),
-      m("div", { class: "flex" + (shell.isMac ? " hidden" : "") }, [
+      m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
         m(TitlebarButton, { variant: "control", "aria-label": "Minimize", hidden: !isDesktop, onclick: () => electronBridge.minimize() }, m(Icon12, { name: "minimize" })),
         m(TitlebarButton, { variant: "control", "aria-label": "Maximize", hidden: !isDesktop, onclick: () => electronBridge.maximize() }, m(Icon12, { name: "maximize" })),
         m(TitlebarButton, { variant: "control", tone: "danger", "aria-label": "Close", hidden: !isDesktop, onclick: () => electronBridge.close() }, m(Icon12, { name: "close" })),
@@ -141,7 +156,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
           class: CHROME_BAR_CLASS,
         },
         m("div", { class: "flex-1 flex items-center gap-0.5 min-w-0" }, [
-          shell.isMac ? trafficLightSpacer() : null,
+          leftWindowControls(shell),
           m(
             TitlebarButton,
             {
@@ -363,7 +378,7 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
               },
               m(Icon16, { name: "bug" }),
             ),
-            m("div", { class: "flex" + (shell.isMac ? " hidden" : "") }, [
+            m("div", { class: "flex" + (isMacLayout(shell) ? " hidden" : "") }, [
               m(
                 TitlebarButton,
                 {

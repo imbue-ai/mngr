@@ -13,7 +13,7 @@ test('native notification clicks wait for the renderer action and are delivered 
   ipc.send = (...args) => sent.push(args);
   let bridge;
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../electron/preload.js'), 'utf8'), {
-    process: { platform: 'darwin' },
+    process: { platform: 'darwin', argv: [] },
     require: () => ({ ipcRenderer: ipc, contextBridge: { exposeInMainWorld: (_name, surface) => { bridge = surface; } } }),
   });
   const first = { id: 'msg-first' };

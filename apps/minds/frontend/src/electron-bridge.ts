@@ -86,8 +86,16 @@ export interface UpdateState {
 
 export type UpdateInstallPolicy = "on-quit" | "on-request";
 
+/** Which window controls a window's bar shows (electron/window-controls.js):
+ * the native macOS traffic lights, traffic lights the bar draws itself, or
+ * the bar's own buttons. */
+export type WindowControls = "native-mac" | "drawn-mac" | "buttons";
+
 interface MindsNativeSurface {
   platform: string;
+  /** Optional: a preload from before drawn traffic lights lacks it, and null
+   * (main did not say) reads as the platform's own controls. */
+  windowControls?: WindowControls | null;
   minimize(): void;
   maximize(): void;
   close(): void;
@@ -234,6 +242,11 @@ export const electronBridge = {
   },
   get isMacPlatform(): boolean {
     return native()?.platform === "darwin";
+  },
+  /** Whether the bar draws macOS-style traffic lights itself, on a platform
+   * that has no native ones. */
+  get isTrafficLightsDrawn(): boolean {
+    return native()?.windowControls === "drawn-mac";
   },
   minimize(): void {
     native()?.minimize();

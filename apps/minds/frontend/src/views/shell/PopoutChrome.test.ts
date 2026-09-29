@@ -5,15 +5,17 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ShellState } from "./shell-state";
 import { PopoutChrome, isBarDragPress } from "./PopoutChrome";
+import { TrafficLights } from "./TrafficLights";
 import type { AnyVnode } from "../../testing";
 import { allText, attrsOf, classTokensOf, collectVnodes, renderRoot } from "../../testing";
 
 const WORKSPACE_ID = "agent-ab12";
 const WINDOW_ID = "win-0123";
 
-function renderBar(accent: string | null, title: string, isMac = false): AnyVnode {
+function renderBar(accent: string | null, title: string, isMac = false, isTrafficLightsDrawn = false): AnyVnode {
   const shell = {
     isMac,
+    isTrafficLightsDrawn,
     stores: {
       workspaces: {
         accentEntry: () => ({ accent, name: "Research" }),
@@ -73,6 +75,15 @@ describe("PopoutChrome", () => {
     expect(spacer).toBeDefined();
     const elsewhere = collectVnodes(renderBar("#aabbcc", "Notes", false));
     expect(elsewhere.find((vnode) => classTokensOf(vnode).includes("w-[72px]"))).toBeUndefined();
+  });
+
+  it("draws its own traffic lights and hides its close control on a platform made to look like a Mac", () => {
+    window.mindsNative = { platform: "linux", close: () => undefined } as unknown as NonNullable<
+      Window["mindsNative"]
+    >;
+    const bar = renderBar("#aabbcc", "Notes", false, true);
+    expect(attrsOf(buttonOf(bar, "popout-close-btn")).hidden).toBe(true);
+    expect(collectVnodes(bar).find((vnode) => vnode.tag === TrafficLights)).toBeDefined();
   });
 
   it("wears the titlebar's self-theming recipe only once an accent is painted", () => {

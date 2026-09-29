@@ -96,6 +96,9 @@ export class ShellState {
    * installed by index.ts like the channel; null only before boot wiring. */
   notificationsUi: NotificationsUiController | null = null;
   isMac = false;
+  /** The bar draws macOS-style traffic lights itself (a window off macOS made
+   * to look like one, the demo box); with isMac, the bar takes the Mac layout. */
+  isTrafficLightsDrawn = false;
   mngrForwardOrigin = "";
   /** The bell's notification feed: local overlay state, not a route, so it
    * pops over whatever surface is on screen (a hub page, the create form, a

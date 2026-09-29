@@ -40,6 +40,7 @@ function main(): void {
 
   const shell = new ShellState(bootContext.stores);
   shell.isMac = bootContext.seed.isMac;
+  shell.isTrafficLightsDrawn = electronBridge.isTrafficLightsDrawn;
   shell.mngrForwardOrigin = bootContext.seed.mngrForwardOrigin;
   onboardingProgress.seed(bootContext.seed.isOnboardingComplete);
 
