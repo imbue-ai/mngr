@@ -66,14 +66,18 @@ class LinuxNotifier(Notifier):
             logger.warning("notify-send not found; install libnotify to enable notifications")
 
 
-def get_notifier() -> Notifier | None:
-    """Return the appropriate notifier for the current platform, or None if unsupported."""
-    system = platform.system()
-    if system == "Darwin":
+def get_notifier(system: str | None = None) -> Notifier | None:
+    """Return the appropriate notifier for the given platform, or None if unsupported.
+
+    ``system`` defaults to ``platform.system()`` for the current platform; it is
+    injectable so tests can select a platform without patching the stdlib.
+    """
+    resolved_system = platform.system() if system is None else system
+    if resolved_system == "Darwin":
         return MacOSNotifier()
-    if system == "Linux":
+    if resolved_system == "Linux":
         return LinuxNotifier()
-    logger.warning("Desktop notifications not supported on {}", system)
+    logger.warning("Desktop notifications not supported on {}", resolved_system)
     return None
 
 

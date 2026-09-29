@@ -4,6 +4,7 @@ import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr_notifications.cli import _run_verification
+from imbue.mngr_notifications.mock_notifier_test import RecordingLinuxNotifier
 from imbue.mngr_notifications.notification_verifier import VerifyNotificationResult
 from imbue.mngr_notifications.notification_verifier import check_notifier_binary
 from imbue.mngr_notifications.notification_verifier import run_test_notification
@@ -24,13 +25,6 @@ def _binary_always_missing(notifier: Notifier) -> str | None:
 
 class _NoOpMacOSNotifier(MacOSNotifier):
     """A MacOSNotifier subclass that silently does nothing."""
-
-    def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
-        pass
-
-
-class _NoOpLinuxNotifier(LinuxNotifier):
-    """A LinuxNotifier subclass that silently does nothing."""
 
     def notify(self, title: str, message: str, execute_command: str | None, cg: ConcurrencyGroup) -> None:
         pass
@@ -59,13 +53,17 @@ def test_run_test_notification_macos_alerter_missing(notification_cg: Concurrenc
 
 
 def test_run_test_notification_linux(notification_cg: ConcurrencyGroup) -> None:
-    """Linux notifier sends and returns is_clicked=None."""
-    notifier = _NoOpLinuxNotifier()
+    """Linux notifier actually sends a notification and returns is_clicked=None."""
+    notifier = RecordingLinuxNotifier()
     result = run_test_notification(notifier, notification_cg, binary_checker=_no_binary_issues)
 
     assert result.is_sent is True
     assert result.is_clicked is None
     assert result.error_message is None
+    # The "sent" result must reflect a real notify call, not just a hardcoded True.
+    assert len(notifier.calls) == 1
+    # The Linux verification path sends a plain notification with no click action.
+    assert notifier.calls[0][2] is None
 
 
 def test_run_test_notification_binary_check_fails(notification_cg: ConcurrencyGroup) -> None:
@@ -129,7 +127,7 @@ def test_run_verification_send_failed(notification_cg: ConcurrencyGroup) -> None
 
 def test_run_verification_linux_confirmed(notification_cg: ConcurrencyGroup) -> None:
     """_run_verification returns True when user confirms they saw the notification on Linux."""
-    notifier = _NoOpLinuxNotifier()
+    notifier = RecordingLinuxNotifier()
     result = _run_verification(
         notifier, notification_cg, binary_checker=_no_binary_issues, confirm_fn=lambda _prompt: True
     )
@@ -138,7 +136,7 @@ def test_run_verification_linux_confirmed(notification_cg: ConcurrencyGroup) -> 
 
 def test_run_verification_linux_not_confirmed(notification_cg: ConcurrencyGroup) -> None:
     """_run_verification returns False when user denies seeing the notification on Linux."""
-    notifier = _NoOpLinuxNotifier()
+    notifier = RecordingLinuxNotifier()
     result = _run_verification(
         notifier, notification_cg, binary_checker=_no_binary_issues, confirm_fn=lambda _prompt: False
     )
