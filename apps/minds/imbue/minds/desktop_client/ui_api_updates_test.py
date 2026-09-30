@@ -23,6 +23,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
 from imbue.minds.desktop_client.testing import SIGNED_IN_ACCOUNT_DIR
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
+from imbue.minds.desktop_client.testing import exec_error_stdout
 from imbue.minds.desktop_client.testing import host_offline_exec_result
 from imbue.minds.desktop_client.testing import landed_verdict
 from imbue.minds.desktop_client.testing import ready_machine_launch_stdout
@@ -32,6 +33,7 @@ from imbue.minds.desktop_client.testing import write_stub_mngr
 from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_message
 from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_api_updates import run_bulk_dispatch
+from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
 from imbue.minds.desktop_client.update_chat import UPDATE_SKILL_NAME
 from imbue.minds.desktop_client.update_chat import build_update_chat_message
 from imbue.minds.desktop_client.update_service import UpdateDispatch
@@ -781,6 +783,11 @@ def test_a_spawn_that_raises_leaves_no_run_locked_behind_it(
 
     assert service.state_store.get(agent_id).activity is UpdateActivity.IDLE
     assert service.state_store.get(agent_id).is_run_in_flight is False
+    # The request that raised carries no sentence of ours, so the row is where the reader learns of it.
+    assert (
+        service.state_store.get(agent_id).dispatch_failure
+        == "Something went wrong starting the update in this machine."
+    )
 
 
 def test_a_second_dispatch_loses_while_the_first_is_still_starting_the_machine(
@@ -1155,3 +1162,232 @@ def test_a_machine_that_refuses_the_agent_has_its_refusal_shown_and_the_run_slot
     assert refusal in body["detail"]
     # The run slot must come back, or a retry after signing in would be refused as already running.
     assert _service(app).state_store.get(agent_id).activity is UpdateActivity.IDLE
+
+
+def _published(app: Flask, agent_id: AgentId) -> UiWorkspaceUpdate:
+    """The machine's row as the next ``workspace_updates`` frame carries it, which every surface reads."""
+    return build_workspace_updates_message(_service(app), update_window=(2, 5)).updates[str(agent_id)]
+
+
+def _press_update_now_and_fail_to_reach(client: FlaskClient, app: Flask, agent_id: AgentId) -> None:
+    """Press Update now on a machine the launch cannot reach even once started, and check the row recorded why."""
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
+    assert _published(app, agent_id).dispatch_failure == "Couldn't reach this machine to start the update."
+
+
+@pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="the published row, not its rendering")
+def test_an_update_that_could_not_reach_the_machine_is_published_for_a_modal_opened_later(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """The 502 answers only the request that pressed the button; a modal closed while it waited never reads it."""
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(
+            returncode=1,
+            stdout=exec_error_stdout("Could not reach host host-1234: connection refused"),
+            stderr="WARNING: stale key dir for host-other\n",
+            is_mngr_output=True,
+        ),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
+
+    published = _published(app, agent_id)
+    assert published.dispatch_failure == "Couldn't reach this machine to start the update."
+    assert published.dispatch_failure_detail == "Could not reach host host-1234: connection refused"
+    assert published.activity is UpdateActivity.IDLE
+
+
+def test_a_launch_that_timed_out_is_published_without_a_detail_it_never_had(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A timeout's stderr is the caller's own account of the argv, not anything the machine said."""
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(returncode=-1, is_timed_out=True, stderr="mngr exec --agent x timed out after 30s"),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
+
+    published = _published(app, agent_id)
+    assert published.dispatch_failure == "Couldn't start the update agent in this machine."
+    assert published.dispatch_failure_detail == ""
+
+
+@pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="the published row, not its rendering")
+def test_an_update_whose_machine_would_not_start_publishes_the_starts_own_diagnosis(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A start that failed and a launch that got no answer are different problems, so the row names which."""
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=_HOST_OFFLINE,
+        mngr_binary=_write_recording_stub(
+            tmp_path,
+            "failing_start_stub_mngr",
+            extra_body='echo "ERROR: The box behind host-5821 is gone" >&2',
+            exit_code=1,
+        ),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 502
+    assert response.get_json()["error"] == "Couldn't start this machine to run the update."
+    published = _published(app, agent_id)
+    assert published.dispatch_failure == "Couldn't start this machine to run the update."
+    assert "ERROR: The box behind host-5821 is gone" in published.dispatch_failure_detail
+    assert published.activity is UpdateActivity.IDLE
+
+
+@pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="the published row, not its rendering")
+def test_an_update_agent_the_machine_refused_is_published_in_the_machines_own_words(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    refusal = "No provider account is signed in on this machine. Sign in from a chat tab, then try again."
+    client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_result=MngrCallResult(
+            returncode=0,
+            stdout=skill_chat_launch_stdout(
+                UPDATE_SKILL_NAME,
+                script_exit_code=2,
+                fallback_stdout="",
+                fallback_exit_code=1,
+                fallback_stderr=f"Error: Pre-command script(s) failed for 'create':\n  Stderr: {refusal}\n",
+            ),
+        ),
+    )
+    _mark_out_of_date(app, agent_id)
+
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 502
+
+    published = _published(app, agent_id)
+    assert published.dispatch_failure == "Couldn't start the update agent in this machine."
+    assert refusal in published.dispatch_failure_detail
+
+
+def test_an_update_that_goes_out_after_one_that_did_not_clears_the_failure(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """A row still saying the update could not start, over a run that did, would send the reader after a fixed fault."""
+    caller = RecordingMngrCaller(result=_HOST_OFFLINE)
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
+    _mark_out_of_date(app, agent_id)
+    _press_update_now_and_fail_to_reach(client, app, agent_id)
+
+    caller.result = MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 200
+
+    published = _published(app, agent_id)
+    assert published.activity is UpdateActivity.RUNNING
+    assert published.dispatch_failure == ""
+    assert published.dispatch_failure_detail == ""
+
+
+@pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="dismissal only")
+def test_dismissing_an_update_that_never_went_out_clears_it(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """There is no verdict or stall behind it, and the dismiss route must still take it off the row."""
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_HOST_OFFLINE)
+    _mark_out_of_date(app, agent_id)
+    _press_update_now_and_fail_to_reach(client, app, agent_id)
+
+    assert _post(client, f"/ui/api/updates/{agent_id}/dismiss").status_code == 200
+
+    published = _published(app, agent_id)
+    assert published.dispatch_failure == ""
+    assert published.dispatch_failure_detail == ""
+
+
+@pytest.mark.witnesses("workspace-updates.unsent-update-is-reported", partial="scheduling only")
+@pytest.mark.parametrize("is_bulk", (False, True), ids=["single", "bulk"])
+def test_scheduling_an_update_that_never_went_out_clears_it(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId, is_bulk: bool
+) -> None:
+    """The schedule is the newer request; a row still saying the last one didn't start would report a superseded press."""
+    client, app = _build_client(tmp_path, root_concurrency_group, mngr_result=_HOST_OFFLINE)
+    _mark_out_of_date(app, agent_id)
+    _press_update_now_and_fail_to_reach(client, app, agent_id)
+
+    response = (
+        _post(client, "/ui/api/updates/bulk/schedule", {"agent_ids": [str(agent_id)]})
+        if is_bulk
+        else _post(client, f"/ui/api/updates/{agent_id}/schedule")
+    )
+    assert response.status_code == 200
+
+    published = _published(app, agent_id)
+    assert published.is_scheduled is True
+    assert published.dispatch_failure == ""
+    assert published.dispatch_failure_detail == ""
+
+
+def test_a_dispatch_that_loses_to_a_live_run_records_no_failure_over_it(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    """The run in flight is the answer to the press; a refusal recorded over it would read as a failure."""
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
+    )
+    _mark_out_of_date(app, agent_id)
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 200
+
+    assert _post(client, f"/ui/api/updates/{agent_id}/now").status_code == 409
+
+    published = _published(app, agent_id)
+    assert published.activity is UpdateActivity.RUNNING
+    assert published.dispatch_failure == ""
+
+
+_READY_RESULT = MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
+_QUIET_GATE_RESULT = MngrCallResult(returncode=0, stdout='MINDS_BACKUP_GATE_JSON:{"running_chats": []}\n')
+
+
+@pytest.mark.witnesses(
+    "workspace-updates.bulk-unsent-update-is-reported", partial="the published row, not its rendering"
+)
+@pytest.mark.parametrize(
+    ("results", "is_host_running", "expected_failure"),
+    (
+        ((_READY_RESULT,), False, "Couldn't reach this machine to start the update."),
+        # An unreadable chat gate counts as agents working in the machine.
+        ((_READY_RESULT,), True, "Agents were still working in this machine, so the update didn't start."),
+        # A quiet gate, and then a launch that cannot reach the machine even once it is started.
+        ((_QUIET_GATE_RESULT, _HOST_OFFLINE), True, "Couldn't reach this machine to start the update."),
+    ),
+    ids=["host-unknown", "chats-running", "dispatch-unreached"],
+)
+def test_a_machine_a_bulk_update_did_not_update_says_why_on_its_row(
+    tmp_path: Path,
+    root_concurrency_group: ConcurrencyGroup,
+    agent_id: AgentId,
+    results: tuple[MngrCallResult, ...],
+    is_host_running: bool,
+    expected_failure: str,
+) -> None:
+    """The bulk route answers before any machine is tried, so the row is the only place the outcome can land."""
+    _client, app = _build_client(
+        tmp_path,
+        root_concurrency_group,
+        mngr_caller=ScriptedMngrCaller(results=results),
+        is_host_running=is_host_running,
+    )
+    _mark_out_of_date(app, agent_id)
+    service = _service(app)
+    with app.app_context():
+        scheduler = get_state().update_scheduler
+
+    run_bulk_dispatch(service, scheduler, [agent_id])
+
+    published = _published(app, agent_id)
+    assert published.dispatch_failure == expected_failure
+    assert published.is_run_in_flight is False

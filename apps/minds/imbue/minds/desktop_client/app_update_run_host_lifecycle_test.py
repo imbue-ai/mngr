@@ -68,6 +68,6 @@ def test_the_update_run_host_start_runs_on_the_calling_thread(
     )
 
     # The resolver knows no host, so this reports failure without shelling out.
-    assert lifecycle.start_and_wait(AgentId.generate()) is False
+    assert lifecycle.start_and_wait(AgentId.generate()).is_successful is False
 
     assert resolver.wait_for_asking_thread_name() == threading.current_thread().name

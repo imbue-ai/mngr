@@ -41,6 +41,16 @@ Feature: Running an update
     And the app shows the workspace's own refusal
     And starting that workspace's update again is not refused as one already in flight
 
+  @unsent-update-is-reported
+  Scenario: An update that never went out says why on the workspace
+    Reaching a workspace, starting it, and creating the agent can each take long enough that the window that asked is gone by the time the answer comes back, so the answer is kept on the workspace, where every update surface reads it, rather than only in the reply to the press.
+    Given an out-of-date workspace that cannot be reached, cannot be started, or refuses the update agent
+    When the user starts an update for that workspace
+    And the user closes the window that asked before the app hears back
+    Then the workspace's row reports that its update didn't start
+    And opening that workspace's update again says why, with the underlying error message when there was one
+    And that report is gone once an update of that workspace goes out or is scheduled, or once the user dismisses it
+
   @stop-mid-apply-is-confirmed
   Scenario: Stopping a workspace while its update is being applied asks first
     A run that is only preparing has changed nothing, so it withholds nothing; the apply is the one step a stop can leave half-done.

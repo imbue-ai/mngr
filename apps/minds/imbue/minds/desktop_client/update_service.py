@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.backup_workspace_scripts import BACKUP_GATE_PROB
 from imbue.minds.desktop_client.backup_workspace_scripts import GATE_RESULT_MARKER
 from imbue.minds.desktop_client.backup_workspace_scripts import build_workspace_script_command
 from imbue.minds.desktop_client.backup_workspace_scripts import extract_marker_json
+from imbue.minds.desktop_client.in_workspace_mngr import FAILURE_DETAIL_MAX_CHARS
 from imbue.minds.desktop_client.skill_chat import SkillChatLaunch
 from imbue.minds.desktop_client.skill_chat import SkillChatLaunchOutcome
 from imbue.minds.desktop_client.skill_chat import generate_chat_name
@@ -39,7 +40,9 @@ from imbue.minds.desktop_client.update_chat import build_update_chat_message
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_scheduler import ScheduledRunConditions
 from imbue.minds.desktop_client.update_status import UpdateActivity
+from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.errors import MindError
@@ -79,28 +82,56 @@ class UpdateDispatchOutcome(UpperCaseStrEnum):
     ALREADY_RUNNING = auto()
     UNSUPPORTED = auto()
     """The workspace predates the update-self skill; there is nothing to run."""
+    START_FAILED = auto()
+    """The launch could not reach the workspace, and its host would not start.
+
+    The start's own diagnosis says why when it gave one.
+    """
     UNREACHABLE = auto()
-    """The launch could not reach the workspace, and starting it did not change that."""
+    """The launch could not reach the workspace, even after it was started; mngr's account says why when it gave one."""
     SPAWN_FAILED = auto()
-    """The create did not land, or the launch was cut off partway; its verdict says why when it gave one."""
+    """The create did not land, or the launch was cut off partway.
+
+    The workspace's verdict on the create, or mngr's account of the cut-off, says why when it gave one.
+    """
+
+
+# What each outcome that did not dispatch tells the user; the route answers with it
+# and the run slice records it, so the modal says the same thing whether it stayed open.
+DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
+    UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this machine.",
+    UpdateDispatchOutcome.UNSUPPORTED: (
+        "This machine is too old to update itself. Ask an agent inside it for help, "
+        "or create a new machine and migrate your work."
+    ),
+    UpdateDispatchOutcome.START_FAILED: "Couldn't start this machine to run the update.",
+    UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this machine to start the update.",
+    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this machine.",
+}
+
+# Recorded for a dispatch that raised rather than returned: no outcome names what went wrong.
+_DISPATCH_RAISED_FAILURE: Final[UpdateDispatchFailure] = UpdateDispatchFailure(
+    message="Something went wrong starting the update in this machine."
+)
 
 
 class UpdateDispatch(FrozenModel):
-    """What a dispatch did, and the workspace's own words when it did not go out.
+    """What a dispatch did, and what the machine, mngr, or the host start said when it did not go out.
 
-    A carrier rather than the bare outcome: SPAWN_FAILED is the one outcome
-    whose cause the enum cannot name.
+    A carrier rather than the bare outcome: the enum names what failed, never
+    what was said about it.
     """
 
     outcome: UpdateDispatchOutcome = Field(description="What the dispatch did")
     failure_detail: str = Field(
         default="",
-        description="The workspace's verdict on a failed spawn; '' when it gave none, and for every other outcome",
+        description="What the machine, mngr, or the host start said about a failed dispatch, bounded; '' when "
+        "none said anything, and for every outcome that is not a failure",
     )
 
     @property
     def log_description(self) -> str:
-        """This dispatch in one log line: the outcome, and the workspace's verdict when it gave one."""
+        """This dispatch in one log line: the outcome, and its failure detail when there is one."""
         if not self.failure_detail:
             return self.outcome.value
         return f"{self.outcome.value}: {self.failure_detail}"
@@ -123,12 +154,12 @@ class WorkspaceUpdateService(MutableModel):
     apply_window: UpdateApplyWindowManager = Field(frozen=True, description="Probes whether a run is still alive.")
     mngr_caller: MngrCaller = Field(frozen=True, description="Runs every in-workspace command.")
     backend_resolver: BackendResolverInterface = Field(frozen=True, description="Discovery: hosts and their states.")
-    start_workspace: Callable[[AgentId], bool] = Field(
+    start_workspace: Callable[[AgentId], MindHostActionOutcome] = Field(
         frozen=True,
         description=(
             "Brings a workspace's host up when the run's launch could not reach it, returning whether it is "
-            "up. The shared host lifecycle action, not a bare ``mngr start``: an update that wakes a machine "
-            "the app had stopped must clear its unattended-recovery suppression, or the machine stays "
+            "up and why not. The shared host lifecycle action, not a bare ``mngr start``: an update that wakes "
+            "a machine the app had stopped must clear its unattended-recovery suppression, or the machine stays "
             "unrecoverable for the rest of the session."
         ),
     )
@@ -151,8 +182,6 @@ class WorkspaceUpdateService(MutableModel):
         with self._callbacks_lock:
             self._on_run_finished_callbacks.append(callback)
 
-    # Dispatch
-
     def dispatch_update(self, agent_id: AgentId, *, target_override: str | None = None) -> UpdateDispatch:
         """Start an update run in ``agent_id``, returning what happened.
 
@@ -162,26 +191,31 @@ class WorkspaceUpdateService(MutableModel):
         The run slot is claimed before any remote work, so a concurrent dispatch
         loses rather than starting a second update. Every non-dispatch exit
         releases it in ``finally``: a row left on STARTING is never polled, so
-        nothing but an app restart could unlock it.
+        nothing but an app restart could unlock it. The release records why the
+        run never went out, on the row every surface reads: the caller that
+        pressed the button may be gone by the time the answer comes back.
         """
         chat_name = generate_chat_name(UPDATE_SKILL_NAME)
         if not self.state_store.try_begin_run(
             agent_id, chat_agent_name=chat_name, target_override=target_override or ""
         ):
             return UpdateDispatch(outcome=UpdateDispatchOutcome.ALREADY_RUNNING)
-        is_dispatched = False
+        dispatch: UpdateDispatch | None = None
         try:
             dispatch = self._start_claimed_run(agent_id, chat_name, target_override)
-            is_dispatched = dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
             return dispatch
         finally:
-            # Conditional on STARTING: a spawn that timed out after creating the
-            # chat has a live run the sweep may already have entered as RUNNING,
-            # and writing IDLE over it would let a retry start a second update.
-            if not is_dispatched:
-                self.state_store.set_activity(
-                    agent_id, UpdateActivity.IDLE, only_from=frozenset({UpdateActivity.STARTING})
+            if dispatch is None:
+                self.state_store.release_failed_claim(agent_id, _DISPATCH_RAISED_FAILURE)
+            elif dispatch.outcome is not UpdateDispatchOutcome.DISPATCHED:
+                self.state_store.release_failed_claim(
+                    agent_id,
+                    UpdateDispatchFailure(
+                        message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome], detail=dispatch.failure_detail
+                    ),
                 )
+            else:
+                pass
 
     def _start_claimed_run(self, agent_id: AgentId, chat_name: str, target_override: str | None) -> UpdateDispatch:
         """Do the work of a dispatch that has already won the run slot.
@@ -196,13 +230,16 @@ class WorkspaceUpdateService(MutableModel):
         message = build_update_chat_message(
             target_override=target_override, is_backup_configured=self.is_backup_configured(agent_id)
         )
-        first_launch = self._launch_update_chat(agent_id, chat_name, message)
-        if first_launch.outcome is not SkillChatLaunchOutcome.UNREACHABLE:
-            launch = first_launch
-        elif self.start_workspace(agent_id):
+        launch = self._launch_update_chat(agent_id, chat_name, message)
+        if launch.outcome is SkillChatLaunchOutcome.UNREACHABLE:
+            start = self.start_workspace(agent_id)
+            if not start.is_successful:
+                return UpdateDispatch(
+                    outcome=UpdateDispatchOutcome.START_FAILED,
+                    # Led by its verdict, so the head is the part worth keeping.
+                    failure_detail=(start.failure_reason or "")[:FAILURE_DETAIL_MAX_CHARS],
+                )
             launch = self._launch_update_chat(agent_id, chat_name, message)
-        else:
-            return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
         match launch.outcome:
             case SkillChatLaunchOutcome.STARTED:
                 self.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
@@ -210,7 +247,7 @@ class WorkspaceUpdateService(MutableModel):
             case SkillChatLaunchOutcome.UNSUPPORTED:
                 return UpdateDispatch(outcome=UpdateDispatchOutcome.UNSUPPORTED)
             case SkillChatLaunchOutcome.UNREACHABLE:
-                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE)
+                return UpdateDispatch(outcome=UpdateDispatchOutcome.UNREACHABLE, failure_detail=launch.failure_detail)
             case SkillChatLaunchOutcome.SPAWN_FAILED:
                 return UpdateDispatch(outcome=UpdateDispatchOutcome.SPAWN_FAILED, failure_detail=launch.failure_detail)
             case _ as unreachable:
@@ -231,12 +268,9 @@ class WorkspaceUpdateService(MutableModel):
         """The scheduler's dispatch hook: whether the run went out."""
         dispatch = self.dispatch_update(agent_id, target_override=target_ref or None)
         if dispatch.outcome is not UpdateDispatchOutcome.DISPATCHED:
-            # An unattended run has no one at the screen, so the log line is the
-            # only place its refusal is written down.
+            # The row keeps only the latest refusal; the log keeps every unattended one.
             logger.info("Scheduled update for {} did not dispatch: {}", agent_id, dispatch.log_description)
         return dispatch.outcome is UpdateDispatchOutcome.DISPATCHED
-
-    # Scheduling
 
     def is_backup_configured(self, agent_id: AgentId) -> bool:
         """Whether this workspace has a canonical restic env, i.e. backups to fall back on.
@@ -290,8 +324,6 @@ class WorkspaceUpdateService(MutableModel):
             return False
         running_chats = payload.get("running_chats")
         return not (isinstance(running_chats, list) and running_chats)
-
-    # Closing a run out
 
     def handle_verdict(self, agent_id: AgentId, verdict: UpdateVerdict, resulting_ref: str) -> None:
         """Everything the app owes a terminal verdict: re-detect, report, unschedule."""

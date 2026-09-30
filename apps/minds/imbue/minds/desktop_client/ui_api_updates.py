@@ -10,6 +10,7 @@ import json
 import re
 import threading
 from typing import Final
+from typing import assert_never
 
 from flask import Blueprint
 from flask import Response
@@ -25,9 +26,12 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdatesMessage
 from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
+from imbue.minds.desktop_client.update_service import DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME
 from imbue.minds.desktop_client.update_service import UpdateDispatch
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
+from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
+from imbue.minds.desktop_client.update_status import UpdateSkipReason
 from imbue.minds.errors import MindError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
@@ -38,21 +42,20 @@ _DISPATCH_STATUS_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, int]] = {
     UpdateDispatchOutcome.DISPATCHED: 200,
     UpdateDispatchOutcome.ALREADY_RUNNING: 409,
     UpdateDispatchOutcome.UNSUPPORTED: 409,
+    UpdateDispatchOutcome.START_FAILED: 502,
     UpdateDispatchOutcome.UNREACHABLE: 502,
     UpdateDispatchOutcome.SPAWN_FAILED: 502,
 }
 
-_DISPATCH_MESSAGE_BY_OUTCOME: Final[dict[UpdateDispatchOutcome, str]] = {
-    UpdateDispatchOutcome.ALREADY_RUNNING: "An update is already running in this machine.",
-    UpdateDispatchOutcome.UNSUPPORTED: (
-        "This machine is too old to update itself. Ask an agent inside it for help, "
-        "or create a new machine and migrate your work."
+# What a bulk-now machine the schedule's gate declined tells the user. Not the
+# window-relative skip messages: this attempt was pressed for, not scheduled.
+_BULK_GATE_SKIP_FAILURE_BY_REASON: Final[dict[UpdateSkipReason, UpdateDispatchFailure]] = {
+    UpdateSkipReason.WORKSPACE_UNREACHABLE: UpdateDispatchFailure(
+        message=DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[UpdateDispatchOutcome.UNREACHABLE]
     ),
-    UpdateDispatchOutcome.UNREACHABLE: "Couldn't reach this machine to start the update.",
-    # Whatever the machine said travels alongside this, as ``detail`` -- a machine with no
-    # provider account signed in refuses the agent in its own words -- and a spawn that timed
-    # out rather than being refused has nothing to add.
-    UpdateDispatchOutcome.SPAWN_FAILED: "Couldn't start the update agent in this machine.",
+    UpdateSkipReason.CHATS_RUNNING: UpdateDispatchFailure(
+        message="Agents were still working in this machine, so the update didn't start."
+    ),
 }
 
 
@@ -107,7 +110,7 @@ def _json_response(payload: dict[str, object], status_code: int = 200) -> Respon
 
 
 def _error_response(message: str, status_code: int, detail: str = "") -> Response:
-    """An error body; ``detail`` is verbatim machine output the SPA renders apart from the message."""
+    """An error body; ``detail`` is what the machine, mngr, or the host start said, shown apart from the message."""
     payload: dict[str, object] = {"error": message}
     if detail:
         payload["detail"] = detail
@@ -129,7 +132,7 @@ def _dispatch_response(dispatch: UpdateDispatch) -> Response:
     status = _DISPATCH_STATUS_BY_OUTCOME[dispatch.outcome]
     if status == 200:
         return _json_response({"ok": True})
-    return _error_response(_DISPATCH_MESSAGE_BY_OUTCOME[dispatch.outcome], status, dispatch.failure_detail)
+    return _error_response(DISPATCH_REFUSAL_MESSAGE_BY_OUTCOME[dispatch.outcome], status, dispatch.failure_detail)
 
 
 def _armed_target_ref(service: WorkspaceUpdateService, agent_id: AgentId) -> str:
@@ -205,6 +208,7 @@ def _handle_schedule_update(agent_id: str) -> Response:
         return resolved
     service, parsed_id, target_ref = resolved
     service.schedule_store.schedule(parsed_id, target_ref=target_ref)
+    service.state_store.clear_dispatch_failure(parsed_id)
     return _json_response({"ok": True})
 
 
@@ -292,7 +296,11 @@ def run_bulk_dispatch(
 
 
 def _dispatch_one_bulk(service: WorkspaceUpdateService, scheduler: UpdateScheduler | None, agent_id: AgentId) -> None:
-    """Run one machine's bulk-now attempt, logging what became of it."""
+    """Run one machine's bulk-now attempt, logging what became of it and recording on its row why it did not go out.
+
+    A dispatch that failed recorded its own reason; only the gate's refusals,
+    which never reach a dispatch, are recorded here.
+    """
     if scheduler is None:
         # No scheduler means no gate to apply; dispatch directly rather than do nothing.
         dispatch = service.dispatch_update(agent_id)
@@ -301,8 +309,18 @@ def _dispatch_one_bulk(service: WorkspaceUpdateService, scheduler: UpdateSchedul
     skip_reason = scheduler.run_now(agent_id)
     if skip_reason is None:
         logger.info("Bulk update dispatch for {} went out", agent_id)
-    else:
-        logger.info("Skipped the bulk update for {}: {}", agent_id, skip_reason.value)
+        return
+    logger.info("Skipped the bulk update for {}: {}", agent_id, skip_reason.value)
+    match skip_reason:
+        case UpdateSkipReason.WORKSPACE_UNREACHABLE | UpdateSkipReason.CHATS_RUNNING:
+            service.state_store.record_skipped_dispatch(agent_id, _BULK_GATE_SKIP_FAILURE_BY_REASON[skip_reason])
+        case (
+            UpdateSkipReason.DISPATCH_FAILED | UpdateSkipReason.UPDATE_IN_FLIGHT | UpdateSkipReason.ALREADY_UP_TO_DATE
+        ):
+            # A failed dispatch recorded its own reason; a run in flight, or nothing to run, is no failure.
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _handle_bulk_schedule() -> Response:
@@ -315,11 +333,12 @@ def _handle_bulk_schedule() -> Response:
         # Re-arming replaces the record, so a machine already pointed at a named
         # version has to be re-armed at that same version.
         service.schedule_store.schedule(agent_id, target_ref=_armed_target_ref(service, agent_id))
+        service.state_store.clear_dispatch_failure(agent_id)
     return _json_response({"ok": True, "scheduled": [str(agent_id) for agent_id in eligible]})
 
 
 def _handle_dismiss_run_outcome(agent_id: str) -> Response:
-    """POST /ui/api/updates/<agent_id>/dismiss: clear how this machine's last run ended.
+    """POST /ui/api/updates/<agent_id>/dismiss: clear how this machine's last run ended, or why it never went out.
 
     Separate from the note route so dismissing the good news cannot silently
     clear an unread failure.

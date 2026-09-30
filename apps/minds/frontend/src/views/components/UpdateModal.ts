@@ -11,6 +11,7 @@ import {
   isRecreationRequired,
   isUpdateDispatchable,
   labelVersionNote,
+  recordedDispatchFailure,
   updateActivityNotice,
 } from "../../models/updates";
 import type { UpdateActionResult } from "../../models/updates";
@@ -32,7 +33,7 @@ interface UpdateModalState {
   /** The action in flight, so its button can say so and the rest can't be pressed. */
   pendingAction: "now" | "schedule" | "cancel" | "dismiss" | null;
   error: string;
-  /** The refusing machine's own words, shown under `error` when it had any. */
+  /** What the machine, mngr, or the host start said, shown under `error` when any said something. */
   errorDetail: string;
   /** Which press is held for the go-ahead-without-backups confirmation. */
   noBackupConfirm: "now" | "schedule" | null;
@@ -348,7 +349,10 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         );
       }
 
-      if (state.error) body.push(m(Notice, { variant: "error" }, [state.error, machineVerdict(state.errorDetail)]));
+      const error = state.error
+        ? { message: state.error, detail: state.errorDetail }
+        : recordedDispatchFailure(update, isUpdating);
+      if (error.message) body.push(m(Notice, { variant: "error" }, [error.message, machineVerdict(error.detail)]));
 
       const actions: m.Children[] = [];
       if (isRecreationRequired(update)) {
@@ -432,8 +436,9 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
         }
       }
       // A run's outcome outlives it and the row wears the badge until it is
-      // cleared; a stall draws the same badge, so it gets the same Dismiss.
-      const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED";
+      // cleared; a stall, or an update that never went out, wears a failure
+      // badge too, so it gets the same Dismiss.
+      const isOutcomeShowing = Boolean(verdict) || update.activity === "STALLED" || Boolean(update.dispatch_failure);
       if (isOutcomeShowing) actions.push(dismissOutcomeButton(agentId, isBusy, onClose));
       if (update.is_scheduled) {
         actions.push(

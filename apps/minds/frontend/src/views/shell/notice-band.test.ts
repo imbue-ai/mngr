@@ -375,6 +375,18 @@ describe("noticeBandFor, an update run", () => {
     expect(attention?.variant).toBe("info");
   });
 
+  it("says an update that never went out didn't start, ahead of the standing version notice", () => {
+    // Update now enters the machine before dispatching, so the band is where
+    // a reader whose modal closed while it waited learns the press failed.
+    const band = noticeBandFor("healthy", "healthy", true, {
+      updateRunOutcome: "not-started",
+      standingUpdateNotice: "out-of-date",
+    });
+    expect(band?.message).toBe("This machine's update didn't start.");
+    expect(band?.variant).toBe("error");
+    expect(band?.action?.kind).toBe("update-workspace");
+  });
+
   it("prefers what a machine is doing now over how its last attempt ended", () => {
     const band = noticeBandFor("healthy", "healthy", true, {
       updateRunPhase: "preparing",

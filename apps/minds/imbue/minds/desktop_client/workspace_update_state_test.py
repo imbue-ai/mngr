@@ -5,6 +5,7 @@ from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import datetime
+from datetime import timedelta
 from datetime import timezone
 from pathlib import Path
 from typing import Final
@@ -24,6 +25,7 @@ from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalRec
 from imbue.minds.desktop_client.update_dismissal_store import UpdateDismissalStore
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
@@ -996,3 +998,55 @@ def test_the_sweep_reads_the_run_record_only_for_reachable_idle_rows(
 
     assert read_ids == [str(idle_id)]
     assert detector.store.get(idle_id).verdict is UpdateVerdict.UPDATED
+
+
+_UNREACHED_FAILURE = UpdateDispatchFailure(
+    message="Couldn't reach this machine to start the update.", detail="Error: connection refused"
+)
+
+
+def test_only_a_run_started_after_a_failed_dispatch_clears_it_from_outside_the_app(tmp_path: Path) -> None:
+    """The sweep re-reads the machine's last run record every pass; an earlier run's says nothing about the attempt."""
+    store, agent_id = _out_of_date_store(tmp_path)
+    assert store.try_begin_run(agent_id, chat_agent_name="update-never-created")
+    claimed_at = store.get(agent_id).run_started_at
+    assert claimed_at is not None
+    assert store.release_failed_claim(agent_id, _UNREACHED_FAILURE) is True
+
+    store.observe_run_record(
+        agent_id,
+        _run_record(chat="update-earlier", started_at=claimed_at - timedelta(days=1), verdict=UpdateVerdict.UPDATED),
+    )
+    assert store.get(agent_id).dispatch_failure == "Couldn't reach this machine to start the update."
+
+    store.observe_run_record(
+        agent_id, _run_record(chat="update-by-hand", started_at=claimed_at + timedelta(minutes=5))
+    )
+
+    state = store.get(agent_id)
+    assert state.activity is UpdateActivity.RUNNING
+    assert state.dispatch_failure == ""
+    assert state.dispatch_failure_detail == ""
+
+
+def test_a_failed_dispatch_whose_run_the_poll_already_entered_records_no_failure(tmp_path: Path) -> None:
+    """A spawn that timed out after creating its chat has a live run; a failure recorded over it would be false."""
+    store, agent_id = _out_of_date_store(tmp_path)
+    assert store.try_begin_run(agent_id, chat_agent_name="update-x")
+    store.set_activity(agent_id, UpdateActivity.RUNNING)
+
+    assert store.release_failed_claim(agent_id, _UNREACHED_FAILURE) is False
+
+    state = store.get(agent_id)
+    assert state.activity is UpdateActivity.RUNNING
+    assert state.dispatch_failure == ""
+
+
+def test_a_declined_bulk_attempt_is_not_recorded_over_a_run_in_flight(tmp_path: Path) -> None:
+    """A run that started between the gate's reading and the record is the answer to the request."""
+    store, agent_id = _out_of_date_store(tmp_path)
+    assert store.try_begin_run(agent_id, chat_agent_name="update-x")
+
+    assert store.record_skipped_dispatch(agent_id, _UNREACHED_FAILURE) is False
+
+    assert store.get(agent_id).dispatch_failure == ""

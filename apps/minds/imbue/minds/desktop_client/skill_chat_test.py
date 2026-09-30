@@ -178,12 +178,13 @@ def test_one_launch_exec_answers_what_the_workspace_made_of_it(
 
 
 def test_a_launch_that_never_reached_the_workspace_is_unreachable() -> None:
-    """Nothing ran there, which is what lets a caller start the workspace and launch again."""
+    """Nothing ran there, which is what lets a caller start the workspace and launch again; mngr's reason rides along."""
     caller = RecordingMngrCaller(result=host_offline_exec_result())
 
     launch = launch_skill_chat(caller, "agent-1", skill_name="assist", chat_name="assist-1", message="/assist x")
 
     assert launch.outcome is SkillChatLaunchOutcome.UNREACHABLE
+    assert launch.failure_detail == "Host 'host-1' is offline and automatic starting is disabled."
 
 
 def test_a_launch_cut_off_after_reaching_the_workspace_is_a_failure_not_unreachable() -> None:

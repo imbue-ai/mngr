@@ -227,6 +227,11 @@ describe("update state predicates", () => {
     }
     expect(updateRunOutcome({ ...OUT_OF_DATE, activity: "STALLED" })).toBe("failed");
   });
+
+  it("reports an update that never went out ahead of an earlier run's outcome", () => {
+    const update = { ...OUT_OF_DATE, verdict: "STUCK" as const, dispatch_failure: "Couldn't start this machine." };
+    expect(updateRunOutcome(update)).toBe("not-started");
+  });
 });
 
 describe("updateBadgeFor", () => {
@@ -287,6 +292,19 @@ describe("updateBadgeFor", () => {
   it("keeps a failed run visible over a machine that is still out of date", () => {
     const badge = updateBadgeFor({ ...OUT_OF_DATE, verdict: "STUCK" }, false);
     expect(badge).toMatchObject({ state: "failed", tone: "error", label: "Update failed" });
+  });
+
+  it("says an update that never went out didn't start, ahead of an earlier run's outcome", () => {
+    const badge = updateBadgeFor(
+      { ...OUT_OF_DATE, verdict: "STUCK", dispatch_failure: "Couldn't reach this machine to start the update." },
+      false,
+    );
+    expect(badge).toMatchObject({
+      state: "failed",
+      tone: "error",
+      label: "Update didn't start",
+      tooltip: "Couldn't reach this machine to start the update.",
+    });
   });
 
   it("badges a machine below the in-place cutoff as needing recreation, not as an update offer", () => {

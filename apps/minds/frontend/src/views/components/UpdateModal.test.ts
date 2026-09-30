@@ -155,6 +155,41 @@ describe("the update modal's Update now", () => {
     );
   });
 
+  it("shows an update that never went out to a modal opened after the press", async () => {
+    // The press's own answer died with the modal that was waiting on it, so
+    // the machine's row is the only record of it the reader can reach.
+    const { draw, requests, onClose } = harness(
+      () => Promise.resolve(jsonResponse({ ok: true })),
+      {
+        ...OUT_OF_DATE,
+        dispatch_failure: "Couldn't reach this machine to start the update.",
+        dispatch_failure_detail: "Error: Could not reach host host-1234: connection refused",
+      },
+    );
+
+    const text = allText(draw());
+    expect(text).toContain("Couldn't reach this machine to start the update.");
+    expect(text).toContain("Error: Could not reach host host-1234: connection refused");
+
+    press(draw(), "Dismiss");
+    await settleDispatch();
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/dismiss`]);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds an update that never went out back while a new press is out", () => {
+    // The press is the newer question; the old answer beside its spinner would read as its reply.
+    const { draw } = harness(() => new Promise<Response>(() => undefined), {
+      ...OUT_OF_DATE,
+      dispatch_failure: "Couldn't reach this machine to start the update.",
+    });
+    expect(allText(draw())).toContain("Couldn't reach this machine to start the update.");
+
+    press(draw(), "Update now");
+
+    expect(allText(draw())).not.toContain("Couldn't reach this machine to start the update.");
+  });
+
   it("offers scheduling as the primary action", () => {
     const schedule = pressableWithLabel(
       harness(() => Promise.resolve(jsonResponse({}))).draw(),

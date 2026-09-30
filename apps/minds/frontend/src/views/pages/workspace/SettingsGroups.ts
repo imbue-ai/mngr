@@ -22,6 +22,7 @@ import {
   devOverridePrefill,
   isRecreationRequired,
   isUpdateDispatchable,
+  recordedDispatchFailure,
   standingUpdateNotice,
   updateActivityNotice,
 } from "../../../models/updates";
@@ -240,8 +241,8 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
 
   const activity = updateActivityNotice(update, isUpdating);
   const held = forMachine(local.noBackupConfirm, agentId);
-  const shownError = forMachine(local.updateError, agentId);
-  const errorMessage = shownError?.message ?? "";
+  const shownError = forMachine(local.updateError, agentId) ?? recordedDispatchFailure(update, isUpdating);
+  const errorMessage = shownError.message;
 
   return m("div", { class: "max-w-md" }, [
     m(SectionHeader, "Version"),
@@ -403,7 +404,7 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
       errorMessage
         ? m("div", { class: "type-helper text-important mt-3", role: "alert" }, [
             errorMessage,
-            machineVerdict(shownError?.detail ?? ""),
+            machineVerdict(shownError.detail),
           ])
         : null,
     ]),

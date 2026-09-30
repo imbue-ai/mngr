@@ -31,6 +31,13 @@ Feature: Scheduling an update
     And the update stays scheduled
     And the app reports why the attempt was skipped, in terms of the update window rather than a night
 
+  @bulk-unsent-update-is-reported
+  Scenario: A workspace a bulk update did not update says why on its row
+    The bulk action answers before any workspace is tried, so each workspace's row is the only place its outcome can land. The press was for now, not for a window, so the reason is not put in terms of one.
+    Given several out-of-date workspaces, one of which cannot be reached or has agents working in it
+    When the user updates them all now
+    Then that workspace's row reports that its update didn't start, and why
+
   @re-arming-replaces
   Scenario: Re-scheduling replaces the previous intent outright
     Given a workspace whose scheduled update was skipped

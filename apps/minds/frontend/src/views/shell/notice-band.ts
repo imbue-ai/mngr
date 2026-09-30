@@ -347,16 +347,19 @@ function updateRunNotice(phase: UpdateRunPhase, holdDetail: string | null): Noti
 }
 
 /**
- * What a finished run still owes the reader, or null: the machine-side
- * counterpart to the row badge, which cannot be seen from inside the machine.
+ * What a finished run, or one that never went out, still owes the reader, or
+ * null: the machine-side counterpart to the row badge, which cannot be seen
+ * from inside the machine.
  */
 function updateOutcomeNotice(outcome: UpdateRunOutcome): NoticePayload | null {
   const message =
-    outcome === "failed"
-      ? "This machine's update didn't finish."
-      : outcome === "needs-attention"
-        ? "This machine updated, and the update agent left a note for you."
-        : null;
+    outcome === "not-started"
+      ? "This machine's update didn't start."
+      : outcome === "failed"
+        ? "This machine's update didn't finish."
+        : outcome === "needs-attention"
+          ? "This machine updated, and the update agent left a note for you."
+          : null;
   if (message === null) return null;
   return {
     key: "workspace-update-outcome",

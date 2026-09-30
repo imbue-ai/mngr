@@ -125,6 +125,16 @@ def describe_skip_reason(recorded_reason: str) -> str:
     return SKIP_REASON_MESSAGES[reason]
 
 
+class UpdateDispatchFailure(FrozenModel):
+    """Why an asked-for run never went out: the app's sentence, and what the machine, mngr, or the host start said."""
+
+    message: str = Field(description="One plain-English sentence saying what did not happen")
+    detail: str = Field(
+        default="",
+        description="Bounded verbatim output from the machine, mngr, or the host start; '' when there was none",
+    )
+
+
 class UpdateRunStatus(FrozenModel):
     """One parsed ``run.json``: the latest run's start facts, its in-flight facts, and its verdict once it has one."""
 

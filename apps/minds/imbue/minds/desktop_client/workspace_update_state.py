@@ -37,6 +37,7 @@ from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
+from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
@@ -174,6 +175,11 @@ class _RunFacts(FrozenModel):
     # The note outlives the record once a newer run starts, so a dismissal must
     # name the run that earned it rather than the one on the record.
     success_note_run_started_at: datetime | None = Field(default=None)
+    dispatch_failure: UpdateDispatchFailure | None = Field(
+        default=None, description="Why the last run asked for never went out; None once one has, or was dismissed"
+    )
+    # A run record started after this is a run the failed attempt did not account for.
+    dispatch_attempted_at: datetime | None = Field(default=None)
 
     def with_record(self, status: UpdateRunStatus) -> "_RunFacts":
         """These facts with ``status`` as the run's record; a verdict ends the run and may earn the note.
@@ -233,6 +239,8 @@ def _compose(detected: _DetectionFacts, run: _RunFacts, schedule: UpdateSchedule
         last_skip_reason=describe_skip_reason(schedule.last_skip_reason) if schedule is not None else "",
         success_note_version=run.success_note_version,
         chat_agent_name=run.record.chat_agent_name,
+        dispatch_failure=run.dispatch_failure.message if run.dispatch_failure is not None else "",
+        dispatch_failure_detail=run.dispatch_failure.detail if run.dispatch_failure is not None else "",
     )
 
 
@@ -337,7 +345,9 @@ class WorkspaceUpdateStateStore(MutableModel):
                 else facts.record
             )
             self._run_by_agent[aid_str] = facts.model_copy_update(
-                to_update(facts.field_ref().activity, activity), to_update(facts.field_ref().record, record)
+                to_update(facts.field_ref().activity, activity),
+                to_update(facts.field_ref().record, record),
+                to_update(facts.field_ref().dispatch_failure, None if is_new_run else facts.dispatch_failure),
             )
         self._fire_on_change()
         return True
@@ -361,9 +371,58 @@ class WorkspaceUpdateStateStore(MutableModel):
                     UpdateRunStatus(chat_agent_name=chat_agent_name, started_at=datetime.now(timezone.utc)),
                 ),
                 to_update(facts.field_ref().target_override, target_override),
+                to_update(facts.field_ref().dispatch_failure, None),
             )
         self._fire_on_change()
         return True
+
+    def release_failed_claim(self, agent_id: AgentId, failure: UpdateDispatchFailure) -> bool:
+        """Hand back a run slot whose dispatch never went out, recording why; return whether it was released.
+
+        Taken only from STARTING: a spawn that timed out after creating the chat
+        has a live run the poll may already have entered as RUNNING, and writing
+        IDLE over it would let a retry start a second update. Such a run is not
+        a failure, so nothing is recorded either.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._run_by_agent.get(aid_str, _RunFacts())
+            if facts.activity is not UpdateActivity.STARTING:
+                return False
+            self._run_by_agent[aid_str] = facts.model_copy_update(
+                to_update(facts.field_ref().activity, UpdateActivity.IDLE),
+                to_update(facts.field_ref().dispatch_failure, failure),
+                to_update(facts.field_ref().dispatch_attempted_at, facts.record.started_at),
+            )
+        self._fire_on_change()
+        return True
+
+    def record_skipped_dispatch(self, agent_id: AgentId, failure: UpdateDispatchFailure) -> bool:
+        """Record why a run asked for was declined before it claimed the slot; return whether it was recorded.
+
+        Nothing for a row with a run in flight: that run is the answer to the request.
+        """
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._run_by_agent.get(aid_str, _RunFacts())
+            if facts.activity in IN_FLIGHT_ACTIVITIES:
+                return False
+            self._run_by_agent[aid_str] = facts.model_copy_update(
+                to_update(facts.field_ref().dispatch_failure, failure),
+                to_update(facts.field_ref().dispatch_attempted_at, datetime.now(timezone.utc)),
+            )
+        self._fire_on_change()
+        return True
+
+    def clear_dispatch_failure(self, agent_id: AgentId) -> None:
+        """Drop the record of an update that never went out: a newer request (a schedule) supersedes it."""
+        aid_str = str(agent_id)
+        with self._lock:
+            facts = self._run_by_agent.get(aid_str)
+            if facts is None or facts.dispatch_failure is None:
+                return
+            self._run_by_agent[aid_str] = facts.model_copy_update(to_update(facts.field_ref().dispatch_failure, None))
+        self._fire_on_change()
 
     def adopt_run_record(self, agent_id: AgentId, status: UpdateRunStatus) -> None:
         """The poll read the in-flight run's own record: it becomes the row's, and its verdict ends the run.
@@ -435,6 +494,14 @@ class WorkspaceUpdateStateStore(MutableModel):
                     new_facts = new_facts.model_copy_update(
                         to_update(new_facts.field_ref().record, _without_outcome(new_facts.record))
                     )
+            # An earlier run's record re-read after a failed attempt says nothing about that attempt.
+            is_newer_than_failed_attempt = (
+                status.started_at is not None
+                and facts.dispatch_attempted_at is not None
+                and status.started_at >= facts.dispatch_attempted_at
+            )
+            if is_newer_than_failed_attempt:
+                new_facts = new_facts.model_copy_update(to_update(new_facts.field_ref().dispatch_failure, None))
             self._run_by_agent[aid_str] = new_facts
         self._fire_on_change()
 
@@ -467,33 +534,39 @@ class WorkspaceUpdateStateStore(MutableModel):
         self._fire_on_change()
 
     def dismiss_run_outcome(self, agent_id: AgentId) -> None:
-        """Clear how the last run ended (the user acknowledged it).
+        """Clear how the last run ended, or why the last one asked for never went out (the user acknowledged it).
 
         STALLED draws the same "Update failed" badge as a verdict, so it is
         dismissible too and goes back to IDLE. The dismissed run's start is
         persisted so the sweep's re-read of the record, in this launch or a
-        later one, does not restore it.
+        later one, does not restore it. A failed dispatch is held only in
+        memory, so there is nothing of it to persist.
         """
         aid_str = str(agent_id)
         with self._lock:
             facts = self._run_by_agent.get(aid_str)
-            if facts is None or (facts.record.verdict is None and facts.activity is not UpdateActivity.STALLED):
+            if facts is None:
+                return
+            is_run_outcome_showing = facts.record.verdict is not None or facts.activity is UpdateActivity.STALLED
+            if not is_run_outcome_showing and facts.dispatch_failure is None:
                 return
             record = facts.record
-            if record.started_at is not None:
-                self.dismissal_store.dismiss_outcome(agent_id, record.started_at)
-            else:
-                logger.warning(
-                    "Clearing {}'s update outcome without remembering it: the run has no readable start to key "
-                    "the dismissal on, so the next launch will report the outcome again",
-                    agent_id,
-                )
+            if is_run_outcome_showing:
+                if record.started_at is not None:
+                    self.dismissal_store.dismiss_outcome(agent_id, record.started_at)
+                else:
+                    logger.warning(
+                        "Clearing {}'s update outcome without remembering it: the run has no readable start to key "
+                        "the dismissal on, so the next launch will report the outcome again",
+                        agent_id,
+                    )
             self._run_by_agent[aid_str] = facts.model_copy_update(
                 to_update(
                     facts.field_ref().activity,
                     UpdateActivity.IDLE if facts.activity is UpdateActivity.STALLED else facts.activity,
                 ),
-                to_update(facts.field_ref().record, _without_outcome(record)),
+                to_update(facts.field_ref().record, _without_outcome(record) if is_run_outcome_showing else record),
+                to_update(facts.field_ref().dispatch_failure, None),
             )
         self._fire_on_change()
 

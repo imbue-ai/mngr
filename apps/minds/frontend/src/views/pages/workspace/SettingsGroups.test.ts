@@ -295,6 +295,44 @@ describe("the Updates settings group's specific-version field", () => {
   });
 });
 
+describe("the Updates settings group after an update that never went out", () => {
+  function recordFailureOnBacked(): void {
+    getAppContext().stores.updates.applyUpdatesMessage({
+      type: "workspace_updates",
+      updates: {
+        [UNBACKED]: { ...OUT_OF_DATE, is_backup_configured: false },
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          dispatch_failure: "Couldn't start this machine to run the update.",
+          dispatch_failure_detail: "ERROR: The box behind host-5821 is gone",
+        },
+      },
+      update_window: "2:00 AM-5:00 AM",
+    });
+  }
+
+  it("shows the machine's recorded reason, on that machine only", () => {
+    const { draw } = harness();
+    recordFailureOnBacked();
+
+    const backed = allText(updatesGroup(draw(BACKED)));
+    expect(backed).toContain("Couldn't start this machine to run the update.");
+    expect(backed).toContain("ERROR: The box behind host-5821 is gone");
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain("Couldn't start this machine");
+  });
+
+  it("holds the recorded reason back while a new press is out", () => {
+    // The press is the newer question; the old answer beside its spinner would read as its reply.
+    const { draw } = harness(() => new Promise<Response>(() => undefined));
+    recordFailureOnBacked();
+
+    press(updatesGroup(draw(BACKED)), "Update now");
+
+    expect(allText(updatesGroup(draw(BACKED)))).not.toContain("Couldn't start this machine");
+  });
+});
+
 describe("the Account settings group on a machine leased from Imbue Cloud", () => {
   /** The drawn Account section's text, whitespace collapsed, and whether it offers an Unlink. */
   function accountSection(root: m.Children): { text: string; hasUnlink: boolean } {

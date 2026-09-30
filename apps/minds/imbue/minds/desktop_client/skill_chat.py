@@ -337,14 +337,15 @@ class SkillChatLaunchOutcome(UpperCaseStrEnum):
 
 
 class SkillChatLaunch(FrozenModel):
-    """What a launch came to, and the workspace's own words when the create did not land."""
+    """What a launch came to, and the workspace's or mngr's own words when it did not start the chat."""
 
     outcome: SkillChatLaunchOutcome = Field(description="What the launch came to")
     failure_detail: str = Field(
         default="",
         description=(
-            "The workspace's own verdict on a failed spawn, for the caller to show; '' for every other outcome "
-            "and when the workspace gave none. "
+            "On SPAWN_FAILED, the workspace's own verdict on the create, or mngr's account of an exec cut off "
+            "after reaching it; on UNREACHABLE, mngr's own account of why the exec never reached it. '' for "
+            "every other outcome and when none of them gave one. "
             "Bounded and stripped of the outer mngr's chatter, so it can be rendered as-is"
         ),
     )
@@ -401,7 +402,7 @@ def launch_skill_chat(
             result.returncode,
             answer.log_detail,
         )
-        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.UNREACHABLE)
+        return SkillChatLaunch(outcome=SkillChatLaunchOutcome.UNREACHABLE, failure_detail=answer.detail)
     if answer.is_delivered:
         return SkillChatLaunch(outcome=SkillChatLaunchOutcome.STARTED)
     if answer.verdict is ChatAppVerdict.NO_VERDICT:

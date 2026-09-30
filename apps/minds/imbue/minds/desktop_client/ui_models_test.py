@@ -77,8 +77,11 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     older window reads its absence as "not a folder" and hides the option on
     every row, and to 23 when the accounts frame gained the account list and
     ``/ui/api/accounts`` was removed -- an older window's Manage Accounts still
-    fetches that route, and would say its accounts could not be loaded."""
-    assert UI_SCHEMA_VERSION == 23
+    fetches that route, and would say its accounts could not be loaded, and to
+    24 when an update row gained ``dispatch_failure`` -- an older window drops
+    it, so an update that never went out would leave the row saying nothing
+    once its modal closed, which is the silence the field was added to end."""
+    assert UI_SCHEMA_VERSION == 24
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -87,7 +90,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 23}
+    assert parsed == {"type": "hello", "schema_version": 24}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:

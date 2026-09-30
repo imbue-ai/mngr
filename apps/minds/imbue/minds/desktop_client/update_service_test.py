@@ -30,6 +30,7 @@ from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -72,7 +73,7 @@ def _build_service(
     caller: MngrCaller,
     store: WorkspaceUpdateStateStore | None = None,
     started: list[AgentId] | None = None,
-    is_start_successful: bool = True,
+    start_failure_reason: str | None = None,
     backend_resolver: MngrCliBackendResolver | None = None,
 ) -> _FixedHostStateService:
     store = store if store is not None else make_update_state_store(tmp_path)
@@ -100,17 +101,17 @@ def _build_service(
         mngr_caller=caller,
         backend_resolver=backend_resolver,
         paths=InstallationPaths(data_dir=tmp_path / "data"),
-        start_workspace=_record_start(started if started is not None else [], is_up=is_start_successful),
+        start_workspace=_record_start(started if started is not None else [], failure_reason=start_failure_reason),
         fixed_host_state=host_state,
     )
 
 
-def _record_start(started: list[AgentId], *, is_up: bool) -> Callable[[AgentId], bool]:
-    """A stand-in host start that records who it was asked for and reports the machine up or not."""
+def _record_start(started: list[AgentId], *, failure_reason: str | None) -> Callable[[AgentId], MindHostActionOutcome]:
+    """A stand-in host start that records who it was asked for and reports the machine up, or why not."""
 
-    def start(agent_id: AgentId) -> bool:
+    def start(agent_id: AgentId) -> MindHostActionOutcome:
         started.append(agent_id)
-        return is_up
+        return MindHostActionOutcome(is_successful=failure_reason is None, failure_reason=failure_reason)
 
     return start
 
@@ -439,6 +440,7 @@ def test_a_spawn_reported_as_failed_does_not_unlock_a_run_that_has_started(
 
     assert dispatch.outcome is UpdateDispatchOutcome.SPAWN_FAILED
     assert store.get(agent_id).activity is UpdateActivity.RUNNING
+    assert store.get(agent_id).dispatch_failure == ""
 
 
 def test_an_update_launches_on_its_machine_by_the_host_discovery_placed_it_on(
@@ -500,10 +502,29 @@ def test_an_update_the_launch_could_not_reach_starts_the_machine_and_launches_ag
     assert len(caller.calls) == 2
 
 
-@pytest.mark.parametrize("is_start_successful", (True, False), ids=("started-but-still-unreachable", "start-failed"))
-def test_an_update_that_cannot_reach_its_machine_even_after_a_start_is_unreachable(
-    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, is_start_successful: bool
+def test_an_update_still_unreachable_after_its_machine_started_says_what_mngr_said(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
+    started: list[AgentId] = []
+    caller = RecordingMngrCaller(result=_HOST_OFFLINE)
+    service = _build_service(
+        tmp_path, root_concurrency_group, host_state=HostState.STOPPED, caller=caller, started=started
+    )
+
+    dispatch = service.dispatch_update(AgentId.generate())
+
+    assert dispatch.outcome is UpdateDispatchOutcome.UNREACHABLE
+    assert dispatch.failure_detail == "Host 'host-1' is offline and automatic starting is disabled."
+    assert len(started) == 1
+    assert len(caller.calls) == 2
+
+
+def test_an_update_whose_machine_would_not_start_carries_the_starts_diagnosis_and_launches_no_more(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup
+) -> None:
+    """A start that failed and a launch that got no answer are different problems, so the outcome names which."""
+    agent_id = AgentId.generate()
+    store = make_update_state_store(tmp_path)
     started: list[AgentId] = []
     caller = RecordingMngrCaller(result=_HOST_OFFLINE)
     service = _build_service(
@@ -511,15 +532,18 @@ def test_an_update_that_cannot_reach_its_machine_even_after_a_start_is_unreachab
         root_concurrency_group,
         host_state=HostState.STOPPED,
         caller=caller,
+        store=store,
         started=started,
-        is_start_successful=is_start_successful,
+        start_failure_reason="ERROR: The box behind host-5821 is gone",
     )
 
-    dispatch = service.dispatch_update(AgentId.generate())
+    dispatch = service.dispatch_update(agent_id)
 
-    assert dispatch.outcome is UpdateDispatchOutcome.UNREACHABLE
-    assert len(started) == 1
-    assert len(caller.calls) == (2 if is_start_successful else 1)
+    assert dispatch.outcome is UpdateDispatchOutcome.START_FAILED
+    assert dispatch.failure_detail == "ERROR: The box behind host-5821 is gone"
+    assert started == [agent_id]
+    assert len(caller.calls) == 1
+    assert store.get(agent_id).dispatch_failure == "Couldn't start this machine to run the update."
 
 
 @pytest.mark.parametrize(

@@ -97,18 +97,34 @@ export function updateRunPhase(update: UiWorkspaceUpdate | null, isUpdating: boo
   return "preparing";
 }
 
-/** What a machine's last run left behind for the user, once it is over. */
-export type UpdateRunOutcome = "none" | "failed" | "needs-attention";
+/** What a machine's last run left behind for the user, once it is over, or
+ * that the last one asked for never went out. */
+export type UpdateRunOutcome = "none" | "not-started" | "failed" | "needs-attention";
 
 /** How the last run ended, for the surfaces that report it. Every failure is
- * one outcome: whatever the agent found, the next step is to check in with it. */
+ * one outcome: whatever the agent found, the next step is to check in with it.
+ * An update that never went out is newer than any run's outcome: it is the
+ * answer to the last press. */
 export function updateRunOutcome(update: UiWorkspaceUpdate | null): UpdateRunOutcome {
   if (update === null) return "none";
+  if (update.dispatch_failure) return "not-started";
   if (update.activity === "STALLED" || isFailureVerdict(update.verdict)) return "failed";
   // Not a failure, but detection resets the machine to UP_TO_DATE on its next
   // sweep, so this is the only account of the leftover work.
   if (update.verdict === "UPDATED_WITH_REBUILD_ITEMS") return "needs-attention";
   return "none";
+}
+
+/** Why the last update asked for never went out, for a surface to show in
+ * place of its own answer to a press, which is lost if the surface closed
+ * while it waited. Empty while a new press is out: that press is the newer
+ * question, and the old answer beside its spinner would read as its reply. */
+export function recordedDispatchFailure(
+  update: UiWorkspaceUpdate,
+  isUpdating: boolean,
+): { message: string; detail: string } {
+  if (isUpdating) return { message: "", detail: "" };
+  return { message: update.dispatch_failure ?? "", detail: update.dispatch_failure_detail ?? "" };
 }
 
 /** The modal's line about a run in flight, and whether it is still waiting. */
@@ -232,6 +248,15 @@ export function updateBadgeFor(update: UiWorkspaceUpdate | null, isUpdating: boo
   }
   if (update === null) return null;
   const outcome = updateRunOutcome(update);
+  if (outcome === "not-started") {
+    return {
+      state: "failed",
+      tone: "error",
+      label: "Update didn't start",
+      tooltip: update.dispatch_failure ?? "",
+      isSpinnerShown: false,
+    };
+  }
   if (outcome === "failed") {
     return {
       state: "failed",
@@ -382,7 +407,7 @@ export class UpdatesStore {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/schedule/cancel`, {});
   }
 
-  /** Clear how the last run ended -- its verdict, or a stall. */
+  /** Clear how the last run ended -- its verdict, or a stall -- or why the last one never went out. */
   async dismissRunOutcome(agentId: string): Promise<UpdateActionResult> {
     return await postUpdateAction(`/ui/api/updates/${encodeURIComponent(agentId)}/dismiss`, {});
   }
@@ -415,9 +440,10 @@ export class UpdatesStore {
 export interface UpdateActionResult {
   isOk: boolean;
   error: string;
-  /** Verbatim output from the machine that refused, when it had something to say
-   * (a config its own mngr will not parse, say). Rendered apart from `error`,
-   * which stays a sentence: this is a machine's words, not ours. */
+  /** Verbatim output from the machine, mngr, or the host start, when any had
+   * something to say (a config the machine's own mngr will not parse, say).
+   * Rendered apart from `error`, which stays a sentence: these are their words,
+   * not ours. */
   detail: string;
 }
 

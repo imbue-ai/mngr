@@ -54,7 +54,7 @@ from imbue.minds.desktop_client.update_status import UpdateVerdict
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 23
+UI_SCHEMA_VERSION: int = 24
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -399,6 +399,16 @@ class UiWorkspaceUpdate(FrozenModel):
         default="", description="The exact ref the armed schedule targets; '' for the skill's default"
     )
     last_skip_reason: str = Field(default="", description="Why the last scheduled attempt did not run")
+    dispatch_failure: str = Field(
+        default="",
+        description="Why the last update asked for never went out, as a sentence; '' when it went out, or since "
+        "a newer run, a schedule, a dismissal, or a restart",
+    )
+    dispatch_failure_detail: str = Field(
+        default="",
+        description="What the machine, mngr, or the host start said about that failure, rendered apart from the "
+        "sentence",
+    )
     success_note_version: str = Field(
         default="", description="Version the last successful run landed, for the dismissible row note"
     )

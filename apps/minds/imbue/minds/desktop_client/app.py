@@ -1970,12 +1970,12 @@ class _UpdateRunHostLifecycle(MutableModel):
     mngr_binary: str = Field(frozen=True, description="mngr executable both actions shell out to.")
     mngr_host_dir: Path = Field(frozen=True, description="MNGR_HOST_DIR for those mngr calls.")
 
-    def start_and_wait(self, agent_id: AgentId) -> bool:
-        """Start the machine, blocking until ``mngr`` returns; whether it is up.
+    def start_and_wait(self, agent_id: AgentId) -> MindHostActionOutcome:
+        """Start the machine, blocking until ``mngr`` returns; whether it is up, and why not.
 
         Synchronous because the dispatch's next step execs into the machine.
         """
-        return self._act(agent_id, MindHostAction.START).is_successful
+        return self._act(agent_id, MindHostAction.START)
 
     def stop_in_background(self, agent_id: AgentId) -> None:
         """Stop the machine on a one-shot worker.
