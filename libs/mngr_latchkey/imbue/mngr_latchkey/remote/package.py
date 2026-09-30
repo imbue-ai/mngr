@@ -82,7 +82,7 @@ from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
 
 # Version of the upstream ``latchkey`` CLI the package installs on the machine.
-LATCHKEY_VERSION: Final[str] = "3.16.0"
+LATCHKEY_VERSION: Final[str] = "3.16.1"
 
 # latchkey-curl-shims release the machine fetches the curl router + the
 # Chrome-impersonating curl from (``latchkey-curl-shims-<triple>.tar.gz``). The
