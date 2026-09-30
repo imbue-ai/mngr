@@ -1,8 +1,10 @@
 import type m from "mithril";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CreateFormDefaults } from "../../models/create";
+import { REPORTING_CONSENT_QUESTION } from "../../models/onboarding";
 import {
   EXISTING_LOGIN_LABEL,
+  FLOW,
   RESEND_EMAIL_LABEL,
   answerStep,
   initialStartFlowState,
@@ -124,6 +126,45 @@ describe("transcriptTurns", () => {
     expect(withAttr(turns, "data-answer")).toHaveLength(0);
     expect(withAttr(turns, "data-aside")).toHaveLength(0);
     expect(allText(turns)).toContain("How do you want to run it?");
+  });
+});
+
+describe("transcriptTurns and the error-reporting checkbox", () => {
+  const started = startQuestions(initialStartFlowState());
+  const consent = (isAllowed: boolean, onChange = vi.fn()) => ({ reportingConsent: { isAllowed, onChange } });
+
+  function checkbox(turns: m.Children[]): Record<string, unknown> | undefined {
+    const node = collectVnodes(turns).find((vnode) => attrsOf(vnode).id === "start-reporting-consent");
+    return node === undefined ? undefined : attrsOf(node);
+  }
+
+  it("asks it on the run question, which every way out of onboarding answers, and on no other", () => {
+    const asking = Object.entries(FLOW)
+      .filter(([, step]) => step.asksReportingConsent)
+      .map(([id]) => id);
+    expect(asking).toEqual(["run"]);
+  });
+
+  it("shows it checked above the run question's answers, and reports a change", () => {
+    const onChange = vi.fn();
+    const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: true, ...consent(true, onChange) });
+    expect(allText(turns)).toContain(REPORTING_CONSENT_QUESTION);
+    const box = checkbox(turns);
+    expect(box?.checked).toBe(true);
+    (box?.onchange as (event: Event) => void)({ target: { checked: false } } as unknown as Event);
+    expect(onChange).toHaveBeenCalledWith(false);
+  });
+
+  it("shows the state it is given, so an unchecked box stays unchecked", () => {
+    const turns = transcriptTurns(started.entries, { isInstant: true, isPressable: true, ...consent(false) });
+    expect(checkbox(turns)?.checked).toBe(false);
+  });
+
+  it("is gone once the run question is answered, and from a read-only transcript", () => {
+    const answered = answerStep(started, 1, "custom", { isSignedIn: false, signedInEmail: "" });
+    const pressable = { isInstant: true, isPressable: true, ...consent(true) };
+    expect(checkbox(transcriptTurns(answered.entries, pressable))).toBe(undefined);
+    expect(checkbox(transcriptTurns(started.entries, { ...pressable, isPressable: false }))).toBe(undefined);
   });
 });
 

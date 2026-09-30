@@ -219,6 +219,9 @@ def test_on_after_provisioning_installs_web_client(tmp_path: Path) -> None:
     text = content.decode()
     assert "registerOscHandler(52" in text
     assert "isSystemSelection" in text
+    # A reconnect must fit to the frame before reporting its size, or a resize made while
+    # disconnected leaves the terminal at its old width.
+    assert re.search(r'websocket connection opened"\);const\{[^}]*fitAddon:(\w+)[^}]*\}=this;\1\.fit\(\)', text)
 
 
 def test_ttyd_command_serves_custom_client_via_index() -> None:

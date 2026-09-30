@@ -1876,7 +1876,7 @@ async function promptWorkspaceShutdown() {
 function fetchAppStatus(timeoutMs = 25000) {
   // One GET to /ui/api/app-status to learn auth status, the restore inputs
   // (is_onboarding_complete, workspace_count, restorable ids), and whether
-  // the error-reporting notice still needs acknowledging. See the startup
+  // the error-reporting consent screen still needs answering. See the startup
   // sequence for how the result routes the cold-start landing screen.
   return new Promise((resolve) => {
     if (!backendBaseUrl) {

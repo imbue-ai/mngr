@@ -288,8 +288,9 @@ class MindsConfig(MutableModel):
         Sentry automatically. Default: True.
 
         A single flag gating both automatic error sends and whether their log/traceback attachments
-        are uploaded. It defaults on for new installs (the first-launch consent screen is
-        informational, with no opt-out there) but can be turned off from Settings -> Error reporting.
+        are uploaded. It defaults on for new installs; the consent question's checkbox (checked to
+        start; asked in the start flow, or on the consent screen) and Settings -> Error reporting
+        both turn it off.
         Read live at Sentry send time (so a change takes effect without an app restart). Manual bug
         reports are an explicit user action and are sent (with full diagnostics) regardless of this
         setting.

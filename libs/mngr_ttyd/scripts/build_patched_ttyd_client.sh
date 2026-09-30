@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Rebuild the vendored ttyd web client (resources/ttyd_index.html).
 #
-# WHY THIS EXISTS
-# ---------------
 # The released ttyd binary (1.7.7, the version mngr_ttyd installs) ships an
 # xterm.js build with NO OSC 52 handler, so a tmux copy inside the browser
 # terminal never reaches the system clipboard. ttyd's unreleased `main` branch
@@ -16,8 +14,7 @@
 # to the stock 1.7.7 binary via `ttyd -I` (the client/server wire protocol is
 # unchanged between 1.7.7 and main, so the old binary + new client interoperate).
 #
-# USAGE
-# -----
+# Usage:
 #   libs/mngr_ttyd/scripts/build_patched_ttyd_client.sh
 #
 # Requires: git, node, and corepack (ships with node) for the pinned yarn.
@@ -29,6 +26,7 @@ _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _RESOURCES_DIR="$_SCRIPT_DIR/../imbue/mngr_ttyd/resources"
 _PATCH="$_SCRIPT_DIR/ttyd_clipboard_provider.patch"
 _FOCUS_PATCH="$_SCRIPT_DIR/ttyd_host_focus.patch"
+_REFIT_PATCH="$_SCRIPT_DIR/ttyd_refit_on_connect.patch"
 _BUILD_DIR="$(mktemp -d -t ttyd_client_build.XXXXXX)"
 trap 'rm -rf "$_BUILD_DIR"' EXIT
 
@@ -46,6 +44,9 @@ git -C "$_BUILD_DIR/ttyd" apply "$_PATCH"
 echo "Applying host-driven focus patch ..."
 git -C "$_BUILD_DIR/ttyd" apply "$_FOCUS_PATCH"
 
+echo "Applying refit-on-connect patch ..."
+git -C "$_BUILD_DIR/ttyd" apply "$_REFIT_PATCH"
+
 echo "Building the html client ..."
 corepack enable
 (cd "$_BUILD_DIR/ttyd/html" && yarn install && yarn build)
@@ -57,6 +58,10 @@ if ! grep -q "isSystemSelection" "$_BUILT"; then
 fi
 if ! grep -q "ttyd-focus" "$_BUILT"; then
     echo "error: built client is missing the host-driven focus patch" >&2
+    exit 1
+fi
+if ! grep -qE 'websocket connection opened"\);const\{[^}]*fitAddon:[A-Za-z_$]+[^}]*\}=this;[A-Za-z_$]+\.fit\(\)' "$_BUILT"; then
+    echo "error: built client is missing the refit-on-connect patch" >&2
     exit 1
 fi
 

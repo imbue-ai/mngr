@@ -4,7 +4,7 @@
 //   - the machines list / home (a runner with prior auth state, like a
 //     logged-in dev machine),
 //   - the first-run start flow (vanilla macos-latest CI runner),
-//   - the once-per-install error-reporting notice, or
+//   - the once-per-install error-reporting consent screen, or
 //   - a restored workspace window (dev machine with saved session state).
 //
 // Any of these landings proves the cold-launch path completed: Electron
@@ -30,7 +30,7 @@ test('main window launches to a usable state (home, start flow, consent, or a re
     // on the RouteError page, so it can't prove a good landing):
     //   #landing-minds-settings  the home page's fixed settings launcher
     //   #start-flow              the first-run start flow (the chat that creates the first workspace)
-    //   #consent-continue        the error-reporting notice
+    //   #consent-continue        the error-reporting consent screen
     //   #content-frame           the workspace surface (restored session)
     const landingMarker = content.locator(
       '#landing-minds-settings, #start-flow, #consent-continue, #content-frame'

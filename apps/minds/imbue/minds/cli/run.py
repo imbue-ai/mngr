@@ -228,10 +228,11 @@ def run(
     #
     # Sentry always initializes, but what it actually sends is gated live by a single per-machine user
     # setting (stored in MindsConfig): ``report_unexpected_errors`` gates automatic error sends and
-    # their log/traceback attachments together. It defaults on for new installs (the first-launch
-    # consent screen is informational) and can be turned off from Settings -> Error reporting. It is
-    # read live, so a change takes effect without restarting. Manual bug reports are always sent (with
-    # full diagnostics) regardless of ``report_unexpected_errors``.
+    # their log/traceback attachments together. It defaults on for new installs, takes the answer to
+    # the consent question's checkbox (checked to start; asked in the start flow, or on the consent
+    # screen), and can be changed from Settings -> Error reporting. It is read live, so a change
+    # takes effect without restarting. Manual bug reports are always sent (with full diagnostics)
+    # regardless of ``report_unexpected_errors``.
     #
     # The minds env selects the Sentry DSN and, for production/staging, which S3 attachment bucket:
     # production and staging each get their own, while every other env (dev-*, ci-*) reports to the

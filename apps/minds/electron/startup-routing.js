@@ -14,7 +14,7 @@
  * Returns one of:
  *   'start'   -> the first-run start flow (`/start`): the manifesto exchange
  *                and the first workspace's questions, asked as a chat
- *   'consent' -> the once-per-install error-reporting notice (`/consent`)
+ *   'consent' -> the once-per-install error-reporting consent screen (`/consent`)
  *   'create'  -> the home / create-agent page (`/`)
  *   'restore' -> reopen the previous session's saved windows
  *
@@ -31,11 +31,8 @@
  *      install that has never made a workspace. (A bare `/` window survives
  *      restore-filtering because it isn't a workspace URL, so without this
  *      clause it would silently win over the start flow.)
- *   3. The error-reporting notice was never acknowledged -> consent. Sits
- *      after the start branches and before the landing content, matching
- *      the legacy server-side gate. ConsentPage's accept action records the
- *      acknowledgement (POST /ui/api/onboarding/consent) and lands home, so
- *      the route never recurs.
+ *   3. The error-reporting consent screen was never answered -> consent.
+ *      Answering it records the answer, so the route never recurs.
  *   4. Nothing restorable -> the home/create page.
  *   5. Otherwise -> restore the saved windows.
  *
@@ -44,7 +41,7 @@
  * @param {boolean} state.isOnboardingComplete   The install is past the first-run start flow.
  * @param {number}  state.workspaceCount         Number of existing workspaces.
  * @param {number}  state.restorableCount        Saved windows that survived restore-filtering.
- * @param {boolean} state.needsConsent           The error-reporting notice is unacknowledged.
+ * @param {boolean} state.needsConsent           The error-reporting consent screen is unanswered.
  * @returns {'start'|'consent'|'create'|'restore'}
  */
 function decideStartupRoute({ authenticated, isOnboardingComplete, workspaceCount, restorableCount, needsConsent }) {

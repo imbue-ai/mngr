@@ -318,11 +318,12 @@ def _resolved_workspace_color(backend_resolver: BackendResolverInterface, agent_
 
 
 def _handle_consent_submit() -> Response:
-    """Record that the user acknowledged the error-reporting notice (POST /consent).
+    """Record that the user answered the error-reporting consent screen (POST /consent).
 
-    The notice sits just after login, so this requires authentication. The screen is informational
-    (no opt-out during the alpha), so this only marks the notice as acknowledged -- reporting stays
-    on by default -- and it syncs the latchkey daemon's consent file for good measure.
+    The screen sits just after login, so this requires authentication. This form post carries no
+    answer, so it only marks the screen answered and leaves the reporting setting as it is (the
+    SPA's POST /ui/api/onboarding/consent carries the answer), then syncs the latchkey daemon's
+    consent file.
     """
     if not _is_request_authenticated():
         return make_response(status_code=403, content='{"error":"Not authenticated"}', media_type="application/json")

@@ -587,11 +587,11 @@ def _set_master_password_via_ui(page: Page, origin: str, new_password: str) -> N
 def _goto_landing(page: Page, origin: str) -> None:
     """Open the landing page.
 
-    No consent detour: the SPA shows the first-run error-reporting notice only
+    No consent detour: the SPA shows the error-reporting consent screen only
     on its own /consent route, which nothing but the Electron shell's
     cold-start first-window routing opens (the legacy frontend's server-side
     gate on ``/`` is gone), so an explicit load of ``/`` always renders the
-    landing -- and nothing these tests drive is gated on acknowledging it.
+    landing -- and nothing these tests drive is gated on answering it.
     """
     page.goto(f"{origin}/", wait_until="domcontentloaded")
 

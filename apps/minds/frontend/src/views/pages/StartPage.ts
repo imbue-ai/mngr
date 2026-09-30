@@ -15,7 +15,11 @@ import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
 import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
-import { markOnboardingComplete } from "../../models/onboarding";
+import {
+  REPORTING_CONSENT_QUESTION,
+  markOnboardingComplete,
+  recordErrorReportingConsent,
+} from "../../models/onboarding";
 import {
   CHAT_STREAM_STEP_MS,
   CONTINUE_LABEL,
@@ -53,6 +57,7 @@ import {
   answerRow,
   choiceTable,
   disclosureList,
+  reportingConsentRow,
   scrollAnchor,
   userTurn,
 } from "./start/transcript";
@@ -79,6 +84,8 @@ export function transcriptTurns(
     onAnswer?: (at: number, choiceId: ChoiceId) => void;
     onUndo?: (at: number) => void;
     onAside?: (stepId: StepId) => void;
+    /** The error-reporting checkbox's state, for the question that carries it. */
+    reportingConsent?: { isAllowed: boolean; onChange: (isAllowed: boolean) => void };
   },
 ): m.Children[] {
   const turns: m.Children[] = [];
@@ -124,6 +131,17 @@ export function transcriptTurns(
     if (!options.isPressable) return;
     const buttonsAt = at === options.reopenedStepIndex ? 0 : optionsAt;
     const aside = step.aside;
+    if (step.asksReportingConsent && options.reportingConsent) {
+      turns.push(
+        reportingConsentRow({
+          key: `${key}-reporting-consent`,
+          delayMs: buttonsAt,
+          question: REPORTING_CONSENT_QUESTION,
+          isAllowed: options.reportingConsent.isAllowed,
+          onChange: options.reportingConsent.onChange,
+        }),
+      );
+    }
     turns.push(
       answerRow({
         key: `${key}-buttons`,
@@ -165,6 +183,8 @@ export const StartPage: m.ClosureComponent = () => {
   let defaults: CreateFormDefaults | null = null;
   let isCustomFormOpen = false;
   let isSubmittingCloud = false;
+  // The run question's error-reporting checkbox.
+  let isReportingAllowed = true;
   // The manifesto points the reader has opened.
   const openManifestoIds = new Set<string>();
   // The verification gate: one check may be in flight, and a poll runs while
@@ -356,7 +376,18 @@ export const StartPage: m.ClosureComponent = () => {
     );
   }
 
+  // Saved with the press on the question that carries the checkbox, whichever way it is answered.
+  function recordReportingConsentIfAsked(stepId: StepId): void {
+    if (!FLOW[stepId].asksReportingConsent) return;
+    // A failed save is asked again on the consent screen at a later launch.
+    void recordErrorReportingConsent(isReportingAllowed).then((isRecorded) => {
+      if (!isRecorded) console.warn("The error-reporting answer could not be saved");
+    });
+  }
+
   function onAnswer(at: number, choiceId: ChoiceId): void {
+    const answered = flow.state.entries[at];
+    if (answered?.kind === "step") recordReportingConsentIfAsked(answered.id);
     if (choiceId === "verified") {
       pressVerified();
       return;
@@ -379,6 +410,7 @@ export const StartPage: m.ClosureComponent = () => {
       resendVerification();
       return;
     }
+    recordReportingConsentIfAsked(stepId);
     flow.state = chooseExistingLogin(flow.state);
     void webLogin.start("Sign in to see your existing workspaces.");
   }
@@ -495,6 +527,12 @@ export const StartPage: m.ClosureComponent = () => {
           onAnswer,
           onUndo: isSubmittingCloud ? undefined : onUndo,
           onAside,
+          reportingConsent: {
+            isAllowed: isReportingAllowed,
+            onChange: (isAllowed) => {
+              isReportingAllowed = isAllowed;
+            },
+          },
         }),
         scrollAnchor(state.entries.length),
       );

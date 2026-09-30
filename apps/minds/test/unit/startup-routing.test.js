@@ -26,7 +26,7 @@ test('unauthenticated -> start regardless of other state', () => {
   );
 });
 
-test('unacknowledged consent notice -> consent, before create and restore', () => {
+test('unanswered consent screen -> consent, before create and restore', () => {
   assert.equal(
     decideStartupRoute({
       authenticated: true,
@@ -37,7 +37,7 @@ test('unacknowledged consent notice -> consent, before create and restore', () =
     }),
     'consent',
   );
-  // Consent outranks restore too: the notice is once-per-install and must
+  // Consent outranks restore too: the screen is once-per-install and must
   // not be skippable by having restorable windows.
   assert.equal(
     decideStartupRoute({
@@ -51,7 +51,7 @@ test('unacknowledged consent notice -> consent, before create and restore', () =
   );
 });
 
-test('an install that never finished onboarding stays on start even when consent is unacknowledged', () => {
+test('an install that never finished onboarding stays on start even when consent is unanswered', () => {
   assert.equal(
     decideStartupRoute({
       authenticated: true,

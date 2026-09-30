@@ -1,0 +1,17 @@
+diff --git a/html/src/components/terminal/xterm/index.ts b/html/src/components/terminal/xterm/index.ts
+index 01a3b67..b292433 100644
+--- a/html/src/components/terminal/xterm/index.ts
++++ b/html/src/components/terminal/xterm/index.ts
+@@ -296,7 +296,11 @@ export class Xterm {
+     private onSocketOpen() {
+         console.log('[ttyd] websocket connection opened');
+ 
+-        const { textEncoder, terminal, overlayAddon } = this;
++        const { textEncoder, terminal, fitAddon, overlayAddon } = this;
++        // The window resize listener is disposed with the previous connection, so a resize
++        // while disconnected never reached the terminal. Fit to the frame as it is now, or the
++        // server is told the size from before the drop and keeps it until the next resize.
++        fitAddon.fit();
+         const msg = JSON.stringify({ AuthToken: this.token, columns: terminal.cols, rows: terminal.rows });
+         this.socket?.send(textEncoder.encode(msg));
+ 
