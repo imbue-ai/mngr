@@ -19,6 +19,7 @@ from pydantic import Field
 from pydantic import model_validator
 from pygtail import Pygtail
 
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import ROTATED_JSONL_PATTERN
 from imbue.imbue_common.logging import log_span
@@ -29,6 +30,7 @@ from imbue.mngr.api.find import filter_one_host
 from imbue.mngr.api.find import find_one_agent
 from imbue.mngr.api.providers import get_provider_instance
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import EventsFollowReaderDiedError
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import try_resolve_readable_host
@@ -66,13 +68,14 @@ TAIL_READ_FAILURES_BEFORE_REPROBE: Final[int] = 3
 # Consecutive failed polls after which a tail thread says so at warning level, once, so a follow
 # that has quietly stopped delivering is visible in the log.
 _TAIL_READ_FAILURES_BEFORE_WARNING: Final[int] = 30
+# Consecutive failed host probes after which the follow loop says so at warning level, once: while
+# the probe keeps failing the loop cannot notice the host going offline or coming back.
+_ONLINE_CHECK_FAILURES_BEFORE_WARNING: Final[int] = 10
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
 _STREAM_HEADER_RECORD_TYPE: Final[str] = "header"
 
 
-# =============================================================================
 # Data types
-# =============================================================================
 
 
 class EventsTarget(FrozenModel):
@@ -130,6 +133,15 @@ class EventSourceInfo(FrozenModel):
     is_current_file_present: bool = Field(default=True, description="Whether events.jsonl exists in this source")
 
 
+class _TailSourceFailure(FrozenModel):
+    """The death of a follow's tail thread, handed to the follow loop through the event queue."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    source_path: str = Field(description="Source whose tail thread died")
+    error: BaseException = Field(description="The exception that ended the thread")
+
+
 class _AllEventsStreamState(MutableModel):
     """Mutable state for the all-events streaming loop."""
 
@@ -147,6 +159,9 @@ class _AllEventsStreamState(MutableModel):
     warned_incorrect_sources: set[str] = Field(
         default_factory=set,
         description="Original source values for which a mismatch warning has already been emitted",
+    )
+    consecutive_online_check_failure_count: int = Field(
+        default=0, description="Host probes in a row that failed to answer online/offline"
     )
 
 
@@ -283,9 +298,7 @@ def _try_get_readable_host_for_events(
     return host_interface, events_path
 
 
-# =============================================================================
 # Read event content
-# =============================================================================
 
 
 def read_event_content(target: EventsTarget, event_file_name: str) -> str:
@@ -307,9 +320,7 @@ def read_event_content(target: EventsTarget, event_file_name: str) -> str:
         return content_bytes.decode("utf-8", errors="replace")
 
 
-# =============================================================================
 # Source filtering
-# =============================================================================
 
 
 @pure
@@ -327,9 +338,7 @@ def filter_sources_by_name(
     return [s for s in sources if s.source_path in allowed]
 
 
-# =============================================================================
 # Event parsing and sorting
-# =============================================================================
 
 
 @pure
@@ -499,9 +508,7 @@ def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
     return [name for _, name in timestamped]
 
 
-# =============================================================================
 # Event source discovery
-# =============================================================================
 
 
 COMMON_TRANSCRIPT_SOURCE_SUFFIX: Final[str] = "common_transcript"
@@ -635,9 +642,7 @@ def _build_event_sources_from_listing(
     return _build_event_sources_from_grouped_files(files_by_dir)
 
 
-# =============================================================================
 # Reading events from sources
-# =============================================================================
 
 
 def _read_events_from_file(
@@ -720,9 +725,7 @@ def read_all_historical_events(
     return sorted_events, byte_offsets
 
 
-# =============================================================================
 # Streaming all events
-# =============================================================================
 
 
 def _collect_historical_events(
@@ -749,7 +752,7 @@ def _start_tail_threads_for_sources(
     target_holder: list[EventsTarget],
     sources: Sequence[EventSourceInfo],
     initial_byte_offsets: dict[str, int],
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -836,7 +839,7 @@ def stream_all_events(
     # target_holder[0] on an online/offline transition; the tail threads read
     # it each poll, so they follow the new target without being recreated.
     target_holder: list[EventsTarget] = [target]
-    event_queue: queue.Queue[EventRecord] = queue.Queue()
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure] = queue.Queue()
     tail_threads: list[threading.Thread] = []
     offset_dir: tempfile.TemporaryDirectory[str] | None = None
     # Wakes local tail threads on directory changes so their poll interval only
@@ -973,7 +976,7 @@ def _resolve_read_plan(target: EventsTarget, source_path: str) -> tuple[bool, Pa
 def _start_tail_thread(
     target_holder: list[EventsTarget],
     source_path: str,
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -982,12 +985,16 @@ def _start_tail_thread(
     offset_dir_path: Path,
     initial_byte_offset: int,
     watch_group: DirectoryWatchGroup,
-) -> threading.Thread:
+) -> ObservableThread:
     """Start a persistent daemon thread that tails one source into the queue.
 
     The thread lives for the whole follow session: it reads the current target
     from ``target_holder`` each poll and gates its I/O on ``online_event``, so a
     target going offline/online needs only a flag flip, never a thread restart.
+
+    If the thread dies it puts a ``_TailSourceFailure`` on the queue, and the
+    follow loop ends the follow with it: a follow that kept running without
+    this source's reader would look healthy while delivering nothing from it.
     """
     plan = _resolve_read_plan(target_holder[0], source_path)
     if plan is not None and plan[0]:
@@ -996,7 +1003,7 @@ def _start_tail_thread(
         # needless re-read). On a later mechanism/path switch the thread itself
         # resets to the start and relies on dedup.
         _write_pygtail_offset_file(plan[1], source_path, offset_dir_path, initial_byte_offset)
-    thread = threading.Thread(
+    thread = ObservableThread(
         target=_tail_source_thread,
         args=(
             source_path,
@@ -1011,7 +1018,10 @@ def _start_tail_thread(
             initial_byte_offset,
             watch_group,
         ),
-        daemon=True,
+        name=f"events-tail-{source_path}",
+        on_failure=lambda error: event_queue.put(_TailSourceFailure(source_path=source_path, error=error)),
+        # The follow loop raises the failure itself, so the shutdown join must not raise it again.
+        suppressed_exceptions=(Exception,),
     )
     thread.start()
     return thread
@@ -1047,7 +1057,7 @@ def _read_local_source_once(
     source_path: str,
     offset_dir_path: Path,
     warner: MalformedJsonLineWarner,
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1086,7 +1096,7 @@ def _read_remote_source_once(
     source_path: str,
     byte_offset: int,
     warner: MalformedJsonLineWarner,
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
 ) -> int:
@@ -1130,7 +1140,7 @@ def _read_remote_source_once(
 def _tail_source_thread(
     source_path: str,
     target_holder: list[EventsTarget],
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1293,7 +1303,7 @@ def _seconds_until_next_housekeeping(
 def _consume_event_queue(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     on_event: Callable[[EventRecord], None],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
@@ -1306,6 +1316,9 @@ def _consume_event_queue(
     source_filters: Sequence[str] = (),
 ) -> None:
     """Consume events from the queue, periodically re-scanning for new sources and checking online/offline.
+
+    Raises ``EventsFollowReaderDiedError`` as soon as a tail thread reports its
+    own death, since the follow could no longer deliver that source's events.
 
     The queue get blocks until an event arrives or the next housekeeping
     deadline passes, so an idle stream wakes only for housekeeping (every
@@ -1331,11 +1344,14 @@ def _consume_event_queue(
             is_online=state.is_online,
             is_read_failing=read_failure_event.is_set() or is_last_probe_for_failing_reads,
         )
-        event: EventRecord | None
+        event: EventRecord | _TailSourceFailure | None
         try:
             event = event_queue.get(timeout=timeout)
         except queue.Empty:
             event = None
+
+        if isinstance(event, _TailSourceFailure):
+            raise EventsFollowReaderDiedError(event.source_path, event.error) from event.error
 
         if event is not None and event.event_id not in state.emitted_event_ids:
             state.emitted_event_ids.add(event.event_id)
@@ -1393,7 +1409,7 @@ def _consume_event_queue(
 def _rescan_and_start_new_tail_threads(
     target_holder: list[EventsTarget],
     state: _AllEventsStreamState,
-    event_queue: queue.Queue[EventRecord],
+    event_queue: queue.Queue[EventRecord | _TailSourceFailure],
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
     stop_event: threading.Event,
@@ -1445,9 +1461,7 @@ def _rescan_and_start_new_tail_threads(
             tail_threads.append(thread)
 
 
-# =============================================================================
 # Online/offline transitions
-# =============================================================================
 
 
 def refresh_events_target(
@@ -1471,6 +1485,36 @@ def refresh_events_target(
         host_id=target.host_id,
         events_subpath=target.events_subpath,
     )
+
+
+def _record_failed_online_check(state: _AllEventsStreamState, display_name: str, error: Exception) -> None:
+    """Count a failed host probe, logging the first at debug and the streak at warning once it gets long."""
+    state.consecutive_online_check_failure_count += 1
+    if state.consecutive_online_check_failure_count == 1:
+        logger.debug("Failed to check whether {} is online: {}", display_name, error)
+    elif state.consecutive_online_check_failure_count == _ONLINE_CHECK_FAILURES_BEFORE_WARNING:
+        logger.warning(
+            "Failed to check whether {} is online {} times in a row (last: {}); "
+            "still treating it as {} until a check succeeds",
+            display_name,
+            state.consecutive_online_check_failure_count,
+            error,
+            "online" if state.is_online else "offline",
+        )
+    else:
+        logger.trace("Failed to check whether {} is online: {}", display_name, error)
+
+
+def _record_answered_online_check(state: _AllEventsStreamState, display_name: str) -> None:
+    """End any streak of failed host probes."""
+    if state.consecutive_online_check_failure_count == 0:
+        return
+    logger.debug(
+        "Checked whether {} is online after {} failed attempt(s)",
+        display_name,
+        state.consecutive_online_check_failure_count,
+    )
+    state.consecutive_online_check_failure_count = 0
 
 
 def _handle_online_offline_transition(
@@ -1503,8 +1547,9 @@ def _handle_online_offline_transition(
     try:
         new_target = refresh_events_target(target)
     except (MngrError, OSError) as e:
-        logger.trace("Failed to check online status: {}", e)
+        _record_failed_online_check(state, target.display_name, e)
         return False
+    _record_answered_online_check(state, target.display_name)
 
     was_online = state.is_online
     is_now_online = isinstance(new_target.host, OnlineHostInterface)

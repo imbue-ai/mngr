@@ -1,5 +1,5 @@
-from imbue.mngr.utils.error_utils import MAX_TRACEBACK_TEXT_LENGTH
-from imbue.mngr.utils.error_utils import format_exception_traceback
+from imbue.imbue_common.tracebacks import MAX_TRACEBACK_TEXT_LENGTH
+from imbue.imbue_common.tracebacks import format_exception_traceback
 
 
 def test_format_exception_traceback_returns_none_for_a_never_raised_exception() -> None:

@@ -37,6 +37,10 @@ mngr is responsible for:
 - enforcing the [host lifecycle](./concepts/hosts.md#Lifecycle), including automatically stopping a host when all its agents are idle
 - configuring/enabling/disabling [plugins](./concepts/plugins.md)
 
+## Sleep and connectivity
+
+`mngr` usually runs on a laptop that sleeps and loses its network. See [laptop sleep and lost connectivity](./sleep_and_connectivity.md) for how clocks, connections, and timeouts behave across those, and what new code should do about it.
+
 ## Multi-user support
 
 `mngr` typically runs as a single user on a host (it stores its data at `~/.mngr/` by convention, for example).

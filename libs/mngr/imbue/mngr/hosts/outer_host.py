@@ -38,6 +38,7 @@ from loguru import logger
 from paramiko import Channel
 from paramiko import ChannelException
 from paramiko import SFTPClient
+from paramiko import SFTPError
 from paramiko import SSHException
 from paramiko import Transport
 from paramiko.common import cMSG_CHANNEL_REQUEST
@@ -309,6 +310,8 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
       including ChannelException (server refused to open a new channel,
       e.g. MaxSessions limit -- the transport may still be alive)
     - EOFError (remote end closed connection)
+    - SFTPError (the SFTP byte stream lost its framing, e.g. "Garbage packet
+      received" after a read timed out mid-packet across a laptop sleep)
     - TimeoutError (pyinfra read_output_buffers timeout when the remote
       sshd is reloaded mid-command, e.g. during cloud-init bootstrap).
       Note: ``TimeoutError`` is an OSError subclass on Python 3, but the
@@ -321,6 +324,8 @@ def is_transient_ssh_error(exception: BaseException) -> bool:
     if isinstance(exception, SSHException):
         return True
     if isinstance(exception, EOFError):
+        return True
+    if isinstance(exception, SFTPError):
         return True
     if isinstance(exception, TimeoutError):
         return True
@@ -683,7 +688,7 @@ class OuterHost(OuterHostInterface):
             if is_dead_ssh_connection_error(e):
                 raise HostConnectionError(closed) from e
             raise
-        except (EOFError, SSHException) as e:
+        except (EOFError, SSHException, SFTPError) as e:
             raise HostConnectionError(failed) from e
 
     def _ensure_connected(self) -> None:
@@ -767,12 +772,14 @@ class OuterHost(OuterHostInterface):
         """Decide, when one attempt of a retried SSH ``operation`` fails, whether its retry needs a fresh connection.
 
         A refused channel open or a channel the server closed leaves the transport
-        usable, so the retry reuses it. A timeout, an EOF, any other SSH error, or a
-        socket that is already dead means the connection only looks open, so it is
-        torn down first (``_disconnect_for_retry`` spares a live transport that holds
-        the cooperative lock) and the retry rebuilds it. The error is re-raised
-        either way for ``retry_on_transient_ssh_error`` to act on. ``TimeoutError``
-        is an ``OSError``, so it has to be matched before the ``OSError`` branch.
+        usable, so the retry reuses it. A timeout, an EOF, an SFTP stream that lost its
+        framing (the tell of a read that timed out mid-packet, whose timeout paramiko's
+        file close then masks), any other SSH error, or a socket that is already dead
+        means the connection only looks open, so it is torn down first
+        (``_disconnect_for_retry`` spares a live transport that holds the cooperative
+        lock) and the retry rebuilds it. The error is re-raised either way for
+        ``retry_on_transient_ssh_error`` to act on. ``TimeoutError`` is an ``OSError``,
+        so it has to be matched before the ``OSError`` branch.
         """
         try:
             yield
@@ -786,7 +793,7 @@ class OuterHost(OuterHostInterface):
                 logger.debug("SSH error while {}: {}, disconnecting for retry", operation, e)
                 self._disconnect_for_retry()
             raise
-        except EOFError as e:
+        except (EOFError, SFTPError) as e:
             logger.debug("SSH error while {}: {}, disconnecting for retry", operation, e)
             self._disconnect_for_retry()
             raise

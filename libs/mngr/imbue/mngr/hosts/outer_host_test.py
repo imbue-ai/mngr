@@ -11,6 +11,7 @@ from typing import cast
 
 import pytest
 from paramiko import ChannelException
+from paramiko import SFTPError
 from paramiko import SSHException
 from paramiko.ssh_exception import NoValidConnectionsError
 from pyinfra.api.command import StringCommand
@@ -610,6 +611,17 @@ def test_a_reset_that_outlives_the_retries_is_translated_not_raw(local_outer_hos
             raise ConnectionResetError(54, "Connection reset by peer")
 
 
+def test_an_sftp_desync_that_outlives_the_retries_is_translated_not_raw(local_outer_host: OuterHost) -> None:
+    """A desynced SFTP stream that survives the retry budget leaves as a domain error.
+
+    ``SFTPError`` subclasses bare ``Exception``, so untranslated it slips past every
+    caller that handles connection failures as ``MngrError``/``OSError``.
+    """
+    with pytest.raises(HostConnectionError, match="failed"):
+        with local_outer_host._translate_ssh_errors(failed="failed", closed="closed", timed_out="timed out"):
+            raise SFTPError("Garbage packet received")
+
+
 def test_ensure_connected_retries_banner_read_connect_failures(temp_mngr_ctx: MngrContext) -> None:
     """A banner-read ConnectError is retried, and the connect succeeds on the next attempt.
 
@@ -765,6 +777,7 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
         (EOFError(), True),
         (TimeoutError("Timed out reading output"), True),
         (ConnectionResetError(54, "Connection reset by peer"), True),
+        (SFTPError("Garbage packet received"), True),
         (ValueError("not transient"), False),
     ],
     ids=[
@@ -776,6 +789,7 @@ def test_is_transient_ssh_connect_error_matches_transient_handshake_connect_erro
         "eof-error",
         "timeout-error",
         "connection-reset",
+        "sftp-stream-desync",
         "non-os-error",
     ],
 )

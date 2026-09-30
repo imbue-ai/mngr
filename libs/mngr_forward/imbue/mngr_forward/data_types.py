@@ -263,3 +263,24 @@ class ForwardListSnapshot(FrozenModel):
         default=(),
         description="All agents returned by mngr list (no filtering)",
     )
+
+
+class EventsStreamStatus(FrozenModel):
+    """What the forward knows about one agent's events stream, for diagnosing an origin it cannot resolve."""
+
+    running_seconds: float | None = Field(
+        description="How long the current child has been running, or None when no child is running"
+    )
+    seconds_since_last_line: float | None = Field(
+        description="How long ago the current child last printed a line, if it has printed any"
+    )
+
+    def describe(self) -> str:
+        if self.running_seconds is None:
+            return "no events stream running"
+        last_line = (
+            "no line yet"
+            if self.seconds_since_last_line is None
+            else f"last line {self.seconds_since_last_line:.0f}s ago"
+        )
+        return f"events stream running {self.running_seconds:.0f}s, {last_line}"

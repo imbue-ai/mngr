@@ -18,6 +18,7 @@ from imbue.imbue_common.logging import log_call
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.imbue_common.tracebacks import format_exception_traceback
 from imbue.mngr.api.discover import warn_on_duplicate_host_names
 from imbue.mngr.api.discovery_events import DiscoveredProvider
 from imbue.mngr.api.discovery_events import DiscoveryError
@@ -52,7 +53,6 @@ from imbue.mngr.utils.cel_utils import apply_compiled_cel_filters
 from imbue.mngr.utils.cel_utils import build_cel_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.cel_utils import with_tolerant_paths
-from imbue.mngr.utils.error_utils import format_exception_traceback
 from imbue.mngr.utils.pydantic_utils import unwrap_optional
 from imbue.mngr.utils.read_deadline import reads_bounded_for
 from imbue.mngr.utils.thread_cleanup import mngr_executor

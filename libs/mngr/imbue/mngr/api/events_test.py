@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from inline_snapshot import snapshot
 from pydantic import ConfigDict
+from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.mngr.api.events import EventRecord
@@ -21,9 +22,12 @@ from imbue.mngr.api.events import READ_FAILURE_REPROBE_INTERVAL_SECONDS
 from imbue.mngr.api.events import SOURCE_SCAN_INTERVAL_SECONDS
 from imbue.mngr.api.events import TAIL_READ_FAILURES_BEFORE_REPROBE
 from imbue.mngr.api.events import _AllEventsStreamState
+from imbue.mngr.api.events import _ONLINE_CHECK_FAILURES_BEFORE_WARNING
+from imbue.mngr.api.events import _TailSourceFailure
 from imbue.mngr.api.events import _build_event_sources_from_grouped_files
 from imbue.mngr.api.events import _build_event_sources_from_listing
 from imbue.mngr.api.events import _check_for_new_archived_events
+from imbue.mngr.api.events import _consume_event_queue
 from imbue.mngr.api.events import _create_source_mismatch_warning
 from imbue.mngr.api.events import _emit_historical_events
 from imbue.mngr.api.events import _handle_online_offline_transition
@@ -47,6 +51,7 @@ from imbue.mngr.api.events import stream_all_events
 from imbue.mngr.cli.testing import SAMPLE_ATIF_STREAM_EVENTS
 from imbue.mngr.cli.testing import write_common_transcript_events
 from imbue.mngr.config.data_types import MngrContext
+from imbue.mngr.errors import EventsFollowReaderDiedError
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.errors import UserInputError
@@ -57,13 +62,17 @@ from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
+from imbue.mngr.interfaces.host import HostInterface
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentAddress
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import HostAddress
+from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.polling import poll_for_value
@@ -117,9 +126,7 @@ def events_volume_target(tmp_path: Path, local_provider) -> tuple[EventsTarget, 
     return target, events_dir
 
 
-# =============================================================================
 # read_event_content tests
-# =============================================================================
 
 
 def test_read_event_content_returns_file_contents(events_volume_target: tuple[EventsTarget, Path]) -> None:
@@ -187,9 +194,7 @@ def test_discover_and_read_events_through_offline_volume_backed_host(
     assert "e1" in content
 
 
-# =============================================================================
 # read_common_transcript_content tests
-# =============================================================================
 
 
 def test_a_rotated_segment_that_ends_mid_line_does_not_swallow_the_next_segment(
@@ -217,9 +222,7 @@ def test_a_rotated_segment_that_ends_mid_line_does_not_swallow_the_next_segment(
     ]
 
 
-# =============================================================================
 # resolve_events_target tests
-# =============================================================================
 
 
 def _create_agent_data_json(
@@ -325,9 +328,7 @@ def test_resolve_events_target_raises_for_unknown_agent(
         resolve_events_target(AgentAddress(agent=AgentName("nonexistent-identifier-abc123")), temp_mngr_ctx)
 
 
-# =============================================================================
 # Host-based list/read tests
-# =============================================================================
 
 
 @pytest.fixture
@@ -415,9 +416,7 @@ def test_read_event_content_raises_when_no_host() -> None:
         read_event_content(target, "test.log")
 
 
-# =============================================================================
 # resolve_events_target with online host tests
-# =============================================================================
 
 
 def test_resolve_events_target_populates_online_host_for_agent(
@@ -441,9 +440,7 @@ def test_resolve_events_target_populates_online_host_for_agent(
     assert str(target.events_path).endswith(f"agents/{agent_id}/events")
 
 
-# =============================================================================
 # parse_event_line tests
-# =============================================================================
 
 
 def test_parse_event_line_valid_json_with_all_fields() -> None:
@@ -497,9 +494,7 @@ def test_parse_event_line_whitespace_only_raises() -> None:
         parse_event_line("   \n  ", source_hint="fallback")
 
 
-# =============================================================================
 # sort_events_by_timestamp tests
-# =============================================================================
 
 
 def test_sort_events_by_timestamp_orders_chronologically() -> None:
@@ -521,9 +516,7 @@ def test_sort_events_by_timestamp_stable_for_equal_timestamps() -> None:
     assert [e.event_id for e in sorted_events] == ["x", "y"]
 
 
-# =============================================================================
 # _sort_rotated_files_oldest_first tests
-# =============================================================================
 
 
 def test_sort_rotated_files_oldest_first() -> None:
@@ -552,9 +545,7 @@ def test_sort_rotated_files_ignores_non_matching() -> None:
     assert result == snapshot(["events.jsonl.20260415110000000000"])
 
 
-# =============================================================================
 # _build_event_sources_from_listing tests
-# =============================================================================
 
 
 def _file_entry(path: str) -> VolumeFile:
@@ -621,9 +612,7 @@ def test_build_event_sources_from_listing_root_level_events_file() -> None:
     assert sources[0].is_current_file_present is True
 
 
-# =============================================================================
 # discover_event_sources (via readable host) tests
-# =============================================================================
 
 
 def test_discover_event_sources_finds_sources_recursively(tmp_path: Path, local_provider) -> None:
@@ -662,9 +651,7 @@ def test_discover_event_sources_empty_dir(tmp_path: Path, local_provider) -> Non
     assert sources == []
 
 
-# =============================================================================
 # filter_sources_by_name tests
-# =============================================================================
 
 
 def test_filter_sources_by_name_returns_all_when_no_filters() -> None:
@@ -706,9 +693,7 @@ def test_filter_sources_by_name_exact_match_not_prefix() -> None:
     assert result[0].source_path == "logs"
 
 
-# =============================================================================
 # read_all_historical_events tests
-# =============================================================================
 
 
 def test_read_all_historical_events_merges_and_sorts(tmp_path: Path, local_provider) -> None:
@@ -835,9 +820,7 @@ def test_read_all_historical_events_with_cel_filter(tmp_path: Path, local_provid
     assert events[0].event_id == "m1"
 
 
-# =============================================================================
 # stream_all_events tests
-# =============================================================================
 
 
 class _StopStream(Exception):
@@ -1008,9 +991,7 @@ def test_stream_all_events_empty_source_filters_shows_all(tmp_path: Path, local_
     assert captured == ["a1", "b1"]
 
 
-# =============================================================================
 # Source mismatch warning tests
-# =============================================================================
 
 
 def test_create_source_mismatch_warning_contains_details() -> None:
@@ -1042,9 +1023,7 @@ def test_maybe_emit_source_mismatch_warning_emits_once() -> None:
     assert len(emitted) == 1
 
 
-# =============================================================================
 # _emit_historical_events tests
-# =============================================================================
 
 
 def test_emit_historical_events_applies_head() -> None:
@@ -1106,9 +1085,7 @@ def test_emit_historical_events_emits_all_when_no_limits() -> None:
     assert len(emitted) == 3
 
 
-# =============================================================================
 # stream_all_events additional tests
-# =============================================================================
 
 
 def test_stream_all_events_tail_mode(tmp_path: Path, local_provider) -> None:
@@ -1194,9 +1171,7 @@ def test_stream_all_events_empty_events_dir(tmp_path: Path, local_provider) -> N
     assert captured == []
 
 
-# =============================================================================
 # resolve_events_target populates new fields
-# =============================================================================
 
 
 def test_resolve_events_target_populates_provider_and_host_id(
@@ -1221,9 +1196,7 @@ def test_resolve_events_target_populates_provider_and_host_id(
     assert target.events_subpath is not None
 
 
-# =============================================================================
 # Follow mode: pygtail tail thread tests
-# =============================================================================
 
 
 class _RunningTailSourceThread(FrozenModel):
@@ -1231,7 +1204,7 @@ class _RunningTailSourceThread(FrozenModel):
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    event_queue: queue_mod.Queue[EventRecord]
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure]
     stop_event: threading.Event
     read_failure_event: threading.Event
     watch_group: DirectoryWatchGroup
@@ -1241,9 +1214,11 @@ class _RunningTailSourceThread(FrozenModel):
     def wait_for_event(self, timeout: float = 15.0) -> EventRecord | None:
         """The next event the thread enqueues within ``timeout`` seconds, or None."""
         try:
-            return self.event_queue.get(timeout=timeout)
+            item = self.event_queue.get(timeout=timeout)
         except queue_mod.Empty:
             return None
+        assert isinstance(item, EventRecord), f"the tail thread reported its own death: {item}"
+        return item
 
 
 @contextmanager
@@ -1258,7 +1233,7 @@ def _running_tail_source_thread(
     Owns the queue, stop event, failure flag, and watch group the thread is
     given, and stops, wakes, and joins the thread on exit.
     """
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
     stop_event = threading.Event()
     read_failure_event = threading.Event()
     watch_group = DirectoryWatchGroup()
@@ -1377,7 +1352,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
     # Start a tail thread and verify it picks up new content
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
     stop_event = threading.Event()
     online_event = threading.Event()
     online_event.set()
@@ -1417,7 +1392,7 @@ def test_stream_all_events_follow_detects_new_content(tmp_path: Path, local_prov
             timeout=15.0,
             poll_interval=0.5,
         )
-        assert result is not None
+        assert isinstance(result, EventRecord)
         assert result.event_id == "new1"
     finally:
         stop_event.set()
@@ -1436,7 +1411,7 @@ def test_tail_thread_follows_a_common_transcript_written_after_it_starts(tmp_pat
 
     offset_dir = tmp_path / "offsets"
     offset_dir.mkdir()
-    event_queue: queue_mod.Queue[EventRecord] = queue_mod.Queue()
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
     stop_event = threading.Event()
     online_event = threading.Event()
     online_event.set()
@@ -1463,7 +1438,7 @@ def test_tail_thread_follows_a_common_transcript_written_after_it_starts(tmp_pat
             timeout=15.0,
             poll_interval=0.5,
         )
-        assert first_event is not None
+        assert isinstance(first_event, EventRecord)
         assert first_event.event_id == "u1-user"
     finally:
         stop_event.set()
@@ -1473,9 +1448,7 @@ def test_tail_thread_follows_a_common_transcript_written_after_it_starts(tmp_pat
         watch_group.stop()
 
 
-# =============================================================================
 # Rotation guard tests
-# =============================================================================
 
 
 def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path, local_provider) -> None:
@@ -1527,9 +1500,7 @@ def test_check_for_new_archived_events_skips_already_known(tmp_path: Path, local
     assert new_events == []
 
 
-# =============================================================================
 # refresh_events_target tests
-# =============================================================================
 
 
 def test_refresh_events_target_returns_same_when_no_provider() -> None:
@@ -1554,9 +1525,7 @@ def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
     assert result is target
 
 
-# =============================================================================
 # _seconds_until_next_housekeeping tests
-# =============================================================================
 
 
 def test_seconds_until_next_housekeeping_online_uses_earlier_of_both_deadlines() -> None:
@@ -1607,9 +1576,7 @@ def test_seconds_until_next_housekeeping_overdue_deadline_clamps_to_zero() -> No
     assert timeout == 0.0
 
 
-# =============================================================================
 # _handle_online_offline_transition tests
-# =============================================================================
 
 
 def test_handle_online_offline_transition_comes_online_sets_gate(
@@ -1752,9 +1719,69 @@ def test_handle_online_offline_transition_keeps_an_online_target_whose_reads_suc
     assert online_event.is_set()
 
 
-# =============================================================================
+class _ProviderWithUnreachableHosts(MockProviderInstance):
+    """A provider whose host lookup raises ``OSError`` while ``is_lookup_failing`` is set, as with no network."""
+
+    is_lookup_failing: bool = Field(default=True, description="Whether get_host raises")
+
+    def get_host(self, host: HostId | HostName) -> HostInterface:
+        if self.is_lookup_failing:
+            raise OSError("Network is unreachable")
+        return super().get_host(host)
+
+
+def test_handle_online_offline_transition_warns_once_per_streak_of_failed_online_checks(
+    temp_host_dir: Path,
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A probe that keeps failing warns once per streak, and a probe that answers ends the streak.
+
+    While the probe fails, the follow cannot notice its host going offline or coming back,
+    so a long streak has to show in the log without a warning on every attempt.
+    """
+    provider = _ProviderWithUnreachableHosts(
+        name=ProviderInstanceName("unreachable"), host_dir=temp_host_dir, mngr_ctx=temp_mngr_ctx
+    )
+    target = EventsTarget(
+        display_name="test",
+        provider=provider,
+        host_id=HostId.generate(),
+        events_subpath=Path("agents") / "does-not-matter" / "events",
+    )
+    # Offline, so the answering probe (which resolves no host) leaves the state as it is.
+    state = _AllEventsStreamState(is_online=False)
+    online_event = threading.Event()
+
+    def probe(count: int) -> None:
+        for _ in range(count):
+            is_transitioned = _handle_online_offline_transition(
+                target_holder=[target], state=state, online_event=online_event, is_read_failing=False
+            )
+            assert is_transitioned is False
+
+    with capture_loguru(level="WARNING") as log_output:
+        probe(_ONLINE_CHECK_FAILURES_BEFORE_WARNING - 1)
+        assert log_output.getvalue() == ""
+
+        probe(1)
+        warnings = log_output.getvalue().splitlines()
+        assert len(warnings) == 1
+        assert f"{_ONLINE_CHECK_FAILURES_BEFORE_WARNING} times in a row" in warnings[0]
+        assert "still treating it as offline" in warnings[0]
+
+        probe(5)
+        assert len(log_output.getvalue().splitlines()) == 1
+
+        provider.is_lookup_failing = False
+        probe(1)
+        assert state.consecutive_online_check_failure_count == 0
+
+        provider.is_lookup_failing = True
+        probe(_ONLINE_CHECK_FAILURES_BEFORE_WARNING)
+        assert len(log_output.getvalue().splitlines()) == 2
+
+
 # Persistent tail thread gating / target-follow tests
-# =============================================================================
 
 
 @pytest.mark.timeout(30)
@@ -1875,9 +1902,89 @@ def test_tail_source_thread_flags_reads_that_keep_failing(
         assert tail.event_queue.empty()
 
 
-# =============================================================================
+class _UnexpectedReaderError(Exception):
+    """An exception no layer of the tail's read path handles."""
+
+
+class _ReaderRaisingUnexpectedError(HostFileReadInterface):
+    """A readable host on which every path exists, but every file read raises an error the tail loop does not catch."""
+
+    def read_file(self, path: Path) -> bytes:
+        raise _UnexpectedReaderError(f"cannot read {path}")
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        return self.read_file(path).decode(encoding)
+
+    def path_exists(self, path: Path) -> bool:
+        return True
+
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        return None
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        return []
+
+
+def _follow_one_source(reader: HostFileReadInterface, events_dir: Path) -> None:
+    """Follow source "services" of ``reader`` until the follow loop raises, then stop and join the tail thread."""
+    stop_event = threading.Event()
+    target_holder = [EventsTarget(host=reader, events_path=events_dir, display_name="test")]
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
+    online_event = threading.Event()
+    online_event.set()
+    read_failure_event = threading.Event()
+    watch_group = DirectoryWatchGroup()
+    thread = _start_tail_thread(
+        target_holder=target_holder,
+        source_path="services",
+        event_queue=event_queue,
+        cel_include_filters=[],
+        cel_exclude_filters=[],
+        stop_event=stop_event,
+        online_event=online_event,
+        read_failure_event=read_failure_event,
+        offset_dir_path=events_dir,
+        initial_byte_offset=0,
+        watch_group=watch_group,
+    )
+    try:
+        _consume_event_queue(
+            target_holder=target_holder,
+            state=_AllEventsStreamState(is_online=True),
+            event_queue=event_queue,
+            on_event=lambda event: None,
+            cel_include_filters=[],
+            cel_exclude_filters=[],
+            stop_event=stop_event,
+            online_event=online_event,
+            read_failure_event=read_failure_event,
+            tail_threads=[thread],
+            offset_dir_path=events_dir,
+            watch_group=watch_group,
+        )
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+        watch_group.stop()
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.allow_warnings(match=r"Error in thread 'events-tail-services'")
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_follow_ends_with_the_readers_error_when_a_tail_thread_dies(tmp_path: Path) -> None:
+    """A tail thread killed by an error nothing handles ends the follow, instead of leaving it deaf.
+
+    A follow that outlived its reader would keep running its housekeeping and
+    look healthy while that source's events went undelivered.
+    """
+    with pytest.raises(EventsFollowReaderDiedError, match="source 'services' died") as raised:
+        # The helper's shutdown join runs inside this block, so a join that raised the thread's error
+        # again would replace the follow's own error and fail the match.
+        _follow_one_source(_ReaderRaisingUnexpectedError(), tmp_path / "events")
+    assert isinstance(raised.value.__cause__, _UnexpectedReaderError)
+
+
 # _build_event_sources_from_grouped_files tests
-# =============================================================================
 
 
 def test_build_event_sources_from_grouped_files_multiple_dirs() -> None:
@@ -1925,9 +2032,7 @@ def test_build_event_sources_from_grouped_files_empty() -> None:
     assert _build_event_sources_from_grouped_files({}) == []
 
 
-# =============================================================================
 # _pygtail_offset_file_path tests
-# =============================================================================
 
 
 def test_pygtail_offset_file_path_with_source_path() -> None:
@@ -1948,9 +2053,7 @@ def test_pygtail_offset_file_path_with_simple_source_path() -> None:
     assert result == "/tmp/offsets/messages.offset"
 
 
-# =============================================================================
 # EventsTarget validator tests
-# =============================================================================
 
 
 def test_events_target_rejects_host_without_events_path(
@@ -1963,9 +2066,7 @@ def test_events_target_rejects_host_without_events_path(
         EventsTarget(host=host, events_path=None, display_name="bad-target")
 
 
-# =============================================================================
 # parse_event_line edge cases
-# =============================================================================
 
 
 def test_parse_event_line_non_dict_json_raises() -> None:
@@ -2035,9 +2136,7 @@ def test_record_from_event_data_does_not_mutate_input_when_source_missing() -> N
     assert data == original_data
 
 
-# =============================================================================
 # Source mismatch warning additional tests
-# =============================================================================
 
 
 def test_create_source_mismatch_warning_has_correct_fields() -> None:
@@ -2068,9 +2167,7 @@ def test_maybe_emit_source_mismatch_warning_skips_when_no_mismatch() -> None:
     assert len(emitted) == 0
 
 
-# =============================================================================
 # _sort_rotated_files_oldest_first edge cases
-# =============================================================================
 
 
 def test_sort_rotated_files_mixed_valid_and_invalid() -> None:
@@ -2090,9 +2187,7 @@ def test_sort_rotated_files_mixed_valid_and_invalid() -> None:
     ]
 
 
-# =============================================================================
 # _build_event_sources_from_listing edge cases
-# =============================================================================
 
 
 def test_build_event_sources_from_listing_skips_paths_not_under_base() -> None:

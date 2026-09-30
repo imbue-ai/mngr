@@ -233,9 +233,14 @@ def test_the_probe_script_frames_a_record_with_no_trailing_newline(tmp_path: Pat
     record.write_text(json.dumps({"chat_agent_name": _CHAT, "apply_phase": "merged"}))
     script = build_update_run_probe_args(AgentId.generate())[3]
 
-    # A bare PATH so the listing half cannot find a real `mngr`.
+    # A failing `mngr` function so the listing half never starts a real one: the script puts the image's
+    # tool directory first on PATH, and a machine with mngr installed there (the CI image) would run it.
     result = subprocess.run(
-        ["bash", "-c", script], cwd=tmp_path, env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True
+        ["bash", "-c", script],
+        cwd=tmp_path,
+        env={"PATH": "/usr/bin:/bin", "BASH_FUNC_mngr%%": "() { return 127; }"},
+        capture_output=True,
+        text=True,
     )
     probe = parse_update_run_probe(result.stdout, _CHAT)
 

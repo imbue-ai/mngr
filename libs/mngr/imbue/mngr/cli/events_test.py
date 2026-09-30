@@ -108,9 +108,7 @@ def test_events_cli_rejects_head_with_follow(
     assert "Cannot use --head with --follow" in result.output
 
 
-# =============================================================================
 # Output helper function tests
-# =============================================================================
 
 
 def test_write_and_flush_stdout(capsys: pytest.CaptureFixture[str]) -> None:
@@ -120,9 +118,7 @@ def test_write_and_flush_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     assert captured.out == "hello world"
 
 
-# =============================================================================
 # _emit_event_record tests
-# =============================================================================
 
 
 def test_emit_event_record_writes_raw_line(capsys: pytest.CaptureFixture[str]) -> None:
@@ -153,9 +149,7 @@ def test_emit_event_record_appends_newline_if_missing(capsys: pytest.CaptureFixt
     assert captured.out == '{"event_id": "e2"}\n'
 
 
-# =============================================================================
 # Filter and streaming behavior tests
-# =============================================================================
 
 
 def test_events_cli_options_with_include_and_exclude() -> None:
@@ -165,9 +159,7 @@ def test_events_cli_options_with_include_and_exclude() -> None:
     assert opts.exclude == ('source == "logs"',)
 
 
-# =============================================================================
 # Tests with real agent data
-# =============================================================================
 
 
 def test_events_cli_streams_all_events(

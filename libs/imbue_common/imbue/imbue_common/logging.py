@@ -21,6 +21,7 @@ from uuid import uuid4
 from loguru import logger
 
 from imbue.imbue_common.pure import pure
+from imbue.imbue_common.tracebacks import format_exception_traceback
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -160,7 +161,7 @@ def trace_span(message: str, *args: Any, _is_trace_span_enabled: bool = True, **
                 logger.trace(done_message, *args, elapsed)
 
 
-# -- Flat JSONL formatting for loguru file sinks --
+# Flat JSONL formatting for loguru file sinks
 #
 # Produces a single flat JSON object per log line that merges the event
 # envelope fields with all standard loguru fields.  The field names are
@@ -221,6 +222,7 @@ def _build_flat_log_dict(
             "type": exc.type.__name__ if exc.type else None,
             "value": str(exc.value) if exc.value else None,
             "traceback": bool(exc.traceback),
+            "traceback_text": format_exception_traceback(exc.value) if exc.value is not None else None,
         }
     else:
         event["exception"] = None

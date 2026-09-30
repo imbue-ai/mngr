@@ -10,6 +10,7 @@ import io
 import json
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
@@ -455,11 +456,16 @@ class _FakeEventsProcess:
 
     ``poll()`` returns None while "alive" and a non-None return code once
     marked dead, mirroring the real RunningProcess contract used by
-    ``_start_events_stream``.
+    ``_start_events_stream``. ``print_stdout_line`` hands a line to the output
+    callback the manager spawned it with, as a real child's stdout would.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_output: Callable[[str, bool], None]) -> None:
         self._poll_value: int | None = None
+        self._on_output = on_output
+
+    def print_stdout_line(self, line: str) -> None:
+        self._on_output(line, True)
 
     def mark_dead(self, returncode: int) -> None:
         self._poll_value = returncode
@@ -486,8 +492,10 @@ class _RecordingConcurrencyGroup:
     def is_shutting_down(self) -> bool:
         return False
 
-    def run_process_in_background(self, **_kwargs: object) -> _FakeEventsProcess:
-        process = _FakeEventsProcess()
+    def run_process_in_background(
+        self, *, on_output: Callable[[str, bool], None], **_kwargs: object
+    ) -> _FakeEventsProcess:
+        process = _FakeEventsProcess(on_output)
         self.spawned.append(process)
         return process
 
@@ -538,6 +546,26 @@ def test_dead_events_stream_is_respawned_on_next_start(
     fake_cg.spawned[0].mark_dead(1)
     _start_events(manager, _INSTANCE_1)
     assert len(fake_cg.spawned) == 2
+
+
+def test_events_stream_status_reports_the_current_childs_last_line_not_its_predecessors(
+    setup: tuple[ForwardStreamManager, ForwardResolver, io.StringIO, list[int]],
+) -> None:
+    """A respawned child starts with no line printed, so a quiet replacement is not dated by a dead one."""
+    manager, _resolver, _buf, _counter = setup
+    fake_cg = _RecordingConcurrencyGroup()
+    _install_recording_cg(manager, fake_cg)
+    _start_events(manager, _INSTANCE_1)
+    fake_cg.spawned[0].print_stdout_line('{"source": "requests"}\n')
+    assert manager.get_events_stream_status(_INSTANCE_1).seconds_since_last_line is not None
+
+    fake_cg.spawned[0].mark_dead(1)
+    assert manager.get_events_stream_status(_INSTANCE_1).describe() == "no events stream running"
+
+    _start_events(manager, _INSTANCE_1)
+    status = manager.get_events_stream_status(_INSTANCE_1)
+    assert status.running_seconds is not None
+    assert status.seconds_since_last_line is None
 
 
 def test_observe_via_file_tails_discovery_log_without_spawning_observe(tmp_path: Path) -> None:

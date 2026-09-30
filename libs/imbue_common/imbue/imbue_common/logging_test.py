@@ -62,9 +62,7 @@ def test_setup_logging_with_custom_level() -> None:
     setup_logging(level="info")
 
 
-# =============================================================================
 # Tests for log_span
-# =============================================================================
 
 
 def test_log_span_emits_debug_on_entry_and_trace_on_exit() -> None:
@@ -202,9 +200,7 @@ def test_log_span_context_does_not_leak_outside_span() -> None:
         logger.remove(handler_id)
 
 
-# =============================================================================
 # Tests for JSONL event formatting
-# =============================================================================
 
 
 def test_format_nanosecond_iso_timestamp_produces_correct_format() -> None:
@@ -327,9 +323,7 @@ def test_build_flat_log_dict_handles_special_chars() -> None:
     assert reparsed["message"] == d["message"]
 
 
-# =============================================================================
 # Tests for _format_arg_value
-# =============================================================================
 
 
 def test_format_arg_value_short_value_unchanged() -> None:
@@ -345,9 +339,7 @@ def test_format_arg_value_truncates_long_value() -> None:
     assert len(result) == 200
 
 
-# =============================================================================
 # Tests for log_call
-# =============================================================================
 
 
 def test_log_call_logs_function_call_and_result() -> None:
@@ -375,9 +367,7 @@ def test_log_call_preserves_function_name() -> None:
     assert my_function.__name__ == "my_function"
 
 
-# =============================================================================
 # Tests for trace_span
-# =============================================================================
 
 
 def test_trace_span_emits_trace_messages() -> None:
@@ -415,9 +405,7 @@ def test_trace_span_logs_on_exception() -> None:
         assert "risky [failed after " in cap.messages[1]
 
 
-# =============================================================================
 # Tests for make_jsonl_file_sink
-# =============================================================================
 
 
 def test_make_jsonl_file_sink_writes_json_lines(tmp_path: Path) -> None:
@@ -469,9 +457,7 @@ def test_make_jsonl_file_sink_rotates_on_size(tmp_path: Path) -> None:
     assert len(rotated_files) >= 1
 
 
-# =============================================================================
 # Tests for _build_flat_log_dict exception info
-# =============================================================================
 
 
 def test_build_flat_log_dict_includes_exception_info() -> None:
@@ -495,3 +481,6 @@ def test_build_flat_log_dict_includes_exception_info() -> None:
     assert exc_info["type"] == "ValueError"
     assert "test error" in exc_info["value"]
     assert exc_info["traceback"] is True
+    # The full stack is recorded, down to the raising line, so a log file alone locates the failure.
+    assert 'raise ValueError("test error")' in exc_info["traceback_text"]
+    assert exc_info["traceback_text"].rstrip().endswith("ValueError: test error")

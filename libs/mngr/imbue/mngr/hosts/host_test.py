@@ -4,7 +4,9 @@ import io
 import json
 import os
 import shlex
+import socket
 import stat as stat_module
+import struct
 import subprocess
 import tempfile
 import threading
@@ -14,16 +16,33 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from typing import IO
 from typing import cast
+from uuid import uuid4
 
 import pluggy
 import pytest
 from paramiko import Channel
 from paramiko import ChannelException
+from paramiko import SFTPAttributes
+from paramiko import SFTPClient
+from paramiko import SFTPError
 from paramiko import SSHException
 from paramiko.common import cMSG_CHANNEL_REQUEST
 from paramiko.message import Message
+from paramiko.sftp import CMD_ATTRS
+from paramiko.sftp import CMD_CLOSE
+from paramiko.sftp import CMD_DATA
+from paramiko.sftp import CMD_HANDLE
+from paramiko.sftp import CMD_INIT
+from paramiko.sftp import CMD_OPEN
+from paramiko.sftp import CMD_READ
+from paramiko.sftp import CMD_STAT
+from paramiko.sftp import CMD_STATUS
+from paramiko.sftp import CMD_VERSION
+from paramiko.sftp import SFTP_EOF
+from paramiko.sftp import SFTP_OK
 from pyinfra.api.command import StringCommand
 from pyinfra.api.host import Host as PyinfraHost
 from pyinfra.connectors.util import CommandOutput
@@ -2138,6 +2157,145 @@ def test_put_file_reconnects_after_the_peer_resets_the_connection(
 
     assert result is True
     assert call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+# Length, type, request id, and data-length fields that precede the data in an SFTP DATA reply.
+_SFTP_DATA_REPLY_HEADER_BYTES: Final[int] = 13
+
+
+class _StallingSFTPServerChannel(Channel):
+    """A channel with an SFTP server serving one file on its far end, for a real ``SFTPClient`` to read.
+
+    With ``stall_offset_in_first_data_reply`` set, ``recv`` stops at that offset into the
+    first DATA reply and raises ``socket.timeout`` once, as paramiko's ``Channel.recv`` does
+    when its timeout elapses; the rest of the stream then arrives as if the stall had cleared.
+    """
+
+    def __init__(self, content: bytes, stall_offset_in_first_data_reply: int | None) -> None:
+        super().__init__(0)
+        self._content = content
+        self._stall_offset = stall_offset_in_first_data_reply
+        self._stall_at: int | None = None
+        self._inbound = b""
+        self._outbound = bytearray()
+        self._delivered = 0
+        self._condition = threading.Condition()
+        self.timeout_count = 0
+
+    def send(self, s: bytes | bytearray) -> int:
+        with self._condition:
+            self._inbound += s
+            while len(self._inbound) >= 4:
+                size = struct.unpack(">I", self._inbound[:4])[0]
+                if len(self._inbound) < 4 + size:
+                    break
+                packet = self._inbound[4 : 4 + size]
+                self._inbound = self._inbound[4 + size :]
+                self._answer(packet[0], Message(packet[1:]))
+            self._condition.notify_all()
+        return len(s)
+
+    def recv(self, nbytes: int) -> bytes:
+        with self._condition:
+            has_reply = self._condition.wait_for(lambda: self._delivered < len(self._outbound), timeout=5.0)
+            assert has_reply, "the SFTP client waited for a reply the fake server never queued"
+            if self._stall_at is not None and self._delivered >= self._stall_at:
+                self._stall_at = None
+                self.timeout_count += 1
+                raise socket.timeout()
+            end = len(self._outbound) if self._stall_at is None else self._stall_at
+            chunk = bytes(self._outbound[self._delivered : min(end, self._delivered + nbytes)])
+            self._delivered += len(chunk)
+            return chunk
+
+    def _answer(self, packet_type: int, request: Message) -> None:
+        reply = Message()
+        if packet_type == CMD_INIT:
+            reply.add_int(3)
+            self._queue_reply(CMD_VERSION, reply)
+            return
+        reply.add_int(request.get_int())
+        if packet_type == CMD_STAT:
+            reply.add_int(SFTPAttributes.FLAG_SIZE)
+            reply.add_int64(len(self._content))
+            self._queue_reply(CMD_ATTRS, reply)
+        elif packet_type == CMD_OPEN:
+            reply.add_string(b"handle")
+            self._queue_reply(CMD_HANDLE, reply)
+        elif packet_type == CMD_READ:
+            request.get_binary()
+            offset = request.get_int64()
+            chunk = self._content[offset : offset + request.get_int()]
+            if chunk:
+                reply.add_string(chunk)
+                reply_start = self._queue_reply(CMD_DATA, reply)
+                if self._stall_offset is not None:
+                    self._stall_at = reply_start + self._stall_offset
+                    self._stall_offset = None
+            else:
+                self._queue_status_reply(reply, SFTP_EOF)
+        elif packet_type == CMD_CLOSE:
+            self._queue_status_reply(reply, SFTP_OK)
+        else:
+            raise AssertionError(f"unexpected SFTP request type {packet_type}")
+
+    def _queue_status_reply(self, reply: Message, status_code: int) -> None:
+        reply.add_int(status_code)
+        reply.add_string("")
+        reply.add_string("")
+        self._queue_reply(CMD_STATUS, reply)
+
+    def _queue_reply(self, packet_type: int, reply: Message) -> int:
+        body = bytes([packet_type]) + reply.asbytes()
+        reply_start = len(self._outbound)
+        self._outbound += struct.pack(">I", len(body)) + body
+        return reply_start
+
+
+class _GetfoErrorRecordingSFTPClient(SFTPClient):
+    """A real ``SFTPClient`` that records what each ``getfo`` raised."""
+
+    def __init__(self, channel: _StallingSFTPServerChannel, getfo_errors_out: list[SFTPError | OSError]) -> None:
+        super().__init__(channel)
+        self._getfo_errors_out = getfo_errors_out
+
+    def getfo(self, remotepath: str, fl: IO[bytes], *args: Any, **kwargs: Any) -> int:
+        try:
+            return super().getfo(remotepath, fl, *args, **kwargs)
+        except (SFTPError, OSError) as e:
+            self._getfo_errors_out.append(e)
+            raise
+
+
+def test_get_file_recovers_when_a_read_times_out_partway_through_an_sftp_reply(
+    local_provider: LocalProviderInstance,
+) -> None:
+    """A read whose timeout fires mid-packet is retried on a fresh connection instead of escaping.
+
+    paramiko reports that timeout as ``SFTPError("Garbage packet received")``, which is
+    neither an ``OSError`` nor an ``SSHException``: closing the file reads the close reply
+    from the middle of the interrupted packet, and that error replaces the timeout.
+    """
+    content = "".join(f'{{"event_id": "{uuid4().hex}"}}\n' for _ in range(40)).encode()
+    stall_offset = _SFTP_DATA_REPLY_HEADER_BYTES + len(content) // 2
+    channels: list[_StallingSFTPServerChannel] = []
+    getfo_errors: list[SFTPError | OSError] = []
+
+    def create_sftp_client() -> SFTPClient:
+        channel = _StallingSFTPServerChannel(content, stall_offset if not channels else None)
+        channels.append(channel)
+        return _GetfoErrorRecordingSFTPClient(channel, getfo_errors)
+
+    host, fake = _create_host_with_custom_sftp_and_fake(local_provider, create_sftp_client)
+    output = io.BytesIO()
+    result = host._get_file("/remote/events.jsonl", output)
+
+    assert result is True
+    assert output.getvalue() == content
+    assert [channel.timeout_count for channel in channels] == [1, 0]
+    assert [repr(error) for error in getfo_errors] == ["SFTPError('Garbage packet received')"]
+    assert isinstance(getfo_errors[0].__context__, TimeoutError)
     assert fake.disconnect_call_count == 1
 
 

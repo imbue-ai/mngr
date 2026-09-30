@@ -89,6 +89,7 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import _create_short_path_tmpdir
 from imbue.mngr_forward.ssh_tunnel import _create_tunnel_listener
+from imbue.mngr_forward.stream_manager import ForwardStreamManager
 from imbue.mngr_forward.testing import TEST_AGENT_ID_2
 from imbue.mngr_forward.testing import TEST_HOST_ID_1
 
@@ -143,14 +144,22 @@ def _make_forward_app(
     embedder_origins: tuple[EmbedderOrigin, ...] = (),
     stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
     request_headers_reader: RequestHeadersFileReader | None = None,
+    is_stream_manager_attached: bool = False,
 ) -> tuple[FastAPI, FileAuthStore, ForwardResolver]:
     """Build a forward app on this module's shared test wiring.
 
     The returned resolver knows no agents yet; callers seed it, which the app
-    sees because it holds the resolver rather than a copy of its contents.
+    sees because it holds the resolver rather than a copy of its contents. With
+    ``is_stream_manager_attached`` the app gets a (never started) stream manager
+    over that resolver, as the CLI wires one whenever it observes discovery.
     """
     auth_store = FileAuthStore(data_directory=data_directory)
     resolver = ForwardResolver(strategy=ForwardServiceStrategy(service_name="system_interface"))
+    stream_manager = (
+        ForwardStreamManager(resolver=resolver, envelope_writer=EnvelopeWriter(output=io.StringIO()))
+        if is_stream_manager_attached
+        else None
+    )
     app = create_forward_app(
         auth_store=auth_store,
         resolver=resolver,
@@ -165,6 +174,7 @@ def _make_forward_app(
         embedder_origins=embedder_origins,
         stall_notice_seconds=stall_notice_seconds,
         request_headers_reader=request_headers_reader,
+        stream_manager=stream_manager,
     )
     return app, auth_store, resolver
 
@@ -4395,6 +4405,34 @@ def test_unresolved_service_origin_logs_a_rate_limited_warning(tmp_path: Path, l
     # The failure envelope still flows for every request (consumers, not logs).
     payloads = [json.loads(line)["payload"] for line in _envelope_lines(envelope_output)]
     assert [p["reason"] for p in payloads] == ["UNRESOLVED", "UNRESOLVED", "UNRESOLVED"]
+
+
+def test_unresolved_service_origin_warning_names_the_agents_events_stream_state(
+    tmp_path: Path, log_warnings: list[str]
+) -> None:
+    """The unresolved-origin warning says what the agent's events stream is doing.
+
+    Without it, a label that never arrived could not be told apart from a stream
+    that died or one alive but no longer delivering.
+    """
+    preauth = "preauth-unresolved-stream-state"
+    app, _auth_store, resolver = _make_forward_app(
+        tmp_path,
+        preauth_cookie_value=preauth,
+        is_stream_manager_attached=True,
+    )
+    _register_default_service(resolver, "http://stub-shell")
+
+    with TestClient(app, base_url=_agent_origin("myapp-x7k9q2w1"), follow_redirects=False) as client:
+        response = client.get(
+            "/",
+            headers={"cookie": f"{MNGR_FORWARD_SESSION_COOKIE_NAME}={preauth}", "accept": "text/html"},
+        )
+        assert response.status_code == 503
+
+    unresolved_warnings = [message for message in log_warnings if "Resolved no backend" in message]
+    assert len(unresolved_warnings) == 1
+    assert "no events stream running" in unresolved_warnings[0]
 
 
 def test_unresolved_service_origin_on_a_websocket_logs_a_rate_limited_warning(

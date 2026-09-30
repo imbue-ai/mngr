@@ -93,6 +93,7 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_forward.ssh_tunnel import parse_url_host_port
+from imbue.mngr_forward.stream_manager import ForwardStreamManager
 
 # How long a backend may go without answering before the plugin emits an
 # advisory ``STALLED`` envelope. The request is deliberately *not* abandoned:
@@ -1295,6 +1296,7 @@ def _log_unresolved_origin_rate_limited(
     limiter: ForwardRepeatRateLimiter,
     instance_key: AgentInstanceKey,
     origin_label: str | None,
+    stream_manager: ForwardStreamManager | None,
 ) -> None:
     """Log (rate-limited per agent+label) that a request's origin had no backend route.
 
@@ -1308,11 +1310,17 @@ def _log_unresolved_origin_rate_limited(
     suppressed_repeats = limiter.suppressed_repeats_if_due(f"{instance_key}|{origin_label}")
     if suppressed_repeats is not None:
         repeat_suffix = f" ({suppressed_repeats} earlier occurrences suppressed)" if suppressed_repeats > 0 else ""
+        stream_suffix = (
+            f"; {stream_manager.get_events_stream_status(instance_key).describe()}"
+            if stream_manager is not None
+            else ""
+        )
         logger.warning(
             "Resolved no backend for {} on {}; serving the 503 loading page "
-            "(service not registered, or its origin label is not yet mapped){}",
+            "(service not registered, or its origin label is not yet mapped){}{}",
             origin_description,
             instance_key,
+            stream_suffix,
             repeat_suffix,
         )
 
@@ -1336,6 +1344,7 @@ async def _handle_workspace_forward_http(
     unresolved_warning_limiter: ForwardRepeatRateLimiter,
     answered_envelope_limiter: ForwardRepeatRateLimiter,
     request_headers_reader: RequestHeadersFileReader | None,
+    stream_manager: ForwardStreamManager | None,
 ) -> Response:
     if request.url.path == _SUBDOMAIN_AUTH_PATH:
         return _handle_subdomain_auth_bridge(request, host_info, auth_store, use_http2)
@@ -1422,7 +1431,9 @@ async def _handle_workspace_forward_http(
     else:
         target = resolver.resolve_by_origin_label(instance_key, host_info.service_name)
     if target is None:
-        _log_unresolved_origin_rate_limited(unresolved_warning_limiter, instance_key, host_info.service_name)
+        _log_unresolved_origin_rate_limited(
+            unresolved_warning_limiter, instance_key, host_info.service_name, stream_manager
+        )
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         return _service_unavailable_response(request)
 
@@ -1499,6 +1510,7 @@ async def _handle_workspace_forward_websocket(
     unresolved_warning_limiter: ForwardRepeatRateLimiter,
     answered_envelope_limiter: ForwardRepeatRateLimiter,
     request_headers_reader: RequestHeadersFileReader | None,
+    stream_manager: ForwardStreamManager | None,
 ) -> None:
     if not _is_authenticated(
         cookies=websocket.cookies,
@@ -1531,7 +1543,9 @@ async def _handle_workspace_forward_websocket(
         # Mirror the HTTP path: an unresolved backend is a backend failure a
         # consumer must hear about. A loaded SPA whose only live channel is a
         # websocket would otherwise leave minds blind to the dead workspace.
-        _log_unresolved_origin_rate_limited(unresolved_warning_limiter, instance_key, host_info.service_name)
+        _log_unresolved_origin_rate_limited(
+            unresolved_warning_limiter, instance_key, host_info.service_name, stream_manager
+        )
         _emit_backend_failure(envelope_writer, agent_id, SystemInterfaceBackendFailureReason.UNRESOLVED, None)
         await websocket.close(code=1013, reason="Backend not yet available")
         return
@@ -1904,6 +1918,7 @@ def create_forward_app(
     embedder_origins: tuple[EmbedderOrigin, ...] = (),
     stall_notice_seconds: float = _STALL_NOTICE_SECONDS,
     request_headers_reader: RequestHeadersFileReader | None = None,
+    stream_manager: ForwardStreamManager | None = None,
 ) -> FastAPI:
     """Create the FastAPI app for ``mngr forward``.
 
@@ -1938,6 +1953,11 @@ def create_forward_app(
     forwarded request and WebSocket handshake the names the file mentions are
     stripped and the agent's entry (or the ``"*"`` default) is set. Without a
     reader, requests are forwarded with their headers untouched.
+
+    ``stream_manager`` owns the per-agent events streams that feed the
+    resolver's service maps. Given one, the warning for an origin that resolves
+    to no backend names the state of that agent's stream; without one
+    (``--no-observe``) the miss is logged without it.
     """
     env = _build_jinja_env()
     tunnel_warning_limiter = ForwardRepeatRateLimiter()
@@ -1983,6 +2003,7 @@ def create_forward_app(
             unresolved_warning_limiter=unresolved_warning_limiter,
             answered_envelope_limiter=answered_envelope_limiter,
             request_headers_reader=request_headers_reader,
+            stream_manager=stream_manager,
         )
         # The proxy owns embedding policy for every workspace origin: APPEND a
         # frame-ancestors CSP header (never modify what the service sent --
@@ -2071,6 +2092,7 @@ def create_forward_app(
             unresolved_warning_limiter=unresolved_warning_limiter,
             answered_envelope_limiter=answered_envelope_limiter,
             request_headers_reader=request_headers_reader,
+            stream_manager=stream_manager,
         )
 
     return app

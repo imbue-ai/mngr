@@ -61,6 +61,7 @@ from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr_forward.data_types import EventsStreamStatus
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.primitives import MNGR_BINARY
 from imbue.mngr_forward.resolver import ForwardResolver
@@ -178,6 +179,8 @@ class ForwardStreamManager(MutableModel):
     _events_stderr_tail_by_instance: dict[str, deque[str]] = PrivateAttr(default_factory=dict)
     # Consecutive gone-target exits per instance; reset by any other exit reason.
     _events_gone_target_strikes_by_instance: dict[str, int] = PrivateAttr(default_factory=dict)
+    # When each live events child last printed a line, for diagnosing an origin that resolves to nothing.
+    _events_last_line_at_by_instance: dict[str, float] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _compiled_includes: list[Any] = PrivateAttr(default_factory=list)
@@ -225,7 +228,7 @@ class ForwardStreamManager(MutableModel):
                 kept.append(source)
         return tuple(kept)
 
-    # -- callback registration --------------------------------------------
+    # Callback registration
 
     def add_on_agent_discovered_callback(self, callback: OnAgentDiscoveredCallback) -> None:
         """Register a callback fired for every agent discovered via the observe stream."""
@@ -235,7 +238,7 @@ class ForwardStreamManager(MutableModel):
         """Register a callback fired for every agent destruction from the observe stream."""
         self._on_agent_destroyed_callbacks.append(callback)
 
-    # -- lifecycle ---------------------------------------------------------
+    # Lifecycle
 
     def start(self) -> None:
         """Start discovery (observe subprocess, or file tail). Per-agent event subprocesses start lazily."""
@@ -283,7 +286,7 @@ class ForwardStreamManager(MutableModel):
             logger.debug("bounce_observe: concurrency group no longer active; skipping respawn")
             self._observe_process = None
 
-    # -- internals ---------------------------------------------------------
+    # Internals
 
     def _spawn_observe(self) -> RunningProcess:
         return self._cg.run_process_in_background(
@@ -486,7 +489,7 @@ class ForwardStreamManager(MutableModel):
             return "unknown"
         return str(agent.provider_name)
 
-    # -- per-agent events streams -----------------------------------------
+    # Per-agent events streams
 
     def _start_events_stream(self, instance_key: AgentInstanceKey) -> None:
         if self._cg.is_shutting_down():
@@ -581,6 +584,7 @@ class ForwardStreamManager(MutableModel):
             # stream re-emits current registrations on connect); only seed an
             # empty map on the first spawn.
             self._events_services.setdefault(instance_str, {})
+            self._events_last_line_at_by_instance.pop(instance_str, None)
         sources: Sequence[str] = self._filtered_event_sources
         try:
             # The instance key doubles as a host-scoped CLI address
@@ -606,6 +610,9 @@ class ForwardStreamManager(MutableModel):
             with self._lock:
                 self._events_processes[instance_str] = process
                 self._events_spawned_at_by_instance[instance_str] = time.monotonic()
+            # A respawn after an exit is already announced by the exit line above.
+            if existing is None:
+                logger.info("Started per-agent events stream for {}", instance_key)
         except InvalidConcurrencyGroupStateError:
             logger.debug("Skipping events stream for {} -- concurrency group inactive", instance_key)
 
@@ -618,6 +625,7 @@ class ForwardStreamManager(MutableModel):
             self._events_spawned_at_by_instance.pop(instance_str, None)
             self._events_stderr_tail_by_instance.pop(instance_str, None)
             self._events_gone_target_strikes_by_instance.pop(instance_str, None)
+            self._events_last_line_at_by_instance.pop(instance_str, None)
         if process is None:
             return
         try:
@@ -639,6 +647,8 @@ class ForwardStreamManager(MutableModel):
         stripped = line.strip()
         if not stripped:
             return
+        with self._lock:
+            self._events_last_line_at_by_instance[str(instance_key)] = time.monotonic()
         self.envelope_writer.emit_event(instance_key.agent_id, stripped)
 
         try:
@@ -684,6 +694,21 @@ class ForwardStreamManager(MutableModel):
             # Invert to origin-label -> service-name for the resolver's routing.
             label_to_name_snapshot = {label: name for name, label in labels.items()}
         self.resolver.update_services(instance_key, services_snapshot, label_to_name_snapshot)
+
+    def get_events_stream_status(self, instance_key: AgentInstanceKey) -> EventsStreamStatus:
+        """Report what is known about an agent's events stream, for logging an origin it cannot resolve."""
+        instance_str = str(instance_key)
+        now = time.monotonic()
+        with self._lock:
+            process = self._events_processes.get(instance_str)
+            started_at = self._events_spawned_at_by_instance.get(instance_str)
+            last_line_at = self._events_last_line_at_by_instance.get(instance_str)
+        if process is None or process.poll() is not None or started_at is None:
+            return EventsStreamStatus(running_seconds=None, seconds_since_last_line=None)
+        return EventsStreamStatus(
+            running_seconds=now - started_at,
+            seconds_since_last_line=now - last_line_at if last_line_at is not None else None,
+        )
 
     @staticmethod
     def _safely_call(callback: Callable[..., None], *args: Any, name: str) -> None:

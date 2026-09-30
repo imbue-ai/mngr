@@ -879,3 +879,15 @@ class MalformedJsonlLineError(MngrError, ValueError):
     ``MalformedJsonLineWarner`` (which buffers a malformed line until the next non-empty
     line proves it wasn't a partial write).
     """
+
+
+class EventsFollowReaderDiedError(MngrError):
+    """Raised when the reader tailing one event source of a follow dies, so the follow stops rather than go deaf."""
+
+    def __init__(self, source_path: str, reader_error: BaseException) -> None:
+        self.source_path = source_path
+        source_description = f"source '{source_path}'" if source_path else "the root source"
+        super().__init__(
+            f"Stopped following events: the reader for {source_description} died "
+            f"({type(reader_error).__name__}: {reader_error})"
+        )

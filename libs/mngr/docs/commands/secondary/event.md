@@ -27,7 +27,8 @@ stream new events.
 In follow mode (--follow), the command polls for new events. When the host
 is online, it reads files directly. When offline, it falls back to polling
 the volume. The command handles online/offline transitions automatically.
-Press Ctrl+C to stop.
+If the reader for one of the sources dies, the command exits with an error
+rather than keep running without that source's events. Press Ctrl+C to stop.
 
 **Usage:**
 

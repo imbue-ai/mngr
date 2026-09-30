@@ -451,6 +451,7 @@ def forward(ctx: click.Context, **kwargs: Any) -> None:
         request_headers_reader=(
             RequestHeadersFileReader(path=Path(opts.request_headers_file)) if opts.request_headers_file else None
         ),
+        stream_manager=stream_manager,
     )
 
     ca = load_or_create_local_ca(plugin_state_dir / "ca") if opts.use_http2 else None
