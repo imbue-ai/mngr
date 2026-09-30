@@ -67,6 +67,10 @@ const {
 // Right-click (context) menu logic lives in ./context-menu so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
 const { registerContextMenuFor } = require('./context-menu');
+// Where a link a page opens goes (the default browser, the mounted workspace,
+// or a window of its own) lives in ./link-routing so it can be unit-tested
+// under plain node and driven by the popup end-to-end harness.
+const { createLinkRouter } = require('./link-routing');
 
 // After the single-web-context collapse each window is ONE BrowserWindow whose
 // page is the Imbue Studio SPA (titlebar + hub pages + the sandboxed workspace
@@ -278,26 +282,6 @@ function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
   return url;
-}
-
-// Classify a URL as "external" (open in the user's default browser). All
-// in-app navigation (the Imbue Studio backend, the mngr_forward plugin, and every
-// `host-<id>.localhost` workspace origin) lives on localhost.
-function isExternalUrl(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    // Malformed but clearly an http(s) link: route it to the browser rather
-    // than spawning a chrome-less popup that hangs on ERR_NAME_NOT_RESOLVED.
-    return /^https?:\/\//i.test(url);
-  }
-  if (parsed.protocol === 'mailto:' || parsed.protocol === 'tel:') return true;
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  const host = parsed.hostname.toLowerCase();
-  if (host === 'localhost' || host.endsWith('.localhost')) return false;
-  if (host === '127.0.0.1' || host === '[::1]') return false;
-  return true;
 }
 
 // Coordinate aliases from the relayed ``workspaces`` shell events: content
@@ -861,7 +845,12 @@ function wireBundleNavigationEvents(bundle) {
     scheduleSessionSave();
     updateOsTitle(bundle);
   };
-  wc.on('did-navigate', (_e, url) => onTopLevelNavigate(url));
+  wc.on('did-navigate', (_e, url) => {
+    // A new document: whatever workspace the old page had mounted is gone
+    // with it, and the new page reports its own.
+    linkRouter.forgetMount(wc);
+    onTopLevelNavigate(url);
+  });
   // Unlike did-navigate, this one also fires for the frames inside the page
   // (a pushState in the workspace shell or a chat page), which are not the
   // window's own route.
@@ -914,6 +903,7 @@ function wireBundleNavigationEvents(bundle) {
   // When the window's renderer dies, show a local crash strip with a Reload
   // button. Never navigate synchronously inside this handler (electron#19887).
   wc.on('render-process-gone', (_e, details) => {
+    linkRouter.forgetMount(wc);
     const reason = details && details.reason;
     if (reason === 'clean-exit') return;
     if (isShuttingDown || bundle.window.isDestroyed()) return;
@@ -1034,32 +1024,41 @@ function registerShortcutsFor(bundle, wc) {
   });
 }
 
-// Route external links to the user's default browser. will-frame-navigate
-// fires for every frame -- including the workspace iframe and the service
-// iframes it embeds -- so an in-place navigation to an external site is
-// cancelled and opened externally instead of rendering a foreign site inside
-// the chrome (the iframe's frame-ancestors would usually refuse anyway).
-function applyExternalLinkHandling(wc) {
-  const openInBrowser = (url) => {
+// Route external links to the user's default browser, and a workspace's own
+// popups back into the workspace (minds:open-link) when it announced it opens
+// links; see ./link-routing for the rule. Each window's page reports the
+// workspace it mounted over 'workspace-link-handling'.
+const linkRouter = createLinkRouter({
+  openExternal: (url, wc) => {
     setImmediate(() => {
       shell.openExternal(url).catch((err) => {
         console.warn('[external-link] failed to open', url, err);
         notifyOpenFailed(url, wc);
       });
     });
-  };
-  wc.setWindowOpenHandler(({ url }) => {
-    if (isExternalUrl(url)) {
-      openInBrowser(url);
-      return { action: 'deny' };
+  },
+  forward: (wc, url) => {
+    if (wc.isDestroyed()) return;
+    try {
+      wc.send('open-link', url);
+    } catch (err) {
+      console.warn('[link-routing] could not hand a popup to the workspace:', err && err.message);
     }
-    return { action: 'allow' };
-  });
-  wc.on('will-frame-navigate', (details) => {
-    if (!isExternalUrl(details.url)) return;
-    details.preventDefault();
-    openInBrowser(details.url);
-  });
+  },
+  appOrigins: () => {
+    const origins = [];
+    for (const base of [backendBaseUrl, mngrForwardBaseUrl]) {
+      if (base) origins.push(new URL(base).origin);
+    }
+    return origins;
+  },
+  workspaceAliases: (workspaceId) => [
+    ...new Set([workspaceId, toHostScopedWorkspaceId(workspaceId), toAgentScopedWorkspaceId(workspaceId)]),
+  ],
+});
+
+function applyExternalLinkHandling(wc) {
+  linkRouter.install(wc);
 }
 
 // The address is copied either way; the explanation is an in-app toast in
@@ -1656,6 +1655,19 @@ ipcMain.on('shell-event', (event, evt) => {
     handleShellEvent(evt, senderBundle);
   } catch (err) {
     console.warn('[shell-event] handler failed:', err);
+  }
+});
+
+// The window's page mounted a workspace frame (or unmounted it), and whether
+// that workspace announced it opens links: `{ workspaceId, opensLinks }`, or
+// null for none. Only the trusted SPA page may say so.
+ipcMain.on('workspace-link-handling', (event, report) => {
+  if (!trustedShellEventSenderBundle(event)) {
+    console.warn('[link-routing] dropped a mount report from an untrusted sender frame');
+    return;
+  }
+  if (!linkRouter.recordMount(event.sender, report)) {
+    console.warn('[link-routing] dropped a malformed mount report');
   }
 });
 

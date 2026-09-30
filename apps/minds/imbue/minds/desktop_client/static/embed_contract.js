@@ -25,11 +25,12 @@
 //      workspace-origin family it navigated the iframe to.
 //
 // Compatibility policy (tolerant): no version field on the wire. Unknown
-// message types are ignored; existing types are immutable -- evolve the
-// contract by ADDING types, never by changing the meaning or payload of an
-// existing one. CONTRACT_VERSION below tracks doc revisions only.
+// message types are ignored, and so are unknown payload fields. A shipped
+// type's existing fields never change meaning -- evolve the contract by adding
+// types, or by adding optional fields to an existing type. CONTRACT_VERSION
+// below tracks doc revisions only.
 
-export const CONTRACT_VERSION = "6";
+export const CONTRACT_VERSION = "7";
 
 // Message types
 
@@ -53,10 +54,12 @@ export const BRING_APP_TO_FRONT = "minds:bring-app-to-front";
 // Share tab, focused on that app. Payload: { serviceName }.
 export const OPEN_SHARE_SETTINGS = "minds:open-share-settings";
 // workspace -> embedder: this document's endpoint is listening, so anything
-// the embedder held for it can be sent now. Payload: {}. Sent once per page
-// load, after the workspace registers its handlers. Without it the embedder
-// cannot tell a loaded frame from one whose page has not run its listener
-// yet, since a send into a not-yet-listening document is simply lost.
+// the embedder held for it can be sent now. Payload: { opensLinks? }. Sent
+// once per page load, after the workspace registers its handlers. Without it
+// the embedder cannot tell a loaded frame from one whose page has not run its
+// listener yet, since a send into a not-yet-listening document is simply lost.
+// `opensLinks: true` promises the page handles OPEN_LINK; absent means it
+// does not.
 export const WORKSPACE_READY = "minds:workspace-ready";
 // workspace -> embedder: open one of the workspace's windows in a desktop
 // window of its own, placed beside the chrome window (the pull-out-window
@@ -121,6 +124,14 @@ export const REATTACH_WINDOW = "minds:reattach-window";
 // shows it again; "released" -- the button was released while out, so the
 // shell ends its gesture, the detach already saved.
 export const TEAR_OUT = "minds:tear-out";
+// embedder -> workspace: open a link inside the workspace. Payload: { url },
+// an absolute http(s) URL. The embedder caught a popup the workspace's page
+// asked for (a `target="_blank"` link, `window.open`) and hands its URL back
+// instead of opening a window of its own; the workspace routes it (the
+// in-workspace browser for a local URL, the app's own window for one of its
+// app addresses, a refusal notice for another workspace's). Sent only to a
+// page that announced WORKSPACE_READY with `opensLinks: true`.
+export const OPEN_LINK = "minds:open-link";
 
 // Upper bound on entries per message, bounding the work it can demand; the
 // snapshot carries the newest verdicts and older cards fall back to the
@@ -130,6 +141,8 @@ export const MAX_PERMISSION_RESOLUTION_ENTRIES = 64;
 export const MAX_DETACHED_WINDOW_ENTRIES = 128;
 // The shell's own bound on a window title.
 export const MAX_WINDOW_TITLE_LENGTH = 256;
+// Upper bound on an OPEN_LINK URL, bounding the work it can demand.
+export const MAX_OPEN_LINK_URL_LENGTH = 8192;
 
 // Payload validation
 
@@ -182,6 +195,17 @@ function isFrameValid(value) {
   });
 }
 
+function isOpenLinkUrlValid(value) {
+  if (typeof value !== 'string' || value.length > MAX_OPEN_LINK_URL_LENGTH) return false;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch (e) {
+    return false;
+  }
+  return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+}
+
 function isOptionalIdValid(value, pattern) {
   if (value === undefined || value === '') return true;
   return typeof value === 'string' && pattern.test(value);
@@ -206,8 +230,8 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
   [OPEN_SHARE_SETTINGS]: function (data) {
     return typeof data.serviceName === 'string' && SERVICE_NAME_PATTERN.test(data.serviceName);
   },
-  [WORKSPACE_READY]: function () {
-    return true;
+  [WORKSPACE_READY]: function (data) {
+    return data.opensLinks === undefined || typeof data.opensLinks === 'boolean';
   },
   [POP_OUT_WINDOW]: function (data) {
     return isWindowIdValid(data.windowId) && isTitleValid(data.title) && isSizeValid(data);
@@ -256,6 +280,9 @@ const EMBEDDER_TO_WORKSPACE_VALIDATORS = {
   },
   [TEAR_OUT]: function (data) {
     return isWindowIdValid(data.windowId) && TEAR_OUT_PHASES.indexOf(data.phase) !== -1;
+  },
+  [OPEN_LINK]: function (data) {
+    return isOpenLinkUrlValid(data.url);
   },
 };
 

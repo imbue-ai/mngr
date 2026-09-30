@@ -98,6 +98,18 @@ contextBridge.exposeInMainWorld('mindsNative', {
   onPopoutDropTarget: (callback) => {
     ipcRenderer.on('popout-drop-target', (_event, isOver) => callback(Boolean(isOver)));
   },
+
+  // Link routing (electron/link-routing.js). The page reports the workspace
+  // its frame shows and whether that workspace announced it opens links
+  // (`{ workspaceId, opensLinks }`, or null when no frame is mounted); main
+  // hands back the URL of a popup that workspace asked for, for the page to
+  // send it as minds:open-link.
+  reportWorkspaceLinkHandling: (report) => ipcRenderer.send('workspace-link-handling', report),
+  onOpenLink: (callback) => {
+    ipcRenderer.on('open-link', (_event, url) => {
+      if (typeof url === 'string') callback(url);
+    });
+  },
   openNotificationInExistingWindow: (route, entry) => ipcRenderer.invoke('open-notification-in-existing-window', route, entry),
   onOpenNotification: (callback) => {
     notificationListener = callback;

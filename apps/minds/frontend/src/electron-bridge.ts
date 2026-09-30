@@ -164,6 +164,10 @@ interface MindsNativeSurface {
   // shows: the popout was dropped onto it, or is closing.
   onReattachPopoutWindow?(callback: (ask: PopoutReattachAsk) => void): void;
   onPopoutDropTarget?(callback: (isOver: boolean) => void): void;
+  // Link routing (electron/link-routing.js). Optional: a preload from before
+  // it lacks them, and the browser build opens popups itself.
+  reportWorkspaceLinkHandling?(report: WorkspaceLinkHandlingReport | null): void;
+  onOpenLink?(callback: (url: string) => void): void;
 }
 
 /** Why the main process could not install the staged update, or null when it is quitting into it. */
@@ -220,6 +224,13 @@ export interface PopoutReattachAsk {
   workspaceId: string;
   windowId: string;
   frame: PopoutFrame | null;
+}
+
+/** The workspace a window's frame shows, as main routes that window's popups:
+ * whether the workspace announced it opens links (minds:open-link). */
+export interface WorkspaceLinkHandlingReport {
+  workspaceId: string;
+  opensLinks: boolean;
 }
 
 declare global {
@@ -388,5 +399,16 @@ export const electronBridge = {
   },
   onPopoutDropTarget(callback: (isOver: boolean) => void): void {
     native()?.onPopoutDropTarget?.(callback);
+  },
+
+  /** Tell main which workspace this window's frame shows and whether it opens
+   * links, or null when no frame is mounted. */
+  reportWorkspaceLinkHandling(report: WorkspaceLinkHandlingReport | null): void {
+    native()?.reportWorkspaceLinkHandling?.(report);
+  },
+  /** Main caught a popup the mounted workspace asked for and hands its URL
+   * back, for the workspace to open inside itself. */
+  onOpenLink(callback: (url: string) => void): void {
+    native()?.onOpenLink?.(callback);
   },
 };

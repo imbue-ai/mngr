@@ -1,0 +1,227 @@
+[
+  {
+    "url": "https://example.com/",
+    "isExternal": true,
+    "note": "an https site"
+  },
+  {
+    "url": "http://example.com:8080/path?q=1#frag",
+    "isExternal": true,
+    "note": "an http site with a port, query and fragment"
+  },
+  {
+    "url": "HTTPS://EXAMPLE.COM/Docs",
+    "isExternal": true,
+    "note": "an uppercase scheme and host are still an external site"
+  },
+  {
+    "url": "https://docs.example.co.uk/a/b",
+    "isExternal": true,
+    "note": "a multi-label external host"
+  },
+  {
+    "url": "https://localhost.example.com/",
+    "isExternal": true,
+    "note": "a host that only starts with localhost is external"
+  },
+  {
+    "url": "https://example.localhost.com/",
+    "isExternal": true,
+    "note": "a localhost label in the middle of an external host is external"
+  },
+  {
+    "url": "https://notlocalhost/",
+    "isExternal": true,
+    "note": "a single-label host other than localhost is external"
+  },
+  {
+    "url": "http://127.0.0.2:8000/",
+    "isExternal": true,
+    "note": "only 127.0.0.1 counts as loopback, not the rest of 127/8"
+  },
+  {
+    "url": "http://0.0.0.0:8000/",
+    "isExternal": true,
+    "note": "0.0.0.0 is not a loopback host here"
+  },
+  {
+    "url": "http://[::ffff:127.0.0.1]/",
+    "isExternal": true,
+    "note": "an IPv4-mapped IPv6 loopback is not [::1]"
+  },
+  {
+    "url": "http://localhost@evil.com/",
+    "isExternal": true,
+    "note": "userinfo that says localhost does not make the host local"
+  },
+  {
+    "url": "http://localhost:8000@evil.com/",
+    "isExternal": true,
+    "note": "userinfo with a port-like suffix does not make the host local"
+  },
+  {
+    "url": "http://evil.com@localhost:8000/",
+    "isExternal": false,
+    "note": "userinfo naming an external site does not make a localhost URL external"
+  },
+  {
+    "url": "http://user:pass@localhost:8000/",
+    "isExternal": false,
+    "note": "credentials on a localhost URL keep it local"
+  },
+  {
+    "url": "http://localhost/",
+    "isExternal": false,
+    "note": "bare localhost"
+  },
+  {
+    "url": "http://localhost:3000/app?x=1#y",
+    "isExternal": false,
+    "note": "localhost with a port, query and fragment"
+  },
+  {
+    "url": "https://localhost:8421/",
+    "isExternal": false,
+    "note": "https localhost"
+  },
+  {
+    "url": "HTTP://LOCALHOST:8000/",
+    "isExternal": false,
+    "note": "an uppercase localhost is local"
+  },
+  {
+    "url": "http://127.0.0.1:8080/x",
+    "isExternal": false,
+    "note": "IPv4 loopback"
+  },
+  {
+    "url": "http://2130706433/",
+    "isExternal": false,
+    "note": "a decimal IPv4 host normalizes to 127.0.0.1"
+  },
+  {
+    "url": "http://0x7f.0.0.1/",
+    "isExternal": false,
+    "note": "a hex IPv4 host normalizes to 127.0.0.1"
+  },
+  {
+    "url": "http://[::1]:8000/",
+    "isExternal": false,
+    "note": "IPv6 loopback"
+  },
+  {
+    "url": "http://[0:0:0:0:0:0:0:1]/",
+    "isExternal": false,
+    "note": "a long-form IPv6 loopback normalizes to [::1]"
+  },
+  {
+    "url": "http://app.localhost:5173/",
+    "isExternal": false,
+    "note": "a *.localhost host"
+  },
+  {
+    "url": "http://a.b.c.localhost/",
+    "isExternal": false,
+    "note": "a deep *.localhost host"
+  },
+  {
+    "url": "https://agent-0123456789abcdef.localhost:8421/",
+    "isExternal": false,
+    "note": "a workspace's own shell address"
+  },
+  {
+    "url": "https://web.agent-0123456789abcdef.localhost:8421/page?x=1",
+    "isExternal": false,
+    "note": "an app address of a workspace (<app>.agent-<hex>.localhost)"
+  },
+  {
+    "url": "https://system_interface.agent-0123456789abcdef.localhost:8421/",
+    "isExternal": false,
+    "note": "an app address whose label has an underscore"
+  },
+  {
+    "url": "http://host-0123456789abcdef.localhost:8421/",
+    "isExternal": false,
+    "note": "a legacy host-keyed workspace address"
+  },
+  {
+    "url": "http://terminal.host-0123456789abcdef.localhost/",
+    "isExternal": false,
+    "note": "an app address on the legacy host-keyed family"
+  },
+  {
+    "url": "https://Web.Agent-0123456789ABCDEF.LOCALHOST/",
+    "isExternal": false,
+    "note": "an uppercase workspace app address is local"
+  },
+  {
+    "url": "mailto:someone@example.com",
+    "isExternal": true,
+    "note": "mailto opens the mail client"
+  },
+  {
+    "url": "MAILTO:someone@example.com",
+    "isExternal": true,
+    "note": "an uppercase mailto scheme"
+  },
+  {
+    "url": "tel:+15551234567",
+    "isExternal": true,
+    "note": "tel opens the phone handler"
+  },
+  {
+    "url": "file:///etc/passwd",
+    "isExternal": false,
+    "note": "file is not an external link (not handed to the browser)"
+  },
+  {
+    "url": "javascript:alert(1)",
+    "isExternal": false,
+    "note": "javascript is never external"
+  },
+  {
+    "url": "data:text/html,<p>hi</p>",
+    "isExternal": false,
+    "note": "data is never external"
+  },
+  {
+    "url": "about:blank",
+    "isExternal": false,
+    "note": "about:blank is never external"
+  },
+  {
+    "url": "blob:http://localhost:8000/0f1e2d3c",
+    "isExternal": false,
+    "note": "blob is never external"
+  },
+  {
+    "url": "ftp://example.com/file",
+    "isExternal": false,
+    "note": "a non-http scheme other than mailto/tel is not external"
+  },
+  {
+    "url": "ws://localhost:8000/socket",
+    "isExternal": false,
+    "note": "a websocket URL is not external"
+  },
+  {
+    "url": "http://",
+    "isExternal": true,
+    "note": "malformed but clearly http: sent to the browser"
+  },
+  {
+    "url": "https://exa mple.com/",
+    "isExternal": true,
+    "note": "malformed (a space in the host) but clearly https: sent to the browser"
+  },
+  {
+    "url": "http://localhost:99999/",
+    "isExternal": true,
+    "note": "malformed (port out of range) but clearly http, so external even on localhost"
+  },
+  {
+    "url": "https://[::1/",
+    "isExternal": true,
+    "note": "malformed IPv6 but clearly https, so external"
+  }
+]

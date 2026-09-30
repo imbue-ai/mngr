@@ -205,6 +205,9 @@ function main(): void {
     m.redraw();
   });
   electronBridge.onTearOut((report) => shell.handleTearOut(report));
+  // A popup the mounted workspace asked for, which main denied: the workspace
+  // opens it inside itself (minds:open-link).
+  electronBridge.onOpenLink((url) => shell.handleOpenLink(url));
   // Main-process asks that target exactly ONE window (main picks it): the
   // deduped open_help routing sends {kind:'help'} to the window showing the
   // affected workspace (else the most recent one).
