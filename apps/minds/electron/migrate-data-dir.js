@@ -1,11 +1,13 @@
 'use strict';
 
 // One-shot move of a tier's files from the legacy `~/.<MINDS_ROOT_NAME>` root
-// onto the platform-canonical state / cache / logs roots.
+// onto the platform-canonical state / cache / logs roots, and the legacy
+// latchkey link kept in place after it.
 //
-// CLEANUP: delete this module, its call in main.js, and
+// CLEANUP: delete this module, its calls in main.js, and
 // test/unit/migrate-data-dir.test.js once no install can still be holding an
-// unmigrated ~/.minds (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration").
+// unmigrated ~/.minds or be missing its latchkey link
+// (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration").
 //
 // Runs in the shell rather than the backend because the shell creates the
 // virtualenv (env-setup.js) and then spawns Python into it: by the time any
@@ -42,6 +44,19 @@ const STALE_GENERATED_DIRS = [path.join('mngr', 'completions')];
 // ever a destination of the move, never a source, so writing here cannot
 // disturb the retry on the next launch.
 const MIGRATION_FAILURE_LOG_NAME = 'migration-failure.log';
+
+// How the marker of a migration that moved a legacy root begins, as opposed to
+// one written for a fresh install.
+const MOVED_MARKER_PREFIX = 'migrated ';
+
+// The legacy root's entry that workspaces created before the move still
+// address by absolute path.
+const LATCHKEY_ENTRY_NAME = 'latchkey';
+
+// Present in every latchkey store mngr_latchkey initializes (its
+// ENCRYPTION_KEY_FILENAME), and absent from a tree that only stray writes
+// through stale absolute paths recreated.
+const LATCHKEY_ENCRYPTION_KEY_NAME = 'encryption_key';
 
 /**
  * Whether `candidatePath` is a directory.
@@ -182,10 +197,78 @@ function migrateLegacyDataDir({ legacyDir, roots, log = console.log }) {
   fs.mkdirSync(roots.state, { recursive: true });
   fs.writeFileSync(
     markerPath,
-    `migrated ${movedCount} entries from ${legacyDir}\nrewrote ${rewrittenCount} recorded-path files\n`
+    `${MOVED_MARKER_PREFIX}${movedCount} entries from ${legacyDir}\nrewrote ${rewrittenCount} recorded-path files\n`
   );
   log(`[migrate] moved ${movedCount} entries; left ${legacyDir} in place`);
   return { migrated: true, reason: 'migrated', movedCount, rewrittenCount };
+}
+
+function wasMovedFromLegacyDir(stateDir) {
+  const markerPath = path.join(stateDir, MIGRATION_MARKER_NAME);
+  return fs.existsSync(markerPath) && fs.readFileSync(markerPath, 'utf8').startsWith(MOVED_MARKER_PREFIX);
+}
+
+/**
+ * Whether `candidatePath` and `targetPath` resolve to the same entry. A
+ * dangling link answers false.
+ */
+function resolvesTo(candidatePath, targetPath) {
+  try {
+    return fs.realpathSync(candidatePath) === fs.realpathSync(targetPath);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Keep `<legacy>/latchkey` resolving to the moved latchkey directory.
+ *
+ * A workspace created before the move holds a permissions-override token
+ * naming `<legacy>/latchkey/mngr_latchkey/permissions/<uuid>.json`, which the
+ * gateway resolves on every request and nothing on this machine can reissue.
+ */
+function ensureLegacyLatchkeyLink({ legacyDir, roots, log = console.log }) {
+  if (path.resolve(legacyDir) === path.resolve(roots.state)) {
+    return { linked: false, reason: 'state-root-is-legacy-root' };
+  }
+  if (!wasMovedFromLegacyDir(roots.state)) {
+    return { linked: false, reason: 'not-moved' };
+  }
+  const target = path.join(roots.state, LATCHKEY_ENTRY_NAME);
+  if (!isDirectory(target)) {
+    return { linked: false, reason: 'no-latchkey-dir' };
+  }
+  const linkPath = path.join(legacyDir, LATCHKEY_ENTRY_NAME);
+  const existing = fs.lstatSync(linkPath, { throwIfNoEntry: false });
+  let reason = 'linked';
+  if (existing !== undefined) {
+    if (resolvesTo(linkPath, target)) {
+      return { linked: false, reason: 'already-resolves' };
+    }
+    if (existing.isSymbolicLink() && !fs.existsSync(linkPath)) {
+      fs.unlinkSync(linkPath);
+      log(`[migrate] removed dangling link ${linkPath}`);
+      reason = 'relinked-dangling';
+    } else if (existing.isDirectory() && !fs.existsSync(path.join(linkPath, LATCHKEY_ENCRYPTION_KEY_NAME))) {
+      // Approving a request filed before the move writes through its recorded
+      // legacy target with `mkdir -p`, which recreates a partial tree here.
+      const orphanedPath = `${linkPath}.orphaned-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      fs.renameSync(linkPath, orphanedPath);
+      log(`[migrate] moved stray ${linkPath} aside to ${orphanedPath}`);
+      reason = 'linked-after-orphaning';
+    } else {
+      throw new Error(
+        `${linkPath} exists and does not resolve to ${target}, so workspaces created before the move cannot reach latchkey`
+      );
+    }
+  }
+  fs.mkdirSync(legacyDir, { recursive: true });
+  fs.symlinkSync(target, linkPath);
+  log(`[migrate] linked ${linkPath} -> ${target}`);
+  return { linked: true, reason };
 }
 
 /**
@@ -211,6 +294,7 @@ function recordMigrationFailure({ roots, legacyDir, error, log = console.error }
 
 module.exports = {
   MIGRATION_FAILURE_LOG_NAME,
+  ensureLegacyLatchkeyLink,
   migrateLegacyDataDir,
   movePath,
   recordMigrationFailure,

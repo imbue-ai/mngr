@@ -6,7 +6,7 @@ const paths = require('./paths');
 const { initElectronLogging, closeElectronLogging } = require('./logger');
 const { initConsoleCapture, recordConsoleMessage, closeConsoleCapture } = require('./console-capture');
 const { initSentry, captureManualReport } = require('./sentry');
-const { migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
+const { ensureLegacyLatchkeyLink, migrateLegacyDataDir, recordMigrationFailure } = require('./migrate-data-dir');
 const { runEnvSetup } = require('./env-setup');
 const { isSecretStartupLogLine } = require('./startup-log');
 const { startBackend, shutdown, getBackendProcess } = require('./backend');
@@ -104,6 +104,14 @@ try {
 // Tee console output into the tier's log root and record uncaught main-process
 // failures BEFORE anything else runs.
 initElectronLogging();
+
+// CLEANUP: remove alongside the migration above (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration").
+// Not fatal: only workspaces created before the move depend on the link.
+try {
+  ensureLegacyLatchkeyLink({ legacyDir: legacyDataDir, roots: platformRoots });
+} catch (err) {
+  console.error(`[migrate] could not keep the legacy latchkey directory resolving: ${err.stack || err}`);
+}
 
 // A Linux launch with a --no-sandbox the sandbox did not need (see
 // linux-sandbox.js) is corrected here, before anything else starts.
@@ -3323,13 +3331,24 @@ async function runQuitSequence() {
   app.quit();
 }
 
-for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, () => {
-    console.log(`[lifecycle] ${signal} received, requesting quit`);
-    isHeadlessQuit = true;
-    app.quit();
-  });
-}
+// Registered once ready: Electron installs its own SIGTERM/SIGINT handling
+// during startup, which replaces a handler registered before it and quits
+// through the running-workspaces prompt.
+app.whenReady().then(() => {
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      // The electron CLI shim forwards each signal it receives, so a process-group
+      // signal arrives twice; a second app.quit() would cut the running quit short.
+      if (isShuttingDown || isQuitSequenceRunning) {
+        console.log(`[lifecycle] ${signal} received, quit already in progress`);
+        return;
+      }
+      console.log(`[lifecycle] ${signal} received, requesting quit`);
+      isHeadlessQuit = true;
+      app.quit();
+    });
+  }
+});
 
 app.on('window-all-closed', () => {
   console.log('[lifecycle] window-all-closed fired, isShuttingDown=' + isShuttingDown);

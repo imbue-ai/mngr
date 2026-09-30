@@ -50,6 +50,8 @@ SSH_KEY_REL="mngr/profiles/$PROFILE_ID/keys/root_ssh_key"
 COMPLETION_REL="mngr/completions/mngr.zsh"
 CANARY_REL="legacy-canary.txt"
 TRANSCRIPT_REL="mngr/preserved/agent-legacy/events.jsonl"
+LATCHKEY_HOST_FILE_REL="latchkey/mngr_latchkey/hosts/host-ci0legacy/latchkey_permissions.json"
+LATCHKEY_HANDLE_REL="latchkey/mngr_latchkey/permissions/ci0legacy.json"
 
 log() { echo "[legacy-fixture] $*"; }
 
@@ -79,6 +81,13 @@ seed() {
     # for byte -- rewriting it would corrupt a transcript.
     mkdir -p "$(dirname "$LEGACY_DIR/$TRANSCRIPT_REL")"
     printf '{"text":"I looked in %s/mngr"}' "$LEGACY_DIR" > "$LEGACY_DIR/$TRANSCRIPT_REL"
+
+    # A workspace's latchkey handle as mngr_latchkey leaves it: a symlink to its
+    # host's permissions file by absolute path. The workspace's token names the
+    # handle's legacy path, which the gateway must still resolve after the move.
+    mkdir -p "$(dirname "$LEGACY_DIR/$LATCHKEY_HOST_FILE_REL")" "$(dirname "$LEGACY_DIR/$LATCHKEY_HANDLE_REL")"
+    printf '{"rules": []}' > "$LEGACY_DIR/$LATCHKEY_HOST_FILE_REL"
+    ln -s "$LEGACY_DIR/$LATCHKEY_HOST_FILE_REL" "$LEGACY_DIR/$LATCHKEY_HANDLE_REL"
 
     # One entry per destination root, so a role routed to the wrong place shows up.
     mkdir -p "$LEGACY_DIR/logs" "$LEGACY_DIR/.uv-cache" "$LEGACY_DIR/template-cache"
@@ -136,6 +145,12 @@ verify() {
         fail "transcript did not reach $moved_transcript"
     fi
 
+    # -f follows symlinks, as the gateway does when it resolves a token's path.
+    [[ -f "$LEGACY_DIR/$LATCHKEY_HANDLE_REL" ]] \
+        || fail "a pre-migration workspace token's path $LEGACY_DIR/$LATCHKEY_HANDLE_REL no longer resolves"
+    [[ "$(realpath "$LEGACY_DIR/$LATCHKEY_HANDLE_REL")" == "$(realpath "$STATE_ROOT/$LATCHKEY_HOST_FILE_REL")" ]] \
+        || fail "$LEGACY_DIR/$LATCHKEY_HANDLE_REL does not resolve to the moved host permissions file"
+
     [[ -f "$STATE_ROOT/.migrated-from-dotfolder" ]] || fail "no migration marker in $STATE_ROOT"
 
     if [[ "$FAILED" -ne 0 ]]; then
@@ -145,7 +160,7 @@ verify() {
         find "$STATE_ROOT" -maxdepth 3 2>&1 | head -40 >&2
         exit 1
     fi
-    log "migration verified: state / cache / logs all populated, recorded paths rewritten, transcript intact"
+    log "migration verified: state / cache / logs all populated, recorded paths rewritten, transcript intact, latchkey tokens resolve"
 }
 
 case "$MODE" in

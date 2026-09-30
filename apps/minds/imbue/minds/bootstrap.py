@@ -140,7 +140,7 @@ def root_name_for_env_name(env_name: str) -> str:
 def minds_data_dir_for(root_name: str) -> Path:
     """Return the ``~/.<root_name>`` dotfolder root (e.g. ~/.minds).
 
-    On macOS this is the pre-migration root, which only the migration still reads; everywhere else it is the live root.
+    On macOS this is the pre-migration root; everywhere else it is the live root.
     """
     return Path.home() / ".{}".format(root_name)
 
@@ -346,7 +346,7 @@ class MindsRoot:
 
     @property
     def legacy_data_dir(self) -> Path:
-        """The pre-migration ``~/.<root_name>`` root, read by the migration and nothing else."""
+        """The pre-migration ``~/.<root_name>`` root, which the migration reads and the latchkey link lives in."""
         return minds_data_dir_for(self._root_name)
 
     @property

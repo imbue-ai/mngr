@@ -2,8 +2,8 @@
 //
 // CLEANUP: delete alongside electron/migrate-data-dir.js (specs/minds-platform-canonical-dirs/spec.md, "Retiring the migration").
 
-// Unit tests for electron/migrate-data-dir.js (the one-shot move off
-// ~/.<MINDS_ROOT_NAME>) and the pure plan in electron/platform-roots.js.
+// Unit tests for electron/migrate-data-dir.js and the pure plan in
+// electron/platform-roots.js.
 //
 // Run with: pnpm test:unit  (node --test test/unit/*.test.js)
 const test = require('node:test');
@@ -15,6 +15,7 @@ const path = require('path');
 const { migrationPlanFor, destinationForLegacyEntry, MIGRATION_MARKER_NAME } = require('../../electron/platform-roots');
 const {
   MIGRATION_FAILURE_LOG_NAME,
+  ensureLegacyLatchkeyLink,
   migrateLegacyDataDir,
   recordMigrationFailure,
 } = require('../../electron/migrate-data-dir');
@@ -42,8 +43,6 @@ function writeFileAt(filePath, contents) {
 
 const quiet = () => {};
 
-// -- destinationForLegacyEntry --
-
 test('regenerable entries go to cache and everything else to state', () => {
   assert.deepEqual(destinationForLegacyEntry('.uv-cache'), { role: 'cache', relativePath: '.uv-cache' });
   assert.deepEqual(destinationForLegacyEntry('template-cache'), { role: 'cache', relativePath: 'template-cache' });
@@ -61,8 +60,6 @@ test('the venv and the interpreter are state, not cache', () => {
 test('the logs entry is unwrapped rather than nested', () => {
   assert.deepEqual(destinationForLegacyEntry('logs'), { role: 'logs', relativePath: '' });
 });
-
-// -- migrationPlanFor --
 
 test('the plan unwraps logs children and keeps every other leaf name', () => {
   const moves = migrationPlanFor({
@@ -87,8 +84,6 @@ test('the plan never tries to move the marker onto itself', () => {
   });
   assert.deepEqual(moves, [{ from: '/legacy/auth', to: '/state/auth' }]);
 });
-
-// -- migrateLegacyDataDir --
 
 test('a populated legacy root is split across the three roots', (t) => {
   const { legacyDir, roots } = makeScratch(t);
@@ -213,7 +208,144 @@ test('a fresh install is marked without inventing a legacy directory', (t) => {
   assert.equal(fs.existsSync(legacyDir), false);
 });
 
-// -- recordMigrationFailure --
+// A migrated install holding one workspace's latchkey files: the host's
+// permissions file, and the handle its token names, a symlink to that file by
+// absolute path.
+function migratedWithLatchkeyHandle(t) {
+  const scratch = makeScratch(t);
+  const { legacyDir, roots } = scratch;
+  const pluginRelativeDir = path.join('latchkey', 'mngr_latchkey');
+  const hostFileRelativePath = path.join(pluginRelativeDir, 'hosts', 'host-1', 'latchkey_permissions.json');
+  const hostFile = path.join(legacyDir, hostFileRelativePath);
+  writeFileAt(hostFile, '{"rules":[]}');
+  const handle = path.join(legacyDir, pluginRelativeDir, 'permissions', 'abc.json');
+  fs.mkdirSync(path.dirname(handle), { recursive: true });
+  fs.symlinkSync(hostFile, handle);
+  migrateLegacyDataDir({ legacyDir, roots, log: quiet });
+  return { ...scratch, handle, hostFile, movedHostFile: path.join(roots.state, hostFileRelativePath) };
+}
+
+test('paths recorded before the move still name the moved permissions file', (t) => {
+  const { legacyDir, roots, handle, hostFile, movedHostFile } = migratedWithLatchkeyHandle(t);
+
+  const result = ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet });
+
+  assert.equal(result.linked, true);
+  // The path a workspace's token and its pending requests' `target` name.
+  assert.equal(fs.statSync(handle).isFile(), true);
+  assert.equal(fs.realpathSync(handle), fs.realpathSync(movedHostFile));
+  // The absolute path the handle's symlink names.
+  assert.equal(fs.realpathSync(hostFile), fs.realpathSync(movedHostFile));
+});
+
+test('a legacy root removed after the move is recreated to hold the link', (t) => {
+  const { legacyDir, roots, handle } = migratedWithLatchkeyHandle(t);
+  fs.rmSync(legacyDir, { recursive: true, force: true });
+
+  assert.equal(ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }).linked, true);
+  assert.equal(fs.statSync(handle).isFile(), true);
+});
+
+test('an install 0.8.0 migrated is linked on its next launch', (t) => {
+  const { legacyDir, roots } = makeScratch(t);
+  const movedLatchkeyDir = path.join(roots.state, 'latchkey');
+  fs.mkdirSync(movedLatchkeyDir, { recursive: true });
+  // The marker exactly as 0.8.0 wrote it.
+  fs.writeFileSync(
+    path.join(roots.state, MIGRATION_MARKER_NAME),
+    `migrated 7 entries from ${legacyDir}\nrewrote 2 recorded-path files\n`
+  );
+
+  assert.equal(ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }).reason, 'linked');
+  assert.equal(fs.realpathSync(path.join(legacyDir, 'latchkey')), fs.realpathSync(movedLatchkeyDir));
+});
+
+test('a link already resolving to the moved directory is left as it is', (t) => {
+  const { legacyDir, roots } = migratedWithLatchkeyHandle(t);
+  const linkPath = path.join(legacyDir, 'latchkey');
+  ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet });
+
+  const second = ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet });
+  assert.equal(second.linked, false);
+  assert.equal(second.reason, 'already-resolves');
+
+  // One made by hand, spelled differently.
+  const handMadeTarget = `${path.join(roots.state, 'latchkey')}${path.sep}`;
+  fs.rmSync(linkPath);
+  fs.symlinkSync(handMadeTarget, linkPath);
+  assert.equal(ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }).reason, 'already-resolves');
+  assert.equal(fs.readlinkSync(linkPath), handMadeTarget);
+});
+
+test('a fresh install is not given a legacy root to hold a link', (t) => {
+  const { legacyDir, roots } = makeScratch(t);
+  migrateLegacyDataDir({ legacyDir, roots, log: quiet });
+  fs.mkdirSync(path.join(roots.state, 'latchkey'), { recursive: true });
+
+  const result = ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet });
+  assert.equal(result.reason, 'not-moved');
+  assert.equal(fs.existsSync(legacyDir), false);
+});
+
+test('a moved install with no latchkey directory is given no link to one', (t) => {
+  const { legacyDir, roots } = makeScratch(t);
+  writeFileAt(path.join(legacyDir, 'auth', 'sessions', 'a.json'), '{}');
+  migrateLegacyDataDir({ legacyDir, roots, log: quiet });
+
+  const result = ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet });
+  assert.equal(result.reason, 'no-latchkey-dir');
+  assert.equal(fs.lstatSync(path.join(legacyDir, 'latchkey'), { throwIfNoEntry: false }), undefined);
+});
+
+test('a partial tree recreated by stray writes is moved aside, then linked', (t) => {
+  // Approving a request filed before the move writes through its legacy target.
+  const { legacyDir, roots, handle, movedHostFile } = migratedWithLatchkeyHandle(t);
+  writeFileAt(handle, '{"rules":["granted after the move"]}');
+
+  const result = ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet });
+
+  assert.equal(result.reason, 'linked-after-orphaning');
+  assert.equal(fs.realpathSync(handle), fs.realpathSync(movedHostFile));
+  const [orphaned] = fs.readdirSync(legacyDir).filter((name) => name.startsWith('latchkey.orphaned-'));
+  const orphanedHandle = path.join(legacyDir, orphaned, 'mngr_latchkey', 'permissions', 'abc.json');
+  assert.equal(fs.readFileSync(orphanedHandle, 'utf8'), '{"rules":["granted after the move"]}');
+});
+
+test('a dangling link is pointed at the moved directory', (t) => {
+  const { base, legacyDir, roots, handle } = migratedWithLatchkeyHandle(t);
+  fs.symlinkSync(path.join(base, 'gone'), path.join(legacyDir, 'latchkey'));
+
+  assert.equal(ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }).reason, 'relinked-dangling');
+  assert.equal(fs.statSync(handle).isFile(), true);
+});
+
+test('a full latchkey store, a file, or a link to another store is reported, not replaced', (t) => {
+  // A store an older build initialized after being reinstalled over this one.
+  const { base, legacyDir, roots } = migratedWithLatchkeyHandle(t);
+  const linkPath = path.join(legacyDir, 'latchkey');
+  const elsewhere = path.join(base, 'other state', 'latchkey');
+  fs.mkdirSync(elsewhere, { recursive: true });
+
+  writeFileAt(path.join(linkPath, 'encryption_key'), 'older build');
+  assert.throws(() => ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }), /does not resolve to/);
+  assert.equal(fs.readFileSync(path.join(linkPath, 'encryption_key'), 'utf8'), 'older build');
+
+  fs.rmSync(linkPath, { recursive: true });
+  writeFileAt(linkPath, 'a file');
+  assert.throws(() => ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }), /does not resolve to/);
+  assert.equal(fs.readFileSync(linkPath, 'utf8'), 'a file');
+
+  fs.rmSync(linkPath);
+  fs.symlinkSync(elsewhere, linkPath);
+  assert.throws(() => ensureLegacyLatchkeyLink({ legacyDir, roots, log: quiet }), /does not resolve to/);
+  assert.equal(fs.readlinkSync(linkPath), elsewhere);
+});
+
+test('no link is made where the legacy root is the state root', (t) => {
+  const { roots } = makeScratch(t);
+  const result = ensureLegacyLatchkeyLink({ legacyDir: roots.state, roots, log: quiet });
+  assert.equal(result.reason, 'state-root-is-legacy-root');
+});
 
 test('a failed migration leaves an account of itself under the log root', (t) => {
   // It runs before the log tee and Sentry, so this file is the only trace a

@@ -257,7 +257,8 @@ function getPlatformRoots() {
 /**
  * The `~/.<MINDS_ROOT_NAME>` root this tier used before the move.
  *
- * On macOS the migration (migrate-data-dir.js) reads it and nothing else does.
+ * On macOS only migrate-data-dir.js uses it: the migration reads it, and the
+ * legacy latchkey link lives in it.
  * Off macOS it is still the live root, and every role below resolves back into
  * it.
  */

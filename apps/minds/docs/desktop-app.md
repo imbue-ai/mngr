@@ -285,6 +285,13 @@ directory behind rather than deleting it. The move is recorded by a
 re-runs on the next launch rather than booting with files split across both
 layouts.
 
+After a move, the old directory holds `latchkey`, a symlink to the moved
+`latchkey/` in the state root. Workspaces created before the move reach
+latchkey through that path, so the app recreates the link on any launch that
+finds it missing or dangling. A partial `latchkey` directory already there is first
+renamed to `latchkey.orphaned-<timestamp>`; anything else in the way is left
+alone and logged to `electron.log`.
+
 `MINDS_ROOT_NAME` selects which data root the backend uses. Activation
 (`minds-admin env activate <name>`) sets it to `minds-<env-name>` (or just
 `minds` for production) and exports the derived `MNGR_HOST_DIR` /
