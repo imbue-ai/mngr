@@ -83,6 +83,15 @@ export function recoveryBusyActionLabel(
   return "Reconnecting...";
 }
 
+/** Whether the card is saying nothing further is needed: the machine answers
+ * and is not stopped. */
+function isNothingFurtherNeeded(
+  health: string,
+  isHostOffline: boolean,
+): boolean {
+  return health === "healthy" && !isHostOffline;
+}
+
 /** What the heading's state means, and what the button below it costs. */
 export function recoverySubheading(
   health: string,
@@ -100,7 +109,7 @@ export function recoverySubheading(
   // condition and this says there is nothing left to do about it -- rather than
   // a separate success notice repeating it beside a heading that has to be kept
   // in step with it by hand.
-  if (health === "healthy")
+  if (isNothingFurtherNeeded(health, isHostOffline))
     return "This machine is answering again. Nothing further is needed here.";
   // Still checking. The restart is offered all the same -- a surface the user
   // opened on purpose never withholds the action -- but the copy does not urge
@@ -196,6 +205,11 @@ export interface RecoveryCardAttrs {
    * names a destination known not to work, which is why the card withholds one
    * everywhere else. */
   onEnterMachine?: (() => void) | null;
+  /** The corner dismissal, for a shell that has one, and the card's Close
+   * button once nothing further is needed. The page has none: it is reached
+   * only because the machine would not load, so it has nowhere of its own to
+   * send anyone, and its titlebar is never covered. */
+  onClose?: () => void;
 }
 
 /** Open the bug-report surface for this machine, so the report identifies the
@@ -226,6 +240,7 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         model,
         isSelfDismissing = false,
         onEnterMachine = null,
+        onClose,
       } = vnode.attrs;
       const info = model.info;
       if (info === null) return null;
@@ -433,6 +448,17 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
         ]);
       }
       const health = isBusy ? "recovering" : info.health;
+      // The way onward from a card saying nothing further is needed: into the
+      // machine on the page, and back to it on the modal, where it is already
+      // behind the card. Restarting is no longer the thing to do, so it and the
+      // report step back beside this.
+      const onwardAction =
+        onEnterMachine !== null
+          ? { label: "Open machine", onclick: onEnterMachine }
+          : isNothingFurtherNeeded(health, info.is_host_offline) &&
+              onClose !== undefined
+            ? { label: "Close", onclick: onClose }
+            : null;
       return m("div", { class: "flex flex-col gap-4" }, [
         m("div", { class: "flex flex-col gap-2" }, [
           m("div", { class: "flex items-center gap-2 type-heading pr-10" }, [
@@ -459,21 +485,17 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
           ? m(Notice, { variant: "info" }, model.recoveryNotice)
           : null,
         m("div", { class: "flex items-center gap-2" }, [
-          // Offered only over a machine that is answering, and first when it
-          // is: the reader came here because they wanted the machine, and on a
-          // card saying nothing further is needed, restarting it is no longer
-          // the thing to do.
-          onEnterMachine === null
+          onwardAction === null
             ? null
             : m(
                 Button,
-                { variant: "primary", onclick: onEnterMachine },
-                "Open machine",
+                { variant: "primary", onclick: onwardAction.onclick },
+                onwardAction.label,
               ),
           m(
             Button,
             {
-              variant: onEnterMachine === null ? "primary" : "secondary",
+              variant: onwardAction === null ? "primary" : "secondary",
               disabled: isBusy,
               onclick: () => void model.dispatchRecovery(),
             },
@@ -639,10 +661,6 @@ export function RecoveryTroubleshooting(): m.Component<{
 export interface RecoveryPanelAttrs extends RecoveryCardAttrs {
   /** DOM id for the panel, so each shell stays addressable in tests + styling. */
   panelId: string;
-  /** The corner dismissal, for a shell that has one. The page does not: it is
-   * reached only because the machine would not load, so it has nowhere of its
-   * own to send anyone, and its titlebar is never covered. */
-  onClose?: () => void;
   extraClass?: string;
 }
 

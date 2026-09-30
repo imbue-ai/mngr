@@ -12,6 +12,7 @@ import {
   type RecoveryInfo,
 } from "../../models/backups";
 import { healthBadgeLabelFor } from "../pages/landing-controls";
+import { Button } from "../components/Button";
 import type { RecoveryKind } from "../../models/health";
 import {
   allText,
@@ -654,14 +655,53 @@ describe("RecoveryCardBody", () => {
   });
 
   it("says nothing about entering the machine on a surface that already can", () => {
-    // The modal passes nothing, and gets no button: it would sit on top of the
-    // very machine it offered to open.
+    // The modal passes no way into the machine, and gets no Open machine: it
+    // would sit on top of the very machine it offered to open.
     const model = modelShowing({ ...UNRESPONSIVE, health: "healthy" });
     expect(renderedText(renderRoot(RecoveryCardBody, { model }))).not.toContain(
       "Open machine",
     );
   });
+
+  it("leads with closing the modal over a machine that is answering again", () => {
+    const model = modelShowing({ ...UNRESPONSIVE, health: "healthy" });
+    const close = vi.fn();
+    const rendered = renderRoot(RecoveryCardBody, { model, onClose: close });
+
+    expect(buttonVariants(rendered)).toEqual([
+      ["Close", "primary"],
+      ["Restart Machine", "secondary"],
+      ["Report a problem", "secondary"],
+    ]);
+    clickButtonLabeled(rendered, "Close");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the restart as the modal's action while the machine still needs one", () => {
+    // Stuck, and stopped: neither is a card saying nothing further is needed,
+    // so the X stays the only dismissal and the restart keeps its weight.
+    for (const info of [
+      { ...UNRESPONSIVE, health: "stuck" },
+      { ...UNRESPONSIVE, health: "healthy", is_host_offline: true },
+    ]) {
+      const rendered = renderRoot(RecoveryCardBody, {
+        model: modelShowing(info),
+        onClose: () => {},
+      });
+      expect(buttonVariants(rendered)).toEqual([
+        ["Restart Machine", "primary"],
+        ["Report a problem", "secondary"],
+      ]);
+    }
+  });
 });
+
+/** Each Button the card renders, as its label and variant, in order. */
+function buttonVariants(rendered: m.Vnode): [string, unknown][] {
+  return collectVnodes(rendered)
+    .filter((vnode) => vnode.tag === Button)
+    .map((vnode) => [allText(vnode.children).trim(), attrsOf(vnode).variant]);
+}
 
 /** What the troubleshooting block puts on screen for a given reading. */
 function renderTroubleshooting(

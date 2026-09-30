@@ -12,7 +12,8 @@
 // that is not there.
 //
 // Once the machine IS answering, though, the page is the only thing between the
-// reader and it, and it supplies the card's "Open machine" button. That is the
+// reader and it, and it supplies the card's "Open machine" button (where the
+// modal, with the machine already behind it, leads with Close). That is the
 // same moment the ?return_to below fires, and deliberately so: the redirect is
 // the path, and the button is what is left when there is no ?return_to to
 // follow (a hand-typed or stale URL) or when the redirect is held back -- and
