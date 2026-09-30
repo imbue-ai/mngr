@@ -18,10 +18,6 @@ def test_prevent_todos() -> None:
 
 
 def test_prevent_exec() -> None:
-    # Count is 1 because of a regex misfire: the gen-2 meminfo publisher
-    # (``slices/gen2_scripts/guest.py``) is a perl program held in a Python
-    # string, and its perl ``exec('docker', ...)`` starts docker in a forked
-    # child. There is no Python ``exec()`` in this package.
     rc.check_exec(_DIR, snapshot(1))
 
 
@@ -115,12 +111,6 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # The slice path (slices/gen2_scripts, shipped into the connector container)
-    # renders cloud-init's NoCloud user-data / network-config, which are YAML by
-    # external contract, with yaml.safe_dump (and parses them back with
-    # yaml.safe_load in the guest tests that check what cloud-init will see) --
-    # the subpackage's import ratchet in test_project_ratchets.py names that
-    # library as an allowed root. Not a config-file anti-pattern.
     rc.check_yaml_usage(_DIR, snapshot(7))
 
 

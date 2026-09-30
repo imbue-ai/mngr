@@ -49,8 +49,6 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # The 3 remaining are in create_host's cleanup path: the outer best-effort
-    # rollback plus the two nested instance/SSH-key teardown catches.
     rc.check_broad_exception_catch(_DIR, snapshot(3))
 
 
@@ -113,10 +111,6 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # 3 = cloud_init_test.py parses the user_data it generates to assert the SSH
-    # key lands at the correct nesting. cloud-init user_data is YAML by spec, so
-    # this tests the format we are forced to emit; it does not introduce new YAML
-    # config. (import yaml + yaml.safe_load + the test function name.)
     rc.check_yaml_usage(_DIR, snapshot(3))
 
 
@@ -224,9 +218,6 @@ def test_prevent_os_fork() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # 3 = run_ssh (subprocess.run), upload_directory (subprocess.run),
-    #     run_ssh_streaming (subprocess.Popen) -- all in docker_over_ssh.py,
-    #     the low-level SSH transport layer where direct subprocess is appropriate
     rc.check_direct_subprocess(_DIR, snapshot(0))
 
 

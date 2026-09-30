@@ -95,17 +95,6 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # 4: server.py has always been asyncio (the proxy is an async ASGI app), and
-    # cli.py now does `asyncio.run(hypercorn.asyncio.serve(...))` to run that app
-    # in-process -- the necessary replacement for uvicorn's sync `.run()` (which
-    # itself ran an asyncio loop). Hypercorn exposes no non-asyncio serve path
-    # for an in-process app object. cli_test.py exercises the serve loop's TLS
-    # teardown behavior (bounded SSL shutdown + exception handler), which can
-    # only be tested from inside an asyncio loop. server_test.py is the fourth,
-    # for the same reason: the stall notice is an event-loop timer, so its stub
-    # backend must yield to the loop to let the timer run at all, and the
-    # streaming stall/close regression tests drive the async streaming response
-    # against a stub asyncio socket backend.
     rc.check_asyncio_import(_DIR, snapshot(4))
 
 
@@ -134,57 +123,6 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    # 48: the six additions over the historical 42 are all in cli_test.py's
-    # hypercorn serving-path tests (a minimal lifespan-only ASGI app and a
-    # shutdown trigger), which necessarily run inside the asyncio loop under
-    # test.
-    # 50: two more awaits in server.py's WebSocket forwarder, which is
-    # inherently async (FastAPI WS handler): racing the two relay legs with
-    # asyncio.wait and explicitly closing the client leg when the backend
-    # dies, so a send-quiet client cannot be left half-open forever.
-    # 60: the stall notice and the client-disconnect race. server.py waits on
-    # the ASGI receive channel and races it against the backend request, and
-    # server_test.py drives that path through the raw ASGI interface
-    # (TestClient only delivers a disconnect after the response is complete,
-    # which is the ordering under test) with a stub backend awaiting a sleep --
-    # a blocking sleep would hold the event loop and stop both the timer and
-    # the disconnect from ever being observed.
-    # 84: server.py's stall-guarded streaming response bounds every client write
-    # and deterministically closes the backend stream (the SSE pool saturation
-    # fix), the same disconnect race now also guards the SSE backend handoff,
-    # and server_test.py's regression tests for both drive the real async
-    # response, ASGI channel stubs, and a stub SSE backend -- all of which is
-    # necessarily async/await code.
-    # 94: closing the backend stream when a client disconnect ties with the SSE
-    # handoff, plus the regression test for it -- which has to construct the tie
-    # deterministically (an asyncio.Barrier releasing the stub backend and the
-    # ASGI receive channel in the same event loop step), so it is async by
-    # construction.
-    # 97: the streaming response, rather than its body generator, now awaits the
-    # backend close, so it also runs on the one exit path a generator-owned
-    # close cannot cover (a stall on the response headers, before the generator
-    # is ever started); the regression test for that path drives the real async
-    # response against the async stub send channel.
-    # 104: the end-to-end test that pins the production wiring -- it drives the
-    # real handler against a real socket backend over a real one-connection pool
-    # and then re-uses that pool, none of which can be observed outside the
-    # event loop the streaming response runs in.
-    # 105: the tie test's stub backend yields the loop once before rendezvousing
-    # with the client's disconnect, which is what puts the disconnect at the
-    # rendezvous first and so leaves the handoff free to finish before the
-    # ``asyncio.wait`` waiter resumes -- the ordering the tie branch is about.
-    # 109: the buffered path reads the response headers and the body in two
-    # steps instead of one ``request()``, which is what tells a backend that
-    # never answered from one that answered and then dropped the body. Splitting
-    # them means awaiting the send, the read, and the close separately, and they
-    # stay in one coroutine so the caller still races a single task against the
-    # client disconnect.
-    # 114: witnessing that event streams reach the client incrementally. The
-    # claim is about arrival *ordering*, so the test has to interleave with the
-    # streaming producer; TestClient's synchronous API only returns once the
-    # response is complete, which is exactly the information the unit is about.
-    # Observing it means driving the real handler and its async send channel
-    # against an async stub backend.
     rc.check_async_await(_DIR, snapshot(114))
 
 
@@ -210,9 +148,6 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # Most of these are the inline ``noqa: SLF001`` suppressions on
-    # stream_manager_test.py's private-access test hooks; ruff requires the
-    # suppression on the flagged line, so each hook costs one.
     rc.check_trailing_comments(_DIR, snapshot(30))
 
 
@@ -329,14 +264,6 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    # 2: InMemoryTLSConfig subclasses hypercorn's third-party `Config` (a plain,
-    # non-model class) and needs `__init__` to call super().__init__() and hold
-    # the per-instance in-memory SSLContext. It cannot be a pydantic model, and
-    # setting the context from outside the class would evade this ratchet while
-    # doing the same thing, so the __init__ stays.
-    # 3: _StallGuardedStreamingResponse subclasses starlette's StreamingResponse
-    # (a plain, non-model third-party class) and needs `__init__` to call
-    # super().__init__() and hold the typed body generator + send timeout.
     rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(3))
 
 

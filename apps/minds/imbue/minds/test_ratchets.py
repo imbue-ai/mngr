@@ -31,26 +31,6 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Justified matches: ``destroying_test.py`` (a real test poll loop),
-    # ``deployment_tests/_mailtm.py::MailtmInbox._wait_for_message_body``
-    # (polling the mail.tm HTTP API for an inbound email -- no
-    # event-driven alternative without standing up an IMAP listener),
-    # ``deployment_tests/helpers.py::_wait_for_url_alive`` (polling
-    # the connector / litellm-proxy healthcheck URLs with cold-boot
-    # tolerance, mirroring what ``envs/health_check.py`` does
-    # deploy-side), ``deployment_tests/test_deploy_new_version.py::
-    # _poll_for_deploy_id_change`` (polling /version after a redeploy
-    # since Modal can keep routing to the stale container for a short
-    # window after the swap), and ``deployment_tests/test_deploy_rollback.py::
-    # _poll_for_deploy_id`` (polling /version after a forced auto-
-    # rollback to confirm the rolled-back version is the one actually
-    # serving traffic; same Modal swap-window justification), and
-    # ``deployment_tests/test_litellm_via_workspace.py::_await_key_spend``
-    # (polling the env's litellm Postgres spend table until the proxy's
-    # asynchronous spend flush lands -- no event-driven alternative), and
-    # ``deployment_tests/test_relay_fleet.py`` (deadline-bounded healthz
-    # poll after restarting a stopped relay's frps -- pacing probes of a
-    # real remote service; no event-driven alternative).
     rc.check_time_sleep(_DIR, snapshot(10))
 
 
@@ -79,21 +59,6 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # The Sentry error-reporting machinery that deliberately catches ``Exception``
-    # now lives in ``imbue_common.sentry`` (so it is shared with ``mngr latchkey
-    # forward``), which dropped this count. One of the remaining catches is in
-    # ``PermissionRequestsConsumer._run``: the consumer thread is the request inbox's
-    # source of truth, so a single unprocessable request must be logged (with
-    # traceback) and skipped rather than allowed to kill the thread, which would
-    # silently stop every future permission request from reaching the UI.
-    # ``UiStatePublisher._run_publish_loop`` carries the same main-loop guard for
-    # the same reason: it is the only publisher of chrome state, so an unexpected
-    # exception in one pass must be logged (with traceback) and survived rather
-    # than silently freezing every window's state for the process lifetime.
-    # ``WebAccessEnabler.__call__`` carries the same guard for the same reason: it
-    # is a best-effort post-create side effect running in the create worker, so an
-    # unexpected failure must be logged (with traceback) and survived rather than
-    # crashing the worker and skipping the create's remaining steps.
     rc.check_broad_exception_catch(_DIR, snapshot(10))
 
 
@@ -106,9 +71,6 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    # The added catch is ``build_info.py`` parsing the desktop app's package.json
-    # for the Sentry release id: a malformed file degrades to a fallback version
-    # (logged at debug) rather than crashing startup.
     rc.check_silent_decode_error_catches(_DIR, snapshot(3))
 
 
@@ -116,11 +78,6 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    # The one allowed inline import is ``from imbue.mngr.main import cli`` inside
-    # ``utils/mngr_caller.py``'s warm-server entry point. Importing it at module
-    # scope would pay mngr's multi-second import cost inside the Imbue Studio backend
-    # process, defeating the entire purpose of the warm process (which imports it
-    # out-of-process, off the request path). See that module's docstring.
     rc.check_inline_imports(_DIR, snapshot(1))
 
 
@@ -137,9 +94,6 @@ def test_prevent_importlib_import_module() -> None:
 
 
 def test_prevent_getattr() -> None:
-    # Both usages are one line in the ported Sentry HTTP transport, reading the
-    # response body whose attribute (``data`` vs ``content``) varies across
-    # sentry-sdk / urllib3 versions.
     rc.check_getattr(_DIR, snapshot(0))
 
 
@@ -151,9 +105,6 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # The Imbue Studio backend is synchronous (Flask) and uses no asyncio. The only remaining import is in
-    # ``scripts/launch_to_msg_e2e.py``, a standalone Playwright e2e driver that runs its own event
-    # loop in a separate process.
     rc.check_asyncio_import(_DIR, snapshot(0))
 
 
@@ -170,21 +121,10 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # All 10 of these are filename references to `pnpm-workspace.yaml` /
-    # `pnpm-lock.yaml` in scripts/build_test.py docstrings + assertion
-    # messages, plus one each in test_latchkey_version_alignment.py and
-    # test_electron_updater_dependency_alignment.py -- pnpm mandates YAML
-    # for its config so we cannot pick TOML there. The ratchet's `r"yaml"`
-    # regex catches the substring in filenames as if it were `import yaml`;
-    # tightening the regex belongs in libs/imbue_common, which these
-    # branches are scoped out of.
     rc.check_yaml_usage(_DIR, snapshot(10))
 
 
 def test_prevent_functools_partial() -> None:
-    # All in the ported Sentry module: the import plus binding the before_send
-    # wrapper and the per-file S3 upload callbacks. Rewriting these as nested
-    # defs/lambdas would only trade the violation for an inline-function one.
     rc.check_functools_partial(_DIR, snapshot(0))
 
 
@@ -218,11 +158,6 @@ def test_prevent_num_prefix() -> None:
 
 
 def test_prevent_trailing_comments() -> None:
-    # ``forward_cli.py`` carries one ``noqa: S603`` suppression next to
-    # the ``subprocess.Popen`` call that spawns ``mngr forward``. The
-    # S603 suppression must be on the same line as the call for ruff to
-    # recognize it; the noqa marker is intentionally not in the
-    # trailing-comment exempt list.
     rc.check_trailing_comments(_DIR, snapshot(3))
 
 
@@ -312,55 +247,15 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # ``latchkey/_spawn.py`` intentionally uses ``subprocess.Popen`` with
-    # ``start_new_session=True`` so that the spawned ``latchkey gateway``
-    # outlives the Imbue Studio desktop client. That is the opposite of what the
-    # ratchet is designed to enforce (managed cleanup via ConcurrencyGroup),
-    # so we exclude that tiny helper specifically; see its module docstring
-    # for the full justification.
-    #
-    # ``forward_cli.py`` similarly uses ``subprocess.Popen`` directly so it
-    # can hold a reference to the ``mngr forward`` plugin's ``Popen.pid``
-    # for the ``SIGHUP``-bounce path. ``ConcurrencyGroup.RunningProcess``
-    # does not expose the PID today; once it does (a separate cleanup spec
-    # in the concurrency_group lib), this exclusion can be dropped.
     excluded = TEST_FILE_PATTERNS + (
         "testing.py",
         "scripts/*.py",
-        # ``hatch_build.py`` runs inside hatchling's isolated build
-        # environment, where the repo's concurrency_group wrapper is not
-        # importable -- it is a build-time script in the same spirit as
-        # ``scripts/*.py`` above, just anchored at the package root where
-        # hatchling requires it to live.
         "hatch_build.py",
         "*/latchkey/_spawn.py",
         "*/desktop_client/forward_cli.py",
-        # ``destroying.py`` spawns a detached ``sh -c '<mngr destroy ...>'`` so
-        # the destroy survives an Imbue Studio backend exit; same justification as
-        # ``latchkey/_spawn.py``. See specs/detached-destroy-flow/spec.md. The
-        # create-attempt discard (``create_attempt_discard.py``) spawns through
-        # the same helper.
         "*/desktop_client/destroying.py",
-        # ``deployment_tests/helpers.py`` is functionally test-helper code
-        # (only ever called from `*/deployment_tests/test_*.py`); it shells
-        # out to `modal environment list` for a one-shot read-only probe.
-        # Same exception as the ``testing.py`` pattern but lives under a
-        # different filename for the deployment_tests subpackage.
         "*/deployment_tests/helpers.py",
-        # ``desktop_client/e2e_workspace_runner.py`` is the shared driver
-        # for the Imbue Studio Electron e2e test and the Modal snapshot script
-        # (``scripts/snapshot_minds_e2e_state.py``). It necessarily shells
-        # out to ``electron``, ``git``, and ``uv run mngr destroy`` --
-        # operator-tool subprocesses that have no ConcurrencyGroup-managed
-        # equivalent (Electron is a long-lived UI host, git is one-shot,
-        # ``mngr destroy`` is the clean-up call). Same justification class
-        # as ``testing.py``: it is only ever called from test / operator
-        # entrypoints, never from product code.
         "*/desktop_client/e2e_workspace_runner.py",
-        # ``desktop_client/default_workspace_template_worktree.py`` is the sibling helper that
-        # materializes the paired DEFAULT_WORKSPACE_TEMPLATE worktree (git clone / archive / commit)
-        # for the same e2e / snapshot entrypoints. Same justification: one-shot
-        # git shell-outs from test / operator code, never from product code.
         "*/desktop_client/default_workspace_template_worktree.py",
     )
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
@@ -378,40 +273,22 @@ def test_prevent_raw_concurrency_group_executor() -> None:
 
 
 def test_prevent_if_elif_without_else() -> None:
-    # Both violations are in apps/minds/scripts/launch_to_msg_e2e.py:
-    # pre_run_sweep's cleanup dispatch (is_dir vs exists) and
-    # _advance_approval's stage-machine switch. Both exhaustively cover
-    # the values they branch on; an else: pass would be cosmetic. The two added
-    # branches are in the ported Sentry transport/uploader and likewise
-    # exhaustively handle their cases.
     rc.check_if_elif_without_else(_DIR, snapshot(2))
 
 
 def test_prevent_inline_functions() -> None:
-    # The remaining inline functions are closures that capture the local state they were
-    # defined next to: the unhandled-exception hook and the health-edge publisher in app.py,
-    # a thread target in api_v1.py, the signal handler in server.py, the WSGI app in
-    # webdav.py, and the per-service probe body in permission_overview.py.
     rc.check_inline_functions(_DIR, snapshot(6))
 
 
 def test_prevent_underscore_imports() -> None:
-    # ``loguru_handler.py`` imports sentry-sdk's ``_IGNORED_LOGGERS`` registry,
-    # the documented way to interoperate with sentry's logger-ignore mechanism.
     rc.check_underscore_imports(_DIR, snapshot(0))
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    # ``bootstrap.MindsRoot``, which cannot be a pydantic model: the
-    # import-linter contract "minds bootstrap layer stays mngr-free and
-    # import-cheap" forbids pydantic at that layer.
     rc.check_init_methods_in_non_exception_classes(_DIR, snapshot(1))
 
 
 def test_prevent_cast_usage() -> None:
-    # All in the ported Sentry module: sentry-sdk's ``Event`` TypedDict types
-    # ``extra`` as ``object`` and scope contexts are loosely typed, so reading
-    # them back requires casts to satisfy the type checker.
     rc.check_cast_usage(_DIR, snapshot(0))
 
 

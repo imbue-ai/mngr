@@ -38,10 +38,6 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # The lima btrfs release helper uses print() to signal pass/fail to its
-    # parent test via stdout (the only IPC channel available across the
-    # `runuser` privilege drop). loguru would write to stderr by default and
-    # confuse the parent's assertion on the "HELPER_RESULT: OK" marker.
     rc.check_bare_print(_DIR, snapshot(2))
 
 
@@ -115,12 +111,6 @@ def test_prevent_namedtuple() -> None:
 
 
 def test_prevent_yaml_usage() -> None:
-    # lima native config only accepts yaml; the provider generates a Lima YAML
-    # config, and the btrfs release test writes a Lima override.yaml to make the
-    # VM bootable in CI. The count includes misfires on calls to
-    # generate_default_lima_yaml from test helpers and on comments naming a
-    # host's lima.yaml file (the regex matches the substring, not actual
-    # yaml usage).
     rc.check_yaml_usage(_DIR, snapshot(115))
 
 

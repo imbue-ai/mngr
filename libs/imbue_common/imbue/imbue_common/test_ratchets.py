@@ -61,12 +61,6 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # The added catches are all in the shared Sentry error-reporting machinery
-    # (``imbue_common/sentry/``): the before_send wrapper, the traceback formatter,
-    # the custom HTTP transport, the loguru callback runner, and the S3 uploader all
-    # deliberately catch ``Exception`` so a failure inside error reporting can never
-    # crash the calling process or lose the original event. These were ported here
-    # from the minds backend so ``mngr latchkey forward`` can share them.
     rc.check_broad_exception_catch(_DIR, snapshot(8))
 
 
@@ -146,9 +140,6 @@ def test_prevent_exit_stack() -> None:
 
 
 def test_prevent_async_await() -> None:
-    # Both are self-references: the PREVENT_ASYNC_AWAIT rule names itself in common_ratchets.py
-    # as `rule_name="async def / await usages"`, which its own pattern matches twice. There is no
-    # actual async code in imbue_common.
     rc.check_async_await(_DIR, snapshot(2))
 
 

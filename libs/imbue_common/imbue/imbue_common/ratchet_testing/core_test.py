@@ -440,3 +440,22 @@ def test_format_ratchet_failure_message_resolves_blame_and_sorts_by_date(git_rep
     new_pos = message.find("New issue")
     assert old_pos > 0 and new_pos > 0, f"Expected both issues in message, got: {message}"
     assert new_pos < old_pos, "Newer violation should appear before older one in the failure message"
+
+
+def test_format_ratchet_failure_message_forbids_justifying_comments(git_repo: Path) -> None:
+    """The failure message must tell the reader where a count change is explained, and where it is not."""
+    test_file = git_repo / "test.py"
+    test_file.write_text("suspicious_code_here()\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Add file"], cwd=git_repo, check=True, capture_output=True)
+
+    chunks = get_ratchet_failures(git_repo, FileExtension(".py"), RegexPattern(r"suspicious_code_here\(\)"))
+    message = format_ratchet_failure_message(
+        rule_name="suspicious calls",
+        rule_description="No suspicious calls allowed",
+        chunks=chunks,
+    )
+
+    assert "Never add a comment" in message
+    assert "counts, not history" in message
+    assert "PR description" in message

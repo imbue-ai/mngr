@@ -30,11 +30,6 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # The 1 allowed sleep is the daemon poll loop in ``api.wait_for_usage``: it is a
-    # background wait that supports ``timeout_seconds=None`` (run indefinitely until
-    # the usage predicate flips), the deliberate exception to "always set a timeout",
-    # so it owns a real time.sleep here instead of using the shared timeout-mandatory
-    # ``poll_until``.
     rc.check_time_sleep(_DIR, snapshot(1))
 
 

@@ -1950,6 +1950,8 @@ Ratchet values use `inline_snapshot` so they can be automatically updated with `
 
 **Important:** Ratchet tests do not work correctly with unstaged changes. Always stage or commit your changes before running ratchet tests.
 
+**Never comment a count.** A `test_ratchets.py` file records counts, not history. Change the number and nothing else; the reason a count moved belongs in the commit message and the changelog entry, the reason a code site is allowed belongs in that module's docstring, and the set of exempt files belongs in `excluded_patterns=(...)`. A comment in the ratchet file is stale the moment the next change lands and nobody deletes it.
+
 #### Project-specific ratchets (`test_project_ratchets.py`)
 
 If a project needs ratchets that only apply to it (not to all projects), put them in a `test_project_ratchets.py` file instead. These are not checked for consistency across projects.

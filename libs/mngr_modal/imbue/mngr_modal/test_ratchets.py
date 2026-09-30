@@ -68,10 +68,6 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    # 4: the lazy provider-backend loader plus the deploy/agent-created hooks in plugin.py
-    # import modal-SDK-bearing modules inside functions to keep the Modal SDK off `mngr`'s
-    # startup path (MIND-179). This is the intended lazy-import pattern, not an anti-pattern
-    # to remove. (The 4th is a pre-existing fastapi import in routes/snapshot_and_shutdown.py.)
     rc.check_inline_imports(_DIR, snapshot(4))
 
 
@@ -99,13 +95,6 @@ def test_prevent_setattr() -> None:
 
 
 def test_prevent_asyncio_import() -> None:
-    # One: ``log_utils_test.py`` drives Modal's ``put_streaming_log`` /
-    # ``put_fetched_log`` via ``asyncio.run`` to verify our
-    # ``_QuietOutputManager`` override still captures build-log output
-    # after the modal 1.4.x refactor. Those two methods are
-    # ``async def`` in the upstream API; there is no sync wrapper to
-    # call instead. The asyncio use is confined to a single test file
-    # and does not leak into the package's runtime code.
     rc.check_asyncio_import(_DIR, snapshot(1))
 
 

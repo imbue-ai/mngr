@@ -31,12 +31,6 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Count is 1 because of a regex misfire: ``core_test.py`` embeds a
-    # fake ``latchkey`` binary as a Python source string. That source
-    # string contains a literal ``time.sleep(0.5)`` call inside the
-    # *spawned subprocess* -- not in test framework code -- to widen
-    # the spawn-race window so the regression test for the
-    # ``ensure_gateway_started`` double-spawn bug reliably triggers.
     rc.check_time_sleep(_DIR, snapshot(1))
 
 
@@ -56,20 +50,6 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    # One catch is the top-level error boundary in ``_forward_command``: a long-running daemon's
-    # unhandled exception must be logged through loguru (so the Sentry report carries the daemon's
-    # logs + traceback, rather than being captured attachment-less by the SDK excepthook) and then
-    # re-raised so the CLI still exits non-zero. It deliberately catches ``Exception`` because any
-    # unexpected fault should be reported; it does not swallow (it re-raises).
-    #
-    # Another instance is the SIGHUP bounce watcher in ``cli.py``
-    # (``_run_sighup_bounce_watcher``). It is a long-lived daemon thread that
-    # must survive *any* single bounce's failure: an uncaught exception there
-    # kills the thread and silently turns every later provider refresh into a
-    # no-op for the supervisor's whole life. ``bounce_observe`` already catches
-    # the specific concurrency-group teardown/respawn errors it expects; the
-    # broad catch here is the deliberate last-resort safety net for a daemon
-    # loop, exactly the case where crashing is worse than continuing.
     rc.check_broad_exception_catch(_DIR, snapshot(2))
 
 
@@ -258,13 +238,6 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # ``_spawn.py`` intentionally uses ``subprocess.Popen`` with
-    # ``start_new_session=True`` for the two subprocesses that must
-    # outlive their caller: ``latchkey ensure-browser`` (which may be
-    # downloading Chromium) and ``mngr latchkey forward`` (which the
-    # supervisor adopts across embedder restarts). The shared
-    # ``latchkey gateway`` no longer needs this -- it's spawned via
-    # ``ConcurrencyGroup`` from ``core.py``.
     excluded = TEST_FILE_PATTERNS + ("*/_spawn.py",)
     rc.check_direct_subprocess(_DIR, snapshot(0), excluded_patterns=excluded)
 
@@ -312,11 +285,6 @@ def test_prevent_per_file_host_upload() -> None:
 
 
 def test_prevent_code_in_init_files() -> None:
-    # The package's root ``__init__.py`` is the conventional home for the
-    # plugin-system marker ``hookimpl = pluggy.HookimplMarker("mngr")``
-    # (the one exception called out in the repo CLAUDE.md). That single
-    # line plus its ``import pluggy`` are tracked here as one violation
-    # of the otherwise-strict no-code-in-init rule.
     rc.check_code_in_init_files(_DIR, snapshot(1))
 
 

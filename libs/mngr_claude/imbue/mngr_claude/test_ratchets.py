@@ -48,8 +48,6 @@ def test_prevent_while_true() -> None:
 
 
 def test_prevent_time_sleep() -> None:
-    # Standalone resource scripts are long-running poll-loop daemons that must
-    # sleep between polls and cannot use mngr's wait helpers.
     chunks = check_ratchet_rule(PREVENT_TIME_SLEEP, _DIR, _STANDALONE_RESOURCE_SCRIPTS)
     assert len(chunks) <= snapshot(0), PREVENT_TIME_SLEEP.format_failure(chunks)
 
@@ -84,18 +82,6 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    # No file is excluded, so every catch in the package is counted here. Three of the
-    # allowed ones read a live-appended JSONL stream from a stdlib-only resource script
-    # (no logger is importable, and anything written to stderr is reported as an error in
-    # the agent's pane): two in common_transcript_convert.py (the raw transcript and the
-    # converter's own output) and one in stream_snapshot.py (the raw transcript again).
-    # A truncated trailing line caught mid-write is expected and benign there -- it
-    # re-reads complete on the next poll -- so it is skipped silently rather than logged.
-    # The other three are read probes over data mngr does not own: two credential
-    # checks in plugin.py, where an unparsable .credentials.json or keychain blob just
-    # means "not on a Claude subscription", and one in stream_json_impl.py, where a
-    # non-JSON line is the documented normal case (blank lines and the debug output
-    # claude leaks to stdout).
     chunks = find_silent_decode_error_catches(_DIR, TEST_FILE_PATTERNS)
     assert len(chunks) <= snapshot(6), PREVENT_SILENT_DECODE_ERROR_CATCH.format_failure(chunks)
 
@@ -104,10 +90,6 @@ def test_prevent_silent_decode_error_catches() -> None:
 
 
 def test_prevent_inline_imports() -> None:
-    # The single deferred import lives in stream_json.py's _impl() accessor: it lazily loads
-    # stream_json_impl (which pulls the ~900-module anthropic SDK) only when a Claude stream is
-    # produced/consumed, keeping anthropic off the mngr cold-start path (MIND-179). This is the
-    # same intentional pattern as mngr's help_formatter lazy rich import.
     rc.check_inline_imports(_DIR, snapshot(1))
 
 
@@ -304,8 +286,6 @@ def test_prevent_underscore_imports() -> None:
 
 
 def test_prevent_init_methods_in_non_exception_classes() -> None:
-    # Standalone resource scripts (stdlib only) cannot use pydantic models, so
-    # their small state classes legitimately define __init__.
     chunks = find_init_methods_in_non_exception_classes(
         _DIR, _STANDALONE_RESOURCE_SCRIPTS + _COMMON_TRANSCRIPT_CONVERT_SCRIPT
     )

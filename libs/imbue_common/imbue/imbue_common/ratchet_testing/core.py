@@ -460,7 +460,11 @@ def format_ratchet_failure_message(
     lines.extend(
         [
             "=" * 80,
-            "What to do: fix the violation and remove the offending code",
+            "What to do: fix the violation and remove the offending code.",
+            "",
+            "If the count must rise instead, change only the number. Never add a comment",
+            "justifying it -- ratchet files record counts, not history. Put the reason in",
+            "your response to the user and in the PR description.",
             "=" * 80,
         ]
     )

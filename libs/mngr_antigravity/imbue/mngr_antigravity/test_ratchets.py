@@ -38,10 +38,6 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # common_transcript_convert.py is a standalone, stdlib-only resource script run
-    # as a subprocess by common_transcript.sh; it prints the count of appended
-    # events to stdout for the shell to capture. That is its data interface, not
-    # user/diagnostic output, so the bare-print rule does not apply.
     rc.check_bare_print(_DIR, snapshot(0), excluded_patterns=("common_transcript_convert.py",))
 
 
@@ -65,18 +61,6 @@ def test_prevent_builtin_exception_raises() -> None:
 
 
 def test_prevent_silent_decode_error_catches() -> None:
-    # All three allowed catches are in common_transcript_convert.py, a stdlib-only
-    # resource script (no logger is importable, and anything it writes to stderr is
-    # reported as a converter error in the agent's pane). Two convert a live-appended
-    # JSONL stream: a truncated trailing line caught mid-write is expected and benign
-    # (it re-reads complete on the next poll), so it is skipped silently rather than
-    # logged. The third is _parse_arguments, where the handler does not swallow the
-    # failure: it preserves the undecodable args payload verbatim in the emitted
-    # record's arguments._raw, which the ATIF fidelity rule requires.
-    # Tightening the ratchet's regex instead was considered and rejected: the
-    # pattern matches the `except json.JSONDecodeError` handler itself, and no
-    # regex over that handler can tell a swallowed failure from one whose body
-    # preserves the undecodable payload under `_raw`.
     rc.check_silent_decode_error_catches(_DIR, snapshot(3))
 
 

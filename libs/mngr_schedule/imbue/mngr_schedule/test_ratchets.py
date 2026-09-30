@@ -39,11 +39,6 @@ def test_prevent_global_keyword() -> None:
 
 
 def test_prevent_bare_print() -> None:
-    # cron_runner.py is deployed standalone into Modal and cannot import
-    # loguru (or anything from imbue.*) at module scope, so all of its
-    # diagnostics + the structured-result sentinel must go via bare
-    # print() / sys.stdout.write(). Exempt the whole file rather than
-    # bumping the count for each new diagnostic.
     excluded = TEST_FILE_PATTERNS + ("cron_runner.py",)
     rc.check_bare_print(_DIR, snapshot(2), excluded_patterns=excluded)
 
@@ -244,7 +239,6 @@ def test_prevent_bare_urwid_tty_signal_keys() -> None:
 
 
 def test_prevent_direct_subprocess() -> None:
-    # testing.py files are test infrastructure and excluded alongside test files
     excluded = TEST_FILE_PATTERNS + ("testing.py",)
     rc.check_direct_subprocess(_DIR, snapshot(6), excluded_patterns=excluded)
 

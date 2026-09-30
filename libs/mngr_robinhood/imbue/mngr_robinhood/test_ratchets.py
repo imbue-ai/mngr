@@ -119,13 +119,6 @@ def test_prevent_hardcoded_guarded_binary() -> None:
 
 
 def test_prevent_num_prefix() -> None:
-    # Misfires: all violations are the external `num_turns` name, which we cannot rename.
-    # Two are the `"num_turns"` string key emitted to match claude -p's native
-    # --output-format=json wire shape (see output_modes.build_result_envelope and the
-    # corresponding test asserting on the wire shape). The other two are reads of the Claude
-    # Agent SDK's documented `ResultMessage.num_turns` field in the live SDK test suite
-    # (test_sdk_types.py and test_sdk_types_detail.py). Renaming any would break compatibility
-    # or break the tests.
     rc.check_num_prefix(_DIR, snapshot(4))
 
 
@@ -239,10 +232,6 @@ def test_prevent_code_in_init_files() -> None:
 
 
 def test_prevent_async_await() -> None:
-    # mngr_robinhood is exempt from the async/await ratchet. It is a thin wrapper around the
-    # Claude Agent SDK, which is fundamentally async, so async/await usage here is intrinsic and
-    # cannot be removed. This test is kept (the meta-ratchet requires every project to define the
-    # same set of ratchet tests) but intentionally enforces no cap.
     pass
 
 
