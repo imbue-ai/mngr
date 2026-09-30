@@ -23,6 +23,7 @@ services = [
     "storage",
     "sentry",
     "ssh-ca",
+    "postmark",
 ]
 
 # The tier's SSH certificate authority (imbue-ai/mngr-internal#850): the public

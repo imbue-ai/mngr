@@ -39,6 +39,7 @@ services = [
     "storage",
     "sentry",
     "ssh-ca",
+    "postmark",
 ]
 
 # Dev envs keep no warm containers (min_containers defaults to 0), so without

@@ -195,6 +195,7 @@ _PER_ENV_SECRET_SERVICES: Final[tuple[str, ...]] = (
     "storage",
     "sentry",
     "ssh-ca",
+    "postmark",
 )
 
 
