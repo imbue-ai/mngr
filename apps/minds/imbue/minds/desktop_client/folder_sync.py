@@ -44,6 +44,7 @@ import json
 import os
 import shlex
 import threading
+import time
 from collections.abc import Callable
 from enum import auto
 from pathlib import Path
@@ -1463,13 +1464,17 @@ class FolderSyncManager(MutableModel):
 
         Bringing a sync up is asynchronous -- see :meth:`start` -- so this is
         for a caller that would rather know the outcome than watch the row.
-        Returns None when no such sync is known.
+        The converger has to settle first: until it has, the run to wait on
+        may not exist yet, or may be one it is about to replace. Returns None
+        when no such sync is known.
         """
+        deadline = time.monotonic() + timeout
+        self.wait_until_settled(agent_id, local_path, timeout)
         with self._lock:
             run = self._runs_by_key.get(_SyncKey(agent_id=agent_id, local_path=local_path))
         if run is None:
             return None
-        run.sink.wait_until_started(timeout)
+        run.sink.wait_until_started(max(0.0, deadline - time.monotonic()))
         return run.to_status()
 
     def status_for_path(self, agent_id: str, local_path: str) -> FolderSyncStatus | None:

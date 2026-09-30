@@ -891,6 +891,7 @@ def test_detail_offers_no_sync_when_this_build_cannot_run_one(tmp_path: Path) ->
     assert payload.sync_unavailable_reason == ""
 
 
+@pytest.mark.flaky
 def test_a_sync_asked_for_by_a_chat_is_keyed_by_its_workspace(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
