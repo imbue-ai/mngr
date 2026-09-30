@@ -11,7 +11,10 @@ const AGENT = "agent-ab12";
 
 /** A window whose content frame is armed on `armedAnyId`, or has no frame at
  * all when it is null. The frame counts its own reloads. */
-function shellWithFrameOn(armedAnyId: string | null): {
+function shellWithFrameOn(
+  armedAnyId: string | null,
+  lastLoadedAtMs: number | null = null,
+): {
   shell: ShellState;
   reloadCount: () => number;
 } {
@@ -24,6 +27,7 @@ function shellWithFrameOn(armedAnyId: string | null): {
     shell.workspaceFrame = {
       armedWorkspaceAnyId: () => armedAnyId,
       reload: () => (count += 1),
+      lastLoadedAtMs: () => lastLoadedAtMs,
     };
   }
   return { shell, reloadCount: () => count };
@@ -1060,7 +1064,7 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   it("reloads the frame when the named workspace is the one on screen", () => {
     const { shell, reloadCount } = shellWithFrameOn("agent-aa11");
 
-    shell.reloadWorkspaceFrame("agent-aa11");
+    shell.reloadWorkspaceFrame("agent-aa11", null);
 
     expect(reloadCount()).toBe(1);
   });
@@ -1068,7 +1072,7 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   it("reloads a host-scoped surface named by its agent id", () => {
     const { shell, reloadCount } = shellWithFrameOn("host-bb22");
 
-    shell.reloadWorkspaceFrame("agent-aa11");
+    shell.reloadWorkspaceFrame("agent-aa11", null);
 
     expect(reloadCount()).toBe(1);
   });
@@ -1076,7 +1080,7 @@ describe("ShellState.reloadWorkspaceFrame", () => {
   it("leaves a window whose frame shows a different workspace alone", () => {
     const { shell, reloadCount } = shellWithFrameOn("agent-aa11");
 
-    shell.reloadWorkspaceFrame("agent-cc33");
+    shell.reloadWorkspaceFrame("agent-cc33", null);
 
     expect(reloadCount()).toBe(0);
   });
@@ -1088,9 +1092,47 @@ describe("ShellState.reloadWorkspaceFrame", () => {
     // must not reach in and re-navigate that screen.
     const { shell, reloadCount } = shellWithFrameOn(null);
 
-    shell.reloadWorkspaceFrame("agent-aa11");
+    shell.reloadWorkspaceFrame("agent-aa11", null);
 
     expect(reloadCount()).toBe(0);
+  });
+
+  // An update's verdict carries the moment the run ended: only a page loaded
+  // before it is still the previous build.
+  const RUN_ENDED_AT_MS = Date.parse("2026-09-28T20:14:49.432Z");
+
+  it("reloads a page that last loaded before the update ended", () => {
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS - 3_600_000);
+
+    shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
+
+    expect(reloadCount()).toBe(1);
+  });
+
+  it("leaves a page loaded since the update ended alone", () => {
+    // The user reloaded it, or the window was opened after the update.
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS + 17_000);
+
+    shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
+
+    expect(reloadCount()).toBe(0);
+  });
+
+  it("reloads a frame whose first page has not finished loading", () => {
+    // Nothing says which build that page will be, so it is treated as stale.
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", null);
+
+    shell.reloadWorkspaceFrame("agent-aa11", RUN_ENDED_AT_MS);
+
+    expect(reloadCount()).toBe(1);
+  });
+
+  it("reloads a freshly loaded page when the refresh names no cutoff", () => {
+    const { shell, reloadCount } = shellWithFrameOn("agent-aa11", RUN_ENDED_AT_MS + 17_000);
+
+    shell.reloadWorkspaceFrame("agent-aa11", null);
+
+    expect(reloadCount()).toBe(1);
   });
 });
 
@@ -1250,6 +1292,7 @@ describe("recovery card openness", () => {
     shell.workspaceFrame = {
       armedWorkspaceAnyId: () => AGENT,
       reload: () => (reloadCount += 1),
+      lastLoadedAtMs: () => null,
     };
 
     shell.openRecoveryModal(AGENT);
@@ -1270,6 +1313,7 @@ describe("recovery card openness", () => {
     shell.workspaceFrame = {
       armedWorkspaceAnyId: () => AGENT,
       reload: () => (reloadCount += 1),
+      lastLoadedAtMs: () => null,
     };
 
     shell.handleHealthChanged(AGENT, "recovery_failed", false);

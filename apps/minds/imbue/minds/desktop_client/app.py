@@ -2531,6 +2531,13 @@ def create_desktop_client(
                 connectivity_detector.add_on_recovery_callback(workspace_view_refresher.on_connectivity_recovered)
             if sleep_tracker is not None:
                 sleep_tracker.add_on_wake_callback(workspace_view_refresher.on_wake)
+            # An update's own refresh is a one-off that a device asleep at the time
+            # never hears, so a verdict saying it landed raises one as well; the app sees the
+            # verdict once it is awake to act on it.
+            if workspace_update_service is not None:
+                workspace_update_service.add_on_update_landed_callback(
+                    workspace_view_refresher.refresh_views_after_update
+                )
             # The tracker fires its on-change callbacks before its stuck-edge ones,
             # so the band is already showing STUCK by the time this dispatches.
             assert unattended_recovery_dispatcher is not None, "built above from the same tracker and group"

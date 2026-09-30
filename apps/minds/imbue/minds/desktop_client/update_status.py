@@ -39,6 +39,12 @@ class UpdateVerdict(UpperCaseStrEnum):
     """Nothing was applied -- e.g. no target was admissible, or the apply rolled back."""
 
 
+# The verdicts after which the workspace serves the new build.
+LANDED_UPDATE_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
+    {UpdateVerdict.UPDATED, UpdateVerdict.UPDATED_WITH_REBUILD_ITEMS}
+)
+
+
 class UpdateAvailability(UpperCaseStrEnum):
     """The detection tri-state, plus the reverse-divergence case."""
 

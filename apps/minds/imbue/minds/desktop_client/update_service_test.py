@@ -5,6 +5,8 @@ import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import pytest
@@ -202,6 +204,8 @@ def test_a_run_that_vanished_puts_its_machine_back_and_disarms_the_intent(
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=_GONE_AGENT_STDOUT))
     service = _build_service(tmp_path, root_concurrency_group, host_state=HostState.STOPPED, caller=caller)
     scheduler, stopped = _attach_recording_scheduler(service, host_state=HostState.STOPPED)
+    landings_told: list[AgentId] = []
+    service.add_on_update_landed_callback(lambda agent_id, run_started_at, ended_at: landings_told.append(agent_id))
     agent_id = AgentId.generate()
     service.schedule_store.schedule(agent_id)
     assert scheduler.run_now(agent_id) is None
@@ -213,6 +217,7 @@ def test_a_run_that_vanished_puts_its_machine_back_and_disarms_the_intent(
     assert service.state_store.get(agent_id).activity is UpdateActivity.STALLED
     assert stopped == [agent_id]
     assert service.schedule_store.read(agent_id) is None
+    assert landings_told == []
 
 
 def test_a_verdict_in_the_run_record_ends_the_run_and_closes_it_out(
@@ -253,6 +258,74 @@ def test_a_verdict_in_the_run_record_ends_the_run_and_closes_it_out(
     assert service.detector.invalidated == [agent_id]
     assert stopped == [agent_id]
     assert service.schedule_store.read(agent_id) is None
+
+
+def _poll_a_run_whose_record_reads(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, record: dict[str, object]
+) -> tuple[AgentId, list[tuple[AgentId, datetime | None, datetime]]]:
+    """Poll one in-flight run whose ``run.json`` is ``record``: its id, and each (id, run start, end) a listener was told."""
+    chat_agent_name = str(record["chat_agent_name"])
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=update_run_probe_stdout(run=json.dumps(record) + "\n", agents=f"{chat_agent_name}\tWAITING\n"),
+        )
+    )
+    service = _build_service(tmp_path, root_concurrency_group, host_state=HostState.RUNNING, caller=caller)
+    told: list[tuple[AgentId, datetime | None, datetime]] = []
+    service.add_on_update_landed_callback(
+        lambda agent_id, run_started_at, ended_at: told.append((agent_id, run_started_at, ended_at))
+    )
+    agent_id = AgentId.generate()
+    service.state_store.try_begin_run(agent_id, chat_agent_name=chat_agent_name)
+    service.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
+    service.poll_in_flight_runs()
+    return agent_id, told
+
+
+@pytest.mark.parametrize("is_verdict_time_recorded", [True, False], ids=["recorded", "unreadable"])
+def test_a_landed_update_tells_the_listeners_when_the_run_started_and_ended(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, is_verdict_time_recorded: bool
+) -> None:
+    """The listeners get the record's start, and its own verdict time or the reading's when the record has none."""
+    started_at = time.time() - 2400.0
+    verdict_at = time.time() - 713.0
+    record: dict[str, object] = {
+        "chat_agent_name": "update-y",
+        "started_at": started_at,
+        "verdict": "UPDATED",
+        "resulting_ref": "minds-v0.7.3",
+    }
+    if is_verdict_time_recorded:
+        record["verdict_at"] = verdict_at
+
+    polled_from = datetime.now(timezone.utc)
+    agent_id, told = _poll_a_run_whose_record_reads(tmp_path, root_concurrency_group, record)
+    polled_until = datetime.now(timezone.utc)
+
+    assert [(told_agent_id, run_started_at) for told_agent_id, run_started_at, _ in told] == [
+        (agent_id, datetime.fromtimestamp(started_at, tz=timezone.utc))
+    ]
+    ended_at = told[0][2]
+    if is_verdict_time_recorded:
+        assert ended_at == datetime.fromtimestamp(verdict_at, tz=timezone.utc)
+    else:
+        assert polled_from <= ended_at <= polled_until
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [UpdateVerdict.ALREADY_CURRENT, UpdateVerdict.REFUSED, UpdateVerdict.NEEDS_RECREATION, UpdateVerdict.STUCK],
+)
+def test_a_verdict_that_landed_nothing_tells_no_listener(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, verdict: UpdateVerdict
+) -> None:
+    """The workspace serves the build its views already loaded, so there is nothing to tell."""
+    record: dict[str, object] = {"chat_agent_name": "update-z", "verdict": verdict.value, "verdict_at": time.time()}
+
+    _agent_id, told = _poll_a_run_whose_record_reads(tmp_path, root_concurrency_group, record)
+
+    assert told == []
 
 
 def test_another_runs_record_does_not_close_this_run_out(

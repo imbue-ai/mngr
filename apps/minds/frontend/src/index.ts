@@ -149,7 +149,10 @@ function main(): void {
       // An in-workspace agent says the interface this view is running is stale.
       // Every window acts on its own frame -- no main process involvement,
       // unlike the pre-SPA content-view reload.
-      shell.reloadWorkspaceFrame(message.agent_id);
+      shell.reloadWorkspaceFrame(
+        message.agent_id,
+        message.loaded_before == null ? null : Date.parse(message.loaded_before),
+      );
     },
   });
   shell.channel = channel;

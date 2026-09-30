@@ -499,17 +499,14 @@ class UiOpenHelpMessage(FrozenModel):
 
 
 class UiWorkspaceRefreshMessage(FrozenModel):
-    """This workspace's displayed view no longer matches what the machine would serve; rebuild it.
-
-    Two producers: an in-workspace agent POSTing to
-    ``/api/v1/agents/<id>/refresh`` after changing the workspace's own interface
-    (see that route for why the agent has to ask), and the system-interface
-    health tracker's recovery edge, for a machine that has just started
-    answering again after serving every window a dead page.
-    """
+    """This workspace's displayed view no longer matches what the machine would serve; rebuild it."""
 
     type: Literal["workspace_refresh"] = "workspace_refresh"
     agent_id: str = Field(description="Workspace agent id whose view is stale")
+    loaded_before: datetime | None = Field(
+        default=None,
+        description="Rebuild only a view whose page last loaded before this instant (UTC); None rebuilds every view",
+    )
 
 
 class UiReloadMessage(FrozenModel):

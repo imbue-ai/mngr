@@ -9,7 +9,13 @@ issued into a network that was still coming back.
 
 import queue
 import time
+from datetime import datetime
+from datetime import timedelta
+from datetime import timezone
+from typing import Any
 from typing import Final
+
+import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
@@ -53,20 +59,27 @@ def _refreshed_agent_ids(client_queue: "queue.Queue[str | None]") -> list[str]:
     ]
 
 
-def _wait_for_refreshes(client_queue: "queue.Queue[str | None]") -> list[str]:
-    """Poll until a refresh frame lands, and answer with the ids seen.
+def _wait_for_refresh_frames(client_queue: "queue.Queue[str | None]") -> list[dict[str, Any]]:
+    """Poll until a refresh frame lands, and answer with the refresh frames seen.
 
     The drain is destructive, so what a pass reads has to be accumulated rather
     than re-read once the poll returns.
     """
-    refreshed: list[str] = []
+    refreshes: list[dict[str, Any]] = []
 
     def _has_refreshed() -> bool:
-        refreshed.extend(_refreshed_agent_ids(client_queue))
-        return bool(refreshed)
+        refreshes.extend(
+            frame for frame in drain_ui_channel_frames(client_queue) if frame["type"] == "workspace_refresh"
+        )
+        return bool(refreshes)
 
     assert poll_until(_has_refreshed, timeout=_PUBLISH_WAIT_SECONDS), "the held view refresh was never published"
-    return refreshed
+    return refreshes
+
+
+def _wait_for_refreshes(client_queue: "queue.Queue[str | None]") -> list[str]:
+    """Poll until a refresh frame lands, and answer with the ids seen."""
+    return [frame["agent_id"] for frame in _wait_for_refresh_frames(client_queue)]
 
 
 def test_a_refresh_on_a_device_with_no_network_trouble_publishes_immediately() -> None:
@@ -344,6 +357,126 @@ def test_a_refresh_raised_just_after_a_wake_waits_out_a_settle() -> None:
 
         assert _wait_for_refreshes(client_queue) == [str(agent_id)]
         assert time.monotonic() - started_at >= _SETTLE_SECONDS
+
+
+def _published_refresh_cutoffs(client_queue: "queue.Queue[str | None]") -> list[datetime | None]:
+    """The ``loaded_before`` of every refresh frame published so far, polled until at least one lands."""
+    return [
+        None if frame["loaded_before"] is None else datetime.fromisoformat(frame["loaded_before"])
+        for frame in _wait_for_refresh_frames(client_queue)
+    ]
+
+
+def _an_hour_ago() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(hours=1)
+
+
+@pytest.mark.parametrize(
+    ("is_sleep_recorded", "is_run_start_readable", "is_refresh_published"),
+    [(True, True, True), (False, True, False), (False, False, True)],
+    ids=["slept-during-the-run", "awake-throughout", "run-start-unreadable"],
+)
+def test_an_update_repeats_its_view_refresh_only_on_a_device_that_may_have_slept_through_it(
+    is_sleep_recorded: bool, is_run_start_readable: bool, is_refresh_published: bool
+) -> None:
+    """The apply refreshed every view as it landed; only a device that could have missed that is owed a repeat."""
+    agent_id = AgentId.generate()
+    ended_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+    publisher, client_queue = build_ui_state_publisher_for_test()
+    sleep_tracker, clock = make_sleep_tracker()
+    with ConcurrencyGroup(name="test-view-refresh-update-sleep-gate") as concurrency_group:
+        refresher = WorkspaceViewRefresher(
+            publisher=publisher, sleep_tracker=sleep_tracker, concurrency_group=concurrency_group
+        )
+        if is_sleep_recorded:
+            record_sleep_of(sleep_tracker, clock, seconds=1500.0)
+
+        refresher.refresh_views_after_update(
+            agent_id, run_started_at=_an_hour_ago() if is_run_start_readable else None, ended_at=ended_at
+        )
+
+        assert _refreshed_agent_ids(client_queue) == ([str(agent_id)] if is_refresh_published else [])
+
+
+@pytest.mark.parametrize("is_run_start_readable", [True, False], ids=["run-start-readable", "run-start-unreadable"])
+def test_an_update_verdict_seen_just_after_a_wake_is_held_and_keeps_its_cutoff(is_run_start_readable: bool) -> None:
+    """The laptop slept through the update, and the app reads its verdict seconds after the lid opens.
+
+    The heartbeat loop has not recorded the wake yet, so it is the verdict's
+    own reading that does. The reload waits out the wake's settle like any
+    other, and still reaches the windows only as "reload a page loaded before
+    the run ended".
+    """
+    agent_id = AgentId.generate()
+    ended_at = datetime(2026, 9, 28, 20, 14, 49, 432000, tzinfo=timezone.utc)
+    publisher, client_queue = build_ui_state_publisher_for_test()
+    sleep_tracker, clock = make_sleep_tracker()
+    with ConcurrencyGroup(name="test-view-refresh-verdict-after-wake") as concurrency_group:
+        detector, _prober = build_stub_connectivity_detector(concurrency_group)
+        detector.probe_now()
+        refresher = WorkspaceViewRefresher(
+            publisher=publisher,
+            connectivity_detector=detector,
+            sleep_tracker=sleep_tracker,
+            concurrency_group=concurrency_group,
+            settle_seconds=_SETTLE_SECONDS,
+        )
+        sleep_tracker.add_on_wake_callback(refresher.on_wake)
+
+        started_at = time.monotonic()
+        clock.lag_seconds = 988.0
+        sleep_tracker.record_heartbeat()
+        clock.lag_seconds = 0.0
+        refresher.refresh_views_after_update(
+            agent_id, run_started_at=_an_hour_ago() if is_run_start_readable else None, ended_at=ended_at
+        )
+        assert _refreshed_agent_ids(client_queue) == []
+
+        assert _published_refresh_cutoffs(client_queue) == [ended_at]
+        assert time.monotonic() - started_at >= _SETTLE_SECONDS
+
+
+_EARLIER_RUN_END: Final[datetime] = datetime(2026, 9, 28, 19, 2, 11, tzinfo=timezone.utc)
+_LATER_RUN_END: Final[datetime] = datetime(2026, 9, 28, 20, 14, 49, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("first_cutoff", "second_cutoff", "expected_cutoff"),
+    [
+        (_LATER_RUN_END, None, None),
+        (None, _LATER_RUN_END, None),
+        (_EARLIER_RUN_END, _LATER_RUN_END, _LATER_RUN_END),
+        (_LATER_RUN_END, _EARLIER_RUN_END, _LATER_RUN_END),
+    ],
+    ids=["verdict-then-recovery", "recovery-then-verdict", "earlier-then-later", "later-then-earlier"],
+)
+def test_two_refreshes_held_for_one_machine_publish_the_one_that_reloads_more(
+    first_cutoff: datetime | None, second_cutoff: datetime | None, expected_cutoff: datetime | None
+) -> None:
+    """One frame per machine leaves the hold, and it must reload every page either refresh would have."""
+    agent_id = AgentId.generate()
+    publisher, client_queue = build_ui_state_publisher_for_test()
+    sleep_tracker, clock = make_sleep_tracker()
+    with ConcurrencyGroup(name="test-view-refresh-merge") as concurrency_group:
+        detector, _prober = build_stub_connectivity_detector(concurrency_group)
+        detector.probe_now()
+        refresher = WorkspaceViewRefresher(
+            publisher=publisher,
+            connectivity_detector=detector,
+            sleep_tracker=sleep_tracker,
+            concurrency_group=concurrency_group,
+            settle_seconds=_SETTLE_SECONDS,
+        )
+        sleep_tracker.add_on_wake_callback(refresher.on_wake)
+
+        record_sleep_of(sleep_tracker, clock, seconds=711.0)
+        for cutoff in (first_cutoff, second_cutoff):
+            if cutoff is None:
+                refresher(agent_id)
+            else:
+                refresher.refresh_views_after_update(agent_id, run_started_at=_an_hour_ago(), ended_at=cutoff)
+
+        assert _published_refresh_cutoffs(client_queue) == [expected_cutoff]
 
 
 class _RecoveringMidCallDetector(ConnectivityDetector):

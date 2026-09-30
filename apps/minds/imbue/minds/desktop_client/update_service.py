@@ -5,6 +5,8 @@ The liveness poll here is the app's only reader of an in-flight run: it moves th
 
 import threading
 from collections.abc import Callable
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from typing import Final
 from typing import Protocol
@@ -39,6 +41,7 @@ from imbue.minds.desktop_client.update_chat import UPDATE_SKILL_NAME
 from imbue.minds.desktop_client.update_chat import build_update_chat_message
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_scheduler import ScheduledRunConditions
+from imbue.minds.desktop_client.update_status import LANDED_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
 from imbue.minds.desktop_client.update_status import UpdateVerdict
@@ -143,6 +146,12 @@ class OnUpdateRunFinishedCallback(Protocol):
     def __call__(self, agent_id: AgentId, *, is_real_failure: bool) -> None: ...
 
 
+class OnUpdateLandedCallback(Protocol):
+    """Told when a run's verdict says an update landed: when the run started (None if unreadable) and when it ended."""
+
+    def __call__(self, agent_id: AgentId, *, run_started_at: datetime | None, ended_at: datetime) -> None: ...
+
+
 class WorkspaceUpdateService(MutableModel):
     """Dispatches updates and closes them out; the routes' and scheduler's shared engine."""
 
@@ -171,6 +180,7 @@ class WorkspaceUpdateService(MutableModel):
     _poll_stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     _is_polling_started: bool = PrivateAttr(default=False)
     _on_run_finished_callbacks: list[OnUpdateRunFinishedCallback] = PrivateAttr(default_factory=list)
+    _on_update_landed_callbacks: list[OnUpdateLandedCallback] = PrivateAttr(default_factory=list)
     _callbacks_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
     def add_on_run_finished_callback(self, callback: OnUpdateRunFinishedCallback) -> None:
@@ -181,6 +191,14 @@ class WorkspaceUpdateService(MutableModel):
         """
         with self._callbacks_lock:
             self._on_run_finished_callbacks.append(callback)
+
+    def add_on_update_landed_callback(self, callback: OnUpdateLandedCallback) -> None:
+        """Register a callback told each run whose verdict says it landed an update.
+
+        Not told of a run that landed nothing, nor of one that stalls without a verdict.
+        """
+        with self._callbacks_lock:
+            self._on_update_landed_callbacks.append(callback)
 
     def dispatch_update(self, agent_id: AgentId, *, target_override: str | None = None) -> UpdateDispatch:
         """Start an update run in ``agent_id``, returning what happened.
@@ -325,8 +343,19 @@ class WorkspaceUpdateService(MutableModel):
         running_chats = payload.get("running_chats")
         return not (isinstance(running_chats, list) and running_chats)
 
-    def handle_verdict(self, agent_id: AgentId, verdict: UpdateVerdict, resulting_ref: str) -> None:
-        """Everything the app owes a terminal verdict: re-detect, report, unschedule."""
+    def handle_verdict(
+        self,
+        agent_id: AgentId,
+        verdict: UpdateVerdict,
+        resulting_ref: str,
+        run_started_at: datetime | None,
+        verdict_at: datetime | None,
+    ) -> None:
+        """Everything the app owes a terminal verdict: re-detect, report, unschedule, tell the listeners if it landed.
+
+        A record whose verdict time is unreadable is dated at this reading, the
+        latest the verdict can have landed.
+        """
         # The badge is stale the instant an update lands; drop the cached read and sweep now.
         self.detector.invalidate_cached_version(agent_id)
         self.detector.request_pass()
@@ -347,6 +376,13 @@ class WorkspaceUpdateService(MutableModel):
                 resulting_ref or "?",
             )
         self._close_scheduled_run_out(agent_id, is_real_failure=is_failure)
+        if verdict not in LANDED_UPDATE_VERDICTS:
+            return
+        ended_at = verdict_at if verdict_at is not None else datetime.now(timezone.utc)
+        with self._callbacks_lock:
+            landed_callbacks = list(self._on_update_landed_callbacks)
+        for callback in landed_callbacks:
+            callback(agent_id, run_started_at=run_started_at, ended_at=ended_at)
 
     def _close_scheduled_run_out(self, agent_id: AgentId, *, is_real_failure: bool) -> None:
         """Tell the listeners a run ended (the scheduler stops a machine it started and does not retry a failure unwatched)."""
@@ -392,7 +428,9 @@ class WorkspaceUpdateService(MutableModel):
             if status.verdict is not None:
                 self._waiting_streak_by_agent.pop(aid_str, None)
                 self.apply_window.close_window(agent_id, reason="terminal verdict")
-                self.handle_verdict(agent_id, status.verdict, status.resulting_ref)
+                self.handle_verdict(
+                    agent_id, status.verdict, status.resulting_ref, status.started_at, status.verdict_at
+                )
                 return
         if probe.is_apply_in_progress:
             # Windowing on the poll's sighting means a normal apply is windowed

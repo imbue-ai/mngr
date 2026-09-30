@@ -35,12 +35,12 @@ from imbue.minds.desktop_client.update_dismissal_store import is_run_dismissed
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleRecord
 from imbue.minds.desktop_client.update_schedule_store import UpdateScheduleStore
 from imbue.minds.desktop_client.update_status import IN_FLIGHT_ACTIVITIES
+from imbue.minds.desktop_client.update_status import LANDED_UPDATE_VERDICTS
 from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateDispatchFailure
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
-from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.update_status import describe_skip_reason
 from imbue.minds.desktop_client.workspace_version import read_workspace_current_version
 from imbue.minds.errors import MindError
@@ -155,12 +155,6 @@ class _DetectionFacts(FrozenModel):
     is_version_from_label: bool = Field(default=False)
 
 
-# The verdicts that leave the "Updated to X" note on the row.
-_SUCCESS_VERDICTS: Final[frozenset[UpdateVerdict]] = frozenset(
-    {UpdateVerdict.UPDATED, UpdateVerdict.UPDATED_WITH_REBUILD_ITEMS}
-)
-
-
 class _RunFacts(FrozenModel):
     """A workspace's run as the app knows it: the run's own record, plus what only the app tracks."""
 
@@ -191,7 +185,7 @@ class _RunFacts(FrozenModel):
             status = status.model_copy_update(to_update(status.field_ref().started_at, self.record.started_at))
         if status.verdict is None:
             return self.model_copy_update(to_update(self.field_ref().record, status))
-        is_note_earned = status.verdict in _SUCCESS_VERDICTS
+        is_note_earned = status.verdict in LANDED_UPDATE_VERDICTS
         completed_at = status.verdict_at if status.verdict_at is not None else datetime.now(timezone.utc)
         return self.model_copy_update(
             to_update(self.field_ref().activity, UpdateActivity.IDLE),
@@ -463,7 +457,7 @@ class WorkspaceUpdateStateStore(MutableModel):
             is_outcome_dismissed = is_run_dismissed(dismissals.outcome_run_started_at, status.started_at)
             # A landed run's note is dismissed on its own, so a relaunch still earns it under a dismissed badge.
             if is_outcome_dismissed and (
-                is_same_run or status.started_at is None or status.verdict not in _SUCCESS_VERDICTS
+                is_same_run or status.started_at is None or status.verdict not in LANDED_UPDATE_VERDICTS
             ):
                 return
             if status.verdict is None:

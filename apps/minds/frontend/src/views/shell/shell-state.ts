@@ -86,6 +86,9 @@ export interface WorkspaceFrameHandle {
   armedWorkspaceAnyId(): string | null;
   /** Re-navigate the frame to that workspace's root URL. */
   reload(): void;
+  /** When the page the frame holds last finished loading (epoch ms), or null
+   * before its first load -- whether the embedder or the page itself started it. */
+  lastLoadedAtMs(): number | null;
 }
 
 export class ShellState {
@@ -219,13 +222,17 @@ export class ShellState {
     this.webLogin = webLoginModel;
   }
 
-  /** Rebuild this window's workspace view, if its frame is showing the one named. */
-  reloadWorkspaceFrame(agentScopedId: string): void {
+  /** Rebuild this window's workspace view, if its frame is showing the one named
+   * -- and, given a cutoff, only if its page last loaded before it: a page
+   * loaded since already runs what the machine serves now. */
+  reloadWorkspaceFrame(agentScopedId: string, loadedBeforeMs: number | null): void {
     const frame = this.workspaceFrame;
     if (frame === null) return;
     const armed = frame.armedWorkspaceAnyId();
     if (armed === null) return;
     if (this.stores.workspaces.toAgentScopedId(armed) !== agentScopedId) return;
+    const lastLoadedAtMs = frame.lastLoadedAtMs();
+    if (loadedBeforeMs !== null && lastLoadedAtMs !== null && lastLoadedAtMs >= loadedBeforeMs) return;
     frame.reload();
   }
 

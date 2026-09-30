@@ -278,6 +278,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let unsubscribeWorkspaces: (() => void) | null = null;
   let closeActiveTabForwarder: (() => void) | null = null;
   let onFrameLoad: (() => void) | null = null;
+  // Stamped by a listener of its own, attached at mount: `onFrameLoad` waits
+  // for the embed contract and is also invoked by hand, so it cannot say when
+  // a page actually loaded.
+  let lastLoadedAtMs: number | null = null;
+  const stampFrameLoad = (): void => {
+    lastLoadedAtMs = Date.now();
+  };
   let snapshotResendTimer: ReturnType<typeof setTimeout> | null = null;
   let permissionResolvedSender: PermissionResolvedSender | null = null;
   let focusChatSender: FocusChatSender | null = null;
@@ -323,6 +330,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     oncreate(vnode) {
       const { shell, workspaceAnyId, soloWindowId } = vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
+      frameElement?.addEventListener("load", stampFrameLoad);
       armFrame(shell, workspaceAnyId, soloWindowId);
       // The armed id, not the attr, is what the shell asks about: this frame is
       // re-armed by onupdate, and it is mounted for the workspace an app modal
@@ -330,6 +338,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       frameHandle = {
         armedWorkspaceAnyId: () => armedWorkspaceAnyId,
         reload: () => reloadFrame(shell),
+        lastLoadedAtMs: () => lastLoadedAtMs,
       };
       shell.workspaceFrame = frameHandle;
 
@@ -491,6 +500,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       if (onFrameLoad !== null)
         frameElement?.removeEventListener("load", onFrameLoad);
       onFrameLoad = null;
+      frameElement?.removeEventListener("load", stampFrameLoad);
       if (snapshotResendTimer !== null) {
         clearTimeout(snapshotResendTimer);
         snapshotResendTimer = null;

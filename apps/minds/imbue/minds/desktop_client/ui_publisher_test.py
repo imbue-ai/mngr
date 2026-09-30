@@ -106,7 +106,7 @@ def test_one_shot_workspace_refresh_event_reaches_the_channel() -> None:
     publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id="agent-13"))
 
     frames = drain_ui_channel_frames(client_queue)
-    assert frames == [{"type": "workspace_refresh", "agent_id": "agent-13"}]
+    assert frames == [{"type": "workspace_refresh", "agent_id": "agent-13", "loaded_before": None}]
 
 
 def test_publish_health_broadcasts_immediately_without_diffing() -> None:

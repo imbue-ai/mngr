@@ -55,6 +55,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyExceptionGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.errors import ConcurrencyGroupError
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.imbue_common.pure import pure
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.environment_signals import ConnectivityDetector
 from imbue.minds.desktop_client.environment_signals import EnvironmentBlock
@@ -76,12 +77,26 @@ from imbue.mngr.primitives import AgentId
 _DEFAULT_REFRESH_SETTLE_SECONDS: Final[float] = 5.0
 
 
+@pure
+def _merge_held_view_refreshes(
+    held: UiWorkspaceRefreshMessage | None, incoming: UiWorkspaceRefreshMessage
+) -> UiWorkspaceRefreshMessage:
+    """The one refresh that does the work of both: an unconditional one, else the later cutoff."""
+    if held is None or incoming.loaded_before is None:
+        return incoming
+    if held.loaded_before is None or held.loaded_before >= incoming.loaded_before:
+        return held
+    return incoming
+
+
 class WorkspaceViewRefresher(MutableModel):
     """Recovery callback that tells every window to rebuild a recovered machine's view.
 
     Hung on the recovery rather than on the unattended start that usually causes
     it, so it also covers a machine that came back some other way: a cold boot
     that finished on its own, or the user starting a machine they had stopped.
+    An update that landed while this device slept raises one too
+    (:meth:`refresh_views_after_update`), through the same hold.
 
     Constructed without a detector and without a sleep tracker, it publishes
     every refresh immediately -- the behaviour without any environment signals
@@ -114,7 +129,8 @@ class WorkspaceViewRefresher(MutableModel):
         frozen=True,
         description=(
             "Ticked when a settle's wait returns, so a wake this device slept through is recorded "
-            "then rather than at the heartbeat loop's next tick. None trusts the wait."
+            "then rather than at the heartbeat loop's next tick, and asked whether this device slept "
+            "through an update run. None trusts the wait, and assumes any update run was slept through."
         ),
     )
     concurrency_group: ConcurrencyGroup = Field(
@@ -132,7 +148,7 @@ class WorkspaceViewRefresher(MutableModel):
     # and deliberately small: it is the set of views the app owes a repaint
     # right now, not a history.
     _held_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    _held_agent_ids: set[str] = PrivateAttr(default_factory=set)
+    _held_refresh_by_agent_id: dict[str, UiWorkspaceRefreshMessage] = PrivateAttr(default_factory=dict)
     # When the settle window was last opened, so a refresh arriving just
     # *after* the recovery edge is held too. The two edges are independent and
     # land in either order: in the incident this was written for the health edge
@@ -143,11 +159,40 @@ class WorkspaceViewRefresher(MutableModel):
     _settle_generation: int = PrivateAttr(default=0)
 
     def __call__(self, agent_id: AgentId) -> None:
+        self._refresh(agent_id, UiWorkspaceRefreshMessage(agent_id=str(agent_id)))
+
+    def refresh_views_after_update(
+        self, agent_id: AgentId, *, run_started_at: datetime | None, ended_at: datetime
+    ) -> None:
+        """Rebuild the views of ``agent_id`` still on the build an update run replaced.
+
+        The run's apply refreshes every view itself as it lands, but that is a
+        one-off: a device asleep at the time never hears it. So this repeats it
+        only when this device slept at some point since the run started, and
+        then only for a view whose page last loaded before ``ended_at`` -- one
+        reloaded or opened since already runs what the machine serves now.
+
+        The tracker is ticked first, as the settle worker does, because the
+        verdict can be read in the moments after a wake that the heartbeat loop
+        has not recorded yet; recording it here also fires the wake callbacks,
+        :meth:`on_wake` among them, so the settle window holds this refresh.
+        """
+        if self.sleep_tracker is not None:
+            self.sleep_tracker.record_heartbeat()
+            if run_started_at is not None and not self.sleep_tracker.was_asleep_since(run_started_at):
+                logger.debug(
+                    "Not repeating the update's view refresh of {}: this device was awake throughout the run", agent_id
+                )
+                return
+        self._refresh(agent_id, UiWorkspaceRefreshMessage(agent_id=str(agent_id), loaded_before=ended_at))
+
+    def _refresh(self, agent_id: AgentId, message: UiWorkspaceRefreshMessage) -> None:
         if not self._is_refresh_held(agent_id):
-            self.publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=str(agent_id)))
+            self.publisher.publish_one_shot(message)
             return
         with self._held_lock:
-            self._held_agent_ids.add(str(agent_id))
+            held = self._held_refresh_by_agent_id.get(str(agent_id))
+            self._held_refresh_by_agent_id[str(agent_id)] = _merge_held_view_refreshes(held, message)
         logger.info("Holding the view refresh of {}: this device's network is still coming back", agent_id)
         # The settle may have ended while the lines above ran, and the worker
         # that would have drained us has already been and gone: the detector
@@ -256,11 +301,11 @@ class WorkspaceViewRefresher(MutableModel):
 
     def _publish_held(self) -> None:
         with self._held_lock:
-            held_agent_ids = sorted(self._held_agent_ids)
-            self._held_agent_ids.clear()
-        for aid_str in held_agent_ids:
+            held_refreshes = sorted(self._held_refresh_by_agent_id.items())
+            self._held_refresh_by_agent_id.clear()
+        for aid_str, message in held_refreshes:
             logger.info("Publishing the held view refresh of {}: the network has settled", aid_str)
-            self.publisher.publish_one_shot(UiWorkspaceRefreshMessage(agent_id=aid_str))
+            self.publisher.publish_one_shot(message)
 
     def _is_refresh_held(self, agent_id: AgentId) -> bool:
         """Whether *this machine's* refresh must wait for the network, rather than publish now.

@@ -1325,7 +1325,7 @@ def test_workspace_refresh_broadcasts_to_every_ui_connection(tmp_path: Path) -> 
     response = client.post(f"/api/v1/agents/{agent_id}/refresh", json={}, headers=_auth_header())
 
     assert response.status_code == 200
-    expected = {"type": "workspace_refresh", "agent_id": str(agent_id)}
+    expected = {"type": "workspace_refresh", "agent_id": str(agent_id), "loaded_before": None}
     assert json.loads(first_queue.get_nowait() or "") == expected
     assert json.loads(second_queue.get_nowait() or "") == expected
 
@@ -1388,7 +1388,9 @@ def test_a_machine_coming_back_tells_every_window_to_rebuild_its_view(
     assert tracker.get_health(agent_id) == AgentHealth.STUCK
     tracker.record_probe_success(agent_id)
 
-    assert _drain_refresh_frames(window_queue) == [{"type": "workspace_refresh", "agent_id": str(agent_id)}]
+    assert _drain_refresh_frames(window_queue) == [
+        {"type": "workspace_refresh", "agent_id": str(agent_id), "loaded_before": None}
+    ]
 
 
 def test_a_machine_that_never_went_down_does_not_refresh_windows(
