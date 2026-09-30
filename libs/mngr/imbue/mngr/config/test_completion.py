@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import click
+import pytest
 
 from imbue.mngr.agents.agent_registry import list_registered_agent_types
 from imbue.mngr.cli.help_topics import get_all_topics
@@ -49,6 +50,12 @@ def _assert_option_exists_on_cli(dotted_key: str, label: str) -> None:
     )
 
 
+# Marked flaky because building the completion cache reads ``.commands`` on every
+# provider group, which defeats LazyProviderCliGroup and imports the AWS, Azure and
+# GCP SDKs. That import finishes in seconds normally, but on a cold-cache offload
+# run, with sandbox I/O still saturated by the base image build, it has blown the
+# 10s pytest-timeout.
+@pytest.mark.flaky
 def test_option_choices_reference_real_options(
     completion_cache_dir: Path,
     temp_mngr_ctx: MngrContext,
