@@ -3416,6 +3416,12 @@ def test_format_env_file_simple_values() -> None:
     assert result.endswith("\n")
 
 
+def test_format_env_file_leaves_variable_references_unquoted() -> None:
+    """A value may reference an earlier variable; sourcing the file must expand it, so it stays unquoted."""
+    result = _format_env_file({"MNGR_AGENT_NAME": "agent-1", "VENV": "${HOME}/venvs/${MNGR_AGENT_NAME}"})
+    assert "VENV=${HOME}/venvs/${MNGR_AGENT_NAME}\n" in result
+
+
 def test_format_env_file_quotes_values_with_spaces() -> None:
     """Values with spaces should be double-quoted."""
     result = _format_env_file({"MSG": "hello world"})
