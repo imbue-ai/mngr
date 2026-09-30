@@ -60,7 +60,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:workspace-ready` | `{}` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. |
 | `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Imbue Studio window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
 | `minds:window-drag-started` | `{ windowId, title, width, height, grabX, grabY }` | A drag of the window's title bar began (or the dragged window changed size mid-drag); `grabX`, `grabY` are where inside the window the pointer holds it. The embedder watches the cursor from here and reports each step with `minds:tear-out`, since the shell's own pointer events stop at the Imbue Studio window's edge on some platforms. |
-| `minds:window-drag-ended` | `{ windowId, isDetached }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out), false when the drag was released inside or cancelled, which drops any popout being dragged. |
+| `minds:window-drag-ended` | `{ windowId, isDetached, isCancelled? }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out); `isCancelled` is true for a cancel (Escape), which drops any popout being dragged, and false for a release, after which a popout that is out stays and the embedder sends `minds:tear-out` `released`. The shell takes the embedder's last `minds:tear-out` word on the drag even when it lands after its own release. A shell that omits `isCancelled` is taken at its `isDetached`. |
 | `minds:detached-windows` | `{ windows: [{ windowId, title }] }` | The pulled-out windows of the sending shell's active desktop, with their titles (at most 128). Sent when the shell announces ready and whenever the set or a title changes; a popout closes itself when its own window is absent, so a solo shell sends a report without its own window only once the return is saved. |
 
 ### embedder -> workspace
@@ -73,7 +73,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:focus-chat` | `{ chatId }` | The user opened a chat's notification; show that chat. Which window it lands in is the workspace's choice. Sent only after the workspace announces `minds:workspace-ready`; fire-and-forget from there (no ack). |
 | `minds:embedder-capabilities` | `{ canPopOut }` | What this chrome can do, sent right after `minds:workspace-ready`. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). |
-| `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the backdrop, clamped by the receiver) when a re-dock drag dropped it there, else at its kept frame. |
+| `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when a re-dock drag dropped it there, else at its kept frame. |
 
 The ack's semantic is "an Imbue Studio chrome is present" -- NOT "the desktop app is
 present". Plain-browser chrome acks too.
@@ -171,4 +171,11 @@ payloads -- to the console.
   bound, sizes as finite positive numbers, grab offsets as finite numbers, and
   a frame as four finite numbers the receiver clamps. A shell whose vendored snapshot predates v6
   never sees `embedder-capabilities`, so its gesture stays off; a v6 shell
-  facing an older chrome sends messages the chrome ignores.
+  facing an older chrome sends messages the chrome ignores. Every v6 chrome
+  sends `reattach-window`'s frame in fractions of the workspace surface; a
+  shell that reads them as fractions of its backdrop puts a dropped window
+  back the taskbar's share shorter. `window-drag-ended` gained an optional
+  `isCancelled` after v6 first shipped: a chrome that reads it keeps a
+  popout that is out on any release and says `released`, and a shell that
+  sends it takes that late word; each side facing an older other falls back
+  to `isDetached`.

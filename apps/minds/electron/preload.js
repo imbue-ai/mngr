@@ -76,11 +76,12 @@ contextBridge.exposeInMainWorld('mindsNative', {
   // here with the workspace's id. A popout window's own page uses its bar's
   // drag, its title, and the reattach ask main sends it when no desktop
   // window can take the window back; a main window hears when a popout's
-  // window is to return to its desktop (a drop onto it, a popout's close).
+  // window is to return to its desktop (a drop onto it, a popout's close),
+  // and reports once its desktop has it back.
   openPopoutWindow: (request) => ipcRenderer.send('open-popout-window', request),
   beginWorkspaceWindowDrag: (request) => ipcRenderer.send('begin-workspace-window-drag', request),
-  endWorkspaceWindowDrag: (workspaceId, windowId, isDetached) =>
-    ipcRenderer.send('end-workspace-window-drag', { workspaceId, windowId, isDetached }),
+  endWorkspaceWindowDrag: (workspaceId, windowId, isDetached, isCancelled) =>
+    ipcRenderer.send('end-workspace-window-drag', { workspaceId, windowId, isDetached, isCancelled }),
   onTearOut: (callback) => {
     ipcRenderer.on('tear-out', (_event, report) => callback(report));
   },
@@ -95,6 +96,8 @@ contextBridge.exposeInMainWorld('mindsNative', {
   onReattachPopoutWindow: (callback) => {
     ipcRenderer.on('reattach-popout-window', (_event, ask) => callback(ask));
   },
+  popoutWindowReturned: (workspaceId, windowId) =>
+    ipcRenderer.send('popout-window-returned', { workspaceId, windowId }),
   onPopoutDropTarget: (callback) => {
     ipcRenderer.on('popout-drop-target', (_event, isOver) => callback(Boolean(isOver)));
   },

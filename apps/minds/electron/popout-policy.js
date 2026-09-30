@@ -147,8 +147,8 @@ function clamp(value, low, high) {
  * The frame (fractions of the target's workspace surface, inside the unit
  * square) a dropped popout's content lands at: the popout's content bounds
  * relative to the surface, shrunk to fit when the popout is larger than it.
- * The workspace shell clamps again against its own backdrop, which is the
- * surface less its taskbar; the small difference is not worth a round trip.
+ * The workspace shell maps it onto its own backdrop, which is the surface
+ * less its taskbar, and clamps it again.
  */
 function redockFrame(popoutContentBounds, targetContentBounds) {
   const surface = surfaceBounds(targetContentBounds);

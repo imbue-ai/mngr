@@ -73,9 +73,12 @@ export const POP_OUT_WINDOW = "minds:pop-out-window";
 // events stop at the window's edge on some platforms.
 export const WINDOW_DRAG_STARTED = "minds:window-drag-started";
 // workspace -> embedder: the shell's own drag gesture ended. Payload:
-// { windowId, isDetached }: `isDetached` is true when the shell detached the
-// window (its release arrived while torn out), false when the drag was
-// released inside or cancelled, which drops any popout being dragged.
+// { windowId, isDetached, isCancelled? }: `isDetached` is true when the shell
+// detached the window (its release arrived while torn out); `isCancelled` is
+// true for a cancel (Escape), which drops any popout being dragged, and false
+// for a release, after which a popout that is out stays and the shell takes
+// the embedder's last TEAR_OUT word even when it lands after the release. A
+// shell that omits `isCancelled` is taken at its `isDetached`.
 export const WINDOW_DRAG_ENDED = "minds:window-drag-ended";
 // workspace -> embedder: the pulled-out windows of the sending shell's active
 // desktop, with their titles. Payload: { windows: [{ windowId, title }] }.
@@ -109,8 +112,9 @@ export const FOCUS_CHAT = "minds:focus-chat";
 export const EMBEDDER_CAPABILITIES = "minds:embedder-capabilities";
 // embedder -> workspace: return a pulled-out window to the desktop, shown and
 // raised. Payload: { windowId, frame? }; `frame` ({ x, y, width, height } in
-// fractions of the backdrop, clamped by the receiver) places it where a
-// re-dock drag dropped it, else it lands at its kept frame.
+// fractions of the workspace surface, the frame's whole viewport, which the
+// receiver maps onto its own backdrop and clamps) places it where a re-dock
+// drag dropped it, else it lands at its kept frame.
 export const REATTACH_WINDOW = "minds:reattach-window";
 // embedder -> workspace: the state of a title-bar drag the embedder is
 // watching (see WINDOW_DRAG_STARTED). Payload: { windowId, phase }: "out" --
@@ -172,8 +176,8 @@ function isDetachedWindowEntryValid(entry) {
   return isWindowIdValid(entry.windowId) && isTitleValid(entry.title);
 }
 
-// A frame in fractions of the backdrop; the receiver clamps it into the unit
-// square, so only the numbers' finiteness is checked here.
+// A frame in fractions of the workspace surface; the receiver maps it onto its
+// backdrop and clamps it, so only the numbers' finiteness is checked here.
 function isFrameValid(value) {
   if (value === undefined) return true;
   if (!value || typeof value !== 'object') return false;
@@ -217,7 +221,8 @@ const WORKSPACE_TO_EMBEDDER_VALIDATORS = {
     return isFiniteNumber(data.grabX) && isFiniteNumber(data.grabY);
   },
   [WINDOW_DRAG_ENDED]: function (data) {
-    return isWindowIdValid(data.windowId) && typeof data.isDetached === 'boolean';
+    if (!isWindowIdValid(data.windowId) || typeof data.isDetached !== 'boolean') return false;
+    return data.isCancelled === undefined || typeof data.isCancelled === 'boolean';
   },
   [DETACHED_WINDOWS]: function (data) {
     if (!Array.isArray(data.windows)) return false;

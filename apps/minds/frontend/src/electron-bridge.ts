@@ -148,7 +148,7 @@ interface MindsNativeSurface {
   // A workspace title-bar drag main watches from here (the pull-out-window
   // spec, section 5.1); it reports each step of the tear-out through onTearOut.
   beginWorkspaceWindowDrag?(request: WorkspaceWindowDragRequest): void;
-  endWorkspaceWindowDrag?(workspaceId: string, windowId: string, isDetached: boolean): void;
+  endWorkspaceWindowDrag?(workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null): void;
   onTearOut?(callback: (report: TearOutReport) => void): void;
   // The popout's own bar was pressed; main follows the cursor until the release.
   beginPopoutDrag?(grab: PopoutGrab): void;
@@ -163,6 +163,8 @@ interface MindsNativeSurface {
   // A main window is asked to return a popout's window to the desktop it
   // shows: the popout was dropped onto it, or is closing.
   onReattachPopoutWindow?(callback: (ask: PopoutReattachAsk) => void): void;
+  // This main window's desktop has the asked-for window back; main closes its popout.
+  popoutWindowReturned?(workspaceId: string, windowId: string): void;
   onPopoutDropTarget?(callback: (isOver: boolean) => void): void;
 }
 
@@ -359,8 +361,8 @@ export const electronBridge = {
   beginWorkspaceWindowDrag(request: WorkspaceWindowDragRequest): void {
     native()?.beginWorkspaceWindowDrag?.(request);
   },
-  endWorkspaceWindowDrag(workspaceId: string, windowId: string, isDetached: boolean): void {
-    native()?.endWorkspaceWindowDrag?.(workspaceId, windowId, isDetached);
+  endWorkspaceWindowDrag(workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null): void {
+    native()?.endWorkspaceWindowDrag?.(workspaceId, windowId, isDetached, isCancelled);
   },
   onTearOut(callback: (report: TearOutReport) => void): void {
     native()?.onTearOut?.(callback);
@@ -385,6 +387,9 @@ export const electronBridge = {
   },
   onReattachPopoutWindow(callback: (ask: PopoutReattachAsk) => void): void {
     native()?.onReattachPopoutWindow?.(callback);
+  },
+  popoutWindowReturned(workspaceId: string, windowId: string): void {
+    native()?.popoutWindowReturned?.(workspaceId, windowId);
   },
   onPopoutDropTarget(callback: (isOver: boolean) => void): void {
     native()?.onPopoutDropTarget?.(callback);

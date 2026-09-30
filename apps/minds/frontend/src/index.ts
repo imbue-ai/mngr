@@ -195,11 +195,16 @@ function main(): void {
   });
   // The pull-out-window spec's asks from main. To a main window: return a
   // popout's window to the desktop this window shows (the popout was dropped
-  // onto it, or is closing); a popout is being dragged over this window, so
-  // the drop is offered here. To a popout with no desktop window to take its
-  // window back: the OS close was pressed, so the window goes back to the
-  // desktop through this popout's own page before the window is destroyed.
-  electronBridge.onReattachPopoutWindow((ask) => shell.handleReattachPopoutWindow(ask));
+  // onto it, or is closing), answering once the desktop has it back; a popout
+  // is being dragged over this window, so the drop is offered here. To a
+  // popout with no desktop window to take its window back: the OS close was
+  // pressed, so the window goes back to the desktop through this popout's own
+  // page before the window is destroyed.
+  electronBridge.onReattachPopoutWindow((ask) => {
+    void shell.handleReattachPopoutWindow(ask).then((isReportedBack) => {
+      if (isReportedBack) electronBridge.popoutWindowReturned(ask.workspaceId, ask.windowId);
+    });
+  });
   electronBridge.onPopoutReattachRequest(() => {
     void shell.returnPopoutToDesktop(null).then(() => electronBridge.popoutReattached());
   });

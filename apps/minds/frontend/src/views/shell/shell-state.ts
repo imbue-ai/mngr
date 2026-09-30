@@ -69,14 +69,15 @@ export interface DetachedWindowEntry {
   title: string;
 }
 
-// How long a reattach waits for the shell to report the window back before
-// the popout goes anyway (the OS window is closing; the ghost's "Bring back"
-// remains if the shell never took it).
+// How long a reattach waits for the shell to report the window back: past it,
+// a popout's own page lets the popout go anyway, and a main window leaves the
+// popout to main's own timer (the ghost's "Bring back" remains if the shell
+// never took it).
 const REATTACH_SETTLE_TIMEOUT_MS = 1000;
 
 interface ReattachWaiter {
   windowId: string;
-  resolve: () => void;
+  resolve: (isReportedBack: boolean) => void;
   settleTimer: ReturnType<typeof setTimeout>;
 }
 
@@ -413,7 +414,7 @@ export class ShellState {
     for (const waiter of waiting) {
       if (present.has(waiter.windowId)) continue;
       clearTimeout(waiter.settleTimer);
-      waiter.resolve();
+      waiter.resolve(true);
     }
     const popout = this.popoutRoute();
     if (popout === null) return;
@@ -428,39 +429,53 @@ export class ShellState {
 
   /** Main asks this window to return a pulled-out window of the workspace it
    * shows to the desktop (the popout was dropped onto this window's surface,
-   * or is closing): the mounted shell takes the window back, and the popout
-   * closes itself once its own shell sees it back. Nothing when this window
-   * shows some other workspace, or is a popout itself (its shell is a view of
-   * one window and owns no desktop). */
-  handleReattachPopoutWindow(ask: PopoutReattachAsk): void {
+   * or is closing): the mounted shell takes the window back. Resolves true
+   * once the shell reports it back, which is main's word to close the popout
+   * (its own page may not have loaded to see it), and false when this window
+   * did not take it (it shows some other workspace, or is a popout itself,
+   * whose shell is a view of one window and owns no desktop), when the shell
+   * never reported the window out, or when no report came in time. */
+  handleReattachPopoutWindow(ask: PopoutReattachAsk): Promise<boolean> {
     const sender = this.reattachWindowSender;
     const displayed = this.displayedWorkspaceAnyId;
-    if (sender === null || displayed === null || this.popoutRoute() !== null) return;
+    if (sender === null || displayed === null || this.popoutRoute() !== null) return Promise.resolve(false);
     // Either spelling on either side: a restored popout or a cold-started
     // main window may still name the workspace by its host-scoped id.
     const workspaces = this.stores.workspaces;
-    if (workspaces.toAgentScopedId(displayed) !== workspaces.toAgentScopedId(ask.workspaceId)) return;
+    if (workspaces.toAgentScopedId(displayed) !== workspaces.toAgentScopedId(ask.workspaceId)) {
+      return Promise.resolve(false);
+    }
+    const reportedBack = this.whenReportedBack(ask.windowId);
     sender(ask.windowId, ask.frame);
+    return reportedBack;
   }
 
   /** Ask this popout's own shell to return its window to the desktop, at
    * `frame` when a drop named one: the way back when no desktop window can
    * take it. Resolves when the shell reports the window back (which it does
    * only once its save has landed), or after a short wait when it never does. */
-  returnPopoutToDesktop(frame: PopoutFrame | null): Promise<void> {
+  async returnPopoutToDesktop(frame: PopoutFrame | null): Promise<void> {
     const popout = this.popoutRoute();
     const sender = this.reattachWindowSender;
-    if (popout === null || sender === null) return Promise.resolve();
-    const isStillDetached = this.detachedWindows.some((entry) => entry.windowId === popout.windowId);
+    if (popout === null || sender === null) return;
+    const reportedBack = this.whenReportedBack(popout.windowId);
     sender(popout.windowId, frame);
-    if (!isStillDetached) return Promise.resolve();
+    await reportedBack;
+  }
+
+  /** Resolves true once the mounted shell's report lacks ``windowId``, and
+   * false after a short wait, or at once when the last report did not have it
+   * out to begin with. Taken before the reattach is sent, so a report that
+   * follows the send is not missed. */
+  private whenReportedBack(windowId: string): Promise<boolean> {
+    if (!this.detachedWindows.some((entry) => entry.windowId === windowId)) return Promise.resolve(false);
     return new Promise((resolve) => {
       const waiter: ReattachWaiter = {
-        windowId: popout.windowId,
+        windowId,
         resolve,
         settleTimer: setTimeout(() => {
           this.reattachWaiters = this.reattachWaiters.filter((candidate) => candidate !== waiter);
-          resolve();
+          resolve(false);
         }, REATTACH_SETTLE_TIMEOUT_MS),
       };
       this.reattachWaiters.push(waiter);
