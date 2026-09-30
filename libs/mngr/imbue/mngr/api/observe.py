@@ -31,8 +31,10 @@ from imbue.imbue_common.event_envelope import EventSource
 from imbue.imbue_common.event_envelope import EventType
 from imbue.imbue_common.event_envelope import IsoTimestamp
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.logging import cleanup_old_rotated_files
 from imbue.imbue_common.logging import format_nanosecond_iso_timestamp
 from imbue.imbue_common.logging import generate_log_event_id
+from imbue.imbue_common.logging import generate_rotation_timestamp
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
@@ -71,6 +73,8 @@ AGENT_STATES_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agent_states")
 ACTIVITY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/activity")
 OBSERVE_LOCK_FILENAME: Final[str] = "observe_lock"
 FULL_STATE_INTERVAL_SECONDS: Final[float] = 300.0
+_OBSERVE_EVENTS_ROTATION_BYTES: Final[int] = 50 * 1024 * 1024
+_OBSERVE_EVENTS_MAX_ROTATED_COUNT: Final[int] = 1
 # Timeout for the activity worker's queue get. Activity items are handled the
 # moment they arrive (the get returns immediately), so this bounds only how
 # often the worker re-checks that its child processes are still alive.
@@ -311,6 +315,23 @@ def _append_event_to_file(events_path: Path, event: EventEnvelope) -> None:
 def append_observe_event(events_base_dir: Path, event: EventEnvelope) -> None:
     """Append a single observation event to the agents JSONL file."""
     _append_event_to_file(get_observe_events_path(events_base_dir), event)
+
+
+def rotate_observe_events_if_over(events_base_dir: Path, max_file_size_bytes: int) -> None:
+    """Move the agents events file aside once it has reached ``max_file_size_bytes``, keeping one rotated file.
+
+    Call it only right before appending a full-state snapshot, so every file begins with a snapshot and a reader
+    that folds from the newest snapshot never needs a rotated file.
+    """
+    events_path = get_observe_events_path(events_base_dir)
+    try:
+        file_size = events_path.stat().st_size
+    except FileNotFoundError:
+        return
+    if file_size < max_file_size_bytes:
+        return
+    events_path.rename(events_path.with_name(f"{events_path.name}.{generate_rotation_timestamp()}"))
+    cleanup_old_rotated_files(events_path.parent, _OBSERVE_EVENTS_MAX_ROTATED_COUNT)
 
 
 def append_agent_state_change_event(events_base_dir: Path, event: AgentStateChangeEvent) -> None:
@@ -876,14 +897,17 @@ class ObserveEventFollower(MutableModel):
         """Position at the newest full-state snapshot and replay from it to EOF."""
         events_path = get_observe_events_path(self.events_base_dir)
         self._is_seeded = True
-        if not events_path.exists():
-            self._offset = 0
-            return
         # Both answers come from one scan (see ``_scan_last_snapshot_and_boundary``):
         # a snapshot the live writer appends after that scan sits at or past the
         # boundary, so the drain below -- or the next tick's -- picks it up rather
         # than losing it in the gap between two separate lookups.
-        snapshot_offset, boundary = _scan_last_snapshot_and_boundary(events_path)
+        try:
+            snapshot_offset, boundary = _scan_last_snapshot_and_boundary(events_path)
+        except FileNotFoundError:
+            # Not written yet, or moved aside by a rotation whose opening snapshot has
+            # not landed yet.
+            self._offset = 0
+            return
         if snapshot_offset is None:
             # No snapshot has ever been written. Skip the existing history (it
             # cannot be folded from) and wait at the tail; ``_has_seen_snapshot``
@@ -907,23 +931,27 @@ class ObserveEventFollower(MutableModel):
         events" and is deliberately out of scope (it would take tracking the inode).
         """
         events_path = get_observe_events_path(self.events_base_dir)
-        if not events_path.exists():
+        # Opened before sizing, so the size and the read come from one inode even if a
+        # rotation renames the file in between; absent while a rotation has moved it aside.
+        try:
+            handle = open(events_path, "rb")
+        except FileNotFoundError:
             return
-        size = events_path.stat().st_size
-        if size < self._offset:
-            # The file shrank, so it was truncated or replaced. Re-run the seed scan
-            # over whatever is there now rather than reading garbage from a stale
-            # offset -- and rather than replaying from byte 0, which would fold every
-            # snapshot the replacement already holds and leave the view on an older
-            # one than the file does.
-            self._offset = 0
-            self._is_seeded = False
-            self._has_seen_snapshot = False
-            self._seed()
-            return
-        if size == self._offset:
-            return
-        with open(events_path, "rb") as handle:
+        with handle:
+            size = os.fstat(handle.fileno()).st_size
+            if size < self._offset:
+                # The file shrank, so it was truncated or replaced. Re-run the seed scan
+                # over whatever is there now rather than reading garbage from a stale
+                # offset -- and rather than replaying from byte 0, which would fold every
+                # snapshot the replacement already holds and leave the view on an older
+                # one than the file does.
+                self._offset = 0
+                self._is_seeded = False
+                self._has_seen_snapshot = False
+                self._seed()
+                return
+            if size == self._offset:
+                return
             handle.seek(self._offset)
             chunk = handle.read(size - self._offset)
         # A trailing line with no terminator is a write in progress -- routine here,
@@ -1109,6 +1137,11 @@ class AgentObserver(MutableModel):
     # stdout). Injected rather than writing stdout here to keep this api-layer module
     # free of cli output concerns. The agent_states change stream is never sent here.
     agents_event_sink: Callable[[EventEnvelope], None] | None = Field(default=None, frozen=True)
+    events_file_rotation_bytes: int = Field(
+        default=_OBSERVE_EVENTS_ROTATION_BYTES,
+        frozen=True,
+        description="Size at which the agents events file is rotated, checked just before each full-state snapshot",
+    )
 
     _concurrency_group: ConcurrencyGroup = PrivateAttr(default_factory=lambda: ConcurrencyGroup(name="agent-observer"))
     # Folds the per-provider discovery stream into a consistent view (known hosts,
@@ -1128,10 +1161,9 @@ class AgentObserver(MutableModel):
     _watchers: dict[str, _AgentWatcher] = PrivateAttr(default_factory=dict)
     _watchers_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
-    # Serializes agents_event_sink calls from the several threads that emit
-    # agents-stream events (activity worker, snapshot loop, discovery-output
-    # handler), so the sink's output never interleaves.
-    _sink_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Serializes agents-stream emits across the observer's threads, so the sink's
+    # output never interleaves and no append can land in a file being rotated away.
+    _emit_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _stop_event: threading.Event = PrivateAttr(default_factory=threading.Event)
     # A listing emits seconds after it reads the hosts, so it must leave out any agent the
     # discovery stream removed in between, or that agent reappears after its AGENT_REMOVED. Held
@@ -1772,12 +1804,14 @@ class AgentObserver(MutableModel):
 
         The file write is the canonical event bus (history replay, multi-consumer
         tailing); the sink is the additive opt-in for a parent process that consumes
-        events live. The sink is called under a lock so events from the observer's
-        several threads never interleave in the sink's output.
+        events live. A full-state snapshot first rotates an oversized file, so the
+        file a reader folds from always starts with one.
         """
-        append_observe_event(self.events_base_dir, event)
-        if self.agents_event_sink is not None:
-            with self._sink_lock:
+        with self._emit_lock:
+            if isinstance(event, FullAgentStateEvent):
+                rotate_observe_events_if_over(self.events_base_dir, self.events_file_rotation_bytes)
+            append_observe_event(self.events_base_dir, event)
+            if self.agents_event_sink is not None:
                 self.agents_event_sink(event)
 
     def _emit_agent_removed(self, agent_id: AgentId, agent_name: AgentName, host_id: HostId) -> None:

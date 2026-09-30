@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -21,7 +23,7 @@ import pytest
 
 from imbue.mngr.utils.testing import get_short_random_string
 
-# -- Helpers --
+# Helpers
 
 
 def _make_jsonl_line(uuid: str | None = None) -> str:
@@ -113,7 +115,9 @@ class ScriptRunner:
     def get_output_uuids(self) -> list[str]:
         return _extract_uuids(self.get_output_lines())
 
-    def run_single_pass(self, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    def run_single_pass(
+        self, timeout: float = 10.0, path_prefix: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Run the script with --single-pass (initialize + one cycle + exit)."""
         env = {
             **os.environ,
@@ -121,6 +125,8 @@ class ScriptRunner:
             "HOME": str(self.fake_home),
             "CLAUDE_CONFIG_DIR": str(self.fake_home / ".claude"),
         }
+        if path_prefix is not None:
+            env["PATH"] = f"{path_prefix}{os.pathsep}{env['PATH']}"
         result = subprocess.run(
             ["bash", str(self.script_path), "--single-pass"],
             capture_output=True,
@@ -131,7 +137,7 @@ class ScriptRunner:
         return result
 
 
-# -- Tests --
+# Tests
 
 
 def test_empty_history_produces_no_output(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
@@ -233,6 +239,41 @@ def test_missing_session_file_no_crash(tmp_path: Path, stub_mngr_log_sh: str, mn
     assert result.returncode == 0, f"stderr: {result.stderr}"
 
     assert runner.get_output_uuids() == uuids_real
+
+
+def test_waiting_for_an_unwritten_session_file_spawns_no_find(
+    tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str
+) -> None:
+    """A never-messaged chat's session has no file, and its poller looks for one every
+    cycle for as long as the chat stays idle; that lookup must not spawn a process.
+    The file must still be picked up once Claude writes it."""
+    runner = ScriptRunner(tmp_path, stub_mngr_log_sh, mngr_transcript_lib_sh)
+    with runner.history_file.open("a") as f:
+        f.write("sess-unwritten hook\n")
+
+    real_find = shutil.which("find")
+    assert real_find is not None
+    find_calls_log = tmp_path / "find_calls.log"
+    shim_dir = tmp_path / "shims"
+    shim_dir.mkdir()
+    find_shim = shim_dir / "find"
+    find_shim.write_text(
+        f'#!/usr/bin/env bash\necho "$*" >> {shlex.quote(str(find_calls_log))}\nexec {shlex.quote(real_find)} "$@"\n'
+    )
+    find_shim.chmod(0o755)
+
+    result = runner.run_single_pass(path_prefix=shim_dir)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert not find_calls_log.exists(), f"find was spawned: {find_calls_log.read_text()}"
+    assert runner.get_output_lines() == []
+
+    uuids = [uuid4().hex for _ in range(2)]
+    _write_lines(
+        runner.claude_projects_dir / "encoded-work-dir" / "sess-unwritten.jsonl", [_make_jsonl_line(u) for u in uuids]
+    )
+    result = runner.run_single_pass(path_prefix=shim_dir)
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert runner.get_output_uuids() == uuids
 
 
 def test_empty_session_file(tmp_path: Path, stub_mngr_log_sh: str, mngr_transcript_lib_sh: str) -> None:
