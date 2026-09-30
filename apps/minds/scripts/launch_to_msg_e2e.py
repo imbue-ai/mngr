@@ -1405,11 +1405,11 @@ def pre_run_sweep() -> None:
         elif stale.exists():
             with contextlib.suppress(OSError):
                 stale.unlink()
-    # Stale latchkey slack creds. mac-runner-reset.sh wiped ~/.minds so the
-    # latchkey dir is also gone -- this is belt-and-braces for the dev case
-    # where someone runs the script outside CI without resetting first.
-    with contextlib.suppress(Exception):
-        latchkey_clear_slack()
+    # Clear slack creds left by a dev run without a reset. Skipped when the store is absent, since
+    # clearing creates it and its key before the first launch migrates the legacy latchkey dir there.
+    if LATCHKEY_DIR.exists():
+        with contextlib.suppress(Exception):
+            latchkey_clear_slack()
 
 
 def run_e2e() -> int:
