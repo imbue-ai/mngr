@@ -15,6 +15,7 @@ from imbue.minds.desktop_client.share_materials_injection import MachineSharingL
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
 from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
+from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
 from imbue.minds.desktop_client.share_materials_injection import parse_share_gateway_status
 from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
@@ -265,7 +266,24 @@ def test_read_share_grants_raises_on_an_unrecognized_exec_envelope() -> None:
         read_share_grants_from_agent(AgentId(), caller)
 
 
-def test_clear_share_materials_is_best_effort_and_no_start() -> None:
+def test_clear_share_publication_keeps_the_grants_document_and_is_best_effort() -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
+
+    clear_share_publication_from_agent(AgentId(), caller)
+
+    joined = " ".join(caller.calls[0])
+    assert "rm -f" in joined
+    assert "--no-start" in joined
+    assert "data/.secrets/share.env" in joined
+    # The gateway's status file goes with share.env: its verdict belongs to the
+    # publication that just ended.
+    assert "data/.state/share_gateway/status.json" in joined
+    # The grants document survives unpublishing.
+    assert "share_grants.toml" not in joined
+
+
+def test_clear_share_materials_removes_the_grants_document_too() -> None:
+    # Unlinking the account that made the grants takes them with it.
     caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="offline"))
 
     clear_share_materials_from_agent(AgentId(), caller)
@@ -273,9 +291,9 @@ def test_clear_share_materials_is_best_effort_and_no_start() -> None:
     joined = " ".join(caller.calls[0])
     assert "rm -f" in joined
     assert "--no-start" in joined
-    assert "share_grants.toml" in joined
-    # The gateway's status file is removed alongside the secrets at unshare.
+    assert "data/.secrets/share.env" in joined
     assert "data/.state/share_gateway/status.json" in joined
+    assert "data/.secrets/share_grants.toml" in joined
 
 
 def test_writes_use_a_unique_tmp_name_per_write() -> None:

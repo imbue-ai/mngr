@@ -9,7 +9,7 @@ import type {
   UiWorkspacesMessage,
 } from "./channel/messages";
 import type { SettingsOverview } from "./models/settings";
-import type { ShareModelOptions } from "./models/workspaceOptions";
+import type { SharePanelModelOptions } from "./models/sharePanel";
 
 /** Render a component to its root vnode by instantiating the closure and
  * calling view() directly -- the inner-app idiom of testing render logic
@@ -147,20 +147,18 @@ export function settingsOverview(
   };
 }
 
-/** ShareModel options for a whole-machine share owned by owner@example.com
- * on host `host-aaaa...`, with a shell and two app services and inert
- * redraw/timer hooks; tests pass the `fetchJson` stub they want answered. */
-export function shareModelOptions(
-  overrides: Partial<ShareModelOptions> = {},
-): ShareModelOptions {
+/** SharePanelModel options for a workspace granted by owner@example.com, with
+ * inert redraw/timer hooks; tests pass the `fetchJson` stub they want answered. */
+export function sharePanelOptions(
+  overrides: Partial<SharePanelModelOptions> = {},
+): SharePanelModelOptions {
   return {
     hostId: "host-" + "a".repeat(32),
-    ownerEmail: "owner@example.com",
-    ownerDisplayName: null,
-    ownerProfilePictureUrl: null,
+    granterEmail: "owner@example.com",
     wholeService: "system_interface",
     appServices: ["web", "docs"],
     serviceLabels: { web: "web-r4nd", system_interface: "shell-r4nd" },
+    publicEmailDomains: ["gmail.com", "outlook.com"],
     redraw: () => undefined,
     setTimer: () => 0,
     clearTimer: () => undefined,

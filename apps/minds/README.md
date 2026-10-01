@@ -33,7 +33,7 @@ contributor needs.
    - A web UI for creating agents from template repositories
    - Reverse proxying to agent web servers (HTTP + WebSocket)
    - A servers page showing local and shared URLs per agent
-   - Controls for enabling/disabling sharing (a per-workspace share on a self-hosted relay)
+   - Controls for publishing a workspace on a self-hosted relay, and for granting who may open it
 
 2. **Agents** are created from template repositories (like [default-workspace-template](https://github.com/imbue-ai/default-workspace-template)) using `mngr create`. The template's `.mngr/settings.toml` drives all configuration.
 
@@ -43,7 +43,7 @@ contributor needs.
    - The bootstrap (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`, or in the drop-in files its `[include]` glob pulls in
    - Apps register their ports via `system/scripts/forward_port.py` into `data/.state/apps.toml`
    - An **app watcher** service monitors `apps.toml` and writes server events to `events.jsonl` for discovery
-   - A **share-gateway** service watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled
+   - A **share-gateway** service watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while the workspace is published
 
 ## Learn more
 

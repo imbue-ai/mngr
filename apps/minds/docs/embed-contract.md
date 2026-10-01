@@ -56,7 +56,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-help` | `{ agentId? }` | Open the get-help / report-a-bug modal, optionally scoped to a workspace. |
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
-| `minds:open-share-settings` | `{ serviceName }` | Open the shell's workspace-options panel on its Share tab, focused on that service. Fire-and-forget (no ack). |
+| `minds:open-share-settings` | `{ serviceName }` | Open the shell's share panel for this workspace, focused on that service. Fire-and-forget (no ack). |
 | `minds:workspace-ready` | `{}` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. |
 | `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Imbue Studio window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
 | `minds:window-drag-started` | `{ windowId, title, width, height, grabX, grabY }` | A drag of the window's title bar began (or the dragged window changed size mid-drag); `grabX`, `grabY` are where inside the window the pointer holds it. The embedder watches the cursor from here and reports each step with `minds:tear-out`, since the shell's own pointer events stop at the Imbue Studio window's edge on some platforms. |
@@ -144,10 +144,10 @@ payloads -- to the console.
   transcript-driven flip), and the string `minds:permission-request-resolved`
   is retired -- never reuse it with a different meaning. Also added
   `open-share-settings` (workspace -> embedder), replacing the workspace's
-  instructional share popup with a deep link to the shell's Share tab. A
+  instructional share popup with a deep link to the shell's share panel. A
   well-shaped name for a service the shell does not recognize falls back to
-  the whole-machine share (`ShareModel.selectTarget`'s existing behavior for
-  an unknown target).
+  the whole workspace (`SharePanelModel.selectTarget`'s existing behavior
+  for an unknown target).
 - **4** -- added `focus-chat` (embedder -> workspace): the landing half of
   an agent message's notification click. The chrome navigates to the
   message's workspace and asks it to show the chat by chat id (a chat's id is

@@ -172,6 +172,35 @@ def test_options_data_carries_the_owning_accounts_name_and_profile_picture(tmp_p
     assert data["account_profile_picture_url"] == "https://pictures.example/owner.png"
 
 
+def test_options_data_carries_what_the_panel_refuses_a_grant_by(tmp_path: Path) -> None:
+    # The share panel refuses an entry before it becomes a row, so it needs the
+    # public-provider list and the granter's own address.
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL)
+    user_id = "55555555-5555-5555-5555-555555555555"
+    cli.add_account(user_id=user_id, email="owner@example.com")
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    session_store.associate_created_workspace(
+        user_id=user_id, agent_id=_AGENT_ID, host_id=_HOST_ID, display_name="", color=None, is_cloud_row=False
+    )
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        backend_resolver=_seeded_resolver(),
+        imbue_cloud_cli=cli,
+        session_store=session_store,
+    )
+
+    response = client.get(f"/ui/api/workspaces/{_AGENT_ID}/options")
+
+    assert response.status_code == 200
+    data = json.loads(response.get_data(as_text=True))
+    assert "gmail.com" in data["public_email_domains"]
+    assert "example.com" not in data["public_email_domains"]
+    # Sorted, so a diff of the payload is stable.
+    assert data["public_email_domains"] == sorted(data["public_email_domains"])
+    assert data["account_email"] == "owner@example.com"
+
+
 def test_options_data_flags_stale_and_leased_workspaces(tmp_path: Path) -> None:
     resolver = _OptionsSeededResolver(
         url_by_agent_and_service={_AGENT_ID: {}},

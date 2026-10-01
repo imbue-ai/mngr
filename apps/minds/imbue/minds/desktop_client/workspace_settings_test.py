@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.workspace_color_writes import WorkspaceColorWrites
 from imbue.minds.desktop_client.workspace_settings import disassociate_workspace_account
 from imbue.minds.desktop_client.workspace_settings import set_workspace_color
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.utils.polling import poll_until
 
@@ -55,6 +56,27 @@ def test_disassociate_without_share_only_removes_association(tmp_path: Path) -> 
 
     assert cli.deleted_share_host_ids == []
     assert session_store.get_account_for_workspace(str(_AGENT)) is None
+
+
+def test_disassociate_clears_the_grants_of_an_unpublished_workspace(tmp_path: Path) -> None:
+    # Unpublishing keeps the grants document, so an unlink has to take it.
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id=_USER_ID, email=_EMAIL)
+    session_store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    session_store.associate_created_workspace(
+        _USER_ID, str(_AGENT), _HOST, display_name="ws", color=None, is_cloud_row=False
+    )
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+
+    disassociate_workspace_account(_AGENT, StaticBackendResolver(url_by_agent_and_service={}), session_store, cli)
+
+    # No share to delete, but the document goes anyway.
+    assert cli.deleted_share_host_ids == []
+    clear_commands = [call[2] for call in caller.calls if call and call[0] == "exec" and "rm -f" in call[2]]
+    assert len(clear_commands) == 1
+    assert "data/.secrets/share_grants.toml" in clear_commands[0]
+    assert "data/.secrets/share.env" in clear_commands[0]
 
 
 def test_a_color_pick_replaced_while_waiting_for_its_turn_is_shown_but_never_written(

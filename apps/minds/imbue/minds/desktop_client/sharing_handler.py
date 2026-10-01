@@ -4,13 +4,19 @@ Sharing is machine-level in the self-hosted relay design: one share per
 workspace host, one grants document covering the workspace plus optional
 per-service scopes. The connector owns the share record + relay token
 (`mngr imbue_cloud shares ...`); authorization lives in the workspace's own
-grants file, which the in-workspace share-gateway re-reads on every request.
+grants file, which the in-workspace share-gateway re-reads on every request
+(and consults only for a visitor who is not the owning account: the owner is
+admitted by the broker's identity, never by a grant).
 
-Enable = connector ``shares create`` -> inject the grants document + share
-materials into the workspace (its share-gateway brings up caddy + frpc) ->
-the UI polls readiness by probing the real hostname. Disable = clear the
-materials + connector ``shares delete`` (the relay token dies, so the tunnel's
-next reconnect is rejected even if the materials linger).
+Publishing and granting are separate operations over the same two records.
+Publish = connector ``shares create`` -> inject share.env into the workspace
+(its share-gateway brings up caddy + frpc, and reads a grants document that
+publish seeds when the workspace has none) -> the UI polls readiness by
+probing the real hostname. Unpublish = clear share.env + connector ``shares
+delete`` (the relay token dies, so the tunnel's next reconnect is rejected
+even if the materials linger), leaving the grants document in place. Saving
+grants rewrites that document alone, published or not; the gateway re-reads it
+per request, so a save takes effect with no token rotation and no restart.
 """
 
 import socket
@@ -25,8 +31,11 @@ from typing import Final
 import httpx
 from loguru import logger
 
+from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.agent_address import build_agent_address
+from imbue.minds.desktop_client.api_models import SharingGrantList
+from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.forward_identity import ForwardIdentityPublisher
 from imbue.minds.desktop_client.identity_records import IdentityCache
@@ -40,11 +49,14 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
+from imbue.minds.desktop_client.share_grant_validation import normalized_grants_document
+from imbue.minds.desktop_client.share_grant_validation import validate_grants_document
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatus
 from imbue.minds.desktop_client.share_materials_injection import ShareGatewayStatusCache
 from imbue.minds.desktop_client.share_materials_injection import ShareInjectionError
 from imbue.minds.desktop_client.share_materials_injection import build_share_env_text
-from imbue.minds.desktop_client.share_materials_injection import clear_share_materials_from_agent
+from imbue.minds.desktop_client.share_materials_injection import clear_share_publication_from_agent
 from imbue.minds.desktop_client.share_materials_injection import probe_share_state_in_agent
 from imbue.minds.desktop_client.share_materials_injection import provision_share_files_in_agent
 from imbue.minds.desktop_client.share_materials_injection import read_share_gateway_status_from_agent
@@ -84,7 +96,7 @@ _UNVERIFIED_EMAIL_SIGNAL: Final[str] = "Email not verified"
 _PRE_GATEWAY_WORKSPACE_MESSAGE: Final[str] = (
     "This machine's workspace template is too old to support sharing. "
     'Ask the machine to update itself (send it "update yourself", which runs '
-    "the update-self skill), then enable sharing again."
+    "the update-self skill), then publish it again."
 )
 
 
@@ -108,8 +120,12 @@ class SharingError(RuntimeError):
     """Raised on a soft sharing failure; carries a single user-presentable message."""
 
 
-class EmptyGrantsError(SharingError):
-    """Raised when a grants document names no grantee at all: a request-validation failure, not an upstream fault."""
+class GrantsRefusedError(SharingError):
+    """Raised when a grants document names entries that must not be granted."""
+
+    def __init__(self, refusals: Sequence[GrantRefusal]) -> None:
+        self.refusals = tuple(refusals)
+        super().__init__(" ".join(refusal.message for refusal in refusals))
 
 
 class ShareMaterialsWriteError(SharingError):
@@ -132,7 +148,7 @@ def resolve_account_email_for_workspace(
     the route to do.
     """
     if session_store is None:
-        raise SharingError("Session store unavailable; sign in to enable sharing.")
+        raise SharingError("Session store unavailable; sign in to publish this workspace.")
     account = session_store.get_account_for_workspace(str(agent_id))
     if account is None:
         raise SharingError(
@@ -260,22 +276,12 @@ def _pick_preferred_relay_region(cli: ImbueCloudCli, account_email: str) -> str 
 _GRANT_LIST_KEYS: Final[tuple[str, ...]] = ("users", "emails", "email_domains")
 
 
-def _grants_have_any_grantee(workspace_grants: dict[str, list[str]], service_grants: dict[str, Any]) -> bool:
-    if any(workspace_grants.get(key) for key in _GRANT_LIST_KEYS):
-        return True
-    for grants in service_grants.values():
-        if any(grants.get(key) for key in _GRANT_LIST_KEYS):
-            return True
-    return False
-
-
-def _granted_user_ids(
-    workspace_grants: dict[str, list[str]], service_grants: dict[str, dict[str, list[str]]]
-) -> list[str]:
+@pure
+def _granted_user_ids(grants: SharingGrantsDocument) -> list[str]:
     """Every user id granted anywhere in the document, deduplicated in first-seen order."""
     seen: dict[str, None] = {}
-    for scope in (workspace_grants, *service_grants.values()):
-        for user_id in scope.get("users", []):
+    for scope in (grants.workspace, *grants.services.values()):
+        for user_id in scope.users:
             seen.setdefault(user_id, None)
     return list(seen)
 
@@ -299,7 +305,7 @@ def _resolve_grant_identities(
     """The identity record per granted user id, from the cache (fresh) or one connector lookup each.
 
     Best effort: an id the connector does not know, or a lookup that fails
-    with nothing cached, is simply absent from the result; the Share tab then
+    with nothing cached, is simply absent from the result; the share panel then
     renders the id itself.
     """
     if identity_cache is None:
@@ -346,7 +352,7 @@ def _record_saved_grants(
     forward_identity: ForwardIdentityPublisher | None,
     owner_account: AccountSession | None,
 ) -> None:
-    """After a grants write landed: mirror the grantees to the connector and mark the workspace shared for the forward."""
+    """After a grants write landed: mirror the grantees to the connector, and put the owner's account on the forward's local requests."""
     _publish_grantees(cli, account_email, host_id, user_ids)
     if forward_identity is not None and owner_account is not None:
         forward_identity.mark_shared(str(agent_id), str(owner_account.user_id))
@@ -383,27 +389,19 @@ def _is_imbue_cloud_agent(backend_resolver: BackendResolverInterface, agent_id: 
     return provider_name is not None and is_imbue_cloud_provider_name(provider_name)
 
 
-def enable_sharing(
-    host_id: str,
-    workspace_grants: dict[str, list[str]],
-    service_grants: dict[str, dict[str, list[str]]],
-    backend_resolver: BackendResolverInterface,
-) -> dict[str, Any]:
-    """Enable (or update) sharing for one machine with the given grants document.
+def publish_workspace(host_id: str, backend_resolver: BackendResolverInterface) -> dict[str, Any]:
+    """Publish one workspace: give it an address on the internet.
 
-    When the machine is already actively shared, only the grants file is
-    rewritten (no token rotation, no tunnel restart -- the gateway re-reads
-    grants per request). Otherwise the full provisioning flow runs
-    client-side for every row -- connector ``shares create`` + materials
-    injection over the user's own SSH -- regardless of provider; the
-    connector's server-side enable-sharing primitive is used only for
-    web-created workspaces, which have no desktop client to inject from.
-    Returns the sharing-status document, which reports ``enabled`` true as
-    soon as the connector share exists; the UI separately polls the
-    readiness endpoint for end-to-end liveness of the shared hostname.
+    Publishing admits nobody by itself -- the grants document is the only
+    thing that admits. The full provisioning flow runs client-side for every
+    row (connector ``shares create`` + materials injection over the user's own
+    SSH) regardless of provider; the connector's server-side enable-sharing
+    primitive is used only for web-created workspaces, which have no desktop
+    client to inject from. An already-published workspace is a no-op that
+    reports its current document. Returns the sharing-status document, which
+    reports ``enabled`` true as soon as the connector share exists -- before
+    the shared hostname answers.
     """
-    if not _grants_have_any_grantee(workspace_grants, service_grants):
-        raise EmptyGrantsError("Sharing requires at least one person, email, or email domain to grant access to.")
     state = get_state()
     cli: ImbueCloudCli | None = state.imbue_cloud_cli
     if cli is None:
@@ -415,12 +413,10 @@ def enable_sharing(
     # Resolved here (a request-context caller) rather than deep inside the
     # share flow, so the same helper can serve the post-create enabler, which
     # runs off a request context and must be handed the config explicitly.
-    return _enable_sharing_with_cli(
+    return _publish_workspace_with_cli(
         host_id,
         agent_id,
         build_agent_address(agent_id, backend_resolver),
-        workspace_grants,
-        service_grants,
         cli,
         account_email,
         require_client_env_config(),
@@ -429,16 +425,90 @@ def enable_sharing(
         identity_cache=state.identity_cache,
         forward_identity=state.forward_identity,
         owner_account=_owner_account_for(session_store, agent_id),
+        grants=None,
     )
 
 
-def _enable_sharing_with_cli(
+def publish_workspace_with_grants(
+    host_id: str, grants: SharingGrantsDocument, backend_resolver: BackendResolverInterface
+) -> dict[str, Any]:
+    """Publish one workspace and store ``grants`` on it, as one operation.
+
+    The document is checked against the one the workspace already holds before
+    anything is created, and lands in the same write as share.env. Raises
+    :class:`GrantsRefusedError` when it adds entries that must not be granted,
+    in which case nothing is created and nothing is written.
+    """
+    state = get_state()
+    cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    if cli is None:
+        raise SharingError("imbue_cloud CLI is not configured on this app.")
+    session_store = state.session_store
+    agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+    return _publish_workspace_with_cli(
+        host_id,
+        agent_id,
+        build_agent_address(agent_id, backend_resolver),
+        cli,
+        resolve_account_email_for_workspace(session_store, agent_id),
+        require_client_env_config(),
+        is_cloud_row=_is_imbue_cloud_agent(backend_resolver, agent_id),
+        service_labels=resolve_share_target_labels(backend_resolver, agent_id),
+        identity_cache=state.identity_cache,
+        forward_identity=state.forward_identity,
+        owner_account=_owner_account_for(session_store, agent_id),
+        grants=grants,
+    )
+
+
+def save_grants(
+    host_id: str,
+    grants: SharingGrantsDocument,
+    backend_resolver: BackendResolverInterface,
+) -> dict[str, Any]:
+    """Replace one workspace's grants document, whether or not it is published.
+
+    Raises :class:`GrantsRefusedError` when the document adds entries that must
+    not be granted (nothing is written then), and :class:`SharingError` when
+    the workspace cannot take the write. Returns the sharing-status document
+    carrying the saved grants.
+    """
+    state = get_state()
+    cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    if cli is None:
+        raise SharingError("imbue_cloud CLI is not configured on this app.")
+    session_store = state.session_store
+    agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+    return _save_grants_with_cli(
+        host_id,
+        build_agent_address(agent_id, backend_resolver),
+        grants,
+        cli,
+        resolve_account_email_for_workspace(session_store, agent_id),
+        service_labels=resolve_share_target_labels(backend_resolver, agent_id),
+        identity_cache=state.identity_cache,
+    )
+
+
+@pure
+def _render_grants_document_toml(grants: SharingGrantsDocument) -> str:
+    """The document in the TOML the workspace gateway reads."""
+    return render_grants_toml(
+        _grant_list_to_plain(grants.workspace),
+        {name: _grant_list_to_plain(entry) for name, entry in grants.services.items()},
+    )
+
+
+@pure
+def _grant_list_to_plain(entry: SharingGrantList) -> dict[str, list[str]]:
+    return {"users": list(entry.users), "emails": list(entry.emails), "email_domains": list(entry.email_domains)}
+
+
+def _publish_workspace_with_cli(
     host_id: str,
     agent_id: AgentId,
     # How ``mngr`` reaches the workspace (see ``build_agent_address``)
     agent_address: str,
-    workspace_grants: dict[str, list[str]],
-    service_grants: dict[str, dict[str, list[str]]],
     cli: ImbueCloudCli,
     account_email: str,
     # Passed in (not resolved via ``get_state()`` here) so this can run off a
@@ -452,7 +522,7 @@ def _enable_sharing_with_cli(
     is_cloud_row: bool,
     # The label per share target as known right now. The shell's is recorded
     # server-side as the share's entry origin, and the whole map rides the
-    # returned document so the Share tab builds links from the same labels the
+    # returned document so the panel builds links from the same labels the
     # connector was told about, or shows a pending state for the ones it lacks.
     service_labels: Mapping[str, str],
     # The desktop's identity state: the cache renders user-id grants with a
@@ -461,11 +531,10 @@ def _enable_sharing_with_cli(
     identity_cache: IdentityCache | None,
     forward_identity: ForwardIdentityPublisher | None,
     owner_account: AccountSession | None,
+    # A granter's document to store as part of this publish. None publishes
+    # whatever the workspace already grants.
+    grants: SharingGrantsDocument | None,
 ) -> dict[str, Any]:
-    grants_toml = render_grants_toml(workspace_grants, service_grants)
-    user_ids = _granted_user_ids(workspace_grants, service_grants)
-    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-
     # One exec answers everything the flow needs from the workspace: whether
     # the template ships the share gateway, whether share.env is present, and
     # the current grants document.
@@ -473,66 +542,136 @@ def _enable_sharing_with_cli(
         probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
     except ShareInjectionError as exc:
         raise SharingError(str(exc)) from exc
-
     if not probe.has_gateway:
         raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+    stored_grants = _readable_grants_document(probe.grants_toml_text)
 
-    if probe.has_share_env:
-        # Materials are present, so this is either a grants-only update (share
-        # active server-side: no token rotation, the gateway picks the new
-        # grants up on its next request) or stale materials from a share since
-        # disabled elsewhere (fall through to full re-provisioning). Only this
-        # rare path needs the connector's status; the common enable-from-off
-        # path never reads it -- create is the source of truth there.
-        try:
-            existing = cli.get_share_status(account=account_email, host_id=host_id)
-        except ImbueCloudCliError as exc:
-            raise SharingError(
-                f"Could not read the machine's sharing status: {describe_connector_failure(exc)}"
-            ) from exc
-        if existing is not None and existing.state == "active":
-            # Before replacing the whole document, make sure the current one is
-            # readable: a save built against a policy that could not be read
-            # would silently erase whatever the unreadable file really granted.
-            # (Should never happen -- writes are atomic and serialized -- but
-            # the failure mode is permanent data loss, so it is checked anyway.)
-            if probe.grants_toml_text is not None and _parse_grants_toml(probe.grants_toml_text) is None:
-                raise SharingError(
-                    "The machine's current sharing permissions file is unreadable, so this change "
-                    "was not saved (saving would erase whoever it currently grants). To reset it, "
-                    "disable sharing for this machine and enable it again."
-                )
-            try:
-                provision_share_files_in_agent(agent_address, grants_toml, None, cli.mngr_caller)
-            except ShareInjectionError as exc:
-                raise SharingError(str(exc)) from exc
-            _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
-            return _share_status_document(
-                host_id, existing, workspace_grants, service_grants, service_labels, identities
-            )
+    # What this publish writes, if anything. With no document given the
+    # workspace keeps the one it holds -- unless nothing there can be parsed,
+    # which counts as holding none: the gateway refuses every request when it
+    # cannot read a document, so an empty one is written for it.
+    if grants is not None:
+        refusals = validate_grants_document(grants, account_email, stored_grants or SharingGrantsDocument())
+        if refusals:
+            raise GrantsRefusedError(refusals)
+        grants_to_store: SharingGrantsDocument | None = normalized_grants_document(grants)
+    elif stored_grants is None:
+        grants_to_store = SharingGrantsDocument()
+    else:
+        grants_to_store = None
+    grants_toml = _render_grants_document_toml(grants_to_store) if grants_to_store is not None else None
 
-    # Local shares with no materials in the workspace pick the relay by
-    # measured latency from here (the workspace runs on this machine, so the
-    # desktop's latency is the right proximity signal). A cloud row runs
-    # elsewhere, and a stale-materials re-provision is already placed, so both
-    # skip the measurement. A re-share after a disable measures again -- the
-    # preference is advisory: the connector honors it only for hosts it has no
-    # region record of, so an existing share always keeps its region.
-    is_relay_region_measured = not is_cloud_row and not probe.has_share_env
-    preferred_region = _pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None
-    share = _create_share_and_write_materials(
-        host_id,
-        agent_id,
-        agent_address,
-        cli,
-        account_email,
-        client_env_config,
-        preferred_region=preferred_region,
-        service_labels=service_labels,
-        grants_toml_text=grants_toml,
-    )
+    # Materials present means the workspace is published already or carries
+    # stale ones from a share disabled elsewhere (re-provision). Only this path
+    # needs the connector's status; the common publish-from-off path never reads
+    # it -- create is the source of truth there.
+    existing = _read_active_share(cli, account_email, host_id) if probe.has_share_env else None
+    if existing is not None:
+        share = existing
+        if grants_toml is not None:
+            _write_grants_document(agent_address, grants_toml, cli)
+    else:
+        # Local shares with no materials in the workspace pick the relay by
+        # measured latency from here (the workspace runs on this machine, so
+        # the desktop's latency is the right proximity signal). A cloud row
+        # runs elsewhere, and a stale-materials re-provision is already placed,
+        # so both skip the measurement. The preference is advisory anyway: the
+        # connector honors it only for hosts it has no region record of.
+        is_relay_region_measured = not is_cloud_row and not probe.has_share_env
+        share = _create_share_and_write_materials(
+            host_id,
+            agent_id,
+            agent_address,
+            cli,
+            account_email,
+            client_env_config,
+            preferred_region=_pick_preferred_relay_region(cli, account_email) if is_relay_region_measured else None,
+            service_labels=service_labels,
+            grants_toml_text=grants_toml,
+        )
+
+    # What the file holds now: what was just written, or the one already there.
+    saved_grants = grants_to_store if grants_to_store is not None else (stored_grants or SharingGrantsDocument())
+    user_ids = _granted_user_ids(saved_grants)
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
-    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    return _share_status_document(host_id, share, saved_grants, service_labels, identities)
+
+
+def _save_grants_with_cli(
+    host_id: str,
+    agent_address: str,
+    grants: SharingGrantsDocument,
+    cli: ImbueCloudCli,
+    account_email: str,
+    service_labels: Mapping[str, str],
+    identity_cache: IdentityCache | None,
+) -> dict[str, Any]:
+    # One read answers everything this save needs of the workspace: whether the
+    # gateway is there to read what it writes, and which of the entries being
+    # saved are new (only those face the rules).
+    try:
+        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
+    except ShareInjectionError as exc:
+        raise SharingError(str(exc)) from exc
+    if not probe.has_gateway:
+        raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
+    stored_grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
+    refusals = validate_grants_document(grants, account_email, stored_grants)
+    if refusals:
+        raise GrantsRefusedError(refusals)
+    saved_grants = normalized_grants_document(grants)
+    # The connector is read BEFORE the write, and not again: a hiccup after the
+    # document landed would otherwise be reported as a failed save.
+    share = _read_active_share(cli, account_email, host_id) if probe.has_share_env else None
+    _write_grants_document(agent_address, _render_grants_document_toml(saved_grants), cli)
+    user_ids = _granted_user_ids(saved_grants)
+    # The connector's grantee index only describes a live share, so an
+    # unpublished workspace's save does not touch it; the next publish mirrors
+    # whatever the document holds by then.
+    if share is not None:
+        _publish_grantees(cli, account_email, host_id, user_ids)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    return _share_status_document(host_id, share, saved_grants, service_labels, identities)
+
+
+def _write_grants_document(agent_address: str, grants_toml: str, cli: ImbueCloudCli) -> None:
+    try:
+        provision_share_files_in_agent(agent_address, grants_toml, None, cli.mngr_caller)
+    except ShareInjectionError as exc:
+        raise SharingError(str(exc)) from exc
+
+
+def _readable_grants_document(grants_toml_text: str | None) -> SharingGrantsDocument | None:
+    """The document the workspace holds; None when it holds none, or one nothing can parse.
+
+    An unparseable document is deliberately indistinguishable from an absent one
+    (the parse logs a warning), so it is replaced rather than left to wedge the
+    workspace.
+    """
+    if not grants_toml_text:
+        return None
+    parsed = _parse_grants_toml(grants_toml_text)
+    if parsed is None:
+        return None
+    workspace_grants, service_grants = parsed
+    return SharingGrantsDocument(
+        workspace=SharingGrantList.model_validate(workspace_grants),
+        services={name: SharingGrantList.model_validate(entry) for name, entry in service_grants.items()},
+    )
+
+
+def _read_active_share(cli: ImbueCloudCli, account_email: str, host_id: str) -> ShareCliInfo | None:
+    """The machine's connector share when it is active, else None.
+
+    Raises :class:`SharingError` when the connector cannot be reached: a
+    workspace's publication state is never guessed.
+    """
+    try:
+        share = cli.get_share_status(account=account_email, host_id=host_id)
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Could not read the machine's sharing status: {describe_connector_failure(exc)}") from exc
+    return share if share is not None and share.state == "active" else None
 
 
 def _create_share_and_write_materials(
@@ -566,9 +705,9 @@ def _create_share_and_write_materials(
             workspace_id=str(agent_id),
         )
     except ImbueCloudCliError as exc:
-        raise SharingError(f"Could not enable sharing: {describe_connector_failure(exc)}") from exc
+        raise SharingError(f"Could not publish this workspace: {describe_connector_failure(exc)}") from exc
     if share.relay_token is None:
-        raise SharingError("Sharing enabled but the connector did not return a relay token.")
+        raise SharingError("The workspace was published but the connector did not return a relay token.")
 
     share_env_text = build_share_env_text(
         workspace_domain=share.workspace_domain,
@@ -620,17 +759,10 @@ def migrate_stale_share(
         raise SharingError(str(exc)) from exc
     if not probe.has_gateway:
         raise SharingError(_PRE_GATEWAY_WORKSPACE_MESSAGE)
-    # The grants are only read here (for the grantee bookkeeping below), but a
-    # document that cannot be read means the share's policy is unknown, and a
-    # move that keeps an unknown policy live at a new address is refused the
-    # same way an edit against it is.
-    parsed_grants = _parse_grants_toml(probe.grants_toml_text) if probe.grants_toml_text else (_empty_grant_list(), {})
-    if parsed_grants is None:
-        raise SharingError(
-            "The machine's current sharing permissions file is unreadable, so sharing was not moved to "
-            "its new address. To reset it, disable sharing for this machine and enable it again."
-        )
-    workspace_grants, service_grants = parsed_grants
+    # The grants are read only for the grantee bookkeeping below; the move
+    # rewrites share.env alone and leaves the document exactly as it is, so a
+    # document nothing can parse costs the move nothing.
+    grants = _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
     try:
         share = _create_share_and_write_materials(
             host_id,
@@ -645,16 +777,16 @@ def migrate_stale_share(
         )
     except ShareMaterialsWriteError as exc:
         # The connector no longer flags the share, so the panel's retry (a
-        # plain read) will not inject again: only a re-enable does.
+        # plain read) will not inject again: only a re-publish does.
         raise SharingError(
             "Sharing was moved to a new address, but this machine did not receive the new share materials, so "
-            f"its shared links stay down until sharing is disabled and enabled again for it: {exc}"
+            f"its shared links stay down until publishing is turned off and on again for it: {exc}"
         ) from exc
     logger.info("Moved sharing for {} from {} to {}", host_id, stale_share.workspace_domain, share.workspace_domain)
-    user_ids = _granted_user_ids(workspace_grants, service_grants)
+    user_ids = _granted_user_ids(grants)
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
     identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    document = _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
+    document = _share_status_document(host_id, share, grants, service_labels, identities)
     document["migrated_domain_from"] = stale_share.workspace_domain
     return document
 
@@ -673,24 +805,23 @@ def enable_web_access_for_workspace(
     identity_cache: IdentityCache | None,
     forward_identity: ForwardIdentityPublisher | None,
 ) -> None:
-    """Bring sharing up for a just-created workspace so it is reachable from /web.
+    """Publish a just-created workspace so it is reachable from /web.
 
     The create form's "enable web access" toggle: every row -- cloud and local
-    alike -- runs the desktop share flow with the owning account as the sole
-    grantee. (The connector's server-side enable-sharing primitive is used
-    only for web-created workspaces, which have no desktop to inject from.)
-    Raises :class:`SharingError` when the workspace has no associated account
-    or the share bring-up fails.
+    alike -- runs the desktop publish flow, which grants nobody. The owner can
+    open what they just created regardless: the in-workspace gateway admits the
+    owning account without consulting the grants document at all. (The
+    connector's server-side enable-sharing primitive is used only for
+    web-created workspaces, which have no desktop to inject from.) Raises
+    :class:`SharingError` when the workspace has no associated account or the
+    bring-up fails.
     """
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
-    owner_grants = {"emails": [account_email], "email_domains": []}
     service_labels = resolve_share_target_labels(backend_resolver, agent_id)
-    _enable_sharing_with_cli(
+    _publish_workspace_with_cli(
         host_id,
         agent_id,
         build_agent_address(agent_id, backend_resolver),
-        owner_grants,
-        {},
         cli,
         account_email,
         client_env_config,
@@ -699,30 +830,33 @@ def enable_web_access_for_workspace(
         identity_cache=identity_cache,
         forward_identity=forward_identity,
         owner_account=_owner_account_for(session_store, agent_id),
+        grants=None,
     )
 
 
 def _share_status_document(
     host_id: str,
-    share: ShareCliInfo,
-    workspace_grants: dict[str, list[str]],
-    service_grants: dict[str, dict[str, list[str]]],
+    # None when the workspace is unpublished: it has no address, but its grants
+    # document is still what the panel lists.
+    share: ShareCliInfo | None,
+    grants: SharingGrantsDocument,
     service_labels: Mapping[str, str],
     identities: Mapping[str, IdentityRecord],
 ) -> dict[str, Any]:
+    workspace_domain = share.workspace_domain if share is not None else None
     return {
         "host_id": host_id,
-        "enabled": share.state == "active",
-        "workspace_domain": share.workspace_domain,
+        "enabled": share is not None and share.state == "active",
+        "workspace_domain": workspace_domain,
         # The bare domain is deliberately unrouted on a share; a target's link
         # is https://<service_labels[target]>.<workspace_domain>/.
-        "url": f"https://{share.workspace_domain}/" if share.workspace_domain else None,
-        "region": share.region,
-        "last_tunnel_login_at": share.last_tunnel_login_at,
-        "cert_not_after": share.cert_not_after,
+        "url": f"https://{workspace_domain}/" if workspace_domain else None,
+        "region": share.region if share is not None else None,
+        "last_tunnel_login_at": share.last_tunnel_login_at if share is not None else None,
+        "cert_not_after": share.cert_not_after if share is not None else None,
         "service_labels": dict(service_labels),
-        "grants": {"workspace": workspace_grants, "services": service_grants},
-        # The record per granted user id the desktop knows, so the Share tab
+        "grants": grants.model_dump(mode="json"),
+        # The record per granted user id the desktop knows, so the share panel
         # renders a name, email, and profile picture instead of a bare id.
         "identities": {user_id: record.model_dump(mode="json") for user_id, record in identities.items()},
     }
@@ -751,12 +885,7 @@ def _parse_grant_list(value: object) -> dict[str, list[str]]:
 def _parse_grants_toml(
     grants_toml_text: str,
 ) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]]] | None:
-    """Parse a grants document read back from the workspace; None when malformed.
-
-    Malformed must stay distinguishable from empty: a malformed read rendered
-    as "no grants" would show every grantee as revoked, and the next
-    whole-document save would then permanently erase grants nobody ever saw.
-    """
+    """Parse a grants document read back from the workspace; None when malformed."""
     try:
         raw = tomllib.loads(grants_toml_text)
     except tomllib.TOMLDecodeError as exc:
@@ -785,45 +914,33 @@ def get_sharing(
     client_env_config: ClientEnvConfig | None,
     forward_identity: ForwardIdentityPublisher | None,
 ) -> dict[str, Any]:
-    """Return the machine's sharing document: enabled/domain/status + the grants read from the workspace.
+    """Return the machine's sharing document: publication status + the grants read from the workspace.
 
-    The document also carries the current origin label per share target, from
-    which the Share tab builds every link (a target absent from it has no link yet).
-    A share the connector flags ``needs_reshare`` (active on a content domain
-    the tier moved away from) is repaired here, on the read, so opening the
-    share panel is what moves it; that read raises :class:`SharingError` when
-    the move fails.
+    The grants are read whether or not the workspace is published: unpublishing
+    keeps the document, so the panel goes on listing it (and removing from it)
+    while off. The document also carries the current origin label per share
+    target, from which the panel builds every link (a target absent from it has
+    no link yet). A share the connector flags ``needs_reshare`` (active on a
+    content domain the tier moved away from) is repaired here, on the read, so
+    opening the share panel is what moves it; that read raises
+    :class:`SharingError` when the move fails.
     """
-    empty_grants = _empty_grant_list()
-    disabled: dict[str, Any] = {
-        "host_id": host_id,
-        "enabled": False,
-        "workspace_domain": None,
-        "url": None,
-        "region": None,
-        "last_tunnel_login_at": None,
-        "cert_not_after": None,
-        "service_labels": {},
-        "grants": {"workspace": empty_grants, "services": {}},
-        "identities": {},
-    }
     share = get_active_share(host_id, backend_resolver, cli, session_store)
-    if cli is None or share is None:
-        return disabled
-
     # Resolution is repeated here (a cheap local lookup), but discovery is
     # concurrently updated, so the coordinate can become unresolvable between
-    # the two calls; degrade to the connector-confirmed share with UNKNOWN
-    # grants rather than failing the whole read. The grants must not degrade
-    # to "empty": the pane would render every grantee as revoked, and an
-    # Enable/edit from that state would replace a policy nobody ever saw.
+    # the two calls; degrade to UNKNOWN grants rather than failing the whole
+    # read. The grants must not degrade to "empty": the pane would render every
+    # grantee as revoked, and a save from that state would replace a policy
+    # nobody ever saw.
     try:
         agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     except SharingError as exc:
         logger.debug("Sharing grants read: {}", exc)
         return _unknown_grants_document(host_id, share, {})
+    if cli is None:
+        return _unknown_grants_document(host_id, share, {})
     service_labels = resolve_share_target_labels(backend_resolver, agent_id)
-    if share.needs_reshare:
+    if share is not None and share.needs_reshare:
         if client_env_config is None:
             raise SharingError("Client environment config is unavailable; cannot move sharing to its new address.")
         return migrate_stale_share(
@@ -846,20 +963,14 @@ def get_sharing(
     except ShareInjectionError as exc:
         logger.debug("Sharing grants read: {}", exc)
         return _unknown_grants_document(host_id, share, service_labels)
-    parsed_grants = _parse_grants_toml(grants_toml_text) if grants_toml_text else (empty_grants, {})
-    if parsed_grants is None:
-        # Malformed reads back as UNKNOWN (grants: null), the same as a read
-        # that never landed: the pane then blocks edits instead of rendering
-        # an empty policy that the next save would publish over the real one.
-        return _unknown_grants_document(host_id, share, service_labels)
-    workspace_grants, service_grants = parsed_grants
+    # A document nothing can parse reads back as an empty one; ``grants: null``
+    # is reserved for a read that never landed, above.
+    grants = _readable_grants_document(grants_toml_text) or SharingGrantsDocument()
+    user_ids = _granted_user_ids(grants)
     identities = _resolve_grant_identities(
-        _granted_user_ids(workspace_grants, service_grants),
-        identity_cache,
-        cli,
-        _account_email_or_none(session_store, agent_id),
+        user_ids, identity_cache, cli, _account_email_or_none(session_store, agent_id)
     )
-    return _share_status_document(host_id, share, workspace_grants, service_grants, service_labels, identities)
+    return _share_status_document(host_id, share, grants, service_labels, identities)
 
 
 def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> str | None:
@@ -871,9 +982,11 @@ def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent
         return None
 
 
-def _unknown_grants_document(host_id: str, share: ShareCliInfo, service_labels: Mapping[str, str]) -> dict[str, Any]:
-    """The active share's document with ``grants: None``: the grants could not be read (not "empty")."""
-    document = _share_status_document(host_id, share, _empty_grant_list(), {}, service_labels, {})
+def _unknown_grants_document(
+    host_id: str, share: ShareCliInfo | None, service_labels: Mapping[str, str]
+) -> dict[str, Any]:
+    """The machine's document with ``grants: None``: the read never landed (not "the workspace grants nobody")."""
+    document = _share_status_document(host_id, share, SharingGrantsDocument(), service_labels, {})
     document["grants"] = None
     return document
 
@@ -970,24 +1083,26 @@ def get_share_gateway_status_cached(
     return status
 
 
-def disable_sharing(
+def unpublish_workspace(
     host_id: str,
     backend_resolver: BackendResolverInterface,
     cli: ImbueCloudCli | None,
     session_store: MultiAccountSessionStore | None,
     forward_identity: ForwardIdentityPublisher | None,
 ) -> None:
-    """Disable sharing for a machine: clear the workspace materials, then delete the connector share.
+    """Take a workspace off the internet: clear share.env, then delete the connector share.
 
-    Idempotent: an already-unshared machine is a success. Raises
-    :class:`SharingError` on a missing CLI, no associated account, or a
-    connector error.
+    The grants document stays where it is, so the panel goes on showing the
+    list while publishing is off and the next publish admits the same people
+    without them being re-added. Idempotent: an already-unpublished workspace
+    is a success. Raises :class:`SharingError` on a missing CLI, no associated
+    account, or a connector error.
     """
     if cli is None:
         raise SharingError("imbue_cloud CLI is not configured.")
     agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
     account_email = resolve_account_email_for_workspace(session_store, agent_id)
-    clear_share_materials_from_agent(build_agent_address(agent_id, backend_resolver), cli.mngr_caller)
+    clear_share_publication_from_agent(build_agent_address(agent_id, backend_resolver), cli.mngr_caller)
     if forward_identity is not None:
         forward_identity.mark_unshared(str(agent_id))
     try:
@@ -998,7 +1113,7 @@ def disable_sharing(
         try:
             cli.delete_share(account=account_email, host_id=host_id)
         except ImbueCloudCliError as exc:
-            raise SharingError(f"Could not stop sharing: {describe_connector_failure(exc)}") from exc
+            raise SharingError(f"Could not unpublish this workspace: {describe_connector_failure(exc)}") from exc
     # Only now does a sync pass agree that the workspace is unshared: a pass
     # that listed the share before the delete would re-add the entry
     # `mark_unshared` removed and leave it there until the next tick.

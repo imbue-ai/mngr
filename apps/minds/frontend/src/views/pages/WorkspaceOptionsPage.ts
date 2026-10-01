@@ -14,7 +14,8 @@
 
 import m from "mithril";
 import { getAppContext } from "../../app-context";
-import type { OptionsTab, SettingsGroup, ShareModel } from "../../models/workspaceOptions";
+import type { SharePanelModel } from "../../models/sharePanel";
+import type { OptionsTab, SettingsGroup } from "../../models/workspaceOptions";
 import { WorkspaceOptionsModel, toOptionsTab } from "../../models/workspaceOptions";
 import { PermissionsModel } from "../../models/workspacePermissions";
 import { isWorkspaceOverlayPath, workspaceSurfaceIdFromPath } from "../shell/classify";
@@ -67,7 +68,7 @@ function requestedSection(): string | null {
  * CHANGE in the param's value selects -- the user's own target navigation
  * never touches the URL, so reapplying an unchanged param would fight it. */
 export function applyRequestedTarget(
-  share: Pick<ShareModel, "selectTarget"> | null,
+  share: Pick<SharePanelModel, "selectTarget"> | null,
   appliedTarget: string | null,
 ): string | null {
   const target = panelParam("target");

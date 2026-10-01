@@ -51,15 +51,55 @@ minds run
 2. Runs `mngr create` with templates from the repo's `.mngr/settings.toml`
 3. The agent starts in a tmux session with its apps and background services
 
-Nothing sharing-related happens at create time: sharing is machine-level
-and user-initiated later, from the workspace options panel's Share tab.
+Nothing sharing-related happens at create time. Publishing is
+workspace-level and you start it later, from the share panel described
+under [Publishing a workspace](#publishing-a-workspace).
 
 ## Accessing your agent
 
 After creation, the agent is accessible at:
 - **Local**: `https://host-{hex}.localhost:8421/` (the desktop client byte-forwards the bare workspace origin to the workspace's system interface, which serves the desktop)
 - **Individual app**: `https://{app_name}.host-{hex}.localhost:8421/` (every registered service owns its own origin; nothing proxies or rewrites service traffic)
-- **Shared** (while sharing is enabled): `https://{label}.{host-id}.{user}.{region}.{domain}`, served over the workspace's share through the self-hosted relay. `{label}` is the service's origin label (`<service>-<rand>`, the shell's for a whole-machine share); it is the link the Share tab shows and copies. The bare `{host-id}.{user}.{region}.{domain}` origin is deliberately not routed, and neither is a plain service-name prefix.
+- **Shared** (while the workspace is published): `https://{label}.{host-id}.{user}.{region}.{domain}`, served over the workspace's share through the self-hosted relay. `{label}` is the service's origin label (`<service>-<rand>`, the shell's for the whole workspace). Each target in the share panel shows and copies its own link. The bare `{host-id}.{user}.{region}.{domain}` origin is deliberately not routed, and neither is a plain service-name prefix.
+
+## Publishing a workspace
+
+Publishing is one switch, "Enable sharing", for the whole workspace. It
+lives in the workspace options, in the panel headed "Share" followed by
+the workspace's name. Open that panel from the share button in the titlebar,
+or from the Share button inside the workspace. Publishing gives the workspace an address on
+the internet. It admits nobody by itself. The account that published
+the workspace can always open it, with or without a grant.
+
+The first publish takes 30 to 90 seconds. While the link is generated the
+panel names the step under way: "Creating link", "Setting up encryption",
+"Connecting to the relay", then "Verifying end to end". You can grant
+permissions while the link is still being prepared.
+
+Permissions are granted per target. The panel lists the whole workspace
+first, then each app. A grant on the whole workspace applies to every app
+in it, and also grants access to files, agent chats and terminal. A grant
+on an app applies to that app alone. Each target has its own link, and
+only people granted permission can open it.
+
+A grant is to one person by email, or to everyone at a domain. An address
+that already belongs to an Imbue account is granted to that account. An
+address with no account admits whoever signs in with it. A public mail
+provider cannot be granted as a domain, because that would admit anyone
+who signs up there. See the [glossary](./glossary.md) for the grant
+vocabulary.
+
+A grant appears in the list the moment you add it and saves behind the
+panel, so nothing locks while the write is in flight. A save that fails
+marks the row "Could not save" and offers Retry. A removal takes effect as
+soon as it saves, because the workspace re-reads the list on every
+request.
+
+Turning publishing off drops the address, and anyone connected is cut
+off. The list of permissions is preserved but inactive: it stays visible
+and removable while off, and comes back live on the next publish with
+nobody re-added. Unlinking the account from the workspace clears the list,
+since nobody is then left who can answer for it.
 
 ## Environment variables and config
 

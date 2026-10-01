@@ -33,6 +33,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.share_targets import split_share_targets
 from imbue.minds.desktop_client.state import get_state
@@ -114,6 +115,12 @@ class WorkspaceOptionsData(FrozenModel):
         description="Registered SVG icon markup per app share target (absent = none registered)",
     )
     whole_service: str = Field(description="The share target name that grants the whole machine")
+    public_email_domains: tuple[str, ...] = Field(
+        description=(
+            "The mail providers a domain grant may never name, sorted, so the share panel can "
+            "refuse such an entry before it becomes a row"
+        )
+    )
     ssh_command: str = Field(description="Copy-pasteable SSH command for the machine's host, '' when unknown")
 
 
@@ -257,6 +264,7 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         service_labels=resolve_share_target_labels(backend_resolver, parsed_agent_id),
         service_icons=service_icons,
         whole_service=whole_service,
+        public_email_domains=tuple(sorted(PUBLIC_EMAIL_DOMAINS)),
         ssh_command=build_ssh_command(backend_resolver, parsed_agent_id),
     )
     return make_response(content=data.model_dump_json(), status_code=200, media_type="application/json")

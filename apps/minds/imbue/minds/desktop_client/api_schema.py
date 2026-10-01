@@ -72,6 +72,7 @@ from imbue.minds.desktop_client.api_models import SshConnectionResponse
 from imbue.minds.desktop_client.api_models import TimezoneResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
+from imbue.minds.desktop_client.api_models import WorkspaceGrantsRequest
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
@@ -159,10 +160,11 @@ _ROUTE_MODELS: Final[Mapping[tuple[str, str], _RouteModels]] = {
         request_model=EstablishSshRequest, response_model=SshConnectionResponse
     ),
     ("GET", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(response_model=MachineSharingResponse),
-    ("PUT", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(
-        request_model=MachineSharingRequest, response_model=MachineSharingResponse
-    ),
+    ("PUT", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(response_model=MachineSharingResponse),
     ("DELETE", "/api/v1/workspace-sharing/{workspace_id}"): _RouteModels(response_model=MachineSharingResponse),
+    ("PUT", "/api/v1/workspace-sharing/{workspace_id}/grants"): _RouteModels(
+        request_model=WorkspaceGrantsRequest, response_model=MachineSharingResponse
+    ),
     ("GET", "/api/v1/workspace-sharing/{workspace_id}/readiness"): _RouteModels(
         response_model=SharingReadinessResponse
     ),

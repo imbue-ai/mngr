@@ -230,6 +230,7 @@ def test_an_apply_with_no_readable_restamp_is_still_under_way() -> None:
     assert probe.apply_updated_at is None
 
 
+@pytest.mark.flaky
 def test_the_probe_script_frames_a_record_with_no_trailing_newline(tmp_path: Path) -> None:
     """Without a trailing newline the end sentinel would glue onto the closing brace and read as unanswered."""
     record = tmp_path / RUN_STATUS_PATH

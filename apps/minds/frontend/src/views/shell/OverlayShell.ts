@@ -76,6 +76,9 @@ export interface OverlayShellAttrs {
   onDismiss: () => void;
   /** DOM id for the close X, where a caller's tests name it. */
   closeButtonId?: string;
+  /** What the close X says, for a surface that names itself ("Close sharing").
+   * Absent leaves the shared control's plain "Close". */
+  closeLabel?: string;
   /** Overrides where a raised icon leads. The options panel takes this: within
    * the panel a tab switch is a param change that keeps the group and section
    * the other tabs were left on, not a fresh open. */
@@ -233,6 +236,12 @@ export function OverlayShell(): m.Component<OverlayShellAttrs> {
           m(DialogCloseButton, {
             id: attrs.closeButtonId,
             onClose: attrs.onDismiss,
+            ...(attrs.closeLabel === undefined
+              ? {}
+              : {
+                  "aria-label": attrs.closeLabel,
+                  "data-tooltip": attrs.closeLabel,
+                }),
           }),
           m("div", { class: attrs.bodyClass }, children),
         ],

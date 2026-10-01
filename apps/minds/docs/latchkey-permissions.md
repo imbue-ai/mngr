@@ -908,8 +908,8 @@ brings it back.
 
 The pane loads independently of the panel's other tabs. A latchkey gateway
 that cannot be reached shows as "permissions can't be loaded" rather than
-an empty, misleading "nothing granted", and does not take Share machine or
-Machine settings down with it.
+an empty, misleading "nothing granted", and does not take the share panel
+or Machine settings down with it.
 
 ### Proxy through this desktop
 

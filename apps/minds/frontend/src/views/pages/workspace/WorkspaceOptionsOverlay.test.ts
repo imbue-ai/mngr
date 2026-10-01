@@ -1,5 +1,6 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { OptionsTab } from "../../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { PermissionsModel } from "../../../models/workspacePermissions";
 import { WorkspaceOptionsOverlay } from "./WorkspaceOptionsOverlay";
@@ -22,7 +23,7 @@ function classOf(vnode: AnyVnode): string {
  * or with no titlebar at all (a cold-start deep link's first paint). The three
  * machine tabs sit inside the strip and the right-hand pair at the window's
  * edge, as the real titlebar lays them out -- the panel raises all five. */
-function render(stripX: number | null): AnyVnode {
+function render(stripX: number | null, tab: OptionsTab = "permissions"): AnyVnode {
   const rects: Record<string, { left: number; top: number; width: number; height: number }> =
     stripX === null
       ? {}
@@ -57,7 +58,7 @@ function render(stripX: number | null): AnyVnode {
     agentId: AGENT_ID,
     model: new WorkspaceOptionsModel(AGENT_ID, { fetchJson, redraw: () => undefined }),
     permissions: new PermissionsModel(AGENT_ID, { fetchJson, redraw: () => undefined }),
-    tab: "permissions",
+    tab,
     group: "general",
     section: null,
     onSelectTab: () => undefined,
@@ -89,6 +90,25 @@ function region(root: AnyVnode): AnyVnode {
   expect(found, "no positioning region").toBeDefined();
   return found as AnyVnode;
 }
+
+/** What the panel's close X says, as the shared control renders it. */
+function closeLabel(root: AnyVnode): unknown {
+  const found = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "ws-options-close");
+  expect(found, "no close control").toBeDefined();
+  const control = ((found as AnyVnode).tag as unknown as () => m.Component)();
+  const button = (control.view as unknown as (v: unknown) => AnyVnode).call(control, {
+    attrs: (found as AnyVnode).attrs,
+    children: (found as AnyVnode).children,
+  });
+  return attrsOf(button)["aria-label"];
+}
+
+describe("the docked options panel's close control", () => {
+  it("names the sharing pane it closes, and stays plain on the others", () => {
+    expect(closeLabel(render(300, "share"))).toBe("Close sharing");
+    expect(closeLabel(render(300, "permissions"))).toBe("Close");
+  });
+});
 
 describe("the docked options panel's geometry", () => {
   it("hangs from the tab strip, capped at 880px", () => {

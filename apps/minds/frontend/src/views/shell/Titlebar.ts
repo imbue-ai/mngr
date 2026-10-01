@@ -312,8 +312,8 @@ export function Titlebar(): m.Component<TitlebarAttrs> {
                         TitlebarButton,
                         {
                           id: "ws-tab-share",
-                          "aria-label": "Share machine",
-                          "data-tooltip": "Share machine",
+                          "aria-label": "Sharing",
+                          "data-tooltip": "Sharing",
                           tone:
                             context.activeTab === "share" ? "default" : "muted",
                           extra: isTitlebarPopupOpen

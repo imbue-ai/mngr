@@ -292,6 +292,13 @@ describe("Titlebar workspace tab strip", () => {
     ]);
   });
 
+  it("labels the sharing tab with the word its pane is titled with", () => {
+    const button = tabButton(renderTitlebar(""), "ws-tab-share");
+
+    expect(attrsOf(button)["aria-label"]).toBe("Sharing");
+    expect(attrsOf(button)["data-tooltip"]).toBe("Sharing");
+  });
+
   it("labels the Permissions tab with the key glyph, tooltipped like its neighbours", () => {
     const button = tabButton(renderTitlebar(""), "ws-tab-permissions");
     expect(attrsOf(button)["aria-label"]).toBe("Permissions");

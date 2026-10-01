@@ -115,39 +115,54 @@ Key concepts in the Imbue Studio system:
 - **registered address**: an email address that is the verified email of an imbue account; *unregistered* otherwise.
   Registration is what invitation routing checks, whatever the grant's kind says; it says nothing about whether Imbue Studio is installed.
 
-- **share panel**: the granter's surface for creating grants and inviting: the "Share machine: <name>" panel in the desktop client's workspace options.
+- **share panel**: the granter's surface for creating grants and inviting: the "Share <name>" panel in the desktop client's workspace options.
 
 - **joined**: a grantee's first authorized visit to the workspace, as recorded by the share broker's visit log. The visitor's own action, not a delivery outcome.
 
-- **invitation** [future]: the message telling a user grant's or an email grant's grantee that they have been granted access, delivered by Imbue over one channel from the single invitation content, carrying the plain share URL.
+- **invitation**: the message telling a user grant's or an email grant's grantee that they have been granted access, delivered by Imbue over one channel from the single invitation content, carrying the plain share URL.
   An invitation belongs to exactly one grant. To *invite* is to create a delivery for it.
 
-- **invitation content** [future]: the one content model behind every invitation (who granted access, which workspace, which app, the share URL, and how to stop receiving mail), rendered once per channel. It carries no message written by the granter.
+- **invitation content**: the one content model behind every invitation (who granted access, which workspace, which app, the share URL, and how to stop receiving mail), rendered once per channel. It carries no message written by the granter.
 
-- **channel** [future]: how a delivery reaches an invitee: email, or an in-app notification in the Imbue Studio notification feed.
+- **channel**: how a delivery reaches an invitee: email, or an in-app notification in the Imbue Studio notification feed.
   Imbue selects the channel from the invitee's registration and notification preferences; the granter never chooses. In-app is modelled now and implemented later.
 
-- **delivery** [future]: one attempt to deliver an invitation over one channel, with a delivery outcome.
+- **delivery**: one attempt to deliver an invitation over one channel, with a delivery outcome.
   An invitation has one or more deliveries; inviting again creates another, subject to the invitation allowance and a per-grant cooldown held in one policy object so that it is easy to change.
 
-- **delivery outcome** [future]: the result of a delivery. At attempt time: `sent`, `suppressed`, `over allowance`, `too soon`, `unroutable`, or `failed`. Later, from the email provider's webhooks: `delivered`, `bounced`, `complained`, or `unsubscribed`.
+- **delivery outcome**: the result of a delivery. At attempt time: `sent`, `suppressed`, `over allowance`, `too soon`, `unroutable`, or `failed`. Later, from the email provider's webhooks: `delivered`, `bounced`, `complained`, or `unsubscribed`.
 
-- **notification preferences** [future]: a registered account's choice of the channels it accepts notifications on, email and in-app, both on by default. Invitations are one kind of notification among others.
+- **notification preferences**: a registered account's choice of the channels it accepts notifications on, email and in-app, both on by default. Invitations are one kind of notification among others.
   Unregistered addresses have no preferences. The invitation email's unsubscribe link turns email off for a registered address and adds any address to the suppression list.
 
-- **suppression list** [future]: the addresses Imbue will not email, each with a reason (`bounced`, `complained`, `unsubscribed`, `reported`, or `blocked`) and a source (an email provider webhook, the invitation email's own unsubscribe or report link, or an operator).
+- **suppression list**: the addresses Imbue will not email, each with a reason (`bounced`, `complained`, `unsubscribed`, `reported`, or `blocked`) and a source (an email provider webhook, the invitation email's own unsubscribe or report link, or an operator).
   Checked before every email delivery; a suppressed delivery still counts against the allowance. `reported` means the recipient used the email's link to report the invitation as unwanted, which also counts against the granter.
 
-- **email provider** [future]: the external service (an ESP) that sends invitation email and reports delivery events by webhook. The design does not name one.
+- **email provider**: the external service (an ESP) that sends invitation email and reports delivery events by webhook. The design does not name one.
 
-- **invitation allowance** [future]: the number of deliveries a granter may attempt per channel in any rolling 24 hours: a constant per channel in one policy object, counted from delivery rows (a per-account override may come later).
+- **invitation allowance**: the number of deliveries a granter may attempt per channel in any rolling 24 hours: a constant per channel in one policy object, counted from delivery rows (a per-account override may come later).
   Every attempted delivery counts, including suppressed ones; refused attempts do not. The granter learns of the allowance only when refused.
 
-- **granter-visible invitation outcome** [future]: what the granter may learn about an invitation: `invited`, `could not invite` (the reason withheld), `over allowance`, `too soon` (the same person was invited within the cooldown), or `joined`.
+- **granter-visible invitation outcome**: what the granter may learn about an invitation: `invited`, `could not invite` (the reason withheld), `over allowance`, `too soon` (the same person was invited within the cooldown), or `joined`.
   Bounces, complaints, opt-outs, reports, and suppression are never shown to the granter, so that abuse is guesswork rather than a probe.
+
+- **strikes**: the number of reports against the invitations an account has sent, one per reported delivery.
+  A delivery is reported when its recipient uses the invitation email's report link or marks the email as spam at their mailbox provider; either suppresses the recipient's address and adds one strike to the account that sent the invitation. A second report of the same delivery adds nothing; a report from another recipient, or of a later delivery to the same person, is another strike.
+  Strikes are counted from the report rows and never stored as a counter, persist as long as the delivery rows do, are visible to operators only and never to the granter, and carry no automatic penalty.
 
 - **share-gateway**: the background service that watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled.
   Who may access the share is controlled by the grants document (`data/.secrets/share_grants.toml`), which the desktop client rewrites as the user edits grants.
+
+- **stream**: a lane within a delivery channel (email, or the in-app notification feed) with its own rule for who may decline it.
+  Every channel has an *essential* stream, for messages the account relationship requires (email verification, password reset, account suspension, changes to terms), which ignores notification preferences and cannot be unsubscribed; and a *notification* stream, for everything else, invitations included, which notification preferences and unsubscribe govern.
+  On the email channel each stream sends from its own address on Imbue's domain, so a reputation problem on one cannot delay the other. Suppression after a bounce blocks every stream; suppression after a complaint, an unsubscribe, or a report blocks the notification stream only.
+
+- **grant reason**: why a user grant exists, recorded on the grant in Imbue Cloud's centralized grants table and never changed.
+  `direct`: a granter named the account, by choosing it or by typing an address that resolved to it at grant time.
+  `claimed_email`: originated from an email grant when the person who owns that address first visited.
+  The workspace admits by account id, exact address, or address domain, in that order, on every request. An email grant is a pending user grant, fulfilled on first visit. A domain grant is a standing rule evaluated per request; it originates nothing, and who it covers is derived when asked.
+
+- **kind**: what a message is about: an invitation, a permission request, a password reset. A kind belongs to exactly one stream of each channel it can use. Channels carry streams; streams carry kinds.
 
 - **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a name and URL for discovery.
   The desktop client's MngrStreamManager watches these events to discover agent backends.

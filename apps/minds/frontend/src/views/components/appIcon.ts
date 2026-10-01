@@ -242,7 +242,7 @@ export function appMonogramMarkup(appName: string, sizePx: number): string {
 
 /** The markup a share target wears: its registered icon when usable, else its
  *  monogram -- the same chain the workspace draws it with. */
-export function shareTargetIconMarkup(rawIcon: string, serviceName: string, sizePx: number): string {
-  const sanitized = rawIcon === "" ? null : sanitizeIconMarkup(rawIcon, sizePx);
+export function shareTargetIconMarkup(rawIcon: string | null, serviceName: string, sizePx: number): string {
+  const sanitized = rawIcon === null ? null : sanitizeIconMarkup(rawIcon, sizePx);
   return sanitized ?? appMonogramMarkup(serviceName, sizePx);
 }

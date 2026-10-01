@@ -7,6 +7,8 @@ import pytest
 from pydantic import Field
 
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.desktop_client.api_models import SharingGrantList
+from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.conftest import FAKE_CONNECTOR_URL
 from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
@@ -24,19 +26,24 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import UserIdentityCliInfo
 from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
+from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
 from imbue.minds.desktop_client.sharing_handler import SharingError
-from imbue.minds.desktop_client.sharing_handler import _enable_sharing_with_cli
 from imbue.minds.desktop_client.sharing_handler import _parse_grants_toml
+from imbue.minds.desktop_client.sharing_handler import _publish_workspace_with_cli
 from imbue.minds.desktop_client.sharing_handler import _resolve_grant_identities
+from imbue.minds.desktop_client.sharing_handler import _save_grants_with_cli
 from imbue.minds.desktop_client.sharing_handler import describe_connector_failure
-from imbue.minds.desktop_client.sharing_handler import disable_sharing
+from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import migrate_stale_share
 from imbue.minds.desktop_client.sharing_handler import pick_lowest_latency_relay_region
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import resolve_agent_for_host
 from imbue.minds.desktop_client.sharing_handler import split_relay_endpoint
+from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
+from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import read_injected_share_env_text
 from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.mngr_caller import MngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
@@ -163,14 +170,11 @@ def test_grants_toml_roundtrips_through_render_and_parse() -> None:
 
 
 def test_parse_grants_toml_reports_malformation_as_none() -> None:
-    # Malformed must stay distinguishable from empty: rendered as "no grants",
-    # the next whole-document save would erase every real grant.
     assert _parse_grants_toml("not toml [[") is None
 
 
 def test_parse_grants_toml_tolerates_wrong_shapes_as_empty() -> None:
-    # Valid TOML of the wrong shape parses to an empty scope (there is no
-    # hidden grant to protect: the value's meaning is unambiguous, just wrong).
+    # The value's meaning is unambiguous, just wrong.
     parsed = _parse_grants_toml("workspace = 'not-a-table'")
     assert parsed is not None
     workspace_grants, service_grants = parsed
@@ -212,7 +216,7 @@ def test_describe_connector_failure_keeps_an_unrecognized_message() -> None:
 def test_resolve_agent_for_host_falls_back_to_the_workspace_record(tmp_path: Path) -> None:
     """A stopped (undiscovered) machine still resolves via its active workspace record.
 
-    Without the fallback, the Share pane of a stopped machine read as "not
+    Without the fallback, the share panel of a stopped machine read as "not
     shared" and disable returned 502 even while a connector share was active.
     """
     agent_id = AgentId.generate()
@@ -241,7 +245,66 @@ def test_resolve_agent_for_host_raises_when_neither_discovery_nor_records_know_t
         resolve_agent_for_host(undiscovered, str(HostId.generate()), store)
 
 
-def test_disable_sharing_drops_the_forward_identity_entry_and_requests_a_sync(tmp_path: Path) -> None:
+def _unpublished_workspace_for_test(tmp_path: Path, caller: MngrCaller) -> tuple[str, StaticBackendResolver, Any]:
+    """A machine with no connector share whose workspace answers execs through ``caller``."""
+    agent_id = AgentId.generate()
+    host_id = str(HostId.generate())
+    cli = FakeImbueCloudCli(connector_url=FAKE_CONNECTOR_URL, mngr_caller=caller)
+    cli.add_account(user_id="user-unpublished-1", email="owner@example.com")
+    store = make_session_store_for_test(tmp_path, cli=cli)
+    store.associate_created_workspace(
+        user_id="user-unpublished-1",
+        agent_id=str(agent_id),
+        host_id=host_id,
+        display_name="unpublished-machine",
+        color=None,
+        is_cloud_row=False,
+    )
+    return host_id, StaticBackendResolver(url_by_agent_and_service={}), (cli, store)
+
+
+def test_get_sharing_reports_the_grants_of_an_unpublished_workspace(tmp_path: Path) -> None:
+    grants_toml = render_grants_toml(
+        {"users": [], "emails": ["friend@example.com"], "email_domains": ["partner.org"]}, {}
+    )
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=exec_json_envelope(grants_toml)))
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+
+    document = get_sharing(host_id, resolver, cli, store, None, None, None)
+
+    assert document["enabled"] is False
+    assert document["url"] is None
+    assert document["grants"]["workspace"] == {
+        "users": [],
+        "emails": ["friend@example.com"],
+        "email_domains": ["partner.org"],
+    }
+
+
+def test_get_sharing_reports_an_empty_document_for_a_workspace_that_has_never_been_published(
+    tmp_path: Path,
+) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=exec_json_envelope("")))
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+
+    document = get_sharing(host_id, resolver, cli, store, None, None, None)
+
+    assert document["enabled"] is False
+    assert document["grants"] == {"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {}}
+
+
+def test_get_sharing_reports_unknown_grants_when_an_unpublished_workspace_cannot_be_read(tmp_path: Path) -> None:
+    # Unreadable must stay distinguishable from empty even while off.
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stderr="agent offline"))
+    host_id, resolver, (cli, store) = _unpublished_workspace_for_test(tmp_path, caller)
+
+    document = get_sharing(host_id, resolver, cli, store, None, None, None)
+
+    assert document["enabled"] is False
+    assert document["grants"] is None
+
+
+def test_unpublish_workspace_drops_the_forward_identity_entry_and_requests_a_sync(tmp_path: Path) -> None:
     agent_id = AgentId.generate()
     host_id = str(HostId.generate())
     cli = make_fake_imbue_cloud_cli()
@@ -267,7 +330,7 @@ def test_disable_sharing_drops_the_forward_identity_entry_and_requests_a_sync(tm
     assert str(agent_id) in json.loads(headers_file.path.read_text())
     assert sync_requests == ["kick"]
 
-    disable_sharing(host_id, resolver, cli, store, forward_identity)
+    unpublish_workspace(host_id, resolver, cli, store, forward_identity)
 
     assert list(json.loads(headers_file.path.read_text())) == ["*"]
     # A sync is requested only once the connector agrees the share is gone, so
@@ -303,7 +366,7 @@ def test_resolve_grant_identities_serves_fresh_cache_entries_and_fetches_the_res
         ["user-cached", "user-fetched", "user-unknown"], cache, cli, "owner@example.com"
     )
 
-    # The unknown id is simply absent: the Share tab renders the bare id.
+    # The unknown id is simply absent: the share panel renders the bare id.
     assert sorted(identities) == ["user-cached", "user-fetched"]
     assert identities["user-fetched"].display_name == "Fetched"
     # A fresh cache entry never costs a lookup, and a fetched record is
@@ -327,16 +390,19 @@ def test_resolve_grant_identities_omits_ids_it_cannot_look_up(tmp_path: Path) ->
     assert _resolve_grant_identities(["user-1"], None, cli, "owner@example.com") == {}
 
 
-def _enable_sharing_for_test(
-    host_id: str, agent_id: AgentId, grants: dict[str, list[str]], cli: ImbueCloudCli, *, is_cloud_row: bool
+def _publish_for_test(
+    host_id: str,
+    agent_id: AgentId,
+    cli: ImbueCloudCli,
+    *,
+    is_cloud_row: bool,
+    grants: SharingGrantsDocument | None = None,
 ) -> dict[str, Any]:
-    """Run the share bring-up for ``host_id`` as its owner, with no service labels known yet."""
-    return _enable_sharing_with_cli(
+    """Publish ``host_id`` as its owner, with no service labels known yet."""
+    return _publish_workspace_with_cli(
         host_id,
         agent_id,
         str(agent_id),
-        grants,
-        {},
         cli,
         "owner@example.com",
         _client_env_config(),
@@ -345,6 +411,7 @@ def _enable_sharing_for_test(
         identity_cache=None,
         forward_identity=None,
         owner_account=None,
+        grants=grants,
     )
 
 
@@ -408,19 +475,21 @@ def test_migrate_stale_share_reshares_and_rewrites_only_share_env() -> None:
     }
 
 
-def test_migrate_stale_share_refuses_an_unreadable_grants_document() -> None:
-    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+def test_migrate_stale_share_moves_a_share_whose_grants_document_cannot_be_parsed() -> None:
+    # The move rewrites share.env alone and leaves the document untouched, so
+    # one that cannot be parsed costs it nothing.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL, created_workspace_domain_to_return=_MOVED_DOMAIN)
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     caller.result = make_share_probe_result(
         is_gateway_present=True, is_share_env_present=True, grants_toml_text="[workspace\nemails = ["
     )
 
-    with pytest.raises(SharingError, match="unreadable"):
-        _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
+    document = _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
 
-    assert cli.create_share_calls == []
-    assert len(caller.calls) == 1
+    assert document["workspace_domain"] == _MOVED_DOMAIN
+    write_command = [call for call in caller.calls if call and call[0] == "exec"][1][2]
+    assert "share_grants.toml" not in write_command
 
 
 def test_migrate_stale_share_refuses_a_pre_share_gateway_workspace() -> None:
@@ -438,7 +507,7 @@ def test_migrate_stale_share_refuses_a_pre_share_gateway_workspace() -> None:
 def test_migrate_stale_share_names_the_recovery_when_the_write_fails_after_the_share_moved() -> None:
     # The connector create moves the share before the materials write, and
     # the panel's retry is a read that will not inject again: the failure has
-    # to say that only a re-enable brings the links back.
+    # to say that only turning publishing off and on again brings the links back.
     caller = ScriptedMngrCaller(
         results=(
             make_share_probe_result(is_gateway_present=True, is_share_env_present=True),
@@ -449,32 +518,31 @@ def test_migrate_stale_share_names_the_recovery_when_the_write_fails_after_the_s
         connector_url=FAKE_CONNECTOR_URL, created_workspace_domain_to_return=_MOVED_DOMAIN, mngr_caller=caller
     )
 
-    with pytest.raises(SharingError, match="disabled and enabled again") as exc_info:
+    with pytest.raises(SharingError, match="turned off and on again") as exc_info:
         _migrate_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli)
 
     assert len(cli.create_share_calls) == 1
     assert "exec died" in str(exc_info.value)
 
 
-def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
-    # An unshared imbue_cloud row provisions exactly like a local one: connector
-    # ``shares create`` plus materials injection over the user's own SSH. (The
-    # connector's server-side enable-sharing primitive is web-create-only.)
+def test_publish_workspace_cloud_row_uses_the_client_side_share_create() -> None:
+    # An unpublished imbue_cloud row provisions exactly like a local one:
+    # connector ``shares create`` plus materials injection over the user's own
+    # SSH. (The connector's server-side primitive is web-create-only.)
     cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
     caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com", "friend@example.com"], "email_domains": []}
 
-    document = _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=True)
+    document = _publish_for_test(host_id, agent_id, cli, is_cloud_row=True)
 
     assert cli.create_share_calls == [("owner@example.com", host_id, None, None, str(agent_id))]
     # Exactly TWO execs touch the workspace: the one-shot state probe and the
-    # combined write of grants + share.env. Each exec pays a full mngr
-    # process + SSH round trip on a remote host, so the count is the
-    # contract, not an implementation detail.
+    # combined write of the seeded grants document + share.env. Each exec pays
+    # a full mngr process + SSH round trip on a remote host, so the count is
+    # the contract.
     exec_calls = [call for call in caller.calls if call and call[0] == "exec"]
     assert len(exec_calls) == 2
     probe_command, write_command = exec_calls[0][2], exec_calls[1][2]
@@ -484,10 +552,89 @@ def test_enable_sharing_cloud_row_uses_the_client_side_share_create() -> None:
     # The owner's identity rides requests, never a file in the workspace.
     assert "owner_email" not in write_command
     assert document["enabled"] is True
-    assert document["grants"]["workspace"] == grants
+    # Publishing grants nobody: the gateway admits the owner on its own, so
+    # nothing is seeded on their behalf.
+    assert document["grants"] == {"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {}}
 
 
-def test_enable_sharing_stamps_the_connector_reported_chrome_origin_into_share_env() -> None:
+def test_publish_workspace_replaces_a_document_nothing_can_parse() -> None:
+    # An unparseable document must never wedge a workspace: publishing treats
+    # it as no document at all and seeds the empty one the gateway needs.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(
+        is_gateway_present=True, is_share_env_present=False, grants_toml_text="[workspace\nemails = ["
+    )
+    agent_id = AgentId("agent-" + "c" * 32)
+    host_id = "host-" + "d" * 32
+
+    document = _publish_for_test(host_id, agent_id, cli, is_cloud_row=False)
+
+    assert document["enabled"] is True
+    assert document["grants"] == {"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {}}
+    write_command = [call for call in caller.calls if call and call[0] == "exec"][1][2]
+    assert "share_grants.toml" in write_command
+
+
+def test_publish_workspace_seeds_a_document_an_already_published_workspace_cannot_parse() -> None:
+    # The seed does not ride only the create: a workspace whose share is
+    # already active but whose document cannot be read gets one written too,
+    # or the gateway would go on refusing everyone with nothing to fix.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(
+        is_gateway_present=True, is_share_env_present=True, grants_toml_text="[workspace\nemails = ["
+    )
+    host_id = "host-" + "d" * 32
+    cli.add_share("owner@example.com", host_id)
+
+    document = _publish_for_test(host_id, AgentId("agent-" + "c" * 32), cli, is_cloud_row=False)
+
+    assert document["grants"] == {"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {}}
+    assert cli.create_share_calls == []
+    write_commands = [call[2] for call in caller.calls if call and call[0] == "exec"][1:]
+    assert len(write_commands) == 1
+    assert "share_grants.toml" in write_commands[0]
+    assert "data/.secrets/share.env" not in write_commands[0]
+
+
+def test_publish_workspace_stores_a_document_it_is_given_in_the_same_write_as_share_env() -> None:
+    # The compat route publishes and saves in one operation: the document it
+    # carries is checked, normalized, and lands with share.env in one exec.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    given = SharingGrantsDocument(workspace=SharingGrantList(emails=(" Friend@Example.com ",)))
+
+    document = _publish_for_test(
+        "host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli, is_cloud_row=False, grants=given
+    )
+
+    assert document["grants"]["workspace"]["emails"] == ["friend@example.com"]
+    write_commands = [call[2] for call in caller.calls if call and call[0] == "exec"][1:]
+    assert len(write_commands) == 1
+    assert "share_grants.toml" in write_commands[0]
+    assert "data/.secrets/share.env" in write_commands[0]
+
+
+def test_publish_workspace_refuses_a_document_it_is_given_before_creating_a_share() -> None:
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    refusable = SharingGrantsDocument(workspace=SharingGrantList(email_domains=("gmail.com",)))
+
+    with pytest.raises(GrantsRefusedError):
+        _publish_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), cli, is_cloud_row=False, grants=refusable)
+
+    assert cli.create_share_calls == []
+    assert len([call for call in caller.calls if call and call[0] == "exec"]) == 1
+
+
+def test_publish_workspace_stamps_the_connector_reported_chrome_origin_into_share_env() -> None:
     # On tiers whose web chrome lives on a custom domain (deploy.toml
     # [origins].chrome_origin), the connector reports that origin on the share
     # create; stamping anything else (e.g. the bare connector URL) locks the
@@ -500,9 +647,8 @@ def test_enable_sharing_stamps_the_connector_reported_chrome_origin_into_share_e
     caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
-    _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+    _publish_for_test(host_id, agent_id, cli, is_cloud_row=False)
 
     share_env_text = read_injected_share_env_text(cli)
     assert "export SHARE_CHROME_ORIGIN=https://minds.shares.example\n" in share_env_text
@@ -510,7 +656,7 @@ def test_enable_sharing_stamps_the_connector_reported_chrome_origin_into_share_e
     assert f"SHARE_CHROME_ORIGIN={connector_url}" not in share_env_text
 
 
-def test_enable_sharing_falls_back_to_the_connector_origin_without_a_reported_chrome_origin() -> None:
+def test_publish_workspace_falls_back_to_the_connector_origin_without_a_reported_chrome_origin() -> None:
     # An old connector (or a tier with no hosted chrome configured) reports no
     # chrome origin; the pre-field behavior -- the bare connector origin, where
     # dev tiers path-serve the chrome -- must be preserved exactly.
@@ -520,18 +666,17 @@ def test_enable_sharing_falls_back_to_the_connector_origin_without_a_reported_ch
     caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
-    _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+    _publish_for_test(host_id, agent_id, cli, is_cloud_row=False)
 
     connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
     assert f"export SHARE_CHROME_ORIGIN={connector_url}\n" in read_injected_share_env_text(cli)
 
 
 @pytest.mark.parametrize("is_cloud_row", [True, False])
-def test_enable_sharing_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool) -> None:
+def test_publish_workspace_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool) -> None:
     # A workspace created from a template older than the share gateway has
-    # nothing watching share.env: the enable is refused up front with the
+    # nothing watching share.env: the publish is refused up front with the
     # update-self pointer instead of provisioning a share that can never come
     # up. The probe is the first exec, so a failing exec refuses immediately.
     cli = make_fake_imbue_cloud_cli()
@@ -540,10 +685,9 @@ def test_enable_sharing_refuses_a_pre_share_gateway_workspace(is_cloud_row: bool
     caller.result = MngrCallResult(returncode=1, stderr="test -d failed")
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError, match="update itself"):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=is_cloud_row)
+        _publish_for_test(host_id, agent_id, cli, is_cloud_row=is_cloud_row)
 
     # Nothing was provisioned: no connector share, no injection past the probe.
     assert cli.shares_by_account == {}
@@ -583,7 +727,7 @@ class _PreferredRegionRecordingCli(FakeImbueCloudCli):
         raise ImbueCloudCliError("recorded; stopping the bring-up here")
 
 
-def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_region() -> None:
+def test_publish_workspace_first_time_local_share_passes_the_measured_preferred_region() -> None:
     # A first-time local share (no existing share record) steers the relay by
     # measured latency. A single configured region short-circuits the
     # measurement (no sockets are opened), but the picked region must still be
@@ -595,22 +739,20 @@ def test_enable_sharing_first_time_local_share_passes_the_measured_preferred_reg
     cli.relays_to_return = {"us9": ("relay-us9.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+        _publish_for_test(host_id, agent_id, cli, is_cloud_row=False)
 
     assert cli.recorded_preferred_regions == ["us9"]
     assert cli.relay_list_call_count == 1
 
 
-def test_enable_sharing_re_share_still_measures_but_the_preference_is_advisory() -> None:
-    # A local enable with no materials in the workspace (first share or
-    # re-share after a disable) measures relay latency and passes the result as
-    # preferred_region. For a re-share this is deliberate and harmless: the
-    # connector honors the preference only for hosts it has no region record
-    # of, so an existing share keeps its region -- and the common enable path
-    # never has to consult the connector's status first to tell the two apart.
+def test_publish_workspace_re_share_still_measures_but_the_preference_is_advisory() -> None:
+    # A local publish with no materials in the workspace measures relay latency
+    # and passes the result as preferred_region. The connector honors the
+    # preference only for hosts it has no region record of, so an existing share
+    # keeps its region -- and the common publish path never has to consult the
+    # connector's status first to tell the two apart.
     cli = _PreferredRegionRecordingCli(connector_url=FAKE_CONNECTOR_URL)
     caller = cli.mngr_caller
     assert isinstance(caller, RecordingMngrCaller)
@@ -619,16 +761,15 @@ def test_enable_sharing_re_share_still_measures_but_the_preference_is_advisory()
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
     cli.shares_by_account.setdefault("owner@example.com", {})[host_id] = "inactive"
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+        _publish_for_test(host_id, agent_id, cli, is_cloud_row=False)
 
     assert cli.recorded_preferred_regions == ["us9"]
     assert cli.relay_list_call_count == 1
 
 
-def test_enable_sharing_with_stale_materials_reprovisions_without_measuring() -> None:
+def test_publish_workspace_with_stale_materials_reprovisions_without_measuring() -> None:
     # Materials present but the connector says the share is inactive (disabled
     # from another device): the flow consults the status (the one path that
     # still needs it), then falls through to a full re-provisioning create --
@@ -641,16 +782,15 @@ def test_enable_sharing_with_stale_materials_reprovisions_without_measuring() ->
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
     cli.shares_by_account.setdefault("owner@example.com", {})[host_id] = "inactive"
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=False)
+        _publish_for_test(host_id, agent_id, cli, is_cloud_row=False)
 
     assert cli.recorded_preferred_regions == [None]
     assert cli.relay_list_call_count == 0
 
 
-def test_enable_sharing_cloud_row_skips_the_relay_latency_measurement() -> None:
+def test_publish_workspace_cloud_row_skips_the_relay_latency_measurement() -> None:
     # A cloud row's workspace runs on a pool host, so the desktop's own relay
     # latency says nothing about it: no relays are probed and no preference is
     # sent (the connector applies its default region). The raise from the
@@ -662,10 +802,80 @@ def test_enable_sharing_cloud_row_skips_the_relay_latency_measurement() -> None:
     cli.relays_to_return = {"us1": ("relay-us1.example:7000",), "us2": ("relay-us2.example:7000",)}
     agent_id = AgentId("agent-" + "c" * 32)
     host_id = "host-" + "d" * 32
-    grants = {"emails": ["owner@example.com"], "email_domains": []}
 
     with pytest.raises(SharingError):
-        _enable_sharing_for_test(host_id, agent_id, grants, cli, is_cloud_row=True)
+        _publish_for_test(host_id, agent_id, cli, is_cloud_row=True)
 
     assert cli.recorded_preferred_regions == [None]
     assert cli.relay_list_call_count == 0
+
+
+class _StatusOrderRecordingCli(SucceedingCreateShareCli):
+    """Records how many execs had run when the connector's share status was read."""
+
+    exec_counts_at_status_read: list[int] = Field(default_factory=list)
+
+    def get_share_status(self, *, account: str, host_id: str) -> ShareCliInfo | None:
+        caller = self.mngr_caller
+        assert isinstance(caller, RecordingMngrCaller)
+        self.exec_counts_at_status_read.append(len([call for call in caller.calls if call and call[0] == "exec"]))
+        return super().get_share_status(account=account, host_id=host_id)
+
+
+def _save_grants_for_test(
+    host_id: str, agent_id: AgentId, grants: SharingGrantsDocument, cli: ImbueCloudCli
+) -> dict[str, Any]:
+    """Save ``grants`` onto ``host_id`` as its owner, with no service labels known yet."""
+    return _save_grants_with_cli(
+        host_id, str(agent_id), grants, cli, "owner@example.com", service_labels={}, identity_cache=None
+    )
+
+
+def test_save_grants_refuses_a_pre_share_gateway_workspace() -> None:
+    # Nothing in such a workspace reads the document, so writing one would only
+    # look like it worked.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=False, is_share_env_present=False)
+
+    with pytest.raises(SharingError, match="update itself"):
+        _save_grants_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), SharingGrantsDocument(), cli)
+
+    assert len([call for call in caller.calls if call and call[0] == "exec"]) == 1
+
+
+def test_save_grants_overwrites_a_document_nothing_can_parse() -> None:
+    # An unparseable document grandfathers nothing and is replaced, so a
+    # corrupted file cannot lock the list.
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(
+        is_gateway_present=True, is_share_env_present=False, grants_toml_text="[workspace\nemails = ["
+    )
+    grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
+
+    document = _save_grants_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), grants, cli)
+
+    assert document["grants"]["workspace"]["emails"] == ["friend@example.com"]
+    write_command = [call for call in caller.calls if call and call[0] == "exec"][1][2]
+    assert "share_grants.toml" in write_command
+
+
+def test_save_grants_reads_the_connector_before_it_writes() -> None:
+    # A connector hiccup must not be reported after the document landed.
+    host_id = "host-" + "d" * 32
+    cli = _StatusOrderRecordingCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
+    cli.add_share("owner@example.com", host_id)
+    grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
+
+    document = _save_grants_for_test(host_id, AgentId("agent-" + "c" * 32), grants, cli)
+
+    assert document["enabled"] is True
+    # Read once, after the probe and before the write exec.
+    assert cli.exec_counts_at_status_read == [1]
+    assert len([call for call in caller.calls if call and call[0] == "exec"]) == 2

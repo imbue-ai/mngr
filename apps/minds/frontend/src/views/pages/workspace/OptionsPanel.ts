@@ -1,4 +1,4 @@
-// The workspace options panel body: the Permissions / Share machine / Machine
+// The workspace options panel body: the Permissions / Sharing / Machine
 // settings pane, rendered inside WorkspaceOptionsOverlay's docked card. The tab
 // strip lives in that overlay (it hangs from the titlebar icon-tabs); this owns
 // the pane title and the active pane's content.
@@ -40,7 +40,7 @@ export interface OptionsPanelAttrs {
  * pushes into a second line or crowds the close X. */
 export function paneTitle(tab: OptionsTab, name: string): m.Child {
   const icon: IconName = tab === "share" ? "user-plus" : "settings";
-  const label = tab === "share" ? "Share machine:" : "Machine settings:";
+  const label = tab === "share" ? "Share" : "Machine settings:";
   return m("h1", { class: "type-heading-lg text-primary flex items-center gap-2 min-w-0 shrink-0" }, [
     m(Icon16, { name: icon, size: "lg", extra: "shrink-0" }),
     m("span", { class: "shrink-0" }, label),

@@ -61,7 +61,7 @@ def test_resolve_user_returns_the_record_and_caches_it(tmp_path: Path) -> None:
         "profile_picture_url": None,
     }
     # The lookup runs under the signed-in account, and the record is cached
-    # so the Share tab can render the grant without another round trip.
+    # so the share panel can render the grant without another round trip.
     assert cli.resolve_calls == [("owner@example.com", "bob@example.com")]
     cached = cache.get("user-2")
     assert cached is not None and cached.record.display_name == "Bob"

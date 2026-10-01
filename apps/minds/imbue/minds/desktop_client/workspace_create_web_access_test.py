@@ -1,5 +1,6 @@
 """Tests for the create form's "enable web access" post-create hook."""
 
+import base64
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_materials_injection import render_grants_toml
 from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import enable_web_access_for_workspace
 from imbue.minds.desktop_client.testing import read_injected_share_env_text
@@ -98,10 +100,9 @@ def _store_with_associated_workspace(
 
 def test_enable_web_access_cloud_rows_use_the_client_side_share_create(tmp_path: Path) -> None:
     # Cloud rows take the same client-side path as local ones: connector
-    # ``shares create`` with the owner as sole grantee, no server-side
-    # primitive, and no relay preference (the desktop's latency says nothing
-    # about the pool host's). The raise from the recording create also proves
-    # a connector failure surfaces as SharingError.
+    # ``shares create``, no server-side primitive, and no relay preference (the
+    # desktop's latency says nothing about the pool host's). The raise from the
+    # recording create also proves a connector failure surfaces as SharingError.
     recording_cli = _RecordingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
     store, cli = _store_with_associated_workspace(tmp_path, cli=recording_cli, is_cloud_row=True)
     assert isinstance(cli, _RecordingCreateShareCli)
@@ -202,6 +203,13 @@ def test_enable_web_access_local_row_resolves_urls_without_an_app_context(tmp_pa
     connector_url = str(FAKE_CONNECTOR_URL).rstrip("/")
     assert f"SHARE_CONNECTOR_URL={connector_url}" in share_env_text
     assert f"SHARE_CHROME_ORIGIN={connector_url}" in share_env_text
+    # The document written alongside it grants nobody: the gateway admits the
+    # owning account on its own, so nothing is granted on the owner's behalf.
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    write_command = next(call[2] for call in caller.calls if call and call[0] == "exec" and "printf" in call[2])
+    empty_toml = render_grants_toml({"users": [], "emails": [], "email_domains": []}, {})
+    assert base64.b64encode(empty_toml.encode()).decode("ascii") in write_command
 
 
 def test_web_access_enabler_swallows_sharing_failures(tmp_path: Path) -> None:

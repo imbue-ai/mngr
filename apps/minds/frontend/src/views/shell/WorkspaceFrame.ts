@@ -169,9 +169,9 @@ export function buildEmbedHandlers(
     sendAck(contract.OPEN_AI_KEYS_ACK);
   };
   handlers[contract.OPEN_SHARE_SETTINGS] = (message) => {
-    // Float the options panel's Share tab over this machine (kept mounted),
-    // focused on the asking app. A name the share pane does not recognize
-    // falls back to the whole-machine share (ShareModel.selectTarget).
+    // Float the options panel's sharing pane over this machine (kept mounted),
+    // focused on the asking app. A name the pane does not recognize falls back
+    // to the whole workspace (SharePanelModel.selectTarget).
     const serviceName =
       typeof message.serviceName === "string" ? message.serviceName : null;
     navigate(

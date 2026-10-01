@@ -75,8 +75,8 @@ global = true
 ### data/.secrets
 
 Contains environment variable exports injected by the desktop client.
-While sharing is enabled, `data/.secrets/share.env` holds the share
-materials the share-gateway service watches for (alongside
+While the workspace is published, `data/.secrets/share.env` holds the
+share materials the share-gateway service watches for (alongside
 `data/.secrets/share_grants.toml`, the grants document gating access):
 
 ```bash
@@ -96,9 +96,12 @@ email (`emails`, email grants the gateway upgrades to account ids on first
 visit), and by email domain (`email_domains`), per app. Every writer of
 that file inside the container -- the desktop's injection and the gateway's
 email-grant upgrade -- holds a `flock` on `share_grants.toml.lock` around its
-write. Services learn who is asking from the `X-Imbue-Identity` header on
-each request (see the Imbue Studio design doc); nothing about the owner is written
-into the workspace as a file.
+write. The grants document outlives the publication: unpublishing removes
+`share.env` and the gateway's status file and leaves the grants document in
+place, so the next publish admits the same people. Unlinking the workspace
+from its account removes all three files. Services learn who is asking from the
+`X-Imbue-Identity` header on each request (see the Imbue Studio design
+doc); nothing about the owner is written into the workspace as a file.
 
 ## Sandboxed runtime on remote workspaces
 
@@ -128,4 +131,4 @@ python3 system/scripts/forward_port.py --url http://localhost:8001 --name web-ad
 python3 system/scripts/forward_port.py --remove --name old-app
 ```
 
-The app watcher service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for the desktop client to discover. (Share registration happens on the Imbue Studio side when the user enables sharing -- not in the watcher.)
+The app watcher service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for the desktop client to discover. (Share registration happens on the Imbue Studio side when the user publishes the workspace -- not in the watcher.)

@@ -1607,12 +1607,12 @@ def _handle_sharing_redirect(
     agent_id: str,
     service_name: str = "",
 ) -> Response:
-    """Redirect a legacy sharing-editor URL to the options panel's Share tab.
+    """Redirect a legacy sharing-editor URL to the options panel's share panel.
 
-    The standalone editor is gone -- the Share machine pane in the workspace
-    options panel is the one sharing surface -- but its URLs were handed out
-    (workspace settings links, permission-request approvals), so they land on
-    the replacement instead of a 404. A service segment picks that target.
+    The standalone editor is gone -- the share panel in the workspace options
+    panel is the one sharing surface -- but its URLs were handed out (workspace
+    settings links, permission-request approvals), so they land on the
+    replacement instead of a 404. A service segment picks that target.
     """
     # The old /modal spelling is a rendering variant, not a share target.
     target = f"&target={quote(service_name)}" if service_name and service_name != "modal" else ""
@@ -2652,9 +2652,9 @@ def create_desktop_client(
     app.add_url_rule("/requests/<request_id>/grant", view_func=_handle_request_grant, methods=["POST"])
     app.add_url_rule("/requests/<request_id>/deny", view_func=_handle_request_deny, methods=["POST"])
 
-    # Legacy sharing-editor URLs redirect to the options panel's Share tab
+    # Legacy sharing-editor URLs redirect to the options panel's share panel
     # (the /modal spelling included -- an overlay that lands there follows the
-    # redirect into the browser-mode page, which still renders the pane).
+    # redirect into the browser-mode page, which still renders the panel).
     app.add_url_rule("/sharing/<agent_id>", view_func=_handle_sharing_redirect)
     app.add_url_rule(
         "/sharing/<agent_id>/<service_name>",

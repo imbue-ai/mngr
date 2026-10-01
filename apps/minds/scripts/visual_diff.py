@@ -152,7 +152,7 @@ def _serve_directory(root: Path) -> tuple[socketserver.TCPServer, threading.Thre
     return httpd, thread, port
 
 
-def _launch_chromium(pw: Any) -> tuple[Any, bool]:
+def launch_chromium(pw: Any) -> tuple[Any, bool]:
     """Launch Playwright's managed chromium, falling back to a system binary.
 
     Playwright's downloaded chromium is unavailable on some host OS versions
@@ -234,7 +234,7 @@ def _slug_for_spa_route(route: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", route.strip("/").lower()).strip("_")
 
 
-def _build_spa_fixture_bootstrap() -> UiBootstrap:
+def build_spa_fixture_bootstrap() -> UiBootstrap:
     """A deterministic bootstrap document exercising the main visual states.
 
     Built from the real wire models so the fixture can never drift from the
@@ -442,7 +442,7 @@ def _build_spa_fixture_bootstrap() -> UiBootstrap:
     return UiBootstrap(seed=seed, schema_version=UI_SCHEMA_VERSION, snapshot=snapshot)
 
 
-def _render_spa_index_html(bootstrap: UiBootstrap) -> str:
+def render_spa_index_html(bootstrap: UiBootstrap) -> str:
     """The SPA index page for a capture, mirroring ``ui_api.serve_spa_index``.
 
     Keep this shape in sync with the real handler (same bootstrap inline, the
@@ -470,7 +470,7 @@ def _render_spa_index_html(bootstrap: UiBootstrap) -> str:
     )
 
 
-def _build_spa_bundle() -> None:
+def build_spa_bundle() -> None:
     """Build frontend/ -> static/ui/ so the capture reflects this branch's source."""
     minds_dir = REPO_ROOT / "apps" / "minds"
     logger.info("[capture-spa] building the frontend bundle (pnpm install/generate/build)")
@@ -496,7 +496,7 @@ class SpaCaptureWiringError(MindError, TypeError):
     ...
 
 
-class _SpaCaptureServer(socketserver.TCPServer):
+class SpaCaptureServer(socketserver.TCPServer):
     """TCPServer that carries the SPA capture's route map + serving root.
 
     Attributes are assigned right after construction (no __init__ override);
@@ -508,19 +508,19 @@ class _SpaCaptureServer(socketserver.TCPServer):
     spa_root_dir: Path
 
 
-class _SpaRouteHandler(_QuietStaticHandler):
+class SpaRouteHandler(_QuietStaticHandler):
     """Serves the SPA index at each route's REAL path.
 
     The SPA router reads ``location.pathname``, so ``/create`` must be served
     at ``/create`` (not ``/html/spa_create.html``); everything else falls back
     to static file serving rooted at the capture dir (``/_static/...``). The
-    route map and serving root ride on the :class:`_SpaCaptureServer`
+    route map and serving root ride on the :class:`SpaCaptureServer`
     instance. ``do_GET``'s name is the http.server API.
     """
 
     def do_GET(self) -> None:
         server = self.server
-        if not isinstance(server, _SpaCaptureServer):
+        if not isinstance(server, SpaCaptureServer):
             raise SpaCaptureWiringError(f"SPA route handler mounted on a non-capture server: {type(server)!r}")
         capture_server = server
         # SimpleHTTPRequestHandler reads ``self.directory`` at request time;
@@ -544,7 +544,7 @@ class _SpaRouteHandler(_QuietStaticHandler):
 def _screenshot_spa_routes(route_slugs: list[tuple[str, str]], png_dir: Path, port: int) -> None:
     """Screenshot every SPA route once the app has mounted."""
     with sync_playwright() as pw:
-        browser, is_full_page_reliable = _launch_chromium(pw)
+        browser, is_full_page_reliable = launch_chromium(pw)
         try:
             context = browser.new_context(
                 viewport={"width": VIEWPORT_W, "height": VIEWPORT_H}, reduced_motion="reduce"
@@ -583,15 +583,15 @@ def _do_capture_spa(label: str, routes: list[str] | None, is_build_skipped: bool
     png_dir.mkdir(parents=True)
 
     if not is_build_skipped:
-        _build_spa_bundle()
+        build_spa_bundle()
 
     # Same serving convention as the legacy mode: /_static resolves through a
     # symlink into the live static dir (which now also contains ui/).
     (output_dir / "_static").symlink_to(STATIC_DIR)
 
     route_slugs = [(r, _slug_for_spa_route(r)) for r in routes] if routes else [(r, s) for r, s in SPA_ROUTE_SLUGS]
-    bootstrap = _build_spa_fixture_bootstrap()
-    index_html = _render_spa_index_html(bootstrap)
+    bootstrap = build_spa_fixture_bootstrap()
+    index_html = render_spa_index_html(bootstrap)
 
     # One HTML artifact per route (identical bodies today, but per-route files
     # keep the compare machinery's scenario model untouched and leave room for
@@ -606,7 +606,7 @@ def _do_capture_spa(label: str, routes: list[str] | None, is_build_skipped: bool
     with socket.socket() as probe_socket:
         probe_socket.bind(("127.0.0.1", 0))
         port = probe_socket.getsockname()[1]
-    httpd = _SpaCaptureServer(("127.0.0.1", port), _SpaRouteHandler)
+    httpd = SpaCaptureServer(("127.0.0.1", port), SpaRouteHandler)
     httpd.spa_html_by_route = html_by_route
     httpd.spa_root_dir = output_dir
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

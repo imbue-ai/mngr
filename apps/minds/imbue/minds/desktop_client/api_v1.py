@@ -36,6 +36,7 @@ import threading
 from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import Sequence
 from datetime import datetime
 from datetime import timezone
 from typing import Final
@@ -107,7 +108,6 @@ from imbue.minds.desktop_client.api_models import ProviderToggleResponse
 from imbue.minds.desktop_client.api_models import RestartOperationStatusResponse
 from imbue.minds.desktop_client.api_models import RestartWorkspaceRequest
 from imbue.minds.desktop_client.api_models import SetProviderEnabledRequest
-from imbue.minds.desktop_client.api_models import SharingGrantList
 from imbue.minds.desktop_client.api_models import SharingGrantsDocument
 from imbue.minds.desktop_client.api_models import SharingReadinessResponse
 from imbue.minds.desktop_client.api_models import SshConnectionResponse
@@ -116,6 +116,7 @@ from imbue.minds.desktop_client.api_models import TimezoneResponse
 from imbue.minds.desktop_client.api_models import UpgradeMergeSummary
 from imbue.minds.desktop_client.api_models import WorkspaceBackupCheckResponse
 from imbue.minds.desktop_client.api_models import WorkspaceBackupsResponse
+from imbue.minds.desktop_client.api_models import WorkspaceGrantsRequest
 from imbue.minds.desktop_client.api_models import WorkspaceLifecycleResponse
 from imbue.minds.desktop_client.api_models import WorkspaceListResponse
 from imbue.minds.desktop_client.api_models import WorkspaceSummary
@@ -146,16 +147,19 @@ from imbue.minds.desktop_client.pending_create_attempts import PendingCreateAtte
 from imbue.minds.desktop_client.responses import make_file_response
 from imbue.minds.desktop_client.responses import make_streaming_response
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
+from imbue.minds.desktop_client.share_grant_validation import GrantRefusal
 from imbue.minds.desktop_client.share_targets import WHOLE_MACHINE_SERVICE
-from imbue.minds.desktop_client.sharing_handler import EmptyGrantsError
+from imbue.minds.desktop_client.sharing_handler import GrantsRefusedError
 from imbue.minds.desktop_client.sharing_handler import SharingError
-from imbue.minds.desktop_client.sharing_handler import disable_sharing
-from imbue.minds.desktop_client.sharing_handler import enable_sharing
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
 from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
 from imbue.minds.desktop_client.sharing_handler import get_sharing
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
+from imbue.minds.desktop_client.sharing_handler import publish_workspace
+from imbue.minds.desktop_client.sharing_handler import publish_workspace_with_grants
 from imbue.minds.desktop_client.sharing_handler import resolve_share_target_labels_for_host
+from imbue.minds.desktop_client.sharing_handler import save_grants
+from imbue.minds.desktop_client.sharing_handler import unpublish_workspace
 from imbue.minds.desktop_client.state import DesktopClientState
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.supertokens_routes import bounce_latchkey_forward_supervisor
@@ -2700,18 +2704,6 @@ def _grants_document_from_request(body: MachineSharingRequest) -> SharingGrantsD
     return SharingGrantsDocument(workspace=body.workspace, services=dict(body.services))
 
 
-def _grants_to_plain(
-    grants: SharingGrantsDocument,
-) -> tuple[dict[str, list[str]], dict[str, dict[str, list[str]]]]:
-    workspace = _grant_list_to_plain(grants.workspace)
-    services = {name: _grant_list_to_plain(entry) for name, entry in grants.services.items()}
-    return workspace, services
-
-
-def _grant_list_to_plain(entry: SharingGrantList) -> dict[str, list[str]]:
-    return {"users": list(entry.users), "emails": list(entry.emails), "email_domains": list(entry.email_domains)}
-
-
 def _optional_str(document: dict[str, object], key: str) -> str | None:
     value = document.get(key)
     return value if isinstance(value, str) else None
@@ -2794,23 +2786,36 @@ def _handle_workspace_sharing_get(workspace_id: str) -> MachineSharingResponse |
 
 
 @require_api_or_cookie_auth
-@API_SPEC.validate(json=MachineSharingRequest, resp=json_response_model(MachineSharingResponse))
+@API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
 def _handle_workspace_sharing_put(workspace_id: str) -> MachineSharingResponse | Response:
-    """Enable sharing (or update the grants) for a workspace. Body: the grants document."""
+    """Publish a workspace: give it an address on the internet. No body; it admits nobody by itself."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
         return _json_error(f"Unknown workspace {workspace_id}", 404)
-    return _machine_sharing_put_core(host_id)
+    return _publish_workspace_core(host_id)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=WorkspaceGrantsRequest, resp=json_response_model(MachineSharingResponse))
+def _handle_workspace_sharing_grants_put(workspace_id: str) -> MachineSharingResponse | Response:
+    """Replace a workspace's grants document, published or not. Body: ``{"grants": <document>}``."""
+    host_id = _sharing_host_for_workspace(workspace_id)
+    if host_id is None:
+        return _json_error(f"Unknown workspace {workspace_id}", 404)
+    # The envelope is validated by the spectree model on the route; only the
+    # document it carries is read out here.
+    grants = SharingGrantsDocument.model_validate((request.get_json(silent=True, force=True) or {}).get("grants"))
+    return _save_grants_core(host_id, grants)
 
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
 def _handle_workspace_sharing_delete(workspace_id: str) -> MachineSharingResponse | Response:
-    """Disable sharing for a workspace (revokes the relay token; live viewers are cut)."""
+    """Unpublish a workspace (revokes the relay token; live visitors are cut). The grant list is kept."""
     host_id = _sharing_host_for_workspace(workspace_id)
     if host_id is None:
         return _json_error(f"Unknown workspace {workspace_id}", 404)
-    return _machine_sharing_delete_core(host_id)
+    return _unpublish_workspace_core(host_id)
 
 
 @require_api_or_cookie_auth
@@ -2864,32 +2869,68 @@ def _handle_machine_sharing_get(host_id: str) -> MachineSharingResponse | Respon
     return _machine_sharing_get_core(host_id)
 
 
-def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response:
-    body = MachineSharingRequest.model_validate(request.get_json(silent=True, force=True) or {})
-    workspace_grants, service_grants = _grants_to_plain(_grants_document_from_request(body))
+def _publish_workspace_core(host_id: str) -> MachineSharingResponse | Response:
     state = get_state()
     try:
         # Serialized per machine: the desktop-side JS only serializes writes
-        # within one pane, so two panes/windows editing one machine would
-        # otherwise interleave their full-document replaces.
+        # within one pane, so two panes/windows acting on one machine would
+        # otherwise interleave.
         with state.machine_sharing_locks.get_lock(host_id):
             try:
-                document = enable_sharing(
-                    host_id=host_id,
-                    workspace_grants=workspace_grants,
-                    service_grants=service_grants,
-                    backend_resolver=state.backend_resolver,
+                document = publish_workspace(host_id=host_id, backend_resolver=state.backend_resolver)
+            finally:
+                # The share state may have changed even on failure (the
+                # connector create can succeed before the injection fails), so
+                # the readiness poll must not keep serving a stale lookup.
+                _invalidate_sharing_caches(state, host_id)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return _sharing_document_to_response(document)
+
+
+def _save_grants_core(host_id: str, grants: SharingGrantsDocument) -> MachineSharingResponse | Response:
+    state = get_state()
+    try:
+        # Serialized per machine, like the publish.
+        with state.machine_sharing_locks.get_lock(host_id):
+            document = save_grants(host_id=host_id, grants=grants, backend_resolver=state.backend_resolver)
+    except GrantsRefusedError as exc:
+        return _grant_refusal_response(exc.refusals)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return _sharing_document_to_response(document)
+
+
+def _grant_refusal_response(refusals: Sequence[GrantRefusal]) -> Response:
+    """The body naming every entry a grants save refused.
+
+    400 rather than 422: spectree reserves 422 for its own request-schema
+    validation errors, and this is a value the schema cannot express.
+    """
+    return _json_response(
+        {"error": "grant_refused", "refusals": [refusal.model_dump(mode="json") for refusal in refusals]},
+        status_code=400,
+    )
+
+
+def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response:
+    """The compat shim's old contract: one operation that publishes and stores one document."""
+    body = MachineSharingRequest.model_validate(request.get_json(silent=True, force=True) or {})
+    grants = _grants_document_from_request(body)
+    state = get_state()
+    try:
+        with state.machine_sharing_locks.get_lock(host_id):
+            try:
+                document = publish_workspace_with_grants(
+                    host_id=host_id, grants=grants, backend_resolver=state.backend_resolver
                 )
             finally:
                 # The share state may have changed even on failure (the
                 # connector create can succeed before the injection fails), so
                 # the readiness poll must not keep serving a stale lookup.
                 _invalidate_sharing_caches(state, host_id)
-    except EmptyGrantsError as exc:
-        # A grants document naming nobody is a request-validation failure,
-        # not an upstream fault. 400 rather than 422: spectree reserves 422
-        # for its own request-schema validation errors.
-        return _json_error(str(exc), 400)
+    except GrantsRefusedError as exc:
+        return _grant_refusal_response(exc.refusals)
     except SharingError as exc:
         return _json_error(str(exc), 502)
     return _sharing_document_to_response(document)
@@ -2898,32 +2939,43 @@ def _machine_sharing_put_core(host_id: str) -> MachineSharingResponse | Response
 @require_api_or_cookie_auth
 @API_SPEC.validate(json=MachineSharingRequest, resp=json_response_model(MachineSharingResponse))
 def _handle_machine_sharing_put(host_id: str) -> MachineSharingResponse | Response:
-    """Enable sharing (or update the grants) for a machine. Body: the grants document (compat shim)."""
+    """Publish a machine and save the grants document in the body (compat shim)."""
     return _machine_sharing_put_core(host_id)
 
 
-def _machine_sharing_delete_core(host_id: str) -> MachineSharingResponse | Response:
+def _unpublish_workspace_core(host_id: str) -> MachineSharingResponse | Response:
     state = get_state()
     try:
-        # Same per-machine serialization as the PUT: a disable racing a grants
-        # write must not interleave with its materials removal.
+        # Same per-machine serialization as the publish: an unpublish racing a
+        # grants write must not interleave with its materials removal.
         with state.machine_sharing_locks.get_lock(host_id):
             try:
-                disable_sharing(
+                unpublish_workspace(
                     host_id, state.backend_resolver, state.imbue_cloud_cli, state.session_store, state.forward_identity
+                )
+                # The grants document outlives the publication, so the reply
+                # carries it: the panel keeps showing the list while off.
+                document = get_sharing(
+                    host_id,
+                    state.backend_resolver,
+                    state.imbue_cloud_cli,
+                    state.session_store,
+                    state.identity_cache,
+                    state.client_env_config,
+                    state.forward_identity,
                 )
             finally:
                 _invalidate_sharing_caches(state, host_id)
     except SharingError as exc:
         return _json_error(str(exc), 502)
-    return MachineSharingResponse(host_id=host_id, enabled=False)
+    return _sharing_document_to_response(document)
 
 
 @require_api_or_cookie_auth
 @API_SPEC.validate(resp=json_response_model(MachineSharingResponse))
 def _handle_machine_sharing_delete(host_id: str) -> MachineSharingResponse | Response:
-    """Disable sharing for a machine (revokes the relay token; live viewers are cut) (compat shim)."""
-    return _machine_sharing_delete_core(host_id)
+    """Unpublish a machine (revokes the relay token; live visitors are cut) (compat shim)."""
+    return _unpublish_workspace_core(host_id)
 
 
 def _machine_sharing_readiness_core(host_id: str) -> SharingReadinessResponse:
@@ -2957,7 +3009,7 @@ def _machine_sharing_readiness_core(host_id: str) -> SharingReadinessResponse:
     shell_label = service_labels.get(WHOLE_MACHINE_SERVICE)
     probe_host = f"{shell_label}.{share.workspace_domain}" if shell_label else None
     is_ready = probe_host is not None and probe_share_readiness(http_client, probe_host)
-    # The labels ride every poll so a Share tab opened before the workspace's
+    # The labels ride every poll so a share panel opened before the workspace's
     # registrations reached this client learns them without re-fetching anything.
     if is_ready:
         return SharingReadinessResponse(
@@ -3492,6 +3544,12 @@ def create_api_v1_blueprint() -> Blueprint:
         view_func=_handle_workspace_sharing_delete,
         endpoint="workspace_sharing_delete",
         methods=["DELETE"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/grants",
+        view_func=_handle_workspace_sharing_grants_put,
+        endpoint="workspace_sharing_grants_put",
+        methods=["PUT"],
     )
 
     # Machine sharing (compat shims for the routes above; agents likewise

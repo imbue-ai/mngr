@@ -1,8 +1,8 @@
-"""/ui/api routes for looking other users up by email (the Share tab's resolve-on-add step).
+"""/ui/api routes for looking other users up by email (the share panel's resolve-on-add step).
 
 ``POST /ui/api/users/resolve`` turns a typed address into the identity record
 of the verified account that owns it, so a grant can be stored under the
-stable user id instead of the email. A miss is a 404 the tab treats as
+stable user id instead of the email. A miss is a 404 the panel treats as
 "store an invite"; any other failure is a 502 with the same consequence.
 """
 

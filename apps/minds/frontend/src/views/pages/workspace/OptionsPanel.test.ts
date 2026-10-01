@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Icon16 } from "../../components/Icon";
 import { ICONS_16 } from "../../components/icons";
 import type { IconName } from "../../components/icons";
-import { attrsOf, collectVnodes } from "../../../testing";
+import { allText, attrsOf, collectVnodes } from "../../../testing";
 import { paneTitle } from "./OptionsPanel";
 import type { OptionsTab } from "../../../models/workspaceOptions";
 
@@ -17,7 +17,17 @@ function headingGlyph(tab: OptionsTab): string {
 }
 
 describe("the options pane heading", () => {
-  it("draws the person-with-plus glyph beside Share machine", () => {
+  it("reads Share and the machine's name, with no colon between them", () => {
+    const title = allText(paneTitle("share", "alpha"));
+
+    expect(title).toContain("Share");
+    expect(title).not.toContain("Sharing");
+    expect(title).toContain("alpha");
+    expect(title).not.toContain(":");
+    expect(title).not.toContain("Share machine");
+  });
+
+  it("draws the person-with-plus glyph beside Share", () => {
     expect(headingGlyph("share")).toBe(ICONS_16["user-plus"]);
   });
 

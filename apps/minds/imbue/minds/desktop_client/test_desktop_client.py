@@ -1185,11 +1185,11 @@ def test_error_reporting_settings_endpoint_requires_auth(tmp_path: Path) -> None
     assert MindsConfig(data_dir=tmp_path).get_report_unexpected_errors() is True
 
 
-def test_sharing_urls_redirect_to_the_options_panels_share_tab(tmp_path: Path) -> None:
-    """Legacy /sharing/<id> URLs land on the Share machine pane, not a 404.
+def test_sharing_urls_redirect_to_the_options_panels_share_panel(tmp_path: Path) -> None:
+    """Legacy /sharing/<id> URLs land on the share panel, not a 404.
 
     The standalone sharing editor is gone -- the workspace options panel's
-    Share tab is the one sharing surface -- but its URLs were handed out, so
+    share panel is the one sharing surface -- but its URLs were handed out, so
     they redirect. A service segment picks that share target.
     """
     client, auth_store = _create_test_client_with_stores(tmp_path)

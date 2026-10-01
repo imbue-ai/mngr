@@ -1,465 +1,287 @@
-// The Share machine tab: per-target nav (apps + whole machine), the grants
-// editor (owner row + removable entries + add box), the share link pill with
-// copy confirmation, and the provisioning notice. View over ShareModel.
+// The share panel: one switch publishes the whole workspace, and each target
+// shows the link it opens and the people it admits. Nothing here waits on a
+// write: every control stays live while the model saves behind it.
 
 import m from "mithril";
 import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
+import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
+import { CopyField } from "../../components/Layout";
+import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import { Spinner } from "../../components/Spinner";
-import { TextInput } from "../../components/FormControls";
-import type { ShareEntry, ShareModel } from "../../../models/workspaceOptions";
-import { shareEntryKey } from "../../../models/workspaceOptions";
+import type {
+  Grant,
+  GrantAddKind,
+  SharePanelModel,
+} from "../../../models/sharePanel";
+import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
+
+const JUST_ADDED_MS = 6000;
 
 const COPY_FLASH_MS = 1200;
 
+const SHARING_SENTENCE =
+  "Sharing gives this workspace an address on the internet. " +
+  "Only people granted access can open it.";
+
+const PROVISIONING_SENTENCE =
+  "Generating a secure link. This takes a while because we want to protect " +
+  "you from bad actors on the internet.";
+
+const CONFIRM_BODY =
+  "Anyone granted access to this workspace will be able to see and change " +
+  "everything within it, including all files, agent chats and terminal. If " +
+  "you only grant access to an app, they will be able to access all data " +
+  "that app provides to them.";
+
+const OFF_NOTICE_WORKSPACE =
+  "This workspace cannot be accessed while sharing is off. " +
+  "Your list of permissions is preserved but inactive.";
+
+const OFF_NOTICE_APP =
+  "This app cannot be accessed while sharing is off. " +
+  "Your list of permissions is preserved but inactive.";
+
+const WHOLE_SCOPE_LINE =
+  "Permissions below apply to every app in this workspace, and also grant " +
+  "access to files, agent chats and terminal.";
+
+const SAVING_LABEL = "Securely granting access";
+
+const ADD_OFF_TOOLTIP = "Permissions cannot be granted while sharing is off";
+
+/** What each kind of grant is called at the add row, and the example it shows. */
+const ADD_KIND_TEXT: Record<
+  GrantAddKind,
+  { readonly label: string; readonly placeholder: string }
+> = {
+  email: { label: "one person by email", placeholder: "name@example.com" },
+  email_domain: { label: "everyone at a domain", placeholder: "example.com" },
+};
+
+// The same box CopyField draws, for the wait that stands in its place: the
+// field must not drop in and push the pane down when the link arrives.
+const LINK_BOX_CLASS =
+  "flex flex-1 min-w-0 items-center gap-2 rounded-md border border-default " +
+  "bg-fill-subtle px-3 py-2 type-body text-tertiary";
+
+// Every row is the same height whatever it holds, so a long list scans as a
+// single column.
+const ROW_CLASS =
+  "flex h-10 flex-none items-center gap-2 rounded-md border px-3";
+
+// A domain row's outline is mixed from its surface, so the two read as one
+// mark.
+const ROW_DOMAIN_CLASS =
+  "bg-[var(--c-info-surface)] border-[color-mix(in_srgb,var(--c-info)_28%,transparent)]";
+
+const ROW_PERSON_CLASS = "bg-fill-subtle border-subtle";
+
+// While sharing is off a row admits nobody, so every kind is drawn alike:
+// flat, grey and dim, as the notice above the list says. The lead box and
+// the row's own colors ride along under the filter.
+const ROW_INACTIVE_CLASS = "bg-fill-subtle border-subtle opacity-60 grayscale";
+
+const COUNT_BADGE_CLASS =
+  "shrink-0 inline-flex min-w-5 items-center justify-center rounded-md " +
+  "bg-fill-subtle px-1.5 type-helper font-semibold text-secondary";
+
+const ROW_LEAD_CLASS =
+  "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full";
+
 export interface ShareTabAttrs {
-  share: ShareModel;
+  share: SharePanelModel;
   workspaceName: string;
 }
 
 interface ShareTabLocalState {
-  addEntryDraft: string;
-  isCopyConfirmed: boolean;
-  copyFlashTimer: number | null;
+  isConfirmOpen: boolean;
+  copied: CopiedLink | null;
+  copyFlashHandle: ScheduleHandle | null;
 }
+
+/** The link last copied, so the check sits on its own control and leaves on its
+ * own once the flash has run, whether or not the scheduled redraw arrives. */
+interface CopiedLink {
+  readonly target: string;
+  /** By the panel's clock. */
+  readonly atMs: number;
+}
+
+type ScheduleHandle = ReturnType<SharePanelModel["schedule"]>;
 
 export function ShareTab(): m.Component<ShareTabAttrs> {
   const local: ShareTabLocalState = {
-    addEntryDraft: "",
-    isCopyConfirmed: false,
-    copyFlashTimer: null,
+    isConfirmOpen: false,
+    copied: null,
+    copyFlashHandle: null,
   };
 
   return {
-    onremove() {
-      if (local.copyFlashTimer !== null)
-        window.clearTimeout(local.copyFlashTimer);
+    onremove(vnode) {
+      if (local.copyFlashHandle !== null)
+        vnode.attrs.share.cancel(local.copyFlashHandle);
     },
     view(vnode) {
       const { share } = vnode.attrs;
-      const isWhole = share.currentTarget === shareWholeService(share);
-
-      return splitPane({
-        navLabel: "Share targets",
-        nav: renderTargetNav(share, local),
-        content: [
-          m("div", { class: "flex items-center gap-2" }, [
-            m(
-              "span",
-              { class: "shrink-0 text-primary" },
-              m(Icon16, {
-                name: isWhole ? "panels-top-left" : "box",
-                size: "lg",
-              }),
-            ),
-            m(
-              "h2",
-              { class: "type-heading text-primary" },
-              isWhole ? "Whole machine" : share.currentTarget,
-            ),
-          ]),
-          m(
-            "p",
-            { class: "mt-1 type-helper text-tertiary" },
-            isWhole
-              ? "Give access to everything in this machine, including every app."
-              : "Give access only to this app on its own.",
-          ),
-          share.status === "loading" || share.status === "idle"
-            ? m("p", { class: "mt-6 type-body text-secondary" }, [
-                m(Spinner, { size: "sm", extra: "mr-1" }),
-                " Loading sharing status...",
-              ])
-            : null,
-          share.errorMessage
-            ? m("div", { class: "mt-4" }, [
-                m(Notice, { variant: "warn" }, share.errorMessage),
-                share.isRetryOffered
-                  ? m(
-                      "div",
-                      { class: "mt-2" },
-                      m(
-                        Button,
-                        {
-                          variant: "secondary",
-                          onclick: () => void share.load(),
-                        },
-                        "Try again",
-                      ),
-                    )
-                  : null,
-              ])
-            : null,
-          share.status === "ready" ? renderEditor(share, local) : null,
-        ],
-        extra: "mt-8",
-      });
+      return m("div", { class: "mt-6 flex flex-1 min-h-0 flex-col gap-6" }, [
+        renderPublishWidget(share, local),
+        m("hr", { class: "border-t border-default" }),
+        splitPane({
+          navLabel: "Share targets",
+          nav: renderTargetNav(share),
+          content: renderTargetPane(share, local),
+          contentExtra: "flex flex-col",
+        }),
+        renderConfirmDialog(share, local),
+      ]);
     },
   };
 }
 
-function shareWholeService(share: ShareModel): string {
-  return share.wholeService;
-}
-
-function renderTargetNav(
-  share: ShareModel,
+function renderPublishWidget(
+  share: SharePanelModel,
   local: ShareTabLocalState,
 ): m.Children {
-  const wholeService = shareWholeService(share);
-  const appServices = share.knownTargets.filter(
-    (target) => target !== wholeService,
-  );
-
-  const targetButton = (
-    target: string,
-    label: string,
-    icon: m.Children,
-  ): m.Children =>
-    m(
-      "button",
-      {
-        type: "button",
-        "data-share-target": target,
-        "aria-pressed": target === share.currentTarget ? "true" : "false",
-        class: navEntryClass(target === share.currentTarget),
-        onclick: () => {
-          local.addEntryDraft = "";
-          cancelCopyFlash(local);
-          share.selectTarget(target);
-        },
-      },
-      [icon, m("span", { class: "truncate" }, label)],
-    );
-
-  // Each app wears the icon it registered (sanitized) or its monogram --
-  // exactly how the workspace itself draws it -- so the share list reads as
-  // the same apps the user already knows.
-  const appIcon = (service: string): m.Children =>
-    m(
-      "span",
-      { class: "shrink-0 inline-flex" },
-      m.trust(shareTargetIconMarkup(share.targetIcon(service), service, 16)),
-    );
-
-  return [
-    appServices.length > 0
-      ? [
+  const publishWrite = share.publishWrite;
+  const isWriting =
+    publishWrite.state === "publishing" ||
+    publishWrite.state === "unpublishing";
+  return m(
+    "section",
+    { id: "ws-share-publish", class: "shrink-0 flex flex-col gap-2" },
+    [
+      m("div", { class: "flex items-center justify-between gap-4" }, [
+        m("h2", { class: "type-heading text-primary" }, "Enable sharing"),
+        m("span", { class: "flex shrink-0 items-center gap-2" }, [
+          m("button", {
+            id: "ws-share-publish-switch",
+            type: "button",
+            role: "switch",
+            "aria-checked": share.isPublished ? "true" : "false",
+            "aria-label": "Enable sharing",
+            class: isWriting
+              ? "perm-switch shrink-0 is-busy"
+              : "perm-switch shrink-0",
+            onclick: () => {
+              if (share.isPublished) void share.unpublish();
+              else local.isConfirmOpen = true;
+            },
+          }),
           m(
-            "div",
-            { class: "flex flex-col gap-0.5" },
-            appServices.map((service) =>
-              targetButton(service, service, appIcon(service)),
-            ),
+            "span",
+            { class: "type-body text-secondary" },
+            share.isPublished ? "Yes" : "No",
           ),
-          m("div", { class: "my-1.5 h-px bg-subtle" }),
-        ]
-      : null,
-    targetButton(
-      wholeService,
-      "Whole machine",
-      m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
-    ),
-  ];
+        ]),
+      ]),
+      m("p", { class: "type-body text-secondary" }, SHARING_SENTENCE),
+      share.isPublished && !share.isLive ? renderProvisioning(share) : null,
+      publishWrite.state === "failed"
+        ? m(
+            "p",
+            {
+              id: "ws-share-publish-error",
+              class: "type-helper text-important",
+            },
+            publishWrite.message,
+          )
+        : null,
+      share.loadErrorMessage === null
+        ? null
+        : m(Notice, { variant: "warn" }, share.loadErrorMessage),
+      share.migratedDomainFrom === null
+        ? null
+        : m(
+            Notice,
+            { variant: "info" },
+            "Sharing moved to a new address. Links you shared before no longer work.",
+          ),
+    ],
+  );
 }
 
-function renderEditor(
-  share: ShareModel,
+function renderConfirmDialog(
+  share: SharePanelModel,
   local: ShareTabLocalState,
 ): m.Children {
-  const target = share.currentTarget;
-  const state = share.targetState(target);
-  const pending = share.pendingKind(target);
-  const isDisabling = pending === "disable";
-  const url = share.targetUrl(target);
-  const ownerEmail = shareOwnerEmail(share);
-
-  return m("div", { class: "mt-6 flex flex-col gap-6" }, [
-    m("section", [
-      m(
-        "h3",
-        { class: "type-body font-semibold text-primary" },
-        "Who are you sharing with?",
-      ),
-      // Every child is keyed and none is a hole: Mithril refuses a children
-      // array that mixes keyed vnodes with unkeyed ones or nulls.
-      m("div", { id: "ws-share-emails", class: "mt-3 flex flex-col gap-1.5" }, [
-        ...(ownerEmail
-          ? [m("div", { key: "owner" }, renderOwnerRow(share))]
-          : []),
-        ...state.entries.map((entry) =>
-          m("div", { key: shareEntryKey(entry) }, renderAclRow(share, entry)),
-        ),
-      ]),
-      m("div", { class: "mt-2 flex items-center gap-2" }, [
-        m(TextInput, {
-          id: "ws-share-new-email",
-          name: "ws_share_new_email",
-          placeholder: "Add email, or a domain to admit everyone at it",
-          extra: "flex-1",
-          value: local.addEntryDraft,
-          disabled: !share.isEditorEditable,
-          oninput: (event: InputEvent) => {
-            local.addEntryDraft = (event.target as HTMLInputElement).value;
-          },
-          onkeydown: (event: KeyboardEvent) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              addDraftEntry(share, local);
-            }
-          },
-        }),
+  return m(
+    Modal,
+    {
+      isOpen: local.isConfirmOpen,
+      onClose: () => {
+        local.isConfirmOpen = false;
+      },
+    },
+    [
+      m("h2", { class: "type-heading text-primary mb-3" }, "Enable sharing?"),
+      m("p", { class: "type-body text-secondary mb-4" }, CONFIRM_BODY),
+      m("div", { class: "flex justify-end gap-3" }, [
         m(
           Button,
           {
-            id: "ws-share-add-btn",
-            variant: local.addEntryDraft.trim() ? "primary" : "secondary",
-            disabled: !share.isEditorEditable,
-            onclick: () => addDraftEntry(share, local),
+            id: "ws-share-publish-cancel",
+            variant: "secondary",
+            onclick: () => {
+              local.isConfirmOpen = false;
+            },
           },
-          "Add",
+          "Cancel",
+        ),
+        m(
+          Button,
+          {
+            id: "ws-share-publish-confirm",
+            variant: "primary",
+            onclick: () => {
+              local.isConfirmOpen = false;
+              void share.publish();
+            },
+          },
+          "Enable sharing",
         ),
       ]),
-    ]),
-
-    m("section", [
-      m(
-        "h3",
-        { class: "type-body font-semibold text-primary mb-3" },
-        "Share link",
-      ),
-      !state.isEnabled && !isDisabling
-        ? m(
-            "div",
-            { id: "ws-share-enable-row", class: "flex items-center gap-3" },
-            [
-              m(
-                Button,
-                {
-                  id: "ws-share-enable-btn",
-                  variant: "primary",
-                  disabled: pending !== null,
-                  onclick: () => void share.enable(local.addEntryDraft),
-                },
-                pending === "enable" ? "Enabling..." : "Enable sharing",
-              ),
-              pending === "enable"
-                ? m(
-                    "span",
-                    {
-                      id: "ws-share-enable-status",
-                      class: "type-helper text-tertiary",
-                    },
-                    [
-                      m(Spinner, { size: "sm", extra: "mr-1" }),
-                      " Registering the share link...",
-                    ],
-                  )
-                : null,
-            ],
-          )
-        : null,
-      state.isEnabled && !isDisabling
-        ? m(
-            "div",
-            {
-              id: "ws-share-url-row",
-              class: "flex items-center gap-2 flex-wrap",
-            },
-            [
-              url
-                ? m(
-                    "button",
-                    {
-                      id: "ws-share-url-btn",
-                      type: "button",
-                      class:
-                        "inline-flex items-center gap-2 max-w-full rounded-full border border-default " +
-                        "bg-fill-subtle px-3 py-1.5 type-body font-mono text-primary cursor-pointer " +
-                        "hover:bg-fill-hover transition-colors",
-                      style: local.isCopyConfirmed
-                        ? "border-color: var(--c-success); background-color: var(--c-success-surface);"
-                        : "",
-                      "aria-label": "Copy the share link",
-                      onclick: () => void copyShareUrl(share, local),
-                    },
-                    [
-                      m("span", { id: "ws-share-url", class: "truncate" }, url),
-                      m(Icon16, {
-                        name: local.isCopyConfirmed ? "check" : "copy",
-                        extra: local.isCopyConfirmed
-                          ? "shrink-0 text-primary"
-                          : "shrink-0 text-tertiary",
-                      }),
-                    ],
-                  )
-                : // The link is https://<label>.<domain>/ and only that origin
-                  // routes, so until the target's label is known there is no
-                  // link that could work -- show the wait, never a guess.
-                  m(
-                    "span",
-                    {
-                      id: "ws-share-url-pending",
-                      class:
-                        "inline-flex items-center gap-2 max-w-full rounded-full border border-subtle " +
-                        "bg-fill-subtle px-3 py-1.5 type-body text-tertiary",
-                    },
-                    [
-                      m(Spinner, { size: "sm", extra: "shrink-0" }),
-                      "Preparing the share link...",
-                    ],
-                  ),
-              m(
-                Button,
-                {
-                  variant: "secondary",
-                  disabled: pending !== null,
-                  onclick: () => void share.disable(),
-                },
-                "Stop sharing",
-              ),
-            ],
-          )
-        : null,
-      isDisabling
-        ? m(
-            "p",
-            {
-              id: "ws-share-busy",
-              class: "flex items-center gap-2 type-body text-secondary",
-            },
-            [
-              m(Spinner, { size: "sm" }),
-              "Stopping sharing and revoking the link...",
-            ],
-          )
-        : null,
-      pending === "emails"
-        ? m(
-            "p",
-            { class: "flex items-center gap-2 type-body text-secondary mt-2" },
-            [m(Spinner, { size: "sm" }), "Updating who can open this link..."],
-          )
-        : null,
-      share.migratedDomainFrom !== null && !isDisabling
-        ? m(
-            "div",
-            { id: "ws-share-moved", class: "mt-3" },
-            m(
-              Notice,
-              { variant: "info" },
-              "Sharing moved to a new address; links you shared before no longer work.",
-            ),
-          )
-        : null,
-      share.isAwaitingLink(target) && !isDisabling
-        ? m(
-            "div",
-            { id: "ws-share-provisioning", class: "mt-3" },
-            m(
-              Notice,
-              { variant: share.isProvisioningHalted ? "error" : "info" },
-              [
-                m(
-                  "p",
-                  share.isProvisioningHalted
-                    ? "Setting up the link failed."
-                    : "The link is not live yet -- setting it up usually takes under a minute:",
-                ),
-                share.isProvisioningHalted
-                  ? null
-                  : renderProvisioningChecklist(share),
-                renderGatewayTrouble(share),
-              ],
-            ),
-          )
-        : null,
-      share.isAwaitingLabel(target) &&
-      !share.isAwaitingLink(target) &&
-      !isDisabling
-        ? m(
-            "p",
-            {
-              id: "ws-share-label-pending",
-              class: "mt-2 type-helper text-tertiary",
-            },
-            "Waiting for the machine to report this link's address. This usually takes a few seconds after the app starts.",
-          )
-        : null,
-    ]),
-  ]);
-}
-
-interface ProvisioningStep {
-  label: string;
-  isDone: boolean;
-}
-
-// The provisioning checklist shown while the link is not yet live: each step's
-// signal comes from the readiness poll (certificate issuance and a fresh
-// tunnel login from the connector's share status; the end-to-end check is the
-// probe itself, which dismisses this whole notice when it succeeds).
-function renderProvisioningChecklist(share: ShareModel): m.Children {
-  const steps: ProvisioningStep[] = [
-    { label: "Share link registered", isDone: true },
-    { label: "TLS certificate issued", isDone: share.isCertIssued },
-    { label: "Tunnel connected to the relay", isDone: share.isTunnelConnected },
-    { label: "Link answers end to end", isDone: false },
-  ];
-  const firstNotDoneIdx = steps.findIndex((step) => !step.isDone);
-  return m(
-    "ul",
-    { id: "ws-share-provisioning-steps", class: "mt-2 flex flex-col gap-1" },
-    steps.map((step, idx) =>
-      m(
-        "li",
-        {
-          class: "flex items-center gap-2",
-          "data-step-done": step.isDone ? "true" : "false",
-        },
-        [
-          step.isDone
-            ? m(Icon16, { name: "check", extra: "shrink-0 text-primary" })
-            : idx === firstNotDoneIdx
-              ? m(Spinner, { size: "sm", extra: "shrink-0" })
-              : m(
-                  "span",
-                  {
-                    class:
-                      "inline-block w-4 shrink-0 text-center text-tertiary",
-                  },
-                  "-",
-                ),
-          m(
-            "span",
-            {
-              class:
-                step.isDone || idx === firstNotDoneIdx ? "" : "text-tertiary",
-            },
-            step.label,
-          ),
-        ],
-      ),
-    ),
+    ],
   );
 }
 
-// What the workspace's own gateway reported about a bring-up that is not
-// going smoothly: a retry in progress (with the last error and when the next
-// attempt is due) or a permanent refusal that only a re-share can clear.
-function renderGatewayTrouble(share: ShareModel): m.Children {
+function renderProvisioning(share: SharePanelModel): m.Children {
+  return m(
+    "div",
+    { id: "ws-share-provisioning", class: "flex flex-col gap-2" },
+    [
+      m("p", { class: "type-body text-secondary" }, PROVISIONING_SENTENCE),
+      m("p", { class: "flex items-center gap-2 type-body text-primary" }, [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        share.activeProvisioningStep.label,
+      ]),
+      m(
+        "p",
+        { class: "type-helper text-tertiary" },
+        "People can be added while the link is being prepared.",
+      ),
+      renderGatewayTrouble(share),
+    ],
+  );
+}
+
+function renderGatewayTrouble(share: SharePanelModel): m.Children {
   // Gateway errors often end in their own period; do not add a second one.
   const gatewayError = share.gatewayError?.replace(/\.\s*$/, "") ?? null;
   if (share.isProvisioningHalted) {
-    return m("p", { id: "ws-share-gateway-trouble", class: "mt-2 type-body" }, [
-      gatewayError
-        ? `The workspace could not set up its certificate or tunnel: ${gatewayError}. `
-        : "The workspace could not set up its certificate or tunnel. ",
-      "Turn sharing off and on again to retry.",
-    ]);
+    return m(
+      "p",
+      { id: "ws-share-gateway-trouble", class: "type-helper text-important" },
+      [
+        gatewayError
+          ? `The workspace could not set up its certificate or tunnel: ${gatewayError}. `
+          : "The workspace could not set up its certificate or tunnel. ",
+        "Turn sharing off and on again to retry.",
+      ],
+    );
   }
   if (share.gatewayState !== "retrying" || share.gatewayFailedAttemptCount < 1)
     return null;
@@ -471,7 +293,7 @@ function renderGatewayTrouble(share: ShareModel): m.Children {
     : null;
   return m(
     "p",
-    { id: "ws-share-gateway-trouble", class: "mt-2 type-helper text-warning" },
+    { id: "ws-share-gateway-trouble", class: "type-helper text-warning" },
     [
       gatewayError
         ? `The last attempt failed: ${gatewayError}. `
@@ -483,183 +305,540 @@ function renderGatewayTrouble(share: ShareModel): m.Children {
   );
 }
 
-function shareOwnerEmail(share: ShareModel): string {
-  return share.ownerEmail;
-}
-
-const ACL_ROW_CLASS =
-  "flex items-center justify-between gap-2 rounded-md border border-subtle bg-fill-subtle px-3 py-2";
-const ACL_ROW_TEXT_CLASS = "type-body text-primary truncate min-w-0";
-
-// Every grantee row leads with the same 24 px box (a picture, a monogram, a
-// dashed placeholder, or a glyph) so the text columns line up down the list.
-const ROW_LEAD_CLASS =
-  "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full";
-
-function renderOwnerRow(share: ShareModel): m.Children {
-  const name = share.ownerDisplayName ?? "";
-  const email = share.ownerEmail;
-  const primary = name || email;
-  return m("div", { id: "ws-share-owner-row", class: ACL_ROW_CLASS }, [
-    m(
-      "span",
-      { class: ACL_ROW_TEXT_CLASS },
-      renderGranteeText(
-        renderProfilePicture(share.ownerProfilePictureUrl, primary),
-        primary,
-        [...(name ? [` (${email})`] : []), " (you)"],
-      ),
+function renderTargetNav(share: SharePanelModel): m.Children {
+  return [
+    renderNavEntry(
+      share,
+      share.wholeService,
+      "Whole workspace",
+      m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
     ),
-  ]);
+    ...share.appTargets.map((target) =>
+      renderNavEntry(share, target, target, renderAppIcon(share, target)),
+    ),
+  ];
 }
 
-/** A grantee row's text: the lead box, then the primary text with its
- * tertiary suffixes, truncated as one line. */
-function renderGranteeText(
-  lead: m.Children,
-  primary: string,
-  suffixes: string[],
+function renderNavEntry(
+  share: SharePanelModel,
+  target: string,
+  label: string,
+  icon: m.Children,
 ): m.Children {
-  return m("span", { class: "flex items-center gap-2 min-w-0" }, [
-    lead,
-    m("span", { class: "truncate" }, [
-      primary,
-      ...suffixes.map((suffix) =>
-        m("span", { class: "text-tertiary" }, suffix),
+  const isSelected = target === share.currentTarget;
+  return m(
+    "button",
+    {
+      type: "button",
+      "data-share-target": target,
+      "aria-pressed": isSelected ? "true" : "false",
+      class: navEntryClass(isSelected),
+      onclick: () => share.selectTarget(target),
+    },
+    [
+      icon,
+      m("span", { class: "grow truncate" }, label),
+      // An app registers its address when it starts, so one that has never run
+      // has no link yet -- which is not the same as having no grants.
+      target === share.wholeService || share.isLabelKnown(target)
+        ? null
+        : m(
+            "span",
+            { class: "shrink-0 type-helper text-tertiary" },
+            "no link yet",
+          ),
+      m(
+        "span",
+        { "data-share-count": target, class: COUNT_BADGE_CLASS },
+        String(share.grantCount(target)),
+      ),
+    ],
+  );
+}
+
+// The icon the app registered, or its monogram, drawn as the workspace draws
+// it.
+function renderAppIcon(share: SharePanelModel, target: string): m.Children {
+  return m(
+    "span",
+    { class: "shrink-0 inline-flex" },
+    m.trust(shareTargetIconMarkup(share.targetIcon(target), target, 16)),
+  );
+}
+
+function renderTargetPane(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
+  const target = share.currentTarget;
+  const isWhole = target === share.wholeService;
+  return [
+    m("div", { class: "shrink-0 flex items-center gap-2" }, [
+      isWhole
+        ? m(Icon16, {
+            name: "panels-top-left",
+            size: "lg",
+            extra: "shrink-0 text-primary",
+          })
+        : renderAppIcon(share, target),
+      m(
+        "h2",
+        { class: "type-heading text-primary" },
+        isWhole
+          ? "Permissions for the whole workspace"
+          : `Permissions for ${target}`,
       ),
     ]),
+    m(
+      "p",
+      { class: "mt-1 shrink-0 type-helper text-tertiary" },
+      isWhole
+        ? WHOLE_SCOPE_LINE
+        : `Permissions below apply only to the ${target} app.`,
+    ),
+    share.isPublished ? renderLinkSection(share, local) : null,
+    renderAddRow(share),
+    share.isPublished || !hasAnyGrant(share)
+      ? null
+      : m(
+          "div",
+          { id: "ws-share-off-notice", class: "shrink-0" },
+          m(
+            Notice,
+            { variant: "info" },
+            isWhole ? OFF_NOTICE_WORKSPACE : OFF_NOTICE_APP,
+          ),
+        ),
+    renderGrantList(share),
+  ];
+}
+
+/** Whether anyone is granted anything anywhere in this workspace. An app's own
+ * list can be empty while the whole workspace's grants still admit people to it. */
+function hasAnyGrant(share: SharePanelModel): boolean {
+  return share.knownTargets.some((target) => share.grantCount(target) > 0);
+}
+
+/** The kind is chosen beside the value, so the two cannot drift apart. */
+function renderAddRow(share: SharePanelModel): m.Children {
+  const target = share.currentTarget;
+  const row = share.addRow(target);
+  const offAttrs = share.canAdd
+    ? {}
+    : { "aria-disabled": "true", "data-tooltip": ADD_OFF_TOOLTIP };
+  return m("section", { id: "ws-share-add", class: "mt-6 shrink-0" }, [
+    m(FormLabel, { target: "ws-share-add-value" }, "Grant permission to"),
+    target === share.wholeService ? null : renderInheritedLine(share),
+    m(
+      "div",
+      {
+        class: share.canAdd
+          ? "flex items-center gap-2"
+          : "flex items-center gap-2 opacity-40",
+      },
+      [
+        m(
+          Select,
+          {
+            id: "ws-share-add-kind",
+            name: "ws_share_add_kind",
+            width: "w-52",
+            value: row.kind,
+            ...offAttrs,
+            onchange: (event: Event) => {
+              row.kind = toGrantAddKind(
+                (event.target as HTMLSelectElement).value,
+              );
+              row.refusalMessage = null;
+            },
+          },
+          GRANT_ADD_KINDS.map((kind) =>
+            m("option", { value: kind }, ADD_KIND_TEXT[kind].label),
+          ),
+        ),
+        m(TextInput, {
+          id: "ws-share-add-value",
+          name: "ws_share_add_value",
+          extra:
+            row.refusalMessage === null
+              ? "flex-1 min-w-0"
+              : "flex-1 min-w-0 !border-important focus:!outline-important",
+          placeholder: ADD_KIND_TEXT[row.kind].placeholder,
+          value: row.value,
+          ...offAttrs,
+          oninput: (event: InputEvent) => {
+            row.value = (event.target as HTMLInputElement).value;
+            row.refusalMessage = null;
+          },
+          onkeydown: (event: KeyboardEvent) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            submitAddRow(share);
+          },
+        }),
+        m(
+          Button,
+          {
+            id: "ws-share-add-btn",
+            variant: "secondary",
+            ...offAttrs,
+            onclick: () => submitAddRow(share),
+          },
+          [m(Icon16, { name: "plus" }), "Add"],
+        ),
+      ],
+    ),
+    row.refusalMessage === null
+      ? null
+      : m(
+          "p",
+          {
+            id: "ws-share-refusal",
+            class: "mt-1.5 type-helper text-important",
+          },
+          row.refusalMessage,
+        ),
   ]);
 }
 
-/** The profile picture, or a monogram from the name/email, for an account row. */
-function renderProfilePicture(
-  pictureUrl: string | null,
-  monogramSeed: string,
-): m.Children {
-  const pictureClass =
-    ROW_LEAD_CLASS + " bg-fill-hover text-tertiary type-helper overflow-hidden";
-  if (pictureUrl) {
+/**
+ * A count stands in for the names, so the line stays one line however many
+ * there are.
+ */
+function renderInheritedLine(share: SharePanelModel): m.Children {
+  const { domainCount, individualCount } = share.inheritedCounts();
+  return m(
+    "p",
+    { id: "ws-share-inherited", class: "mb-1.5 type-helper text-tertiary" },
+    [
+      m(
+        "button",
+        {
+          type: "button",
+          class: "text-accent cursor-pointer hover:underline",
+          onclick: () => share.selectTarget(share.wholeService),
+        },
+        "Permissions granted to the whole workspace",
+      ),
+      ` will also apply here. ${plural(domainCount, "domain")} and ` +
+        `${plural(individualCount, "individual")} have been granted access.`,
+    ],
+  );
+}
+
+function plural(count: number, noun: string): string {
+  return count === 1 ? `${count} ${noun}` : `${count} ${noun}s`;
+}
+
+function submitAddRow(share: SharePanelModel): void {
+  if (!share.canAdd) return;
+  const target = share.currentTarget;
+  const row = share.addRow(target);
+  share.addGrant(target, row.kind, row.value);
+}
+
+/** The target's own grant list: the one part of the pane that scrolls. */
+function renderGrantList(share: SharePanelModel): m.Children {
+  const grants = share.grantsFor(share.currentTarget);
+  if (grants.length === 0)
+    return m(
+      "p",
+      {
+        id: "ws-share-empty",
+        // mt-6 keeps the box clear of the tooltip the disabled add row shows.
+        class:
+          "mt-6 shrink-0 rounded-md border border-dashed border-default p-3 " +
+          "type-body text-tertiary",
+      },
+      "Nobody has been granted access yet.",
+    );
+  return m(
+    "div",
+    {
+      id: "ws-share-grants",
+      class:
+        "mt-4 flex flex-1 min-h-0 flex-col gap-1.5 overflow-y-auto " +
+        "[scrollbar-gutter:stable]",
+    },
+    grants.map((grant) => renderGrantRow(share, grant)),
+  );
+}
+
+function renderGrantRow(share: SharePanelModel, grant: Grant): m.Children {
+  const grantee = grant.grantee;
+  const isDomain = grantee.kind === "email_domain";
+  const text = grantText(share, grant);
+  return m(
+    "div",
+    {
+      key: grant.key,
+      "data-grant-row": grant.key,
+      class:
+        ROW_CLASS +
+        " " +
+        rowSurfaceClass(share, isDomain) +
+        (isJustAdded(share, grant) ? " grant-row-added" : ""),
+      // Nobody is told about a domain grant; the row admits people the granter
+      // has never named.
+      ...(isDomain
+        ? {
+            "data-tooltip":
+              `People at ${grantee.value} will not hear about this ` +
+              "unless you send them the link yourself",
+          }
+        : {}),
+    },
+    [
+      renderGrantLead(share, grant),
+      m(
+        "span",
+        {
+          "data-grant-name": grant.key,
+          class: "type-body text-primary whitespace-nowrap",
+        },
+        text.primary,
+      ),
+      text.secondary === null
+        ? null
+        : m(
+            "span",
+            { class: "type-body text-tertiary whitespace-nowrap" },
+            text.secondary,
+          ),
+      m("span", { class: "grow" }),
+      // Reserved for the invitation work: an outcome per row, and the control
+      // that starts one. Both keep their height so filling them later does not
+      // move the row.
+      m("span", {
+        "data-slot": "status",
+        class: "flex h-6 shrink-0 items-center",
+      }),
+      m("span", {
+        "data-slot": "action",
+        class: "flex h-6 shrink-0 items-center",
+      }),
+      renderGrantState(share, grant),
+      m(
+        "button",
+        {
+          type: "button",
+          class:
+            "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
+            "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
+          "aria-label": isDomain
+            ? `Remove anyone at ${grantee.value}`
+            : `Remove ${text.primary}`,
+          onclick: () => share.removeGrant(share.currentTarget, grant.key),
+        },
+        m(Icon16, { name: "close" }),
+      ),
+    ],
+  );
+}
+
+/** A row's surface: its kind's while sharing is on, and one flat grey for every
+ * kind while it is off. */
+function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
+  if (!share.isPublished) return ROW_INACTIVE_CLASS;
+  return isDomain ? ROW_DOMAIN_CLASS : ROW_PERSON_CLASS;
+}
+
+function renderGrantState(share: SharePanelModel, grant: Grant): m.Children {
+  const status = grant.status;
+  if (status.state === "saving")
     return m(
       "span",
-      { class: pictureClass },
-      m("img", {
-        src: pictureUrl,
-        alt: "",
-        class: "h-6 w-6 object-cover",
-      }),
-    );
-  }
-  return m(
-    "span",
-    { class: pictureClass },
-    monogramSeed.slice(0, 1).toUpperCase(),
-  );
-}
-
-/** The empty dashed circle of an invited address that has no account yet. */
-function renderPendingAccountPlaceholder(): m.Children {
-  return m("span", {
-    class: ROW_LEAD_CLASS + " border border-dashed border-default",
-  });
-}
-
-function renderDomainGlyph(): m.Children {
-  return m(
-    "span",
-    { class: ROW_LEAD_CLASS + " text-tertiary" },
-    m(Icon16, { name: "globe" }),
-  );
-}
-
-function renderEntryText(share: ShareModel, entry: ShareEntry): m.Children {
-  switch (entry.kind) {
-    case "user": {
-      const record = share.identityFor(entry.userId);
-      const name = record?.display_name ?? "";
-      const email = record?.email ?? "";
-      const primary = name || email || entry.userId;
-      const secondary = name && email ? email : "";
-      return renderGranteeText(
-        renderProfilePicture(record?.profile_picture_url ?? null, primary),
-        primary,
-        secondary ? [` (${secondary})`] : [],
-      );
-    }
-    case "email":
-      return renderGranteeText(renderPendingAccountPlaceholder(), entry.email, [
-        " (hasn't signed up yet)",
-      ]);
-    case "domain":
-      return renderGranteeText(renderDomainGlyph(), entry.domain, [
-        " (anyone at this domain)",
-      ]);
-  }
-}
-
-function entryRemovalLabel(share: ShareModel, entry: ShareEntry): string {
-  switch (entry.kind) {
-    case "user":
-      return share.identityFor(entry.userId)?.email ?? entry.userId;
-    case "email":
-      return entry.email;
-    case "domain":
-      return entry.domain;
-  }
-}
-
-function renderAclRow(share: ShareModel, entry: ShareEntry): m.Children {
-  return m("div", { class: ACL_ROW_CLASS }, [
-    m("span", { class: ACL_ROW_TEXT_CLASS }, renderEntryText(share, entry)),
-    m(
-      "button",
       {
-        type: "button",
+        // The address beside this never yields: it cannot shrink below its own
+        // text, so something has to give when a long one leaves no room. This
+        // does, down to the spinner alone, rather than pushing the address out
+        // of the row.
         class:
-          "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
-          "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
-        "aria-label": `Remove ${entryRemovalLabel(share, entry)}`,
-        disabled: !share.isEditorEditable,
-        onclick: () => share.removeEntry(entry),
+          "flex min-w-0 items-center gap-1.5 overflow-hidden " +
+          "type-helper text-tertiary",
       },
-      m(Icon16, { name: "close" }),
+      [
+        m(Spinner, { size: "sm", extra: "shrink-0" }),
+        m("span", { class: "min-w-0 truncate" }, SAVING_LABEL),
+      ],
+    );
+  if (status.state !== "failed") return null;
+  return m("span", { class: "flex min-w-0 items-center gap-1.5" }, [
+    m(
+      "span",
+      {
+        class: "min-w-0 truncate type-helper text-important",
+        "data-tooltip": status.failureMessage,
+      },
+      status.failureMessage,
+    ),
+    m(
+      Button,
+      {
+        variant: "ghost",
+        size: "icon",
+        onclick: () => share.retryGrant(share.currentTarget, grant.key),
+      },
+      "Retry",
     ),
   ]);
 }
 
-function addDraftEntry(share: ShareModel, local: ShareTabLocalState): void {
-  const entry = local.addEntryDraft.trim();
-  if (!entry) return;
-  void share.addEntry(entry);
-  local.addEntryDraft = "";
+/** The box every row leads with, so the names line up down the list. */
+function renderGrantLead(share: SharePanelModel, grant: Grant): m.Children {
+  const grantee = grant.grantee;
+  if (grantee.kind === "email_domain")
+    return m(
+      "span",
+      {
+        class:
+          ROW_LEAD_CLASS +
+          " border border-dashed border-strong text-tertiary type-helper",
+      },
+      "@",
+    );
+  if (grantee.kind === "email")
+    return m(
+      "span",
+      {
+        class:
+          ROW_LEAD_CLASS + " border border-dashed border-strong text-tertiary",
+      },
+      m(Icon16, { name: "user-plus", size: "sm" }),
+    );
+  const record = share.identityFor(grantee.userId);
+  const pictureUrl = record?.profile_picture_url ?? null;
+  if (pictureUrl !== null)
+    return m(
+      "span",
+      { class: ROW_LEAD_CLASS + " bg-fill-active overflow-hidden" },
+      m("img", { src: pictureUrl, alt: "", class: "h-6 w-6 object-cover" }),
+    );
+  return m(
+    "span",
+    { class: ROW_LEAD_CLASS + " bg-fill-active text-secondary type-helper" },
+    monogram(grantText(share, grant).primary),
+  );
 }
 
-async function copyShareUrl(
-  share: ShareModel,
+function grantText(
+  share: SharePanelModel,
+  grant: Grant,
+): { primary: string; secondary: string | null } {
+  const grantee = grant.grantee;
+  if (grantee.kind === "email_domain")
+    return { primary: `Anyone at ${grantee.value}`, secondary: null };
+  if (grantee.kind === "email")
+    return {
+      primary: grantee.value,
+      // Only a row the workspace has taken back can say this: until the account
+      // lookup has answered, nobody knows whether they have signed up.
+      secondary:
+        grant.status.state === "settled" ? "(hasn't signed up yet)" : null,
+    };
+  const record = share.identityFor(grantee.userId);
+  const email = record?.email ?? grantee.value;
+  const name = record?.display_name ?? "";
+  if (name !== "") return { primary: name, secondary: email };
+  return { primary: email ?? grantee.userId, secondary: null };
+}
+
+function monogram(text: string): string {
+  const words = text.split(/\s+/).filter((word) => word !== "");
+  if (words.length === 0) return "";
+  const initials =
+    words.length === 1 ? words[0].slice(0, 1) : words[0][0] + words[1][0];
+  return initials.toUpperCase();
+}
+
+function isJustAdded(share: SharePanelModel, grant: Grant): boolean {
+  const addedAtMs = grant.addedAtMs;
+  return addedAtMs !== null && share.nowMs() - addedAtMs < JUST_ADDED_MS;
+}
+
+/** Absent while publishing is off, because there is nothing to open. */
+function renderLinkSection(
+  share: SharePanelModel,
   local: ShareTabLocalState,
+): m.Children {
+  const target = share.currentTarget;
+  // The link is shown only once it can actually be opened: a workspace still
+  // being brought up has an address that answers nothing yet, and an app that
+  // has not registered one has no address at all.
+  const url =
+    share.isAwaitingLink || share.isAwaitingLabel(target)
+      ? null
+      : share.targetUrl(target);
+  const copied = local.copied;
+  const isCopied =
+    copied !== null &&
+    copied.target === target &&
+    share.nowMs() - copied.atMs < COPY_FLASH_MS;
+  return m("section", { id: "ws-share-link", class: "mt-6 shrink-0" }, [
+    m("p", { class: "type-label text-primary" }, "Link"),
+    m(
+      "div",
+      { class: "mt-1.5 flex items-center gap-2" },
+      url === null
+        ? m("div", { class: LINK_BOX_CLASS }, [
+            m(Spinner, { size: "sm", extra: "shrink-0" }),
+            "Preparing the link",
+          ])
+        : [
+            m(CopyField, {
+              value: url,
+              extra: isCopied
+                ? "flex-1 min-w-0 border-success bg-[var(--c-success-surface)]"
+                : "flex-1 min-w-0",
+              "aria-label": "The link to this target",
+            }),
+            m(
+              Button,
+              {
+                id: "ws-share-copy",
+                variant: "secondary",
+                size: "icon",
+                "aria-label":
+                  target === share.wholeService
+                    ? "Copy the link"
+                    : `Copy the link to ${target}`,
+                onclick: () => {
+                  void copyLink(share, local, url);
+                },
+              },
+              m(Icon16, { name: isCopied ? "check" : "copy" }),
+            ),
+          ],
+    ),
+    url === null
+      ? null
+      : m(
+          "p",
+          { class: "mt-1.5 type-helper text-tertiary" },
+          "Only people granted permission can open this link.",
+        ),
+  ]);
+}
+
+async function copyLink(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  url: string,
 ): Promise<void> {
-  const url = share.targetUrl(share.currentTarget);
-  if (!url) return;
+  const clipboard = navigator.clipboard;
+  // The link is on screen and selectable either way, so a clipboard that
+  // refuses costs the confirmation and nothing else.
+  if (!clipboard) return;
   try {
-    await navigator.clipboard.writeText(url);
-  } catch (error) {
-    share.errorMessage =
-      "Could not copy the link: " +
-      (error instanceof Error ? error.message : String(error));
-    m.redraw();
+    await clipboard.writeText(url);
+  } catch {
     return;
   }
-  local.isCopyConfirmed = true;
-  if (local.copyFlashTimer !== null) window.clearTimeout(local.copyFlashTimer);
-  local.copyFlashTimer = window.setTimeout(() => {
-    local.copyFlashTimer = null;
-    local.isCopyConfirmed = false;
+  local.copied = { target: share.currentTarget, atMs: share.nowMs() };
+  if (local.copyFlashHandle !== null) share.cancel(local.copyFlashHandle);
+  local.copyFlashHandle = share.schedule(() => {
+    local.copyFlashHandle = null;
     m.redraw();
   }, COPY_FLASH_MS);
   m.redraw();
-}
-
-function cancelCopyFlash(local: ShareTabLocalState): void {
-  if (local.copyFlashTimer !== null) window.clearTimeout(local.copyFlashTimer);
-  local.copyFlashTimer = null;
-  local.isCopyConfirmed = false;
 }

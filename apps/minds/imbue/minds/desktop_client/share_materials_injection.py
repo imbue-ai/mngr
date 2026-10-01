@@ -21,6 +21,7 @@ import base64
 import binascii
 import shlex
 import threading
+from collections.abc import Sequence
 from typing import Final
 
 from loguru import logger
@@ -62,11 +63,11 @@ class ShareInjectionError(RuntimeError):
 class MachineSharingLockRegistry(MutableModel):
     """Per-machine locks serializing the desktop backend's sharing writes.
 
-    Two concurrent sharing edits for one machine (the Share pane open from the
+    Two concurrent sharing edits for one machine (the share panel open from the
     titlebar and the workspace list, or two windows) would otherwise run their
-    full-document replaces fully interleaved; the machine-sharing PUT/DELETE
-    handlers hold this lock so one machine's edits serialize regardless of
-    which pane or window they came from.
+    full-document replaces fully interleaved; the machine-sharing handlers hold
+    this lock so one machine's edits serialize regardless of which panel or
+    window they came from.
     """
 
     _lock_by_host_id: dict[str, threading.Lock] = PrivateAttr(default_factory=dict)
@@ -216,14 +217,14 @@ _PROBE_GRANTS_B64_PREFIX: Final[str] = "MNGR_SHARE_GRANTS_B64="
 _PROBE_ABSENT_VALUE: Final[str] = "ABSENT"
 _PROBE_UNREADABLE_VALUE: Final[str] = "UNREADABLE"
 
-# One script answering everything the enable flow needs to know about the
+# One script answering everything the publish flow needs to know about the
 # workspace, so the whole read costs a single exec round trip. The grants read
-# is checked (a failed redirect/read fails the command substitution) so an
-# existing-but-unreadable document reports UNREADABLE rather than looking
-# absent -- the caller's data-loss guard depends on the distinction. `echo |
-# tr` rather than `base64 -w0`: the workspace is a Debian container today, but
-# the pipe form works on any base64 (echo is safe here -- base64 output never
-# starts with a dash and carries no escapes).
+# is checked (a failed redirect/read fails the command substitution) so a
+# document that exists but could not be read reports UNREADABLE and raises,
+# rather than looking absent and being replaced. `echo | tr` rather than
+# `base64 -w0`: the workspace is a Debian container today, but the pipe form
+# works on any base64 (echo is safe here -- base64 output never starts with a
+# dash and carries no escapes).
 _PROBE_SHARE_STATE_SCRIPT: Final[str] = (
     f"if test -d {_SHARE_GATEWAY_SERVICE_DIR}; then echo {_PROBE_GATEWAY_PREFIX}1; "
     f"else echo {_PROBE_GATEWAY_PREFIX}0; fi; "
@@ -244,7 +245,7 @@ class ShareAgentProbe(FrozenModel):
         description=(
             "Whether the template ships the share-gateway service. Workspaces from a "
             "pre-share-gateway template (minds-v0.3.11 and older) have nothing watching "
-            "share.env, so a share enabled for them can never come up. "
+            "share.env, so a workspace published from one can never come up. "
             "CLEANUP: this signal (and its caller's refusal) can be removed once no supported "
             "workspaces predate the share gateway -- i.e. after the first post-v0.3.11 release "
             "is deployed and the remaining old workspaces have run update-self."
@@ -252,8 +253,8 @@ class ShareAgentProbe(FrozenModel):
     )
     has_share_env: bool = Field(
         description=(
-            "Whether share.env is present (the share stack's on-switch). Distinguishes an "
-            "actively-shared workspace from one whose earlier enable failed between the "
+            "Whether share.env is present (the share stack's on-switch). Distinguishes a "
+            "published workspace from one whose earlier publish failed between the "
             "connector-side create and the injection."
         )
     )
@@ -311,28 +312,39 @@ def probe_share_state_in_agent(agent_address: str, mngr_caller: MngrCaller) -> S
     )
 
 
+def clear_share_publication_from_agent(agent_address: str, mngr_caller: MngrCaller) -> None:
+    """Remove share.env and the gateway's status file, keeping the grants document."""
+    _remove_share_files_from_agent(agent_address, (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE), mngr_caller)
+
+
 def clear_share_materials_from_agent(agent_address: str, mngr_caller: MngrCaller) -> None:
-    """Remove share.env, the grants file, and the gateway's status file.
+    """Remove share.env, the gateway's status file, and the grants document.
+
+    For unlinking a workspace from the account that made its grants: nobody is
+    left who can answer for them.
+    """
+    _remove_share_files_from_agent(
+        agent_address, (_SHARE_ENV_FILE, _SHARE_GATEWAY_STATUS_FILE, _SHARE_GRANTS_FILE), mngr_caller
+    )
+
+
+def _remove_share_files_from_agent(agent_address: str, relative_paths: Sequence[str], mngr_caller: MngrCaller) -> None:
+    """Delete share files inside the workspace, best effort.
 
     The share-gateway tears the stack down when share.env disappears and
-    removes its own status file on its next tick; removing it here too keeps
-    a re-share that lands inside that tick from reading the old share's
-    verdict. Best-effort: a failure leaves stale materials (the connector-side
-    relay token is already deleted, so the tunnel's next reconnect is rejected
-    anyway), which is logged but not fatal. ``--no-start``: clearing materials
-    from a stopped container must not cold-boot anything.
+    removes its own status file on its next tick; removing it here too keeps a
+    re-publish that lands inside that tick from reading the old publication's
+    verdict. A failure leaves stale materials (the connector-side relay token
+    is already deleted, so the tunnel's next reconnect is rejected anyway),
+    which is logged but not fatal. ``--no-start``: clearing files from a
+    stopped container must not cold-boot anything.
     """
     result = mngr_caller.call(
-        [
-            "exec",
-            agent_address,
-            f"rm -f {_SHARE_ENV_FILE} {_SHARE_GRANTS_FILE} {_SHARE_GATEWAY_STATUS_FILE}",
-            "--no-start",
-        ],
+        ["exec", agent_address, f"rm -f {' '.join(relative_paths)}", "--no-start"],
         timeout=_SHARE_EXEC_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        logger.warning("Failed to clear share materials from agent {}: {}", agent_address, result.stderr.strip())
+        logger.warning("Failed to clear share files from agent {}: {}", agent_address, result.stderr.strip())
 
 
 def read_share_grants_from_agent(agent_address: str, mngr_caller: MngrCaller) -> str | None:

@@ -199,9 +199,9 @@ def disassociate_workspace_account(
         return
     # Tear down the machine share for this workspace (if any): without an
     # associated account there is nobody to make authenticated connector calls
-    # for it, so an active share must not outlive the association. The relay
-    # token dies with the connector-side delete; clearing the in-workspace
-    # materials also stops its share stack.
+    # for it, and nobody answerable for its grants, so neither may outlive the
+    # association. The relay token dies with the connector-side delete;
+    # clearing the in-workspace materials also stops its share stack.
     if imbue_cloud_cli is not None:
         display_info = backend_resolver.get_agent_display_info(agent_id)
         host_id = str(display_info.host_id) if display_info is not None else ""
@@ -212,12 +212,16 @@ def disassociate_workspace_account(
             if found is not None and found[1].host_id.startswith("host-"):
                 host_id = found[1].host_id
         if host_id.startswith("host-"):
+            # Cleared whether or not the workspace is published: unpublishing
+            # keeps the grants document, and an unpublished workspace would
+            # otherwise carry the previous owner's grantees through an unlink
+            # into whoever links it next.
+            clear_share_materials_from_agent(
+                build_agent_address(agent_id, backend_resolver), imbue_cloud_cli.mngr_caller
+            )
             try:
                 share = imbue_cloud_cli.get_share_status(account=str(account.email), host_id=host_id)
                 if share is not None and share.state == "active":
-                    clear_share_materials_from_agent(
-                        build_agent_address(agent_id, backend_resolver), imbue_cloud_cli.mngr_caller
-                    )
                     imbue_cloud_cli.delete_share(account=str(account.email), host_id=host_id)
             except ImbueCloudCliError as exc:
                 logger.warning("Failed to delete the machine share during disassociation: {}", exc)

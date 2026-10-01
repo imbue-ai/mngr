@@ -1,11 +1,10 @@
-// The titlebar's five popup icons -- Permissions / Machine settings / Share
-// machine, the notification bell, and the bug-report button -- and the raised
-// copy of all five that every one of their surfaces draws over the dimmed
-// titlebar while it is open.
+// The titlebar's popup icons -- the machine tabs, the notification bell, and
+// the bug-report button -- and the raised copy of them that every one of their
+// surfaces draws over the dimmed titlebar while it is open.
 //
 // Every one of those surfaces (the docked options panel, the request popup,
-// the bell's feed, Get help) raises the same strip, so any of the five is one
-// click from any other -- no clicking out first -- and the strip reads as one
+// the bell's feed, Get help) raises the same strip, so any icon is one click
+// from any other -- no clicking out first -- and the strip reads as one
 // strip wherever you are.
 //
 // The copies are drawn at the real buttons' own measured window rects (the
@@ -57,7 +56,7 @@ export const TITLEBAR_POPUP_ICONS: readonly TitlebarPopupIcon[] = [
     id: "share",
     buttonId: "ws-tab-share",
     icon: "user-plus",
-    label: "Share machine",
+    label: "Sharing",
   },
   {
     id: "notifications",

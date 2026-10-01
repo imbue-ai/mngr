@@ -22,7 +22,6 @@
 @source inline("rounded-2xl");
 
 /*
- * ---------------------------------------------------------------------------
  * Design tokens -- light / dark theming. Built in two layers so a theme swap
  * is a single class on <html> with zero component changes:
  *
@@ -40,7 +39,6 @@
  * inverted surface. Both are pure black / pure white at three alpha steps
  * (primary 100%, secondary, tertiary) -- no hue. Regular and inverse mirror
  * each other and swap black<->white between light and dark.
- * ---------------------------------------------------------------------------
  */
 /* Light is the default (:root); ``.light`` re-asserts it so a subtree can be
  * forced light even under a ``.dark`` ancestor (and vice versa) -- useful for
@@ -246,7 +244,6 @@
 }
 
 /*
- * ---------------------------------------------------------------------------
  * Hand-written CSS that Tailwind doesn't cover (migrated verbatim from the
  * former tokens.css): per-workspace accent spine, spinner keyframes, the
  * .titlebar-surface self-theming recipe, shared card / pill / option /
@@ -260,7 +257,6 @@
  * so there is no JS contrast math and no --titlebar-fg. --workspace-accent /
  * --titlebar-bg feed the .accent-spine / .accent-swatch / .titlebar-* rules
  * below.
- * ---------------------------------------------------------------------------
  */
 
 :root {
@@ -676,10 +672,9 @@ body:has(#notice-band) .workspace-surface {
   opacity: 0.5;
   cursor: not-allowed;
 }
-/* A flip whose write is still in flight. The control is disabled for the
-   duration (the change has not happened yet, and a second one must not race
-   it), so this has to out-specify the :disabled rule above: a switch that is
-   working reads as "wait", not as "broken". */
+/* A flip whose write is still in flight: it reads as "wait", not as "broken".
+   A pane that disables its switch while the write lands still gets this look,
+   hence the doubled selector out-specifying the :disabled rule above. */
 .perm-switch.is-busy,
 .perm-switch.is-busy:disabled {
   opacity: 0.6;
@@ -711,6 +706,24 @@ body:has(#notice-band) .workspace-surface {
     -8px 0 0 0 var(--c-fill-subtle),
     8px 0 0 0 var(--c-fill-subtle);
   border-radius: 8px;
+}
+
+/*
+ * A share-panel grant row added a moment ago. The success tint is laid over the
+ * row's own surface as an inset shadow rather than a background, so it fades
+ * away to whichever surface the row already has.
+ */
+@keyframes grant-row-added {
+  from { box-shadow: inset 0 0 0 9999px var(--c-success-surface); }
+  to { box-shadow: inset 0 0 0 9999px transparent; }
+}
+.grant-row-added {
+  animation: grant-row-added 6s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .grant-row-added {
+    animation: none;
+  }
 }
 
 /*
@@ -916,7 +929,6 @@ body:has(#notice-band) .workspace-surface {
 }
 
 /*
- * ---------------------------------------------------------------------------
  * The start flow and the creation page (views/pages/StartPage.ts,
  * views/pages/CreatingPage.ts, views/pages/start/transcript.ts).
  *
@@ -927,7 +939,6 @@ body:has(#notice-band) .workspace-surface {
  * 0 and fades in at its own delay, so the block is its final size at once and
  * nothing reflows as it fills. Both delays ride in as custom properties from
  * the models, which is where the schedule is worked out.
- * ---------------------------------------------------------------------------
  */
 @keyframes start-char-in {
   to { opacity: 1; }

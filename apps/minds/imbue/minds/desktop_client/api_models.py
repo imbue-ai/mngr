@@ -370,17 +370,22 @@ class SharingGrantsDocument(FrozenModel):
 
 
 class MachineSharingRequest(ApiRequestModel):
-    """Body for enabling/updating a machine's sharing grants document.
+    """Body of the host-keyed compat shim: publish the machine, then save this grants document.
 
     ``workspace`` grants admit every service; ``services`` entries admit only
-    that one service's origin. At least one grantee is required overall (an
-    empty document would share with nobody and is rejected by the handler).
+    that one service's origin. A document that grants nobody is accepted.
     """
 
     workspace: SharingGrantList = Field(default=SharingGrantList(), description="Workspace-level grants")
     services: dict[str, SharingGrantList] = Field(
         default_factory=dict, description="Per-service grants, keyed by registered service name"
     )
+
+
+class WorkspaceGrantsRequest(ApiRequestModel):
+    """Body for replacing a workspace's grants document, published or not."""
+
+    grants: SharingGrantsDocument = Field(description="The whole document to store, replacing the current one")
 
 
 class BugReportRequest(ApiRequestModel):
@@ -656,7 +661,7 @@ class SharingReadinessResponse(FrozenModel):
         description=(
             "The workspace share gateway's own bring-up state while the share is not live: up, "
             "retrying (a failed attempt, next one scheduled), or halted (a permanent connector "
-            "refusal; disable and re-enable sharing to retry). None when ready or unknown."
+            "refusal; turn publishing off and on again to retry). None when ready or unknown."
         ),
     )
     gateway_error: str | None = Field(

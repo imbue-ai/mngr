@@ -1,5 +1,5 @@
 import m from "mithril";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AnyVnode } from "../../../testing";
 import {
   allText,
@@ -7,199 +7,1257 @@ import {
   classTokensOf,
   collectVnodes,
   renderRoot,
-  shareModelOptions,
+  settle,
+  sharePanelOptions,
 } from "../../../testing";
-import type {
-  MachineSharingResponse,
-  ShareModelOptions,
-} from "../../../models/workspaceOptions";
-import { ShareModel } from "../../../models/workspaceOptions";
-import { Icon16 } from "../../components/Icon";
+import type { MachineSharingResponse } from "../../../models/workspaceOptions";
+import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
+import type { SharePanelModelOptions } from "../../../models/sharePanel";
+import { GRANT_ADD_KINDS, SharePanelModel } from "../../../models/sharePanel";
+import { Modal } from "../../components/Modal";
+import { Spinner } from "../../components/Spinner";
 import { ShareTab } from "./ShareTab";
 
-const OWNER = "owner@example.com";
-const OWNER_PICTURE = "https://pictures.example/owner.png";
+const WHOLE = "system_interface";
 
-/** A ready share model whose whole-machine scope carries one grantee of each
- * kind: an account with a record, an invited address, and a domain. The owner
- * has no name and no picture unless `owner` says otherwise. */
-async function readyShareModel(
-  owner: Partial<
-    Pick<ShareModelOptions, "ownerDisplayName" | "ownerProfilePictureUrl">
-  > = {},
-  documentOverrides: Partial<MachineSharingResponse> = {},
-): Promise<ShareModel> {
-  const response: MachineSharingResponse = {
-    enabled: true,
-    url: "https://m.relay.example/",
-    grants: {
-      workspace: {
-        users: ["user-2"],
-        emails: [OWNER, "newcomer@example.com"],
-        email_domains: ["example.org"],
-      },
-      services: {},
-    },
-    identities: {
-      "user-2": {
-        user_id: "user-2",
-        email: "bob@example.com",
-        display_name: "Bob",
-        profile_picture_url: null,
-      },
-    },
-    ...documentOverrides,
-  };
-  const model = new ShareModel(
-    shareModelOptions({
-      ownerEmail: OWNER,
-      appServices: [],
-      serviceLabels: { system_interface: "shell-r4nd" },
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+/** A loaded panel over `response`, with the shared fixture's two apps: `web`,
+ * whose address the backend knows, and `docs`, whose it does not. */
+async function readyPanel(
+  response: Partial<MachineSharingResponse> = {},
+  overrides: Partial<SharePanelModelOptions> = {},
+): Promise<SharePanelModel> {
+  const model = new SharePanelModel(
+    sharePanelOptions({
       fetchJson: () =>
-        Promise.resolve({ ok: true, status: 200, body: response }),
-      ...owner,
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          body: {
+            enabled: false,
+            url: null,
+            grants: {
+              workspace: { emails: [], email_domains: [] },
+              services: {},
+            },
+            ...response,
+          },
+        }),
+      ...overrides,
     }),
   );
   await model.load();
   return model;
 }
 
-function renderTab(share: ShareModel): m.Vnode {
+/** A published panel whose link is live. */
+async function publishedPanel(
+  response: Partial<MachineSharingResponse> = {},
+): Promise<SharePanelModel> {
+  return readyPanel({
+    enabled: true,
+    url: "https://m.relay.example/",
+    ...response,
+  });
+}
+
+function renderTab(share: SharePanelModel): m.Vnode {
   return renderRoot(ShareTab, { share, workspaceName: "alpha" });
 }
 
-/** The keyed grantee rows of the editor, owner first, in render order. */
-function granteeRows(root: m.Vnode): AnyVnode[] {
-  const list = collectVnodes(root).find(
-    (vnode) => attrsOf(vnode).id === "ws-share-emails",
-  );
-  expect(list).toBeDefined();
-  return (list?.children as AnyVnode[]) ?? [];
+/** Draw the panel repeatedly against one component instance, as a mount does:
+ * the dialog and the copy confirmation live in the view's own closure, which a
+ * fresh instance per draw would forget. */
+function mountedTab(share: SharePanelModel): () => m.Vnode {
+  const instance = ShareTab() as unknown as m.Component;
+  return () => {
+    const vnode = m(instance, {
+      share,
+      workspaceName: "alpha",
+    } as unknown as m.Attributes) as m.Vnode;
+    return (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+      instance,
+      vnode,
+    );
+  };
 }
 
-function rowByText(root: m.Vnode, text: string): AnyVnode {
-  const row = granteeRows(root).find((vnode) => allText(vnode).includes(text));
-  expect(row, `no grantee row mentioning ${text}`).toBeDefined();
+function byId(root: unknown, id: string): AnyVnode | undefined {
+  return collectVnodes(root).find((vnode) => attrsOf(vnode).id === id);
+}
+
+/** The nav entries, in the order the nav lists them. */
+function navEntries(root: unknown): AnyVnode[] {
+  return collectVnodes(root).filter(
+    (vnode) => attrsOf(vnode)["data-share-target"] !== undefined,
+  );
+}
+
+/** The grant rows, in the order the list draws them. */
+function grantRows(root: unknown): AnyVnode[] {
+  return collectVnodes(root).filter(
+    (vnode) => attrsOf(vnode)["data-grant-row"] !== undefined,
+  );
+}
+
+function rowByText(root: unknown, text: string): AnyVnode {
+  const row = grantRows(root).find((vnode) => allText(vnode).includes(text));
+  expect(row, `no grant row mentioning ${text}`).toBeDefined();
   return row as AnyVnode;
 }
 
-/** The 24 px lead box every grantee row starts with. */
-function leadBox(row: AnyVnode): AnyVnode {
-  const lead = collectVnodes(row).find((vnode) => {
-    const tokens = classTokensOf(vnode);
-    return (
-      tokens.includes("h-6") &&
-      tokens.includes("w-6") &&
-      tokens.includes("rounded-full")
-    );
-  });
-  expect(lead, "row has no 24 px lead box").toBeDefined();
-  return lead as AnyVnode;
+/** The controls of the add row, in the order they are read. */
+function addControls(root: unknown): AnyVnode[] {
+  return [
+    byId(root, "ws-share-add-kind") as AnyVnode,
+    byId(root, "ws-share-add-value") as AnyVnode,
+    byId(root, "ws-share-add-btn") as AnyVnode,
+  ];
 }
 
-describe("ShareTab moved-address notice", () => {
-  it("shows the one-line notice only when the read moved the share", async () => {
-    const moved = await readyShareModel(
-      {},
-      { migrated_domain_from: "old.relay.example" },
+function chooseKind(root: unknown, kind: string): void {
+  const onchange = attrsOf(addControls(root)[0]).onchange as (
+    event: Event,
+  ) => void;
+  onchange({ target: { value: kind } } as unknown as Event);
+}
+
+function type(root: unknown, value: string): void {
+  const oninput = attrsOf(addControls(root)[1]).oninput as (
+    event: InputEvent,
+  ) => void;
+  oninput({ target: { value } } as unknown as InputEvent);
+}
+
+function pressAdd(root: unknown): void {
+  (attrsOf(addControls(root)[2]).onclick as () => void)();
+}
+
+describe("ShareTab publish widget", () => {
+  it("heads the switch Enable sharing, reading No, over the sharing sentence", async () => {
+    const share = await readyPanel();
+
+    const widget = byId(renderTab(share), "ws-share-publish");
+
+    expect(widget).toBeDefined();
+    expect(allText(widget)).toContain("Enable sharing");
+    expect(allText(widget)).not.toMatch(/publish/i);
+    expect(allText(widget)).toContain(
+      "Sharing gives this workspace an address on the internet. " +
+        "Only people granted access can open it.",
     );
-    const movedNotice = collectVnodes(renderTab(moved)).find(
-      (vnode) => attrsOf(vnode).id === "ws-share-moved",
+    const control = byId(widget, "ws-share-publish-switch");
+    expect(attrsOf(control as AnyVnode).role).toBe("switch");
+    expect(attrsOf(control as AnyVnode)["aria-label"]).toBe("Enable sharing");
+    expect(attrsOf(control as AnyVnode)["aria-checked"]).toBe("false");
+    expect(allText(widget)).toContain("No");
+  });
+
+  it("reads Yes and keeps the sharing sentence once the workspace is published", async () => {
+    const share = await publishedPanel();
+
+    const widget = byId(renderTab(share), "ws-share-publish");
+
+    expect(
+      attrsOf(byId(widget, "ws-share-publish-switch") as AnyVnode)[
+        "aria-checked"
+      ],
+    ).toBe("true");
+    expect(allText(widget)).toContain("Yes");
+    expect(allText(widget)).toContain(
+      "Sharing gives this workspace an address on the internet. " +
+        "Only people granted access can open it.",
     );
-    expect(movedNotice).toBeDefined();
-    expect(allText(movedNotice as AnyVnode)).toContain(
-      "Sharing moved to a new address",
+  });
+
+  it("rules the switch and its sentence off from the targets below", async () => {
+    const share = await publishedPanel();
+
+    const vnodes = collectVnodes(renderTab(share));
+    const widgetIdx = vnodes.findIndex(
+      (vnode) => attrsOf(vnode).id === "ws-share-publish",
+    );
+    const ruleIdx = vnodes.findIndex((vnode) => vnode.tag === "hr");
+    const navIdx = vnodes.findIndex((vnode) => vnode.tag === "nav");
+
+    expect(widgetIdx).toBeGreaterThanOrEqual(0);
+    expect(ruleIdx).toBeGreaterThan(widgetIdx);
+    expect(navIdx).toBeGreaterThan(ruleIdx);
+    expect(
+      collectVnodes(vnodes[widgetIdx]).some((vnode) => vnode.tag === "hr"),
+    ).toBe(false);
+  });
+
+  it("says the link is being generated and names only the step under way", async () => {
+    const share = await publishedPanel();
+    share.isLive = false;
+    share.isCertIssued = true;
+
+    const block = byId(renderTab(share), "ws-share-provisioning");
+
+    expect(allText(block)).toContain(
+      "Generating a secure link. This takes a while because we want to " +
+        "protect you from bad actors on the internet.",
+    );
+    expect(allText(block)).toContain("Connecting to the relay");
+    expect(allText(block)).not.toContain("Creating link");
+    expect(allText(block)).not.toContain("Setting up encryption");
+    expect(allText(block)).not.toContain("Verifying end to end");
+    expect(allText(block)).toContain(
+      "People can be added while the link is being prepared.",
+    );
+    expect(collectVnodes(block).some((vnode) => vnode.tag === Spinner)).toBe(
+      true,
+    );
+  });
+});
+
+describe("ShareTab target nav", () => {
+  it("lists the whole workspace first, then each app with its count", async () => {
+    const share = await publishedPanel({
+      grants: {
+        workspace: {
+          emails: ["friend@example.com"],
+          email_domains: ["example.org"],
+        },
+        services: { web: { emails: ["dev@example.com"], email_domains: [] } },
+      },
+    });
+
+    const entries = navEntries(renderTab(share));
+
+    expect(entries.map((entry) => attrsOf(entry)["data-share-target"])).toEqual(
+      [WHOLE, "web", "docs"],
+    );
+    expect(allText(entries[0])).toContain("Whole workspace");
+    expect(allText(entries[0])).toContain("2");
+    expect(allText(entries[1])).toContain("1");
+    expect(allText(entries[2])).toContain("0");
+  });
+
+  it("holds only the entries, with no rule between the whole workspace and the apps", async () => {
+    const share = await publishedPanel();
+
+    const nav = collectVnodes(renderTab(share)).find(
+      (vnode) => vnode.tag === "nav",
+    ) as AnyVnode;
+
+    expect((nav.children as AnyVnode[]).map((child) => child.tag)).toEqual([
+      "button",
+      "button",
+      "button",
+    ]);
+  });
+
+  it("puts each count in a badge rather than leaving it a bare numeral", async () => {
+    const share = await publishedPanel();
+
+    for (const entry of navEntries(renderTab(share))) {
+      const count = collectVnodes(entry).find(
+        (vnode) => attrsOf(vnode)["data-share-count"] !== undefined,
+      );
+      expect(count).toBeDefined();
+      const tokens = classTokensOf(count as AnyVnode);
+      expect(tokens).toContain("bg-fill-subtle");
+      expect(tokens).toContain("rounded-md");
+      expect(tokens).toContain("type-helper");
+      expect(tokens).toContain("text-secondary");
+    }
+  });
+
+  it("marks only an app whose address the backend does not know yet", async () => {
+    const share = await publishedPanel();
+
+    const entries = navEntries(renderTab(share));
+
+    expect(allText(entries[0])).not.toContain("no link yet");
+    expect(allText(entries[1])).not.toContain("no link yet");
+    expect(allText(entries[2])).toContain("no link yet");
+  });
+
+  it("selects the target it is pressed on", async () => {
+    const share = await publishedPanel();
+
+    const entries = navEntries(renderTab(share));
+    (attrsOf(entries[1]).onclick as () => void)();
+
+    expect(share.currentTarget).toBe("web");
+    expect(allText(renderTab(share))).toContain("Permissions for web");
+  });
+});
+
+describe("ShareTab link section", () => {
+  it("shows the target's link and who it opens for while published", async () => {
+    const share = await publishedPanel();
+
+    const link = byId(renderTab(share), "ws-share-link");
+
+    expect(allText(link)).toContain("Link");
+    expect(
+      collectVnodes(link).some(
+        (vnode) =>
+          attrsOf(vnode).value === "https://shell-r4nd.m.relay.example/",
+      ),
+    ).toBe(true);
+    expect(allText(link)).toContain(
+      "Only people granted permission can open this link.",
+    );
+  });
+
+  it("waits for the link rather than showing an empty field", async () => {
+    const share = await publishedPanel();
+    share.isLive = false;
+    share.selectTarget("docs");
+
+    const link = byId(renderTab(share), "ws-share-link");
+
+    expect(allText(link)).toContain("Preparing the link");
+    expect(allText(link)).not.toContain("Only people granted permission");
+  });
+
+  it("has no link section at all while publishing is off", async () => {
+    const share = await readyPanel();
+
+    expect(byId(renderTab(share), "ws-share-link")).toBeUndefined();
+  });
+});
+
+describe("ShareTab target pane", () => {
+  it("heads the pane with the target and what a permission there covers", async () => {
+    const share = await publishedPanel();
+
+    expect(allText(renderTab(share))).toContain(
+      "Permissions for the whole workspace",
+    );
+    expect(allText(renderTab(share))).toContain(
+      "Permissions below apply to every app in this workspace, and also grant " +
+        "access to files, agent chats and terminal.",
     );
 
-    const unmoved = await readyShareModel();
-    const absent = collectVnodes(renderTab(unmoved)).find(
-      (vnode) => attrsOf(vnode).id === "ws-share-moved",
+    share.selectTarget("web");
+
+    expect(allText(renderTab(share))).toContain("Permissions for web");
+    expect(allText(renderTab(share))).toContain(
+      "Permissions below apply only to the web app.",
     );
-    expect(absent).toBeUndefined();
+  });
+});
+
+describe("ShareTab add row", () => {
+  it("places the example the chosen kind calls for", async () => {
+    const share = await publishedPanel();
+
+    expect(attrsOf(addControls(renderTab(share))[1]).placeholder).toBe(
+      "name@example.com",
+    );
+
+    chooseKind(renderTab(share), "email_domain");
+
+    expect(attrsOf(addControls(renderTab(share))[1]).placeholder).toBe(
+      "example.com",
+    );
+  });
+
+  it("offers the kinds the model grants, and reads any other as one person", async () => {
+    const share = await publishedPanel();
+
+    const options = collectVnodes(addControls(renderTab(share))[0]).filter(
+      (vnode) => vnode.tag === "option",
+    );
+    expect(options.map((option) => attrsOf(option).value)).toEqual([
+      ...GRANT_ADD_KINDS,
+    ]);
+    expect(options.map((option) => allText(option))).toEqual([
+      "one person by email",
+      "everyone at a domain",
+    ]);
+
+    chooseKind(renderTab(share), "nonsense");
+
+    expect(attrsOf(addControls(renderTab(share))[1]).placeholder).toBe(
+      "name@example.com",
+    );
+    expect(share.addRow(WHOLE).kind).toBe("email");
+  });
+
+  it("grants what was typed and empties the row", async () => {
+    const share = await publishedPanel();
+
+    type(renderTab(share), "friend@example.com");
+    pressAdd(renderTab(share));
+
+    expect(share.grantsFor(WHOLE).map((grant) => grant.grantee.value)).toEqual([
+      "friend@example.com",
+    ]);
+    expect(attrsOf(addControls(renderTab(share))[1]).value).toBe("");
+  });
+
+  it("says why nothing can be granted while sharing is off, and grants nothing", async () => {
+    const share = await readyPanel();
+
+    const root = renderTab(share);
+    for (const control of addControls(root)) {
+      expect(attrsOf(control)["aria-disabled"]).toBe("true");
+      expect(attrsOf(control)["data-tooltip"]).toBe(
+        "Permissions cannot be granted while sharing is off",
+      );
+    }
+
+    type(root, "friend@example.com");
+    pressAdd(root);
+
+    expect(share.grantsFor(WHOLE)).toHaveLength(0);
+  });
+
+  it("shows a refused entry's reason where it was typed", async () => {
+    const share = await publishedPanel();
+
+    type(renderTab(share), "gmail.com");
+    chooseKind(renderTab(share), "email_domain");
+    pressAdd(renderTab(share));
+
+    expect(allText(byId(renderTab(share), "ws-share-refusal"))).toBe(
+      "gmail.com cannot be granted permissions because it is a public email provider.",
+    );
+    expect(share.grantsFor(WHOLE)).toHaveLength(0);
+    expect(String(attrsOf(addControls(renderTab(share))[1]).extra)).toContain(
+      "!border-important",
+    );
+  });
+
+  it("clears the refusal, and the mark on the input, as soon as it is retyped", async () => {
+    const share = await publishedPanel();
+    chooseKind(renderTab(share), "email_domain");
+    type(renderTab(share), "gmail.com");
+    pressAdd(renderTab(share));
+
+    type(renderTab(share), "gmail.co");
+
+    expect(byId(renderTab(share), "ws-share-refusal")).toBeUndefined();
+    expect(
+      String(attrsOf(addControls(renderTab(share))[1]).extra),
+    ).not.toContain("!border-important");
+  });
+});
+
+describe("ShareTab grant list", () => {
+  /** A published panel granting one domain, one account, one invited address
+   * and one address whose write failed. */
+  async function panelWithGrants(): Promise<SharePanelModel> {
+    const share = await publishedPanel({
+      grants: {
+        workspace: {
+          users: ["user-2"],
+          emails: ["newcomer@example.com"],
+          email_domains: ["acme.example"],
+        },
+        services: {},
+      },
+      identities: {
+        "user-2": {
+          user_id: "user-2",
+          email: "carol@example.net",
+          display_name: "Carol Reyes",
+          profile_picture_url: null,
+        },
+      },
+    });
+    share.grantsFor(WHOLE);
+    type(renderTab(share), "erin@example.org");
+    pressAdd(renderTab(share));
+    return share;
+  }
+
+  it("says so in words when nobody has been granted access", async () => {
+    const share = await publishedPanel();
+
+    const empty = byId(renderTab(share), "ws-share-empty") as AnyVnode;
+    expect(allText(empty)).toBe("Nobody has been granted access yet.");
+    expect(grantRows(renderTab(share))).toHaveLength(0);
+    // Boxed, and clear of the disabled add row's tooltip.
+    expect(classTokensOf(empty)).toContain("border-dashed");
+    expect(classTokensOf(empty)).toContain("text-tertiary");
+    expect(classTokensOf(empty)).toContain("mt-6");
+  });
+
+  it("leads the list with the domain grants", async () => {
+    const share = await panelWithGrants();
+
+    const rows = grantRows(renderTab(share));
+
+    expect(allText(rows[0])).toContain("Anyone at acme.example");
+    expect(allText(rows[1])).toContain("Carol Reyes");
+  });
+
+  it("outlines every row, and tints a domain row's outline with its surface", async () => {
+    const share = await panelWithGrants();
+
+    const rows = grantRows(renderTab(share));
+
+    for (const row of rows) expect(classTokensOf(row)).toContain("border");
+    for (const row of rows)
+      expect(classTokensOf(row)).not.toContain("grayscale");
+    expect(classTokensOf(rows[0])).toContain(
+      "border-[color-mix(in_srgb,var(--c-info)_28%,transparent)]",
+    );
+    expect(classTokensOf(rows[1])).toContain("border-subtle");
+  });
+
+  it("waits for the lookup before saying nobody has signed up", async () => {
+    const share = await readyPanel(
+      { enabled: true, url: "https://m.relay.example/" },
+      {
+        fetchJson: (url: string, init?: RequestInit) =>
+          url === RESOLVE_USER_URL || init?.method === "PUT"
+            ? new Promise(() => undefined)
+            : Promise.resolve({
+                ok: true,
+                status: 200,
+                body: {
+                  enabled: true,
+                  url: "https://m.relay.example/",
+                  grants: {
+                    workspace: { emails: [], email_domains: [] },
+                    services: {},
+                  },
+                },
+              }),
+      },
+    );
+
+    type(renderTab(share), "newcomer@example.com");
+    pressAdd(renderTab(share));
+
+    const row = rowByText(renderTab(share), "newcomer@example.com");
+    expect(share.grantsFor(WHOLE)[0].status.state).toBe("saving");
+    expect(allText(row)).not.toContain("signed up");
+  });
+
+  it("gives every row the same height and never shortens a name", async () => {
+    const share = await panelWithGrants();
+
+    const rows = grantRows(renderTab(share));
+
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      expect(classTokensOf(row)).toContain("h-10");
+      expect(classTokensOf(row)).toContain("flex-none");
+      const name = collectVnodes(row).find(
+        (vnode) => attrsOf(vnode)["data-grant-name"] !== undefined,
+      );
+      expect(name).toBeDefined();
+      expect(classTokensOf(name as AnyVnode)).toContain("whitespace-nowrap");
+      expect(classTokensOf(name as AnyVnode)).not.toContain("truncate");
+    }
+  });
+
+  it("keeps an empty status slot and an empty action slot on every row", async () => {
+    const share = await panelWithGrants();
+
+    for (const row of grantRows(renderTab(share))) {
+      const slots = collectVnodes(row).filter(
+        (vnode) => attrsOf(vnode)["data-slot"] !== undefined,
+      );
+      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual([
+        "status",
+        "action",
+      ]);
+      for (const slot of slots) expect(allText(slot)).toBe("");
+    }
+  });
+
+  it("scrolls the list alone, with nothing above it in the scroller", async () => {
+    const share = await panelWithGrants();
+
+    const list = byId(renderTab(share), "ws-share-grants");
+
+    expect(classTokensOf(list as AnyVnode)).toContain("overflow-y-auto");
+    expect(classTokensOf(list as AnyVnode)).toContain("flex-1");
+    expect(classTokensOf(list as AnyVnode)).toContain("min-h-0");
+    expect(allText(list)).not.toContain("Grant permission to");
+  });
+
+  it("marks a row while it saves, and offers a retry once it cannot", async () => {
+    const share = await readyPanel(
+      { enabled: true, url: "https://m.relay.example/" },
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          Promise.resolve(
+            init?.method === "PUT"
+              ? { ok: false, status: 500, body: {} }
+              : {
+                  ok: true,
+                  status: 200,
+                  body: {
+                    enabled: true,
+                    url: "https://m.relay.example/",
+                    grants: {
+                      workspace: { emails: [], email_domains: [] },
+                      services: {},
+                    },
+                  },
+                },
+          ),
+      },
+    );
+
+    type(renderTab(share), "erin@example.org");
+    pressAdd(renderTab(share));
+
+    expect(allText(rowByText(renderTab(share), "erin@example.org"))).toContain(
+      "Securely granting access",
+    );
+
+    await settle();
+
+    const row = rowByText(renderTab(share), "erin@example.org");
+    expect(allText(row)).toContain("Could not save");
+    expect(allText(row)).toContain("Retry");
+  });
+
+  it("names the person each remove control takes access from", async () => {
+    const share = await panelWithGrants();
+
+    const labels = grantRows(renderTab(share)).map((row) => {
+      const button = collectVnodes(row).find(
+        (vnode) =>
+          typeof attrsOf(vnode)["aria-label"] === "string" &&
+          String(attrsOf(vnode)["aria-label"]).startsWith("Remove"),
+      );
+      return attrsOf(button as AnyVnode)["aria-label"];
+    });
+
+    expect(labels).toEqual([
+      "Remove anyone at acme.example",
+      "Remove Carol Reyes",
+      "Remove newcomer@example.com",
+      "Remove erin@example.org",
+    ]);
+  });
+
+  it("takes a row out the moment its remove control is pressed", async () => {
+    const share = await panelWithGrants();
+
+    const row = rowByText(renderTab(share), "newcomer@example.com");
+    const button = collectVnodes(row).find(
+      (vnode) => attrsOf(vnode)["aria-label"] === "Remove newcomer@example.com",
+    );
+    (attrsOf(button as AnyVnode).onclick as () => void)();
+
+    expect(allText(renderTab(share))).not.toContain("newcomer@example.com");
+  });
+});
+
+describe("ShareTab publish confirmation", () => {
+  /** A panel that remembers the methods its sharing calls used, and answers a
+   * publish with a published workspace. */
+  async function recordingPanel(): Promise<{
+    share: SharePanelModel;
+    methods: string[];
+  }> {
+    const methods: string[] = [];
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: (_url: string, init?: RequestInit) => {
+          const method = init?.method ?? "GET";
+          methods.push(method);
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              enabled: method === "PUT",
+              url: method === "PUT" ? "https://m.relay.example/" : null,
+              grants: {
+                workspace: { emails: [], email_domains: [] },
+                services: {},
+              },
+            },
+          });
+        },
+      },
+    );
+    return { share, methods };
+  }
+
+  function pressSwitch(root: unknown): void {
+    (
+      attrsOf(byId(root, "ws-share-publish-switch") as AnyVnode)
+        .onclick as () => void
+    )();
+  }
+
+  function isDialogOpen(root: unknown): boolean {
+    const dialog = collectVnodes(root).find((vnode) => vnode.tag === Modal);
+    expect(dialog, "the panel drew no dialog").toBeDefined();
+    return attrsOf(dialog as AnyVnode).isOpen === true;
+  }
+
+  it("names the consequence before anything is created", async () => {
+    const { share, methods } = await recordingPanel();
+    const draw = mountedTab(share);
+
+    pressSwitch(draw());
+
+    const root = draw();
+    expect(isDialogOpen(root)).toBe(true);
+    expect(allText(root)).toContain(
+      "Anyone granted access to this workspace will be able to see and change " +
+        "everything within it, including all files, agent chats and terminal. " +
+        "If you only grant access to an app, they will be able to access all " +
+        "data that app provides to them.",
+    );
+    expect(allText(root)).toContain("Enable sharing?");
+    expect(allText(byId(root, "ws-share-publish-confirm"))).toBe(
+      "Enable sharing",
+    );
+    expect(
+      attrsOf(byId(root, "ws-share-publish-switch") as AnyVnode)[
+        "aria-checked"
+      ],
+    ).toBe("false");
+    expect(methods).toEqual(["GET"]);
+  });
+
+  it("leaves the switch where it was, and creates nothing, on Cancel", async () => {
+    const { share, methods } = await recordingPanel();
+    const draw = mountedTab(share);
+
+    pressSwitch(draw());
+    (
+      attrsOf(byId(draw(), "ws-share-publish-cancel") as AnyVnode)
+        .onclick as () => void
+    )();
+
+    const root = draw();
+    expect(isDialogOpen(root)).toBe(false);
+    expect(
+      attrsOf(byId(root, "ws-share-publish-switch") as AnyVnode)[
+        "aria-checked"
+      ],
+    ).toBe("false");
+    expect(share.isPublished).toBe(false);
+    expect(methods).toEqual(["GET"]);
+  });
+
+  it("publishes once the question is answered", async () => {
+    const { share, methods } = await recordingPanel();
+    const draw = mountedTab(share);
+
+    pressSwitch(draw());
+    (
+      attrsOf(byId(draw(), "ws-share-publish-confirm") as AnyVnode)
+        .onclick as () => void
+    )();
+    await settle();
+
+    expect(isDialogOpen(draw())).toBe(false);
+    expect(share.isPublished).toBe(true);
+    expect(methods).toContain("PUT");
+  });
+});
+
+describe("ShareTab off notice", () => {
+  /** An unpublished panel that still grants one person everywhere. */
+  async function offPanel(): Promise<SharePanelModel> {
+    return readyPanel({
+      grants: {
+        workspace: { emails: ["friend@example.com"], email_domains: [] },
+        services: { web: { emails: ["dev@example.com"], email_domains: [] } },
+      },
+    });
+  }
+
+  it("says the workspace cannot be opened, and the list is kept", async () => {
+    const share = await offPanel();
+
+    expect(allText(byId(renderTab(share), "ws-share-off-notice"))).toBe(
+      "This workspace cannot be accessed while sharing is off. " +
+        "Your list of permissions is preserved but inactive.",
+    );
+
+    share.selectTarget("web");
+
+    expect(allText(byId(renderTab(share), "ws-share-off-notice"))).toBe(
+      "This app cannot be accessed while sharing is off. " +
+        "Your list of permissions is preserved but inactive.",
+    );
+  });
+
+  it("draws every row flat, grey and dim while sharing is off", async () => {
+    const share = await readyPanel({
+      grants: {
+        workspace: {
+          emails: ["friend@example.com"],
+          email_domains: ["acme.example"],
+        },
+        services: {},
+      },
+    });
+
+    const rows = grantRows(renderTab(share));
+
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      const tokens = classTokensOf(row);
+      expect(tokens).toContain("grayscale");
+      expect(tokens).toContain("opacity-60");
+      expect(tokens).toContain("bg-fill-subtle");
+      expect(tokens).toContain("border-subtle");
+      expect(tokens).not.toContain("bg-[var(--c-info-surface)]");
+    }
+  });
+
+  it("still offers to remove a grant while publishing is off", async () => {
+    const share = await offPanel();
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    const button = collectVnodes(row).find(
+      (vnode) => attrsOf(vnode)["aria-label"] === "Remove friend@example.com",
+    );
+    (attrsOf(button as AnyVnode).onclick as () => void)();
+
+    expect(share.grantsFor(WHOLE)).toHaveLength(0);
+  });
+
+  it("has no off notice once the workspace is published", async () => {
+    const share = await publishedPanel({
+      grants: {
+        workspace: { emails: ["friend@example.com"], email_domains: [] },
+        services: {},
+      },
+    });
+
+    expect(byId(renderTab(share), "ws-share-off-notice")).toBeUndefined();
+  });
+});
+
+describe("ShareTab inherited grants", () => {
+  async function appPanel(workspaceGrants: {
+    emails: string[];
+    email_domains: string[];
+  }): Promise<SharePanelModel> {
+    const share = await publishedPanel({
+      grants: { workspace: workspaceGrants, services: {} },
+    });
+    share.selectTarget("web");
+    return share;
+  }
+
+  it("counts what the whole workspace's grants add, and leads to them", async () => {
+    const share = await appPanel({
+      emails: ["one@example.com", "two@example.com"],
+      email_domains: ["acme.example"],
+    });
+
+    const line = byId(renderTab(share), "ws-share-inherited");
+    expect(allText(line)).toContain(
+      "Permissions granted to the whole workspace",
+    );
+    expect(allText(line)).toContain(
+      "will also apply here. 1 domain and 2 individuals have been granted access.",
+    );
+
+    const link = collectVnodes(line).find(
+      (vnode) => typeof attrsOf(vnode).onclick === "function",
+    );
+    (attrsOf(link as AnyVnode).onclick as () => void)();
+
+    expect(share.currentTarget).toBe(WHOLE);
+  });
+
+  it("counts one of each in the singular", async () => {
+    const share = await appPanel({
+      emails: ["one@example.com"],
+      email_domains: ["acme.example"],
+    });
+
+    expect(allText(byId(renderTab(share), "ws-share-inherited"))).toContain(
+      "1 domain and 1 individual have been granted access.",
+    );
+  });
+
+  it("says nothing about inherited grants on the whole workspace itself", async () => {
+    const share = await publishedPanel();
+
+    expect(byId(renderTab(share), "ws-share-inherited")).toBeUndefined();
+  });
+});
+
+describe("ShareTab copy control", () => {
+  it("copies the target's link and confirms it", async () => {
+    const written: string[] = [];
+    vi.stubGlobal("navigator", {
+      clipboard: {
+        writeText: (text: string) => {
+          written.push(text);
+          return Promise.resolve();
+        },
+      },
+    });
+    vi.spyOn(m, "redraw").mockImplementation(() => undefined);
+    const share = await publishedPanel();
+
+    const draw = mountedTab(share);
+
+    const copy = byId(draw(), "ws-share-copy") as AnyVnode;
+    expect(attrsOf(copy)["aria-label"]).toBe("Copy the link");
+    (attrsOf(copy).onclick as () => void)();
+    await settle();
+
+    expect(written).toEqual(["https://shell-r4nd.m.relay.example/"]);
+    expect(
+      collectVnodes(byId(draw(), "ws-share-copy")).some(
+        (vnode) => attrsOf(vnode).name === "check",
+      ),
+    ).toBe(true);
+  });
+
+  it("names the app a link opens", async () => {
+    const share = await publishedPanel();
+    share.selectTarget("web");
+
+    expect(
+      attrsOf(byId(renderTab(share), "ws-share-copy") as AnyVnode)[
+        "aria-label"
+      ],
+    ).toBe("Copy the link to web");
+  });
+});
+
+describe("ShareTab while the link is being prepared", () => {
+  /** B2.3: published a moment ago, two steps done, one grant still saving. */
+  async function provisioningPanel(): Promise<SharePanelModel> {
+    const share = await readyPanel(
+      { enabled: true, url: "https://m.relay.example/" },
+      {
+        fetchJson: (url: string, init?: RequestInit) =>
+          url === RESOLVE_USER_URL || init?.method === "PUT"
+            ? new Promise(() => undefined)
+            : Promise.resolve({
+                ok: true,
+                status: 200,
+                body: {
+                  enabled: true,
+                  url: "https://m.relay.example/",
+                  grants: {
+                    workspace: { emails: [], email_domains: [] },
+                    services: {},
+                  },
+                },
+              }),
+      },
+    );
+    share.isLive = false;
+    share.isCertIssued = true;
+    share.publishWrite = { state: "publishing" };
+    type(renderTab(share), "bob@example.org");
+    pressAdd(renderTab(share));
+    return share;
+  }
+
+  it("names the step under way over a list that is still live", async () => {
+    const share = await provisioningPanel();
+
+    const root = renderTab(share);
+
+    expect(allText(byId(root, "ws-share-provisioning"))).toContain(
+      "Connecting to the relay",
+    );
+    expect(allText(rowByText(root, "bob@example.org"))).toContain("Securely granting access");
+    expect(allText(byId(root, "ws-share-link"))).toContain(
+      "Preparing the link",
+    );
+  });
+
+  it("takes another grant while the publish write is still in flight", async () => {
+    const share = await provisioningPanel();
+    expect(share.publishWrite).toEqual({ state: "publishing" });
+
+    const root = renderTab(share);
+    for (const control of addControls(root))
+      expect(attrsOf(control)["aria-disabled"]).toBeUndefined();
+
+    type(root, "carol@example.net");
+    pressAdd(root);
+
+    expect(share.grantCount(WHOLE)).toBe(2);
+  });
+});
+
+describe("ShareTab row states together", () => {
+  /** B2.4: one row saving, one failed, one just added, on one clock. */
+  async function mixedPanel(): Promise<{
+    share: SharePanelModel;
+    setNow: (ms: number) => void;
+  }> {
+    let now = 1000;
+    let isFirstWrite = true;
+    const share = await readyPanel(
+      { enabled: true, url: "https://m.relay.example/" },
+      {
+        monotonicNowMs: () => now,
+        fetchJson: (url: string, init?: RequestInit) => {
+          if (url === RESOLVE_USER_URL) return new Promise(() => undefined);
+          if (init?.method === "PUT") {
+            if (!isFirstWrite) return new Promise(() => undefined);
+            isFirstWrite = false;
+            return Promise.resolve({ ok: false, status: 500, body: {} });
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: {
+                workspace: { emails: [], email_domains: [] },
+                services: {},
+              },
+            },
+          });
+        },
+      },
+    );
+    type(renderTab(share), "erin@example.org");
+    pressAdd(renderTab(share));
+    await settle();
+    type(renderTab(share), "dan@example.org");
+    pressAdd(renderTab(share));
+    return { share, setNow: (ms: number) => (now = ms) };
+  }
+
+  it("marks the failed row, the saving row and the new row each on its own", async () => {
+    const { share } = await mixedPanel();
+
+    const root = renderTab(share);
+    const failed = rowByText(root, "erin@example.org");
+    const saving = rowByText(root, "dan@example.org");
+
+    expect(allText(failed)).toContain("Could not save");
+    expect(allText(failed)).toContain("Retry");
+    expect(allText(saving)).toContain("Securely granting access");
+    expect(allText(saving)).not.toContain("Could not save");
+  });
+
+  it("fades the highlight off a row once its moment has passed", async () => {
+    const { share, setNow } = await mixedPanel();
+
+    expect(
+      classTokensOf(rowByText(renderTab(share), "dan@example.org")),
+    ).toContain("grant-row-added");
+
+    setNow(1000 + 60_000);
+
+    expect(
+      classTokensOf(rowByText(renderTab(share), "dan@example.org")),
+    ).not.toContain("grant-row-added");
+  });
+
+  it("never highlights a row the workspace handed back", async () => {
+    const share = await publishedPanel({
+      grants: {
+        workspace: { emails: ["friend@example.com"], email_domains: [] },
+        services: {},
+      },
+    });
+
+    expect(
+      classTokensOf(rowByText(renderTab(share), "friend@example.com")),
+    ).not.toContain("grant-row-added");
+  });
+});
+
+describe("ShareTab on an app pane", () => {
+  it("refuses beside the line that says what is already inherited", async () => {
+    const share = await publishedPanel({
+      grants: {
+        workspace: {
+          emails: ["one@example.com"],
+          email_domains: ["acme.example"],
+        },
+        services: {},
+      },
+    });
+    share.selectTarget("web");
+
+    chooseKind(renderTab(share), "email_domain");
+    type(renderTab(share), "gmail.com");
+    pressAdd(renderTab(share));
+
+    const root = renderTab(share);
+    expect(allText(byId(root, "ws-share-inherited"))).toContain(
+      "1 domain and 1 individual have been granted access.",
+    );
+    expect(allText(byId(root, "ws-share-refusal"))).toBe(
+      "gmail.com cannot be granted permissions because it is a public email provider.",
+    );
+    expect(share.grantCount("web")).toBe(0);
+  });
+
+  it("says the app cannot be opened even when only the workspace grants anyone", async () => {
+    const share = await readyPanel({
+      grants: {
+        workspace: { emails: ["friend@example.com"], email_domains: [] },
+        services: {},
+      },
+    });
+    share.selectTarget("web");
+
+    expect(share.grantCount("web")).toBe(0);
+    expect(allText(byId(renderTab(share), "ws-share-off-notice"))).toBe(
+      "This app cannot be accessed while sharing is off. " +
+        "Your list of permissions is preserved but inactive.",
+    );
   });
 });
 
 describe("ShareTab grantee rows", () => {
-  it("renders the owner with their picture, name, email, and the (you) suffix", async () => {
-    const share = await readyShareModel({
-      ownerDisplayName: "Owner Person",
-      ownerProfilePictureUrl: OWNER_PICTURE,
+  /** One grant of every kind: an account with a picture, an account without,
+   * an invited address, and a domain. */
+  async function everyKindPanel(): Promise<SharePanelModel> {
+    return publishedPanel({
+      grants: {
+        workspace: {
+          users: ["user-2", "user-3"],
+          emails: ["newcomer@example.com"],
+          email_domains: ["acme.example"],
+        },
+        services: {},
+      },
+      identities: {
+        "user-2": {
+          user_id: "user-2",
+          email: "carol@example.net",
+          display_name: "Carol Reyes",
+          profile_picture_url: "https://pictures.example/carol.png",
+        },
+        "user-3": {
+          user_id: "user-3",
+          email: "frank@example.net",
+          display_name: "Frank Ito",
+          profile_picture_url: null,
+        },
+      },
     });
+  }
 
-    const row = rowByText(renderTab(share), "(you)");
+  /** The lead box a row starts with. */
+  function leadBox(row: AnyVnode): AnyVnode {
+    const lead = collectVnodes(row).find((vnode) => {
+      const tokens = classTokensOf(vnode);
+      return tokens.includes("h-6") && tokens.includes("rounded-full");
+    });
+    expect(lead, "row has no lead box").toBeDefined();
+    return lead as AnyVnode;
+  }
 
-    expect(allText(row)).toBe(`Owner Person  (${OWNER})  (you)`);
-    const picture = collectVnodes(leadBox(row)).find(
+  it("leads an account row with its picture, or with its initials", async () => {
+    const share = await everyKindPanel();
+
+    const root = renderTab(share);
+    const picture = collectVnodes(leadBox(rowByText(root, "Carol Reyes"))).find(
       (vnode) => vnode.tag === "img",
     );
-    expect(picture).toBeDefined();
-    expect(attrsOf(picture as AnyVnode).src).toBe(OWNER_PICTURE);
-  });
-
-  it("falls back to the owner's monogram and email when the account has neither name nor picture", async () => {
-    const share = await readyShareModel();
-
-    const row = rowByText(renderTab(share), "(you)");
-
-    expect(allText(row)).toContain(`${OWNER}  (you)`);
-    expect(allText(row)).not.toContain(`(${OWNER})`);
-    const lead = leadBox(row);
-    expect(collectVnodes(lead).some((vnode) => vnode.tag === "img")).toBe(
-      false,
+    expect(attrsOf(picture as AnyVnode).src).toBe(
+      "https://pictures.example/carol.png",
     );
-    expect(allText(lead)).toBe("O");
+    expect(allText(leadBox(rowByText(root, "Frank Ito")))).toBe("FI");
   });
 
-  it("renders an account grantee with a monogram, name, and email", async () => {
-    const share = await readyShareModel();
+  it("leads an invited address with a dashed box, and a domain with an @", async () => {
+    const share = await everyKindPanel();
 
-    const row = rowByText(renderTab(share), "Bob");
+    const root = renderTab(share);
+    const invited = leadBox(rowByText(root, "newcomer@example.com"));
+    expect(classTokensOf(invited)).toContain("border-dashed");
+    expect(
+      collectVnodes(invited).some(
+        (vnode) => attrsOf(vnode).name === "user-plus",
+      ),
+    ).toBe(true);
 
-    expect(allText(row)).toContain("Bob  (bob@example.com)");
-    expect(allText(leadBox(row))).toBe("B");
+    const domain = leadBox(rowByText(root, "Anyone at acme.example"));
+    expect(classTokensOf(domain)).toContain("border-dashed");
+    expect(allText(domain)).toBe("@");
   });
 
-  it("renders an invited address with an empty dashed placeholder and says they have not signed up", async () => {
-    const share = await readyShareModel();
+  it("says nobody hears about a domain grant, on the row that made it", async () => {
+    const share = await everyKindPanel();
 
-    const row = rowByText(renderTab(share), "newcomer@example.com");
+    const row = rowByText(renderTab(share), "Anyone at acme.example");
 
-    expect(allText(row)).toContain("(hasn't signed up yet)");
-    expect(allText(row)).not.toContain("(invited)");
-    const lead = leadBox(row);
-    const tokens = classTokensOf(lead);
-    expect(tokens).toContain("border");
-    expect(tokens).toContain("border-dashed");
-    expect(allText(lead)).toBe("");
-  });
-
-  it("renders a domain grantee with the globe glyph in the same lead box", async () => {
-    const share = await readyShareModel();
-
-    const row = rowByText(renderTab(share), "example.org");
-
-    expect(allText(row)).toContain("(anyone at this domain)");
-    const glyph = collectVnodes(leadBox(row)).find(
-      (vnode) => vnode.tag === Icon16,
+    expect(attrsOf(row)["data-tooltip"]).toBe(
+      "People at acme.example will not hear about this unless you send " +
+        "them the link yourself",
     );
-    expect(glyph).toBeDefined();
-    expect(attrsOf(glyph as AnyVnode).name).toBe("globe");
   });
 
-  it("gives every grantee row the same lead box size so the text columns align", async () => {
-    const share = await readyShareModel({
-      ownerDisplayName: "Owner Person",
-      ownerProfilePictureUrl: OWNER_PICTURE,
-    });
+  it("says an invited address has not signed up only once it is saved", async () => {
+    const share = await everyKindPanel();
 
-    const rows = granteeRows(renderTab(share));
+    expect(
+      allText(rowByText(renderTab(share), "newcomer@example.com")),
+    ).toContain("(hasn't signed up yet)");
+    expect(allText(rowByText(renderTab(share), "Carol Reyes"))).not.toContain(
+      "signed up",
+    );
+  });
+});
 
-    expect(rows).toHaveLength(4);
-    for (const row of rows) {
-      const tokens = classTokensOf(leadBox(row));
-      expect(tokens).toContain("shrink-0");
-      expect(tokens).toContain("h-6");
-      expect(tokens).toContain("w-6");
-    }
+describe("ShareTab provisioning trouble", () => {
+  /** A published workspace whose link is not live yet. */
+  async function stuckPanel(): Promise<SharePanelModel> {
+    const share = await publishedPanel();
+    share.isLive = false;
+    return share;
+  }
+
+  it("says a halted bring-up only publishing again can clear", async () => {
+    const share = await stuckPanel();
+    share.gatewayState = "halted";
+    share.gatewayError = "the certificate order was refused.";
+
+    const trouble = byId(renderTab(share), "ws-share-gateway-trouble");
+
+    expect(allText(trouble)).toContain("the certificate order was refused");
+    expect(allText(trouble)).toContain(
+      "Turn sharing off and on again to retry",
+    );
+  });
+
+  it("says when a failed attempt will be tried again", async () => {
+    const share = await stuckPanel();
+    share.gatewayState = "retrying";
+    share.gatewayFailedAttemptCount = 2;
+    share.gatewayError = "the relay refused the tunnel";
+
+    const trouble = byId(renderTab(share), "ws-share-gateway-trouble");
+
+    expect(allText(trouble)).toContain("The last attempt failed");
+    expect(allText(trouble)).toContain("the relay refused the tunnel");
+  });
+
+  it("says nothing about trouble while the bring-up is going well", async () => {
+    const share = await stuckPanel();
+
+    expect(byId(renderTab(share), "ws-share-gateway-trouble")).toBeUndefined();
+  });
+});
+
+describe("ShareTab moved address", () => {
+  it("says the old links no longer work when the read moved the share", async () => {
+    const share = await publishedPanel();
+    expect(allText(renderTab(share))).not.toContain("moved to a new address");
+
+    share.migratedDomainFrom = "old.relay.example";
+
+    expect(allText(renderTab(share))).toContain(
+      "Sharing moved to a new address. Links you shared before no longer work.",
+    );
   });
 });

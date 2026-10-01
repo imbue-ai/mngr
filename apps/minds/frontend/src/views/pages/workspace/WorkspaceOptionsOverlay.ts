@@ -66,6 +66,9 @@ export function WorkspaceOptionsOverlay(): m.Component<WorkspaceOptionsOverlayAt
           panelId: "ws-options-panel",
           backdropId: "ws-options-backdrop",
           closeButtonId: "ws-options-close",
+          // The sharing pane names itself in its close control, as its own
+          // title does.
+          closeLabel: tab === "share" ? "Close sharing" : undefined,
           // A fixed-height card, so a long pane (twenty share entries) scrolls
           // inside it rather than growing the card off-screen; capped to the
           // window, and it stops widening at 880px.

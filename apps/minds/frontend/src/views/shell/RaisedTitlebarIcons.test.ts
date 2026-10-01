@@ -164,6 +164,12 @@ describe("the raised titlebar icon strip", () => {
     expect(undotted).toBeUndefined();
   });
 
+  it("gives the sharing icon the word the pane is titled with", () => {
+    const strip = renderStrip(["ws-tab-share", "help-toggle"], "help");
+
+    expect(attrsOf(icon(strip, "share"))["aria-label"]).toBe("Sharing");
+  });
+
   it("labels the icon you are on as the way out", () => {
     const strip = renderStrip(
       ["notifications-toggle", "help-toggle"],

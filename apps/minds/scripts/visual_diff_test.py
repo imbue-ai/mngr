@@ -13,7 +13,7 @@ import visual_diff
 
 
 def test_spa_fixture_bootstrap_satisfies_the_wire_models() -> None:
-    bootstrap = visual_diff._build_spa_fixture_bootstrap()
+    bootstrap = visual_diff.build_spa_fixture_bootstrap()
 
     snapshot = bootstrap.snapshot
     assert len(snapshot.workspaces.workspaces) > 0
