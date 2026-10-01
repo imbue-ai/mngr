@@ -2757,7 +2757,7 @@ ipcMain.handle('check-for-updates', async () => {
 // with the call still pending, which is the point.
 ipcMain.handle('install-update', async () => {
   try {
-    updater.installNow();
+    await updater.installNow();
   } catch (err) {
     return { error: String((err && err.message) || err) };
   }

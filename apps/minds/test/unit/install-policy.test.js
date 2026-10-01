@@ -117,50 +117,85 @@ function fakeUpdater(failure) {
   return updater;
 }
 
-test('an install electron-updater reports nothing about is a quit under way', () => {
+/** Options that keep a waiting test instant: no real sleeping, one poll. */
+function waitOptions(hasInstallStarted, overrides = {}) {
+  return { hasInstallStarted, timeoutMs: 20, intervalMs: 1, sleep: async () => {}, ...overrides };
+}
+
+/** An install signal that flips to started after `pollsUntilStarted` checks. */
+function startsAfter(pollsUntilStarted) {
+  let polls = 0;
+  return () => {
+    polls += 1;
+    return polls > pollsUntilStarted;
+  };
+}
+
+test('an install that starts is a quit under way', async () => {
   const updater = fakeUpdater(null);
-  assert.doesNotThrow(() => installStagedUpdate(updater));
+  await installStagedUpdate(updater, waitOptions(() => true));
   assert.equal(updater.installCalls, 1);
 });
 
-test('an install electron-updater reports a failure for throws it, naming the cause', () => {
-  // A cancelled pkexec prompt on a .deb: dpkg never ran, the app stays up, and
-  // the only trace is the `error` event -- which the renderer has to hear about,
-  // or the click did nothing as far as the user can see.
-  const updater = fakeUpdater(new Error('Command failed: pkexec /bin/bash -c dpkg -i minds.deb'));
-  assert.throws(() => installStagedUpdate(updater), /Installing the update failed: Command failed: pkexec/);
+test('an install that starts after an error the updater reported is not a failure', async () => {
+  // macOS: clicking while Squirrel is still taking the zip makes electron-updater
+  // arm the install for when Squirrel has it and kick Squirrel with a native call
+  // that answers "The command is disabled and cannot be executed". The install
+  // then goes through seconds later, so the error is not the verdict.
+  const updater = fakeUpdater(new Error('The command is disabled and cannot be executed'));
+  await installStagedUpdate(updater, waitOptions(startsAfter(3)));
+  assert.equal(updater.installCalls, 1);
 });
 
-test('the failure listener does not outlive the install call', () => {
+test('an install that never starts throws, naming the cause the updater reported', async () => {
+  // A cancelled pkexec prompt on a .deb: dpkg never ran and the app stays up.
+  const updater = fakeUpdater(new Error('Command failed: pkexec /bin/bash -c dpkg -i minds.deb'));
+  await assert.rejects(
+    () => installStagedUpdate(updater, waitOptions(() => false)),
+    /Installing the update failed: Command failed: pkexec/,
+  );
+});
+
+test('an install that never starts and reports nothing still throws', async () => {
+  const updater = fakeUpdater(null);
+  await assert.rejects(
+    () => installStagedUpdate(updater, waitOptions(() => false)),
+    /Installing the update failed: the updater never started installing it/,
+  );
+});
+
+test('the failure listener does not outlive the install call', async () => {
   // Left registered, every later updater error (a failed check) would be taken
   // as an install failure by the next call.
   const failing = fakeUpdater(new Error('dpkg refused'));
-  assert.throws(() => installStagedUpdate(failing));
+  await assert.rejects(() => installStagedUpdate(failing, waitOptions(() => false)));
   assert.equal(failing.listenerCount('error'), 0);
   const quitting = fakeUpdater(null);
-  installStagedUpdate(quitting);
+  await installStagedUpdate(quitting, waitOptions(() => true));
   assert.equal(quitting.listenerCount('error'), 0);
 });
 
-test('with a relaunch of its own, the install turns off the updater restart and relaunches after installing', () => {
+test('with a relaunch of its own, the install turns off the updater restart and relaunches after installing', async () => {
   const updater = fakeUpdater(null);
   const events = [];
   updater.quitAndInstall = () => events.push(`install autoRunAppAfterInstall=${updater.autoRunAppAfterInstall}`);
-  installStagedUpdate(updater, () => events.push('relaunch'));
+  await installStagedUpdate(updater, waitOptions(() => true, { relaunch: () => events.push('relaunch') }));
   assert.deepEqual(events, ['install autoRunAppAfterInstall=false', 'relaunch']);
 });
 
-test('without a relaunch of its own, the install leaves the updater restart alone', () => {
+test('without a relaunch of its own, the install leaves the updater restart alone', async () => {
   const updater = fakeUpdater(null);
-  installStagedUpdate(updater);
+  await installStagedUpdate(updater, waitOptions(() => true));
   assert.equal(updater.autoRunAppAfterInstall, true);
 });
 
-test('a failed install does not relaunch', () => {
+test('an install that never starts does not relaunch', async () => {
   // The app stays up with the download staged; a restart armed here would
   // start the same old version the moment the user quit.
   const updater = fakeUpdater(new Error('dpkg refused'));
   let relaunches = 0;
-  assert.throws(() => installStagedUpdate(updater, () => (relaunches += 1)));
+  await assert.rejects(() =>
+    installStagedUpdate(updater, waitOptions(() => false, { relaunch: () => (relaunches += 1) })),
+  );
   assert.equal(relaunches, 0);
 });

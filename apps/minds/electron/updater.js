@@ -345,11 +345,13 @@ async function downloadAndOffer(version) {
  * install control. Under the on-request policy this is the only install path;
  * on a .deb the password prompt appears here, right after the click.
  *
- * Throws when the install fails (the prompt was cancelled, dpkg refused),
- * which leaves the app running with the download still staged for another
- * try; the renderer says so, since nothing else would.
+ * Settles once the install is under way, which is what the app quitting is
+ * about to follow. Throws only when no install started (the prompt was
+ * cancelled, dpkg refused), which leaves the app running with the download
+ * still staged for another try; the renderer says so, since nothing else
+ * would.
  */
-function installNow() {
+async function installNow() {
   // The package on disk is already the new version and the quit it asked for
   // was cancelled; electron-updater ignores a second install outright (no
   // error, nothing run), so the only thing left to do is quit into it.
@@ -359,7 +361,10 @@ function installNow() {
     return;
   }
   try {
-    installStagedUpdate(autoUpdater, installPolicy.relaunchedBy === 'app' ? relaunchAfterQuit : null);
+    await installStagedUpdate(autoUpdater, {
+      relaunch: installPolicy.relaunchedBy === 'app' ? relaunchAfterQuit : null,
+      hasInstallStarted: () => isInstallApplied,
+    });
   } catch (err) {
     console.error(`[update] ${err.message}`);
     throw err;
@@ -526,13 +531,13 @@ function init({ onStatus } = {}) {
   autoUpdater.on('appimage-filename-updated', (updatedPath) => {
     appImagePath = updatedPath;
   });
-  // electron-updater emits this on Electron's own autoUpdater once the Linux
-  // install has run, right before it asks the app to quit.
-  if (installPolicy.policy === 'on-request') {
-    nativeAutoUpdater.on('before-quit-for-update', () => {
-      isInstallApplied = true;
-    });
-  }
+  // The one signal every platform gives that an install is under way, and so
+  // what `installNow` waits for: Squirrel raises it as it swaps the bundle,
+  // and electron-updater raises it on Electron's own autoUpdater once a Linux
+  // installer has run, right before it asks the app to quit.
+  nativeAutoUpdater.on('before-quit-for-update', () => {
+    isInstallApplied = true;
+  });
   void check();
   const timer = setInterval(() => void check(), CHECK_INTERVAL_MS);
   timer.unref?.();

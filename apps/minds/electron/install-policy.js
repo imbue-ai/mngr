@@ -82,22 +82,45 @@ function relaunchTargetFor({ packageType, appImagePath, executablePath, args }) 
   return { executablePath: appImagePath, args: [] };
 }
 
+/** How long an install gets to start before it counts as one that never did. */
+const INSTALL_START_TIMEOUT_MS = 20_000;
+const INSTALL_START_POLL_MS = 50;
+
 /**
- * Run `updater.quitAndInstall()`, throwing the failure it reports instead of
- * returning quietly.
+ * Run `updater.quitAndInstall()`, throwing unless the install starts.
  *
- * electron-updater reports a failed install -- a cancelled pkexec prompt, a
- * dpkg error, a missing APPIMAGE -- only as an `error` event, emitted before
- * `quitAndInstall` returns (the Linux installers run their commands
- * synchronously), and then leaves the app running with the download still
- * staged. Without this the caller cannot tell a quit that is under way from
- * an app that stayed put.
+ * The verdict is `hasInstallStarted`, which the caller reads from the
+ * `before-quit-for-update` the install raises on Electron's own updater --
+ * the one signal every platform gives: Squirrel raises it as it swaps the
+ * bundle, and electron-updater raises it once a Linux installer has run.
+ *
+ * An `error` event is not the verdict, because it does not mean the same
+ * thing everywhere. A cancelled pkexec prompt reports one and installs
+ * nothing; a macOS install asked for while Squirrel is still taking the zip
+ * reports one too (`quitAndInstall` arms the install for when Squirrel has
+ * it, then kicks Squirrel with a native call that answers "The command is
+ * disabled and cannot be executed") and installs seconds later. Reading the
+ * error as failure told that user their update had failed while it was
+ * installing. What an error is good for is saying why an install that never
+ * started did not.
  *
  * With `relaunch` (the 'app' side of `relaunchedBy`), the updater's own
  * restart is switched off and `relaunch` is called once the install has gone
  * through, before the quit the updater then asks for.
  */
-function installStagedUpdate(updater, relaunch = null) {
+async function installStagedUpdate(
+  updater,
+  {
+    relaunch = null,
+    hasInstallStarted,
+    timeoutMs = INSTALL_START_TIMEOUT_MS,
+    intervalMs = INSTALL_START_POLL_MS,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = {},
+) {
+  if (typeof hasInstallStarted !== 'function') {
+    throw new Error('installStagedUpdate needs a hasInstallStarted to read the signal the install itself raises');
+  }
   if (relaunch !== null) {
     updater.autoRunAppAfterInstall = false;
   }
@@ -111,8 +134,15 @@ function installStagedUpdate(updater, relaunch = null) {
   } finally {
     updater.removeListener('error', onError);
   }
-  if (failure !== null) {
-    throw new Error(`Installing the update failed: ${String((failure && failure.message) || failure)}`);
+  // Checked before the first sleep: a Linux installer runs inside
+  // `quitAndInstall`, so its signal is already there and `relaunch` still
+  // lands in the same tick as the install it follows.
+  for (let waited = 0; !hasInstallStarted(); waited += intervalMs) {
+    if (waited >= timeoutMs) {
+      const cause = failure === null ? 'the updater never started installing it' : String(failure.message || failure);
+      throw new Error(`Installing the update failed: ${cause}`);
+    }
+    await sleep(intervalMs);
   }
   if (relaunch !== null) {
     relaunch();
