@@ -42,6 +42,11 @@ dependencies = [
 # during resolution (`uv lock`); a frozen install replays the lockfile.
 [tool.uv]
 exclude-newer = "14 days"
+# Each shipped target must get a wheel or an sdist of every package.
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 
 [tool.uv.sources]
 minds = { path = "../../../../apps/minds", editable = true }
