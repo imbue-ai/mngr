@@ -23,6 +23,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.mngr.api.providers import _instance_cache
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
+from imbue.mngr.config.loader import get_or_create_profile_dir
 from imbue.mngr.errors import HostAuthenticationError
 from imbue.mngr.errors import HostConnectionError
 from imbue.mngr.errors import HostNotFoundError
@@ -1535,6 +1536,40 @@ def test_reload_provider_config_picks_up_a_new_provider_and_drops_what_it_replac
         assert (ProviderInstanceName("local"), id(retired_ctx)) not in _instance_cache
         # Only the provider mapping is replaced; the rest of the config survives.
         assert handler.mngr_ctx.config.default_host_dir == original_host_dir
+
+
+def test_reload_provider_config_reads_a_provider_added_alongside_a_disable_for_an_absent_plugin(
+    tmp_path: Path,
+    temp_host_dir: Path,
+    temp_git_repo: Path,
+    temp_mngr_ctx: MngrContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reload sees a new provider even when the same write disables a plugin this install lacks.
+
+    The disable is written after the supervisor's plugin manager was built, so
+    that manager has neither registered nor pre-blocked the plugin.
+    """
+    monkeypatch.chdir(temp_git_repo)
+    added_provider = f"added-later-{uuid4().hex}"
+    (get_or_create_profile_dir(temp_host_dir) / "settings.toml").write_text(
+        "is_allowed_in_pytest = true\n"
+        f'[providers."{added_provider}"]\nbackend = "local"\n'
+        f'[plugins."absent-plugin-{uuid4().hex}"]\nenabled = false\n'
+    )
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+        )
+
+        handler.reload_provider_config()
+
+        assert ProviderInstanceName(added_provider) in handler.mngr_ctx.config.providers
 
 
 def _wait_for_provisioning_passes(handler: _ProvisionRecordingHandler, expected_count: int) -> None:

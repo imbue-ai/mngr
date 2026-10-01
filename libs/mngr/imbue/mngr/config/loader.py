@@ -297,12 +297,16 @@ def load_config(
     )
 
     # Block the CLI/[plugins.*] disabled set so their hooks don't fire. This covers
-    # CLI-level --disable-plugin flags that weren't known at startup; is_strict
-    # catches --disable-plugin typos (a name that is neither registered nor already
-    # blocked). Opt-in plugins are intentionally excluded here: create_plugin_manager
-    # already blocked them, so re-blocking would add nothing in production while
-    # tripping the strict check in the bare-pm path.
-    block_disabled_plugins(pm, cli_disabled_plugins, is_strict=True)
+    # CLI-level --disable-plugin flags that weren't known at startup. Only those
+    # flags are checked strictly, to catch typos (a name that is neither registered
+    # nor already blocked). A [plugins.*] section may name a plugin this install
+    # lacks, and a process reloading settings against its startup pm can meet one
+    # written after that pm was built. Opt-in plugins are intentionally excluded here:
+    # create_plugin_manager already blocked them, so re-blocking would add nothing
+    # in production while tripping the strict check in the bare-pm path.
+    flag_disabled_plugins = frozenset(disabled_plugins or ())
+    block_disabled_plugins(pm, flag_disabled_plugins, is_strict=True)
+    block_disabled_plugins(pm, cli_disabled_plugins - flag_disabled_plugins)
 
     # Record disabled_plugins as the faithful union with the opt-in-derived set
     # (OPT_IN_PLUGINS not explicitly enabled). _apply_plugin_overrides only sees

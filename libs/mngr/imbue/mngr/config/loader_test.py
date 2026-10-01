@@ -3,6 +3,7 @@
 from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import click
 import pluggy
@@ -52,6 +53,7 @@ from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
 from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.errors import ConfigParseError
+from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
 from imbue.mngr.primitives import AgentTypeName
 from imbue.mngr.primitives import LogLevel
@@ -1543,6 +1545,48 @@ def test_block_disabled_plugins_is_idempotent() -> None:
     block_disabled_plugins(pm, frozenset({"modal"}))
 
     assert pm.is_blocked("modal")
+
+
+def test_load_config_blocks_a_settings_disabled_plugin_that_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A ``[plugins.<name>]`` disable for a plugin this install lacks loads, as it does at startup.
+
+    A long-lived process reloads settings against the plugin manager it built
+    at startup, so a disable block written after that point names a plugin the
+    manager has neither registered nor pre-blocked.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+
+    plugin_name = f"absent-plugin-{uuid4().hex}"
+    profile_dir = get_or_create_profile_dir(tmp_path / ".mngr")
+    (profile_dir / "settings.toml").write_text(
+        f'is_allowed_in_pytest = true\n[plugins."{plugin_name}"]\nenabled = false\n'
+    )
+
+    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
+
+    assert plugin_name in mngr_ctx.config.disabled_plugins
+    assert pm.is_blocked(plugin_name)
+
+
+def test_load_config_rejects_a_disable_plugin_flag_naming_an_unknown_plugin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
+) -> None:
+    """A ``--disable-plugin`` name that matches no plugin is a typo, and still fails loudly."""
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+
+    _isolate_load_config_env(monkeypatch)
+
+    plugin_name = f"typo-plugin-{uuid4().hex}"
+    with pytest.raises(UserInputError, match=f"Cannot disable plugin '{plugin_name}'"):
+        load_config(pm=pm, concurrency_group=cg, disabled_plugins=[plugin_name])
 
 
 # Tests for _normalize_tuple_fields_for_construct
