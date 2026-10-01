@@ -147,11 +147,10 @@ const test = base.test.extend({
   },
 });
 
-// -- Lifecycle helpers (macos-lifecycle.spec.js) --
-//
-// These reach into the app's MAIN process via electronApplication.evaluate,
-// which is what makes the windowless states testable at all: window closes and
-// dock activations are main-process lifecycle events with no renderer to drive.
+// The lifecycle helpers below reach into the app's MAIN process via
+// electronApplication.evaluate, which is what makes the windowless states
+// testable at all: window closes and dock activations are main-process
+// lifecycle events with no renderer to drive.
 
 // Close every window the way the red traffic-light button does, and wait for
 // main to settle on zero. Resolves the window count main itself sees, so a
@@ -177,6 +176,26 @@ async function windowOpenedBy(app, emit, { timeoutMs = 60 * 1000 } = {}) {
   const opened = app.waitForEvent('window', { timeout: timeoutMs });
   await emit();
   return opened;
+}
+
+// Record the main-frame document loads of the next window main creates, in
+// order: `['start:loading-screen', 'load:loading-screen', 'start:route', ...]`,
+// where `loading-screen` is shell.html and `route` any other URL. Arm it
+// before the action that opens the window. Resolves a reader for the record.
+async function recordNextWindowLoads(app) {
+  await app.evaluate(({ app: electronApp }) => {
+    const loads = [];
+    globalThis.__nextWindowLoads = loads;
+    const describe = (url) => (url.includes('shell.html') ? 'loading-screen' : 'route');
+    electronApp.once('browser-window-created', (_event, win) => {
+      const wc = win.webContents;
+      wc.on('did-start-navigation', (details) => {
+        if (details.isMainFrame && !details.isSameDocument) loads.push(`start:${describe(details.url)}`);
+      });
+      wc.on('did-finish-load', () => loads.push(`load:${describe(wc.getURL())}`));
+    });
+  });
+  return () => app.evaluate(() => globalThis.__nextWindowLoads);
 }
 
 // macOS dock-icon click (applicationShouldHandleReopen:).
@@ -221,6 +240,7 @@ module.exports = {
   liveUrl,
   closeAllWindows,
   windowOpenedBy,
+  recordNextWindowLoads,
   emitActivate,
   emitOpenUrl,
   captureAppOutput,

@@ -699,6 +699,12 @@ function createBundle({ kind = 'main', popout = null, bounds = null } = {}) {
     // every other window starts already resolved.
     introFinished: Promise.resolve(),
     resolveIntroFinished: () => {},
+    // Settles once the shell.html this window opened on has loaded or failed
+    // to; a window opened on anything else starts settled. The first-window
+    // route (applyStartupRouting) lands only after it: a navigation that
+    // overtakes a fresh window's first one can hide the window from a
+    // DevTools-protocol client such as Playwright.
+    loadingDocumentLoaded: Promise.resolve(),
   };
   bundles.add(bundle);
   mruWindows.unshift(bundle);
@@ -1131,7 +1137,7 @@ function openTakeoverWindow() {
   bundle.isErrorState = !!takeover;
   bundle.isLoadingState = !takeover;
   const wc = bundle.window.webContents;
-  wc.loadFile(path.join(__dirname, 'shell.html')).catch(() => {});
+  bundle.loadingDocumentLoaded = wc.loadFile(path.join(__dirname, 'shell.html')).catch(() => {});
   wc.once('did-finish-load', () => {
     if (wc.isDestroyed()) return;
     if (takeover) wc.send('error-details', takeover);
@@ -1155,8 +1161,8 @@ function openStartupRoutedWindow() {
   // an app-status read before the one-time login code is consumed, which
   // answers "signed out".
   if (isStartupRoutingBeingComputed) return bundle;
-  computeStartupRouting()
-    .then((routing) => {
+  Promise.all([computeStartupRouting(), bundle.loadingDocumentLoaded])
+    .then(([routing]) => {
       // Closed while we were asking: leave the route pending so the next
       // window the user opens still gets it.
       if (bundle.window.isDestroyed()) return;
@@ -2187,11 +2193,13 @@ async function runStartupSequence(bundle) {
     });
     markIntroSeen();
   }
+  const loaded = bundle.window.webContents.loadFile(
+    path.join(__dirname, 'shell.html'),
+    isIntroDue ? { hash: 'intro' } : {},
+  );
+  bundle.loadingDocumentLoaded = loaded.catch(() => {});
   try {
-    await bundle.window.webContents.loadFile(
-      path.join(__dirname, 'shell.html'),
-      isIntroDue ? { hash: 'intro' } : {},
-    );
+    await loaded;
     console.log(`[startup] shell.html loaded (intro=${isIntroDue})`);
   } catch (err) {
     // Closing the window mid-load rejects the load. This sequence owns the
@@ -2439,17 +2447,18 @@ async function startBackendWithRetry() {
       const isInitialAlive = initialBundle && !initialBundle.window.isDestroyed();
       const target = isInitialAlive ? initialBundle : getMostRecentWindow();
       if (target) {
-        // A first launch may still be playing the loading document's intro;
-        // the route waits for it rather than cutting the film short.
-        await target.introFinished;
+        // A window opened while this ran may still be loading shell.html, and
+        // a first launch may still be playing its intro; the route waits for
+        // both rather than cutting either short.
+        await Promise.all([target.loadingDocumentLoaded, target.introFinished]);
         if (lastErrorTakeover) {
-          // The backend died while the film played. The takeover owns the
+          // The backend died while the route waited. The takeover owns the
           // window now; landing the route would paint the dead port over it.
-          console.log('[startup] the backend failed during the intro; leaving the error takeover up');
+          console.log('[startup] the backend failed before the route landed; leaving the error takeover up');
         } else if (!target.window.isDestroyed()) {
           applyStartupRouting(target, routing, { boundsAlreadyApplied: isInitialAlive });
         } else {
-          console.log('[startup] the startup window closed during the intro; holding the route for the next one');
+          console.log('[startup] the startup window closed before the route landed; holding the route for the next one');
         }
       } else {
         // Nothing is open at all. macOS keeps the app alive, so leave the route

@@ -26,6 +26,7 @@ const {
   liveUrl,
   closeAllWindows,
   windowOpenedBy,
+  recordNextWindowLoads,
   emitActivate,
   emitOpenUrl,
   captureAppOutput,
@@ -38,6 +39,10 @@ test.skip(() => process.platform !== 'darwin', 'windowless app state is macOS-on
 const BACKEND_READY_RE = /\[startup\] Backend ready at (http:\/\/localhost:\d+)/;
 // Logged each time main computes the first-window route (computeStartupRouting).
 const STARTUP_ROUTE_LINES_RE = /\[startup\] route=/g;
+
+// A reopened window navigates to its route only once its loading screen has
+// loaded; an earlier route navigation can hide the window from Playwright.
+const ROUTE_AFTER_LOADING_SCREEN = ['start:loading-screen', 'load:loading-screen', 'start:route'];
 
 // shell.html renders the error view only once main sends it an error-details
 // payload, so a visible #retry-btn means "this window is showing the error
@@ -132,6 +137,7 @@ test.describe('healthy app', () => {
     // the start flow on a fresh runner. The path alone cannot tell a reopen from
     // a home-page load on a fresh runner -- home redirects a new user to /start
     // too -- so also assert the route was recomputed.
+    const reopenLoads = await recordNextWindowLoads(app);
     const reopened = await windowOpenedBy(app, () => emitActivate(app));
     await expect
       .poll(countRouteComputations, { timeout: 2 * 60 * 1000 })
@@ -139,6 +145,7 @@ test.describe('healthy app', () => {
     await expect
       .poll(async () => new URL(await liveUrl(reopened)).pathname, { timeout: 2 * 60 * 1000 })
       .toBe(launchPath);
+    expect((await reopenLoads()).slice(0, 3)).toEqual(ROUTE_AFTER_LOADING_SCREEN);
   });
 
   test('#482 a backend crash with no window open reopens to Retry, not the dead port', async ({ mindsApp }) => {
@@ -180,10 +187,12 @@ test.describe('healthy app', () => {
     await output.waitForLine(BACKEND_READY_RE);
     await output.waitForLine(/\[startup\] Consuming one-time code via/, { timeoutMs: 60 * 1000 });
 
+    const reopenLoads = await recordNextWindowLoads(app);
     const reopened = await windowOpenedBy(app, () => emitActivate(app));
     await expect
       .poll(() => liveUrl(reopened), { timeout: 2 * 60 * 1000 })
       .toMatch(/^http:\/\/localhost:\d+\//);
     expect(await liveUrl(reopened), 'a stranded app lands every window on /login').not.toContain('/login');
+    expect((await reopenLoads()).slice(0, 3)).toEqual(ROUTE_AFTER_LOADING_SCREEN);
   });
 });
