@@ -312,3 +312,59 @@ test('workspace endpoint validates the capabilities and reattach payloads', () =
     ['reattach', 'win-abc', false],
   ]);
 });
+
+test('embedder endpoint reads opensLinks on a readiness announcement only as a boolean or absent', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.WORKSPACE_READY]: (msg) => seen.push(msg.opensLinks) },
+  });
+  const announce = (payload) =>
+    win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.WORKSPACE_READY, ...payload } });
+  announce({});
+  announce({ opensLinks: true });
+  announce({ opensLinks: false });
+  announce({ opensLinks: 'yes' });
+  announce({ opensLinks: 1 });
+  announce({ opensLinks: null });
+  assert.deepStrictEqual(seen, [undefined, true, false]);
+});
+
+test('workspace endpoint accepts an open-link only for an absolute http(s) URL within the length bound', () => {
+  const seen = [];
+  contract.createWorkspaceEndpoint({
+    handlers: { [contract.OPEN_LINK]: (msg) => seen.push(msg.url) },
+  });
+  const deliver = (payload) =>
+    win.deliver({ source: parentWin, origin: 'http://chrome', data: { type: contract.OPEN_LINK, ...payload } });
+  const atBound = 'http://localhost:8000/' + 'a'.repeat(contract.MAX_OPEN_LINK_URL_LENGTH - 'http://localhost:8000/'.length);
+  deliver({ url: 'http://localhost:8000/docs?q=1#top' });
+  deliver({ url: 'https://web.agent-0a1b.localhost:8421/page' });
+  deliver({ url: atBound });
+  deliver({ url: atBound + 'a' });
+  deliver({});
+  deliver({ url: 42 });
+  deliver({ url: '' });
+  deliver({ url: '/relative/path' });
+  deliver({ url: 'localhost:8000/no-scheme' });
+  deliver({ url: 'javascript:alert(1)' });
+  deliver({ url: 'file:///etc/passwd' });
+  deliver({ url: 'mailto:someone@example.com' });
+  deliver({ url: 'data:text/html,<p>hi</p>' });
+  deliver({ url: 'http://exa mple.com/' });
+  assert.deepStrictEqual(seen, ['http://localhost:8000/docs?q=1#top', 'https://web.agent-0a1b.localhost:8421/page', atBound]);
+});
+
+test('embedder endpoint never honours an open-link, which only travels to the workspace', () => {
+  const frameWin = makeWindowDouble();
+  const seen = [];
+  contract.createEmbedderEndpoint({
+    getFrameWindow: () => frameWin,
+    isExpectedOrigin: () => true,
+    handlers: { [contract.OPEN_LINK]: (msg) => seen.push(msg.url) },
+  });
+  win.deliver({ source: frameWin, origin: 'https://agent-1.localhost', data: { type: contract.OPEN_LINK, url: 'http://localhost/' } });
+  assert.deepStrictEqual(seen, []);
+});

@@ -1799,4 +1799,28 @@ describe("pulled-out windows (the popout route)", () => {
     shell.handleTearOut({ ...report, phase: "released" });
     expect(forwarded).toEqual([report]);
   });
+
+  it("hands a popup's URL from main to the mounted frame, and not to a frame torn down after its successor mounted", () => {
+    stubAccentPainting();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const shell = new ShellState(createEmptyStores());
+    shell.handleOpenLink("http://localhost:3000/dropped");
+    const oldFrame: string[] = [];
+    const newFrame: string[] = [];
+    const oldSender = (url: string): number => oldFrame.push(url);
+    const newSender = (url: string): number => newFrame.push(url);
+    shell.registerOpenLinkSender(oldSender);
+    shell.registerOpenLinkSender(newSender);
+    shell.unregisterOpenLinkSender(oldSender);
+    shell.handleOpenLink("http://localhost:3000/preview");
+    shell.unregisterOpenLinkSender(newSender);
+    shell.handleOpenLink("http://localhost:3000/after");
+    expect(oldFrame).toEqual([]);
+    expect(newFrame).toEqual(["http://localhost:3000/preview"]);
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+      "[link-routing] dropped a popup's URL main handed back, since no workspace frame is mounted: http://localhost:3000/dropped",
+      "[link-routing] dropped a popup's URL main handed back, since no workspace frame is mounted: http://localhost:3000/after",
+    ]);
+    warn.mockRestore();
+  });
 });

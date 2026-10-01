@@ -1,6 +1,6 @@
 # The Imbue Studio embed contract
 
-Version: 6 (tracks `CONTRACT_VERSION` in
+Version: 7 (tracks `CONTRACT_VERSION` in
 `apps/minds/imbue/minds/desktop_client/static/embed_contract.js`)
 
 The Imbue Studio chrome (the "embedder") displays workspace content in a
@@ -46,7 +46,7 @@ Payloads that carry ids are validated against conservative server-issued
 shapes on receive (and re-validated by anything that builds a URL from them);
 see the `*_PATTERN` constants in the module.
 
-## Message inventory (v6)
+## Message inventory (v7)
 
 ### workspace -> embedder
 
@@ -57,7 +57,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:open-ai-keys-page` | `{ hostId? }` | Open the AI-key mint modal for this workspace. The embedder replies with `minds:open-ai-keys-ack`. |
 | `minds:bring-app-to-front` | `{}` | OAuth finished in the external browser; raise the app window (Electron) / no-op (plain browser). |
 | `minds:open-share-settings` | `{ serviceName }` | Open the shell's share panel for this workspace, focused on that service. Fire-and-forget (no ack). |
-| `minds:workspace-ready` | `{}` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. |
+| `minds:workspace-ready` | `{ opensLinks? }` | This document's endpoint is listening; the embedder may send what it held for it. Sent once per page load, after the workspace registers its handlers. `opensLinks: true` promises the page handles `minds:open-link`; `false` or absent means it does not. A value that is not a boolean rejects the message. |
 | `minds:pop-out-window` | `{ windowId, title, width, height }` | Open this window in a desktop window of its own beside the Imbue Studio window (the pull-out-window spec). `width` and `height` are the window's rendered size in CSS px. Sent again for a window already out to show its popout. |
 | `minds:window-drag-started` | `{ windowId, title, width, height, grabX, grabY }` | A drag of the window's title bar began (or the dragged window changed size mid-drag); `grabX`, `grabY` are where inside the window the pointer holds it. The embedder watches the cursor from here and reports each step with `minds:tear-out`, since the shell's own pointer events stop at the Imbue Studio window's edge on some platforms. |
 | `minds:window-drag-ended` | `{ windowId, isDetached, isCancelled? }` | The shell's own drag gesture ended: `isDetached` is true when the shell detached the window (its release arrived while torn out); `isCancelled` is true for a cancel (Escape), which drops any popout being dragged, and false for a release, after which a popout that is out stays and the embedder sends `minds:tear-out` `released`. The shell takes the embedder's last `minds:tear-out` word on the drag even when it lands after its own release. A shell that omits `isCancelled` is taken at its `isDetached`. |
@@ -74,6 +74,7 @@ see the `*_PATTERN` constants in the module.
 | `minds:embedder-capabilities` | `{ canPopOut }` | What this chrome can do, sent right after `minds:workspace-ready`. A workspace that never receives it (an older chrome, a plain browser) keeps its pull-out gesture off. |
 | `minds:tear-out` | `{ windowId, phase }` | A step of the title-bar drag the embedder watches: `"out"` (the cursor left the Imbue Studio window by the tear-out distance and a popout follows it; the shell detaches the window, saved at once so the popout's own shell reads it, and hides it), `"in"` (the cursor came back and the popout is gone; the shell brings the window back and shows it again), or `"released"` (the button came up while out; the shell ends its gesture, the detach already saved). A word that lands after the shell's own release of the drag still stands (see `minds:window-drag-ended`). |
 | `minds:reattach-window` | `{ windowId, frame? }` | Return a pulled-out window to the desktop, shown and raised: at `frame` (`{ x, y, width, height }` in fractions of the workspace surface, which is the frame's whole viewport; the receiver maps it onto its own backdrop and clamps it) when a re-dock drag dropped it there, else at its kept frame. |
+| `minds:open-link` | `{ url }` | Open this link inside the workspace: the in-workspace browser for a local URL, the app's own window for one of this workspace's app addresses, a refusal notice for another workspace's address. `url` is an absolute `http:` or `https:` URL of at most `MAX_OPEN_LINK_URL_LENGTH` (8192) characters. The desktop app sends it in place of opening a window for a popup (`target="_blank"`, `window.open`) the workspace's page asked for, and only to a page that announced `opensLinks: true`. |
 
 The ack's semantic is "an Imbue Studio chrome is present" -- NOT "the desktop app is
 present". Plain-browser chrome acks too.
@@ -95,9 +96,11 @@ never has to ask, time, or retry anything.
 
 - No version field travels on the wire.
 - Receivers ignore unknown message types silently.
-- Existing types are immutable: never change the meaning, payload shape, or
-  direction of a shipped type. Evolve by adding new types.
-- Receivers ignore unknown payload fields on known types.
+- A shipped type's existing fields never change meaning, and its direction
+  never changes. Evolve by adding new types, or by adding optional fields to
+  an existing type.
+- Receivers ignore unknown payload fields on known types, so an optional field
+  a receiver predates is simply not read.
 
 This lets a newer chrome face an older workspace (and vice versa)
 indefinitely: the intersection of types both sides know keeps working, and
@@ -115,6 +118,10 @@ payloads -- to the console.
 - The Electron main process re-validates ids with its own copies of the
   shape patterns before building URLs (never trust the renderer). Those
   constants live in `electron/main.js` and mirror this module's.
+- Which popups become `minds:open-link` is the Electron main process's
+  decision (`electron/link-routing.js`). The chrome page reports each
+  window's mounted workspace and whether it announced `opensLinks` to main
+  over IPC, and main hands a popup's URL back to that page to send.
 - Workspace health and URL state flow through the Imbue Studio backend's `/ui/ws`
   WebSocket channel, not through postMessage: the shell derives titlebar state
   from its own route plus the channel, identically in Electron and browser
@@ -179,3 +186,13 @@ payloads -- to the console.
   popout that is out on any release and says `released`, and a shell that
   sends it takes that late word; each side facing an older other falls back
   to `isDetached`.
+- **7** -- added `open-link` (embedder -> workspace) and the optional
+  `opensLinks` field on `workspace-ready` (the compatibility rule was
+  reworded to allow optional fields). The
+  desktop app denies a popup the workspace's page asked for that is not
+  external, and hands its URL to the workspace instead of opening a bare
+  window, when the workspace announced `opensLinks: true`. A workspace that
+  announces nothing keeps getting the bare window; a v7 workspace facing an
+  older chrome never receives `open-link` and its popups open as before. The
+  URL must be an absolute `http:` or `https:` URL within
+  `MAX_OPEN_LINK_URL_LENGTH`.

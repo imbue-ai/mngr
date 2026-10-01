@@ -14,13 +14,19 @@ import { fetchJson } from "../../models/create";
 import type {
   DetachedWindowEntry,
   FocusChatSender,
+  OpenLinkSender,
   PermissionResolvedSender,
   ReattachWindowSender,
   ShellState,
   TearOutSender,
   WorkspaceFrameHandle,
 } from "./shell-state";
-import type { PopoutOpenRequest, TearOutReport, WorkspaceWindowDragRequest } from "../../electron-bridge";
+import type {
+  PopoutOpenRequest,
+  TearOutReport,
+  WorkspaceLinkHandlingReport,
+  WorkspaceWindowDragRequest,
+} from "../../electron-bridge";
 
 // The embed contract module is served verbatim at /_static/embed_contract.js
 // (single shared source with the workspace side; see docs/embed-contract.md).
@@ -42,6 +48,7 @@ interface EmbedContractModule {
   EMBEDDER_CAPABILITIES: string;
   REATTACH_WINDOW: string;
   TEAR_OUT: string;
+  OPEN_LINK: string;
   REQUEST_ID_PATTERN: RegExp;
   createEmbedderEndpoint(options: {
     getFrameWindow: () => Window | null;
@@ -110,8 +117,9 @@ export interface EmbedHandlerDeps {
    * over. */
   workspaceAgentId: () => string;
   openRequestPopup: (requestId: string | null) => void;
-  /** The mounted page announced that its endpoint is listening. */
-  onWorkspaceReady: () => void;
+  /** The mounted page announced that its endpoint is listening, and whether
+   * it opens the links main hands back (minds:open-link). */
+  onWorkspaceReady: (opensLinks: boolean) => void;
   /** The workspace asked to pull one of its windows out (the pull-out-window
    * spec); null in a chrome that cannot, which then never answers with the
    * capability either. */
@@ -182,8 +190,8 @@ export function buildEmbedHandlers(
     );
   };
   handlers[contract.BRING_APP_TO_FRONT] = () => bringAppToFront();
-  handlers[contract.WORKSPACE_READY] = () => {
-    onWorkspaceReady();
+  handlers[contract.WORKSPACE_READY] = (message) => {
+    onWorkspaceReady(message.opensLinks === true);
     // What this chrome can do, so the workspace's pull-out gesture turns on
     // only where a desktop window can be made.
     sendAck(contract.EMBEDDER_CAPABILITIES, { canPopOut: deps.popout !== null });
@@ -264,6 +272,73 @@ export async function pushResolutionSnapshot(
   if (entries !== null && entries.length > 0) send(entries);
 }
 
+/** What main is told about the mounted frame's link handling, and the gate on
+ * handing its page a popup's URL. Only the page's own announcement sets
+ * `opensLinks`, so sending the frame to a new page forgets it until that page
+ * announces: a URL sent before a page listens is lost. Repeated reports of
+ * the same state are not sent again. */
+export class FrameLinkHandling {
+  private workspaceId: string | null = null;
+  private opensLinks = false;
+  private lastReport: WorkspaceLinkHandlingReport | null | undefined = undefined;
+  private readonly report: (report: WorkspaceLinkHandlingReport | null) => void;
+  private readonly sendOpenLink: (url: string) => void;
+
+  constructor(
+    report: (report: WorkspaceLinkHandlingReport | null) => void,
+    sendOpenLink: (url: string) => void,
+  ) {
+    this.report = report;
+    this.sendOpenLink = sendOpenLink;
+  }
+
+  /** The frame was armed on a workspace (its agent-scoped id); `isNavigating`
+   * when that sent the frame to a new page. */
+  frameArmed(workspaceId: string, isNavigating: boolean): void {
+    this.workspaceId = workspaceId;
+    if (isNavigating) this.opensLinks = false;
+    this.publish();
+  }
+
+  /** The frame's page announced that it is listening. */
+  pageReady(opensLinks: boolean): void {
+    this.opensLinks = opensLinks;
+    this.publish();
+  }
+
+  /** The frame is no longer mounted. */
+  unmounted(): void {
+    this.workspaceId = null;
+    this.opensLinks = false;
+    this.publish();
+  }
+
+  /** Main handed back a popup's URL: it goes to a page that announced it
+   * opens links, and nowhere otherwise. */
+  openLink(url: string): void {
+    if (this.workspaceId === null || !this.opensLinks) {
+      const why = this.workspaceId === null ? "no workspace is mounted" : "its page has not announced opensLinks";
+      console.warn(`[link-routing] dropped a popup's URL main handed back, since ${why}: ${url}`);
+      return;
+    }
+    this.sendOpenLink(url);
+  }
+
+  private publish(): void {
+    const next =
+      this.workspaceId === null ? null : { workspaceId: this.workspaceId, opensLinks: this.opensLinks };
+    const last = this.lastReport;
+    const isUnchanged =
+      last !== undefined &&
+      (last === null || next === null
+        ? last === next
+        : last.workspaceId === next.workspaceId && last.opensLinks === next.opensLinks);
+    if (isUnchanged) return;
+    this.lastReport = next;
+    this.report(next);
+  }
+}
+
 // electronBridge.onCloseActiveTab has no unregister, so the preload callback
 // is registered ONCE at module scope and forwards to whichever frame is
 // currently mounted; mount/unmount only swap this ref.
@@ -299,6 +374,13 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let focusChatSender: FocusChatSender | null = null;
   let reattachWindowSender: ReattachWindowSender | null = null;
   let tearOutSender: TearOutSender | null = null;
+  let openLinkSender: OpenLinkSender | null = null;
+  const linkHandling = new FrameLinkHandling(
+    (report) => electronBridge.reportWorkspaceLinkHandling(report),
+    (url) => {
+      if (contract !== null) endpoint?.send(contract.OPEN_LINK, { url });
+    },
+  );
   let frameHandle: WorkspaceFrameHandle | null = null;
   let isRemoved = false;
   // Whether the page the frame currently holds has announced that its
@@ -324,10 +406,12 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     armedSoloWindowId = soloWindowId;
     armedIsSoloReopened = isSoloReopened;
     const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId, isSoloReopened);
-    if (frameElement.getAttribute("src") !== expected) {
+    const isNavigating = frameElement.getAttribute("src") !== expected;
+    if (isNavigating) {
       isMountedPageReady = false;
       frameElement.src = expected;
     }
+    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(workspaceAnyId), isNavigating);
   }
 
   // Re-navigate the frame even though the URL is unchanged: assigning src
@@ -340,6 +424,7 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     isMountedPageReady = false;
     frameElement.src =
       shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
+    linkHandling.frameArmed(shell.stores.workspaces.toAgentScopedId(armedWorkspaceAnyId), true);
   }
 
   return {
@@ -386,8 +471,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             shell.openInbox(requestId === null ? {} : { selected: requestId });
             m.redraw();
           },
-          onWorkspaceReady: () => {
+          onWorkspaceReady: (opensLinks) => {
             isMountedPageReady = true;
+            linkHandling.pageReady(opensLinks);
             // A chat ask held while the page was not listening -- a fresh
             // mount, or a click from another workspace -- goes now.
             shell.flushPendingFocusChat();
@@ -458,6 +544,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
           endpoint?.send(loaded.TEAR_OUT, { windowId: report.windowId, phase: report.phase });
         };
         shell.registerTearOutSender(tearOutSender);
+        openLinkSender = (url) => linkHandling.openLink(url);
+        shell.registerOpenLinkSender(openLinkSender);
         // Every (re)load of the workspace page starts it with an empty verdict
         // cache; push its snapshot so no card offers Approve/Deny for a
         // request decided while the page was not live. Sent twice (idempotent)
@@ -510,10 +598,16 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
         vnode.attrs.shell.unregisterTearOutSender(tearOutSender);
         tearOutSender = null;
       }
+      if (openLinkSender !== null) {
+        vnode.attrs.shell.unregisterOpenLinkSender(openLinkSender);
+        openLinkSender = null;
+      }
       // Clear the shell's handle only if it is still ours, so this teardown can
-      // never unhook a frame that is actually mounted.
+      // never unhook a frame that is actually mounted, nor tell main that no
+      // frame is mounted when a successor already reported its own.
       if (vnode.attrs.shell.workspaceFrame === frameHandle) {
         vnode.attrs.shell.workspaceFrame = null;
+        linkHandling.unmounted();
       }
       frameHandle = null;
       if (onFrameLoad !== null)

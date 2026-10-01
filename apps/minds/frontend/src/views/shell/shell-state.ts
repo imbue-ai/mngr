@@ -63,6 +63,10 @@ export type ReattachWindowSender = (
  * the report names the frame's workspace. Registered by WorkspaceFrame. */
 export type TearOutSender = (report: TearOutReport) => void;
 
+/** Sends a popup's URL main handed back into the mounted frame, as
+ * minds:open-link, when its page announced it opens links. */
+export type OpenLinkSender = (url: string) => void;
+
 /** One pulled-out window as the workspace shell reports it. */
 export interface DetachedWindowEntry {
   windowId: string;
@@ -204,6 +208,7 @@ export class ShellState {
   private permissionResolvedSender: PermissionResolvedSender | null = null;
   private reattachWindowSender: ReattachWindowSender | null = null;
   private tearOutSender: TearOutSender | null = null;
+  private openLinkSender: OpenLinkSender | null = null;
   /** The pulled-out windows the mounted shell last reported (the
    * pull-out-window spec, section 5.5). */
   private detachedWindows: readonly DetachedWindowEntry[] = [];
@@ -384,6 +389,24 @@ export class ShellState {
    * frame hears it when the report names its workspace. */
   handleTearOut(report: TearOutReport): void {
     this.tearOutSender?.(report);
+  }
+
+  registerOpenLinkSender(sender: OpenLinkSender): void {
+    this.openLinkSender = sender;
+  }
+
+  unregisterOpenLinkSender(sender: OpenLinkSender): void {
+    if (this.openLinkSender === sender) this.openLinkSender = null;
+  }
+
+  /** Main caught a popup the mounted workspace asked for and hands its URL
+   * back: the workspace opens it inside itself. */
+  handleOpenLink(url: string): void {
+    if (this.openLinkSender === null) {
+      console.warn(`[link-routing] dropped a popup's URL main handed back, since no workspace frame is mounted: ${url}`);
+      return;
+    }
+    this.openLinkSender(url);
   }
 
   /** The popout this window is, when its route is a popout's. */
