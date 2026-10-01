@@ -62,10 +62,8 @@ from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
 from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
-from imbue.mngr.utils.jsonl_warn import split_complete_lines
+from imbue.mngr.utils.jsonl_warn import split_complete_lines_from_bytes
 from imbue.mngr.utils.process_exit_watch import ProcessExitWatch
-
-# Constants
 
 OBSERVE_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agents")
 AGENT_STATES_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agent_states")
@@ -87,9 +85,6 @@ _FULL_STATE_MARKER: Final[bytes] = b'"AGENTS_FULL_STATE"'
 # interrupts at once, or inside the consumer's sink, so this only has to cover
 # a sink that is slow rather than stuck.
 _FOLLOW_JOIN_TIMEOUT_SECONDS: Final[float] = 5.0
-
-
-# Event Types
 
 
 class ObserveEventType(UpperCaseStrEnum):
@@ -149,9 +144,6 @@ class AgentRemovedEvent(EventEnvelope):
     )
 
 
-# Path Helpers
-
-
 @pure
 def get_default_events_base_dir(config: MngrConfig) -> Path:
     """Return the default base directory for observe events (the expanded default_host_dir)."""
@@ -186,9 +178,6 @@ def get_agent_states_events_path(events_base_dir: Path) -> Path:
 def get_observe_lock_path(events_base_dir: Path) -> Path:
     """Return the path to the observe lock file."""
     return events_base_dir / OBSERVE_LOCK_FILENAME
-
-
-# Event Construction
 
 
 def _make_envelope_fields() -> tuple[IsoTimestamp, EventId]:
@@ -258,9 +247,6 @@ def make_agent_removed_event(agent_id: AgentId, agent_name: AgentName, host_id: 
     )
 
 
-# Event Parsing
-
-
 def parse_observe_event_line(line: str) -> AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent | None:
     """Parse one JSONL line from the agents stream into its observe event type.
 
@@ -288,9 +274,6 @@ def parse_observe_event_line(line: str) -> AgentStateEvent | FullAgentStateEvent
     if event_type == ObserveEventType.AGENT_REMOVED:
         return AgentRemovedEvent.model_validate(data)
     return None
-
-
-# File I/O
 
 
 def _append_event_to_file(events_path: Path, event: EventEnvelope) -> None:
@@ -332,9 +315,6 @@ def append_agent_state_change_event(events_base_dir: Path, event: AgentStateChan
     _append_event_to_file(get_agent_states_events_path(events_base_dir), event)
 
 
-# Tracked State
-
-
 class _TrackedState(FrozenModel):
     """Last known agent and host states for an agent, used for change detection."""
 
@@ -349,9 +329,6 @@ def _details_instance_key(agent: AgentDetails) -> str:
     tracking is keyed by the instance rather than the bare agent id.
     """
     return str(AgentInstanceKey.build(agent.id, agent.host.id))
-
-
-# History Loading
 
 
 def _is_full_state_line(line: str) -> bool:
@@ -474,9 +451,6 @@ def load_base_state_from_history(
     return last_state_by_instance
 
 
-# Locking
-
-
 class ObserveLockError(MngrError):
     """Raised when another mngr observe instance is already writing to the same directory."""
 
@@ -573,9 +547,6 @@ def is_observe_writer_running(events_base_dir: Path) -> bool:
     finally:
         os.close(fd)
     return False
-
-
-# Following
 
 
 class ObserveStreamUnavailableError(MngrError, ValueError):
@@ -948,10 +919,10 @@ class ObserveEventFollower(MutableModel):
             handle.seek(self._offset)
             chunk = handle.read(size - self._offset)
         # A trailing line with no terminator is a write in progress -- routine here,
-        # since a snapshot over the atomic-append size tears. ``split_complete_lines``
-        # holds it back and reports the byte count actually consumed, so the offset
-        # lands on it and it is re-read once the writer has finished it.
-        lines, consumed_bytes = split_complete_lines(chunk.decode("utf-8", errors="replace"))
+        # since a snapshot over the atomic-append size tears. The split holds it back
+        # and counts the raw bytes consumed, so the offset lands on it and it is
+        # re-read once the writer has finished it.
+        lines, consumed_bytes = split_complete_lines_from_bytes(chunk)
         self._offset += consumed_bytes
         for line in lines:
             self._forward(line)
@@ -997,9 +968,6 @@ class ObserveEventFollower(MutableModel):
                 "Agent lifecycle stream recovered: an 'mngr observe' process is writing {} again",
                 get_observe_events_path(self.events_base_dir),
             )
-
-
-# Observer
 
 
 class _KnownHost(FrozenModel):
@@ -1560,8 +1528,6 @@ class AgentObserver(MutableModel):
             self._reconcile_watcher_for_agent(agent)
         for instance_key_str in instance_keys_to_drop:
             self._close_watcher(instance_key_str)
-
-    # PID Watchers (local agents only)
 
     def _reconcile_watcher_for_agent(self, agent: AgentDetails) -> None:
         """Open, replace, or close the PID watcher for one agent from its probed details.

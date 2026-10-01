@@ -20,6 +20,7 @@ from imbue.mngr.errors import DuplicateAgentNameError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import HostResources
 from imbue.mngr.interfaces.data_types import SnapshotInfo
@@ -137,8 +138,6 @@ class BaseHost(HostInterface):
         """Get the name of the provider instance managing this host."""
         return self.provider_instance.name
 
-    # Activity Configuration
-
     def get_activity_config(self) -> ActivityConfig:
         """Get the activity configuration for this host."""
         certified_data = self.get_certified_data()
@@ -166,14 +165,10 @@ class BaseHost(HostInterface):
             )
             self.set_certified_data(updated_data)
 
-    # Certified Data
-
     def get_plugin_data(self, plugin_name: str) -> dict[str, Any]:
         """Get certified plugin data from data.json."""
         certified_data = self.get_certified_data()
         return certified_data.plugin.get(plugin_name, {})
-
-    # Provider-Derived Information
 
     def get_provider_resources(self) -> HostResources:
         return self.provider_instance.get_host_resources(self)
@@ -191,8 +186,6 @@ class BaseHost(HostInterface):
         """Get tags from the provider."""
         all_data = self.get_certified_data()
         return {**all_data.user_tags}
-
-    # Agent Information
 
     def _validate_and_create_discovered_agent(self, agent_data: dict[str, Any]) -> DiscoveredAgent | None:
         """Validate agent data and create a DiscoveredAgent if valid.
@@ -233,7 +226,6 @@ class BaseHost(HostInterface):
             if existing.agent_name == new_name and existing.agent_id != agent_id:
                 raise DuplicateAgentNameError(new_name, existing.agent_id)
 
-    # Agent-Derived Information
     def get_state(self) -> HostState:
         """Get the current state of the host.
 
@@ -344,8 +336,6 @@ class OfflineHost(BaseHost):
             return self.observed_state
         return super().get_state()
 
-    # Certified Data
-
     def get_certified_data(self) -> CertifiedHostData:
         return self.certified_host_data
 
@@ -357,8 +347,6 @@ class OfflineHost(BaseHost):
             to_update(data.field_ref().updated_at, datetime.now(timezone.utc)),
         )
         self.on_updated_host_data(self.id, stamped_data)
-
-    # Agent Operations
 
     def rename_agent(
         self,
@@ -467,6 +455,15 @@ class OfflineHostWithVolume(OfflineHost, HostFileReadInterface, HostFileWriteInt
     def read_file(self, path: Path) -> bytes:
         """Read a file from the host volume."""
         return self.host_volume.read_file(self._to_volume_path(path))
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        """Read a file's bytes from ``start_byte`` to EOF by reading the whole file.
+
+        The volume API has no ranged read, and an offline host's files do not change,
+        so callers read them once rather than polling.
+        """
+        content = self.read_file(path)
+        return FileTailRead(file_size=len(content), content=content[start_byte:])
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file from the host volume and decode it."""

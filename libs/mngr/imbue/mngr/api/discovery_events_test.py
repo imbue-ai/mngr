@@ -115,9 +115,6 @@ def _write_provider_snapshots(
         )
 
 
-# === Path Helper Tests ===
-
-
 def test_get_discovery_events_dir_returns_correct_path(temp_config: MngrConfig) -> None:
     events_dir = get_discovery_events_dir(temp_config)
     assert events_dir == temp_config.default_host_dir / "events" / "mngr" / "discovery"
@@ -127,9 +124,6 @@ def test_get_discovery_events_path_returns_jsonl_file(temp_config: MngrConfig) -
     events_path = get_discovery_events_path(temp_config)
     assert events_path.name == "events.jsonl"
     assert events_path.parent.name == "discovery"
-
-
-# === Event Construction Tests ===
 
 
 def test_make_agent_discovery_event_has_correct_fields() -> None:
@@ -239,9 +233,6 @@ def test_full_discovery_snapshot_event_parses_legacy_lines_without_new_fields() 
     assert parsed.error_by_provider_name == {}
 
 
-# === Conversion Helper Tests ===
-
-
 def test_discovered_agent_from_agent_details_preserves_key_fields() -> None:
     host_id = HostId.generate()
     provider_name = ProviderInstanceName("docker")
@@ -343,9 +334,6 @@ def test_extract_agents_and_hosts_deduplicates_hosts() -> None:
     agents, hosts, _ = extract_agents_and_hosts_from_full_listing([details1, details2])
     assert len(agents) == 2
     assert len(hosts) == 1
-
-
-# === File I/O Tests ===
 
 
 def test_append_discovery_event_creates_dirs_and_writes(temp_config: MngrConfig) -> None:
@@ -454,9 +442,6 @@ def test_write_provider_discovery_snapshot_writes_to_file(temp_config: MngrConfi
     assert len(data["agents"]) == 2
     assert len(data["hosts"]) == 1
     assert returned_event.event_id == data["event_id"]
-
-
-# === Parsing Tests ===
 
 
 def test_parse_agent_discovery_event_round_trips() -> None:
@@ -802,9 +787,6 @@ def test_resolve_provider_names_skips_foreign_schema_lines(temp_mngr_ctx: MngrCo
     assert events_path.stat().st_size == pre_resolution_size
 
 
-# === find_discovery_snapshot_replay_offset Tests ===
-
-
 def test_find_replay_offset_returns_zero_when_no_file(tmp_path: Path) -> None:
     assert find_discovery_snapshot_replay_offset(tmp_path / "nonexistent.jsonl") == 0
 
@@ -956,9 +938,6 @@ def test_find_replay_offset_warns_on_mid_file_corruption(tmp_path: Path) -> None
     assert "Skipped corrupt JSONL line" in log_output.getvalue()
 
 
-# === Destroy Event Tests ===
-
-
 def test_emit_agent_destroyed_writes_to_file(temp_config: MngrConfig) -> None:
     agent_id = AgentId.generate()
     host_id = HostId.generate()
@@ -1022,9 +1001,6 @@ def test_parse_host_destroyed_event_round_trips() -> None:
     assert len(parsed.agent_ids) == 1
 
 
-# === HOST_SSH_INFO Event Tests ===
-
-
 def test_emit_host_ssh_info_writes_to_file(temp_config: MngrConfig) -> None:
     host_id = HostId.generate()
     ssh = SSHInfo(
@@ -1070,9 +1046,6 @@ def test_parse_host_ssh_info_event_round_trips() -> None:
     assert parsed.ssh.host == "remote.example.com"
     assert parsed.ssh.port == 2222
     assert parsed.ssh.key_path == Path("/tmp/key")
-
-
-# === resolve_provider_names_for_identifiers Tests ===
 
 
 def test_resolve_provider_names_returns_none_when_no_file(temp_mngr_ctx: MngrContext) -> None:
@@ -1319,9 +1292,6 @@ def test_resolve_provider_names_from_legacy_full_snapshot(temp_mngr_ctx: MngrCon
 
     result = resolve_provider_names_for_identifiers(temp_mngr_ctx, ["legacy-agent"])
     assert result == ("docker",)
-
-
-# === resolve_hosts_for_identifiers Tests ===
 
 
 def _seed_local_host_snapshot(
@@ -1688,9 +1658,6 @@ def test_resolve_hosts_without_fallback_still_raises_for_absent_agent(
     _seed_local_host_snapshot(temp_mngr_ctx, local_provider, "present-agent")
     with pytest.raises(AgentNotFoundError):
         resolve_hosts_for_identifiers(temp_mngr_ctx, ["never-existed-agent"])
-
-
-# === Discovery Stream Tests ===
 
 
 def test_discovery_stream_emit_line_emits_valid_json_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
@@ -2210,9 +2177,6 @@ def test_emit_lines_from_offset_holds_back_partial_last_line(tmp_path: Path) -> 
     assert json.loads(captured[0])["event_id"] == str(event_1.event_id)
 
 
-# === Discovery Event Rotation Tests ===
-
-
 def test_rotate_discovery_events_does_nothing_when_file_is_small(tmp_path: Path) -> None:
     """Rotation should not trigger when the file is below the size threshold."""
     events_path = tmp_path / "events.jsonl"
@@ -2357,3 +2321,101 @@ def test_resolve_provider_names_unions_providers_for_duplicated_agent_id(temp_mn
 
     resolved = resolve_provider_names_for_identifiers(temp_mngr_ctx, [str(shared_agent_id)])
     assert resolved == ("docker", "modal")
+
+
+def test_emit_lines_from_offset_returns_a_raw_byte_offset_past_an_undecodable_byte(tmp_path: Path) -> None:
+    """The returned offset must index the file's raw bytes.
+
+    The offset is a binary seek position. Measuring the consumed length on a copy
+    decoded with ``errors="replace"`` would count each undecodable byte as three
+    (its U+FFFD), putting the offset two bytes ahead of the truth per bad byte --
+    and since it seeds every later read, the drift never self-corrects: the next
+    read starts mid-line and the source goes silent for the rest of the session.
+    """
+    events_path = tmp_path / "events.jsonl"
+    event = make_agent_discovery_event(make_test_discovered_agent())
+    good_line = (json.dumps(event.model_dump(mode="json")) + "\n").encode("utf-8")
+    # A lone 0xFF is not valid UTF-8 anywhere, so it survives to the decoder.
+    corrupt_line = b'{"bad":"\xff"}\n'
+    events_path.write_bytes(corrupt_line + good_line)
+
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    captured: list[str] = []
+    consumed_offset = _emit_lines_from_offset(events_path, 0, warner, set(), Lock(), captured.append)
+
+    assert consumed_offset == len(corrupt_line) + len(good_line)
+    # Seeking to the returned offset lands at EOF, so the next poll starts on a line boundary.
+    with open(events_path, "rb") as f:
+        f.seek(consumed_offset)
+        assert f.read() == b""
+
+
+def test_discovery_tail_keeps_advancing_past_an_undecodable_byte(tmp_path: Path) -> None:
+    """The tail loop must not wedge on a byte it cannot decode.
+
+    Read in text mode, an undecodable byte raises UnicodeDecodeError. The loop's
+    blanket exception handler logs that and leaves the offset untouched, so every
+    later poll would re-read the same bytes -- an error line every second and a
+    permanently silent tail.
+    """
+    events_path = tmp_path / "events.jsonl"
+    good = make_agent_discovery_event(make_test_discovered_agent())
+    good_line = (json.dumps(good.model_dump(mode="json")) + "\n").encode("utf-8")
+    events_path.write_bytes(b'{"bad":"\xff"}\n' + good_line)
+
+    captured: list[str] = []
+    stop_event = threading.Event()
+    warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
+    thread = threading.Thread(
+        target=tail_discovery_events_from_offset,
+        args=(events_path, 0, stop_event, set(), Lock(), warner, captured.append),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        # The corrupt line also decodes to valid JSON, so only the good line after it proves progress.
+        poll_until(lambda: any(good.event_id in line for line in captured), timeout=10.0, poll_interval=0.05)
+    finally:
+        stop_event.set()
+        thread.join(timeout=5.0)
+
+    assert len(captured) >= 2, f"tail did not get past the undecodable byte (captured {len(captured)})"
+    assert good.event_id in captured[-1]
+
+
+def test_resolve_provider_names_survives_an_undecodable_byte_in_the_replay_window(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A corrupt byte in the replay window must cost one line, not the whole resolution.
+
+    The replay seeks a raw byte offset, so it has to read raw bytes. Read in text mode, the line
+    iterator raises UnicodeDecodeError -- a ValueError no caller handles -- so a single bad byte
+    anywhere after the latest snapshot would make every identifier unresolvable.
+    """
+    snapshot_agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("snapshot-agent"),
+        provider_name=ProviderInstanceName("docker"),
+        certified_data={},
+    )
+    _write_provider_snapshots(temp_mngr_ctx.config, [snapshot_agent], [])
+
+    events_path = get_discovery_events_path(temp_mngr_ctx.config)
+    # A lone 0xFF is not valid UTF-8 anywhere, so it survives to the decoder.
+    with open(events_path, "ab") as f:
+        f.write(b'{"note":"\xff"}\n')
+
+    later_agent = DiscoveredAgent(
+        host_id=HostId.generate(),
+        agent_id=AgentId.generate(),
+        agent_name=AgentName("later-agent"),
+        provider_name=ProviderInstanceName("modal"),
+        certified_data={},
+    )
+    emit_agent_discovered(temp_mngr_ctx.config, later_agent)
+
+    # The agent recorded *after* the corrupt line is the real claim: the replay got past it.
+    with capture_loguru(level="WARNING") as log_output:
+        assert resolve_provider_names_for_identifiers(temp_mngr_ctx, ["later-agent"]) == ("modal",)
+    assert "does not match the current schema" in log_output.getvalue()

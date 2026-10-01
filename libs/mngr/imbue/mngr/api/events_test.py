@@ -33,6 +33,7 @@ from imbue.mngr.api.events import _emit_historical_events
 from imbue.mngr.api.events import _handle_online_offline_transition
 from imbue.mngr.api.events import _maybe_emit_source_mismatch_warning
 from imbue.mngr.api.events import _pygtail_offset_file_path
+from imbue.mngr.api.events import _read_remote_source_once
 from imbue.mngr.api.events import _record_from_event_data
 from imbue.mngr.api.events import _seconds_until_next_housekeeping
 from imbue.mngr.api.events import _sort_rotated_files_oldest_first
@@ -59,6 +60,7 @@ from imbue.mngr.hosts.offline_host import OfflineHost
 from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
 from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
@@ -75,6 +77,7 @@ from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.file_watch import DirectoryWatchGroup
+from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr.utils.testing import capture_loguru
 
@@ -124,9 +127,6 @@ def events_volume_target(tmp_path: Path, local_provider) -> tuple[EventsTarget, 
     events_dir.mkdir()
     target = _make_local_host_target(local_provider, events_dir)
     return target, events_dir
-
-
-# read_event_content tests
 
 
 def test_read_event_content_returns_file_contents(events_volume_target: tuple[EventsTarget, Path]) -> None:
@@ -194,9 +194,6 @@ def test_discover_and_read_events_through_offline_volume_backed_host(
     assert "e1" in content
 
 
-# read_common_transcript_content tests
-
-
 def test_a_rotated_segment_that_ends_mid_line_does_not_swallow_the_next_segment(
     tmp_path: Path, local_provider
 ) -> None:
@@ -220,9 +217,6 @@ def test_a_rotated_segment_that_ends_mid_line_does_not_swallow_the_next_segment(
     assert [json.loads(line)["event_id"] for line in lines] == [
         event["event_id"] for event in SAMPLE_ATIF_STREAM_EVENTS
     ]
-
-
-# resolve_events_target tests
 
 
 def _create_agent_data_json(
@@ -328,9 +322,6 @@ def test_resolve_events_target_raises_for_unknown_agent(
         resolve_events_target(AgentAddress(agent=AgentName("nonexistent-identifier-abc123")), temp_mngr_ctx)
 
 
-# Host-based list/read tests
-
-
 @pytest.fixture
 def events_host_target(
     tmp_path: Path,
@@ -416,9 +407,6 @@ def test_read_event_content_raises_when_no_host() -> None:
         read_event_content(target, "test.log")
 
 
-# resolve_events_target with online host tests
-
-
 def test_resolve_events_target_populates_online_host_for_agent(
     temp_mngr_ctx: MngrContext,
     local_provider,
@@ -438,9 +426,6 @@ def test_resolve_events_target_populates_online_host_for_agent(
     assert isinstance(target.host, OnlineHostInterface)
     assert target.events_path is not None
     assert str(target.events_path).endswith(f"agents/{agent_id}/events")
-
-
-# parse_event_line tests
 
 
 def test_parse_event_line_valid_json_with_all_fields() -> None:
@@ -494,9 +479,6 @@ def test_parse_event_line_whitespace_only_raises() -> None:
         parse_event_line("   \n  ", source_hint="fallback")
 
 
-# sort_events_by_timestamp tests
-
-
 def test_sort_events_by_timestamp_orders_chronologically() -> None:
     events = [
         EventRecord(raw_line="c", timestamp="2026-03-03T00:00:00Z", event_id="c", source="s", data={}),
@@ -514,9 +496,6 @@ def test_sort_events_by_timestamp_stable_for_equal_timestamps() -> None:
     ]
     sorted_events = sort_events_by_timestamp(events)
     assert [e.event_id for e in sorted_events] == ["x", "y"]
-
-
-# _sort_rotated_files_oldest_first tests
 
 
 def test_sort_rotated_files_oldest_first() -> None:
@@ -543,9 +522,6 @@ def test_sort_rotated_files_ignores_non_matching() -> None:
     files = ["events.jsonl.20260415110000000000", "events.jsonl", "other.log"]
     result = _sort_rotated_files_oldest_first(files)
     assert result == snapshot(["events.jsonl.20260415110000000000"])
-
-
-# _build_event_sources_from_listing tests
 
 
 def _file_entry(path: str) -> VolumeFile:
@@ -612,9 +588,6 @@ def test_build_event_sources_from_listing_root_level_events_file() -> None:
     assert sources[0].is_current_file_present is True
 
 
-# discover_event_sources (via readable host) tests
-
-
 def test_discover_event_sources_finds_sources_recursively(tmp_path: Path, local_provider) -> None:
     """Verify discover_event_sources finds all event sources recursively via the host."""
     events_dir = tmp_path / "events"
@@ -649,9 +622,6 @@ def test_discover_event_sources_empty_dir(tmp_path: Path, local_provider) -> Non
     target = _make_local_host_target(local_provider, events_dir)
     sources = discover_event_sources(target)
     assert sources == []
-
-
-# filter_sources_by_name tests
 
 
 def test_filter_sources_by_name_returns_all_when_no_filters() -> None:
@@ -691,9 +661,6 @@ def test_filter_sources_by_name_exact_match_not_prefix() -> None:
     result = filter_sources_by_name(sources, ["logs"])
     assert len(result) == 1
     assert result[0].source_path == "logs"
-
-
-# read_all_historical_events tests
 
 
 def test_read_all_historical_events_merges_and_sorts(tmp_path: Path, local_provider) -> None:
@@ -774,6 +741,31 @@ def test_read_all_historical_events_warns_on_mid_file_corruption(tmp_path: Path,
     assert "this is not valid json" in output
 
 
+def test_read_all_historical_events_skips_a_valid_json_line_that_is_not_an_event(
+    tmp_path: Path, local_provider
+) -> None:
+    """A line with no timestamp costs that line, not the whole history read.
+
+    Raised out of the history read, it would fail ``mngr event`` at startup on every attach.
+    """
+    events_dir = tmp_path / "events"
+    events_dir.mkdir()
+    (events_dir / "src").mkdir()
+    (events_dir / "src" / "events.jsonl").write_text(
+        '{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src"}\n'
+        '{"note":"no timestamp"}\n'
+        '{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2","source":"src"}\n'
+    )
+    target = _make_local_host_target(local_provider, events_dir)
+    sources = [EventSourceInfo(source_path="src", rotated_files=(), is_current_file_present=True)]
+
+    with capture_loguru(level="WARNING") as log_output:
+        events, _ = read_all_historical_events(target, sources, [], [])
+
+    assert [e.event_id for e in events] == ["e1", "e2"]
+    assert "no timestamp" in log_output.getvalue()
+
+
 def test_read_all_historical_events_silent_when_only_last_line_corrupted(tmp_path: Path, local_provider) -> None:
     events_dir = tmp_path / "events"
     events_dir.mkdir()
@@ -818,9 +810,6 @@ def test_read_all_historical_events_with_cel_filter(tmp_path: Path, local_provid
 
     assert len(events) == 1
     assert events[0].event_id == "m1"
-
-
-# stream_all_events tests
 
 
 class _StopStream(Exception):
@@ -991,9 +980,6 @@ def test_stream_all_events_empty_source_filters_shows_all(tmp_path: Path, local_
     assert captured == ["a1", "b1"]
 
 
-# Source mismatch warning tests
-
-
 def test_create_source_mismatch_warning_contains_details() -> None:
     warning = _create_source_mismatch_warning("wrong_source", "correct_source")
     assert warning.source == "event_watcher"
@@ -1021,9 +1007,6 @@ def test_maybe_emit_source_mismatch_warning_emits_once() -> None:
     # Second call with same source should not emit
     _maybe_emit_source_mismatch_warning(event, warned, emitted.append)
     assert len(emitted) == 1
-
-
-# _emit_historical_events tests
 
 
 def test_emit_historical_events_applies_head() -> None:
@@ -1083,9 +1066,6 @@ def test_emit_historical_events_emits_all_when_no_limits() -> None:
     _emit_historical_events(events, state, emitted.append, head_count=None, tail_count=None)
 
     assert len(emitted) == 3
-
-
-# stream_all_events additional tests
 
 
 def test_stream_all_events_tail_mode(tmp_path: Path, local_provider) -> None:
@@ -1171,9 +1151,6 @@ def test_stream_all_events_empty_events_dir(tmp_path: Path, local_provider) -> N
     assert captured == []
 
 
-# resolve_events_target populates new fields
-
-
 def test_resolve_events_target_populates_provider_and_host_id(
     temp_mngr_ctx: MngrContext,
     local_provider,
@@ -1194,9 +1171,6 @@ def test_resolve_events_target_populates_provider_and_host_id(
     assert target.provider is not None
     assert target.host_id is not None
     assert target.events_subpath is not None
-
-
-# Follow mode: pygtail tail thread tests
 
 
 class _RunningTailSourceThread(FrozenModel):
@@ -1448,9 +1422,6 @@ def test_tail_thread_follows_a_common_transcript_written_after_it_starts(tmp_pat
         watch_group.stop()
 
 
-# Rotation guard tests
-
-
 def test_check_for_new_archived_events_finds_newly_rotated_files(tmp_path: Path, local_provider) -> None:
     """Verify _check_for_new_archived_events detects rotated files that appeared after initial scan."""
     events_dir = tmp_path / "events"
@@ -1500,9 +1471,6 @@ def test_check_for_new_archived_events_skips_already_known(tmp_path: Path, local
     assert new_events == []
 
 
-# refresh_events_target tests
-
-
 def test_refresh_events_target_returns_same_when_no_provider() -> None:
     """Verify refresh_events_target is a no-op when provider info is missing."""
     target = EventsTarget(display_name="test")
@@ -1523,9 +1491,6 @@ def test_refresh_events_target_returns_same_when_no_events_subpath() -> None:
     target = EventsTarget(display_name="test", events_subpath=None)
     result = refresh_events_target(target)
     assert result is target
-
-
-# _seconds_until_next_housekeeping tests
 
 
 def test_seconds_until_next_housekeeping_online_uses_earlier_of_both_deadlines() -> None:
@@ -1574,9 +1539,6 @@ def test_seconds_until_next_housekeeping_overdue_deadline_clamps_to_zero() -> No
         is_read_failing=False,
     )
     assert timeout == 0.0
-
-
-# _handle_online_offline_transition tests
 
 
 def test_handle_online_offline_transition_comes_online_sets_gate(
@@ -1781,9 +1743,6 @@ def test_handle_online_offline_transition_warns_once_per_streak_of_failed_online
         assert len(log_output.getvalue().splitlines()) == 2
 
 
-# Persistent tail thread gating / target-follow tests
-
-
 @pytest.mark.timeout(30)
 def test_tail_source_thread_does_no_io_while_gate_closed_then_resumes(
     tmp_path: Path,
@@ -1793,9 +1752,9 @@ def test_tail_source_thread_does_no_io_while_gate_closed_then_resumes(
     """The persistent tail thread reads nothing while ``online_event`` is clear, then
     picks up events once it is set -- the core "no docker exec while offline" guarantee.
 
-    Uses a volume-backed offline host (the whole-file polling path) so any read would
-    go through ``read_event_content``; with the gate closed the thread must not read at
-    all, so the pre-existing ``e1`` stays out of the queue until the gate opens.
+    Uses a volume-backed offline host (the offset-read polling path) so any read would
+    go through ``read_event_tail_from_offset``; with the gate closed the thread must not
+    read at all, so the pre-existing ``e1`` stays out of the queue until the gate opens.
     """
     host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
     assert not isinstance(host, OnlineHostInterface)
@@ -1879,7 +1838,7 @@ def test_tail_source_thread_flags_reads_that_keep_failing(
     """A remote-mechanism tail whose every read fails must say so through the failure event
     once the failures stop looking transient, so the follow loop re-resolves the host instead of
     retrying a dead handle forever in silence."""
-    # A volume-backed host reads by whole-file poll (the remote mechanism); pointing it at a
+    # A volume-backed host reads by offset-read poll (the remote mechanism); pointing it at a
     # directory with no events file makes every poll fail.
     host = _make_offline_volume_backed_host(local_provider, temp_mngr_ctx)
     events_dir = tmp_path / "events"
@@ -1910,6 +1869,9 @@ class _ReaderRaisingUnexpectedError(HostFileReadInterface):
     """A readable host on which every path exists, but every file read raises an error the tail loop does not catch."""
 
     def read_file(self, path: Path) -> bytes:
+        raise _UnexpectedReaderError(f"cannot read {path}")
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
         raise _UnexpectedReaderError(f"cannot read {path}")
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
@@ -1984,9 +1946,6 @@ def test_follow_ends_with_the_readers_error_when_a_tail_thread_dies(tmp_path: Pa
     assert isinstance(raised.value.__cause__, _UnexpectedReaderError)
 
 
-# _build_event_sources_from_grouped_files tests
-
-
 def test_build_event_sources_from_grouped_files_multiple_dirs() -> None:
     """Multiple directories should produce multiple EventSourceInfo objects."""
     files_by_dir = {
@@ -2032,9 +1991,6 @@ def test_build_event_sources_from_grouped_files_empty() -> None:
     assert _build_event_sources_from_grouped_files({}) == []
 
 
-# _pygtail_offset_file_path tests
-
-
 def test_pygtail_offset_file_path_with_source_path() -> None:
     """Source path with slashes should have slashes replaced by underscores."""
     result = _pygtail_offset_file_path("logs/mngr", Path("/tmp/offsets"))
@@ -2053,9 +2009,6 @@ def test_pygtail_offset_file_path_with_simple_source_path() -> None:
     assert result == "/tmp/offsets/messages.offset"
 
 
-# EventsTarget validator tests
-
-
 def test_events_target_rejects_host_without_events_path(
     local_provider,
 ) -> None:
@@ -2064,9 +2017,6 @@ def test_events_target_rejects_host_without_events_path(
     assert isinstance(host, HostFileReadInterface)
     with pytest.raises(MngrError, match="host and events_path must both be set"):
         EventsTarget(host=host, events_path=None, display_name="bad-target")
-
-
-# parse_event_line edge cases
 
 
 def test_parse_event_line_non_dict_json_raises() -> None:
@@ -2136,9 +2086,6 @@ def test_record_from_event_data_does_not_mutate_input_when_source_missing() -> N
     assert data == original_data
 
 
-# Source mismatch warning additional tests
-
-
 def test_create_source_mismatch_warning_has_correct_fields() -> None:
     warning = _create_source_mismatch_warning("bad_source", "good_source")
     assert warning.source == "event_watcher"
@@ -2167,9 +2114,6 @@ def test_maybe_emit_source_mismatch_warning_skips_when_no_mismatch() -> None:
     assert len(emitted) == 0
 
 
-# _sort_rotated_files_oldest_first edge cases
-
-
 def test_sort_rotated_files_mixed_valid_and_invalid() -> None:
     """Non-matching filenames should be ignored."""
     result = _sort_rotated_files_oldest_first(
@@ -2187,9 +2131,6 @@ def test_sort_rotated_files_mixed_valid_and_invalid() -> None:
     ]
 
 
-# _build_event_sources_from_listing edge cases
-
-
 def test_build_event_sources_from_listing_skips_paths_not_under_base() -> None:
     """Entries whose path is not under events_path should be ignored."""
     entries = [
@@ -2199,3 +2140,145 @@ def test_build_event_sources_from_listing_skips_paths_not_under_base() -> None:
     result = _build_event_sources_from_listing(entries, Path("/base/path"))
     assert len(result) == 1
     assert result[0].source_path == "messages"
+
+
+class _InMemoryTailReader(HostFileReadInterface):
+    """Reader serving one in-memory events file through the real ranged-read contract.
+
+    Reproduces what a remote host's ``read_file_tail_from_offset`` returns -- the size
+    the same call saw, and empty content at or past EOF -- so the offset walk under
+    test is the production one rather than a paraphrase of it.
+    """
+
+    content: bytes = b""
+    requested_start_bytes: list[int] = Field(default_factory=list)
+
+    def read_file(self, path: Path) -> bytes:
+        return self.content
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        self.requested_start_bytes.append(start_byte)
+        return FileTailRead(file_size=len(self.content), content=self.content[start_byte:])
+
+    def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
+        return self.content.decode(encoding)
+
+    def path_exists(self, path: Path) -> bool:
+        return True
+
+    def get_file_mtime(self, path: Path) -> datetime | None:
+        return None
+
+    def list_directory(self, path: Path, *, recursive: bool = False) -> list[VolumeFile]:
+        return []
+
+
+def _event_line(event_id: str, day: int = 1) -> bytes:
+    return f'{{"timestamp":"2026-01-{day:02d}T00:00:00Z","event_id":"{event_id}","source":"src"}}\n'.encode("utf-8")
+
+
+def _poll_remote_source(
+    reader: _InMemoryTailReader,
+    byte_offset: int,
+    warner: MalformedJsonLineWarner,
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure],
+) -> tuple[int, list[str]]:
+    """Run one poll and return the new offset plus the event ids it enqueued."""
+    target = EventsTarget(host=reader, events_path=Path("/fake/events"), display_name="test")
+    new_offset = _read_remote_source_once(target, "src", byte_offset, warner, event_queue, [], [])
+    emitted = []
+    while not event_queue.empty():
+        item = event_queue.get_nowait()
+        assert isinstance(item, EventRecord)
+        emitted.append(item.event_id)
+    return new_offset, emitted
+
+
+def test_read_remote_source_once_walks_the_offset_across_partials_eof_and_rotation() -> None:
+    """The poll sequence a follow session actually drives, with no event lost or doubled.
+
+    Grow with a torn trailing line, complete it, idle at EOF, then rotate. Each step's
+    offset must land on a line boundary in the file's real bytes, since the next ranged
+    read starts exactly there.
+    """
+    first = _event_line("e1")
+    torn = b'{"timestamp":"2026-01-02T00:00:00Z","event_id":"e2"'
+    rest_of_torn = b',"source":"src"}\n'
+    reader = _InMemoryTailReader(content=first + torn)
+    warner = MalformedJsonLineWarner(source_description="test")
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
+
+    with capture_loguru(level="WARNING") as log_output:
+        # The torn line is held back rather than emitted as two halves.
+        offset, emitted = _poll_remote_source(reader, 0, warner, event_queue)
+        assert emitted == ["e1"]
+        assert offset == len(first)
+
+        # Once the writer flushes the rest, the held-back line arrives whole and once.
+        reader.content = first + torn + rest_of_torn
+        offset, emitted = _poll_remote_source(reader, offset, warner, event_queue)
+        assert emitted == ["e2"]
+        assert offset == len(reader.content)
+
+        # Idling at EOF transfers nothing and leaves the offset alone.
+        offset, emitted = _poll_remote_source(reader, offset, warner, event_queue)
+        assert emitted == []
+        assert offset == len(reader.content)
+
+        # Rotation: the file is now shorter than the saved offset, so the poll re-reads
+        # from the start (the consume loop's event-id dedup is the backstop for events
+        # the new file happens to repeat).
+        reader.content = _event_line("e3", day=3)
+        offset, emitted = _poll_remote_source(reader, offset, warner, event_queue)
+        assert emitted == ["e3"]
+        assert offset == len(reader.content)
+
+    assert log_output.getvalue() == ""
+    # Every poll asks only for the bytes past its saved offset; the rotation poll then
+    # re-reads from the start.
+    whole_length = len(first + torn + rest_of_torn)
+    assert reader.requested_start_bytes == [0, len(first), whole_length, whole_length, 0]
+
+
+def test_read_remote_source_once_offset_stays_on_a_line_boundary_past_an_undecodable_byte() -> None:
+    """An undecodable byte must not push the offset past the line it sits in.
+
+    The offset indexes the file's real bytes, but the line is reported as text, where
+    the byte becomes a 3-byte U+FFFD. Counting the text would leave every later poll
+    starting mid-line, which drops every subsequent event for the rest of the session.
+    """
+    corrupt = b'{"timestamp":"2026-01-01T00:00:00Z","event_id":"e1","source":"src","note":"\xff"}\n'
+    reader = _InMemoryTailReader(content=corrupt)
+    warner = MalformedJsonLineWarner(source_description="test")
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
+
+    offset, emitted = _poll_remote_source(reader, 0, warner, event_queue)
+    assert emitted == ["e1"]
+    assert offset == len(corrupt)
+
+    # The next line is then read whole, rather than truncated at the front.
+    reader.content = corrupt + _event_line("e2", day=2)
+    offset, emitted = _poll_remote_source(reader, offset, warner, event_queue)
+    assert emitted == ["e2"]
+    assert offset == len(reader.content)
+
+
+def test_read_remote_source_once_advances_past_valid_json_lines_that_are_not_events() -> None:
+    """A line the follow cannot turn into an event must not stop the follow at that line.
+
+    The tail loop treats an exception from a poll as a failed read and retries from the
+    same offset, so a line that raised would be re-read forever and nothing after it
+    would ever be delivered.
+    """
+    content = _event_line("e1") + b'{"bad":"\xff"}\n' + b"[1, 2, 3]\n" + _event_line("e2", day=2)
+    reader = _InMemoryTailReader(content=content)
+    warner = MalformedJsonLineWarner(source_description="test")
+    event_queue: queue_mod.Queue[EventRecord | _TailSourceFailure] = queue_mod.Queue()
+
+    with capture_loguru(level="WARNING") as log_output:
+        offset, emitted = _poll_remote_source(reader, 0, warner, event_queue)
+
+    assert emitted == ["e1", "e2"]
+    assert offset == len(content)
+    assert "timestamp" in log_output.getvalue()
+    assert "not a JSON object" in log_output.getvalue()

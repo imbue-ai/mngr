@@ -23,6 +23,7 @@ from imbue.mngr.interfaces.agent import AgentInterface
 from imbue.mngr.interfaces.data_types import ActivityConfig
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import HostBootInfo
 from imbue.mngr.interfaces.data_types import HostLifecycleOptions
 from imbue.mngr.interfaces.data_types import HostResources
@@ -237,6 +238,15 @@ class HostFileReadInterface(MutableModel, ABC):
     @abstractmethod
     def read_file(self, path: Path) -> bytes:
         """Read a file and return its contents as bytes."""
+        ...
+
+    @abstractmethod
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        """Read a file's bytes from ``start_byte`` to EOF, never past the ``file_size`` the same call reports.
+
+        A ``file_size`` below the caller's saved offset means the file was truncated or
+        rotated. Raises FileNotFoundError if the file does not exist.
+        """
         ...
 
     @abstractmethod

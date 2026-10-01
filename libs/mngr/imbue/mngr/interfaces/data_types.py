@@ -494,6 +494,13 @@ class VolumeFile(FrozenModel):
     )
 
 
+class FileTailRead(FrozenModel):
+    """A file's bytes from an offset to EOF, with the file's size as seen by the same read."""
+
+    file_size: int = Field(description="Size in bytes of the file at read time")
+    content: bytes = Field(description="The file's bytes from the requested offset to EOF (empty at/past EOF)")
+
+
 class VolumeInfo(FrozenModel):
     """Information about a volume."""
 

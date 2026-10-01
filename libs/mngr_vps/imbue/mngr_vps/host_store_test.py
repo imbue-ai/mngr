@@ -20,6 +20,7 @@ from imbue.mngr.errors import HostRecordUnreadableError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -50,12 +51,6 @@ def _make_certified_data(host_id: str = "test-host-123", host_name: str = "test-
         created_at=now,
         updated_at=now,
     )
-
-
-# =============================================================================
-# Schema tests: VpsHostConfig and VpsHostRecord are unchanged by the
-# unified-volume refactor; these tests guard the pydantic shapes.
-# =============================================================================
 
 
 def test_vps_host_config_optional_fields() -> None:
@@ -121,7 +116,6 @@ def test_vps_host_record_model_copy_update() -> None:
     assert record.certified_host_data.host_name == "test-host"
 
 
-# =============================================================================
 # VpsHostStore tests against a tmp-dir-backed fake outer.
 #
 # The fake stands in for the VPS's outer host: file I/O goes to a real local
@@ -132,7 +126,6 @@ def test_vps_host_record_model_copy_update() -> None:
 # docker volume inspect is special-cased to return the registered
 # ``device_by_volume`` path so ``resolve_volume_device`` resolves to the fake
 # bind-source path without needing a real docker daemon.
-# =============================================================================
 
 
 class _LocalFakeOuter(OuterHostInterface):
@@ -217,6 +210,10 @@ class _LocalFakeOuter(OuterHostInterface):
 
     def read_file(self, path: Path) -> bytes:
         return path.read_bytes()
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        content = path.read_bytes()
+        return FileTailRead(file_size=len(content), content=content[start_byte:])
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -110,7 +110,7 @@ def resolve_names_from_discovery_stream(
         return [], []
 
     try:
-        all_lines = events_path.read_text().splitlines()
+        all_lines = events_path.read_bytes().decode("utf-8", errors="replace").splitlines()
     except OSError:
         return [], []
 

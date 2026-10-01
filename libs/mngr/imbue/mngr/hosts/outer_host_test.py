@@ -1,6 +1,7 @@
 """Unit tests for OuterHost and the outer-host accessors."""
 
 import errno
+import os
 import shlex
 import stat
 import subprocess
@@ -11,8 +12,11 @@ from typing import cast
 
 import pytest
 from paramiko import ChannelException
+from paramiko import SFTPAttributes
+from paramiko import SFTPClient
 from paramiko import SFTPError
 from paramiko import SSHException
+from paramiko import Transport
 from paramiko.ssh_exception import NoValidConnectionsError
 from pyinfra.api.command import StringCommand
 from pyinfra.api.exceptions import ConnectError
@@ -31,6 +35,7 @@ from imbue.mngr.hosts.outer_host import _is_remote_directory
 from imbue.mngr.hosts.outer_host import _is_transient_ssh_connect_error
 from imbue.mngr.hosts.outer_host import _prepend_env_exports
 from imbue.mngr.hosts.outer_host import _sftp_walk
+from imbue.mngr.hosts.outer_host import create_local_pyinfra_host
 from imbue.mngr.hosts.outer_host import create_ssh_pyinfra_host_using_user_config
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
@@ -1100,3 +1105,321 @@ def test_paramiko_is_pinned_to_the_version_whose_private_transport_method_the_re
     in ``pyproject.toml`` and here together.
     """
     assert importlib_metadata.version("paramiko") == "3.5.1"
+
+
+def test_read_file_tail_from_offset_local_returns_delta_and_size(local_outer_host: OuterHost, tmp_path: Path) -> None:
+    """The tail read returns only the bytes past the offset, plus the size the call saw.
+
+    This is the follow-mode poll primitive: the offset walk (grow, poll at
+    EOF, shrink after rotation) is exactly the sequence the events tailer
+    drives once a second.
+    """
+    target_file = tmp_path / "events.jsonl"
+    target_file.write_bytes(b"first line\n")
+
+    from_start = local_outer_host.read_file_tail_from_offset(target_file, 0)
+    assert from_start.file_size == 11
+    assert from_start.content == b"first line\n"
+
+    # Appending and polling from the previous offset yields only the delta.
+    target_file.write_bytes(b"first line\nsecond line\n")
+    delta = local_outer_host.read_file_tail_from_offset(target_file, 11)
+    assert delta.file_size == 23
+    assert delta.content == b"second line\n"
+
+    # Polling at EOF transfers nothing but still reports the size.
+    at_eof = local_outer_host.read_file_tail_from_offset(target_file, 23)
+    assert at_eof.file_size == 23
+    assert at_eof.content == b""
+
+    # After rotation (file shrank), the size falls below the saved offset --
+    # the caller's rotation signal.
+    target_file.write_bytes(b"new\n")
+    after_rotation = local_outer_host.read_file_tail_from_offset(target_file, 23)
+    assert after_rotation.file_size == 4
+    assert after_rotation.content == b""
+
+
+def test_read_file_tail_from_offset_local_missing_file_raises(local_outer_host: OuterHost, tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        local_outer_host.read_file_tail_from_offset(tmp_path / "missing-1c9e4b.jsonl", 0)
+
+
+class _FakeSshClientWithTransport:
+    """Paramiko-client stand-in handing out one transport."""
+
+    def __init__(self, transport: Any) -> None:
+        self._transport = transport
+
+    def get_transport(self) -> Any:
+        return self._transport
+
+
+class _FakeConnectorWithClient:
+    """Pyinfra-connector stand-in exposing the paramiko client OuterHost reaches for."""
+
+    def __init__(self, client: _FakeSshClientWithTransport) -> None:
+        self.client = client
+
+
+class _FakeTransportFailingSftpOpen:
+    """Transport whose SFTP channel open reports a dead connection, then a distinct failure."""
+
+    def __init__(self) -> None:
+        self.open_call_count = 0
+
+    def set_keepalive(self, interval: int) -> None:
+        pass
+
+    def open_session(self, timeout: float | None = None) -> Any:
+        self.open_call_count += 1
+        if self.open_call_count == 1:
+            raise EOFError("Server connection dropped")
+        raise HostConnectionError("second attempt on a rebuilt connection")
+
+
+class _FakePyinfraHostWithDeadSftpTransport:
+    """Pyinfra-host stand-in believing it is connected while its transport is gone.
+
+    The shape a long-lived tail connection presents after a sleep or a NAT drop:
+    ``connected`` is still True, so nothing reconnects until something disconnects.
+    """
+
+    def __init__(self, transport: _FakeTransportFailingSftpOpen) -> None:
+        self.connected = True
+        self.name = "fake-ssh-host"
+        self.connector_cls = type("SSHConnector", (), {})
+        self.connector = _FakeConnectorWithClient(_FakeSshClientWithTransport(transport))
+        self.disconnect_call_count = 0
+
+    def connect(self, raise_exceptions: bool = False) -> None:
+        self.connected = True
+
+    def disconnect(self) -> None:
+        self.disconnect_call_count += 1
+        self.connected = False
+
+
+def test_read_file_tail_from_offset_disconnects_a_dead_transport_before_retrying(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A tail read that hits a dead transport must rebuild the connection, not retry onto the corpse.
+
+    ``_ensure_connected`` only reconnects when pyinfra's ``connected`` flag is
+    False, and only ``disconnect()`` clears it -- so without this, the once-a-second
+    events-follow poll would fail against the same dead transport for the rest of the
+    session, with the tail thread swallowing each failure at trace level.
+    """
+    transport = _FakeTransportFailingSftpOpen()
+    fake = _FakePyinfraHostWithDeadSftpTransport(transport)
+    outer = OuterHost(
+        id=HostId.generate(),
+        connector=PyinfraConnector(cast(PyinfraHost, fake)),
+        mngr_ctx=temp_mngr_ctx,
+    )
+
+    with pytest.raises(HostConnectionError, match="second attempt"):
+        outer._read_file_tail_from_offset_with_transient_retry("/agent/events/events.jsonl", 0, None)
+
+    assert transport.open_call_count == 2
+    assert fake.disconnect_call_count == 1
+
+
+class _FakeSftpFile:
+    """paramiko ``SFTPFile`` stand-in that records whether the read was pipelined."""
+
+    MAX_REQUEST_SIZE = 32768
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.position = 0
+        self.prefetched_file_sizes: list[int | None] = []
+        self.requested_read_sizes: list[int | None] = []
+
+    def __enter__(self) -> "_FakeSftpFile":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        return False
+
+    def seek(self, offset: int, whence: int = 0) -> None:
+        self.position = offset
+
+    def prefetch(self, file_size: int | None = None) -> None:
+        self.prefetched_file_sizes.append(file_size)
+
+    def read(self, size: int | None = None) -> bytes:
+        self.requested_read_sizes.append(size)
+        available = self.content[self.position :]
+        data = available if size is None else available[:size]
+        self.position += len(data)
+        return data
+
+
+class _FakeSftpClient:
+    """SFTP channel stand-in serving one in-memory file."""
+
+    def __init__(self, content: bytes) -> None:
+        self.content = content
+        self.opened_files: list[_FakeSftpFile] = []
+
+    def stat(self, path: str) -> SFTPAttributes:
+        attributes = SFTPAttributes()
+        attributes.st_size = len(self.content)
+        return attributes
+
+    def open(self, path: str, mode: str = "r") -> _FakeSftpFile:
+        opened = _FakeSftpFile(self.content)
+        self.opened_files.append(opened)
+        return opened
+
+    def close(self) -> None:
+        pass
+
+
+class _GrowingFakeSftpClient(_FakeSftpClient):
+    """Serves a file that gains bytes between the ``stat`` and the ``open``.
+
+    The shape a live ``events.jsonl`` takes under an appending writer, and the
+    only thing that can tell a bounded read from an unbounded one.
+    """
+
+    def __init__(self, content: bytes, appended_after_stat: bytes) -> None:
+        super().__init__(content)
+        self.appended_after_stat = appended_after_stat
+        self.stat_size: int | None = None
+
+    def stat(self, path: str) -> SFTPAttributes:
+        attributes = super().stat(path)
+        self.stat_size = attributes.st_size
+        # The writer appends between the two calls.
+        self.content = self.content + self.appended_after_stat
+        return attributes
+
+
+class _OuterHostWithFakeSftp(OuterHost):
+    """OuterHost whose SFTP channel is a fake, so the ranged read runs without a server."""
+
+    fake_sftp: Any = None
+
+    def _get_paramiko_transport(self) -> Transport:
+        return cast(Transport, None)
+
+    def _create_sftp_client(self, transport: Transport) -> SFTPClient | None:
+        return cast(SFTPClient, self.fake_sftp)
+
+
+def _make_outer_host_with_fake_sftp(mngr_ctx: MngrContext, fake_sftp: _FakeSftpClient) -> _OuterHostWithFakeSftp:
+    return _OuterHostWithFakeSftp(
+        id=HostId.generate(),
+        connector=PyinfraConnector(create_local_pyinfra_host()),
+        mngr_ctx=mngr_ctx,
+        fake_sftp=fake_sftp,
+    )
+
+
+def test_read_file_tail_from_offset_pipelines_a_whole_file_in_request_sized_reads(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A large range is prefetched and read one request's worth at a time; a poll-sized delta is one read.
+
+    paramiko serves a sized read larger than one request by growing a bytes buffer through
+    concatenation, copying the whole buffer per chunk. Reading at most MAX_REQUEST_SIZE per call,
+    as ``SFTPClient.getfo`` does, never enters that path. A delta that fits in one request needs
+    neither prefetch nor a loop.
+    """
+    content = b"x" * 200_000
+    fake_sftp = _FakeSftpClient(content)
+    outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
+
+    whole_file = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
+    assert whole_file.content == content
+    whole_file_reader = fake_sftp.opened_files[-1]
+    assert whole_file_reader.prefetched_file_sizes == [len(content)]
+    assert all(
+        size is not None and size <= _FakeSftpFile.MAX_REQUEST_SIZE for size in whole_file_reader.requested_read_sizes
+    )
+
+    delta_size = 100
+    delta = outer._read_file_tail_from_offset_via_paramiko(
+        "/agent/events/events.jsonl", len(content) - delta_size, None
+    )
+    assert delta.content == content[-delta_size:]
+    assert fake_sftp.opened_files[-1].prefetched_file_sizes == []
+    # Unsized, paramiko would fill an 8 KiB buffer per synchronous request.
+    assert fake_sftp.opened_files[-1].requested_read_sizes == [delta_size]
+
+
+def test_read_file_tail_from_offset_stops_at_the_size_it_reported(temp_mngr_ctx: MngrContext) -> None:
+    """Content must not run past ``file_size``, even while the file is being appended to.
+
+    The stat happens before the read, so a live ``events.jsonl`` can gain bytes in
+    between. The interface promises the two agree, and callers rely on it: the poll's
+    rotation test compares its saved offset against ``file_size``, so content reaching
+    past that size could push the offset beyond the last size the caller ever saw.
+    """
+    content = b"x" * 5_000
+    appended = b"y" * 900
+    fake_sftp = _GrowingFakeSftpClient(content, appended)
+    outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, fake_sftp)
+
+    tail = outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)
+
+    assert fake_sftp.stat_size == len(content)
+    assert tail.file_size == len(content)
+    # The bytes appended after the stat wait for the next poll rather than
+    # arriving with a size that does not account for them.
+    assert len(tail.content) == len(content)
+    assert tail.content == content
+
+
+def test_local_read_file_tail_from_offset_stops_at_the_size_it_reported(
+    tmp_path: Path, local_outer_host: OuterHost
+) -> None:
+    """The local path owes the same guarantee as the remote one.
+
+    Bounding it is invisible on a static file, so without a file that grows between
+    the stat and the read the bound could be deleted and every other test would
+    still pass.
+    """
+
+    class _GrowingPath(Path):
+        """A path that gains bytes at the moment it is stat'd, as a live log does."""
+
+        def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
+            result = super().stat(follow_symlinks=follow_symlinks)
+            with open(self, "ab") as appended:
+                appended.write(b"y" * 900)
+            return result
+
+    content = b"x" * 5_000
+    events_path = _GrowingPath(tmp_path / "events.jsonl")
+    events_path.write_bytes(content)
+
+    tail = local_outer_host.read_file_tail_from_offset(events_path, 0)
+
+    assert tail.file_size == len(content)
+    assert len(tail.content) == len(content)
+    assert tail.content == content
+
+
+class _FakeSftpClientVanishingOnOpen(_FakeSftpClient):
+    """SFTP channel whose file is unlinked between the stat and the open."""
+
+    def open(self, path: str, mode: str = "r") -> _FakeSftpFile:
+        raise IOError("No such file")
+
+
+def test_read_file_tail_from_offset_raises_file_not_found_when_the_file_vanishes_after_the_stat(
+    temp_mngr_ctx: MngrContext,
+) -> None:
+    """A file rotated away between the stat and the open must still surface as FileNotFoundError.
+
+    That race is the ordinary case here -- this primitive polls an events.jsonl that rotates --
+    and the interface documents FileNotFoundError for a missing file, so callers can tell it
+    apart from a read that failed.
+    """
+    outer = _make_outer_host_with_fake_sftp(temp_mngr_ctx, _FakeSftpClientVanishingOnOpen(b"first line\n"))
+
+    with pytest.raises(FileNotFoundError):
+        outer._read_file_tail_from_offset_via_paramiko("/agent/events/events.jsonl", 0, None)

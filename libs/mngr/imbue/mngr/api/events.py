@@ -34,6 +34,7 @@ from imbue.mngr.errors import EventsFollowReaderDiedError
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.offline_host import try_resolve_readable_host
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import HostFileReadInterface
@@ -51,7 +52,7 @@ from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
 from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
-from imbue.mngr.utils.jsonl_warn import split_complete_lines
+from imbue.mngr.utils.jsonl_warn import split_complete_lines_from_bytes
 
 # Poll interval for tails that cannot be woken by a directory watch: remote
 # (SSH/volume) targets, and local targets whose watch could not be established.
@@ -73,9 +74,6 @@ _TAIL_READ_FAILURES_BEFORE_WARNING: Final[int] = 30
 _ONLINE_CHECK_FAILURES_BEFORE_WARNING: Final[int] = 10
 _EVENTS_JSONL_FILENAME: Final[str] = "events.jsonl"
 _STREAM_HEADER_RECORD_TYPE: Final[str] = "header"
-
-
-# Data types
 
 
 class EventsTarget(FrozenModel):
@@ -298,9 +296,6 @@ def _try_get_readable_host_for_events(
     return host_interface, events_path
 
 
-# Read event content
-
-
 def read_event_content(target: EventsTarget, event_file_name: str) -> str:
     """Read the full content of an event file, relative to the events directory.
 
@@ -320,7 +315,16 @@ def read_event_content(target: EventsTarget, event_file_name: str) -> str:
         return content_bytes.decode("utf-8", errors="replace")
 
 
-# Source filtering
+def read_event_tail_from_offset(target: EventsTarget, event_file_name: str, start_byte: int) -> FileTailRead:
+    """Read an event file's bytes from ``start_byte`` to EOF, with the size the same call saw."""
+    if target.host is None or target.events_path is None:
+        raise MngrError(f"Cannot read event file for {target.display_name}: no readable host available")
+
+    file_path = target.events_path / event_file_name
+    try:
+        return target.host.read_file_tail_from_offset(file_path, start_byte)
+    except (FileNotFoundError, OSError) as e:
+        raise MngrError(f"Failed to read event file '{event_file_name}': {e}") from e
 
 
 @pure
@@ -336,9 +340,6 @@ def filter_sources_by_name(
         return sources
     allowed = set(source_filters)
     return [s for s in sources if s.source_path in allowed]
-
-
-# Event parsing and sorting
 
 
 @pure
@@ -420,14 +421,26 @@ def _parse_stream_line(warner: MalformedJsonLineWarner, line: str, source_hint: 
 
     Besides the blank and malformed lines the warner skips, a common-transcript
     stream opens with a header record: stream framing with no timestamp to order it by.
+
+    A line that is valid JSON but not an event (not an object, or missing a required
+    envelope field) is logged and skipped rather than raised: a follow cannot advance
+    past a line that raises.
     """
-    parsed = warner.parse(line)
+    try:
+        parsed = warner.parse(line)
+    except MalformedJsonlLineError as e:
+        logger.warning("Skipped a line that is not a valid event in source '{}': {}", source_hint, e)
+        return None
     if parsed is None:
         return None
     data, stripped = parsed
     if data.get("type") == _STREAM_HEADER_RECORD_TYPE and not data.get("timestamp"):
         return None
-    return _record_from_event_data(data, stripped, source_hint)
+    try:
+        return _record_from_event_data(data, stripped, source_hint)
+    except MalformedJsonlLineError as e:
+        logger.warning("Skipped a line that is not a valid event in source '{}': {}", source_hint, e)
+        return None
 
 
 def _create_source_mismatch_warning(original_source: str, correct_source: str) -> EventRecord:
@@ -506,9 +519,6 @@ def _sort_rotated_files_oldest_first(filenames: Sequence[str]) -> list[str]:
             timestamped.append((match.group(1), name))
     timestamped.sort(key=lambda pair: pair[0])
     return [name for _, name in timestamped]
-
-
-# Event source discovery
 
 
 COMMON_TRANSCRIPT_SOURCE_SUFFIX: Final[str] = "common_transcript"
@@ -642,9 +652,6 @@ def _build_event_sources_from_listing(
     return _build_event_sources_from_grouped_files(files_by_dir)
 
 
-# Reading events from sources
-
-
 def _read_events_from_file(
     target: EventsTarget,
     # Path to the file relative to the events directory (e.g. "messages/events.jsonl")
@@ -653,22 +660,25 @@ def _read_events_from_file(
 ) -> tuple[list[EventRecord], int]:
     """Read and parse all events from a single JSONL file.
 
-    Returns (events, byte_length) where byte_length is the size of the raw content.
+    Returns (events, byte_length), where byte_length counts the raw bytes read rather than
+    the decoded text, since it seeds the follow tail's byte offset.
 
     Note: this function intentionally does NOT hold back a trailing partial line via
-    split_complete_lines. It is used for whole-file historical reads (rotated files
+    split_complete_lines_from_bytes. It is used for whole-file historical reads (rotated files
     and the current events.jsonl), where the final line is expected to be complete;
     holding one back would misclassify a complete final line as partial and silently
-    drop it. ``read_event_content`` reads byte-exact via ``HostFileReadInterface.read_file``,
-    so a file's true trailing-newline state is preserved either way. Partial-write
-    robustness during *streaming* is handled separately by the follow-tail loop in
-    _read_remote_source_once, which has its own partial-line guard.
+    drop it. The read is byte-exact, so a file's true trailing-newline state is
+    preserved either way. Partial-write robustness during *streaming* is handled
+    separately by the follow-tail loop in _read_remote_source_once, which has its own
+    partial-line guard.
     """
-    try:
-        content = read_event_content(target, relative_file_path)
-    except (MngrError, OSError) as e:
-        logger.trace("Failed to read event file '{}': {}", relative_file_path, e)
-        return [], 0
+    with log_span("Reading event file '{}' for {}", relative_file_path, target.display_name):
+        try:
+            tail = read_event_tail_from_offset(target, relative_file_path, 0)
+        except (MngrError, OSError) as e:
+            logger.trace("Failed to read event file '{}': {}", relative_file_path, e)
+            return [], 0
+    content = tail.content.decode("utf-8", errors="replace")
 
     events: list[EventRecord] = []
     warner = MalformedJsonLineWarner(source_description=f"event file '{relative_file_path}'")
@@ -677,7 +687,7 @@ def _read_events_from_file(
         if record is not None:
             events.append(record)
 
-    return events, len(content.encode("utf-8"))
+    return events, len(tail.content)
 
 
 def read_all_historical_events(
@@ -723,9 +733,6 @@ def read_all_historical_events(
     ]
 
     return sorted_events, byte_offsets
-
-
-# Streaming all events
 
 
 def _collect_historical_events(
@@ -960,7 +967,7 @@ def _resolve_read_plan(target: EventsTarget, source_path: str) -> tuple[bool, Pa
     """Return ``(is_local, events_file_path)`` for reading ``source_path`` from ``target`` now.
 
     ``is_local`` selects the read mechanism: pygtail incremental tailing of a
-    local online host's file, versus whole-file polling (an SSH-remote online
+    local online host's file, versus offset-read polling (an SSH-remote online
     host, or a volume-backed offline host). ``events_file_path`` is the absolute
     path to the source's ``events.jsonl`` and also serves as the switch-detection
     key -- a change in either the mechanism or the path means the tail thread
@@ -1100,19 +1107,19 @@ def _read_remote_source_once(
     cel_include_filters: Sequence[Any],
     cel_exclude_filters: Sequence[Any],
 ) -> int:
-    """Poll a source by whole-file read, enqueue new lines, and return the new byte offset.
+    """Poll a source by offset read (stat + ranged read in one host call), enqueue new lines, and return the new byte offset.
 
     Used for any non-local target (SSH-remote online host, or a volume-backed
-    offline host). May raise ``MngrError``/``OSError`` from the read; the caller
-    handles that and retries on the next poll without advancing the offset.
+    offline host). Only the bytes past ``byte_offset`` are transferred; the
+    size seen by the same call detects rotation (size below the offset), which
+    re-reads from the start with event-id dedup as the backstop. May raise
+    ``MngrError``/``OSError`` from the read; the caller handles that and
+    retries on the next poll without advancing the offset.
     """
     relative_file_path = f"{source_path}/{_EVENTS_JSONL_FILENAME}" if source_path else _EVENTS_JSONL_FILENAME
-    content = read_event_content(target, relative_file_path)
+    tail = read_event_tail_from_offset(target, relative_file_path, byte_offset)
 
-    content_bytes = content.encode("utf-8")
-    current_length = len(content_bytes)
-
-    if current_length < byte_offset:
+    if tail.file_size < byte_offset:
         # File was rotated -- re-read from beginning, dedup via event_ids.
         # Drop any malformed line still buffered in the warner: it came from
         # the now-rotated file's tail, so treating it as mid-file corruption
@@ -1120,13 +1127,12 @@ def _read_remote_source_once(
         logger.debug("Remote event file for source '{}' was rotated", source_path)
         byte_offset = 0
         warner.reset()
+        tail = read_event_tail_from_offset(target, relative_file_path, byte_offset)
 
-    if current_length > byte_offset:
-        new_content = content_bytes[byte_offset:].decode("utf-8", errors="replace")
-        # Only consume up to the last newline; any trailing partial line is
-        # left in the file for the next poll so a mid-flush write doesn't
-        # cause the line to be split and silently lost.
-        lines, bytes_consumed = split_complete_lines(new_content)
+    if tail.content:
+        # Split on the raw bytes, since ``byte_offset`` counts them. Any trailing partial
+        # line stays in the file for the next poll, so a mid-flush write is not split.
+        lines, bytes_consumed = split_complete_lines_from_bytes(tail.content)
         for line in lines:
             record = _parse_stream_line(warner, line, source_path)
             if record is None or not _event_passes_cel_filters(record, cel_include_filters, cel_exclude_filters):
@@ -1459,9 +1465,6 @@ def _rescan_and_start_new_tail_threads(
                 watch_group=watch_group,
             )
             tail_threads.append(thread)
-
-
-# Online/offline transitions
 
 
 def refresh_events_target(

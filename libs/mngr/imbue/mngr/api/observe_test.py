@@ -79,8 +79,6 @@ from imbue.mngr.utils.testing import make_test_agent_details
 from imbue.mngr.utils.testing import make_test_discovered_agent
 from imbue.mngr.utils.testing import make_test_discovered_host
 
-# Path Helper Tests
-
 
 def test_get_default_events_base_dir_expands_home(temp_config: MngrConfig) -> None:
     events_base_dir = get_default_events_base_dir(temp_config)
@@ -112,9 +110,6 @@ def test_get_agent_states_events_path_returns_jsonl_file(temp_host_dir: Path) ->
 def test_get_observe_lock_path_returns_correct_path(temp_host_dir: Path) -> None:
     lock_path = get_observe_lock_path(temp_host_dir)
     assert lock_path == temp_host_dir / "observe_lock"
-
-
-# Event Construction Tests
 
 
 def test_make_agent_state_event_has_correct_fields() -> None:
@@ -166,9 +161,6 @@ def test_make_agent_state_change_event_with_none_old_state() -> None:
     assert event.new_state == "RUNNING"
     assert event.old_host_state is None
     assert event.new_host_state == "RUNNING"
-
-
-# File I/O Tests
 
 
 def test_append_observe_event_creates_file_and_writes_valid_json(temp_host_dir: Path) -> None:
@@ -234,9 +226,6 @@ def test_append_agent_state_change_event_creates_parent_directories(temp_host_di
     event = make_agent_state_change_event(agent, None, None)
     append_agent_state_change_event(temp_host_dir, event)
     assert events_path.parent.exists()
-
-
-# History Loading Tests
 
 
 def test_load_base_state_from_history_returns_empty_when_no_file(temp_host_dir: Path) -> None:
@@ -322,9 +311,6 @@ def test_load_base_state_from_history_silent_on_partial_last_line(temp_host_dir:
     assert log_output.getvalue() == ""
 
 
-# Lock Tests
-
-
 def test_acquire_and_release_observe_lock(temp_host_dir: Path) -> None:
     fd = acquire_observe_lock(temp_host_dir)
     assert fd >= 0
@@ -370,9 +356,6 @@ def test_separate_dirs_can_lock_independently(tmp_path: Path) -> None:
     release_observe_lock(fd_b)
 
 
-# Serialization Roundtrip Tests
-
-
 def test_agent_state_event_serializes_to_valid_json() -> None:
     agent = make_test_agent_details()
     event = make_agent_state_event(agent)
@@ -411,9 +394,6 @@ def test_agent_state_change_event_serializes_to_valid_json() -> None:
     assert parsed["old_host_state"] == "RUNNING"
     assert parsed["new_host_state"] == "RUNNING"
     assert parsed["agent"]["name"] == "test-agent"
-
-
-# AgentObserver Tests
 
 
 def _make_observer(temp_mngr_ctx: MngrContext, noop_binary: str) -> AgentObserver:
@@ -866,9 +846,6 @@ def test_agent_observer_does_not_stream_activity_from_a_host_a_snapshot_lists_as
         assert str(host.host_id) not in observer._events_processes
 
 
-# UNKNOWN State Tests
-
-
 def _make_provider(name: str) -> DiscoveredProvider:
     return make_discovered_provider(
         ProviderInstanceName(name),
@@ -1097,9 +1074,6 @@ def test_process_snapshot_agents_unknown_scoped_to_errored_provider(
     assert _details_instance_key(healthy_agent) not in observer._last_known_details_by_instance
 
 
-# Observe-event parsing (agents stream)
-
-
 def test_parse_observe_event_line_round_trips_agent_state() -> None:
     agent = make_test_agent_details(name="parsed")
     line = json.dumps(make_agent_state_event(agent).model_dump(mode="json"))
@@ -1136,9 +1110,6 @@ def test_parse_observe_event_line_returns_none_for_state_change_and_unknown() ->
     assert parse_observe_event_line(change_line) is None
     assert parse_observe_event_line('{"type":"SOMETHING_NEW"}') is None
     assert parse_observe_event_line("   ") is None
-
-
-# agents_event_sink forwarding (drives --stream-events)
 
 
 def _make_observer_with_sink(
@@ -1190,9 +1161,6 @@ def test_no_sink_does_not_error(temp_mngr_ctx: MngrContext, noop_binary: str) ->
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     observer._emit_agent_state(make_test_agent_details(name="silent"))
     assert get_observe_events_path(observer.events_base_dir).exists()
-
-
-# Rotation Tests
 
 
 def _rotated_observe_event_files(events_base_dir: Path) -> list[Path]:
@@ -1341,9 +1309,6 @@ def test_follower_waits_out_a_rotation_whose_opening_snapshot_has_not_landed(
     assert _snapshot_agent_names(new_lines[0]) == ["after-rotation"]
 
 
-# Agent membership deltas (AGENT_REMOVED + added enqueues host)
-
-
 def test_discovery_added_agent_enqueues_its_host_for_reprobe(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
     """A newly discovered agent enqueues its host so the observer re-probes and emits real state."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
@@ -1467,9 +1432,6 @@ def test_an_agent_listed_after_its_removal_is_emitted(temp_mngr_ctx: MngrContext
             observer._emit_listed_agent_states([_listed_details_of(agent)], listing_start)
 
     assert _agents_stream_events_naming(observer, agent.agent_id) == ["AGENT_REMOVED", "AGENT_STATE"]
-
-
-# PID watchers (local agents)
 
 
 def _drain_activity_queue(observer: AgentObserver) -> set[str]:
@@ -1613,8 +1575,6 @@ def test_many_local_agents_are_watched_from_one_thread(temp_mngr_ctx: MngrContex
             proc.terminate()
             proc.wait()
 
-
-# Follower Tests
 
 # Backstop so a wedged-sink test cannot leave a thread blocked forever if it fails
 # before releasing the sink itself. Never reached on the passing path.
@@ -1891,6 +1851,32 @@ def test_follower_forwards_events_appended_after_it_caught_up(temp_host_dir: Pat
     second = parse_observe_event_line(seen[1])
     assert isinstance(second, AgentStateEvent)
     assert second.agent.name == "later-agent"
+
+
+def test_follower_offset_stays_on_a_line_boundary_past_an_undecodable_byte(temp_host_dir: Path) -> None:
+    """An undecodable byte must advance the offset by one byte, not by its 3-byte U+FFFD.
+
+    The offset is a binary seek position, so counting the decoded text would start
+    every later read mid-line and garble each event after it.
+    """
+    events_path = get_observe_events_path(temp_host_dir)
+    agent = make_test_agent_details(name="snapshot-agent", state=AgentLifecycleState.RUNNING)
+    append_observe_event(temp_host_dir, make_full_agent_state_event([agent]))
+
+    seen: list[str] = []
+    with _observer_holding_the_lock(temp_host_dir):
+        follower = ObserveEventFollower(events_base_dir=temp_host_dir, on_line=seen.append)
+        follower.poll_once()
+        with open(events_path, "ab") as f:
+            f.write(b'{"note":"\xff"}\n')
+        follower.poll_once()
+        later = make_test_agent_details(name="later-agent", state=AgentLifecycleState.WAITING)
+        append_observe_event(temp_host_dir, make_agent_state_event(later))
+        follower.poll_once()
+
+    last = parse_observe_event_line(seen[-1])
+    assert isinstance(last, AgentStateEvent)
+    assert last.agent.name == "later-agent"
 
 
 def test_follower_waits_for_a_half_written_line_to_finish(temp_host_dir: Path) -> None:

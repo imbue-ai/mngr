@@ -1,5 +1,7 @@
 import json
 import threading
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from typing import Final
 
@@ -83,6 +85,39 @@ class MalformedJsonLineWarner(MutableModel):
 
 
 @pure
+def split_complete_lines_from_bytes(new_content: bytes) -> tuple[list[str], int]:
+    """Split raw bytes into complete (newline-terminated) lines, holding back any partial.
+
+    Returns (lines, bytes_consumed). bytes_consumed counts the raw bytes up to and
+    including the final newline, so a caller whose offset indexes the file's bytes can
+    advance by it directly.
+
+    Any trailing content after the final newline (an in-progress partial write) is left
+    for the next read so it can be reconstructed once the writer flushes the rest.
+    """
+    last_newline = new_content.rfind(b"\n")
+    if last_newline == -1:
+        return [], 0
+    complete_part = new_content[: last_newline + 1]
+    lines = complete_part.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines, len(complete_part)
+
+
+def iter_decoded_lines_from_offset(path: Path, offset: int = 0) -> Iterator[tuple[int, str]]:
+    """Yield ``(line_start, decoded_line)`` for each line from ``offset``, in the byte domain.
+
+    Reads in binary: a text-mode file refuses ``tell()`` during iteration, and raises
+    ``UnicodeDecodeError`` on an undecodable byte instead of costing one garbled line.
+    """
+    with open(path, "rb") as f:
+        f.seek(offset)
+        for raw_line in f:
+            yield f.tell() - len(raw_line), raw_line.decode("utf-8", errors="replace")
+
+
+@pure
 def split_complete_lines(new_content: str) -> tuple[list[str], int]:
     """Split content into complete (newline-terminated) lines, holding back any partial.
 
@@ -91,11 +126,4 @@ def split_complete_lines(new_content: str) -> tuple[list[str], int]:
     final newline (an in-progress partial write) is left for the next read so it can
     be reconstructed once the writer flushes the rest.
     """
-    last_newline = new_content.rfind("\n")
-    if last_newline == -1:
-        return [], 0
-    complete_part = new_content[: last_newline + 1]
-    lines = complete_part.split("\n")
-    if lines and lines[-1] == "":
-        lines.pop()
-    return lines, len(complete_part.encode("utf-8"))
+    return split_complete_lines_from_bytes(new_content.encode("utf-8"))

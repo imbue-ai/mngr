@@ -74,6 +74,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.common import LOCAL_CONNECTOR_NAME
 from imbue.mngr.hosts.common import get_ssh_known_hosts_file
 from imbue.mngr.interfaces.data_types import CommandResult
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.interfaces.host import OuterHostInterface
@@ -167,6 +168,12 @@ def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
             if entry is not None:
                 entries.append(entry)
     return entries
+
+
+def _is_missing_file_sftp_error(error: IOError) -> bool:
+    """Whether an SFTP read failed because the remote file does not exist."""
+    error_msg = str(error)
+    return "No such file" in error_msg or "not found" in error_msg.lower()
 
 
 def _is_remote_directory(sftp: SFTPClient, path: str) -> bool:
@@ -978,7 +985,7 @@ class OuterHost(OuterHostInterface):
         explicit timeout (``from_transport`` passes none, so a wedged sshd
         hangs the open forever) and gives the channel a default silence
         timeout; callers with their own read budget override it via
-        ``settimeout`` (see ``_get_file_via_paramiko``).
+        ``settimeout`` (see ``_open_sftp_channel``).
         """
         channel = transport.open_session(timeout=SSH_CHANNEL_OPEN_TIMEOUT_SECONDS)
         if channel is None:
@@ -1070,6 +1077,34 @@ class OuterHost(OuterHostInterface):
         ``_create_sftp_client``) so a stalled transfer raises ``socket.timeout``
         (a ``TimeoutError``) within the caller's own budget.
         """
+        with self._open_sftp_channel(timeout_seconds) as sftp:
+            try:
+                if isinstance(filename_or_io, str):
+                    sftp.get(remote_filename, filename_or_io)
+                else:
+                    sftp.getfo(remote_filename, filename_or_io)
+                return True
+            except IOError as e:
+                if _is_missing_file_sftp_error(e):
+                    raise FileNotFoundError(f"File not found: {remote_filename}") from e
+                # Reading a directory fails here with a server-specific message, so
+                # classify it by asking the server; this keeps a remote read's error
+                # the same OSError subclass a local read of a directory raises. Only
+                # a failure the server actually answered is worth asking about: a
+                # timed-out or dead connection cannot answer, and must not be made
+                # slower by the attempt.
+                is_answered_by_server = not isinstance(e, TimeoutError) and not is_dead_ssh_connection_error(e)
+                if is_answered_by_server and _is_remote_directory(sftp, remote_filename):
+                    raise IsADirectoryError(f"Is a directory: {remote_filename}") from e
+                raise
+
+    @contextmanager
+    def _open_sftp_channel(self, timeout_seconds: float | None) -> Iterator[SFTPClient]:
+        """Open a dedicated SFTP channel on the shared transport, closing it on exit.
+
+        When ``timeout_seconds`` is set, it replaces the channel's default silence
+        bound, so a stalled transfer raises ``socket.timeout`` within the caller's budget.
+        """
         transport = self._get_paramiko_transport()
         sftp = self._create_sftp_client(transport)
         if sftp is None:
@@ -1079,25 +1114,7 @@ class OuterHost(OuterHostInterface):
             if channel is not None:
                 channel.settimeout(timeout_seconds)
         try:
-            if isinstance(filename_or_io, str):
-                sftp.get(remote_filename, filename_or_io)
-            else:
-                sftp.getfo(remote_filename, filename_or_io)
-            return True
-        except IOError as e:
-            error_msg = str(e)
-            if "No such file" in error_msg or "not found" in error_msg.lower():
-                raise FileNotFoundError(f"File not found: {remote_filename}") from e
-            # Reading a directory fails here with a server-specific message, so
-            # classify it by asking the server; this keeps a remote read's error
-            # the same OSError subclass a local read of a directory raises. Only
-            # a failure the server actually answered is worth asking about: a
-            # timed-out or dead connection cannot answer, and must not be made
-            # slower by the attempt.
-            is_answered_by_server = not isinstance(e, TimeoutError) and not is_dead_ssh_connection_error(e)
-            if is_answered_by_server and _is_remote_directory(sftp, remote_filename):
-                raise IsADirectoryError(f"Is a directory: {remote_filename}") from e
-            raise
+            yield sftp
         finally:
             sftp.close()
 
@@ -1379,6 +1396,82 @@ class OuterHost(OuterHostInterface):
             # self-terminates within it (surfacing as HostConnectionError) rather than hanging.
             self._get_file(str(path), output, timeout_seconds=remaining_read_timeout(None))
             return output.getvalue()
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        """Read a file's bytes from ``start_byte`` to EOF, plus the size seen by the same call.
+
+        Raises FileNotFoundError if the file does not exist. Remote hosts serve
+        this with one SFTP channel (stat + ranged read) instead of transferring
+        the whole file.
+        """
+        if self.is_local:
+            file_size = path.stat().st_size
+            if start_byte >= file_size:
+                return FileTailRead(file_size=file_size, content=b"")
+            with path.open("rb") as local_file:
+                local_file.seek(start_byte)
+                # Bounded by the size just stat'd, like the remote path, so a file
+                # being appended to cannot overshoot it.
+                return FileTailRead(file_size=file_size, content=local_file.read(file_size - start_byte))
+        with (
+            self._notify_on_connection_error(),
+            self._translate_ssh_errors(
+                timed_out="SSH read timed out while reading file tail",
+                closed="Connection was closed while reading file tail",
+                failed="Could not read file tail due to connection error",
+            ),
+        ):
+            return self._read_file_tail_from_offset_with_transient_retry(
+                str(path), start_byte, remaining_read_timeout(None)
+            )
+
+    @retry_on_transient_ssh_error
+    def _read_file_tail_from_offset_with_transient_retry(
+        self, remote_filename: str, start_byte: int, timeout_seconds: float | None
+    ) -> FileTailRead:
+        self._ensure_connected()
+        self._reverify_lock_if_channel_died()
+        with self._disconnect_on_transient_ssh_error(f"reading the tail of {remote_filename}"):
+            return self._read_file_tail_from_offset_via_paramiko(remote_filename, start_byte, timeout_seconds)
+
+    def _read_file_tail_from_offset_via_paramiko(
+        self, remote_filename: str, start_byte: int, timeout_seconds: float | None
+    ) -> FileTailRead:
+        """Stat and ranged-read a remote file on a dedicated paramiko SFTP channel."""
+        with self._open_sftp_channel(timeout_seconds) as sftp:
+            try:
+                file_size = sftp.stat(remote_filename).st_size or 0
+            except IOError as e:
+                if _is_missing_file_sftp_error(e):
+                    raise FileNotFoundError(f"File not found: {remote_filename}") from e
+                raise
+            if start_byte >= file_size:
+                return FileTailRead(file_size=file_size, content=b"")
+            # A rotating file can be unlinked between the stat and the open.
+            try:
+                remote_file = sftp.open(remote_filename, "rb")
+            except IOError as e:
+                if _is_missing_file_sftp_error(e):
+                    raise FileNotFoundError(f"File not found: {remote_filename}") from e
+                raise
+            with remote_file:
+                remote_file.seek(start_byte)
+                # A range larger than one request is pipelined with prefetch, as
+                # ``SFTPClient.getfo`` does; ``prefetch`` queues from the current
+                # position, so the seek bounds it.
+                read_size = file_size - start_byte
+                if read_size > remote_file.MAX_REQUEST_SIZE:
+                    remote_file.prefetch(file_size)
+                # One request's worth per read, as ``getfo`` does: paramiko grows a
+                # larger sized read by bytes concatenation, copying the whole buffer
+                # per chunk, which balloons memory on a multi-megabyte range.
+                buffer = bytearray()
+                while len(buffer) < read_size:
+                    chunk = remote_file.read(min(remote_file.MAX_REQUEST_SIZE, read_size - len(buffer)))
+                    if not chunk:
+                        break
+                    buffer += chunk
+            return FileTailRead(file_size=file_size, content=bytes(buffer))
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = True) -> None:
         """Write bytes content to a file, creating parent directories as needed.

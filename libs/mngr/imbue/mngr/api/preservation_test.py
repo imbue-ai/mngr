@@ -46,6 +46,7 @@ from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.data_types import CertifiedHostData
+from imbue.mngr.interfaces.data_types import FileTailRead
 from imbue.mngr.interfaces.data_types import FileType
 from imbue.mngr.interfaces.data_types import PyinfraConnector
 from imbue.mngr.interfaces.data_types import VolumeFile
@@ -364,6 +365,10 @@ class _OneFileFailingReader(HostFileReadInterface):
         if key == self.failing_path:
             raise OSError("simulated read failure")
         return self.contents_by_path[key]
+
+    def read_file_tail_from_offset(self, path: Path, start_byte: int) -> FileTailRead:
+        content = self.read_file(path)
+        return FileTailRead(file_size=len(content), content=content[start_byte:])
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         return self.read_file(path).decode(encoding)

@@ -1,10 +1,14 @@
 """Unit tests for the jsonl_warn module."""
 
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr.errors import MalformedJsonlLineError
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
+from imbue.mngr.utils.jsonl_warn import iter_decoded_lines_from_offset
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
+from imbue.mngr.utils.jsonl_warn import split_complete_lines_from_bytes
 from imbue.mngr.utils.testing import capture_loguru
 
 
@@ -151,11 +155,6 @@ def test_reset_does_not_disable_future_corruption_detection() -> None:
     assert "first malformed" not in output
 
 
-# =============================================================================
-# split_complete_lines tests
-# =============================================================================
-
-
 def test_split_complete_lines_returns_complete_lines_and_consumed_bytes() -> None:
     lines, consumed = split_complete_lines("line1\nline2\n")
     assert lines == ["line1", "line2"]
@@ -191,3 +190,52 @@ def test_split_complete_lines_byte_count_matches_for_multibyte_content() -> None
     lines, consumed = split_complete_lines("café\n")
     assert lines == ["café"]
     assert consumed == len("café\n".encode("utf-8"))
+
+
+def test_split_complete_lines_from_bytes_counts_raw_bytes_not_replacement_chars() -> None:
+    """An undecodable byte must cost one consumed byte, not the three U+FFFD encodes to.
+
+    Callers advance a file offset by this count while reading the file's raw bytes
+    (a ranged read), so overcounting shifts every later read into the middle of a
+    line -- permanently, since the shift never self-corrects.
+    """
+    raw = b'{"a": "\xff"}\n'
+    lines, consumed = split_complete_lines_from_bytes(raw)
+    assert consumed == len(raw)
+    assert lines == ['{"a": "�"}']
+    # Measuring the decoded string instead reports two bytes too many.
+    _, decoded_consumed = split_complete_lines(raw.decode("utf-8", errors="replace"))
+    assert decoded_consumed == consumed + 2
+
+
+def test_split_complete_lines_from_bytes_holds_back_a_partial_last_line() -> None:
+    lines, consumed = split_complete_lines_from_bytes("café\npart".encode("utf-8"))
+    assert lines == ["café"]
+    assert consumed == len("café\n".encode("utf-8"))
+
+
+def test_iter_decoded_lines_from_offset_yields_raw_byte_starts(tmp_path: Path) -> None:
+    """Both the offsets out and the offset in are raw byte positions.
+
+    Callers seek what this yields, in binary. Measuring the decoded line instead would
+    run short by two bytes per multi-byte character and long by two per undecodable
+    one, and since the offset seeds the next read, the drift never self-corrects.
+    """
+    events_path = tmp_path / "events.jsonl"
+    # 6 bytes, 5 characters -- a character count would put the next line at 5.
+    multibyte_line = "café\n".encode("utf-8")
+    corrupt_line = b'{"bad":"\xff"}\n'
+    last_line = b"last\n"
+    events_path.write_bytes(multibyte_line + corrupt_line + last_line)
+
+    assert list(iter_decoded_lines_from_offset(events_path)) == [
+        (0, "café\n"),
+        (len(multibyte_line), '{"bad":"\ufffd"}\n'),
+        (len(multibyte_line) + len(corrupt_line), "last\n"),
+    ]
+
+    # Starting from a yielded offset reads that line whole rather than from its middle.
+    assert list(iter_decoded_lines_from_offset(events_path, len(multibyte_line))) == [
+        (len(multibyte_line), '{"bad":"\ufffd"}\n'),
+        (len(multibyte_line) + len(corrupt_line), "last\n"),
+    ]

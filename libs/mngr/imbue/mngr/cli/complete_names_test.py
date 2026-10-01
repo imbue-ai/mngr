@@ -188,9 +188,26 @@ def test_complete_names_incremental_agent_discovered(tmp_path: Path) -> None:
     assert agent_names == ["newcomer", "original"]
 
 
-# =============================================================================
-# _find_replay_start_idx tests
-# =============================================================================
+def test_complete_names_survives_an_undecodable_byte(tmp_path: Path) -> None:
+    """An undecodable byte in the discovery log costs one line, not the whole completion."""
+    events_path = tmp_path / "events" / "mngr" / "discovery" / "events.jsonl"
+    write_discovery_snapshot_to_path(events_path, ["original"])
+    new_agent = {
+        "timestamp": "2025-01-01T00:01:00Z",
+        "type": "AGENT_DISCOVERED",
+        "event_id": "evt-later",
+        "source": "mngr/discovery",
+        "agent": {"agent_id": "agent-later", "agent_name": "newcomer", "host_id": "host-1", "provider_name": "local"},
+    }
+    with open(events_path, "ab") as f:
+        # A lone 0xFF is not valid UTF-8 anywhere, so it survives to the decoder.
+        f.write(b'{"note":"\xff"}\n')
+        f.write((json.dumps(new_agent) + "\n").encode("utf-8"))
+
+    agent_names, _ = resolve_names_from_discovery_stream(events_path)
+
+    # The agent recorded after the corrupt line proves the replay got past it.
+    assert agent_names == ["newcomer", "original"]
 
 
 def test_find_replay_start_returns_zero_for_empty_list() -> None:
@@ -249,11 +266,6 @@ def test_find_replay_start_skips_malformed_json() -> None:
     lines = [good, bad_line]
     # The bad line at index 1 is skipped, and the good line at index 0 is found.
     assert _find_replay_start_idx(lines) == 0
-
-
-# =============================================================================
-# per-provider DISCOVERY_PROVIDER replay tests
-# =============================================================================
 
 
 def test_resolve_names_reads_per_provider_snapshots(tmp_path: Path) -> None:
@@ -315,11 +327,6 @@ def test_resolve_names_per_provider_snapshot_resets_only_its_own_provider(tmp_pa
 
     assert agent_names == ["fresh-local", "modal-agent"]
     assert "stale-local" not in agent_names
-
-
-# =============================================================================
-# resolve_names_from_discovery_stream edge case tests
-# =============================================================================
 
 
 def test_resolve_names_returns_empty_for_empty_file(tmp_path: Path) -> None:
@@ -431,11 +438,6 @@ def test_resolve_names_works_without_full_snapshot(tmp_path: Path) -> None:
     assert host_names == ["discovered-host"]
 
 
-# =============================================================================
-# _get_discovery_events_path tests
-# =============================================================================
-
-
 def test_get_discovery_events_path_uses_mngr_host_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """_get_discovery_events_path should use MNGR_HOST_DIR env var when set."""
     monkeypatch.setenv("MNGR_HOST_DIR", str(tmp_path))
@@ -450,11 +452,6 @@ def test_get_discovery_events_path_uses_mngr_root_name(monkeypatch: pytest.Monke
     result = _get_discovery_events_path()
     expected = Path("~/.custom-root").expanduser() / "events" / "mngr" / "discovery" / "events.jsonl"
     assert result == expected
-
-
-# =============================================================================
-# main() tests via subprocess
-# =============================================================================
 
 
 def test_main_prints_agent_names_by_default(tmp_path: Path) -> None:

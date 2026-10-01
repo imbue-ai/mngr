@@ -59,7 +59,8 @@ from imbue.mngr.utils.file_watch import DirectoryWatchGroup
 from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
 from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
-from imbue.mngr.utils.jsonl_warn import split_complete_lines
+from imbue.mngr.utils.jsonl_warn import iter_decoded_lines_from_offset
+from imbue.mngr.utils.jsonl_warn import split_complete_lines_from_bytes
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 
 DISCOVERY_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/discovery")
@@ -86,9 +87,6 @@ class DiscoveryEventType(UpperCaseStrEnum):
     DISCOVERY_PROVIDER = auto()
     HOST_SSH_INFO = auto()
     DISCOVERY_ERROR = auto()
-
-
-# === Event Data Types ===
 
 
 class AgentDiscoveryEvent(EventEnvelope):
@@ -309,9 +307,6 @@ DiscoveryEvent = Annotated[
 _DISCOVERY_EVENT_ADAPTER: Final[TypeAdapter[DiscoveryEvent]] = TypeAdapter(DiscoveryEvent)
 
 
-# === Path Helpers ===
-
-
 @pure
 def get_discovery_events_dir(config: MngrConfig) -> Path:
     """Return the directory for discovery event files.
@@ -328,9 +323,6 @@ def get_discovery_events_dir(config: MngrConfig) -> Path:
 def get_discovery_events_path(config: MngrConfig) -> Path:
     """Return the path to the discovery events JSONL file."""
     return get_discovery_events_dir(config) / "events.jsonl"
-
-
-# === Conversion Helpers ===
 
 
 @pure
@@ -394,9 +386,6 @@ def discovered_host_from_online_host(
         provider_name=provider_name,
         host_state=HostState.RUNNING,
     )
-
-
-# === Event Construction ===
 
 
 def _make_envelope_fields() -> tuple[IsoTimestamp, EventId]:
@@ -487,9 +476,6 @@ def make_discovered_provider(
     )
 
 
-# === File I/O ===
-
-
 _DISCOVERY_MAX_FILE_SIZE_BYTES: Final[int] = 50 * 1024 * 1024
 _DISCOVERY_MAX_ROTATED_COUNT: Final[int] = 1
 
@@ -505,7 +491,7 @@ def append_discovery_event(config: MngrConfig, event: EventEnvelope) -> None:
     events_path.parent.mkdir(parents=True, exist_ok=True)
     _rotate_discovery_events_if_needed(events_path)
     line = json.dumps(event.model_dump(mode="json"), separators=(",", ":")) + "\n"
-    with open(events_path, "a") as f:
+    with open(events_path, "a", encoding="utf-8") as f:
         f.write(line)
 
 
@@ -694,9 +680,6 @@ def write_provider_discovery_snapshot(
         error is not None,
     )
     return event
-
-
-# === Event Parsing ===
 
 
 _SCHEMA_MISMATCH_DETAIL_TRUNCATION: Final[int] = 500
@@ -901,38 +884,37 @@ def _scan_discovery_snapshots(events_path: Path) -> _DiscoverySnapshotScan:
     latest_non_errored_event_id_by_provider: dict[str, str] = {}
     latest_with_provider_event_id_by_provider: dict[str, str] = {}
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
-    with open(events_path) as f:
-        for line in f:
-            parsed = warner.parse(line)
-            if parsed is None:
-                continue
-            data, _ = parsed
-            event_type = data.get("type")
-            if event_type == DiscoveryEventType.DISCOVERY_PROVIDER:
-                provider_name = str(data.get("provider_name", ""))
-                event_id = data.get("event_id")
-                if event_id is not None:
-                    event_id_str = str(event_id)
-                    all_snapshot_event_ids.add(event_id_str)
-                    latest_event_id_by_provider[provider_name] = event_id_str
-                    if data.get("error") is None:
-                        latest_non_errored_event_id_by_provider[provider_name] = event_id_str
-                    if data.get("provider") is not None:
-                        latest_with_provider_event_id_by_provider[provider_name] = event_id_str
-                started_at_raw = data.get("discovery_started_at")
-                if started_at_raw is not None:
-                    started_at = parse_event_timestamp(IsoTimestamp(str(started_at_raw)))
-                    latest_start_by_provider[provider_name] = started_at
-                    if data.get("error") is None:
-                        latest_non_errored_start_by_provider[provider_name] = started_at
-            elif event_type == DiscoveryEventType.DISCOVERY_FULL:
-                # The legacy global snapshot has no span; its own write time is the
-                # furthest back its (whole-world) reset needs replaying from.
-                timestamp_raw = data.get("timestamp")
-                if timestamp_raw is not None:
-                    latest_full_started_at = parse_event_timestamp(IsoTimestamp(str(timestamp_raw)))
-            else:
-                pass
+    for _line_start, decoded in iter_decoded_lines_from_offset(events_path):
+        parsed = warner.parse(decoded)
+        if parsed is None:
+            continue
+        data, _ = parsed
+        event_type = data.get("type")
+        if event_type == DiscoveryEventType.DISCOVERY_PROVIDER:
+            provider_name = str(data.get("provider_name", ""))
+            event_id = data.get("event_id")
+            if event_id is not None:
+                event_id_str = str(event_id)
+                all_snapshot_event_ids.add(event_id_str)
+                latest_event_id_by_provider[provider_name] = event_id_str
+                if data.get("error") is None:
+                    latest_non_errored_event_id_by_provider[provider_name] = event_id_str
+                if data.get("provider") is not None:
+                    latest_with_provider_event_id_by_provider[provider_name] = event_id_str
+            started_at_raw = data.get("discovery_started_at")
+            if started_at_raw is not None:
+                started_at = parse_event_timestamp(IsoTimestamp(str(started_at_raw)))
+                latest_start_by_provider[provider_name] = started_at
+                if data.get("error") is None:
+                    latest_non_errored_start_by_provider[provider_name] = started_at
+        elif event_type == DiscoveryEventType.DISCOVERY_FULL:
+            # The legacy global snapshot has no span; its own write time is the
+            # furthest back its (whole-world) reset needs replaying from.
+            timestamp_raw = data.get("timestamp")
+            if timestamp_raw is not None:
+                latest_full_started_at = parse_event_timestamp(IsoTimestamp(str(timestamp_raw)))
+        else:
+            pass
 
     if latest_start_by_provider:
         earliest_window_start = min(
@@ -953,25 +935,18 @@ def _scan_discovery_snapshots(events_path: Path) -> _DiscoverySnapshotScan:
 
 
 def _find_offset_of_first_event_at_or_after(events_path: Path, start: datetime) -> int:
-    """Byte offset of the first event line whose timestamp is at or after ``start`` (0 if none).
-
-    Uses ``f.tell()`` to track byte positions rather than ``len(line)``, which counts
-    characters and would be wrong for multi-byte UTF-8 content.
-    """
+    """Byte offset of the first event line whose timestamp is at or after ``start`` (0 if none)."""
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
-    with open(events_path, "rb") as f:
-        for raw_line in f:
-            line_start = f.tell() - len(raw_line)
-            decoded = raw_line.decode("utf-8", errors="replace")
-            parsed = warner.parse(decoded)
-            if parsed is None:
-                continue
-            data, _ = parsed
-            timestamp_raw = data.get("timestamp")
-            if timestamp_raw is None:
-                continue
-            if parse_event_timestamp(IsoTimestamp(str(timestamp_raw))) >= start:
-                return line_start
+    for line_start, decoded in iter_decoded_lines_from_offset(events_path):
+        parsed = warner.parse(decoded)
+        if parsed is None:
+            continue
+        data, _ = parsed
+        timestamp_raw = data.get("timestamp")
+        if timestamp_raw is None:
+            continue
+        if parse_event_timestamp(IsoTimestamp(str(timestamp_raw))) >= start:
+            return line_start
     return 0
 
 
@@ -1116,38 +1091,36 @@ def _replay_discovery_events_into_maps(events_path: Path) -> _ResolutionMaps:
 
     warner = MalformedJsonLineWarner(source_description=f"discovery events file '{events_path}'")
     schema_warner = DiscoverySchemaMismatchWarner(source_description=f"discovery events file '{events_path}'")
-    with open(events_path) as f:
-        f.seek(offset)
-        for line in f:
-            parsed = warner.parse(line)
-            if parsed is None:
-                continue
-            _data, stripped_line = parsed
-            event = schema_warner.parse(stripped_line)
-            if event is None:
-                continue
-            if isinstance(event, FullDiscoverySnapshotEvent):
-                # Legacy global snapshot: supersedes everything before it.
-                maps.reset()
-                last_event_time_by_agent_instance.clear()
-                for agent in event.agents:
-                    _record_agent(maps, agent)
-            elif isinstance(event, ProviderDiscoverySnapshotEvent):
-                _apply_provider_snapshot_to_maps(maps, event, last_event_time_by_agent_instance)
-            elif isinstance(event, AgentDiscoveryEvent):
-                _record_agent(maps, event.agent)
-                last_event_time_by_agent_instance[event.agent.instance_key] = parse_event_timestamp(event.timestamp)
-            elif isinstance(event, AgentDestroyedEvent):
-                # Host-scoped: destroying (host A, id X) must not make a same-id
-                # agent on another host unresolvable.
-                instance_key = AgentInstanceKey.build(event.agent_id, event.host_id)
-                maps.destroyed_agent_instances.add(instance_key)
-                last_event_time_by_agent_instance[instance_key] = parse_event_timestamp(event.timestamp)
-            else:
-                # Host, SSH info, and error events are not relevant for resolution. A
-                # host's continued existence (and its name) come from provider.get_host
-                # when the caller fetches the host to stop it, so host events are skipped.
-                pass
+    for _line_start, decoded in iter_decoded_lines_from_offset(events_path, offset):
+        parsed = warner.parse(decoded)
+        if parsed is None:
+            continue
+        _data, stripped_line = parsed
+        event = schema_warner.parse(stripped_line)
+        if event is None:
+            continue
+        if isinstance(event, FullDiscoverySnapshotEvent):
+            # Legacy global snapshot: supersedes everything before it.
+            maps.reset()
+            last_event_time_by_agent_instance.clear()
+            for agent in event.agents:
+                _record_agent(maps, agent)
+        elif isinstance(event, ProviderDiscoverySnapshotEvent):
+            _apply_provider_snapshot_to_maps(maps, event, last_event_time_by_agent_instance)
+        elif isinstance(event, AgentDiscoveryEvent):
+            _record_agent(maps, event.agent)
+            last_event_time_by_agent_instance[event.agent.instance_key] = parse_event_timestamp(event.timestamp)
+        elif isinstance(event, AgentDestroyedEvent):
+            # Host-scoped: destroying (host A, id X) must not make a same-id
+            # agent on another host unresolvable.
+            instance_key = AgentInstanceKey.build(event.agent_id, event.host_id)
+            maps.destroyed_agent_instances.add(instance_key)
+            last_event_time_by_agent_instance[instance_key] = parse_event_timestamp(event.timestamp)
+        else:
+            # Host, SSH info, and error events are not relevant for resolution. A
+            # host's continued existence (and its name) come from provider.get_host
+            # when the caller fetches the host to stop it, so host events are skipped.
+            pass
     schema_warner.log_summary()
 
     return maps
@@ -1380,8 +1353,6 @@ def extract_agents_and_hosts_from_full_listing(
     return discovered_agents, tuple(discovered_hosts), tuple(host_ssh_infos)
 
 
-# === Discovery Stream ===
-
 # Baseline cadence consumers (e.g. minds) use to derive a freshness threshold for the
 # discovery stream as a whole: if NO discovery event of any kind has landed in a small
 # multiple of this, the pipeline has stalled (vs. a single provider being down, which
@@ -1554,12 +1525,13 @@ def tail_discovery_events_from_offset(
                         current_offset = 0
                         warner.reset()
                     if file_size > current_offset:
-                        with open(events_path) as f:
+                        # Binary, since current_offset counts raw bytes.
+                        with open(events_path, "rb") as f:
                             f.seek(current_offset)
                             new_content = f.read()
                         # Hold back any trailing partial line so a mid-flush write
                         # doesn't get split across polls and silently lost.
-                        new_lines, bytes_consumed = split_complete_lines(new_content)
+                        new_lines, bytes_consumed = split_complete_lines_from_bytes(new_content)
                         current_offset += bytes_consumed
                         logger.debug(
                             "Discovery tail: consumed {} new bytes, {} lines from events file",
@@ -1607,8 +1579,9 @@ def _emit_lines_from_offset(
     """
     with open(events_path, "rb") as f:
         f.seek(offset)
-        new_content = f.read().decode("utf-8", errors="replace")
-    lines, bytes_consumed = split_complete_lines(new_content)
+        new_content = f.read()
+    # ``offset`` indexes the file's raw bytes, so the consumed count must too.
+    lines, bytes_consumed = split_complete_lines_from_bytes(new_content)
     for line in lines:
         _discovery_stream_emit_line(line, warner, emitted_event_ids, emit_lock, on_line, should_emit)
     return offset + bytes_consumed
