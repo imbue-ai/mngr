@@ -142,7 +142,7 @@ def test_success_page_without_redirect_says_return_to_terminal() -> None:
 def test_success_page_with_redirect_links_to_url_without_auto_navigation() -> None:
     # Deliberately a plain link, not an automatic navigation: the click is the
     # user gesture that triggers the browser's open-external-app prompt. The
-    # app-driven variant carries the minds wordmark and copy.
+    # app-driven variant carries the Imbue Studio wordmark and copy.
     page = _login_result_page("minds://", _LoginPageOutcome.SIGNED_IN, None).decode("utf-8")
     assert '<a href="minds://">Open app</a>' in page
     assert "<svg" in page and 'fill="currentColor"' in page

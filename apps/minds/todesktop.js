@@ -68,6 +68,10 @@ module.exports = {
   },
   linux: {
     category: 'Development',
+    // Linux desktops draw the icon file as it is -- none of them mask it to a
+    // platform shape the way the Dock does -- so Linux gets the full-bleed,
+    // squarer cut rather than the macOS one, which the top-level `icon` serves.
+    icon: './electron/assets/icon-linux.png',
     // Chromium's sandbox needs either a root-owned setuid helper, which an
     // AppImage's user-owned mount cannot carry, or unprivileged user
     // namespaces, which Ubuntu 24.04 restricts through AppArmor. "probe"

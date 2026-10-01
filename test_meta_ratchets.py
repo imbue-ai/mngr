@@ -360,6 +360,50 @@ def test_numbered_sql_migrations_have_unique_numbers() -> None:
     )
 
 
+# Every file that draws the Imbue Studio wordmark. The artwork cannot be shared
+# from one place: its consumers are an Electron page loaded off disk (which
+# cannot fetch a sibling file), two Vite bundles with different roots, and a
+# wheel that ships no assets. apps/minds' SVG is the drawing of record.
+_WORDMARK_SOURCE = Path("apps/minds/frontend/src/assets/studio-wordmark.svg")
+_WORDMARK_COPIES: tuple[Path, ...] = (
+    Path("apps/minds/electron/assets/studio-wordmark.svg"),
+    Path("apps/minds/electron/intro-letters.js"),
+    Path("apps/remote_service_connector/frontend/src/components.ts"),
+    Path("libs/mngr_imbue_cloud/imbue/mngr_imbue_cloud/cli/auth.py"),
+)
+# A path's outline, in any of the forms the copies write it: an SVG `d`
+# attribute, a TypeScript object property, a JavaScript one in single quotes.
+_WORDMARK_OUTLINE_RE = re.compile(r"""\bd[:=] ?["'](M[^"']+)["']""")
+
+
+def test_every_copy_of_the_wordmark_draws_the_same_artwork() -> None:
+    """Ensure every file drawing the wordmark carries the current artwork's outlines.
+
+    Nothing propagates a redrawn mark to the copies, and the ones outside
+    apps/minds are found by neither a search for the asset's filename nor one
+    for the product's name.
+    """
+    source_text = (_REPO_ROOT / _WORDMARK_SOURCE).read_text()
+    outlines = _WORDMARK_OUTLINE_RE.findall(source_text)
+    assert len(outlines) == 6, f"{_WORDMARK_SOURCE} should draw six letters, not {len(outlines)}"
+
+    stale_descriptions: list[str] = []
+    for copy_path in _WORDMARK_COPIES:
+        copy_file = _REPO_ROOT / copy_path
+        if not copy_file.exists():
+            # apps/remote_service_connector is absent from the public mirror.
+            assert not _IS_SOURCE_OF_TRUTH, f"{copy_path} is gone; drop or repoint it in _WORDMARK_COPIES"
+            continue
+        copy_text = copy_file.read_text()
+        missing = [outline for outline in outlines if outline not in copy_text]
+        if missing:
+            stale_descriptions.append(f"  {copy_path}: {len(missing)} of {len(outlines)} letters are out of date")
+    assert len(stale_descriptions) == 0, (
+        f"These files draw a wordmark {_WORDMARK_SOURCE} no longer draws; redraw them from it:\n"
+        + "\n".join(stale_descriptions)
+    )
+
+
 def test_prevent_bash_without_strict_mode() -> None:
     """Ensure all bash scripts in the repo use 'set -euo pipefail' for strict error handling.
 

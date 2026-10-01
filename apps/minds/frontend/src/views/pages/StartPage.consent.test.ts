@@ -1,10 +1,18 @@
-// The start flow saves the error-reporting checkbox with the run question's answer. A file of its own because the
-// existing-login answer starts the browser sign-in, whose module is replaced here.
+// The reporting question that closes the manifesto: what it says, what "See more" opens, and that either answer is
+// saved before the questions begin. A file of its own because it drives the live page, whose sign-in module is
+// replaced here.
 import type m from "mithril";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import { createEmptyStores } from "../../models/boot";
-import { attrsOf, collectVnodes } from "../../testing";
+import {
+  REPORTING_ACCEPT_LABEL,
+  REPORTING_ASK,
+  REPORTING_DECLINE_LABEL,
+  REPORTING_MORE_DETAIL,
+  REPORTING_MORE_LABEL,
+} from "../../models/startFlow";
+import { allText, attrsOf, collectVnodes } from "../../testing";
 import { ShellState } from "../shell/shell-state";
 import { StartPage } from "./StartPage";
 
@@ -18,15 +26,17 @@ function attrsWith(tree: unknown, name: string, value: string): Record<string, u
   return attrsOf(vnode);
 }
 
-/** The start page with its questions begun, so the run question and its checkbox are showing. */
-function renderStartedPage(): () => unknown {
+function renderPage(): () => unknown {
   const component = (StartPage as unknown as (vnode: unknown) => m.Component)({});
-  const view = (): unknown => (component.view as () => unknown)();
-  (attrsWith(view(), "data-answer", "continue").onclick as () => void)();
-  return view;
+  return (): unknown => (component.view as () => unknown)();
 }
 
-describe("StartPage saving the error-reporting checkbox", () => {
+/** The live page streams its agent turns one character per span, so its text reads back spaced out. */
+function unspaced(value: unknown): string {
+  return (typeof value === "string" ? value : allText(value)).replace(/\s+/g, "");
+}
+
+describe("the manifesto's reporting question", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -49,21 +59,53 @@ describe("StartPage saving the error-reporting checkbox", () => {
     return JSON.parse(String(init?.body));
   }
 
-  it("saves the checkbox as it stands with an answer to the run question", async () => {
-    const view = renderStartedPage();
+  it("asks it after the manifesto, with both answers and nothing else to press", () => {
+    const view = renderPage();
+
+    expect(unspaced(view())).toContain(unspaced(REPORTING_ASK));
+    expect(allText(view())).toContain(REPORTING_MORE_LABEL);
+    const answers = collectVnodes(view())
+      .map((node) => attrsOf(node)["data-answer"])
+      .filter((answer) => answer !== undefined);
+    expect(answers).toEqual(["reporting-no", "reporting-yes"]);
+  });
+
+  it("keeps what it collects behind See more until it is pressed", () => {
+    const view = renderPage();
+    expect(allText(view())).not.toContain(REPORTING_MORE_DETAIL);
+
+    (attrsWith(view(), "id", "start-reporting-more").onclick as () => void)();
+
+    expect(allText(view())).toContain(REPORTING_MORE_DETAIL);
+  });
+
+  it("saves the yes and opens the where-to-run question", async () => {
+    const view = renderPage();
+
+    (attrsWith(view(), "data-answer", "reporting-yes").onclick as () => void)();
+
+    expect(await postedConsentBody()).toEqual({ report_unexpected_errors: true });
+    expect(allText(view())).toContain(REPORTING_ACCEPT_LABEL);
+    expect(unspaced(view())).toContain(unspaced("How do you want to run it?"));
+  });
+
+  it("saves the no, and says the no rather than a press nobody made", async () => {
+    const view = renderPage();
+
+    (attrsWith(view(), "data-answer", "reporting-no").onclick as () => void)();
+
+    expect(await postedConsentBody()).toEqual({ report_unexpected_errors: false });
+    expect(allText(view())).toContain(REPORTING_DECLINE_LABEL);
+    expect(unspaced(view())).toContain(unspaced("How do you want to run it?"));
+  });
+
+  it("is answered once: the where-to-run answer saves nothing more", async () => {
+    const view = renderPage();
+    (attrsWith(view(), "data-answer", "reporting-yes").onclick as () => void)();
+    await postedConsentBody();
 
     (attrsWith(view(), "data-answer", "custom").onclick as () => void)();
 
-    expect(await postedConsentBody()).toEqual({ report_unexpected_errors: true });
-  });
-
-  it("saves an unchecked box with the existing-login answer", async () => {
-    const view = renderStartedPage();
-    const onchange = attrsWith(view(), "id", "start-reporting-consent").onchange as (event: Event) => void;
-    onchange({ target: { checked: false } } as unknown as Event);
-
-    (attrsWith(view(), "data-aside", "").onclick as () => void)();
-
-    expect(await postedConsentBody()).toEqual({ report_unexpected_errors: false });
+    expect(fetchMock.mock.calls.filter(([url]) => url === CONSENT_URL)).toHaveLength(1);
   });
 });

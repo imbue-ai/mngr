@@ -20,8 +20,13 @@ import type {
 import {
   FLOW,
   MANIFESTO_HEADING,
+  MANIFESTO_OPENER,
+  MANIFESTO_OPENER_EMPHASIS,
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
+  REPORTING_ASK,
+  REPORTING_MORE_DETAIL,
+  REPORTING_MORE_LABEL,
   stepText,
 } from "./startFlow";
 
@@ -59,15 +64,30 @@ export function tableColumnMarkdown(column: TableColumn): string {
   return [title, ...column.points.map((point) => `- ${point}`)].join("\n");
 }
 
+/** The opener with the phrase it is about emphasised, as the start flow draws it. */
+export function manifestoOpenerMarkdown(): string {
+  return MANIFESTO_OPENER.replace(MANIFESTO_OPENER_EMPHASIS, `*${MANIFESTO_OPENER_EMPHASIS}*`);
+}
+
 /** The manifesto exchange every workspace's conversation opens with, whichever page it started on. */
 export function manifestoTurns(): WelcomeChatTurn[] {
   return [
+    assistant(manifestoOpenerMarkdown()),
     user(MANIFESTO_QUESTION),
     assistant(
       [
         `**${MANIFESTO_HEADING}**`,
         "",
         ...MANIFESTO_POINTS.map((point) => disclosureMarkdown(point)),
+      ].join("\n"),
+    ),
+    // The answer rides in on the transcript's first `said` entry, so only the
+    // question itself is owed here.
+    assistant(
+      [
+        REPORTING_ASK,
+        "",
+        `<details><summary>${REPORTING_MORE_LABEL}</summary>\n\n*${REPORTING_MORE_DETAIL}*\n\n</details>`,
       ].join("\n"),
     ),
   ];

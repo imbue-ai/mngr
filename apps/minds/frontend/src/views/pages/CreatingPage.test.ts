@@ -4,7 +4,8 @@ import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { AppContext } from "../../app-context";
 import type { CreateAttemptDetail } from "../../models/create";
 import { readyTurnMarkdown } from "../../models/creationTranscript";
-import { MANIFESTO_QUESTION } from "../../models/startFlow";
+import { MANIFESTO_OPENER, MANIFESTO_QUESTION, REPORTING_ASK } from "../../models/startFlow";
+import { manifestoOpenerMarkdown } from "../../models/welcomeChat";
 import type { WelcomeChatBody } from "../../models/welcomeChat";
 import { allText, attrsOf, collectVnodes, jsonResponse } from "../../testing";
 import { CreatingPage, failureGuidance, failureTurn } from "./CreatingPage";
@@ -114,7 +115,8 @@ describe("CreatingPage across a route change", () => {
     await vi.waitFor(() => expect(allText(render(vnodeFor("create-attempt-c")))).toContain("workspace-create-attempt-c"));
 
     const text = allText(render(vnodeFor("create-attempt-c")));
-    expect(text.indexOf("Wait.. what is honest software?")).toBeLessThan(text.indexOf("Honest Software:"));
+    expect(text.indexOf(MANIFESTO_OPENER)).toBeLessThan(text.indexOf(MANIFESTO_QUESTION));
+    expect(text.indexOf(MANIFESTO_QUESTION)).toBeLessThan(text.indexOf("Honest Software:"));
     expect(text.indexOf("Honest Software:")).toBeLessThan(text.indexOf("Create a workspace with these settings:"));
   });
 
@@ -168,8 +170,10 @@ describe("CreatingPage across a route change", () => {
 
     await vi.waitFor(() => expect(seedBodies).toHaveLength(1));
     const turns = seedBodies[0].turns;
-    expect(turns[0]).toEqual({ role: "user", text: MANIFESTO_QUESTION });
-    expect(turns[2].text).toContain("Name — workspace-create-attempt-d");
+    expect(turns[0]).toEqual({ role: "assistant", text: manifestoOpenerMarkdown() });
+    expect(turns[1]).toEqual({ role: "user", text: MANIFESTO_QUESTION });
+    expect(turns[3].text).toContain(REPORTING_ASK);
+    expect(turns[4].text).toContain("Name — workspace-create-attempt-d");
     expect(turns[turns.length - 1].text).toBe(readyTurnMarkdown());
     const nodes = collectVnodes(render(vnodeFor("create-attempt-d")));
     expect(nodes.some((node) => attrsOf(node).key === "creation-ready")).toBe(true);

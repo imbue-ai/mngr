@@ -8,6 +8,10 @@
 // renders it above its own turns when it is reached from the flow in the same
 // session, and a reload simply starts over (nothing is persisted).
 
+/** The agent speaks first, and names the thing the rest of the exchange is about. */
+export const MANIFESTO_OPENER = "Imbue Studio is honest software.";
+/** The phrase in the opener the exchange is about: italic wherever the opener is drawn. */
+export const MANIFESTO_OPENER_EMPHASIS = "honest software";
 export const MANIFESTO_QUESTION = "Wait.. what is honest software?";
 export const MANIFESTO_HEADING = "Honest Software:";
 
@@ -61,18 +65,35 @@ export const MANIFESTO_POINTS: DisclosurePoint[] = [
 
 /** The manifesto answer as one text, for the length the streaming schedule is timed on. */
 export const MANIFESTO_ANSWER = [MANIFESTO_HEADING, "", ...MANIFESTO_POINTS.map((point) => point.label)].join("\n");
-export const CONTINUE_LABEL = "Sounds great, let's continue";
+
+/**
+ * The question that closes the manifesto. Answering it is what starts the
+ * first-run questions, so every install answers it exactly once, before it is
+ * asked anything else.
+ */
+export const REPORTING_ASK = "Is it ok if we report errors to help improve Studio?";
+/** What the ask does not say, a click away. */
+export const REPORTING_MORE_LABEL = "See more";
+export const REPORTING_MORE_DETAIL =
+  "The reports we collect include diagnostic details about the error and your setup, which can be identifying " +
+  "at times (e.g. an email account). We generally try to anonymize data, and we try to ensure that error data " +
+  "is not retained for more than 30 days. You can change this any time in Settings → Error reporting.";
+export const REPORTING_DECLINE_LABEL = "No";
+export const REPORTING_ACCEPT_LABEL = "Sounds great";
 
 /** The user's bubble rises into place over this long. */
 export const CHAT_BUBBLE_MS = 280;
 /** The beat between the question landing and the answer starting: read as considering it. */
 export const CHAT_THINK_MS = 1000;
+/** The beat between the opener landing and the reply to it: read as taking it in. */
+export const CHAT_REACT_MS = 2000;
 /** The answer streams a character at a time, each fading in; even, like a machine emitting tokens. */
 export const CHAT_STREAM_STEP_MS = 12;
 export const CHAT_STREAM_FADE_MS = 70;
-/** The pause before the first message, and between an answer landing and its button. */
+/** The pause before the first message. */
 export const CHAT_GAP_MS = 150;
-export const CHAT_CONTINUE_GAP_MS = 1200;
+/** The beat between the manifesto's last point and the question that follows it: read as letting it land. */
+export const CHAT_READ_MS = 1200;
 /** The pause before an agent turn the user's action caused starts arriving. */
 export const FLOW_THINK_MS = 500;
 /** The pause between a question landing and its choices appearing under it. */
@@ -84,16 +105,22 @@ export function streamDurationMs(text: string): number {
 }
 
 export interface ManifestoSchedule {
+  openerAt: number;
   questionAt: number;
   answerAt: number;
-  continueAt: number;
+  reportingAt: number;
+  answersAt: number;
 }
 
 export function manifestoSchedule(): ManifestoSchedule {
-  const questionAt = CHAT_GAP_MS;
+  const openerAt = CHAT_GAP_MS;
+  // The reply waits out the whole opener, not just its first character.
+  const questionAt = openerAt + streamDurationMs(MANIFESTO_OPENER) + CHAT_REACT_MS;
   const answerAt = questionAt + CHAT_BUBBLE_MS + CHAT_THINK_MS;
-  const continueAt = answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_CONTINUE_GAP_MS;
-  return { questionAt, answerAt, continueAt };
+  const reportingAt = answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_READ_MS;
+  // The buttons follow their question the same beat later every other question's do.
+  const answersAt = reportingAt + streamDurationMs(REPORTING_ASK) + FLOW_OPTIONS_GAP_MS;
+  return { openerAt, questionAt, answerAt, reportingAt, answersAt };
 }
 
 export type StepId = "run" | "auth" | "retry" | "again" | "verify" | "verify-again";
@@ -131,9 +158,6 @@ export interface FlowStep {
   choices: FlowChoice[];
   /** The quieter, agent-side way out under the question, when there is one. */
   aside?: { label: string };
-  /** The question that also carries the error-reporting checkbox: every way out of onboarding (a cloud or custom
-   *  workspace, or an existing account's sign-in) answers it, so every new install answers the checkbox too. */
-  asksReportingConsent?: boolean;
 }
 
 const CLOUD_CHOICE: FlowChoice = {
@@ -195,7 +219,6 @@ export const FLOW: Record<StepId, FlowStep> = {
     prompt: "How do you want to run it?",
     choices: [CUSTOM_CHOICE, CLOUD_CHOICE],
     aside: { label: EXISTING_LOGIN_LABEL },
-    asksReportingConsent: true,
   },
   // Sign in leads: the app is downloaded from a page that already required an
   // Imbue account, so the account step is a sign-in for nearly everyone. The
@@ -263,8 +286,9 @@ export function signedInSaid(email: string): string {
 
 /**
  * One entry, in order. A `step` is a question, with its answer once given; a
- * `said` is a user turn with no question behind it (the "Sounds great" press,
- * the sign-in receipt); a `note` is an agent line with nothing to answer.
+ * `said` is a user turn with no question behind it (the reporting answer that
+ * starts the questions, the sign-in receipt); a `note` is an agent line with
+ * nothing to answer.
  */
 export type TranscriptEntry =
   | { kind: "step"; id: StepId; ack: string; answer: ChoiceId | null; said: string }
@@ -293,13 +317,13 @@ function stepEntry(id: StepId, ack: string): TranscriptEntry {
   return { kind: "step", id, ack, answer: null, said: "" };
 }
 
-/** The user pressed "Sounds great, let's continue". */
-export function startQuestions(state: StartFlowState): StartFlowState {
+/** The user answered the reporting question, whichever way; `said` is the button they pressed. */
+export function startQuestions(state: StartFlowState, said: string): StartFlowState {
   if (state.isStarted) return state;
   return {
     ...state,
     isStarted: true,
-    entries: [{ kind: "said", text: CONTINUE_LABEL }, stepEntry("run", "")],
+    entries: [{ kind: "said", text: said }, stepEntry("run", "")],
   };
 }
 

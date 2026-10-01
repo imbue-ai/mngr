@@ -1,7 +1,9 @@
 import m from "mithril";
 import { describe, expect, it } from "vitest";
+import type { AnyVnode } from "../../../testing";
+import { attrsOf, classesOf, collectText, collectVnodes } from "../../../testing";
 import type { ScrollTarget } from "./transcript";
-import { TranscriptScroller, choiceTable } from "./transcript";
+import { TranscriptScroller, agentTurn, choiceTable } from "./transcript";
 
 function anchor(scrolls: string[], label: string): ScrollTarget {
   return { scrollIntoView: () => scrolls.push(label) };
@@ -88,5 +90,48 @@ describe("choiceTable", () => {
     expect(badgeClassOf(cloud)).toContain("text-accent");
     expect(badgeClassOf(custom)).toContain("text-secondary");
     expect(badgeClassOf(custom)).not.toContain("text-accent");
+  });
+});
+
+describe("agentTurn", () => {
+  const OPENER = "Imbue Studio is honest software.";
+
+  /** The turn's text, straight through, however many runs it is drawn in. */
+  function textOf(turn: unknown): string {
+    return collectText(turn).join("");
+  }
+
+  /** Each character's own delay, in order: the stream's schedule. */
+  function delays(turn: unknown): number[] {
+    return collectVnodes(turn)
+      .filter((vnode) => classesOf(vnode).includes("start-char"))
+      .map((vnode) => Number(/--start-char-delay: ([\d.]+)ms/.exec(String(attrsOf(vnode).style ?? ""))?.[1]));
+  }
+
+  function emOf(turn: unknown): AnyVnode | undefined {
+    return collectVnodes(turn).find((vnode) => vnode.tag === "em");
+  }
+
+  it("draws the emphasised run in italics and leaves the rest of the sentence alone", () => {
+    const turn = agentTurn({ key: "opener", text: OPENER, emphasis: "honest software", startAtMs: 0 });
+
+    expect(textOf(emOf(turn))).toBe("honest software");
+    expect(textOf(turn)).toBe(OPENER);
+  });
+
+  it("does not move the stream: every character lands when it would have anyway", () => {
+    // The emphasis is how the turn is drawn, not when any of it arrives, so a
+    // phrase picked out mid-sentence must not shift the characters after it.
+    const plain = agentTurn({ key: "opener", text: OPENER, startAtMs: 150 });
+    const emphasised = agentTurn({ key: "opener", text: OPENER, emphasis: "honest software", startAtMs: 150 });
+
+    expect(delays(emphasised)).toEqual(delays(plain));
+  });
+
+  it("falls back to the plain stream when the phrase is not in the text", () => {
+    const turn = agentTurn({ key: "opener", text: OPENER, emphasis: "not in there", startAtMs: 0 });
+
+    expect(emOf(turn)).toBeUndefined();
+    expect(textOf(turn)).toBe(OPENER);
   });
 });

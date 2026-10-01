@@ -1,7 +1,8 @@
 // The start flow (/start): the first thing a new install shows once the
-// backend is up. The manifesto exchange plays on a fixed clock; pressing its
-// button starts the first-run questions, asked one at a time as a chat (see
-// models/startFlow.ts for the transcript and its transitions). A cloud answer
+// backend is up. The manifesto exchange plays on a fixed clock and ends on the
+// error-reporting question; answering that starts the first-run questions,
+// asked one at a time as a chat (see models/startFlow.ts for the transcript
+// and its transitions). A cloud answer
 // submits the create form's remote preset directly; the custom answer opens
 // the create form itself as a modal; "I already have one (log in)" signs in and
 // leaves for the home page. A cloud create waits for the account's email to be
@@ -15,20 +16,22 @@ import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults } from "../../models/create";
 import { fetchCreateFormDefaults, submitCreateRequest } from "../../models/create";
 import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../models/emailVerification";
-import {
-  REPORTING_CONSENT_QUESTION,
-  markOnboardingComplete,
-  recordErrorReportingConsent,
-} from "../../models/onboarding";
+import { markOnboardingComplete, recordErrorReportingConsent } from "../../models/onboarding";
 import {
   CHAT_STREAM_STEP_MS,
-  CONTINUE_LABEL,
   FLOW,
   FLOW_OPTIONS_GAP_MS,
   FLOW_THINK_MS,
   MANIFESTO_HEADING,
+  MANIFESTO_OPENER,
+  MANIFESTO_OPENER_EMPHASIS,
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
+  REPORTING_ACCEPT_LABEL,
+  REPORTING_ASK,
+  REPORTING_DECLINE_LABEL,
+  REPORTING_MORE_DETAIL,
+  REPORTING_MORE_LABEL,
   SIGN_IN_INTRO_BY_CHOICE,
   answerStep,
   chooseExistingLogin,
@@ -57,7 +60,6 @@ import {
   answerRow,
   choiceTable,
   disclosureList,
-  reportingConsentRow,
   scrollAnchor,
   userTurn,
 } from "./start/transcript";
@@ -84,8 +86,6 @@ export function transcriptTurns(
     onAnswer?: (at: number, choiceId: ChoiceId) => void;
     onUndo?: (at: number) => void;
     onAside?: (stepId: StepId) => void;
-    /** The error-reporting checkbox's state, for the question that carries it. */
-    reportingConsent?: { isAllowed: boolean; onChange: (isAllowed: boolean) => void };
   },
 ): m.Children[] {
   const turns: m.Children[] = [];
@@ -131,17 +131,6 @@ export function transcriptTurns(
     if (!options.isPressable) return;
     const buttonsAt = at === options.reopenedStepIndex ? 0 : optionsAt;
     const aside = step.aside;
-    if (step.asksReportingConsent && options.reportingConsent) {
-      turns.push(
-        reportingConsentRow({
-          key: `${key}-reporting-consent`,
-          delayMs: buttonsAt,
-          question: REPORTING_CONSENT_QUESTION,
-          isAllowed: options.reportingConsent.isAllowed,
-          onChange: options.reportingConsent.onChange,
-        }),
-      );
-    }
     turns.push(
       answerRow({
         key: `${key}-buttons`,
@@ -183,10 +172,9 @@ export const StartPage: m.ClosureComponent = () => {
   let defaults: CreateFormDefaults | null = null;
   let isCustomFormOpen = false;
   let isSubmittingCloud = false;
-  // The run question's error-reporting checkbox.
-  let isReportingAllowed = true;
   // The manifesto points the reader has opened.
   const openManifestoIds = new Set<string>();
+  let isReportingMoreOpen = false;
   // The verification gate: one check may be in flight, and a poll runs while
   // the flow waits on the emailed link.
   let isCheckingVerification = false;
@@ -376,18 +364,16 @@ export const StartPage: m.ClosureComponent = () => {
     );
   }
 
-  // Saved with the press on the question that carries the checkbox, whichever way it is answered.
-  function recordReportingConsentIfAsked(stepId: StepId): void {
-    if (!FLOW[stepId].asksReportingConsent) return;
+  /** Either answer to the reporting question: it is saved, and it is what starts the questions. */
+  function answerReporting(isAllowed: boolean): void {
     // A failed save is asked again on the consent screen at a later launch.
-    void recordErrorReportingConsent(isReportingAllowed).then((isRecorded) => {
+    void recordErrorReportingConsent(isAllowed).then((isRecorded) => {
       if (!isRecorded) console.warn("The error-reporting answer could not be saved");
     });
+    flow.state = startQuestions(flow.state, isAllowed ? REPORTING_ACCEPT_LABEL : REPORTING_DECLINE_LABEL);
   }
 
   function onAnswer(at: number, choiceId: ChoiceId): void {
-    const answered = flow.state.entries[at];
-    if (answered?.kind === "step") recordReportingConsentIfAsked(answered.id);
     if (choiceId === "verified") {
       pressVerified();
       return;
@@ -410,7 +396,6 @@ export const StartPage: m.ClosureComponent = () => {
       resendVerification();
       return;
     }
-    recordReportingConsentIfAsked(stepId);
     flow.state = chooseExistingLogin(flow.state);
     void webLogin.start("Sign in to see your existing workspaces.");
   }
@@ -491,6 +476,12 @@ export const StartPage: m.ClosureComponent = () => {
       // Every child is keyed: Mithril rejects a fragment that mixes keyed
       // vnodes with holes, so optional pieces are appended rather than nulled.
       const children: m.Children[] = [
+        agentTurn({
+          key: "manifesto-opener",
+          text: MANIFESTO_OPENER,
+          emphasis: MANIFESTO_OPENER_EMPHASIS,
+          startAtMs: schedule.openerAt,
+        }),
         userTurn({ key: "manifesto-question", delayMs: schedule.questionAt, text: MANIFESTO_QUESTION }),
         agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: schedule.answerAt }),
         disclosureList({
@@ -501,19 +492,41 @@ export const StartPage: m.ClosureComponent = () => {
           onToggle: toggleManifestoPoint,
         }),
       ];
+      children.push(
+        agentTurn({
+          key: "manifesto-reporting",
+          id: "start-reporting-ask",
+          text: REPORTING_ASK,
+          startAtMs: schedule.reportingAt,
+          isInstant: state.isStarted,
+          more: {
+            id: "start-reporting-more",
+            label: REPORTING_MORE_LABEL,
+            detail: REPORTING_MORE_DETAIL,
+            isOpen: isReportingMoreOpen,
+            onToggle: () => {
+              isReportingMoreOpen = !isReportingMoreOpen;
+            },
+          },
+        }),
+      );
       if (!state.isStarted) {
         children.push(
           answerRow({
-            key: "manifesto-continue",
-            delayMs: schedule.continueAt,
+            key: "manifesto-reporting-answers",
+            delayMs: schedule.answersAt,
             buttons: [
               {
-                id: "continue",
-                label: CONTINUE_LABEL,
+                id: "reporting-no",
+                label: REPORTING_DECLINE_LABEL,
+                isEmphasized: false,
+                onPress: () => answerReporting(false),
+              },
+              {
+                id: "reporting-yes",
+                label: REPORTING_ACCEPT_LABEL,
                 isEmphasized: true,
-                onPress: () => {
-                  flow.state = startQuestions(flow.state);
-                },
+                onPress: () => answerReporting(true),
               },
             ],
           }),
@@ -527,12 +540,6 @@ export const StartPage: m.ClosureComponent = () => {
           onAnswer,
           onUndo: isSubmittingCloud ? undefined : onUndo,
           onAside,
-          reportingConsent: {
-            isAllowed: isReportingAllowed,
-            onChange: (isAllowed) => {
-              isReportingAllowed = isAllowed;
-            },
-          },
         }),
         scrollAnchor(state.entries.length),
       );

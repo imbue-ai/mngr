@@ -11,7 +11,7 @@
 import m from "mithril";
 // Inlined: the built bundle is served under /_static/ui/, a prefix Vite does
 // not know, so a URL import would point at a path Flask never serves.
-import lockupUrl from "../../assets/mind-wordmark.svg?inline";
+import lockupUrl from "../../assets/studio-wordmark.svg?inline";
 import { Badge } from "../components/Badge";
 import { Button } from "../components/Button";
 import { Icon12, Icon16 } from "../components/Icon";
@@ -81,7 +81,7 @@ function startTitlebar(shell: ShellState): m.Children {
       m("div", { class: "flex-1" }),
       m("img", {
         id: "start-mark",
-        class: "start-chrome-mark absolute left-1/2 top-1/2 h-4 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
+        class: "start-chrome-mark absolute left-1/2 top-1/2 h-5 w-auto -translate-x-1/2 -translate-y-1/2 select-none",
         src: lockupUrl,
         alt: "Imbue Studio",
         draggable: false,

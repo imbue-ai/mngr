@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   CHAT_BUBBLE_MS,
-  CHAT_CONTINUE_GAP_MS,
   CHAT_GAP_MS,
+  CHAT_READ_MS,
+  CHAT_REACT_MS,
   CHAT_THINK_MS,
-  CONTINUE_LABEL,
+  FLOW_OPTIONS_GAP_MS,
   MANIFESTO_ANSWER,
+  MANIFESTO_OPENER,
+  REPORTING_ACCEPT_LABEL,
+  REPORTING_ASK,
+  REPORTING_DECLINE_LABEL,
   answerStep,
   chooseExistingLogin,
   dismissPendingModal,
@@ -30,15 +35,17 @@ const SIGNED_OUT = { isSignedIn: false, signedInEmail: "" };
 const SIGNED_IN = { isSignedIn: true, signedInEmail: "alice@example.com" };
 
 function started(): StartFlowState {
-  return startQuestions(initialStartFlowState());
+  return startQuestions(initialStartFlowState(), REPORTING_ACCEPT_LABEL);
 }
 
 describe("the manifesto schedule", () => {
-  it("sequences question, answer, and button with the read gaps in between", () => {
+  it("sequences opener, question, answer, the reporting question and its answers with the read gaps between", () => {
     const schedule = manifestoSchedule();
-    expect(schedule.questionAt).toBe(CHAT_GAP_MS);
-    expect(schedule.answerAt).toBe(CHAT_GAP_MS + CHAT_BUBBLE_MS + CHAT_THINK_MS);
-    expect(schedule.continueAt).toBe(schedule.answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_CONTINUE_GAP_MS);
+    expect(schedule.openerAt).toBe(CHAT_GAP_MS);
+    expect(schedule.questionAt).toBe(CHAT_GAP_MS + streamDurationMs(MANIFESTO_OPENER) + CHAT_REACT_MS);
+    expect(schedule.answerAt).toBe(schedule.questionAt + CHAT_BUBBLE_MS + CHAT_THINK_MS);
+    expect(schedule.reportingAt).toBe(schedule.answerAt + streamDurationMs(MANIFESTO_ANSWER) + CHAT_READ_MS);
+    expect(schedule.answersAt).toBe(schedule.reportingAt + streamDurationMs(REPORTING_ASK) + FLOW_OPTIONS_GAP_MS);
   });
 
   it("a one-character stream lands after just its fade", () => {
@@ -48,19 +55,24 @@ describe("the manifesto schedule", () => {
 });
 
 describe("starting the questions", () => {
-  it("records the press as a user turn and opens the where-to-run question", () => {
+  it("records the reporting answer as a user turn and opens the where-to-run question", () => {
     const state = started();
     expect(state.isStarted).toBe(true);
     expect(state.entries).toEqual([
-      { kind: "said", text: CONTINUE_LABEL },
+      { kind: "said", text: REPORTING_ACCEPT_LABEL },
       { kind: "step", id: "run", ack: "", answer: null, said: "" },
     ]);
     expect(openStepIndex(state)).toBe(1);
   });
 
+  it("records a refusal the same way, so the transcript carries which answer was given", () => {
+    const state = startQuestions(initialStartFlowState(), REPORTING_DECLINE_LABEL);
+    expect(state.entries[0]).toEqual({ kind: "said", text: REPORTING_DECLINE_LABEL });
+  });
+
   it("is idempotent", () => {
     const state = started();
-    expect(startQuestions(state)).toBe(state);
+    expect(startQuestions(state, REPORTING_DECLINE_LABEL)).toBe(state);
   });
 });
 

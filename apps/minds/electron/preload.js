@@ -44,6 +44,13 @@ contextBridge.exposeInMainWorld('mindsNative', {
   },
   retry: () => ipcRenderer.send('retry'),
   openLogFile: () => ipcRenderer.send('open-log-file'),
+  // The app is up and the first route decided. The loading document's intro
+  // holds on a settled mark until this arrives, and takes it as its cue to
+  // leave -- so the lockup's travel to the titlebar always means the same
+  // thing.
+  onStartupReady: (callback) => {
+    ipcRenderer.on('startup-ready', (_event, detail) => callback(detail || {}));
+  },
   // The loading document's intro is over (played out, skipped, or never
   // shown), so main may land the first route on this window.
   introFinished: () => ipcRenderer.send('intro-finished'),

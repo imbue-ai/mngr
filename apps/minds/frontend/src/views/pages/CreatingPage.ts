@@ -30,8 +30,13 @@ import {
   FLOW_OPTIONS_GAP_MS,
   FLOW_THINK_MS,
   MANIFESTO_HEADING,
+  MANIFESTO_OPENER,
+  MANIFESTO_OPENER_EMPHASIS,
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
+  REPORTING_ASK,
+  REPORTING_MORE_DETAIL,
+  REPORTING_MORE_LABEL,
   startFlow,
   streamDurationMs,
 } from "../../models/startFlow";
@@ -66,6 +71,7 @@ interface CreatingState {
   openSectionIds: Set<string>;
   /** The manifesto points the reader has opened. */
   openManifestoIds: Set<string>;
+  isReportingMoreOpen: boolean;
   /** The hand-off of the conversation to the new workspace, settled either way before the wash. */
   welcomeChat: Promise<void> | null;
   /** Set once the page is left or a later attempt takes it over, so a pending entry never fires. */
@@ -143,6 +149,7 @@ function freshState(createAttemptId: string): CreatingState {
     isLogOpen: false,
     openSectionIds: new Set<string>(),
     openManifestoIds: new Set<string>(),
+    isReportingMoreOpen: false,
     welcomeChat: null,
     isEntryCancelled: false,
     isActionPending: false,
@@ -497,6 +504,13 @@ export const CreatingPage: m.ClosureComponent = () => {
   /** The manifesto exchange, already on the page: every workspace's conversation opens with it. */
   function manifestoTurns(): m.Children[] {
     return [
+      agentTurn({
+        key: "manifesto-opener",
+        text: MANIFESTO_OPENER,
+        emphasis: MANIFESTO_OPENER_EMPHASIS,
+        startAtMs: 0,
+        isInstant: true,
+      }),
       userTurn({ key: "manifesto-question", delayMs: 0, isInstant: true, text: MANIFESTO_QUESTION }),
       agentTurn({ key: "manifesto-answer", text: MANIFESTO_HEADING, startAtMs: 0, isInstant: true }),
       disclosureList({
@@ -508,6 +522,20 @@ export const CreatingPage: m.ClosureComponent = () => {
         onToggle: (id) => {
           if (state.openManifestoIds.has(id)) state.openManifestoIds.delete(id);
           else state.openManifestoIds.add(id);
+        },
+      }),
+      agentTurn({
+        key: "manifesto-reporting",
+        text: REPORTING_ASK,
+        startAtMs: 0,
+        isInstant: true,
+        more: {
+          label: REPORTING_MORE_LABEL,
+          detail: REPORTING_MORE_DETAIL,
+          isOpen: state.isReportingMoreOpen,
+          onToggle: () => {
+            state.isReportingMoreOpen = !state.isReportingMoreOpen;
+          },
         },
       }),
     ];

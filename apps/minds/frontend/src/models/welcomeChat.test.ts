@@ -2,15 +2,18 @@ import { describe, expect, it } from "vitest";
 import type { CreateAttemptRequestSummary } from "./create";
 import { SETUP_LINE, SETUP_SECTIONS, readyTurnMarkdown } from "./creationTranscript";
 import {
-  CONTINUE_LABEL,
   MANIFESTO_POINTS,
   MANIFESTO_QUESTION,
+  REPORTING_ACCEPT_LABEL,
+  REPORTING_ASK,
+  REPORTING_MORE_DETAIL,
 } from "./startFlow";
 import type { TranscriptEntry } from "./startFlow";
 import { jsonResponse } from "../testing";
 import {
   disclosureMarkdown,
   flowTurns,
+  manifestoOpenerMarkdown,
   postWelcomeChat,
   tableColumnMarkdown,
   welcomeChatBody,
@@ -27,9 +30,9 @@ const REQUEST: CreateAttemptRequestSummary = {
   branch: "",
 };
 
-/** A cloud create by a returning user: the continue press, the where-to-run question, its answer, the receipt. */
+/** A cloud create by a returning user. */
 const ENTRIES: TranscriptEntry[] = [
-  { kind: "said", text: CONTINUE_LABEL },
+  { kind: "said", text: REPORTING_ACCEPT_LABEL },
   { kind: "step", id: "run", ack: "", answer: "cloud", said: "On Imbue Cloud" },
   {
     kind: "note",
@@ -43,7 +46,9 @@ describe("welcomeChatBody", () => {
 
     expect(body.title).toBe("Welcome");
     expect(body.turns.map((turn) => turn.role)).toEqual([
+      "assistant",
       "user",
+      "assistant",
       "assistant",
       "user",
       "assistant",
@@ -53,20 +58,23 @@ describe("welcomeChatBody", () => {
       "assistant",
       "assistant",
     ]);
-    expect(body.turns[0].text).toBe(MANIFESTO_QUESTION);
+    expect(body.turns[0].text).toBe(manifestoOpenerMarkdown());
+    expect(body.turns[1].text).toBe(MANIFESTO_QUESTION);
     for (const point of MANIFESTO_POINTS) {
-      expect(body.turns[1].text).toContain(`<summary>${point.label}</summary>`);
-      expect(body.turns[1].text).toContain(point.detail);
+      expect(body.turns[2].text).toContain(`<summary>${point.label}</summary>`);
+      expect(body.turns[2].text).toContain(point.detail);
     }
-    expect(body.turns[2].text).toBe(CONTINUE_LABEL);
-    expect(body.turns[4].text).toBe("On Imbue Cloud");
-    expect(body.turns[6].text).toContain("Name — workspace-1");
-    expect(body.turns[6].text).toContain("Branch — latest");
-    expect(body.turns[7].text.startsWith(SETUP_LINE)).toBe(true);
+    expect(body.turns[3].text).toContain(REPORTING_ASK);
+    expect(body.turns[3].text).toContain(REPORTING_MORE_DETAIL);
+    expect(body.turns[4].text).toBe(REPORTING_ACCEPT_LABEL);
+    expect(body.turns[6].text).toBe("On Imbue Cloud");
+    expect(body.turns[8].text).toContain("Name — workspace-1");
+    expect(body.turns[8].text).toContain("Branch — latest");
+    expect(body.turns[9].text.startsWith(SETUP_LINE)).toBe(true);
     for (const section of SETUP_SECTIONS) {
-      expect(body.turns[7].text).toContain(disclosureMarkdown(section));
+      expect(body.turns[9].text).toContain(disclosureMarkdown(section));
     }
-    expect(body.turns[8].text).toBe(readyTurnMarkdown());
+    expect(body.turns[10].text).toBe(readyTurnMarkdown());
   });
 });
 

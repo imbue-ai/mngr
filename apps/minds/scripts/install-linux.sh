@@ -537,7 +537,7 @@ Type=Application
 Name=Imbue Studio
 Comment=Imbue Studio desktop client (from source)
 Exec="$LAUNCHER"
-Icon=$CHECKOUT/apps/minds/electron/assets/icon.png
+Icon=$CHECKOUT/apps/minds/electron/assets/icon-linux.png
 Terminal=false
 Categories=Development;
 DESKTOP

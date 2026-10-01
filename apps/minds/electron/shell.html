@@ -7,13 +7,21 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     /* Loading / quitting / error takeover screen: a white page carrying the
        lockup. On an installation's first launch (loaded with the #intro hash)
-       the page plays the intro -- the lockup resolves, two lines fade in and
-       out, the lockup travels up to where the app's start route will hold it.
-       Every later launch opens on that parked state at once. */
+       the page plays the intro on the brand's brown instead, in two halves.
+       The letters pop in one after the next (intro-pop.js), and once they have
+       settled the loader fades in under them; the page holds there for as long
+       as starting up takes. When main says the app is ready the loader goes,
+       the lockup travels up to where the start route will hold it, and the
+       page settles -- the brown goes white and the mark goes brown with it,
+       arriving at the state every later launch opens on at once. The route
+       lands at the end of that, so the travel always means the same thing:
+       the app is ready. */
     :root {
-      /* The SPA's --c-success green, duplicated because the shell shares no
-         stylesheet with it. */
-      --brand: #0c8106;
+      /* The intro's own palette, from the Manifesto frame: the page the film
+         plays on and the cream drawn on it. The mark settles to
+         --intro-surface, so it ends the colour the page began. */
+      --intro-surface: #492222;
+      --intro-ink: #e9ecd9;
       --ink: #000000;
       --ink-secondary: rgb(0 0 0 / 0.65);
       --ink-tertiary: rgb(0 0 0 / 0.45);
@@ -21,17 +29,25 @@
       --fill-subtle: rgb(0 0 0 / 0.04);
       --fill-hover: rgb(0 0 0 / 0.06);
       --border-default: rgb(0 0 0 / 0.17);
-      /* The two intro lines are the only serif on the page; the family is a
-         single knob so a licensed face can be swapped in later. */
-      --intro-serif: Georgia, "Times New Roman", serif;
       /* The titlebar band the SPA's start route parks the mark in: 38px tall
-         with a 16px mark centered in it. */
+         with a 20px mark centered in it. */
       --titlebar-height: 38px;
-      --parked-mark-height: 16px;
-      /* The intro's durations and curves (--lockup-delay, --lockup-focus,
-         --line-fade, --line-ease, --line-out) and the two blurs (--em-blur,
-         --line-out-blur) are set by the script from intro-timing.js, which
-         owns every number the film is cut to. */
+      --parked-mark-height: 20px;
+      /* How wide the mark itself reads on the page, and the gap between it and
+         the loader under it -- both a share of the window's width, so they keep
+         their proportions to each other at any size.
+         The mark is capped against the window's HEIGHT as well, because a share
+         of the width alone is unbounded in a wide, short window: at 48cqw a
+         1830x550 one draws the mark 246px tall, 45% of the height, and the
+         column it is in runs off both ends. 78vh of width is 22vh of drawing at
+         the mark's 1035:290 aspect, which is what it occupies in a window
+         shaped like a window. */
+      --mark-width: min(48cqw, 78vh);
+      --loader-gap: 0.5cqw;
+      /* The intro's durations (--loader-fade, --settle) are set by the script
+         from intro-timing.js, which owns every number the film is cut to. A
+         launch with no film never sets --settle, so its fallback of 0ms is what
+         keeps the parked page from fading up out of a brown it never showed. */
     }
     html, body { height: 100%; }
     body {
@@ -45,90 +61,77 @@
       container-type: inline-size;
     }
 
-    /* The intro layer: the lockup and the lines, stacked in the middle of the
-       page. Present only while the intro plays. The body is a drag region, and
-       a drag region swallows every mouse event, so the layer opts out: a click
-       anywhere during the film has to reach the skip listener. */
-    #intro {
-      display: none;
+    /* The stack: the mark and the loader as ONE centred column, which is what
+       keeps the page honest when its contents change height. The loader is in
+       the column from the first frame, invisible until there is something to
+       report, so nothing jumps when it appears -- and when the log unfurls the
+       column grows and carries the mark UP rather than running off the bottom
+       of the window.
+
+       It covers the window but does NOT opt out of the body's drag region: a
+       no-drag layer this size would leave a frameless window with nowhere to
+       pick it up by. The two things in it that must take a click say so
+       themselves. */
+    #stack {
+      display: flex;
       position: absolute;
       inset: 0;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      padding-bottom: 2cqw;
-      -webkit-app-region: no-drag;
+      gap: var(--loader-gap);
+      /* Nothing in the column ever touches the window's edge, and the column
+         itself cannot spill: it is centred, so an overflow would be cropped at
+         BOTH ends -- the mark's top and the log's bottom at once. */
+      padding: 16px 16px calc(16px + 2cqw);
+      overflow: hidden;
+      transition: background-color var(--settle, 0ms) ease-out;
     }
-    body.intro #intro { display: flex; }
-    /* The lockup as drawn (577 x 139), 32% of the page wide. The wrapper keeps
-       the aspect ratio so its box is right before the image has loaded, and it
-       is the element that travels: the image inside only ever resolves. */
+    /* The page is the brand's, whatever it is doing -- starting, quitting or
+       reporting a failure. Only the hand-off to the start flow takes it to
+       white, and only because the mark is going to the titlebar of a white
+       page. The stack carries the colour so it goes white under the mark at the
+       settle without a second layer to keep in step. */
+    #stack { background-color: var(--intro-surface); }
+    body.settling #stack { background-color: var(--surface); }
+    /* The mark is the page, except once it has parked in the titlebar, where
+       the parked <img> has the drawing instead. */
+    body.parked .lockup-travel { display: none; }
+    /* The lockup's box is BIGGER than the mark: the arrival overshoots the
+       drawing's own bounds, so the drawing sits in a padded viewBox and nothing
+       is clipped while it moves. --mark-width is the width the mark itself
+       reads at; the element is scaled up from it by --lockup-bleed, the ratio
+       between the padded box and the drawing. Both the bleed and the aspect are
+       set by the script from the one place the padding is written down
+       (intro-pop.js), so the numbers cannot drift apart. */
     .lockup-travel {
-      width: 32cqw;
-      aspect-ratio: 577 / 139;
+      width: calc(var(--mark-width) * var(--lockup-bleed, 1));
+      aspect-ratio: var(--lockup-aspect, 1035 / 289.789);
       transform-origin: top center;
+      /* The mark is drawn at the size it is drawn at. When the column runs out
+         of room it is the log that gives, not the artwork. */
+      flex: none;
     }
+    /* The film's lockup is drawn inline rather than loaded as an <img>: the
+       arrival rewrites each letter's path data every frame, and its colour is
+       then a CSS property, which is what lets the settle cross it with the
+       page's. The letters are built into it by the script, from
+       intro-letters.js. */
     .lockup {
       display: block;
       width: 100%;
-      animation: lockup-focus var(--lockup-focus) cubic-bezier(0, 0.55, 0.45, 1) var(--lockup-delay) both;
+      fill: var(--intro-ink);
+      transition: fill var(--settle, 0ms) ease-out;
     }
-    @keyframes lockup-focus {
-      from { opacity: 0; filter: blur(1.25cqw); transform: scale(0.98); }
-      to { opacity: 1; filter: blur(0); transform: scale(1); }
-    }
-    /* Every line sits in the same grid cell, so one leaves while the next
-       arrives in the same place with nothing reflowing. */
-    .lines {
-      margin-top: 2.5cqw;
-      display: grid;
-      justify-items: center;
-    }
-    .line {
-      grid-column: 1;
-      grid-row: 1;
-      font-family: var(--intro-serif);
-      font-size: 2.5cqw;
-      line-height: 1;
-      white-space: pre;
-      color: var(--brand);
-      animation: line-out var(--line-out) ease-out var(--line-out-delay) both;
-    }
-    .line em { font-style: italic; }
-    /* The line arrives whole: every run starts together on the lockup's own
-       curve, so the words fade up as one piece of type rather than a wave. */
-    .run {
-      opacity: 0;
-      animation: run-in var(--line-fade) var(--line-ease) var(--line-in-delay) both;
-    }
-    /* An emphasised run also comes into FOCUS, the same move the lockup makes
-       above it, so the sharpening lands on exactly the words the line is
-       about. The blur is on the run, not its characters: the italic phrase
-       resolves as one piece of type. The single duration, easing and delay
-       set above apply to both names. */
-    em.run {
-      animation-name: run-in, em-focus;
-    }
-    @keyframes run-in { from { opacity: 0; } to { opacity: 1; } }
-    @keyframes em-focus {
-      from { filter: blur(var(--em-blur)); }
-      to { filter: blur(0); }
-    }
-    /* A line that has been read leaves whole, rising and blurring as it
-       fades, so it goes the way the mark came.
-
-       The explicit `from` is load-bearing: a keyframe with an implicit start
-       and a var() in its end is dropped whole by Chrome. */
-    @keyframes line-out {
-      from { opacity: 1; transform: translateY(0); filter: blur(0); }
-      to { opacity: 0; transform: translateY(-3px); filter: blur(var(--line-out-blur)); }
-    }
-
+    body.settling .lockup { fill: var(--intro-surface); }
     /* The parked mark: the same drawing at the size and place the SPA's start
        route holds it, so the hand-off between documents is a substitution. */
     #parked-mark {
       display: none;
       position: absolute;
+      /* Over the stack, which is painted after it and carries the page's own
+         colour: underneath, the mark the swap reveals is simply not on screen. */
+      z-index: 1;
       top: calc((var(--titlebar-height) - var(--parked-mark-height)) / 2);
       left: 50%;
       transform: translateX(-50%);
@@ -137,26 +140,52 @@
     }
     body.parked #parked-mark { display: block; }
 
-    /* The status block: what the startup sequence is doing, under an
-       indeterminate bar. Hidden until the intro is over. */
+    /* The loader: what the startup sequence is doing, under an indeterminate
+       bar. Always in the stack, so the column's height never depends on whether
+       it is showing; only its opacity does. */
     #status-block {
-      display: none;
-      position: absolute;
-      inset: 0;
+      display: flex;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
       gap: 14px;
+      /* Lets the log shrink when the window is short: a flex item will not go
+         below its content unless its min-height says it may, and that has to be
+         said at every step from the column down to the log. */
+      min-height: 0;
       opacity: 0;
-      animation: status-in 250ms ease-out both;
+      transition: opacity var(--loader-fade, 250ms) ease-out;
     }
-    body.parked #status-block { display: flex; }
+    body.loading #status-block { opacity: 1; }
+    /* A quit is not waiting for anything to become worth reporting: there is no
+       grace to sit through and no chance the screen is gone before it lands, so
+       its report is simply there from the first frame rather than fading up. */
+    body.quitting #status-block {
+      opacity: 1;
+      transition: none;
+    }
+    /* Everything in the stack keeps its shapes on the brand's page but not its
+       ink, which is the near-black of a white one. Re-inking the stack's own
+       vars is what carries that: the bar, the phase line, the log, the error
+       heading and its buttons all read their colour from these, so none of
+       their rules is restated here. */
+    #stack {
+      --ink: var(--intro-ink);
+      --ink-secondary: color-mix(in srgb, var(--intro-ink) 80%, transparent);
+      --ink-tertiary: color-mix(in srgb, var(--intro-ink) 55%, transparent);
+      --fill-subtle: color-mix(in srgb, var(--intro-ink) 18%, transparent);
+      --fill-hover: color-mix(in srgb, var(--intro-ink) 12%, transparent);
+      --border-default: color-mix(in srgb, var(--intro-ink) 35%, transparent);
+      /* What reads ON the ink, for the one control that is a filled block of
+         it. NOT --surface: the settle sets the stack's background to --surface,
+         so redefining that here would paint the page brown at the moment it is
+         supposed to be going white. */
+      --ink-inverse: var(--intro-surface);
+    }
     body.error #status-block { display: none; }
-    @keyframes status-in { to { opacity: 1; } }
     .progress {
-      width: 180px;
-      height: 3px;
-      border-radius: 2px;
+      width: 160px;
+      height: 12px;
+      border-radius: 6px;
       background: var(--fill-subtle);
       overflow: hidden;
       position: relative;
@@ -168,45 +197,56 @@
       bottom: 0;
       left: -40%;
       width: 40%;
-      border-radius: 2px;
+      border-radius: 6px;
       background: var(--ink-tertiary);
       animation: progress-slide 1400ms cubic-bezier(0.4, 0, 0.2, 1) infinite;
     }
     @keyframes progress-slide {
       to { left: 100%; }
     }
+    /* Asked for less motion, the bar stops rather than slides: an indeterminate
+       indicator loops forever by definition, which is the case the setting is
+       most clearly about. The track stays as a placeholder and the phase line
+       -- which says something real, and changes -- carries the progress. */
+    @media (prefers-reduced-motion: reduce) {
+      .progress::after { display: none; }
+    }
     .status {
-      font-size: 13px;
+      font-size: 14px;
       color: var(--ink-secondary);
       min-height: 18px;
       text-align: center;
+      /* The phase line is whatever the backend last said, and the stack clips
+         rather than scrolls, so an unexpectedly long one has to wrap instead of
+         growing the row past the window. */
+      max-width: min(480px, calc(100vw - 48px));
     }
     /* The startup console log, closed by default under the status line; the
-       bar and the phase label say enough for most launches. Sized so the
-       parked mark and the bar stay where they are when it opens. */
-    #startup-log-toggle { margin-bottom: 0; }
+       bar and the phase label say enough for most launches. Opening it grows
+       the stack, which lifts the mark rather than pushing the log off-screen. */
     #startup-log {
       max-width: min(640px, calc(100vw - 48px));
-      max-height: min(240px, 40vh);
+      max-height: 240px;
+      min-height: 0;
       margin-top: 0;
       text-align: left;
     }
-    /* A committed quit hides the bar and the log: nothing is being waited for,
-       only reported. */
-    body.quitting .progress,
-    body.quitting #startup-log-toggle,
+    /* A quit is a wait like any other -- the backend gets a SIGTERM and up to
+       five seconds to go, and local workspaces may be stopping -- so the bar
+       runs through it rather than leaving the report sitting still. The log
+       does not: there is nothing to disclose, which is also why the row below
+       is not pressable. */
     body.quitting #startup-log { display: none; }
+    body.quitting .status-row { cursor: default; pointer-events: none; }
 
-    /* Error state: a takeover with the parked mark still up top. */
+    /* Error state: the takeover goes in the column under the mark, in the place
+       the loader would have been, so the page stays one thing. */
     #error-view {
       display: none;
-      position: absolute;
-      inset: 0;
       flex-direction: column;
       align-items: center;
-      justify-content: center;
       text-align: center;
-      padding: 32px;
+      min-height: 0;
     }
     body.error #error-view { display: flex; }
     h1 {
@@ -235,15 +275,35 @@
       cursor: pointer;
       font-weight: 500;
     }
-    .btn-primary { background: var(--ink); color: var(--surface); }
+    .btn-primary { background: var(--ink); color: var(--ink-inverse, var(--surface)); }
     .btn-primary:hover { opacity: 0.8; }
     .btn-secondary { background: transparent; color: var(--ink); border-color: var(--border-default); }
     .btn-secondary:hover { background: var(--fill-hover); }
+    /* The bar and the line together ARE the disclosure: pressing anywhere on
+       them opens the log. They are one thing being said -- how far along the
+       start is, and what it is doing -- so they are one target rather than a
+       12px-tall strip of text. Nothing marks it as pressable until the pointer
+       is on it, when the line underlines: the line's job is to be read, and a
+       permanent affordance would be a second thing to look at on a page whose
+       whole business is one mark and one line. */
+    .status-row {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      background: none;
+      border: none;
+      padding: 0;
+      color: inherit;
+      cursor: pointer;
+      -webkit-app-region: no-drag;
+    }
+    .status-row:hover .status { text-decoration: underline; }
     .toggle-details {
       background: none;
       border: none;
       color: var(--ink-secondary);
-      font-size: 13px;
+      font-size: 12px;
       cursor: pointer;
       text-decoration: underline;
       margin-bottom: 12px;
@@ -302,20 +362,19 @@
   </style>
 </head>
 <body>
-  <div id="intro" aria-hidden="true">
-    <div class="lockup-travel" id="lockup-travel">
-      <img class="lockup" id="lockup" src="assets/mind-wordmark.svg" alt="Imbue Studio" draggable="false">
+  <img id="parked-mark" src="assets/studio-wordmark.svg" alt="Imbue Studio" draggable="false">
+  <div id="stack">
+    <div class="lockup-travel" id="lockup-travel" aria-hidden="true">
+      <svg class="lockup" id="lockup"></svg>
     </div>
-    <div class="lines" id="lines"></div>
-  </div>
-  <img id="parked-mark" src="assets/mind-wordmark.svg" alt="Imbue Studio" draggable="false">
-  <div id="status-block">
-    <div class="progress" aria-hidden="true"></div>
-    <div class="status" id="status-line"></div>
-    <button class="toggle-details" id="startup-log-toggle" type="button">Show details</button>
-    <pre class="details" id="startup-log"></pre>
-  </div>
-  <div id="error-view">
+    <div id="status-block">
+      <button class="status-row" id="status-toggle" type="button" aria-expanded="false" aria-controls="startup-log">
+        <div class="progress" aria-hidden="true"></div>
+        <span class="status" id="status-line"></span>
+      </button>
+      <pre class="details" id="startup-log"></pre>
+    </div>
+    <div id="error-view">
     <h1>Something went wrong</h1>
     <p class="message" id="error-message">Imbue Studio stopped unexpectedly.</p>
     <div class="actions">
@@ -328,32 +387,40 @@
       <code id="report-event-id"></code>
       <button id="report-copy-btn" type="button">Copy</button>
     </div>
-    <button class="toggle-details" id="toggle-details-btn">Show details</button>
-    <pre class="details" id="error-details"></pre>
+      <button class="toggle-details" id="toggle-details-btn">Show details</button>
+      <pre class="details" id="error-details"></pre>
+    </div>
   </div>
 
+  <script src="intro-letters.js"></script>
+  <script src="intro-wobble.js"></script>
+  <script src="intro-pop.js"></script>
   <script src="intro-timing.js"></script>
   <script src="startup-log.js"></script>
   <script>
     var statusLine = document.getElementById('status-line');
     var startupLog = document.getElementById('startup-log');
-    var startupLogToggle = document.getElementById('startup-log-toggle');
+    var statusToggle = document.getElementById('status-toggle');
     var startupLogLines = [];
 
-    // The full startup console output, behind "Show details". Every line the
+    // The full startup console output, behind the status line. Every line the
     // main process forwards lands here whether or not the log is open, so
     // opening it shows what already happened, scrolled to the newest line.
     function renderStartupLog() {
       startupLog.textContent = startupLogLines.join('\n');
       if (startupLog.classList.contains('visible')) startupLog.scrollTop = startupLog.scrollHeight;
     }
-    startupLogToggle.addEventListener('click', function() {
-      startupLog.classList.toggle('visible');
-      this.textContent = startupLog.classList.contains('visible') ? 'Hide details' : 'Show details';
+    statusToggle.addEventListener('click', function() {
+      var isOpen = startupLog.classList.toggle('visible');
+      statusToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
       renderStartupLog();
     });
     var lockupTravel = document.getElementById('lockup-travel');
-    var linesEl = document.getElementById('lines');
+    var lockupEl = document.getElementById('lockup');
+    // Set by buildLockup: how the mark sits inside the lockup's padded box.
+    // 1 and 0 describe a box with no padding, which is what the parked <img> is.
+    var markHeightRatio = 1;
+    var markTopRatio = 0;
 
     // Quitting takeover: shell.html is loaded with a `#quitting` hash when a
     // committed quit flips every window to this page. Seed the status line
@@ -366,33 +433,83 @@
     // The intro
 
     var isIntroFinished = false;
+    var isSettling = false;
+    var isDeparting = false;
+    var hasArrived = false;
+    // Set when main reports the app ready before the letters have settled: the
+    // arrival finishes first, and the departure starts off the back of it.
+    var isDepartureDue = false;
+    // Whether the lockup should travel to the titlebar before handing over.
+    // Only the start flow holds it there; every other route paints over this
+    // page, and a mark that moved first would be a move to nowhere.
+    var shouldPark = false;
+    // When the loader came up, or null if it never did.
+    var loaderShownAt = null;
+    var introFrame = null;
     var introTimers = [];
     var introAnimations = [];
 
-    // Tell the main process the film is over (or never ran), so it can land the
-    // first route. Idempotent: the skip and the natural end can both reach here.
+    // Tell the main process the film is over, so it can land the first route.
+    // The page is deliberately left as it is: whatever route lands paints over
+    // it, and tidying up first would flash something the user did not ask for.
+    // Idempotent -- the error takeover and the natural end can both reach here.
     function finishIntro() {
       if (isIntroFinished) return;
       isIntroFinished = true;
       introTimers.forEach(function(timer) { clearTimeout(timer); });
       introAnimations.forEach(function(animation) { animation.cancel(); });
-      document.body.classList.remove('intro');
-      document.body.classList.add('parked');
+      if (introFrame !== null) cancelAnimationFrame(introFrame);
+      document.body.classList.remove('loading', 'departing');
       if (window.mindsNative && window.mindsNative.introFinished) window.mindsNative.introFinished();
     }
 
-    function buildLine(runs, lineSchedule) {
-      var line = document.createElement('p');
-      line.className = 'line';
-      line.style.setProperty('--line-in-delay', lineSchedule.shownAt + 'ms');
-      line.style.setProperty('--line-out-delay', lineSchedule.fadesOutAt + 'ms');
-      runs.forEach(function(run) {
-        var holder = run.em ? document.createElement('em') : document.createElement('span');
-        holder.className = 'run';
-        holder.textContent = run.text;
-        line.appendChild(holder);
+    // The film's last beat, once the mark has parked: the page and the mark
+    // cross colours, and only when they have met does the parked <img> take the
+    // drawing over. The travel animation is left running until then -- it is
+    // what holds the mark at the top, so cancelling it here would drop the mark
+    // back to the middle of the page for the length of the settle.
+    function settleIntro(settleMs) {
+      if (isIntroFinished || isSettling) return;
+      isSettling = true;
+      document.body.classList.add('settling');
+      introTimers.push(setTimeout(function() {
+        // `parked` hides the inline lockup, which is the mark until the cross
+        // has played, so it waits for the end of the settle.
+        document.body.classList.add('parked');
+        finishIntro();
+      }, settleMs));
+    }
+
+    // The letters, drawn into the lockup once and then rewritten in place by
+    // the arrival. Built here rather than written into the markup because the
+    // path data lives in intro-letters.js, which the arrival reads too.
+    function buildLockup(letters) {
+      var box = letters.BOX;
+      var pad = window.mindsIntroPop.ARRIVAL_PAD;
+      // The box the drawing moves in, as opposed to the box it rests in.
+      var bled = { x: box.x - pad, y: box.y - pad, w: box.w + pad * 2, h: box.h + pad * 2 };
+      var svgNS = 'http://www.w3.org/2000/svg';
+      lockupEl.setAttribute('viewBox', bled.x + ' ' + bled.y + ' ' + bled.w + ' ' + bled.h);
+      lockupTravel.style.setProperty('--lockup-aspect', bled.w + ' / ' + bled.h);
+      lockupTravel.style.setProperty('--lockup-bleed', String(bled.w / box.w));
+      // What the travel has to aim with: the drawing is this fraction of the
+      // element's height, and starts this far down inside it.
+      markHeightRatio = box.h / bled.h;
+      markTopRatio = pad / bled.h;
+      // The letters are drawn in the artwork's own space, which is the viewBox's,
+      // so the group that holds them needs no transform of its own.
+      var frame = document.createElementNS(svgNS, 'g');
+      var groups = letters.LETTERS.map(function(letter) {
+        var group = document.createElementNS(svgNS, 'g');
+        var path = document.createElementNS(svgNS, 'path');
+        path.setAttribute('d', letter.d);
+        if (letter.evenOdd) path.setAttribute('fill-rule', 'evenodd');
+        group.appendChild(path);
+        frame.appendChild(group);
+        return { group: group, path: path };
       });
-      return line;
+      lockupEl.appendChild(frame);
+      return groups;
     }
 
     // The lockup's travel is measured rather than written in CSS: one end is a
@@ -406,12 +523,34 @@
       var parkedHeight = parseFloat(rootStyle.getPropertyValue('--parked-mark-height'));
       var titlebarHeight = parseFloat(rootStyle.getPropertyValue('--titlebar-height'));
       var parkedTop = (titlebarHeight - parkedHeight) / 2;
+      // Where the element's top sits in the page with its own transform taken
+      // back out, to a fraction of a pixel. offsetTop is transform-free but
+      // rounds to a whole one, and that rounding is the whole of the error: the
+      // mark parks up to half a pixel off where the start flow draws it, so it
+      // visibly shifts as one document replaces the other. The transform-origin
+      // is the top edge, so the matrix's y-translation is exactly how far that
+      // edge has been moved -- including mid-travel, when a resize re-aims.
+      var layoutTop = function() {
+        var top = lockupTravel.getBoundingClientRect().top;
+        var transform = getComputedStyle(lockupTravel).transform;
+        return transform === 'none' ? top : top - new DOMMatrixReadOnly(transform).f;
+      };
       var measure = function() {
+        // Aimed at the MARK, not at the element that carries it: the element is
+        // taller than the drawing by the room the arrival needs, so scaling it to
+        // the parked height would land a mark smaller than the one the parked
+        // <img> replaces it with, and sitting a padding too low.
+        // The used height rather than offsetHeight, for the same reason as above.
+        var height = parseFloat(getComputedStyle(lockupTravel).height);
+        var scale = parkedHeight / (height * markHeightRatio);
+        // The box scales about its own top, so the mark's top -- a padding down
+        // inside it -- lands that far down times the scale.
+        var markTopAfter = scale * height * markTopRatio;
         return [
           { transform: 'translateY(0) scale(1)' },
           {
-            transform: 'translateY(' + (parkedTop - lockupTravel.offsetTop) + 'px) scale(' +
-              (parkedHeight / lockupTravel.offsetHeight) + ')',
+            transform: 'translateY(' + (parkedTop - layoutTop() - markTopAfter) +
+              'px) scale(' + scale + ')',
           },
         ];
       };
@@ -429,34 +568,156 @@
       });
     }
 
-    function playIntro() {
+    // The arrival: the letters pop in, and the loader comes up under them once
+    // the rig says it has settled. There is no duration here on purpose -- the
+    // springs decide when they are done, so nothing has to be kept in step with
+    // a number written somewhere else.
+    function startArrival(letters) {
+      var wobble = window.mindsIntroWobble;
+      var groups = buildLockup(letters);
+      var drawings = letters.LETTERS.map(function(letter) { return wobble.parsePath(letter.d); });
+      var rig = window.mindsIntroPop.createPopRig();
+      var previous = null;
+
+      function draw() {
+        rig.frame().forEach(function(letterFrame, i) {
+          groups[i].group.setAttribute('transform', letterFrame.transform);
+          groups[i].path.setAttribute(
+            'd',
+            letterFrame.warp ? wobble.emitPath(drawings[i], letterFrame.warp) : letters.LETTERS[i].d,
+          );
+        });
+      }
+
+      function tick(now) {
+        // The first frame advances nothing: `now` is the page's clock, not the
+        // rig's, so stepping by it would start the letters part-way through.
+        var dt = previous === null ? 0 : (now - previous) / 1000;
+        previous = now;
+        rig.step(dt);
+        draw();
+        if (rig.settled()) {
+          introFrame = null;
+          arrive();
+          return;
+        }
+        introFrame = requestAnimationFrame(tick);
+      }
+
+      draw();
+      introFrame = requestAnimationFrame(tick);
+    }
+
+    // The mark with no film: built once and drawn at rest. What the quitting
+    // page, the error takeover and a reduced-motion launch show.
+    function drawSettledMark(letters) {
+      var groups = buildLockup(letters);
+      var rig = window.mindsIntroPop.createPopRig();
+      rig.settleAll();
+      rig.frame().forEach(function(letterFrame, i) {
+        groups[i].group.setAttribute('transform', letterFrame.transform);
+        groups[i].path.setAttribute('d', letters.LETTERS[i].d);
+      });
+    }
+
+    // The mark has landed. If the app is already up, the film simply runs on.
+    // Otherwise the loader is given a moment to become worth showing.
+    function arrive() {
+      if (hasArrived || isIntroFinished) return;
+      hasArrived = true;
+      if (isDepartureDue) {
+        startDeparture();
+        return;
+      }
+      var graceMs = window.mindsIntroTiming.INTRO_TIMING.loaderGraceMs;
+      introTimers.push(setTimeout(showLoader, graceMs));
+    }
+
+    // The wait has gone on long enough to be worth reporting.
+    function showLoader() {
+      if (isIntroFinished || isDeparting) return;
+      loaderShownAt = Date.now();
+      // Nothing to place: the loader has been in the stack since the first
+      // frame, holding its own height. Showing it is only a matter of opacity.
+      document.body.classList.add('loading');
+    }
+
+    // Main says the app is ready: the loader goes and the lockup travels to the
+    // place the start route will hold it.
+    function startDeparture() {
+      if (isIntroFinished || isDeparting) return;
+      // Ready before the letters have settled: let them finish, and leave from
+      // a landed mark rather than cutting the arrival short.
+      if (!hasArrived) {
+        isDepartureDue = true;
+        return;
+      }
       var introTiming = window.mindsIntroTiming;
       var timing = introTiming.INTRO_TIMING;
-      var schedule = introTiming.computeIntroSchedule(timing, introTiming.INTRO_LINES);
-      var rootStyle = document.documentElement.style;
-      rootStyle.setProperty('--lockup-delay', timing.lockupDelayMs + 'ms');
-      rootStyle.setProperty('--lockup-focus', timing.lockupFocusMs + 'ms');
-      rootStyle.setProperty('--line-fade', timing.fadeMs + 'ms');
-      rootStyle.setProperty('--line-ease', timing.fadeEase);
-      rootStyle.setProperty('--em-blur', timing.emBlur);
-      rootStyle.setProperty('--line-out', timing.outMs + 'ms');
-      rootStyle.setProperty('--line-out-blur', timing.outBlur);
-      document.body.classList.add('intro');
-      introTiming.INTRO_LINES.forEach(function(runs, index) {
-        linesEl.appendChild(buildLine(runs, schedule.lines[index]));
-      });
+      // The loader is up but has not been up long enough to read. Let it stand:
+      // a status line that flashes past tells the user nothing and reads as a
+      // glitch.
+      if (loaderShownAt !== null) {
+        var shownFor = Date.now() - loaderShownAt;
+        if (shownFor < timing.loaderMinMs) {
+          introTimers.push(setTimeout(startDeparture, timing.loaderMinMs - shownFor));
+          return;
+        }
+      }
+      isDeparting = true;
+      // Nothing to fade out when the loader never came up, so the mark sets off
+      // without waiting one out.
+      var schedule = introTiming.computeDepartureSchedule(
+        loaderShownAt === null ? Object.assign({}, timing, { loaderFadeMs: 0 }) : timing,
+      );
+      document.body.classList.remove('loading');
+      document.body.classList.add('departing');
+      if (!shouldPark) {
+        // Nowhere to travel to: the route about to land is not the one that
+        // holds the mark in its titlebar. The loader goes and the page waits,
+        // mark and all, to be painted over.
+        introTimers.push(setTimeout(finishIntro, timing.loaderFadeMs));
+        return;
+      }
       startLockupTravel(schedule.travelAt, timing.travelMs);
-      introTimers.push(setTimeout(finishIntro, schedule.parkedAt));
-      // A click or a key jumps straight to the parked state.
-      document.addEventListener('click', finishIntro, { once: true });
-      document.addEventListener('keydown', finishIntro, { once: true });
+      introTimers.push(setTimeout(function() { settleIntro(timing.settleMs); }, schedule.parkedAt));
+    }
+
+    function playIntro() {
+      var timing = window.mindsIntroTiming.INTRO_TIMING;
+      var rootStyle = document.documentElement.style;
+      rootStyle.setProperty('--loader-fade', timing.loaderFadeMs + 'ms');
+      rootStyle.setProperty('--settle', timing.settleMs + 'ms');
+      startArrival(window.mindsIntroLetters);
+      // Nothing here listens for a click or a key. The page holds on the loader
+      // for as long as starting up takes, and the status row on screen during
+      // that hold is meant to be pressed -- a skip would eat the first press.
     }
 
     var isReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (location.hash === '#intro' && !isReducedMotion && window.mindsIntroTiming) {
-      playIntro();
-    } else {
-      finishIntro();
+    var canDrawMark =
+      window.mindsIntroTiming && window.mindsIntroLetters && window.mindsIntroWobble && window.mindsIntroPop;
+    // The mark is on the page in every state, animated or not: quitting and the
+    // error takeover want the drawing, not the film, and reduced motion wants
+    // the drawing without the film too.
+    if (canDrawMark) {
+      if (location.hash === '#intro' && !isReducedMotion) {
+        playIntro();
+      } else {
+        drawSettledMark(window.mindsIntroLetters);
+      }
+    }
+    if (location.hash === '#intro') {
+      if (window.mindsNative && window.mindsNative.onStartupReady) {
+        window.mindsNative.onStartupReady(function(detail) {
+          shouldPark = !!(detail && detail.park);
+          startDeparture();
+        });
+      }
+      if (isReducedMotion) {
+        // No film to wait out, but the loader still has a wait to report.
+        arrive();
+      }
     }
 
     // The error takeover

@@ -37,6 +37,22 @@ export function streamedText(text: string, startAtMs: number, isInstant: boolean
   );
 }
 
+/**
+ * The same stream with one run of it in italics. Every character keeps the
+ * delay it would have had, so the emphasis changes how the turn is drawn and
+ * not when any of it lands.
+ */
+function emphasisedText(text: string, phrase: string, startAtMs: number, isInstant: boolean): m.Children {
+  const at = text.indexOf(phrase);
+  if (at < 0) return streamedText(text, startAtMs, isInstant);
+  const stepAt = (index: number): number => startAtMs + index * CHAT_STREAM_STEP_MS;
+  return [
+    streamedText(text.slice(0, at), startAtMs, isInstant),
+    m("em", streamedText(phrase, stepAt(at), isInstant)),
+    streamedText(text.slice(at + phrase.length), stepAt(at + phrase.length), isInstant),
+  ];
+}
+
 interface ArrivalAttrs {
   /** Identity for the mount, so the arrival plays once per turn. */
   key: string;
@@ -94,6 +110,15 @@ export function userTurn(attrs: ArrivalAttrs & { text: string; onUndo?: () => vo
   );
 }
 
+/** A quiet toggle at the end of an agent turn, and the aside it opens under it. */
+export interface TurnMore {
+  id?: string;
+  label: string;
+  detail: string;
+  isOpen: boolean;
+  onToggle: () => void;
+}
+
 /**
  * An agent turn: a bare paragraph, streamed. 100px short of the column so its
  * right edge lands inside the user's rather than flush with it. `id` names the
@@ -109,13 +134,19 @@ export function agentTurn(attrs: {
   textId?: string;
   /** A bold first line, streamed ahead of the text. */
   lead?: string;
+  /** A run of the text to draw in italics: the phrase the turn is about. */
+  emphasis?: string;
   /** A type class for the whole turn, when it is not body text. */
   class?: string;
+  more?: TurnMore;
 }): m.Children {
   const isInstant = attrs.isInstant ?? false;
   const lead = attrs.lead ?? "";
   const textAt = lead === "" ? attrs.startAtMs : attrs.startAtMs + streamDurationMs(lead) + CHAT_STREAM_STEP_MS;
-  const text = streamedText(attrs.text, textAt, isInstant);
+  const text =
+    attrs.emphasis === undefined
+      ? streamedText(attrs.text, textAt, isInstant)
+      : emphasisedText(attrs.text, attrs.emphasis, textAt, isInstant);
   const body = attrs.textId !== undefined ? m("span", { id: attrs.textId }, text) : text;
   return m(
     "p",
@@ -127,8 +158,38 @@ export function agentTurn(attrs: {
         (attrs.class !== undefined ? ` ${attrs.class}` : ""),
       "data-agent-turn": "",
     },
-    lead === "" ? body : [m("strong", streamedText(lead, attrs.startAtMs, isInstant)), "\n", body],
+    [
+      lead === "" ? body : [m("strong", streamedText(lead, attrs.startAtMs, isInstant)), "\n", body],
+      attrs.more ? moreToggle(attrs.more, textAt + streamDurationMs(attrs.text), isInstant) : null,
+    ],
   );
+}
+
+/**
+ * The "See more" at the end of a turn, and what it opens. It arrives with the
+ * turn's last character rather than standing there ahead of a sentence that
+ * has not finished.
+ */
+function moreToggle(more: TurnMore, startAtMs: number, isInstant: boolean): m.Children {
+  return [
+    " ",
+    m(
+      "button",
+      {
+        type: "button",
+        id: more.id,
+        "data-turn-more": "",
+        "aria-expanded": more.isOpen ? "true" : "false",
+        class:
+          "cursor-pointer border-0 bg-transparent p-0 text-tertiary underline hover:text-primary" +
+          (isInstant ? "" : " start-char"),
+        style: isInstant ? undefined : `--start-char-delay: ${startAtMs}ms; --start-char-fade: ${CHAT_STREAM_FADE_MS}ms;`,
+        onclick: more.onToggle,
+      },
+      more.label,
+    ),
+    more.isOpen ? m("em", { class: "mt-2 block text-secondary", "data-turn-more-detail": "" }, more.detail) : null,
+  ];
 }
 
 /**
@@ -180,33 +241,6 @@ export function disclosureList(attrs: {
         ),
       );
     }),
-  );
-}
-
-/**
- * The error-reporting checkbox, on the user's side just above a question's answers: it starts checked, so
- * answering as it stands keeps reporting on, and unchecking it first turns reporting off.
- */
-export function reportingConsentRow(
-  attrs: ArrivalAttrs & { question: string; isAllowed: boolean; onChange: (isAllowed: boolean) => void },
-): m.Children {
-  return m(
-    "label",
-    {
-      key: attrs.key,
-      class: "mt-10 flex cursor-pointer items-start justify-end gap-2 type-body text-secondary" + arrivalClass(attrs),
-      style: arrivalStyle(attrs),
-    },
-    [
-      m("input", {
-        id: "start-reporting-consent",
-        type: "checkbox",
-        checked: attrs.isAllowed,
-        class: "mt-1 cursor-pointer",
-        onchange: (event: Event) => attrs.onChange((event.target as HTMLInputElement).checked),
-      }),
-      m("span", attrs.question),
-    ],
   );
 }
 

@@ -258,32 +258,6 @@ function getSessionStatePath() {
   return path.join(paths.getStateDir(), 'window-state.json');
 }
 
-// The loading document's first-launch intro plays once per install. Electron
-// owns this marker because Electron is the only thing that plays the film; the
-// backend separately owns whether onboarding is complete.
-function getIntroSeenPath() {
-  return path.join(paths.getStateDir(), 'intro-seen.json');
-}
-
-function hasSeenIntro() {
-  try {
-    return fs.existsSync(getIntroSeenPath());
-  } catch (err) {
-    console.warn('[startup] could not read the intro-seen marker; skipping the intro:', err.message);
-    return true;
-  }
-}
-
-// Written when the film STARTS, so a quit during it still counts as seen.
-function markIntroSeen() {
-  try {
-    fs.mkdirSync(paths.getStateDir(), { recursive: true });
-    fs.writeFileSync(getIntroSeenPath(), JSON.stringify({ has_seen_intro: true }));
-  } catch (err) {
-    console.warn('[startup] could not write the intro-seen marker:', err.message);
-  }
-}
-
 function toAbsoluteUrl(url) {
   if (!url) return url;
   if (url.startsWith('/') && backendBaseUrl) return backendBaseUrl + url;
@@ -2022,7 +1996,7 @@ function registerAppImageDesktopEntry() {
   try {
     fs.mkdirSync(applicationsDir, { recursive: true });
     fs.mkdirSync(path.dirname(iconPath), { recursive: true });
-    const iconSourcePath = path.join(__dirname, 'assets', 'icon.png');
+    const iconSourcePath = path.join(__dirname, 'assets', 'icon-linux.png');
     const icon = nativeImage.createFromPath(iconSourcePath);
     // createFromPath answers an unreadable file with an empty image rather
     // than an error, which would otherwise be written out as an empty PNG.
@@ -2193,23 +2167,18 @@ function installDevDockIcon() {
 async function runStartupSequence(bundle) {
   console.log('[startup] Loading shell.html...');
   bundle.isLoadingState = true;
-  const isIntroDue = !hasSeenIntro();
-  if (isIntroDue) {
-    // Held open until the document says the film is over, so the first route
-    // never lands mid-intro (see startBackendWithRetry).
-    bundle.introFinished = new Promise((resolve) => {
-      bundle.resolveIntroFinished = resolve;
-    });
-    markIntroSeen();
-  }
-  const loaded = bundle.window.webContents.loadFile(
-    path.join(__dirname, 'shell.html'),
-    isIntroDue ? { hash: 'intro' } : {},
-  );
+  // Every launch plays it: the app has to start either way, and the film is
+  // what the wait looks like. What a later launch skips is the lockup's travel
+  // to the titlebar, which only means anything when the start flow is about to
+  // hold the mark there -- see the park flag on startup-ready.
+  bundle.introFinished = new Promise((resolve) => {
+    bundle.resolveIntroFinished = resolve;
+  });
+  const loaded = bundle.window.webContents.loadFile(path.join(__dirname, 'shell.html'), { hash: 'intro' });
   bundle.loadingDocumentLoaded = loaded.catch(() => {});
   try {
     await loaded;
-    console.log(`[startup] shell.html loaded (intro=${isIntroDue})`);
+    console.log('[startup] shell.html loaded');
   } catch (err) {
     // Closing the window mid-load rejects the load. This sequence owns the
     // backend start and the one-time code, so it runs on without a window.
@@ -2459,9 +2428,19 @@ async function startBackendWithRetry() {
       const target = isInitialAlive ? initialBundle : getMostRecentWindow();
       if (target) {
         // A window opened while this ran may still be loading shell.html, and
-        // a first launch may still be playing its intro; the route waits for
-        // both rather than cutting either short.
-        await Promise.all([target.loadingDocumentLoaded, target.introFinished]);
+        // the cue below is an IPC send: it reaches nothing until that document
+        // has a listener.
+        await target.loadingDocumentLoaded;
+        // The loading document is holding on a settled mark with the loader
+        // under it. This is its cue to leave, and whether to park on the way:
+        // the lockup travels up to the titlebar only when the start flow is
+        // about to hold it there, and otherwise the page simply reports itself
+        // finished and waits to be painted over. Either way the route waits for
+        // that rather than cutting the film short.
+        if (!target.window.isDestroyed()) {
+          target.window.webContents.send('startup-ready', { park: routing.route === 'start' });
+        }
+        await target.introFinished;
         if (lastErrorTakeover) {
           // The backend died while the route waited. The takeover owns the
           // window now; landing the route would paint the dead port over it.
