@@ -120,6 +120,23 @@ which lives outside the public mirror:
       caught (with a clear error) by `minds-admin env deploy`'s preflight. Full
       detail: [environments.md](./deploy/reference/environments.md).
 
+- [ ] **Linear credentials in latchkey.** Agents reach Linear only through
+      `latchkey curl`, so without this the flake skills silently skip filing
+      (`/report-incidental-flakes`, `/detect-flakes`) and `/work-on-linear` and
+      `/deflake-mngr-ci` cannot run at all. Install the CLI --
+      `npm install -g latchkey`, which must land at or above the
+      `LATCHKEY_MIN_VERSION` in
+      `libs/mngr_latchkey/imbue/mngr_latchkey/core.py`; the desktop app's
+      bundled copy is named by absolute path and is not on your PATH -- then
+      `latchkey auth browser linear`, or, with no GUI,
+      `latchkey auth set linear -H "Authorization: <key>"` with a personal API
+      key from Linear's Settings -> Security & access. Verify with
+      `uv run python scripts/flake_reconcile.py list-tickets`, which is
+      read-only and is the exact call the skills make. `latchkey services info
+      linear` is not a substitute: 3.x moved `credentialStatus` from the top
+      level into a per-account `credentials` map, so anything reading the old
+      top-level field sees nothing whether or not the credential works.
+
 With those in place, follow the **minds-dev-workflow** skill
 (`.agents/skills/minds-dev-workflow/SKILL.md`; ask your agent to run it, or
 read it directly) for the actual commands. It covers the whole loop:
