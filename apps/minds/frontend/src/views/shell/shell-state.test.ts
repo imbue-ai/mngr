@@ -1585,6 +1585,16 @@ describe("pulled-out windows (the popout route)", () => {
     return { shell, sends };
   }
 
+  /** A main window's shell showing the workspace, its frame's reattach sender a no-op. */
+  function workspaceShell(): ShellState {
+    stubAccentPainting();
+    const shell = new ShellState(createEmptyStores());
+    shell.registerReattachWindowSender(() => undefined);
+    vi.spyOn(m.route, "get").mockImplementation(() => `/workspace/${AGENT}`);
+    shell.handleRouteChanged(`/workspace/${AGENT}`);
+    return shell;
+  }
+
   function report(
     shell: ShellState,
     windows: { windowId: string; title: string }[],
@@ -1731,6 +1741,49 @@ describe("pulled-out windows (the popout route)", () => {
       { windowId: "win-0123", frame: null },
       { windowId: "win-4567", frame: null },
     ]);
+  });
+
+  it("answers main once the desktop reports the window it was asked to take back, so the popout can go", async () => {
+    vi.useFakeTimers();
+    try {
+      const shell = workspaceShell();
+      const ignored = { count: 0 };
+      report(shell, [{ windowId: "win-0123", title: "PRs" }], [], ignored);
+      let answer: boolean | null = null;
+      const answered = shell
+        .handleReattachPopoutWindow({ workspaceId: AGENT, windowId: "win-0123", frame: null })
+        .then((isReportedBack) => {
+          answer = isReportedBack;
+        });
+      // Another window's change is not this window's return.
+      report(shell, [{ windowId: "win-0123", title: "PRs" }, { windowId: "win-4567", title: "Chat" }], [], ignored);
+      await Promise.resolve();
+      expect(answer).toBeNull();
+      report(shell, [{ windowId: "win-4567", title: "Chat" }], [], ignored);
+      await answered;
+      expect(answer).toBe(true);
+      // A main window never closes itself on its own report.
+      expect(ignored.count).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not answer main that the window is back when the desktop never confirms it", async () => {
+    vi.useFakeTimers();
+    try {
+      const shell = workspaceShell();
+      const ignored = { count: 0 };
+      // Never reported out: nothing seen to come back.
+      const ask = { workspaceId: AGENT, windowId: "win-0123", frame: null };
+      expect(await shell.handleReattachPopoutWindow(ask)).toBe(false);
+      report(shell, [{ windowId: "win-0123", title: "PRs" }], [], ignored);
+      const answered = shell.handleReattachPopoutWindow(ask);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(await answered).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("forwards main's report of a watched title-bar drag to the mounted frame, and nothing without one", () => {

@@ -247,7 +247,7 @@ test('embedder endpoint validates the pull-out message payloads', () => {
     handlers: {
       [contract.POP_OUT_WINDOW]: (msg) => seen.push(['out', msg.windowId]),
       [contract.WINDOW_DRAG_STARTED]: (msg) => seen.push(['drag', msg.windowId, msg.grabX]),
-      [contract.WINDOW_DRAG_ENDED]: (msg) => seen.push(['ended', msg.windowId, msg.isDetached]),
+      [contract.WINDOW_DRAG_ENDED]: (msg) => seen.push(['ended', msg.windowId, msg.isDetached, msg.isCancelled]),
       [contract.DETACHED_WINDOWS]: (msg) => seen.push(['set', msg.windows.length]),
     },
   });
@@ -263,7 +263,9 @@ test('embedder endpoint validates the pull-out message payloads', () => {
   deliver({ ...drag, grabX: Number.NaN });
   deliver({ ...drag, height: -1 });
   deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'win-abc', isDetached: true });
+  deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'win-abc', isDetached: false, isCancelled: true });
   deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'win-abc', isDetached: 'yes' });
+  deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'win-abc', isDetached: false, isCancelled: 'no' });
   deliver({ type: contract.WINDOW_DRAG_ENDED, windowId: 'agent-abc', isDetached: false });
   deliver({ type: contract.DETACHED_WINDOWS, windows: [{ windowId: 'win-abc', title: 'A' }] });
   deliver({ type: contract.DETACHED_WINDOWS, windows: [] });
@@ -276,7 +278,8 @@ test('embedder endpoint validates the pull-out message payloads', () => {
   assert.deepStrictEqual(seen, [
     ['out', 'win-0123456789abcdef'],
     ['drag', 'win-0123456789abcdef', 12],
-    ['ended', 'win-abc', true],
+    ['ended', 'win-abc', true, undefined],
+    ['ended', 'win-abc', false, true],
     ['set', 1],
     ['set', 0],
   ]);

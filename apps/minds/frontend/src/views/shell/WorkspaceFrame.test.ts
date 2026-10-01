@@ -132,7 +132,8 @@ function makeHandlers(options: { canPopOut?: boolean } = {}) {
         ? {
             open: (request) => popoutCalls.push(["open", request]),
             beginDrag: (request) => popoutCalls.push(["drag", request]),
-            endDrag: (workspaceId, windowId, isDetached) => popoutCalls.push(["ended", workspaceId, windowId, isDetached]),
+            endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
+              popoutCalls.push(["ended", workspaceId, windowId, isDetached, isCancelled]),
             detachedWindows: (windows) => popoutCalls.push(["detached", windows]),
           }
         : null,
@@ -176,14 +177,17 @@ describe("buildEmbedHandlers", () => {
     const size = { windowId: "win-0123", title: "Notes", width: 640, height: 480 };
     handlers[contract.POP_OUT_WINDOW]({ ...size, extra: "dropped" });
     handlers[contract.WINDOW_DRAG_STARTED]({ ...size, grabX: 12, grabY: 8, extra: "dropped" });
-    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: true });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: true, isCancelled: false });
+    handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false, isCancelled: true });
+    // A shell that does not say whether it cancelled.
     handlers[contract.WINDOW_DRAG_ENDED]({ windowId: "win-0123", isDetached: false });
     const request = { workspaceId: WORKSPACE_AGENT_ID, ...size };
     expect(popoutCalls).toEqual([
       ["open", request],
       ["drag", { ...request, grabX: 12, grabY: 8 }],
-      ["ended", WORKSPACE_AGENT_ID, "win-0123", true],
-      ["ended", WORKSPACE_AGENT_ID, "win-0123", false],
+      ["ended", WORKSPACE_AGENT_ID, "win-0123", true, false],
+      ["ended", WORKSPACE_AGENT_ID, "win-0123", false, true],
+      ["ended", WORKSPACE_AGENT_ID, "win-0123", false, null],
     ]);
     const browser = makeHandlers();
     expect(browser.handlers[browser.contract.POP_OUT_WINDOW]).toBeUndefined();

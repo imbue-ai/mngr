@@ -116,8 +116,9 @@ export interface EmbedHandlerDeps {
     open: (request: PopoutOpenRequest) => void;
     /** A title-bar drag began (or the dragged window changed size); main watches the cursor from here. */
     beginDrag: (request: WorkspaceWindowDragRequest) => void;
-    /** The shell's own drag gesture ended, having detached the window or not. */
-    endDrag: (workspaceId: string, windowId: string, isDetached: boolean) => void;
+    /** The shell's own drag gesture ended, having detached the window or not, and cancelled or released
+     * (null from a shell that does not say). */
+    endDrag: (workspaceId: string, windowId: string, isDetached: boolean, isCancelled: boolean | null) => void;
     detachedWindows: (windows: readonly DetachedWindowEntry[]) => void;
   } | null;
 }
@@ -199,7 +200,12 @@ export function buildEmbedHandlers(
     handlers[contract.WINDOW_DRAG_STARTED] = (message) =>
       popout.beginDrag({ ...openRequestOf(message), grabX: Number(message.grabX), grabY: Number(message.grabY) });
     handlers[contract.WINDOW_DRAG_ENDED] = (message) =>
-      popout.endDrag(workspaceAgentId(), String(message.windowId), message.isDetached === true);
+      popout.endDrag(
+        workspaceAgentId(),
+        String(message.windowId),
+        message.isDetached === true,
+        typeof message.isCancelled === "boolean" ? message.isCancelled : null,
+      );
     handlers[contract.DETACHED_WINDOWS] = (message) => {
       const windows = Array.isArray(message.windows) ? message.windows : [];
       const entries: DetachedWindowEntry[] = [];
@@ -378,8 +384,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
             ? {
                 open: (request) => electronBridge.openPopoutWindow(request),
                 beginDrag: (request) => electronBridge.beginWorkspaceWindowDrag(request),
-                endDrag: (workspaceId, windowId, isDetached) =>
-                  electronBridge.endWorkspaceWindowDrag(workspaceId, windowId, isDetached),
+                endDrag: (workspaceId, windowId, isDetached, isCancelled) =>
+                  electronBridge.endWorkspaceWindowDrag(workspaceId, windowId, isDetached, isCancelled),
                 detachedWindows: (windows) =>
                   shell.handleDetachedWindows(
                     windows,

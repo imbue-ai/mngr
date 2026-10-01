@@ -44,6 +44,7 @@ const {
   POPOUT_MIN_WIDTH,
   POPOUT_MIN_HEIGHT,
 } = require('./popout-policy');
+const { createTearOutWatch } = require('./tear-out-watch');
 const { linkFallbackFor, nativeNotificationOptionsFor, routeNotificationClick } = require('./notifications');
 const {
   shouldWriteSessionState,
@@ -195,8 +196,9 @@ const windowControls = resolveWindowControls(process.platform, process.env);
 // A popout follows the cursor on a timer (Electron cannot hand a live drag
 // to a new native window): once per frame is smooth enough and cheap.
 const POPOUT_FOLLOW_INTERVAL_MS = 16;
-// How long an OS close of a popout waits for its page to return the window
-// to the desktop before the window goes anyway.
+// How long a popout whose window is returning to the desktop (an OS close, a
+// drop onto a main window) waits for the desktop to take the window back
+// before it goes anyway.
 const POPOUT_REATTACH_TIMEOUT_MS = 2000;
 // Window ids as the workspace shell mints them; mirrors the embed contract's
 // WINDOW_ID_PATTERN (never trust the renderer).
@@ -806,10 +808,10 @@ function wireBundleWindowEvents(bundle) {
       // A drag watch ends with the popout it opened: left running, its next
       // tick would open another one under the still-held cursor.
       for (const other of bundles) {
-        if (other.dragWatch && other.dragWatch.popout === bundle) stopDragWatch(other);
+        if (other.dragWatch && other.dragWatch.tearOut.popout === bundle) stopDragWatch(other);
       }
     } else {
-      stopDragWatch(bundle);
+      abandonDragWatch(bundle);
     }
     bundles.delete(bundle);
     const mruIdx = mruWindows.indexOf(bundle);
@@ -2805,12 +2807,23 @@ function settlePopout(bundle) {
   }
 }
 
+// Close a popout with no reattach handshake: its window is back on the
+// desktop, was never out, or has already been asked back.
+function closePopoutWindow(bundle, reason) {
+  if (bundle.window.isDestroyed()) return;
+  stopFollowingCursor(bundle);
+  settlePopout(bundle);
+  console.log(`[popout] closing ${bundle.popout.windowId} of ${bundle.popout.workspaceId} (${reason})`);
+  bundle.window.close();
+}
+
 // Ask a main window showing the popout's workspace to return the popout's
 // window to the desktop, at ``frame`` (fractions of that window's surface)
 // when a drop named one. That window's shell is the desktop's one writer of
 // the layout, so the return goes through it rather than the popout's own
-// page whenever one is open; the popout closes itself once its own page sees
-// the window back (close-popout).
+// page whenever one is open. The popout closes once the window is reported
+// back or after the wait, not only when its own page sees it back: that page
+// may not have loaded yet.
 function sendReattachAsk(target, bundle, frame) {
   try {
     // Agent-scoped like the SPA's own ids: a restored popout carries the
@@ -2828,10 +2841,10 @@ function sendReattachAsk(target, bundle, frame) {
 // An OS close of a popout (its bar's close control included): the window
 // goes back to the desktop first, through the most recent main window
 // showing the workspace, else through the popout's own page (which then
-// answers popout-reattached); the close goes on when the popout's page sees
-// the window back, when that answer arrives, or after the wait. Answers
-// whether the close must wait; a page that cannot be asked settles the
-// popout instead, and the close goes on.
+// answers popout-reattached); the close goes on when that main window reports
+// the window back (popout-window-returned), when the popout's page sees it
+// back or answers, or after the wait. Answers whether the close must wait; a
+// page that cannot be asked settles the popout instead, and the close goes on.
 function requestPopoutReattach(bundle) {
   if (bundle.popout.reattachTimer !== null) return true;
   const wc = bundle.window.webContents;
@@ -2849,13 +2862,18 @@ function requestPopoutReattach(bundle) {
       console.warn('[popout] could not ask the page to reattach:', err && err.message);
     }
   }
+  armReattachTimeout(bundle);
+  return true;
+}
+
+// A popout whose window is on its way back to the desktop closes after the
+// wait if nothing confirmed the return first.
+function armReattachTimeout(bundle) {
+  if (bundle.popout.reattachTimer !== null) return;
   bundle.popout.reattachTimer = setTimeout(() => {
     bundle.popout.reattachTimer = null;
-    console.warn('[popout] the page did not confirm the reattach in time; closing anyway');
-    settlePopout(bundle);
-    if (!bundle.window.isDestroyed()) bundle.window.close();
+    closePopoutWindow(bundle, 'the return was not confirmed in time');
   }, POPOUT_REATTACH_TIMEOUT_MS);
-  return true;
 }
 
 // The main windows a re-dock drag could drop onto, most recently focused
@@ -2981,11 +2999,14 @@ ipcMain.on('open-popout-window', (event, request) => {
     return;
   }
   const existing = findPopoutBundle(request.workspaceId, request.windowId);
-  if (existing) {
+  if (existing && existing.popout.reattachTimer === null && !existing.popout.isReattachSettled) {
     // Already out (a "Show" from the desktop's ghost or taskbar): raise it.
     focusBundle(existing);
     return;
   }
+  // One whose window is on its way back to the desktop closes regardless, so
+  // raising it would lose this pop-out.
+  if (existing) closePopoutWindow(existing, 'replaced by a new pop-out');
   openPopout(source, request, 'open');
 });
 
@@ -2998,51 +3019,51 @@ ipcMain.on('open-popout-window', (event, request) => {
 // cursor is past the workspace surface by the tear-out distance, drops it
 // when the cursor comes back, and ends the drag on the mouse-up the window
 // still receives. The shell hears each step as a tear-out message and keeps
-// its own gesture in step.
+// its own gesture in step. What each step does to the popout is the
+// tear-out watch's (./tear-out-watch).
 function startDragWatch(source, request) {
-  stopDragWatch(source);
-  const watch = { request, popout: null, timer: null };
-  source.dragWatch = watch;
-  watch.timer = setInterval(() => {
+  abandonDragWatch(source);
+  const tearOut = createTearOutWatch(request, tearOutEffectsFor(source));
+  const timer = setInterval(() => {
     if (source.window.isDestroyed()) {
-      stopDragWatch(source);
+      abandonDragWatch(source);
       return;
     }
     const cursor = screen.getCursorScreenPoint();
-    const isOut = isTornOut(cursor, surfaceBounds(source.window.getContentBounds()));
-    if (isOut && watch.popout === null) {
-      watch.popout = openPopout(source, watch.request, 'drag');
-      if (watch.popout !== null) sendTearOut(source, watch.request, 'out');
-    } else if (!isOut && watch.popout !== null) {
-      dropDraggedPopout(watch);
-      sendTearOut(source, watch.request, 'in');
-    }
+    tearOut.sample(isTornOut(cursor, surfaceBounds(source.window.getContentBounds())));
   }, POPOUT_FOLLOW_INTERVAL_MS);
+  source.dragWatch = { tearOut, timer };
 }
 
+// End the watch on ``source``; answers its tear-out watch, or null when none ran.
 function stopDragWatch(source) {
   const watch = source.dragWatch;
-  if (!watch) return;
+  if (!watch) return null;
   clearInterval(watch.timer);
   source.dragWatch = null;
+  return watch.tearOut;
 }
 
-// The drag came back inside or was cancelled: the window never left the
-// desktop, so the popout goes without any reattach.
-function dropDraggedPopout(watch) {
-  const popout = watch.popout;
-  watch.popout = null;
-  if (popout === null || popout.window.isDestroyed()) return;
-  stopFollowingCursor(popout);
-  settlePopout(popout);
-  popout.window.close();
+// End the watch on ``source`` with neither a release nor the shell's end (a
+// new drag replaced it, or the window went away): a popout it opened stays.
+function abandonDragWatch(source) {
+  const tearOut = stopDragWatch(source);
+  if (tearOut !== null) tearOut.abandon();
 }
 
-// The drag was released with the popout out: it stays, focused.
-function settleDraggedPopout(watch) {
-  const popout = watch.popout;
-  watch.popout = null;
-  if (popout === null || popout.window.isDestroyed()) return;
+function tearOutEffectsFor(source) {
+  return {
+    openPopout: (request) => openPopout(source, request, 'drag'),
+    findPopout: (request) => findPopoutBundle(request.workspaceId, request.windowId),
+    closePopout: closePopoutWindow,
+    keepPopout: keepDraggedPopout,
+    sendTearOut: (request, phase) => sendTearOut(source, request, phase),
+  };
+}
+
+// The popout a drag opened stays where the drag left it, focused.
+function keepDraggedPopout(popout) {
+  if (popout.window.isDestroyed()) return;
   stopFollowingCursor(popout);
   focusBundle(popout);
   scheduleSessionSave();
@@ -3050,16 +3071,13 @@ function settleDraggedPopout(watch) {
 
 // The mouse-up of a watched drag arrived at the source window.
 function releaseDragWatch(source) {
-  const watch = source.dragWatch;
-  if (!watch) return;
-  stopDragWatch(source);
-  if (watch.popout === null) return;
-  settleDraggedPopout(watch);
-  sendTearOut(source, watch.request, 'released');
+  const tearOut = stopDragWatch(source);
+  if (tearOut !== null) tearOut.release();
 }
 
 function sendTearOut(source, request, phase) {
   if (source.window.isDestroyed()) return;
+  console.log(`[popout] tear-out ${phase}: ${request.windowId} of ${request.workspaceId}`);
   try {
     source.window.webContents.send('tear-out', {
       workspaceId: request.workspaceId,
@@ -3078,10 +3096,14 @@ ipcMain.on('begin-workspace-window-drag', (event, request) => {
     return;
   }
   const watch = source.dragWatch;
-  if (watch && watch.request.windowId === request.windowId && watch.request.workspaceId === request.workspaceId) {
+  if (
+    watch &&
+    watch.tearOut.request.windowId === request.windowId &&
+    watch.tearOut.request.workspaceId === request.workspaceId
+  ) {
     // The dragged window changed size (a snapped window un-snapped): the
     // popout still to open takes the new size and grab.
-    watch.request = request;
+    watch.tearOut.updateRequest(request);
     return;
   }
   startDragWatch(source, request);
@@ -3091,13 +3113,15 @@ ipcMain.on('end-workspace-window-drag', (event, payload) => {
   const source = popoutSenderBundle(event);
   if (!source || !isValidWorkspaceWindowIds(payload)) return;
   const watch = source.dragWatch;
-  if (!watch || watch.request.windowId !== payload.windowId) return;
-  stopDragWatch(source);
-  if (watch.popout === null) return;
+  if (!watch || watch.tearOut.request.windowId !== payload.windowId) return;
+  const isDetached = payload.isDetached === true;
+  const isCancelled = typeof payload.isCancelled === 'boolean' ? payload.isCancelled : null;
+  console.log(
+    `[popout] the shell ended its drag of ${payload.windowId} (detached: ${isDetached}, cancelled: ${isCancelled})`,
+  );
   // The shell's own release reached it first (a pointer that does leave the
-  // window): it detached the window, and the popout stays; a cancel drops it.
-  if (payload.isDetached === true) settleDraggedPopout(watch);
-  else dropDraggedPopout(watch);
+  // window), possibly before the tear-out it was sent did.
+  stopDragWatch(source).end(isDetached, isCancelled);
 });
 
 ipcMain.on('begin-popout-drag', (event, grab) => {
@@ -3116,10 +3140,10 @@ ipcMain.on('end-popout-bar-drag', (event) => {
   scheduleSessionSave();
   if (!target || target.window.isDestroyed()) return;
   // Released over a main window showing this workspace: that window's shell
-  // returns the window to the desktop where it was dropped, and the popout
-  // closes itself once its own page sees the window back.
+  // returns the window to the desktop where it was dropped.
   const frame = redockFrame(bundle.window.getContentBounds(), target.window.getContentBounds());
   sendReattachAsk(target, bundle, frame);
+  armReattachTimeout(bundle);
   focusBundle(target);
 });
 
@@ -3128,15 +3152,23 @@ ipcMain.on('close-popout', (event) => {
   if (!bundle || !isPopoutBundle(bundle)) return;
   // The page says the window is no longer pulled out (closed for everyone,
   // or brought back from the desktop): nothing to reattach.
-  settlePopout(bundle);
-  bundle.window.close();
+  closePopoutWindow(bundle, 'its page no longer shows the window as out');
+});
+
+// A main window's shell took back the window main asked it to (a drop onto
+// it, a popout's close): the popout waiting on that return goes now.
+ipcMain.on('popout-window-returned', (event, payload) => {
+  const source = popoutSenderBundle(event);
+  if (!source || isPopoutBundle(source) || !isValidWorkspaceWindowIds(payload)) return;
+  const popout = findPopoutBundle(payload.workspaceId, payload.windowId);
+  if (popout === null || popout.popout.reattachTimer === null) return;
+  closePopoutWindow(popout, 'the desktop took the window back');
 });
 
 ipcMain.on('popout-reattached', (event) => {
   const bundle = popoutSenderBundle(event);
   if (!bundle || !isPopoutBundle(bundle)) return;
-  settlePopout(bundle);
-  bundle.window.close();
+  closePopoutWindow(bundle, 'its page returned the window');
 });
 
 ipcMain.on('set-popout-title', (event, title) => {
