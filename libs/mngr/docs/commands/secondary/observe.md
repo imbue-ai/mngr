@@ -17,6 +17,10 @@ events to local JSONL files:
 - <events-dir>/events/mngr/agents/events.jsonl: individual and full agent state snapshots
 - <events-dir>/events/mngr/agent_states/events.jsonl: only when the lifecycle state field changes
 
+The agents file is rotated to events.jsonl.<timestamp> once it reaches 50 MiB,
+just before a full state snapshot, so the live file always begins with one.
+Only the most recent rotated file is kept.
+
 The observer:
 1. Loads base state from event history (if available) to detect state changes since last run
 2. Runs host discovery to track which hosts are online

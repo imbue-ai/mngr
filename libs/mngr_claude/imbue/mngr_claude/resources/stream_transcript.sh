@@ -40,7 +40,7 @@ source "$MNGR_AGENT_STATE_DIR/commands/mngr_log.sh"
 # shellcheck source=mngr_transcript_lib.sh
 source "$MNGR_AGENT_STATE_DIR/commands/mngr_transcript_lib.sh"
 
-# -- Per-session state (bash 4+ associative arrays) --
+# Per-session state (bash 4+ associative arrays)
 # Note: explicit =() is required for set -u compatibility (empty associative
 # arrays are "unbound" under set -u without it).
 declare -A _FILE_BY_SID=()    # session_id -> resolved file path ("" if not yet found)
@@ -59,13 +59,23 @@ _HISTORY_LINES_NOW=0          # line count of the history file observed this cyc
 # reconciliation and cleared once reconciliation finishes.
 declare -A _MNGR_TRANSCRIPT_ID_SET=()
 
-# -- Helpers --
+# Helpers
 
-# Find the JSONL file for a session ID.
+# Find the JSONL file for a session ID, setting _FOUND_SESSION_JSONL to its path
+# (or "" when it does not exist yet).
 # Claude stores session files at $CLAUDE_CONFIG_DIR/projects/<hash>/<session_id>.jsonl
 # Falls back to ~/.claude/projects/ when CLAUDE_CONFIG_DIR is not set.
+# A chat that has never been messaged has no file, so this runs every poll cycle
+# for as long as the chat stays idle; a glob keeps that from spawning a process.
 _find_session_jsonl() {
-    find "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/" -name "${1}.jsonl" 2>/dev/null | head -1
+    local match
+    _FOUND_SESSION_JSONL=""
+    for match in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/"*/"${1}.jsonl"; do
+        if [ -f "$match" ]; then
+            _FOUND_SESSION_JSONL="$match"
+            return 0
+        fi
+    done
 }
 
 _line_count() {
@@ -136,23 +146,22 @@ _try_resolve_file() {
     if [ -n "${_FILE_BY_SID[$sid]:-}" ]; then
         return 0
     fi
-    local path
-    path=$(_find_session_jsonl "$sid")
-    if [ -n "$path" ] && [ -f "$path" ]; then
-        _FILE_BY_SID[$sid]="$path"
-        log_debug "Resolved session $sid -> $path"
+    _find_session_jsonl "$sid"
+    if [ -n "$_FOUND_SESSION_JSONL" ]; then
+        _FILE_BY_SID[$sid]="$_FOUND_SESSION_JSONL"
+        log_debug "Resolved session $sid -> $_FOUND_SESSION_JSONL"
         return 0
     fi
     return 1
 }
 
-# -- Reconciliation (restart recovery) --
+# Reconciliation (restart recovery)
 #
 # Field extraction, id-set construction, and reverse-scan reconciliation
 # come from mngr_transcript_lib.sh. The shared helpers operate on the
 # global _MNGR_TRANSCRIPT_ID_SET, populated by mngr_transcript_build_id_set.
 
-# -- Session processing --
+# Session processing
 
 # Check a session file for new lines and append them to the output.
 # The shared mngr_transcript_emit_lines_range uses sed with a bounded range
@@ -211,7 +220,7 @@ _check_for_new_sessions() {
     _KNOWN_HISTORY_LINES=$current_lines
 }
 
-# -- Initialization --
+# Initialization
 
 _initialize() {
     # Load all known sessions from history
@@ -248,7 +257,7 @@ _initialize() {
     _MNGR_TRANSCRIPT_ID_SET=()
 }
 
-# -- Poll cycle (shared by main loop and single-pass mode) --
+# Poll cycle (shared by main loop and single-pass mode)
 
 _run_one_cycle() {
     # One wc pass covers the history file and every resolved session file, so
@@ -279,7 +288,7 @@ _run_one_cycle() {
     done
 }
 
-# -- Main --
+# Main
 
 main() {
     local is_single_pass=false

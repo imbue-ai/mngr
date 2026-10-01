@@ -58,6 +58,7 @@ from imbue.mngr.api.observe import make_agent_state_event
 from imbue.mngr.api.observe import make_full_agent_state_event
 from imbue.mngr.api.observe import parse_observe_event_line
 from imbue.mngr.api.observe import release_observe_lock
+from imbue.mngr.api.observe import rotate_observe_events_if_over
 from imbue.mngr.config.data_types import MngrConfig
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import ProviderInstanceConfig
@@ -1189,6 +1190,155 @@ def test_no_sink_does_not_error(temp_mngr_ctx: MngrContext, noop_binary: str) ->
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     observer._emit_agent_state(make_test_agent_details(name="silent"))
     assert get_observe_events_path(observer.events_base_dir).exists()
+
+
+# Rotation Tests
+
+
+def _rotated_observe_event_files(events_base_dir: Path) -> list[Path]:
+    return sorted(get_observe_events_dir(events_base_dir).glob("events.jsonl.*"))
+
+
+def _observe_event_types_in(path: Path) -> list[str]:
+    return [json.loads(line)["type"] for line in path.read_text().splitlines()]
+
+
+def _make_observer_rotating_at_every_snapshot(temp_mngr_ctx: MngrContext, noop_binary: str) -> AgentObserver:
+    return AgentObserver(
+        mngr_ctx=temp_mngr_ctx,
+        events_base_dir=get_default_events_base_dir(temp_mngr_ctx.config),
+        mngr_binary=noop_binary,
+        events_file_rotation_bytes=1,
+    )
+
+
+def test_an_oversized_agents_file_rotates_only_at_a_snapshot(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """Per-agent events never rotate the file; the next snapshot does, and it opens the new file."""
+    observer = _make_observer_rotating_at_every_snapshot(temp_mngr_ctx, noop_binary)
+    events_path = get_observe_events_path(observer.events_base_dir)
+    stale = make_test_agent_details(name="rotated-away", state=AgentLifecycleState.STOPPED)
+    observer._emit_observe_event(make_full_agent_state_event([stale]))
+    observer._emit_observe_event(make_agent_state_event(stale))
+    observer._emit_observe_event(make_agent_state_event(stale))
+    assert _rotated_observe_event_files(observer.events_base_dir) == []
+
+    current = make_test_agent_details(name="after-rotation", state=AgentLifecycleState.RUNNING)
+    observer._emit_observe_event(make_full_agent_state_event([current]))
+
+    rotated_files = _rotated_observe_event_files(observer.events_base_dir)
+    assert len(rotated_files) == 1
+    assert _observe_event_types_in(rotated_files[0]) == [
+        ObserveEventType.AGENTS_FULL_STATE,
+        ObserveEventType.AGENT_STATE,
+        ObserveEventType.AGENT_STATE,
+    ]
+    assert _observe_event_types_in(events_path) == [ObserveEventType.AGENTS_FULL_STATE]
+    tracked = load_base_state_from_history(observer.events_base_dir)
+    assert {key: state.agent_state for key, state in tracked.items()} == {_details_instance_key(current): "RUNNING"}
+
+
+def test_rotating_the_agents_file_keeps_only_the_newest_rotated_file(temp_host_dir: Path) -> None:
+    """An oversized file is rotated away, then deleted at the rotation after that."""
+    events_path = get_observe_events_path(temp_host_dir)
+    for generation in range(3):
+        agent = make_test_agent_details(name=f"generation-{generation}")
+        append_observe_event(temp_host_dir, make_full_agent_state_event([agent]))
+        rotate_observe_events_if_over(temp_host_dir, max_file_size_bytes=1)
+        assert not events_path.exists()
+
+    rotated_files = _rotated_observe_event_files(temp_host_dir)
+    assert len(rotated_files) == 1
+    kept = parse_observe_event_line(rotated_files[0].read_text().strip())
+    assert isinstance(kept, FullAgentStateEvent)
+    assert [agent.name for agent in kept.agents] == ["generation-2"]
+
+
+def test_rotating_leaves_an_agents_file_under_the_limit_in_place(temp_host_dir: Path) -> None:
+    events_path = get_observe_events_path(temp_host_dir)
+    append_observe_event(temp_host_dir, make_full_agent_state_event([make_test_agent_details()]))
+    size_before = events_path.stat().st_size
+
+    rotate_observe_events_if_over(temp_host_dir, max_file_size_bytes=size_before + 1)
+
+    assert events_path.stat().st_size == size_before
+    assert _rotated_observe_event_files(temp_host_dir) == []
+
+
+def _emit_history_longer_than_a_fresh_file(observer: AgentObserver) -> int:
+    """Emit a snapshot plus updates and return how many lines that is.
+
+    The updates make this file longer than the one a rotation starts, which is what lets a
+    follower's size check read the rotation as a shrink.
+    """
+    before = make_test_agent_details(name="before-rotation", state=AgentLifecycleState.RUNNING)
+    observer._emit_observe_event(make_full_agent_state_event([before]))
+    update_count = 4
+    for _ in range(update_count):
+        observer._emit_observe_event(make_agent_state_event(before))
+    return 1 + update_count
+
+
+def _snapshot_agent_names(line: str) -> list[str]:
+    event = parse_observe_event_line(line)
+    assert isinstance(event, FullAgentStateEvent)
+    return [agent.name for agent in event.agents]
+
+
+def test_follower_continues_from_the_snapshot_that_opens_a_rotated_in_file(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A rotation looks like a shrink to the follower, which re-seeds on the new file's opening snapshot."""
+    observer = _make_observer_rotating_at_every_snapshot(temp_mngr_ctx, noop_binary)
+    events_base_dir = observer.events_base_dir
+    history_line_count = _emit_history_longer_than_a_fresh_file(observer)
+
+    seen: list[str] = []
+    with _observer_holding_the_lock(events_base_dir):
+        follower = ObserveEventFollower(events_base_dir=events_base_dir, on_line=seen.append)
+        follower.poll_once()
+        assert len(seen) == history_line_count
+
+        after = make_test_agent_details(name="after-rotation", state=AgentLifecycleState.RUNNING)
+        observer._emit_observe_event(make_full_agent_state_event([after]))
+        later = make_test_agent_details(name="later-update", state=AgentLifecycleState.WAITING)
+        observer._emit_observe_event(make_agent_state_event(later))
+        follower.poll_once()
+
+    assert len(_rotated_observe_event_files(events_base_dir)) == 1
+    new_lines = seen[history_line_count:]
+    assert len(new_lines) == 2
+    assert _snapshot_agent_names(new_lines[0]) == ["after-rotation"]
+    update_event = parse_observe_event_line(new_lines[1])
+    assert isinstance(update_event, AgentStateEvent)
+    assert update_event.agent.name == "later-update"
+
+
+def test_follower_waits_out_a_rotation_whose_opening_snapshot_has_not_landed(
+    temp_mngr_ctx: MngrContext, noop_binary: str
+) -> None:
+    """A poll between the rename and the new file's first append finds no file; the follower stays healthy."""
+    observer = _make_observer_rotating_at_every_snapshot(temp_mngr_ctx, noop_binary)
+    events_base_dir = observer.events_base_dir
+    history_line_count = _emit_history_longer_than_a_fresh_file(observer)
+
+    seen: list[str] = []
+    with _observer_holding_the_lock(events_base_dir):
+        follower = ObserveEventFollower(events_base_dir=events_base_dir, on_line=seen.append)
+        follower.poll_once()
+        assert len(seen) == history_line_count
+
+        rotate_observe_events_if_over(events_base_dir, max_file_size_bytes=1)
+        follower.poll_once()
+        assert len(seen) == history_line_count
+        assert follower.failure_detail() is None
+
+        after = make_test_agent_details(name="after-rotation", state=AgentLifecycleState.RUNNING)
+        observer._emit_observe_event(make_full_agent_state_event([after]))
+        follower.poll_once()
+
+    new_lines = seen[history_line_count:]
+    assert len(new_lines) == 1
+    assert _snapshot_agent_names(new_lines[0]) == ["after-rotation"]
 
 
 # Agent membership deltas (AGENT_REMOVED + added enqueues host)

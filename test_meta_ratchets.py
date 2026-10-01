@@ -251,12 +251,17 @@ def test_no_type_errors() -> None:
     check_no_type_errors(_REPO_ROOT)
 
 
+@pytest.mark.timeout(30)
 def test_no_ruff_errors() -> None:
     """Ensure all Python files pass ruff lint and format checks repo-wide.
 
     Runs both ruff check and ruff format --check from the repo root, covering all
     workspace members plus repo-root and scripts/ files. CI backstop for the ruff
     pre-commit hook.
+
+    The two cold, repo-wide ``uv run ruff`` subprocesses can stall past the default
+    timeout under load; the check is deterministic, so it gets a longer timeout
+    rather than a flaky mark.
     """
     fix_hint = "To fix: `uv run ruff check --fix . && uv run ruff format .`"
     errors: list[str] = []
