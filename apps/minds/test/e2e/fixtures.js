@@ -79,10 +79,11 @@ const test = base.test.extend({
       env: { ...process.env, ...mindsAppEnv },
       timeout: 5 * 60 * 1000,
     });
+    const output = captureAppOutput(app);
 
     const mainWindow = await app.firstWindow({ timeout: 5 * 60 * 1000 });
 
-    await use({ app, mainWindow, pickContentWindow });
+    await use({ app, mainWindow, pickContentWindow, output });
 
     // Save log snapshots on failure for postmortem: minds.log carries the
     // backend's output, electron.log the main process's startup milestones and

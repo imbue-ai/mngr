@@ -13,8 +13,36 @@
 
 const { test, expect } = require('./fixtures');
 
+// First launch downloads the app's Python packages from PyPI, whose CDN can
+// stall for minutes from CI runners; that download gets its own budget.
+const ENV_SETUP_BUDGET_MS = 5 * 60 * 1000;
+// CLEANUP: drop the `Backend ready at` alternative once no binary verified from this
+// spec predates the `env-setup finished` line (minds-v0.8.1 and older lack it).
+const ENV_SETUP_DONE_RE = /\[startup\] (?:env-setup (finished|failed)|Backend ready at)/;
+
+async function waitForEnvSetup(app, output) {
+  let done;
+  try {
+    done = await output.waitForLine(ENV_SETUP_DONE_RE, { timeoutMs: ENV_SETUP_BUDGET_MS });
+  } catch {
+    done = null;
+  }
+  if (done && done[1] !== 'failed') return;
+  const logs = await Promise.all(
+    app.windows().map((w) =>
+      w.evaluate(() => (document.getElementById('startup-log') || {}).textContent || '').catch(() => ''),
+    ),
+  );
+  const uvLog = logs.find((l) => l.trim()) || '';
+  const why = done
+    ? 'failed'
+    : `was still running after ${ENV_SETUP_BUDGET_MS / 60000} min (a PyPI download stall)`;
+  throw new Error(`First-launch dependency setup ${why}; uv log tail:\n${uvLog.split('\n').slice(-20).join('\n')}`);
+}
+
 test('main window launches to a usable state (home, start flow, consent, or a restored workspace)', async ({ mindsApp }, testInfo) => {
-  const { mainWindow, app, pickContentWindow } = mindsApp;
+  test.setTimeout(12 * 60 * 1000);
+  const { mainWindow, app, pickContentWindow, output } = mindsApp;
   // Assert against the content window, not firstWindow(): firstWindow()
   // can return the SPA title-bar view (Projects / Home / Back /
   // Forward, no auth UI), which carries none of the landing elements.
@@ -22,6 +50,7 @@ test('main window launches to a usable state (home, start flow, consent, or a re
   // projects home.
   let content;
   try {
+    await waitForEnvSetup(app, output);
     content = await pickContentWindow(app, { timeoutMs: 3 * 60 * 1000 });
     // Identify a usable landing by stable structural hooks, not visible
     // copy, so wording redesigns can't break this smoke test. Each hook only

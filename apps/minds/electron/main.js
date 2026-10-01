@@ -2216,11 +2216,13 @@ async function runStartupSequence(bundle) {
     console.warn('[startup] shell.html load did not finish:', err.message);
   }
 
+  const envSetupStartedAt = Date.now();
   try {
     await runEnvSetup(
       (status) => broadcastStatusToLoadingWindows(status),
       (line) => broadcastStartupLogLine(line),
     );
+    console.log(`[startup] env-setup finished in ${((Date.now() - envSetupStartedAt) / 1000).toFixed(1)}s`);
   } catch (err) {
     console.error('[startup] env-setup failed:', err.message);
     showErrorInAllWindows(
