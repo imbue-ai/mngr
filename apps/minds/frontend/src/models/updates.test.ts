@@ -3,6 +3,7 @@ import type { UiWorkspaceUpdatesMessage } from "../channel/messages";
 import {
   UpdatesStore,
   devOverridePrefill,
+  displayVersion,
   isRunInFlight,
   isUpdateDispatchable,
   isUpdateOffered,
@@ -443,5 +444,16 @@ describe("choosing a specific version", () => {
     expect(devOverridePrefill("")).toBe("");
     expect(devOverridePrefill("main")).toBe("main");
     expect(devOverridePrefill("gabriel/some-branch")).toBe("upstream/gabriel/some-branch");
+  });
+});
+
+describe("displayVersion", () => {
+  it("drops the tag prefix from a release and leaves every other ref as it is", () => {
+    expect(displayVersion("minds-v0.8.2")).toBe("v0.8.2");
+    expect(displayVersion("minds-v0.4.0-rc1")).toBe("v0.4.0-rc1");
+    expect(displayVersion("main")).toBe("main");
+    expect(displayVersion("upstream/gabriel/some-branch")).toBe("upstream/gabriel/some-branch");
+    expect(displayVersion("minds-feature")).toBe("minds-feature");
+    expect(displayVersion("")).toBe("");
   });
 });

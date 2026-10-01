@@ -213,7 +213,7 @@ describe("the update modal's verdict line", () => {
     });
 
     expect(allText(draw())).toContain(
-      "This machine was updated to minds-v0.4.1.",
+      "This machine was updated to v0.4.1.",
     );
   });
 

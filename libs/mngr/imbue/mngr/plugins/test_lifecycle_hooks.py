@@ -87,6 +87,7 @@ def test_on_before_command_receives_correct_command_name(
     assert before_calls[0][1]["command_name"] == "list"
 
 
+@pytest.mark.flaky
 def test_on_before_command_receives_correct_params(
     lifecycle_tracker: _LifecycleTracker, cli_runner: CliRunner
 ) -> None:

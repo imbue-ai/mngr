@@ -35,7 +35,7 @@ import {
 import { Spinner } from "../components/Spinner";
 import { StatusBadge } from "../components/StatusBadge";
 import type { UpdateBadgeTone } from "../../models/updates";
-import { updateBadgeFor } from "../../models/updates";
+import { displayVersion, updateBadgeFor } from "../../models/updates";
 
 const BADGE_CLASS = "inline-flex items-center px-2 py-0.5 rounded-md type-label";
 
@@ -331,8 +331,8 @@ export const LandingPage: m.ClosureComponent = () => {
       m(
         "span",
         update.verdict === "UPDATED_WITH_REBUILD_ITEMS"
-          ? `Updated to ${version}, with a note for you.`
-          : `Updated to ${version}.`,
+          ? `Updated to ${displayVersion(version)}, with a note for you.`
+          : `Updated to ${displayVersion(version)}.`,
       ),
       m(
         Button,

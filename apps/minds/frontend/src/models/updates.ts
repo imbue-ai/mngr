@@ -75,6 +75,11 @@ export function labelVersionNote(liveness: string | undefined): string | null {
   return "Read from when this machine was created — start it to see the version it's actually running.";
 }
 
+/** A template ref as the reader sees it: `minds-v0.8.2` -> `v0.8.2`; any other ref as is. */
+export function displayVersion(ref: string): string {
+  return ref.replace(/^minds-(?=v\d)/, "");
+}
+
 /** What the specific-version field is prefilled with on a dev build, or "". A
  * released build (`minds-v*` ceiling) prefills nothing; a dev build reports the
  * branch it is pinned to, addressed the way the update agent's fetch resolves it. */

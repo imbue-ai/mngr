@@ -7,6 +7,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import type { UiWorkspaceUpdate } from "../../channel/messages";
 import {
+  displayVersion,
   isFailureVerdict,
   isRecreationRequired,
   isUpdateDispatchable,
@@ -53,7 +54,7 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
   // is only the fallback: its next sweep is an exec into a machine whose
   // services are still coming back from the apply, so for a while after a
   // verdict `current_version` still reads the version this run moved off.
-  const landed = update.success_note_version || update.current_version;
+  const landed = displayVersion(update.success_note_version || update.current_version);
   switch (update.verdict) {
     case "UPDATED":
       return `This machine was updated${landed ? ` to ${landed}` : ""}.`;
@@ -65,14 +66,14 @@ function verdictMessage(update: UiWorkspaceUpdate): string {
         `The update agent left a note for you${update.verdict_detail ? ":" : " in the update chat."}`
       );
     case "ALREADY_CURRENT":
-      return `This machine is already up to date${update.current_version ? ` on ${update.current_version}` : ""}. Nothing was changed.`;
+      return `This machine is already up to date${update.current_version ? ` on ${displayVersion(update.current_version)}` : ""}. Nothing was changed.`;
     case "NEEDS_RECREATION":
       return `The update agent found that this update can't be applied to this machine in place. ${checkInLine(update)}`;
     case "STUCK":
       return `The update couldn't finish and couldn't clean up after itself. ${checkInLine(update)}`;
     case "REFUSED":
       return update.in_place_compatible_ref
-        ? `The update didn't run. ${update.in_place_compatible_ref} can still be applied to this machine. ${checkInLine(update)}`
+        ? `The update didn't run. ${displayVersion(update.in_place_compatible_ref)} can still be applied to this machine. ${checkInLine(update)}`
         : `The update didn't run. ${checkInLine(update)}`;
     default:
       return "";
@@ -99,7 +100,7 @@ export function migrateCommandFor(workspaceName: string): string {
  * group. Window-relative rather than "tonight": the window is configurable to
  * any hours. */
 export function scheduledLine(update: UiWorkspaceUpdate, updateWindow: string): string {
-  const target = update.scheduled_target_ref ? ` to ${update.scheduled_target_ref}` : "";
+  const target = update.scheduled_target_ref ? ` to ${displayVersion(update.scheduled_target_ref)}` : "";
   return `Scheduled to update${target} in the next update window (${updateWindow}).`;
 }
 
@@ -107,7 +108,7 @@ export function scheduledLine(update: UiWorkspaceUpdate, updateWindow: string): 
 export function updateVersionRow(label: string, value: string): m.Children {
   return m("div", { class: "flex items-baseline justify-between gap-4" }, [
     m("span", { class: "type-helper text-secondary shrink-0" }, label),
-    m("span", { class: "type-body text-primary font-mono min-w-0 text-right wrap-anywhere" }, value || "unknown"),
+    m("span", { class: "type-body text-primary font-mono min-w-0 text-right wrap-anywhere" }, displayVersion(value) || "unknown"),
   ]);
 }
 
@@ -251,8 +252,8 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
     return m(
       "p",
       { class: "type-body text-secondary" },
-      `This machine (${update.current_version}) is newer than this copy of Imbue Studio ` +
-        `(${update.supported_version}). Update the app to catch up — there's nothing to run here.`,
+      `This machine (${displayVersion(update.current_version)}) is newer than this copy of Imbue Studio ` +
+        `(${displayVersion(update.supported_version)}). Update the app to catch up — there's nothing to run here.`,
     );
   }
 
