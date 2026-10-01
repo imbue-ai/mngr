@@ -1,4 +1,5 @@
 import os
+import signal
 import threading
 from collections.abc import Iterator
 from multiprocessing.connection import Pipe
@@ -278,3 +279,33 @@ def test_warm_process_spawned_across_stop_is_terminated_not_stored(mngr_caller: 
     mngr_caller.stop()
     mngr_caller._store_or_terminate_warm_process(warm_process)
     assert warm_process.running_process.is_finished()
+
+
+@pytest.mark.timeout(60)
+def test_warm_process_that_ignores_sigterm_is_killed_when_terminated(mngr_caller: MngrCaller) -> None:
+    """Terminating a warm process that does not act on SIGTERM still ends it before ``terminate`` returns.
+
+    A process that never exits on SIGTERM is the limiting case of one slow to honour
+    it on a loaded machine. It has to be gone once ``terminate`` returns, or it
+    outlives the owning group's exit timeout. The ignored disposition survives the
+    exec into the warm process, and a duplicate of the parent's socket end keeps the
+    child from exiting on socket EOF, so only the kill after the grace can end it.
+    """
+    # Let the pre-warm spawn land first, so it does not also start with SIGTERM ignored.
+    wait_for(
+        lambda: mngr_caller._warm_process is not None,
+        timeout=30.0,
+        poll_interval=0.05,
+        error_message="pre-warmed mngr process was never stored as the idle process",
+    )
+    previous_sigterm_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        warm_process = mngr_caller._spawn_warm_process()
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm_handler)
+    held_socket_fd = os.dup(warm_process.connection.fileno())
+    try:
+        warm_process.terminate()
+        assert warm_process.running_process.is_finished()
+    finally:
+        os.close(held_socket_fd)

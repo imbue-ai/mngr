@@ -85,9 +85,15 @@ _WarmRequest = tuple[tuple[str, ...], dict[str, str], Path | None]
 
 _DEFAULT_CALL_TIMEOUT_SECONDS: Final[float] = 60.0
 
-# When terminating a claimed/replaced warm process, give it this long to die
-# before escalating to SIGKILL.
-_TERMINATE_FORCE_KILL_SECONDS: Final[float] = 5.0
+# A warm process has nothing worth saving on exit, so one that is slow to honour
+# SIGTERM loses nothing by being killed after a short grace. A long grace would
+# keep such a straggler alive past the owning concurrency group's exit timeout.
+_SIGTERM_GRACE_SECONDS: Final[float] = 2.0
+
+# How long stopping a warm process may take before it counts as broken. It has to
+# outlast the grace, the kill that follows it and the draining of the process's
+# output, all of which run before the process is reported finished.
+_STOP_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Sentinel returncode used when a call is terminated for exceeding its timeout.
 _TIMEOUT_RETURNCODE: Final[int] = -1
@@ -284,9 +290,9 @@ class _WarmMngrProcess(MutableModel):
         """Close the parent socket and terminate the warm process (no-op if already exited)."""
         self.connection.close()
         try:
-            self.running_process.terminate(force_kill_seconds=_TERMINATE_FORCE_KILL_SECONDS)
+            self.running_process.terminate(force_kill_seconds=_STOP_TIMEOUT_SECONDS)
         except TimeoutExpired as exc:
-            logger.opt(exception=exc).error("Timed out force-killing a warm mngr process")
+            logger.opt(exception=exc).error("Timed out stopping a warm mngr process")
 
 
 class MngrCaller(MutableModel):
@@ -374,7 +380,10 @@ class MngrCaller(MutableModel):
             # the child has been forked (and thus has inherited ``child_fd``), so
             # closing the parent's copy below is race-free.
             running_process = concurrency_group.run_process_in_background(
-                command, is_checked_by_group=False, pass_fds=(child_fd,)
+                command,
+                is_checked_by_group=False,
+                pass_fds=(child_fd,),
+                shutdown_timeout_sec=_SIGTERM_GRACE_SECONDS,
             )
             warm_process = _WarmMngrProcess(
                 connection=parent_connection, running_process=running_process, concurrency_group=concurrency_group
