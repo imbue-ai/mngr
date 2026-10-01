@@ -231,6 +231,7 @@ export function Shell(): m.Component<ShellAttrs> {
               shell,
               workspaceAnyId: surfaceWorkspaceId,
               soloWindowId: popout?.windowId ?? null,
+              isSoloReopened: popout !== null && new URLSearchParams(routeSearch).get("reopened") === "1",
             })
           : m(
               "div#local-page-scroll",

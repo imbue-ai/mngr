@@ -1149,8 +1149,21 @@ describe("Shell on the popout route", () => {
     const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
     expect(attrsOf(frame as AnyVnode).workspaceAnyId).toBe(WORKSPACE_ID);
     expect(attrsOf(frame as AnyVnode).soloWindowId).toBe("win-0123");
+    // Opened for a tear-out (no mark on the route): the shell waits for the desktop's detach save.
+    expect(attrsOf(frame as AnyVnode).isSoloReopened).toBe(false);
     // The routed page itself renders nothing of its own here.
     expect(collectVnodes(root).some((vnode) => vnode.attrs?.id === "popout-page")).toBe(false);
+  });
+
+  it("tells the workspace shell a popout the app reopened was reopened", () => {
+    const { state } = makeShell({
+      currentRouteSearch: () => "reopened=1",
+      isPopoutDropTarget: false,
+    } as unknown as Partial<ShellState>);
+    const root = renderShell(state, POPOUT_PATH, m("div#popout-page"));
+    const frame = collectVnodes(root).find((vnode) => vnode.tag === WorkspaceFrame);
+    expect(attrsOf(frame as AnyVnode).soloWindowId).toBe("win-0123");
+    expect(attrsOf(frame as AnyVnode).isSoloReopened).toBe(true);
   });
 
   it("mounts the ordinary surface with no solo window, and offers a drop only there", () => {

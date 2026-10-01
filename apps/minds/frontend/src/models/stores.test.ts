@@ -70,6 +70,17 @@ describe("WorkspacesStore", () => {
     expect(soloNext).toBe("/?solo=win-0123");
   });
 
+  it("marks a reopened popout's solo page, which reaches the workspace shell beside the window", () => {
+    const store = new WorkspacesStore();
+    store.applyWorkspacesMessage(workspacesMessage());
+    const frameUrl = store.workspaceFrameUrl("agent-aa11", "win-0123", true);
+    const bridgeNext = new URL(frameUrl, "http://x").searchParams.get("next");
+    const soloNext = new URL(bridgeNext ?? "", "http://x").searchParams.get("next") ?? "";
+    const shellParams = new URL(soloNext, "http://x").searchParams;
+    expect(shellParams.get("solo")).toBe("win-0123");
+    expect(shellParams.get("reopened")).toBe("1");
+  });
+
   it("caches accents under both coordinates and applies previews", () => {
     const store = new WorkspacesStore();
     store.applyWorkspacesMessage(workspacesMessage());

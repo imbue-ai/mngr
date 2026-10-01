@@ -66,19 +66,19 @@ export class WorkspacesStore {
     return this.agentIdByHostId.get(anyId) ?? anyId;
   }
 
-  workspaceFrameUrl(anyId: string, soloWindowId: string | null = null): string {
+  workspaceFrameUrl(anyId: string, soloWindowId: string | null = null, isSoloReopened = false): string {
     // Content URLs are keyed by the workspace id (the /goto/ bridge and the
     // origin family both route it); a host id from persisted state resolves
     // through the alias map. A popout asks the workspace shell for one window
     // edge to edge: the shell's `?solo=` boot parameter rides through the
     // bridge's own `next`, which the /goto/ handler forwards as a same-origin
-    // path.
+    // path, with `reopened=1` beside it for a popout the app reopened (a
+    // restore), whose shell then trusts the stored layout at once.
     const workspaceScoped = this.toAgentScopedId(anyId);
     const gotoPath = "/goto/" + workspaceScoped + "/";
-    const bridgeNext =
-      soloWindowId === null
-        ? gotoPath
-        : gotoPath + "?next=" + encodeURIComponent("/?solo=" + encodeURIComponent(soloWindowId));
+    if (soloWindowId === null) return "/forward-bridge?next=" + encodeURIComponent(gotoPath);
+    const soloPath = "/?solo=" + encodeURIComponent(soloWindowId) + (isSoloReopened ? "&reopened=1" : "");
+    const bridgeNext = gotoPath + "?next=" + encodeURIComponent(soloPath);
     return "/forward-bridge?next=" + encodeURIComponent(bridgeNext);
   }
 

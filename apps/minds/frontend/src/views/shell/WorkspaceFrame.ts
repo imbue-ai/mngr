@@ -79,6 +79,9 @@ export interface WorkspaceFrameAttrs {
   /** The one window the workspace shell shows edge to edge (a popout), else
    * null for the whole desktop. */
   soloWindowId: string | null;
+  /** Whether the app reopened that popout (a restore) rather than opening it
+   * for a tear-out or the window menu just now. */
+  isSoloReopened: boolean;
 }
 
 /** The request an OPEN_REQUEST_MODAL message names, or null when it names
@@ -308,12 +311,19 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
   let isMountedPageReady = false;
 
   let armedSoloWindowId: string | null = null;
+  let armedIsSoloReopened = false;
 
-  function armFrame(shell: ShellState, workspaceAnyId: string, soloWindowId: string | null): void {
+  function armFrame(
+    shell: ShellState,
+    workspaceAnyId: string,
+    soloWindowId: string | null,
+    isSoloReopened: boolean,
+  ): void {
     if (frameElement === null) return;
     armedWorkspaceAnyId = workspaceAnyId;
     armedSoloWindowId = soloWindowId;
-    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId);
+    armedIsSoloReopened = isSoloReopened;
+    const expected = shell.stores.workspaces.workspaceFrameUrl(workspaceAnyId, soloWindowId, isSoloReopened);
     if (frameElement.getAttribute("src") !== expected) {
       isMountedPageReady = false;
       frameElement.src = expected;
@@ -329,15 +339,15 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
     if (frameElement === null || armedWorkspaceAnyId === null) return;
     isMountedPageReady = false;
     frameElement.src =
-      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId);
+      shell.stores.workspaces.workspaceFrameUrl(armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
   }
 
   return {
     oncreate(vnode) {
-      const { shell, workspaceAnyId, soloWindowId } = vnode.attrs;
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
       frameElement = vnode.dom.querySelector("#content-frame");
       frameElement?.addEventListener("load", stampFrameLoad);
-      armFrame(shell, workspaceAnyId, soloWindowId);
+      armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
       // The armed id, not the attr, is what the shell asks about: this frame is
       // re-armed by onupdate, and it is mounted for the workspace an app modal
       // floats over as well as for the routed workspace surface.
@@ -352,7 +362,9 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       // legacy host id with no alias mapping yet; re-arm when the mapping
       // lands and the URL therefore changes to the workspace-id form.
       unsubscribeWorkspaces = shell.stores.workspaces.onChanged(() => {
-        if (armedWorkspaceAnyId !== null) armFrame(shell, armedWorkspaceAnyId, armedSoloWindowId);
+        if (armedWorkspaceAnyId !== null) {
+          armFrame(shell, armedWorkspaceAnyId, armedSoloWindowId, armedIsSoloReopened);
+        }
       });
 
       void loadEmbedContract().then((loaded) => {
@@ -472,7 +484,8 @@ export function WorkspaceFrame(): m.Component<WorkspaceFrameAttrs> {
       });
     },
     onupdate(vnode) {
-      armFrame(vnode.attrs.shell, vnode.attrs.workspaceAnyId, vnode.attrs.soloWindowId);
+      const { shell, workspaceAnyId, soloWindowId, isSoloReopened } = vnode.attrs;
+      armFrame(shell, workspaceAnyId, soloWindowId, isSoloReopened);
     },
     onremove(vnode) {
       isRemoved = true;

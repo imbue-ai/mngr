@@ -28,7 +28,7 @@ const {
 const { startRelaunchAfterExit } = require('./linux-relaunch');
 // Workspace-URL classification lives in ./surface-routing so it can be
 // unit-tested under plain node (main.js can't be required outside Electron).
-const { parseWorkspaceId, parsePopoutRoute } = require('./surface-routing');
+const { parseWorkspaceId, parsePopoutRoute, popoutRoutePath } = require('./surface-routing');
 // Pulled-out workspace windows (the pull-out-window spec): the pure decisions
 // live in ./popout-policy so they can be unit-tested under plain node.
 const {
@@ -355,12 +355,14 @@ function wrapperUrlForWorkspace(workspaceId) {
 // The SPA URL that shows one pulled-out window of ``workspaceId`` in a popout
 // window (the pull-out-window spec). Like wrapperUrlForWorkspace, the
 // host-scoped coordinate rides through when no agent alias is known yet.
-function popoutUrlFor(workspaceId, windowId) {
+// ``isReopened`` marks a popout the app opens again rather than for a
+// tear-out or the window menu just now (see popoutRoutePath).
+function popoutUrlFor(workspaceId, windowId, { isReopened }) {
   if (!workspaceId || !windowId || !backendBaseUrl) return null;
   const agentScoped = toAgentScopedWorkspaceId(workspaceId);
   if (!/^(?:agent|host)-[a-f0-9]+$/i.test(agentScoped)) return null;
   if (!WINDOW_ID_PATTERN.test(windowId)) return null;
-  return backendBaseUrl + '/popout/' + encodeURIComponent(agentScoped) + '/' + encodeURIComponent(windowId);
+  return backendBaseUrl + popoutRoutePath(agentScoped, windowId, { isReopened });
 }
 
 function isPopoutBundle(bundle) {
@@ -868,7 +870,7 @@ function wireBundleNavigationEvents(bundle) {
       // A popout persists as its own port-independent route, host-keyed like
       // the workspace windows, and is restored through it.
       bundle.currentWorkspaceId = toHostScopedWorkspaceId(popoutRoute.workspaceId);
-      bundle.currentContentUrl = '/popout/' + bundle.currentWorkspaceId + '/' + popoutRoute.windowId;
+      bundle.currentContentUrl = popoutRoutePath(bundle.currentWorkspaceId, popoutRoute.windowId, { isReopened: false });
     } else {
       bundle.currentWorkspaceId = null;
       bundle.currentContentUrl = parsed.pathname + parsed.search;
@@ -1106,11 +1108,11 @@ function wireBundleShowLogic(bundle) {
 
 function openNewWindow(url, { showInactive = false } = {}) {
   const absolute = toAbsoluteUrl(url);
-  // A popout route (a session restore's) opens a popout window, not a main
-  // window on that page.
+  // A popout route (a session restore's, at launch or on a dock reopen) opens
+  // a popout window, not a main window on that page; the popout is reopened.
   const popoutRoute = parsePopoutRoute(absolute);
   if (popoutRoute) {
-    const popoutUrl = popoutUrlFor(popoutRoute.workspaceId, popoutRoute.windowId);
+    const popoutUrl = popoutUrlFor(popoutRoute.workspaceId, popoutRoute.windowId, { isReopened: true });
     const bundle = createBundle({ kind: 'popout', popout: popoutRoute });
     if (showInactive) bundle.showInactiveOnFirstShow = true;
     bundle.isLoadingState = false;
@@ -1268,7 +1270,11 @@ function reloadAllWindowsAfterRetry() {
     // describes anything. Inside the loop because with no live window nothing
     // lands and the route is still owed.
     isStartupRoutingPending = false;
-    const target = bundle.preErrorUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
+    // A popout comes back reopened: its window may have been brought back
+    // while the backend was down.
+    const target = isPopoutBundle(bundle)
+      ? popoutUrlFor(bundle.popout.workspaceId, bundle.popout.windowId, { isReopened: true })
+      : bundle.preErrorUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
     if (target) navigateBundle(bundle, target);
   }
 }
@@ -1303,8 +1309,11 @@ function restoreFromQuittingInAllWindows() {
   for (const bundle of bundles) {
     if (bundle.window.isDestroyed()) continue;
     bundle.isQuittingState = false;
-    const target = bundle.preErrorUrl || bundle.currentContentUrl
-      || (backendBaseUrl ? backendBaseUrl + '/' : null);
+    // A popout comes back reopened: its window may have been brought back
+    // while the quit page was up.
+    const target = isPopoutBundle(bundle)
+      ? popoutUrlFor(bundle.popout.workspaceId, bundle.popout.windowId, { isReopened: true })
+      : bundle.preErrorUrl || bundle.currentContentUrl || (backendBaseUrl ? backendBaseUrl + '/' : null);
     if (target) navigateBundle(bundle, target);
   }
 }
@@ -1377,7 +1386,7 @@ function toPersistedContentUrl(url) {
   const popoutRoute = parsePopoutRoute(absolute);
   if (popoutRoute) {
     const hostScoped = toHostScopedWorkspaceId(popoutRoute.workspaceId);
-    return `/popout/${encodeURIComponent(hostScoped)}/${encodeURIComponent(popoutRoute.windowId)}`;
+    return popoutRoutePath(hostScoped, popoutRoute.windowId, { isReopened: false });
   }
   const workspaceId = parseWorkspaceId(absolute) || parseRecoveryPageAgentId(absolute);
   if (workspaceId) return `/goto/${encodeURIComponent(toHostScopedWorkspaceId(workspaceId))}/`;
@@ -2970,7 +2979,7 @@ function isValidPopoutRequest(request, numberKeys) {
 // "open") or under the cursor, following it (mode "drag"). Null when the
 // popout URL cannot be built yet.
 function openPopout(source, request, mode) {
-  const url = popoutUrlFor(request.workspaceId, request.windowId);
+  const url = popoutUrlFor(request.workspaceId, request.windowId, { isReopened: false });
   if (!url) {
     console.warn(`[popout] no popout URL for ${request.windowId} of ${request.workspaceId}; not opening`);
     return null;
@@ -3228,7 +3237,7 @@ ipcMain.on('reload-chrome', (event) => {
   // workspace wrapper, which is a main window's page.
   let target;
   if (isPopoutBundle(bundle)) {
-    target = popoutUrlFor(bundle.popout.workspaceId, bundle.popout.windowId);
+    target = popoutUrlFor(bundle.popout.workspaceId, bundle.popout.windowId, { isReopened: true });
   } else if (bundle.currentWorkspaceId) {
     target = wrapperUrlForWorkspace(bundle.currentWorkspaceId);
   } else {

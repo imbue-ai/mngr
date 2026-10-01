@@ -66,8 +66,19 @@ function parsePopoutRoute(url) {
   }
 }
 
+// The SPA path of a popout (a route parsePopoutRoute reads back). A popout
+// the app reopens (a restore, a reload) carries `?reopened=1`, which the SPA
+// passes on to the workspace shell: a reopened popout's shell trusts the
+// stored layout at once, while a freshly torn-out one waits for the desktop's
+// detach save, still on its way while it loads.
+function popoutRoutePath(workspaceId, windowId, { isReopened }) {
+  const path = '/popout/' + encodeURIComponent(workspaceId) + '/' + encodeURIComponent(windowId);
+  return isReopened ? path + '?reopened=1' : path;
+}
+
 module.exports = {
   parseWorkspaceId,
   parseSpaWorkspaceRouteId,
   parsePopoutRoute,
+  popoutRoutePath,
 };

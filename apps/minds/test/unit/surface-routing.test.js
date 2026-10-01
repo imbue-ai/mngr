@@ -10,7 +10,12 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseWorkspaceId, parseSpaWorkspaceRouteId, parsePopoutRoute } = require('../../electron/surface-routing');
+const {
+  parseWorkspaceId,
+  parseSpaWorkspaceRouteId,
+  parsePopoutRoute,
+  popoutRoutePath,
+} = require('../../electron/surface-routing');
 
 const BASE = 'http://localhost:8080';
 const AGENT = 'agent-0a1b2c3d4e5f';
@@ -74,4 +79,17 @@ test('parsePopoutRoute matches the SPA /popout/<workspace>/<window> route only',
   assert.equal(parsePopoutRoute(`${BASE}/workspace/${AGENT}`), null);
   assert.equal(parsePopoutRoute(''), null);
   assert.equal(parsePopoutRoute('/popout/x/y'), null);
+});
+
+test('popoutRoutePath marks a reopened popout, and the marked path still reads back as the same popout', () => {
+  const route = { workspaceId: AGENT, windowId: 'win-0123456789abcdef' };
+  // A tear-out or the window menu's open: the shell waits for the desktop's detach save.
+  const fresh = popoutRoutePath(AGENT, 'win-0123456789abcdef', { isReopened: false });
+  assert.equal(fresh, `/popout/${AGENT}/win-0123456789abcdef`);
+  // A session restore, a dock reopen, a reload: the shell trusts the stored layout at once.
+  const reopened = popoutRoutePath(AGENT, 'win-0123456789abcdef', { isReopened: true });
+  assert.equal(new URL(reopened, BASE).searchParams.get('reopened'), '1');
+  // The mark is on the query, so persistence and restore (which read the route) see the same popout.
+  assert.deepEqual(parsePopoutRoute(`${BASE}${fresh}`), route);
+  assert.deepEqual(parsePopoutRoute(`${BASE}${reopened}`), route);
 });
