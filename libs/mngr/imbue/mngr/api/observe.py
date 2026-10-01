@@ -2,7 +2,6 @@ import fcntl
 import json
 import os
 import queue
-import select
 import threading
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -15,7 +14,6 @@ from enum import auto
 from pathlib import Path
 from typing import Final
 
-import psutil
 from loguru import logger
 from pydantic import ConfigDict
 from pydantic import Field
@@ -63,6 +61,7 @@ from imbue.mngr.utils.file_watch import WATCHED_TAIL_FALLBACK_POLL_SECONDS
 from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines
+from imbue.mngr.utils.process_exit_watch import ProcessExitWatch
 
 # Constants
 
@@ -75,12 +74,6 @@ FULL_STATE_INTERVAL_SECONDS: Final[float] = 300.0
 # moment they arrive (the get returns immediately), so this bounds only how
 # often the worker re-checks that its child processes are still alive.
 _ACTIVITY_QUEUE_POLL_SECONDS: Final[float] = 5.0
-# Timeout for each psutil wait() call in a PID watcher's *fallback* loop (used
-# only when the event-driven pidfd wait is unavailable, i.e. macOS or an old
-# Linux kernel). Bounds how long such a watcher takes to notice a stop request
-# (it cannot interrupt an in-flight wait); process death itself is detected
-# event-driven by psutil, well before this elapses.
-_WATCH_POLL_SECONDS: Final[float] = 3.0
 # Cheap byte-level pre-filter so scanning a large event file does not run every
 # line through ``json.loads``. Only lines containing the literal type token are
 # parsed to confirm they really are full-state snapshots.
@@ -988,76 +981,6 @@ class _KnownHost(FrozenModel):
     host_name: HostName = Field(description="Human-readable name of the host")
 
 
-class _AgentWatcher(FrozenModel):
-    """Bookkeeping for one local agent's PID-death watcher thread.
-
-    ``pid`` is what the watcher is currently bound to, so a reconcile can tell
-    whether the agent's main process changed. Holds a live thread and stop Event
-    (hence arbitrary_types_allowed); it is never serialized.
-    """
-
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
-
-    pid: int = Field(description="PID the watcher is bound to")
-    stop_event: threading.Event = Field(description="Set to ask the watcher thread to stop")
-    thread: threading.Thread = Field(description="The running watcher thread")
-    stop_wake_write_fd: int = Field(
-        description="Write end of the watcher's stop pipe; closing it wakes the thread's "
-        "event-driven poll(2) wait (the read end sees POLLHUP)"
-    )
-
-
-def _signal_watcher_stop(watcher: _AgentWatcher) -> None:
-    """Ask a watcher thread to stop and wake its (possibly poll(2)-blocked) wait.
-
-    Closing the pipe's write end raises POLLHUP on the read end, which the
-    pidfd wait treats as a stop request. Callers always pop the watcher from
-    the registry (under the watchers lock) before signalling, so each watcher
-    is signalled at most once and the fd is never double-closed.
-    """
-    watcher.stop_event.set()
-    os.close(watcher.stop_wake_write_fd)
-
-
-def _wait_for_pid_exit_via_pidfd(process: psutil.Process, stop_wake_read_fd: int) -> bool | None:
-    """Event-driven wait for a process exit, with no wake-ups until something happens.
-
-    Blocks in poll(2) on the process's pidfd (readable once the process exits)
-    and the watcher's stop pipe (POLLHUP once the write end is closed by
-    :func:`_signal_watcher_stop`). Returns True when the process exited, False
-    on a stop request, and None when pidfd is unavailable on this platform
-    (macOS, or a pre-5.3 Linux kernel) so the caller can fall back to the
-    psutil polling wait. A process that is already gone counts as exited.
-    """
-    if not hasattr(os, "pidfd_open"):
-        return None
-    pid = process.pid
-    try:
-        pidfd = os.pidfd_open(pid)
-    except ProcessLookupError:
-        return True
-    except OSError as e:
-        logger.debug("pidfd_open unavailable for pid {} (falling back to psutil wait): {}", pid, e)
-        return None
-    try:
-        # pidfd_open pinned whichever process owns the pid right now, while
-        # ``process`` pinned (by create_time) whichever owned it at watcher
-        # creation. is_running() compares the two: False means the watched
-        # process already exited and the pid was recycled, so report the exit
-        # instead of polling an unrelated process's pidfd forever.
-        if not process.is_running():
-            return True
-        poller = select.poll()
-        poller.register(pidfd, select.POLLIN)
-        poller.register(stop_wake_read_fd, select.POLLIN)
-        # Blocks with no timeout; python retries EINTR internally. Exit wins a
-        # tie so a death racing a stop request is still reported as an exit.
-        ready_fds = {fd for fd, _event_mask in poller.poll()}
-        return pidfd in ready_fds
-    finally:
-        os.close(pidfd)
-
-
 def _make_unknown_agent_details(last_known: AgentDetails) -> AgentDetails:
     """Build a synthetic AgentDetails representing an UNKNOWN agent.
 
@@ -1122,11 +1045,11 @@ class AgentObserver(MutableModel):
     # so the same id may exist on multiple hosts (e.g. mid-migration) and each
     # instance is tracked independently.
     _last_tracked_state_by_instance: dict[str, _TrackedState] = PrivateAttr(default_factory=dict)
-    # PID-death watchers for local agents, keyed by agent instance. Each entry owns a
-    # thread that blocks on psutil until the agent's main process exits, then
-    # enqueues the agent's host for a re-probe so the death is emitted as state.
-    _watchers: dict[str, _AgentWatcher] = PrivateAttr(default_factory=dict)
-    _watchers_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
+    # Watches each local agent's main process, keyed by agent instance, and enqueues the
+    # agent's host for a re-probe when it exits so the death is emitted as state. One
+    # thread waits on every agent, built with the first watch.
+    _process_exit_watch: ProcessExitWatch | None = PrivateAttr(default=None)
+    _process_exit_watch_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
     # Serializes agents_event_sink calls from the several threads that emit
     # agents-stream events (activity worker, snapshot loop, discovery-output
@@ -1624,90 +1547,24 @@ class AgentObserver(MutableModel):
         self._open_or_replace_watcher(instance_key_str, str(agent.host.id), agent.pid)
 
     def _open_or_replace_watcher(self, instance_key_str: str, host_id_str: str, pid: int) -> None:
-        """Ensure a watcher thread is running for ``pid``, replacing one on a stale PID.
+        """Watch ``pid`` for the agent, replacing a watch on a stale PID; re-probe the host if it is already gone."""
+        is_watched = self._get_process_exit_watch().watch(
+            instance_key_str, pid, lambda: self._on_watched_process_exit(instance_key_str, host_id_str, pid)
+        )
+        if not is_watched:
+            self._activity_queue.put(host_id_str)
 
-        Held under ``_watchers_lock`` for its whole duration so two reconcile paths
-        (the activity worker and the snapshot loop) cannot each start a thread for
-        the same agent and leak one. The stale-watcher stop/join is inlined rather
-        than delegated to ``_close_watcher`` to avoid re-acquiring the non-reentrant
-        lock; joining here is deadlock-free because ``_watch_pid`` never takes it.
-        """
-        with self._watchers_lock:
-            existing = self._watchers.get(instance_key_str)
-            if existing is not None and existing.pid == pid:
-                return
-            # New agent or the main process changed (PID differs): stop the stale
-            # watcher first, then start a fresh one bound to the current PID.
-            if existing is not None:
-                self._watchers.pop(instance_key_str, None)
-                _signal_watcher_stop(existing)
-                existing.thread.join(timeout=5.0)
-            try:
-                process = psutil.Process(pid)
-            except psutil.NoSuchProcess:
-                # The process is already gone. Enqueue a re-probe so the next listing
-                # emits the stopped/done state rather than silently missing the death.
-                self._activity_queue.put(host_id_str)
-                return
-            stop_event = threading.Event()
-            # The stop pipe wakes the thread's event-driven poll(2) wait; the
-            # thread owns (and closes) the read end, the _AgentWatcher entry owns
-            # the write end (closed by _signal_watcher_stop).
-            stop_wake_read_fd, stop_wake_write_fd = os.pipe()
-            # is_checked=False so a single watcher's failure is isolated (logged via
-            # on_failure) instead of being re-raised at the next strand start / group
-            # exit, which would poison the whole ConcurrencyGroup and stop all
-            # observation -- see _on_watcher_failure for the intended isolation.
-            is_thread_started = False
-            try:
-                thread = self._concurrency_group.start_new_thread(
-                    target=lambda: self._watch_pid(
-                        instance_key_str, host_id_str, process, pid, stop_event, stop_wake_read_fd
-                    ),
-                    daemon=True,
-                    name=f"observe-pid-watch-{instance_key_str[:14]}",
-                    on_failure=self._on_watcher_failure,
-                    is_checked=False,
+    def _get_process_exit_watch(self) -> ProcessExitWatch:
+        with self._process_exit_watch_lock:
+            if self._process_exit_watch is None:
+                self._process_exit_watch = ProcessExitWatch(
+                    concurrency_group=self._concurrency_group, thread_name="observe-pid-watch"
                 )
-                is_thread_started = True
-            finally:
-                if not is_thread_started:
-                    os.close(stop_wake_read_fd)
-                    os.close(stop_wake_write_fd)
-            self._watchers[instance_key_str] = _AgentWatcher(
-                pid=pid, stop_event=stop_event, thread=thread, stop_wake_write_fd=stop_wake_write_fd
-            )
+            return self._process_exit_watch
 
-    def _watch_pid(
-        self,
-        instance_key_str: str,
-        host_id_str: str,
-        process: psutil.Process,
-        pid: int,
-        stop_event: threading.Event,
-        stop_wake_read_fd: int,
-    ) -> None:
-        """Block until the watched process exits (or a stop is requested), then signal activity.
-
-        On Linux the wait is fully event-driven: a poll(2) over the process's
-        pidfd and the watcher's stop pipe blocks with no timer at all. When
-        pidfd is unavailable (macOS, old kernels) it falls back to psutil's
-        wait -- itself event-driven for process death -- polled with a short
-        timeout only to notice stop requests.
-        """
-        try:
-            pidfd_wait_result = _wait_for_pid_exit_via_pidfd(process, stop_wake_read_fd)
-            if pidfd_wait_result is None:
-                is_exited = self._wait_for_pid_exit_via_psutil(instance_key_str, process, pid, stop_event)
-            else:
-                is_exited = pidfd_wait_result
-        finally:
-            os.close(stop_wake_read_fd)
-        if not is_exited:
-            return
-        # A stop request that raced the exit means this watcher was replaced or
-        # the observer is shutting down -- the re-probe is no longer ours to ask for.
-        if stop_event.is_set() or self._stop_event.is_set():
+    def _on_watched_process_exit(self, instance_key_str: str, host_id_str: str, pid: int) -> None:
+        # A shutting-down observer no longer asks for re-probes.
+        if self._stop_event.is_set():
             return
         logger.debug(
             "Local agent {} main process (pid {}) exited; enqueueing host {} for re-probe",
@@ -1717,55 +1574,19 @@ class AgentObserver(MutableModel):
         )
         self._activity_queue.put(host_id_str)
 
-    def _wait_for_pid_exit_via_psutil(
-        self,
-        instance_key_str: str,
-        process: psutil.Process,
-        pid: int,
-        stop_event: threading.Event,
-    ) -> bool:
-        """Fallback wait for platforms without pidfd. True when the process exited, False on a stop request."""
-        while not (stop_event.is_set() or self._stop_event.is_set()):
-            try:
-                process.wait(timeout=_WATCH_POLL_SECONDS)
-            except psutil.TimeoutExpired:
-                continue
-            except (psutil.Error, OSError) as e:
-                # psutil.Process.wait() can surface a bare OSError (not a psutil.Error)
-                # when its underlying os.pidfd_open/kqueue/poll fails; treat any such
-                # failure the same as an exit and re-probe rather than crash the watcher.
-                logger.debug("PID watch for agent {} (pid {}) errored, treating as exit: {}", instance_key_str, pid, e)
-            return True
-        return False
-
     def _close_watcher(self, instance_key_str: str) -> None:
-        """Stop and join the watcher for an agent, if any. Idempotent.
-
-        Held under ``_watchers_lock`` through the join (deadlock-free because the
-        watcher thread never takes that lock) so it cannot race a concurrent
-        reconcile into leaving two entries for the same agent.
-        """
-        with self._watchers_lock:
-            watcher = self._watchers.pop(instance_key_str, None)
-            if watcher is None:
-                return
-            _signal_watcher_stop(watcher)
-            watcher.thread.join(timeout=5.0)
+        """Stop watching an agent's process, if it is watched. Idempotent."""
+        with self._process_exit_watch_lock:
+            process_exit_watch = self._process_exit_watch
+        if process_exit_watch is not None:
+            process_exit_watch.unwatch(instance_key_str)
 
     def _close_all_watchers(self) -> None:
-        """Tear down every PID watcher (observer shutdown)."""
-        with self._watchers_lock:
-            instance_key_strs = list(self._watchers.keys())
-        for instance_key_str in instance_key_strs:
-            self._close_watcher(instance_key_str)
+        """Stop watching every agent's process and join the watch thread (observer shutdown).
 
-    def _on_watcher_failure(self, e: BaseException) -> None:
-        """Log an unexpected watcher-thread failure without tearing down the observer.
-
-        One local agent's watch dying should not stop observing every other agent;
-        the periodic snapshot still catches that agent's death, just less promptly.
+        Closes the watch even if none was built yet, so a reconcile racing the shutdown is refused.
         """
-        logger.opt(exception=e).warning("PID watcher thread failed")
+        self._get_process_exit_watch().close()
 
     def _emit_observe_event(self, event: EventEnvelope) -> None:
         """Append an agents-stream event to its file and forward it to the sink when set.

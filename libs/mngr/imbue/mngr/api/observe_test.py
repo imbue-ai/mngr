@@ -1,8 +1,6 @@
 import json
-import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -14,7 +12,6 @@ from datetime import timezone
 from pathlib import Path
 from typing import Final
 
-import psutil
 import pytest
 
 from imbue.imbue_common.event_envelope import EventEnvelope
@@ -43,7 +40,6 @@ from imbue.mngr.api.observe import _TrackedState
 from imbue.mngr.api.observe import _details_instance_key
 from imbue.mngr.api.observe import _make_unknown_agent_details
 from imbue.mngr.api.observe import _scan_last_snapshot_and_boundary
-from imbue.mngr.api.observe import _wait_for_pid_exit_via_pidfd
 from imbue.mngr.api.observe import acquire_observe_lock
 from imbue.mngr.api.observe import append_agent_state_change_event
 from imbue.mngr.api.observe import append_observe_event
@@ -1342,35 +1338,38 @@ def _spawn_sleeper() -> subprocess.Popen[bytes]:
     return subprocess.Popen(["sleep", "60"])
 
 
+@contextmanager
+def _running_process_exit_watch(observer: AgentObserver) -> Iterator[None]:
+    """Run the observer's concurrency group, closing its process exit watch before the group exits."""
+    with observer._concurrency_group:
+        try:
+            yield
+        finally:
+            observer._close_all_watchers()
+
+
 def test_reconcile_watcher_opens_replaces_and_closes(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """The watcher registry opens on first sighting, replaces on PID change, and closes when the PID is gone."""
+    """The watch opens on first sighting, follows a PID change, and closes when the PID is gone."""
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     proc_a = _spawn_sleeper()
     proc_b = _spawn_sleeper()
     host_id = HostId.generate()
     try:
-        with observer._concurrency_group:
+        with _running_process_exit_watch(observer):
             agent_a = make_test_agent_details(name="watched", host_id=host_id, pid=proc_a.pid)
             instance_key_str = _details_instance_key(agent_a)
-
-            # First sighting opens a watcher bound to proc_a.
+            # First sighting watches proc_a.
             observer._reconcile_watcher_for_agent(agent_a)
-            assert observer._watchers[instance_key_str].pid == proc_a.pid
-            first_thread = observer._watchers[instance_key_str].thread
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc_a.pid
 
-            # Same PID: no replacement (same watcher thread kept).
-            observer._reconcile_watcher_for_agent(agent_a)
-            assert observer._watchers[instance_key_str].thread is first_thread
-
-            # PID changed: watcher is replaced and the old thread is stopped.
+            # PID changed: the watch follows the new process.
             agent_b = agent_a.model_copy_update(to_update(agent_a.field_ref().pid, proc_b.pid))
             observer._reconcile_watcher_for_agent(agent_b)
-            assert observer._watchers[instance_key_str].pid == proc_b.pid
-            assert not first_thread.is_alive()
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc_b.pid
 
-            # No live process (pid None): watcher closed and removed.
+            # No live process (pid None): the watch is closed.
             observer._reconcile_watcher_for_agent(agent_a.model_copy_update(to_update(agent_a.field_ref().pid, None)))
-            assert instance_key_str not in observer._watchers
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) is None
     finally:
         for proc in (proc_a, proc_b):
             proc.terminate()
@@ -1382,28 +1381,27 @@ def test_reconcile_watcher_skips_remote_agents(temp_mngr_ctx: MngrContext, noop_
 
     The PID is in the remote host's namespace; watching it here would bind to an
     unrelated same-numbered local process. A remote sighting also closes any
-    watcher left over from when the agent was local.
+    watch left over from when the agent was local.
     """
     observer = _make_observer(temp_mngr_ctx, noop_binary)
     proc = _spawn_sleeper()
     try:
-        with observer._concurrency_group:
+        with _running_process_exit_watch(observer):
             local_agent = make_test_agent_details(name="roaming", pid=proc.pid)
             remote_host = local_agent.host.model_copy_update(
                 to_update(local_agent.host.field_ref().provider_name, ProviderInstanceName("modal"))
             )
             remote_agent = local_agent.model_copy_update(to_update(local_agent.field_ref().host, remote_host))
             instance_key_str = _details_instance_key(local_agent)
-
-            # A remote agent carrying a pid does not open a watcher.
+            # A remote agent carrying a pid is not watched.
             observer._reconcile_watcher_for_agent(remote_agent)
-            assert instance_key_str not in observer._watchers
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) is None
 
-            # A remote sighting closes a watcher opened while the agent was local.
+            # A remote sighting closes a watch opened while the agent was local.
             observer._reconcile_watcher_for_agent(local_agent)
-            assert instance_key_str in observer._watchers
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) == proc.pid
             observer._reconcile_watcher_for_agent(remote_agent)
-            assert instance_key_str not in observer._watchers
+            assert observer._get_process_exit_watch().watched_pid(instance_key_str) is None
     finally:
         proc.terminate()
         proc.wait()
@@ -1415,13 +1413,13 @@ def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: Mngr
     proc = _spawn_sleeper()
     host_id = HostId.generate()
     try:
-        with observer._concurrency_group:
+        with _running_process_exit_watch(observer):
             agent = make_test_agent_details(name="dying", host_id=host_id, pid=proc.pid)
             observer._reconcile_watcher_for_agent(agent)
-            assert _details_instance_key(agent) in observer._watchers
+            assert observer._get_process_exit_watch().watched_pid(_details_instance_key(agent)) == proc.pid
 
-            # The process dies on its own; the watcher should notice via psutil and
-            # enqueue the agent's host for a re-probe.
+            # The process dies on its own; the watch should notice and enqueue the
+            # agent's host for a re-probe.
             proc.terminate()
 
             host_id_str = str(agent.host.id)
@@ -1438,68 +1436,32 @@ def test_pid_watcher_enqueues_host_when_watched_process_dies(temp_mngr_ctx: Mngr
     finally:
         if proc.poll() is None:
             proc.kill()
-        # Reap if psutil's wait did not already (avoids a lingering zombie).
-        try:
-            proc.wait(timeout=1.0)
-        except (subprocess.TimeoutExpired, ChildProcessError):
-            pass
+        proc.wait()
 
 
-class _RaisingWaitProcess(psutil.Process):
-    """Concrete psutil.Process double whose wait() raises OSError, as pidfd_open/kqueue can."""
+def test_many_local_agents_are_watched_from_one_thread(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
+    """Watching many local agents adds one thread, not one per agent.
 
-    def wait(self, timeout: float | None = None) -> int | None:
-        raise OSError("simulated pidfd_open failure")
-
-
-def test_psutil_fallback_wait_treats_wait_oserror_as_exit(temp_mngr_ctx: MngrContext, noop_binary: str) -> None:
-    """A bare OSError from process.wait() is treated as exit (re-probe), not a crash.
-
-    psutil.Process.wait() can surface a plain OSError (not a psutil.Error) from its
-    os.pidfd_open/kqueue/poll backend; the fallback wait must report it as an exit
-    rather than let it escape and kill the watcher thread.
+    A burst of per-agent threads is what grew the observer's glibc malloc arenas.
     """
     observer = _make_observer(temp_mngr_ctx, noop_binary)
-
-    is_exited = observer._wait_for_pid_exit_via_psutil("agent-1", _RaisingWaitProcess(), 4321, threading.Event())
-
-    assert is_exited is True
-
-
-@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="pidfd_open is Linux-only")
-def test_wait_for_pid_exit_via_pidfd_reports_exit() -> None:
-    """The pidfd wait returns True once the watched process has exited."""
-    proc = subprocess.Popen([sys.executable, "-c", "pass"])
-    stop_wake_read_fd, stop_wake_write_fd = os.pipe()
+    procs = [_spawn_sleeper() for _ in range(8)]
     try:
-        assert _wait_for_pid_exit_via_pidfd(psutil.Process(proc.pid), stop_wake_read_fd) is True
+        with _running_process_exit_watch(observer):
+            threads_before = set(threading.enumerate())
+            agents = [make_test_agent_details(name="many", pid=proc.pid) for proc in procs]
+            for agent in agents:
+                observer._reconcile_watcher_for_agent(agent)
+            process_exit_watch = observer._get_process_exit_watch()
+            new_threads = set(threading.enumerate()) - threads_before
+            assert [thread.name for thread in new_threads] == [process_exit_watch.thread_name]
+            assert [process_exit_watch.watched_pid(_details_instance_key(agent)) for agent in agents] == [
+                proc.pid for proc in procs
+            ]
     finally:
-        os.close(stop_wake_read_fd)
-        os.close(stop_wake_write_fd)
-        proc.wait()
-
-
-@pytest.mark.skipif(not hasattr(os, "pidfd_open"), reason="pidfd_open is Linux-only")
-def test_wait_for_pid_exit_via_pidfd_stop_pipe_close_unblocks() -> None:
-    """Closing the stop pipe's write end wakes the blocked wait and reports no exit."""
-    proc = subprocess.Popen(["sleep", "37963"])
-    stop_wake_read_fd, stop_wake_write_fd = os.pipe()
-    results: list[bool | None] = []
-    process = psutil.Process(proc.pid)
-    thread = threading.Thread(
-        target=lambda: results.append(_wait_for_pid_exit_via_pidfd(process, stop_wake_read_fd)),
-        daemon=True,
-    )
-    thread.start()
-    try:
-        os.close(stop_wake_write_fd)
-        thread.join(timeout=5.0)
-        assert not thread.is_alive(), "pidfd wait did not unblock on stop pipe close"
-        assert results == [False]
-    finally:
-        os.close(stop_wake_read_fd)
-        proc.kill()
-        proc.wait()
+        for proc in procs:
+            proc.terminate()
+            proc.wait()
 
 
 # Follower Tests

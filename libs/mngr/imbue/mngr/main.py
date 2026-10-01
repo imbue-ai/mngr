@@ -62,6 +62,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.providers.registry import get_all_provider_args_help_sections
 from imbue.mngr.utils.click_utils import detect_alias_to_canonical
 from imbue.mngr.utils.click_utils import detect_aliases_by_command
+from imbue.mngr.utils.malloc_arenas import cap_malloc_arenas
 
 
 def _call_on_error_hook(ctx: click.Context, error: BaseException) -> None:
@@ -169,6 +170,9 @@ def cli(ctx: click.Context) -> None:
     """
     Initial entry point for mngr CLI commands.
     """
+    # Before any command starts its threads, so their allocations share arenas.
+    cap_malloc_arenas()
+
     # Quoted so an argument containing a space stays one argument in ``ps``.
     setproctitle.setproctitle(shlex.join(["mngr"] + sys.argv[1:]))
 
