@@ -1,0 +1,29 @@
+{
+  "fill" : {
+    "solid" : "srgb:0.28627,0.13333,0.13333,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "figure.png",
+          "name" : "figure"
+        }
+      ],
+      "name" : "figure",
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

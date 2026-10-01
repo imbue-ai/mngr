@@ -42,7 +42,11 @@ Because the column is centred, anything that does not fit is cropped at *both* e
 
 The page is moved along entirely by the main process, so opened in a browser (`open shell.html#intro`, or `#quitting` for the quitting screen) it arrives, shows the loader and then waits there -- which is the way to sit and look at that state. Everything past the wait is a message main sends, so the departure is only seen in the app.
 
-**The app icon.** `assets/icon.svg` is the artwork as the brand draws it: a square tile, cream figure on `#492222`, no corner treatment. Each platform's PNG is that tile under the corner its platform expects, which is not the same corner. macOS crops to the brand's squircle on Apple's grid -- an 824x824 body centred in the 1024 canvas -- because the Dock draws an icon at the size the file gives it, and a full-bleed 1024 sits visibly larger than every native app beside it. Linux crops to a plain rounded square at the full 1024, radius 128: no Linux desktop masks the icon to a shape of its own, so the file is what is shown, and padding it would only make it small. `icon-dev.png` is the macOS cut on olive (`#4B4C08`) with a `dev` label, which `installDevDockIcon` puts in the dock of an unpackaged run so a dev build is never mistaken for the installed one.
+**The app icon.** `assets/icon.svg` is the artwork as the brand draws it: a square tile, cream figure on `#492222`, no corner treatment. The corner, and now the material, are the platform's business, and the platforms do not agree.
+
+macOS gets `assets/icon.icon`, an Icon Composer package: `icon.json` plus the cream figure alone on a transparent 1024 canvas (`Assets/figure.png`), with the brown as the document's `fill`. It is there to state the material rather than let macOS guess it. macOS 26 reads a flat `.icns` as artwork to light -- it separates the figure from the plate and applies the Liquid Glass material, so the tile arrives in the Dock bevelled, glossy and shaded top-to-bottom. The package turns that off at the source: `specular: false`, `glass: false`, `shadow.kind: none`, `translucency.enabled: false`. The system still draws the squircle and still lights the plate's edge, as it does for every icon on the platform; what it no longer does is emboss the figure. The figure is in the full-bleed 1024 space here, not the 824 body the old `.icns` used -- that inset existed only to fake the squircle the system now draws itself. The builder compiles the package with `actool` (Xcode 26 or newer, on the build machine) into `Assets.car` and `CFBundleIconName`, and cuts the legacy `icon.icns` from it too, so `icon.png` no longer reaches macOS at all; it stays as the top-level `icon`, the generic fallback.
+
+Linux gets `icon-linux.png`, the tile under a plain rounded square at the full 1024, radius 128: no Linux desktop masks the icon to a shape of its own, so the file is what is shown, and padding it would only make it small. `icon-dev.png` is a squircle cut on olive (`#4B4C08`) with a `dev` label, which `installDevDockIcon` puts in the dock of an unpackaged run so a dev build is never mistaken for the installed one; it goes through `app.dock.setIcon` as a plain image and so is not covered by the `.icon` package.
 
 ### The first run
 
@@ -442,9 +446,12 @@ apps/minds/
     startup-routing.js      # Pure first-window route decision (electron-free, unit-tested)
     assets/
       icon.svg              # App icon: the square master, no corner treatment
-      icon.png              # App icon, macOS cut: 824 body in a 1024 canvas, the brand squircle
+      icon.icon/            # App icon, macOS: the Icon Composer package that states the flat material
+        icon.json           # The manifest: the brown plate as the fill, the figure as one flat layer
+        Assets/figure.png   # The cream figure alone, on a transparent 1024 canvas
+      icon.png              # App icon, squircle cut: the generic top-level fallback
       icon-linux.png        # App icon, Linux cut: full-bleed 1024, a plain 128 corner
-      icon-dev.png          # The macOS cut on olive with a `dev` label: the unpackaged dock icon
+      icon-dev.png          # The squircle cut on olive with a `dev` label: the unpackaged dock icon
       studio-wordmark.svg   # The brand lockup the parked mark shows (the SPA inlines its own copy for the start titlebar)
     pyproject/
       pyproject.toml        # Standalone: declares minds dependency

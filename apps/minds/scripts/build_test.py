@@ -1492,3 +1492,55 @@ def test_todesktop_config_excludes_resources_from_app_files() -> None:
             f"extraResources source {source!r} lives outside resources/, where appFiles would "
             "upload it a second time into app.asar"
         )
+
+
+def test_macos_icon_package_declares_a_flat_material() -> None:
+    """Guard: ``mac.icon`` must be an Icon Composer package that turns glass off.
+
+    macOS 26 reads a legacy ``.icns`` as artwork to light -- it separates the
+    cream figure from the brown plate and applies the Liquid Glass material,
+    which puts a bevel, a specular rim and a top-to-bottom shade on a tile the
+    brand draws flat. Pointing ``mac.icon`` at a ``.icon`` package is what
+    states the material instead of leaving it to be guessed. The gloss is only
+    visible in a packaged build on macOS 26.
+    """
+    todesktop = _load_todesktop_config()
+    icon_rel = todesktop.get("mac", {}).get("icon")
+    assert icon_rel and icon_rel.endswith(".icon"), (
+        "todesktop.js must point mac.icon at an Icon Composer .icon package; "
+        f"got {icon_rel!r}. A .icns or .png there is auto-glassed by macOS 26."
+    )
+    icon_dir = APP_ROOT / icon_rel
+    assert icon_dir.is_dir(), f"{icon_rel} must be a directory (a .icon is a package)"
+
+    manifest = json.loads((icon_dir / "icon.json").read_text())
+    # figure.png is the figure alone on transparency, so the plate the brand draws
+    # lives only in this key, and Icon Composer's own default for it is a gradient.
+    fill = manifest.get("fill", {})
+    assert "solid" in fill, f"icon.json must paint the plate with a solid fill; its fill declares {sorted(fill)}"
+    space, _, channels = fill["solid"].partition(":")
+    assert space in ("srgb", "extended-srgb"), f"unexpected colour space in icon.json's fill: {fill['solid']!r}"
+    red, green, blue, alpha = (float(channel) for channel in channels.split(","))
+    plate = "#" + "".join(f"{round(channel * 255):02x}" for channel in (red, green, blue))
+    master = re.search(
+        r'<rect[^>]+fill="(#[0-9a-fA-F]{6})"', (APP_ROOT / "electron" / "assets" / "icon.svg").read_text()
+    )
+    assert master is not None, "icon.svg must paint its tile with a hex <rect> fill for this guard to read"
+    assert (plate, alpha) == (master.group(1).lower(), 1.0), (
+        f"icon.json fills the plate with {plate} at alpha {alpha}; icon.svg draws the tile {master.group(1)}, opaque"
+    )
+
+    groups = manifest["groups"]
+    assert groups, "icon.json must declare at least one layer group"
+    for group in groups:
+        assert group.get("specular") is False, "specular must be off or the figure gets a highlight"
+        assert group.get("shadow", {}).get("kind") == "none", "the figure must not cast a shadow onto the plate"
+        assert group.get("translucency", {}).get("enabled") is False, "the figure must not be translucent"
+        layers = group.get("layers", [])
+        assert layers, f"group {group.get('name')!r} must carry a layer, or the package draws a bare plate"
+        for layer in layers:
+            name = layer.get("image-name")
+            assert name, f"every layer must name its artwork; group {group.get('name')!r} has one that does not"
+            assert layer.get("glass") is False, f"every layer must set glass: false; {name} does not"
+            asset = icon_dir / "Assets" / name
+            assert asset.is_file(), f"icon.json references a missing asset: {asset}"

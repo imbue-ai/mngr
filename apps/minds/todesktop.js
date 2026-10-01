@@ -58,6 +58,14 @@ module.exports = {
   // second copy of its subtree in app.asar.
   mac: {
     entitlements: 'entitlements.mac.plist',
+    // macOS 26 reads a legacy `.icns` as artwork to light: it separates the
+    // cream figure from the brown plate and gives it the Liquid Glass
+    // material, so the flat tile the brand draws arrives in the Dock bevelled
+    // and glossy. An Icon Composer `.icon` states the material instead, which
+    // is the only way to decline it. The builder compiles the package with
+    // `actool` (Xcode 26+, on the build machine) and cuts the legacy
+    // `icon.icns` from it too, so the top-level `icon` never reaches macOS.
+    icon: './electron/assets/icon.icon',
     // Finder, the Dock and Get Info read this. CFBundleName is deliberately
     // absent so it defaults to productName: Electron resolves the helper apps
     // as `<CFBundleName> Helper.app` while the builder names them from
@@ -69,8 +77,8 @@ module.exports = {
   linux: {
     category: 'Development',
     // Linux desktops draw the icon file as it is -- none of them mask it to a
-    // platform shape the way the Dock does -- so Linux gets the full-bleed,
-    // squarer cut rather than the macOS one, which the top-level `icon` serves.
+    // platform shape the way the Dock does -- so Linux's cut bakes in its own
+    // squarer corner, where `mac.icon` leaves the shape to the system.
     icon: './electron/assets/icon-linux.png',
     // Chromium's sandbox needs either a root-owned setuid helper, which an
     // AppImage's user-owned mount cannot carry, or unprivileged user
