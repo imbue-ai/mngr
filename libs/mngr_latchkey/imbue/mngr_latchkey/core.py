@@ -59,6 +59,7 @@ from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr_latchkey._spawn import spawn_detached_latchkey_ensure_browser
 from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogError
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
+from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
 from imbue.mngr_latchkey.encryption_key import LATCHKEY_ENCRYPTION_KEY_ENV_VAR
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
@@ -625,6 +626,7 @@ def _build_local_latchkey_env(
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     inject_encryption_key_into_env(env, encryption_key)
+    inject_app_name_prefix_into_env(env)
     return env
 
 
@@ -632,18 +634,13 @@ def _build_env_with_latchkey_directory(
     latchkey_directory: Path | None,
     *,
     encryption_key: SecretStr | None = None,
-) -> dict[str, str] | None:
-    """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process.
-
-    Returns ``None`` when no override is requested so the child inherits
-    the parent environment unchanged.
-    """
-    if latchkey_directory is None and encryption_key is None:
-        return None
+) -> dict[str, str]:
+    """Build an env override that pins ``LATCHKEY_DIRECTORY`` for a child process."""
     env = dict(os.environ)
     if latchkey_directory is not None:
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     inject_encryption_key_into_env(env, encryption_key)
+    inject_app_name_prefix_into_env(env)
     return env
 
 
@@ -726,6 +723,7 @@ def _build_gateway_env(
     # The permission check still runs, and denies whatever no rule allows.
     env["LATCHKEY_PASSTHROUGH_UNKNOWN"] = "1"
     inject_encryption_key_into_env(env, encryption_key)
+    inject_app_name_prefix_into_env(env)
     return env
 
 
@@ -1957,10 +1955,7 @@ class Latchkey(MutableModel):
         (used by :meth:`add_account`).
         """
         env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        if is_ephemeral and env is not None:
-            # ``_build_env_with_latchkey_directory`` only returns ``None`` when
-            # neither a directory nor an encryption key is set; here we always
-            # pass an encryption key, so ``env`` is a real dict we can extend.
+        if is_ephemeral:
             env[LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR] = "1"
         cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
         with cg:

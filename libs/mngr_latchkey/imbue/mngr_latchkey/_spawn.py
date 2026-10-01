@@ -29,6 +29,7 @@ from loguru import logger
 from pydantic import SecretStr
 
 from imbue.imbue_common.logging import generate_rotation_timestamp
+from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
 from imbue.mngr_latchkey.store import forward_events_log_path
 from imbue.mngr_latchkey.store import plugin_data_dir as _plugin_data_dir
@@ -132,6 +133,7 @@ def spawn_detached_latchkey_ensure_browser(
         latchkey_directory.mkdir(parents=True, exist_ok=True)
         env["LATCHKEY_DIRECTORY"] = str(latchkey_directory)
     inject_encryption_key_into_env(env, encryption_key)
+    inject_app_name_prefix_into_env(env)
 
     _rotate_raw_capture_if_too_large(log_path)
     log_file = log_path.open("ab")

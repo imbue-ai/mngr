@@ -54,6 +54,7 @@ from pydantic import model_validator
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
+from imbue.mngr_latchkey.app_name_prefix import APP_NAME_PREFIX
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
@@ -337,6 +338,7 @@ class RemotePackageContext(FrozenModel):
 
     layout: RemotePackageLayout = Field(description="Where things live on the machine.")
     latchkey_version: str = Field(description="The upstream latchkey CLI version the machine runs.")
+    app_name_prefix: str = Field(description="The name prefix the gateway stamps on what it creates in a service.")
     node_major_version: str = Field(description="The Node.js major the bootstrap installs from NodeSource.")
     minimum_node_major_version: int = Field(description="The oldest Node.js major accepted as already installed.")
     curl_shims_repo: str = Field(description="GitHub repository the curl shims are released from.")
@@ -442,6 +444,7 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
     return RemotePackageContext(
         layout=layout,
         latchkey_version=LATCHKEY_VERSION,
+        app_name_prefix=APP_NAME_PREFIX,
         node_major_version=NODE_MAJOR_VERSION,
         minimum_node_major_version=MINIMUM_NODE_MAJOR_VERSION,
         curl_shims_repo=CURL_SHIMS_REPO,

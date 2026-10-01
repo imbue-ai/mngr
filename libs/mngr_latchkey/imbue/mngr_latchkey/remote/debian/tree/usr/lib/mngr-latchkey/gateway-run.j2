@@ -38,6 +38,7 @@ lk_source_gateway_conf
 export LATCHKEY_GATEWAY_LISTEN_PORT={{ outer_port }}
 export LATCHKEY_GATEWAY_LISTEN_HOST="$LK_GATEWAY_LISTEN_HOST"
 export LATCHKEY_DISABLE_COUNTING=1
+export LATCHKEY_APP_NAME_PREFIX='{{ app_name_prefix }}'
 # Requests carrying the X-Imbue-Impersonate marker header get Chrome TLS
 # impersonation through the curl router; everything else uses system curl.
 export LATCHKEY_CURL='{{ curl_router_path }}'
