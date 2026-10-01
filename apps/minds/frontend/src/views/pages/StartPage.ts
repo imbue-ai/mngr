@@ -251,12 +251,9 @@ export const StartPage: m.ClosureComponent = () => {
           return;
         }
         flow.state = requireEmailVerification(flow.state, email);
-        // Signing up sends no verification email: the connector sends the first
-        // one when it refuses a verification-gated action, and this check
-        // pre-empts that refusal, so the question sends the email it tells the
-        // user to look for. The verdict is dropped; the question's resend
-        // reports its own.
-        void resendVerificationEmail(email);
+        // No send here: the link went out when the account was created, and
+        // originating another one would only burn the cooldown that the
+        // user's own resend needs.
         stopVerificationTimers();
         verificationPollTimer = setInterval(() => void pollVerification(), VERIFICATION_POLL_MS);
         redraw();
@@ -320,8 +317,8 @@ export const StartPage: m.ClosureComponent = () => {
   function resendVerification(): void {
     const email = flow.state.verificationEmail;
     if (email === null) return;
-    resendVerificationEmail(email).then((isSent) => {
-      flow.state = noteVerificationEmailSent(flow.state, isSent);
+    resendVerificationEmail(email).then((outcome) => {
+      flow.state = noteVerificationEmailSent(flow.state, outcome);
       redraw();
     });
   }

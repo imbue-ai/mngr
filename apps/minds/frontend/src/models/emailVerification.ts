@@ -24,17 +24,27 @@ export async function fetchIsEmailVerified(email: string, fetcher: FetchLike = d
   return body.verified;
 }
 
-/** Re-send the verification email; false when the server's cooldown suppressed it or the request failed. */
-export async function resendVerificationEmail(email: string, fetcher: FetchLike = defaultFetch): Promise<boolean> {
+/**
+ * How a re-send ended.
+ *
+ * "suppressed" means a link really did go out moments ago (the server's
+ * per-user cooldown); "failed" means nothing went out. Keeping them apart is
+ * what lets the views avoid claiming a delivery that never happened.
+ */
+export type ResendOutcome = "sent" | "suppressed" | "failed";
+
+/** Re-send the verification email and report what became of it. */
+export async function resendVerificationEmail(
+  email: string,
+  fetcher: FetchLike = defaultFetch,
+): Promise<ResendOutcome> {
   try {
     const response = await fetcher(verificationUrl(email), { method: "POST", credentials: "same-origin" });
-    if (!response.ok) return false;
+    if (!response.ok) return "failed";
     const body = (await response.json()) as { sent?: unknown };
-    return body.sent === true;
+    return body.sent === true ? "sent" : "suppressed";
   } catch (error: unknown) {
-    // Answered as nothing sent, like the server's cooldown; the console line
-    // is what separates a request that never landed from a suppressed send.
     console.debug(`[verification] Could not re-send the verification email: ${String(error)}`);
-    return false;
+    return "failed";
   }
 }

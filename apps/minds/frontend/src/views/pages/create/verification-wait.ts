@@ -2,11 +2,12 @@
 // create for an unverified email, so the create waits on the emailed link
 // instead of being sent off to fail.
 
+import type { ResendOutcome } from "../../../models/emailVerification";
 import { VERIFICATION_POLL_MS, fetchIsEmailVerified, resendVerificationEmail } from "../../../models/emailVerification";
 
 export interface VerificationWaitDeps {
   isEmailVerified: (email: string) => Promise<boolean>;
-  resendVerificationEmail: (email: string) => Promise<boolean>;
+  resendVerificationEmail: (email: string) => Promise<ResendOutcome>;
   redraw: () => void;
   bringAppToFront: () => void;
   pollMs: number;
@@ -16,7 +17,7 @@ export class VerificationWait {
   /** The email whose link is awaited; null while nothing is. */
   email: string | null = null;
   /** The last resend's outcome, for the notice; null before one is pressed. */
-  isResendSent: boolean | null = null;
+  resendOutcome: ResendOutcome | null = null;
   private readonly deps: VerificationWaitDeps;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private isChecking = false;
@@ -49,10 +50,9 @@ export class VerificationWait {
           return;
         }
         this.email = email;
-        // Signing up sends no verification email (the connector sends the
-        // first when it refuses a gated action, which this wait pre-empts), so
-        // the wait sends the one its notice tells the user to look for.
-        void this.deps.resendVerificationEmail(email);
+        // No send here: the link went out when the account was created, and
+        // originating another one would only burn the cooldown that the
+        // user's own Resend press needs.
         this.pollTimer = setInterval(() => void this.poll(generation, email, onVerified), this.deps.pollMs);
         this.deps.redraw();
       },
@@ -68,9 +68,9 @@ export class VerificationWait {
     const email = this.email;
     if (email === null) return;
     const generation = this.generation;
-    void this.deps.resendVerificationEmail(email).then((isSent) => {
+    void this.deps.resendVerificationEmail(email).then((outcome) => {
       if (generation !== this.generation) return;
-      this.isResendSent = isSent;
+      this.resendOutcome = outcome;
       this.deps.redraw();
     });
   }
@@ -81,7 +81,7 @@ export class VerificationWait {
     this.pollTimer = null;
     this.isChecking = false;
     this.email = null;
-    this.isResendSent = null;
+    this.resendOutcome = null;
   }
 
   /** One quiet check while the link is awaited; a failed check simply waits for the next. */

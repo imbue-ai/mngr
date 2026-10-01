@@ -8,6 +8,8 @@
 // renders it above its own turns when it is reached from the flow in the same
 // session, and a reload simply starts over (nothing is persisted).
 
+import type { ResendOutcome } from "./emailVerification";
+
 /** The agent speaks first, and names the thing the rest of the exchange is about. */
 export const MANIFESTO_OPENER = "Imbue Studio is honest software.";
 /** The phrase in the opener the exchange is about: italic wherever the opener is drawn. */
@@ -265,13 +267,19 @@ export function stepText(step: FlowStep, ack: string): { lead: string; body: str
 }
 
 export function verificationAsk(email: string): string {
-  return `(click the link sent to ${email})`;
+  return `(click the link emailed to ${email} when you created your account)`;
 }
 
-export function verificationEmailSentNote(email: string, isSent: boolean): string {
-  return isSent
-    ? `Sent another email to ${email}.`
-    : `An email was sent to ${email} recently. Check your inbox and spam folder.`;
+/** Only an outcome the server confirmed may point the user at an inbox. */
+export function verificationEmailSentNote(email: string, outcome: ResendOutcome): string {
+  switch (outcome) {
+    case "sent":
+      return `Sent another email to ${email}.`;
+    case "suppressed":
+      return `An email went out to ${email} moments ago. Check your inbox and spam folder.`;
+    case "failed":
+      return `Could not send the email to ${email}. Please try again.`;
+  }
 }
 
 export const SIGN_IN_INTRO_BY_CHOICE: Record<"signup" | "signin", string> = {
@@ -452,11 +460,11 @@ export function reaskEmailVerification(state: StartFlowState): StartFlowState {
 }
 
 /** The verification email was (or was not) re-sent; the agent says which. */
-export function noteVerificationEmailSent(state: StartFlowState, isSent: boolean): StartFlowState {
+export function noteVerificationEmailSent(state: StartFlowState, outcome: ResendOutcome): StartFlowState {
   if (state.verificationEmail === null) return state;
   return {
     ...state,
-    entries: [...state.entries, { kind: "note", text: verificationEmailSentNote(state.verificationEmail, isSent) }],
+    entries: [...state.entries, { kind: "note", text: verificationEmailSentNote(state.verificationEmail, outcome) }],
   };
 }
 

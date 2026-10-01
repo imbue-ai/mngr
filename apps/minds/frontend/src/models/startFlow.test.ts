@@ -259,15 +259,21 @@ describe("the email verification gate", () => {
     expect(verified.isCloudCreatePending).toBe(true);
   });
 
-  it("says whether the email went out again, and only while the flow waits on one", () => {
+  it("says what became of the resend, and only while the flow waits on one", () => {
     const waiting = requireEmailVerification(owingCreate(), "alice@example.com");
-    expect(noteVerificationEmailSent(waiting, true).entries.at(-1)).toMatchObject({
+    expect(noteVerificationEmailSent(waiting, "sent").entries.at(-1)).toMatchObject({
       kind: "note",
       text: "Sent another email to alice@example.com.",
     });
-    expect(noteVerificationEmailSent(waiting, false).entries.at(-1)?.kind === "note").toBe(true);
+    expect(noteVerificationEmailSent(waiting, "suppressed").entries.at(-1)).toMatchObject({
+      text: "An email went out to alice@example.com moments ago. Check your inbox and spam folder.",
+    });
+    // A failure must not point the user at an inbox holding nothing.
+    expect(noteVerificationEmailSent(waiting, "failed").entries.at(-1)).toMatchObject({
+      text: "Could not send the email to alice@example.com. Please try again.",
+    });
     const notWaiting = started();
-    expect(noteVerificationEmailSent(notWaiting, true)).toBe(notWaiting);
+    expect(noteVerificationEmailSent(notWaiting, "sent")).toBe(notWaiting);
   });
 
   it("the verified press is not itself an answer", () => {

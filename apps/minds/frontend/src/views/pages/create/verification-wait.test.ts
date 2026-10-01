@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ResendOutcome } from "../../../models/emailVerification";
 import { VerificationWait } from "./verification-wait";
 
 const POLL_MS = 100;
@@ -18,7 +19,7 @@ interface Harness {
  * `verdicts` answers the checks in order (the last one repeats); an "unreachable" entry fails that
  * check, and an empty list makes every check fail.
  */
-function harness(verdicts: Verdict[], isResendSent = true): Harness {
+function harness(verdicts: Verdict[], resendOutcome: ResendOutcome = "sent"): Harness {
   const counters: Omit<Harness, "wait"> = { verdicts, resent: [], raises: 0, created: 0, unchecked: 0 };
   const wait = new VerificationWait({
     isEmailVerified: () => {
@@ -28,7 +29,7 @@ function harness(verdicts: Verdict[], isResendSent = true): Harness {
     },
     resendVerificationEmail: (email) => {
       counters.resent.push(email);
-      return Promise.resolve(isResendSent);
+      return Promise.resolve(resendOutcome);
     },
     redraw: () => undefined,
     bringAppToFront: () => {
@@ -79,13 +80,12 @@ describe("VerificationWait", () => {
     expect(state.wait.email).toBeNull();
   });
 
-  it("sends the link for an unverified email and creates once, when it is clicked", async () => {
+  it("waits on the link for an unverified email and creates once, when it is clicked", async () => {
     const state = harness([false, false, true]);
     requireCreate(state);
     await vi.advanceTimersByTimeAsync(0);
 
     expect(state.wait.email).toBe("new@example.com");
-    expect(state.resent).toEqual(["new@example.com"]);
     expect(state.created).toBe(0);
 
     await vi.advanceTimersByTimeAsync(POLL_MS);
@@ -135,17 +135,27 @@ describe("VerificationWait", () => {
     expect(state.created).toBe(0);
   });
 
-  it("reports whether a resend went out", async () => {
-    const state = harness([false], false);
+  it("sends nothing of its own: the link went out when the account was created", async () => {
+    const state = harness([false]);
+
     requireCreate(state);
     await vi.advanceTimersByTimeAsync(0);
-    expect(state.wait.isResendSent).toBeNull();
+
+    expect(state.resent).toEqual([]);
+    expect(state.wait.resendOutcome).toBeNull();
+    state.wait.cancel();
+  });
+
+  it("reports what became of a resend the user asked for", async () => {
+    const state = harness([false], "suppressed");
+    requireCreate(state);
+    await vi.advanceTimersByTimeAsync(0);
 
     state.wait.resend();
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(state.resent).toEqual(["new@example.com", "new@example.com"]);
-    expect(state.wait.isResendSent).toBe(false);
+    expect(state.resent).toEqual(["new@example.com"]);
+    expect(state.wait.resendOutcome).toBe("suppressed");
     state.wait.cancel();
   });
 });

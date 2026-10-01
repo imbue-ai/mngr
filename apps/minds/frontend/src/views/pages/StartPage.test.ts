@@ -141,7 +141,7 @@ describe("transcriptTurns on the verification question", () => {
     const turns = transcriptTurns(waiting.entries, { isInstant: true, isPressable: true });
     const strong = collectVnodes(turns).find((node) => node.tag === "strong");
     expect(allText(strong)).toBe("You must verify your email");
-    expect(allText(turns)).toContain("(click the link sent to a@b.com)");
+    expect(allText(turns)).toContain("(click the link emailed to a@b.com when you created your account)");
     expect(withAttr(turns, "data-answer").map((node) => node.attrs?.["data-answer"])).toEqual(["verified"]);
     expect(allText(withAttr(turns, "data-aside"))).toContain(RESEND_EMAIL_LABEL);
   });

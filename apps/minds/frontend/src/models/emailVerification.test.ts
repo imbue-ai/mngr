@@ -20,18 +20,21 @@ describe("fetchIsEmailVerified", () => {
 });
 
 describe("resendVerificationEmail", () => {
-  it("posts to the same resource and reports whether an email went out", async () => {
+  it("posts to the same resource and reads an accepted send as sent", async () => {
     const methods: Array<string | undefined> = [];
     const fetcher = async (_url: string, init?: RequestInit): Promise<Response> => {
       methods.push(init?.method);
-      return jsonResponse({ sent: false, email: "a@b.com" });
+      return jsonResponse({ sent: true, email: "a@b.com" });
     };
-    expect(await resendVerificationEmail("a@b.com", fetcher)).toBe(false);
+    expect(await resendVerificationEmail("a@b.com", fetcher)).toBe("sent");
     expect(methods).toEqual(["POST"]);
   });
 
-  it("reads a failed request as nothing sent", async () => {
-    expect(await resendVerificationEmail("a@b.com", async () => jsonResponse({}, 409))).toBe(false);
-    expect(await resendVerificationEmail("a@b.com", async () => Promise.reject(new Error("offline")))).toBe(false);
+  it("separates a cooldown-suppressed send from one that never went out", async () => {
+    // The server answered: a mail really did go out moments ago.
+    expect(await resendVerificationEmail("a@b.com", async () => jsonResponse({ sent: false }))).toBe("suppressed");
+    // Nothing reached the server, so nothing was sent and the view must not say otherwise.
+    expect(await resendVerificationEmail("a@b.com", async () => jsonResponse({}, 409))).toBe("failed");
+    expect(await resendVerificationEmail("a@b.com", async () => Promise.reject(new Error("offline")))).toBe("failed");
   });
 });

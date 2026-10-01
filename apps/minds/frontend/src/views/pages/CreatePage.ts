@@ -13,6 +13,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { electronBridge } from "../../electron-bridge";
 import type { CreateFormDefaults, LocalBackendPrerequisite } from "../../models/create";
+import type { ResendOutcome } from "../../models/emailVerification";
 import {
   backupProviderLabel,
   fetchCreateFormDefaults,
@@ -82,6 +83,13 @@ export function signInOutcome(
 const LINK_BUTTON_EXTRA =
   "!p-0 !bg-transparent !type-helper !text-tertiary hover:!bg-transparent hover:!text-primary hover:underline " +
   "whitespace-nowrap";
+
+// Only an outcome the server confirmed may point the user at an inbox.
+const RESEND_NOTICE_BY_OUTCOME: Record<ResendOutcome, string> = {
+  sent: "Sent another email.",
+  suppressed: "An email went out moments ago; check your inbox.",
+  failed: "Could not send the email. Please try again.",
+};
 
 export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) => {
   const attrs = initialVnode.attrs;
@@ -294,17 +302,13 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
   function verificationNotice(): m.Children {
     const email = verificationWait.email;
     if (email === null) return null;
-    const resendOutcome =
-      verificationWait.isResendSent === null
-        ? null
-        : verificationWait.isResendSent
-          ? "Sent another email."
-          : "An email was sent a moment ago; check your inbox.";
+    const outcome = verificationWait.resendOutcome;
+    const resendNotice = outcome === null ? null : RESEND_NOTICE_BY_OUTCOME[outcome];
     return m(Notice, { variant: "info", id: "verification-wait", role: "status", extra: "!mt-6 !mb-0 !px-5 !py-4 text-center" }, [
       m("p", { class: "type-body text-primary" }, [
-        "Workspaces on Imbue Cloud require a verified email. Please click the link we sent to ",
+        "Workspaces on Imbue Cloud require a verified email. Click the link emailed to ",
         m("strong", email),
-        " and your workspace will be created.",
+        " when you created your account, and your workspace will be created.",
       ]),
       m("div", { class: "mt-3 flex justify-center gap-3" }, [
         m(
@@ -314,7 +318,7 @@ export const CreatePage: m.ClosureComponent<CreatePageAttrs> = (initialVnode) =>
         ),
         m(Button, { variant: "ghost", id: "verification-cancel", onclick: cancelVerificationWait }, "Cancel"),
       ]),
-      resendOutcome === null ? null : m("p", { class: "mt-2 type-helper text-secondary" }, resendOutcome),
+      resendNotice === null ? null : m("p", { class: "mt-2 type-helper text-secondary" }, resendNotice),
     ]);
   }
 
