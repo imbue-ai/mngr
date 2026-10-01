@@ -129,6 +129,9 @@ def test_client_message_adapter_parses_client_state() -> None:
     parsed = UI_CLIENT_MESSAGE_ADAPTER.validate_json(raw)
     assert isinstance(parsed, UiClientStateMessage)
     assert parsed.route == "/settings"
+    # A renderer from before window kinds and the lock relay still registers, as an unlocked main window.
+    assert parsed.window_kind == "main"
+    assert parsed.is_screen_locked is False
 
 
 def test_client_message_adapter_rejects_server_message_types() -> None:
@@ -197,6 +200,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiSharedPathRequest",
             "UiSnapshot",
             "UiWaitingPermissionRequest",
+            "UiWindowKind",
             "UiWorkspaceEntry",
             "UiWorkspacePermissions",
             "UiWorkspaceRefreshMessage",

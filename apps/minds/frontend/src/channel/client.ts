@@ -19,6 +19,7 @@ import { parseServerMessage } from "./messages";
 import type { AppStores } from "../models/boot";
 import { VISIBLE_AFTER_FAILURES, backoffDelayMs } from "./backoff";
 import { resolveWindowFocus } from "../window-focus";
+import { isScreenLocked } from "../screen-lock";
 
 const SCHEMA_RELOAD_GUARD_KEY = "minds-ui-schema-reloaded";
 
@@ -65,6 +66,8 @@ export interface ChannelOptions {
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem">;
   /** Injected in tests; defaults to document.hasFocus(). */
   hasWindowFocus?: () => boolean;
+  /** Injected in tests; defaults to the lock state Electron main relays. */
+  isScreenLocked?: () => boolean;
 }
 
 export function defaultChannelSocketFactory(): ChannelSocketLike {
@@ -134,12 +137,13 @@ export class UiChannelClient {
     this.sendClientState();
   }
 
-  /** Re-registers client_state on a bare focus/blur (route and workspace
-   * unchanged, so setClientState's own dedup would otherwise never resend):
-   * the server's OS-dispatch gate needs this window's current focus, not just
-   * what it is displaying, and there is no other route/workspace change to
-   * piggyback the frame on when the reader just alt-tabs away and back. */
-  notifyFocusChanged(): void {
+  /** Re-registers client_state on a bare focus/blur or screen lock (route
+   * and workspace unchanged, so setClientState's own dedup would otherwise
+   * never resend): the server's OS-dispatch gate needs this window's current
+   * focus and the lock, not just what it is displaying, and there is no other
+   * route/workspace change to piggyback the frame on when the reader just
+   * alt-tabs away and back. */
+  resendClientState(): void {
     this.sendClientState();
   }
 
@@ -184,6 +188,10 @@ export class UiChannelClient {
         route: this.currentRoute,
         workspace_agent_id: this.currentWorkspaceAgentId,
         has_focus: this.hasFocus(),
+        // A pulled-out window shows no toasts, so its focus does not stand in
+        // for a banner.
+        window_kind: this.currentRoute.startsWith("/popout/") ? "popout" : "main",
+        is_screen_locked: (this.options.isScreenLocked ?? isScreenLocked)(),
       }),
     );
   }

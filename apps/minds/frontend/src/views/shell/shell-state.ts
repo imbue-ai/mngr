@@ -22,6 +22,7 @@ import {
 } from "./classify";
 import type { PopoutRoute } from "./classify";
 import type { PopoutFrame, PopoutReattachAsk, TearOutReport } from "../../electron-bridge";
+import { electronBridge } from "../../electron-bridge";
 import { recoveryRoute } from "../../models/create";
 import { setPendingHelpLaunch } from "../../models/help";
 import { WebLoginModel, webLogin } from "../../models/webLogin";
@@ -251,7 +252,46 @@ export class ShellState {
    * OS-notification click arrives with); empty adds nothing. */
   enterWorkspace(anyId: string, query: Record<string, string> = {}): void {
     const agentScoped = this.stores.workspaces.toAgentScopedId(anyId);
-    m.route.set(`/workspace/${agentScoped}`, query);
+    this.routeTo(`/workspace/${agentScoped}`, query);
+  }
+
+  /** Set the route without putting a second main window on a workspace. A
+   * route onto the surface of a workspace this window is not showing first
+   * asks the desktop app, which raises that workspace's own window instead
+   * when it has one (handing it the route) and leaves this window where it
+   * is. Outside the desktop app, where windows and tabs are not deduplicated,
+   * it is a plain route set. */
+  routeTo(route: string, params?: Record<string, string>): void {
+    const setRoute = (): void => {
+      if (params === undefined) m.route.set(route);
+      else m.route.set(route, params);
+    };
+    const targetAnyId = workspaceSurfaceIdFromPath(route.split("?")[0]);
+    const displayed = this.displayedWorkspaceAnyId;
+    const workspaces = this.stores.workspaces;
+    if (
+      targetAnyId === null ||
+      (displayed !== null &&
+        workspaces.toAgentScopedId(displayed) === workspaces.toAgentScopedId(targetAnyId))
+    ) {
+      setRoute();
+      return;
+    }
+    const claim = electronBridge.claimWorkspaceWindow(
+      workspaces.toAgentScopedId(targetAnyId),
+      params === undefined ? route : m.buildPathname(route, params),
+    );
+    if (claim === null) {
+      setRoute();
+      return;
+    }
+    void claim.then(
+      (isOpenedElsewhere) => {
+        if (!isOpenedElsewhere) setRoute();
+      },
+      // No answer from main: navigating here is better than going nowhere.
+      () => setRoute(),
+    );
   }
 
   /** Enter a workspace the way its machines-list row does: onto its surface
@@ -867,11 +907,6 @@ export class ShellState {
     }
     this.consumeReviewParam(path, search);
     this.consumeChatParam(path, search);
-    // Arriving on a workspace reads its agent messages: the chat is right
-    // there. Keyed on the navigation, not the redraw, so the app is not
-    // told on every render.
-    if (!isSameRoute && agentScoped !== null)
-      this.notificationsUi?.handleWorkspaceDisplayed(agentScoped);
     this.channel?.setClientState(path, agentScoped);
   }
 

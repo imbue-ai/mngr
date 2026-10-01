@@ -109,6 +109,10 @@ interface MindsNativeSurface {
   openNotificationSettings(): Promise<boolean>;
   bringAppToFront(): void;
   openWorkspaceInNewWindow(agentId: string): void;
+  claimWorkspaceWindow?(
+    workspaceId: string,
+    route: string,
+  ): Promise<{ opened_elsewhere: boolean }>;
   openNotificationInExistingWindow?(
     route: string,
     entry: UiNotificationEntry,
@@ -121,6 +125,8 @@ interface MindsNativeSurface {
   // Main relays each window's own focus and blur (the signal the renderer
   // cannot see while keyboard focus sits inside the workspace iframe).
   onWindowFocusChanged?(callback: (isFocused: boolean) => void): void;
+  // The OS locked or unlocked the screen (macOS and Windows only).
+  onScreenLockChanged?(callback: (isLocked: boolean) => void): void;
   // Main asks this window to flash a plain in-app toast (the "couldn't open
   // link" fallback).
   onToast?(callback: (toast: { title: string; body: string }) => void): void;
@@ -278,6 +284,14 @@ export const electronBridge = {
   openWorkspaceInNewWindow(agentId: string): void {
     native()?.openWorkspaceInNewWindow(agentId);
   },
+  /** Ask before this window navigates onto a workspace: resolves true when
+   * main raised the workspace's own main window instead (this window stays
+   * put), false when this window may go ahead. Null outside the desktop app,
+   * where windows and tabs are not deduplicated. */
+  claimWorkspaceWindow(workspaceId: string, route: string): Promise<boolean> | null {
+    const claim = native()?.claimWorkspaceWindow?.(workspaceId, route);
+    return claim === undefined ? null : claim.then((answer) => answer.opened_elsewhere);
+  },
   /** Null when unavailable; false when this window should handle the click. */
   openNotificationInExistingWindow(
     route: string,
@@ -302,6 +316,9 @@ export const electronBridge = {
   },
   onWindowFocusChanged(callback: (isFocused: boolean) => void): void {
     native()?.onWindowFocusChanged?.(callback);
+  },
+  onScreenLockChanged(callback: (isLocked: boolean) => void): void {
+    native()?.onScreenLockChanged?.(callback);
   },
   onToast(callback: (toast: { title: string; body: string }) => void): void {
     native()?.onToast?.(callback);

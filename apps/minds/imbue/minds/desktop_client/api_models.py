@@ -240,6 +240,17 @@ class AgentNotificationRequest(ApiRequestModel):
 
     message: str = Field(description="Free-text notification body")
     title: str | None = Field(default=None, description="Optional title, shown as a prefix on the body")
+    watched_by: tuple[str, ...] = Field(
+        default=(),
+        description=(
+            "Ids of the chat page instances showing this chat to a focused reader; non-empty means the "
+            "notification is recorded as read and not shown. Absent when the workspace does not know."
+        ),
+    )
+
+
+class AgentNotificationReadRequest(ApiRequestModel):
+    """Body for marking a chat's notifications read (the chat is being watched); carries no fields."""
 
 
 class EstablishSshRequest(ApiRequestModel):

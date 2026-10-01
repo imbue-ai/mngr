@@ -20,10 +20,12 @@ entries of three kinds, each with its own lifecycle:
   terminal state on its own. Clearing a request entry hides it for good, across
   restarts when the feed is given a file to remember cleared ids in (the
   request itself stays pending in the inbox).
-- Agent messages are appended by the agent notifications route. They leave the
-  feed when their workspace is navigated to or when they are cleared (which is
-  what opening one does), and drop out when their workspace leaves the list;
-  they never become receipts.
+- Agent messages are appended by the agent notifications route. They resolve
+  into receipts when they are read: watched on arrival (the workspace says a
+  page is showing the chat to a focused reader), or read later (the workspace
+  reports the chat became watched). Showing their workspace reads nothing by
+  itself. They leave the feed when cleared (which is what opening one does)
+  and drop out when their workspace leaves the list.
 - System events are appended by the backup producers. Clearing removes them.
 
 Entries are stamped with their event's own timestamp (``requested_at`` on a
@@ -39,10 +41,11 @@ Dispatch additionally requires ALL of:
   where the gateway re-delivers every still-pending request, stays silent; a
   request with no filing time counts as backfill);
 - the injected preferences allow it: master toggle on, style "os" or "both";
-- for a workspace-scoped entry, no *focused* connected UI window is currently
-  displaying that workspace (the surface on screen already shows it there).
-  Being displayed in an unfocused window does not count: the reader is not
-  looking at that window. Account-level entries always fire.
+- no main window has focus, unless the screen is locked or the style allows
+  no toasts: a focused main window shows the entry as an in-app toast, so the
+  banner is the fallback for a toast nobody can see. A focused pulled-out
+  window does not count (it shows no toasts), and a locked machine's windows
+  may still report focus.
 
 Thread-safety: ``reconcile`` is called from the publisher thread and from
 WS-connect snapshot builds, and the append/clear paths from request threads,
@@ -85,6 +88,10 @@ _FEED_CAP: Final[int] = 50
 # The styles that include an OS nudge (the remaining style, cards, is
 # in-app only and rendered by the frontend from the feed frame itself).
 _OS_DISPATCH_STYLES: Final[frozenset[NotificationStyle]] = frozenset({NotificationStyle.OS, NotificationStyle.BOTH})
+
+# The styles that include the in-app toast, which stands in for the banner
+# while a main window has focus.
+_TOAST_STYLES: Final[frozenset[NotificationStyle]] = frozenset({NotificationStyle.CARDS, NotificationStyle.BOTH})
 
 # How many cleared request ids the feed remembers; the oldest are forgotten first.
 _CLEARED_REQUEST_ID_CAP: Final[int] = 1000
@@ -159,9 +166,11 @@ class NotificationFeed(MutableModel):
     get_dispatch_preferences: Callable[[], NotificationDispatchPreferences] = Field(
         frozen=True, description="Live reader of the stored notification preferences"
     )
-    get_connected_focused_workspace_agent_ids: Callable[[], tuple[str, ...]] = Field(
-        frozen=True,
-        description="Live reader of the workspace agent ids a focused connected UI window is currently displaying",
+    is_main_window_focused: Callable[[], bool] = Field(
+        frozen=True, description="Live reader of whether any connected main window has focus"
+    )
+    is_screen_locked: Callable[[], bool] = Field(
+        frozen=True, description="Live reader of whether a connected window reports the screen locked"
     )
     constructed_at: datetime = Field(
         frozen=True,
@@ -259,13 +268,25 @@ class NotificationFeed(MutableModel):
             self._dispatch_new_entry(entry)
         return message
 
-    def append_agent_message(self, card: AgentMessageCard, sent_at: datetime | None = None) -> UiNotificationEntry:
-        """Record a chat agent's message and nudge the OS for it."""
+    def append_agent_message(
+        self,
+        card: AgentMessageCard,
+        sent_at: datetime | None = None,
+        watched_by: tuple[str, ...] = (),
+    ) -> UiNotificationEntry:
+        """Record a chat agent's message and nudge the OS for it.
+
+        ``watched_by`` names the chat page instances the workspace says are
+        showing the chat to a focused reader. A watched message is recorded
+        already read and surfaces nowhere, unless the screen is locked: the
+        watcher may be this very machine with the chat left focused.
+        """
+        is_watched = len(watched_by) > 0 and not self.is_screen_locked()
         entry = UiNotificationEntry(
             id=f"msg-{uuid4().hex}",
             kind=NotificationKind.AGENT_MESSAGE,
             created_at=(sent_at or datetime.now(timezone.utc)).isoformat(),
-            is_resolved=False,
+            is_resolved=is_watched,
             outcome=None,
             title=card.chat_name,
             body=card.body,
@@ -276,6 +297,22 @@ class NotificationFeed(MutableModel):
             workspace_accent=card.workspace_accent,
             service_name="",
         )
+        if is_watched:
+            logger.debug(
+                "notification {}: chat {} is watched by {} -- recorded as read, nothing shown",
+                entry.id,
+                card.chat_agent_id,
+                ", ".join(watched_by),
+            )
+            self._append_entry(entry, is_dispatched=False)
+            return entry
+        if len(watched_by) > 0:
+            logger.debug(
+                "notification {}: chat {} is watched by {} but the screen is locked -- delivering anyway",
+                entry.id,
+                card.chat_agent_id,
+                ", ".join(watched_by),
+            )
         self._append_entry(entry)
         return entry
 
@@ -299,28 +336,32 @@ class NotificationFeed(MutableModel):
         self._append_entry(entry)
         return entry
 
-    def _append_entry(self, entry: UiNotificationEntry) -> None:
+    def _append_entry(self, entry: UiNotificationEntry, is_dispatched: bool = True) -> None:
         with self._lock:
             self._entry_by_id[entry.id] = entry
             self._evict_beyond_cap_locked()
         self._notify_change()
-        self._dispatch_new_entry(entry)
+        if is_dispatched:
+            self._dispatch_new_entry(entry)
 
-    def mark_workspace_read(self, workspace_agent_id: str) -> bool:
-        """The user navigated to the workspace: its agent messages are read. Returns whether the feed changed."""
-        if workspace_agent_id == "":
+    def mark_chat_read(self, chat_agent_id: str) -> bool:
+        """The chat is being watched: its agent messages are read. Returns whether the feed changed."""
+        if chat_agent_id == "":
             return False
         with self._lock:
-            read_ids = [
-                entry.id
-                for entry in self._entry_by_id.values()
-                if entry.kind == NotificationKind.AGENT_MESSAGE and entry.workspace_agent_id == workspace_agent_id
-            ]
-            for entry_id in read_ids:
-                del self._entry_by_id[entry_id]
-        if len(read_ids) == 0:
+            is_changed = False
+            for entry_id, entry in self._entry_by_id.items():
+                if entry.kind != NotificationKind.AGENT_MESSAGE or entry.is_resolved:
+                    continue
+                if entry.chat_agent_id != chat_agent_id:
+                    continue
+                self._entry_by_id[entry_id] = entry.model_copy_update(to_update(entry.field_ref().is_resolved, True))
+                is_changed = True
+        if not is_changed:
             return False
         self._notify_change()
+        if self.notification_dispatcher is not None:
+            self.notification_dispatcher.dispatch_read(chat_agent_id)
         return True
 
     def clear(self, entry_id: str) -> bool:
@@ -509,20 +550,17 @@ class NotificationFeed(MutableModel):
                 preferences.style,
             )
             return
-        if entry.workspace_agent_id and entry.workspace_agent_id in self.get_connected_focused_workspace_agent_ids():
-            # A focused connected window is already showing this workspace,
-            # and the surface there (the in-chat card, the chat itself) covers
-            # it: stay silent. Being displayed in an unfocused window
-            # (alt-tabbed away, behind another app) does not count -- the
-            # reader is not looking at that window, so the OS banner is the
-            # only nudge they will see. An account-level entry has no
-            # workspace to be on screen, so it always fires.
-            logger.debug(
-                "notification {}: {} is already on screen in a focused window -- the surface there covers it",
-                entry.id,
-                entry.workspace_name,
-            )
+        if self.is_screen_locked():
+            # A locked machine's windows may still report focus, and nobody
+            # sees a toast behind the lock screen.
+            logger.debug("notification {}: the screen is locked -- the banner fires whatever has focus", entry.id)
+        elif preferences.style in _TOAST_STYLES and self.is_main_window_focused():
+            # Every main window flashes the entry as a toast, and one of them
+            # is in front of the reader: the banner would say it twice.
+            logger.debug("notification {}: a main window has focus -- its toast covers it", entry.id)
             return
+        else:
+            logger.debug("notification {}: no toast is in front of the reader -- the banner is the nudge", entry.id)
         with self._lock:
             # Re-verify against the CURRENT entry state, not the possibly-stale
             # `entry` parameter: reconcile() is called from multiple threads

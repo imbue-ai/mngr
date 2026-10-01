@@ -10,7 +10,12 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseWorkspaceId, parseSpaWorkspaceRouteId, parsePopoutRoute } = require('../../electron/surface-routing');
+const {
+  parseWorkspaceId,
+  parseSpaWorkspaceRouteId,
+  parsePopoutRoute,
+  parseOverlayBehindWorkspaceId,
+} = require('../../electron/surface-routing');
 
 const BASE = 'http://localhost:8080';
 const AGENT = 'agent-0a1b2c3d4e5f';
@@ -74,4 +79,14 @@ test('parsePopoutRoute matches the SPA /popout/<workspace>/<window> route only',
   assert.equal(parsePopoutRoute(`${BASE}/workspace/${AGENT}`), null);
   assert.equal(parsePopoutRoute(''), null);
   assert.equal(parsePopoutRoute('/popout/x/y'), null);
+});
+
+test('parseOverlayBehindWorkspaceId names the workspace an app overlay keeps mounted behind it', () => {
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=${AGENT}`), AGENT);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/inbox?selected=evt-1&workspace=${AGENT}`), AGENT);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/settings/ai-keys?workspace=${HOST}`), HOST);
+  // Opened over Home, or a route that never floats over a workspace.
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help`), null);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/accounts?workspace=${AGENT}`), null);
+  assert.equal(parseOverlayBehindWorkspaceId(`${BASE}/help?workspace=not-an-id`), null);
 });

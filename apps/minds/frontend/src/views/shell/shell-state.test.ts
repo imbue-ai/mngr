@@ -378,21 +378,64 @@ describe("ShellState chat deep link and focus-chat relay", () => {
     shell.flushPendingFocusChat();
     expect(sent).toEqual(["agent-dd44"]);
   });
+});
 
-  it("tells the notifications controller which workspace was displayed, once per navigation", () => {
+describe("ShellState.routeTo (one main window per workspace)", () => {
+  const OTHER_ID = "agent-cd34";
+
+  function stubClaim(isOpenedElsewhere: boolean): string[][] {
+    const claims: string[][] = [];
+    vi.stubGlobal("window", {
+      mindsNative: {
+        platform: "darwin",
+        claimWorkspaceWindow: async (workspaceId: string, route: string) => {
+          claims.push([workspaceId, route]);
+          return { opened_elsewhere: isOpenedElsewhere };
+        },
+      },
+    });
+    return claims;
+  }
+
+  it("stays put when another window already shows the workspace", async () => {
     const shell = makeShell();
-    const displayed: string[] = [];
-    shell.notificationsUi = {
-      handleWorkspaceDisplayed: (id: string) => displayed.push(id),
-      clearLiveToasts: () => undefined,
-    } as unknown as ShellState["notificationsUi"];
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const claims = stubClaim(true);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
 
-    land(shell, `/workspace/${WORKSPACE_ID}`);
-    land(shell, `/workspace/${WORKSPACE_ID}`);
-    land(shell, "/create");
-    land(shell, `/workspace/${WORKSPACE_ID}`);
+    shell.enterWorkspace(OTHER_ID, { chat: "agent-ee55" });
+    await vi.waitFor(() => expect(claims).toHaveLength(1));
+    await Promise.resolve();
 
-    expect(displayed).toEqual([WORKSPACE_ID, WORKSPACE_ID]);
+    // Main raised the other window and handed it the route, chat included.
+    expect(claims).toEqual([[OTHER_ID, `/workspace/${OTHER_ID}?chat=agent-ee55`]]);
+    expect(routeSet).not.toHaveBeenCalled();
+  });
+
+  it("navigates here once the workspace has no other window", async () => {
+    const shell = makeShell();
+    land(shell, "/");
+    stubClaim(false);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.routeTo(`/workspace/${OTHER_ID}/options?tab=settings`);
+
+    await vi.waitFor(() =>
+      expect(routeSet).toHaveBeenCalledWith(`/workspace/${OTHER_ID}/options?tab=settings`),
+    );
+  });
+
+  it("asks nothing for a route within the workspace this window shows, or off any workspace", () => {
+    const shell = makeShell();
+    land(shell, `/workspace/${WORKSPACE_ID}`);
+    const claims = stubClaim(true);
+    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+
+    shell.routeTo(`/workspace/${WORKSPACE_ID}/options?tab=share`);
+    shell.routeTo("/accounts");
+
+    expect(claims).toEqual([]);
+    expect(routeSet.mock.calls).toEqual([[`/workspace/${WORKSPACE_ID}/options?tab=share`], ["/accounts"]]);
   });
 });
 

@@ -341,7 +341,7 @@ export function UpdateModal(): m.Component<UpdateModalAttrs> {
               class: "type-helper text-secondary underline hover:text-primary cursor-pointer self-start text-left",
               onclick: () => {
                 onClose();
-                m.route.set(`/workspace/${agentId}/options`, { tab: "settings", group: "updates", override: "1" });
+                shell.routeTo(`/workspace/${agentId}/options`, { tab: "settings", group: "updates", override: "1" });
               },
             },
             "Update to a different version…",

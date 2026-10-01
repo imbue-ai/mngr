@@ -18,6 +18,7 @@ import { mountRouter, navigateExternalUrl } from "./router";
 import { ShellState } from "./views/shell/shell-state";
 import { installTooltips } from "./views/shell/tooltips";
 import { setRelayedWindowFocus } from "./window-focus";
+import { setScreenLocked } from "./screen-lock";
 
 function main(): void {
   const bootstrap = window.__MINDS_BOOTSTRAP__;
@@ -70,6 +71,7 @@ function main(): void {
   });
   const notificationsUi = new NotificationsUiController({
     isFeedOverlayOpen: () => shell.isNotificationsOpen,
+    isPopoutWindow: () => shell.popoutRoute() !== null,
     onEntryOpened: () => shell.closeNotifications(),
     gestures,
   });
@@ -158,20 +160,24 @@ function main(): void {
   shell.channel = channel;
 
   // The server's OS-dispatch gate needs this window's live focus state, not
-  // just what it is displaying (see _ConnectedFocusedWorkspaceAgentIdsReader):
-  // a window showing the asking workspace while alt-tabbed away should still
-  // get an OS banner. Neither route nor workspace changes on a bare
-  // focus/blur, so this can't piggyback on setClientState's own call sites.
+  // just what it is displaying (see _FocusedMainWindowReader): with no main
+  // window in front of the reader, the OS banner is the only nudge they see.
+  // Neither route nor workspace changes on a bare focus/blur, so this can't
+  // piggyback on setClientState's own call sites.
   // The window's own events only fire while keyboard focus sits in this
   // document (not inside the workspace iframe); in the desktop app, main
   // relays every window focus and blur, which is the signal that holds.
-  window.addEventListener("focus", () => channel.notifyFocusChanged());
-  window.addEventListener("blur", () => channel.notifyFocusChanged());
+  window.addEventListener("focus", () => channel.resendClientState());
+  window.addEventListener("blur", () => channel.resendClientState());
   electronBridge.onWindowFocusChanged((isFocused) => {
     setRelayedWindowFocus(isFocused);
     m.redraw();
-    channel.notifyFocusChanged();
+    channel.resendClientState();
     if (isFocused) void notificationsUi.loadPrefs();
+  });
+  electronBridge.onScreenLockChanged((isLocked) => {
+    setScreenLocked(isLocked);
+    channel.resendClientState();
   });
   // A one-off message from main (the "couldn't open link" fallback) flashes
   // as an in-app toast in the window it happened in.

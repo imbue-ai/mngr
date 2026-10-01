@@ -189,7 +189,8 @@ def _make_feed() -> NotificationFeed:
         get_dispatch_preferences=lambda: NotificationDispatchPreferences(
             is_enabled=True, style=NotificationStyle.BOTH
         ),
-        get_connected_focused_workspace_agent_ids=lambda: (),
+        is_main_window_focused=lambda: False,
+        is_screen_locked=lambda: False,
     )
 
 

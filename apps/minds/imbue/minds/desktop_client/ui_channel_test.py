@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 from simple_websocket import Client as WebSocketClient
 from simple_websocket import ConnectionClosed
 
-from imbue.minds.desktop_client.app import _ConnectedFocusedWorkspaceAgentIdsReader
+from imbue.minds.desktop_client.app import _FocusedMainWindowReader
+from imbue.minds.desktop_client.app import _ScreenLockedReader
 from imbue.minds.desktop_client.app import create_desktop_client
 from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import MngrCliBackendResolver
@@ -32,6 +34,7 @@ from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiClientStateMessage
 from imbue.minds.desktop_client.ui_models import UiReloadMessage
+from imbue.minds.desktop_client.ui_models import UiWindowKind
 from imbue.minds.desktop_client.ws_gateway import create_websocket_aware_wsgi_server
 
 
@@ -108,27 +111,41 @@ def test_broadcaster_records_client_state_only_for_registered_queues() -> None:
     assert broadcaster.get_connected_client_states() == [state]
 
 
-def test_connected_focused_workspace_agent_ids_excludes_unfocused_windows() -> None:
-    # The notification feed's OS-dispatch gate: a workspace displayed in an
-    # unfocused window (alt-tabbed away, behind another app) must not count as
-    # "on screen" for OS-dispatch purposes, even though it does for the
-    # in-app toast's own (focus-agnostic) on-screen check.
+def _broadcaster_with_windows(*states: UiClientStateMessage) -> UiChannelBroadcaster:
     broadcaster = UiChannelBroadcaster()
-    focused_queue = broadcaster.register()
-    unfocused_queue = broadcaster.register()
-    broadcaster.set_client_state(
-        focused_queue,
-        UiClientStateMessage(client_id="win-focused", route="/", workspace_agent_id="agent-focused", has_focus=True),
-    )
-    broadcaster.set_client_state(
-        unfocused_queue,
-        UiClientStateMessage(
-            client_id="win-unfocused", route="/", workspace_agent_id="agent-unfocused", has_focus=False
-        ),
-    )
-    reader = _ConnectedFocusedWorkspaceAgentIdsReader(broadcaster=broadcaster)
+    for state in states:
+        broadcaster.set_client_state(broadcaster.register(), state)
+    return broadcaster
 
-    assert reader() == ("agent-focused",)
+
+@pytest.mark.witnesses(
+    "notifications.focused-pulled-out-window-banners", partial="covers the focus reader the banner gate reads"
+)
+def test_only_a_focused_main_window_counts_as_the_app_being_in_front() -> None:
+    # The notification feed's banner gate: a focused main window shows the
+    # in-app toast, which a pulled-out window never does.
+    unfocused_main = UiClientStateMessage(client_id="main", route="/", workspace_agent_id="agent-a", has_focus=False)
+    focused_popout = UiClientStateMessage(
+        client_id="popout",
+        route="/popout/agent-a/win-1",
+        workspace_agent_id="agent-a",
+        window_kind=UiWindowKind.POPOUT,
+    )
+    focused_main_elsewhere = UiClientStateMessage(client_id="other", route="/", workspace_agent_id=None)
+
+    assert _FocusedMainWindowReader(broadcaster=_broadcaster_with_windows(unfocused_main, focused_popout))() is False
+    assert (
+        _FocusedMainWindowReader(broadcaster=_broadcaster_with_windows(unfocused_main, focused_main_elsewhere))()
+        is True
+    )
+
+
+def test_any_window_reporting_the_lock_counts_as_the_screen_locked() -> None:
+    unlocked = UiClientStateMessage(client_id="a", route="/", workspace_agent_id=None)
+    locked = UiClientStateMessage(client_id="b", route="/", workspace_agent_id=None, is_screen_locked=True)
+
+    assert _ScreenLockedReader(broadcaster=_broadcaster_with_windows(unlocked))() is False
+    assert _ScreenLockedReader(broadcaster=_broadcaster_with_windows(unlocked, locked))() is True
 
 
 @contextmanager

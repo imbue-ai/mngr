@@ -293,10 +293,10 @@ def test_agent_notification_title_becomes_a_prefix_on_the_body(tmp_path: Path) -
     assert entry.body == "Test run: all green"
 
 
-def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_path: Path) -> None:
-    workspace_agent_id = AgentId()
-    chat_id = AgentId()
-    members = (AgentId(), AgentId())
+def _app_with_moved_chat(
+    tmp_path: Path, workspace_agent_id: AgentId, chat_id: AgentId, members: tuple[AgentId, ...]
+) -> tuple[Flask, BackendResolverInterface]:
+    """An app whose resolver knows a chat that has run on each of ``members`` in turn, under one ``chat_id``."""
     resolver = make_resolver_with_data(
         json.dumps(
             {
@@ -330,6 +330,14 @@ def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_pa
         minds_api_key=_TEST_KEY,
         mngr_caller=RecordingMngrCaller(),
     )
+    return app, resolver
+
+
+def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_id = AgentId()
+    members = (AgentId(), AgentId())
+    app, resolver = _app_with_moved_chat(tmp_path, workspace_agent_id, chat_id, members)
 
     for member in members:
         response = app.test_client().post(
@@ -348,6 +356,64 @@ def test_agent_notifications_keep_the_same_chat_destination_across_agents(tmp_pa
         assert entry.workspace_name == "alpha"
         assert entry.workspace_accent == "#123456"
         assert entry.title == "migration-chat"
+
+
+def test_a_watched_agent_notification_is_recorded_read(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_agent_id = AgentId()
+    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+
+    watched = client.post(
+        f"/api/v1/agents/{chat_agent_id}/notifications",
+        json={"message": "Seen as it happened", "watched_by": ["instance-1", "instance-2"]},
+        headers=_auth_header(),
+    )
+    unwatched = client.post(
+        f"/api/v1/agents/{chat_agent_id}/notifications",
+        json={"message": "Nobody was looking", "watched_by": []},
+        headers=_auth_header(),
+    )
+
+    assert watched.status_code == 200
+    assert unwatched.status_code == 200
+    resolved_by_body = {entry.body: entry.is_resolved for entry in _feed_entries(app)}
+    assert resolved_by_body == {"Seen as it happened": True, "Nobody was looking": False}
+
+
+def test_reading_a_chat_through_one_of_its_agents_resolves_the_chat_messages(tmp_path: Path) -> None:
+    workspace_agent_id = AgentId()
+    chat_agent_id = AgentId()
+    client, app = _client_with_chat(tmp_path, workspace_agent_id, chat_agent_id)
+    client.post(
+        f"/api/v1/agents/{chat_agent_id}/notifications",
+        json={"message": "The migration finished."},
+        headers=_auth_header(),
+    )
+
+    response = client.post(f"/api/v1/agents/{chat_agent_id}/notifications/read", json={}, headers=_auth_header())
+    again = client.post(f"/api/v1/agents/{chat_agent_id}/notifications/read", json={}, headers=_auth_header())
+
+    assert response.status_code == 200
+    # Nothing left to read is still a success: the workspace calls on every watch transition.
+    assert again.status_code == 200
+    (entry,) = _feed_entries(app)
+    assert entry.is_resolved is True
+
+
+def test_reading_a_chat_resolves_messages_filed_by_its_earlier_agent(tmp_path: Path) -> None:
+    """The chat moved to a new agent: reading through the new one still reads what the old one sent."""
+    earlier, current = AgentId(), AgentId()
+    app, _resolver = _app_with_moved_chat(tmp_path, AgentId(), AgentId(), (earlier, current))
+    client = app.test_client()
+    client.post(
+        f"/api/v1/agents/{earlier}/notifications", json={"message": "Done on the old agent"}, headers=_auth_header()
+    )
+
+    response = client.post(f"/api/v1/agents/{current}/notifications/read", json={}, headers=_auth_header())
+
+    assert response.status_code == 200
+    (entry,) = _feed_entries(app)
+    assert entry.is_resolved is True
 
 
 def test_agent_notification_without_a_message_is_rejected(tmp_path: Path) -> None:
