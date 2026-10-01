@@ -25,7 +25,7 @@ Alias: cfg
 **Usage:**
 
 ```text
-mngr config [OPTIONS] COMMAND [ARGS]...
+mngr config [OPTIONS] [COMMAND] [ARGS]...
 ```
 **Options:**
 

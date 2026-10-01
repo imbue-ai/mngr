@@ -7,6 +7,7 @@ subcommands with a navigable TUI list. Provides a single-select picker
 on the checkbox screen in `plugin_install_wizard._run_selection_screen`.
 """
 
+import operator
 from collections.abc import Sequence
 
 from urwid.event_loop.abstract_loop import ExitMainLoop
@@ -42,8 +43,10 @@ class _PickerInputFilter(MutableModel):
 
     state: _PickerState
 
-    def __call__(self, keys: list[str], raw: list[int]) -> list[str]:
-        passthrough: list[str] = []
+    def __call__(
+        self, keys: list[str | tuple[str, int, int, int]], raw: list[int]
+    ) -> list[str | tuple[str, int, int, int]]:
+        passthrough: list[str | tuple[str, int, int, int]] = []
         for key in keys:
             if key == "enter":
                 self.state.is_confirmed = True
@@ -152,7 +155,8 @@ def run_single_select_picker(
     if not state.is_confirmed:
         return None
 
-    return listbox.focus_position
+    # urwid types a ListBox position as SupportsIndex; this walker's are list indices.
+    return operator.index(listbox.focus_position)
 
 
 def run_multi_select_picker(

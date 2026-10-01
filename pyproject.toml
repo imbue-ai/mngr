@@ -8,7 +8,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pytest-xdist>=3.8.0",
-    "ty>=0.0.39",
+    # ty is held at 0.0.39: the later 0.0.x releases report a different set of
+    # diagnostics on this tree, including a change in how
+    # [tool.ty.environment] extra-paths resolves scripts/. Lift the cap in the
+    # change that works through them. MIND-301.
+    "ty>=0.0.39,<0.0.40",
     "click>=8.0.0",
 ]
 
@@ -18,7 +22,7 @@ dependencies = [
 # surface. scripts/release.py advances it to 2 weeks before each release, and
 # only ever forward. This only buys a detection delay; it can't catch a
 # compromise that stays undetected past the window.
-exclude-newer = "2026-09-01T00:00:00Z"
+exclude-newer = "2026-09-02T00:00:00Z"
 
 [tool.uv.sources]
 imbue-common = { workspace = true }

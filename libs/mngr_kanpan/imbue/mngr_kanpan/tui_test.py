@@ -27,6 +27,7 @@ from urwid.widget.frame import Frame
 from urwid.widget.listbox import ListBox
 from urwid.widget.pile import Pile
 from urwid.widget.text import Text
+from urwid.widget.widget import AbstractFlowWidget
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.interfaces.data_types import AgentDetails
@@ -625,7 +626,10 @@ def test_render_footer_is_single_writer_no_flicker() -> None:
 
 def _render_header_lines(header: Pile, cols: int) -> list[str]:
     """Render `header`'s first row at `cols` columns, as one string per screen line."""
-    return [line.decode() for line in header.contents[0][0].render((cols,)).text]
+    # Pile.contents is typed as plain widgets; only a flow widget renders at (cols,).
+    first_row = header.contents[0][0]
+    assert isinstance(first_row, AbstractFlowWidget)
+    return [line.decode() for line in first_row.render((cols,)).text]
 
 
 def _render_header_rows(title: str, status: str, cols: int) -> list[str]:

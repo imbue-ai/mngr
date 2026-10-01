@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from pathlib import Path
+from typing import Any
 from typing import Generator
 from typing import assert_never
 from uuid import uuid4
@@ -775,3 +776,30 @@ def testing_provider_no_host_volume(
     provider = make_testing_provider(temp_mngr_ctx, testing_modal, is_host_volume_created=False)
     yield provider
     testing_modal.cleanup()
+
+
+def register_modal_test_fixtures(namespace: dict[str, Any]) -> None:
+    """Register this module's Modal test fixtures into the given namespace.
+
+    Call this from a consuming package's conftest.py (mngr_claude's tests drive
+    real Modal hosts and need `modal_subprocess_env`, `real_modal_provider` and
+    the autouse credential loader). This mirrors `register_plugin_test_fixtures`;
+    `pytest_plugins` cannot do the job, because pytest honours it only in the
+    rootdir conftest -- which a consuming package's conftest is not, on every way
+    of invoking this suite except running pytest inside that package.
+    """
+    namespace["initial_snapshot_provider"] = initial_snapshot_provider
+    namespace["modal_mngr_ctx"] = modal_mngr_ctx
+    namespace["modal_subprocess_env"] = modal_subprocess_env
+    namespace["modal_test_session_cleanup"] = modal_test_session_cleanup
+    namespace["modal_test_session_env_name"] = modal_test_session_env_name
+    namespace["modal_test_session_host_dir"] = modal_test_session_host_dir
+    namespace["modal_test_session_user_id"] = modal_test_session_user_id
+    namespace["persistent_modal_provider"] = persistent_modal_provider
+    namespace["real_modal_provider"] = real_modal_provider
+    namespace["temp_source_dir"] = temp_source_dir
+    namespace["testing_modal"] = testing_modal
+    namespace["testing_provider"] = testing_provider
+    namespace["testing_provider_no_host_volume"] = testing_provider_no_host_volume
+    namespace["_load_modal_test_credentials"] = _load_modal_test_credentials
+    namespace["_reset_modal_app_registry"] = _reset_modal_app_registry

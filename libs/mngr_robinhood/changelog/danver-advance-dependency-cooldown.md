@@ -1,0 +1,1 @@
+`anthropic` 1.3.0 adds a `toolset_name` field to `ToolUseBlock`, so the `tool_use` blocks robinhood emits in stream-json output now carry `"toolset_name":null`. This is a cosmetic departure from the real `claude` binary's wire shape, alongside the `"caller":null` and `"citations":null` already documented in the `imbue.mngr_claude.stream_json` module docstring.

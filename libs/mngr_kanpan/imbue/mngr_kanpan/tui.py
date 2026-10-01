@@ -332,7 +332,7 @@ class _HyperlinkCanvas(MutableModel):
         return self._widget_info
 
     @property
-    def coords(self) -> dict[str, Any]:
+    def coords(self) -> Mapping[str, Any]:
         return self.inner.coords
 
     @property
@@ -356,12 +356,10 @@ class _HyperlinkCanvas(MutableModel):
     def cols(self) -> int:
         return self.inner.cols()
 
-    def translate_coords(self, dx: int, dy: int) -> dict[str, Any]:
+    def translate_coords(self, dx: int, dy: int) -> Mapping[str, Any]:
         return self.inner.translate_coords(dx, dy)
 
-    def content(
-        self, trim_left: int = 0, trim_top: int = 0, cols: int | None = 0, rows: int | None = 0, attr: Any = None
-    ) -> Any:
+    def content(self, trim_left: int = 0, trim_top: int = 0, cols: int = 0, rows: int = 0, attr: Any = None) -> Any:
         osc_open = f"\033]8;;{self.url}\033\\".encode()
         osc_close = b"\033]8;;\033\\"
         return _osc8_wrap_content(self.inner.content(trim_left, trim_top, cols, rows, attr), osc_open, osc_close)
@@ -1134,9 +1132,11 @@ def _on_batch_poll(
         list[tuple[_BatchWorkItem, Future[subprocess.CompletedProcess[str]]]],
         list[_BatchItemResult],
         int,
-    ],
+    ]
+    | None,
 ) -> None:
     """Collect whichever operations have finished, and keep watching the rest."""
+    assert data is not None
     state, in_flight, results, total = data
     still_running: list[tuple[_BatchWorkItem, Future[subprocess.CompletedProcess[str]]]] = []
     for item, future in in_flight:
@@ -1261,9 +1261,10 @@ def _mute_focused_agent(state: _KanpanState) -> None:
 
 
 def _on_mute_persist_poll(
-    loop: MainLoop, data: tuple[_KanpanState, Future[None], AgentInstanceKey, AgentName, bool]
+    loop: MainLoop, data: tuple[_KanpanState, Future[None], AgentInstanceKey, AgentName, bool] | None
 ) -> None:
     """Poll for mute persist completion. Revert UI on failure."""
+    assert data is not None
     state, future, instance_key, agent_name, expected_muted = data
     if future.done():
         try:
@@ -1802,8 +1803,9 @@ def _start_peek_capture(state: _KanpanState) -> None:
     state.peek_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_capture_poll, state)
 
 
-def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
+def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState | None) -> None:
     """Poll the in-flight transcript read; render it and schedule the next while open."""
+    assert state is not None
     state.peek_alarm = None
     future = state.peek_capture_future
     if future is None or state.peek_agent_name is None:
@@ -1834,8 +1836,9 @@ def _on_peek_capture_poll(loop: MainLoop, state: _KanpanState) -> None:
         state.peek_alarm = loop.set_alarm_in(PEEK_REFRESH_SECONDS, _on_peek_capture_tick, state)
 
 
-def _on_peek_capture_tick(loop: MainLoop, state: _KanpanState) -> None:
+def _on_peek_capture_tick(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback that starts the next live capture."""
+    assert state is not None
     state.peek_alarm = None
     if state.peek_agent_name is not None:
         _start_peek_capture(state)
@@ -1918,7 +1921,7 @@ def _submit_peek_reply(state: _KanpanState) -> None:
 
 def _on_peek_reply_poll(
     loop: MainLoop,
-    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentInstanceKey, AgentName, str],
+    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], AgentInstanceKey, AgentName, str] | None,
 ) -> None:
     """Poll a sent reply; refresh the board either way, drop its optimistic echo on failure.
 
@@ -1928,6 +1931,7 @@ def _on_peek_reply_poll(
     attempted, and the exit code does not say whether it got that far. A failed send would
     otherwise leave the echo up forever, showing the message as delivered when it was not.
     """
+    assert data is not None
     state, future, instance_key, agent_name, reply_text = data
     if not future.done():
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_peek_reply_poll, data)
@@ -2223,9 +2227,7 @@ def _open_search(state: _KanpanState) -> None:
     for backspace_key in ("backspace", "ctrl h"):
         # urwid_readline types its keymap from the bound methods it ships with, so it
         # does not admit an external callable even though it is meant to be rebound.
-        edit.keymap[backspace_key] = _SearchBackspace(  # ty: ignore[invalid-assignment]
-            state=state, backward_delete_char=edit.keymap[backspace_key]
-        )
+        edit.keymap[backspace_key] = _SearchBackspace(state=state, backward_delete_char=edit.keymap[backspace_key])
     state.search_input = edit
     # The query grows into the belt's free space while the legend shrinks to fit.
     _set_belt_status_slot(state, AttrMap(edit, "footer"), is_status_flexible=True)
@@ -2459,9 +2461,11 @@ def _handle_prompt_key(state: _KanpanState, key: str) -> bool | None:
 
 
 def _on_custom_command_poll(
-    loop: MainLoop, data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], CustomCommand, AgentName]
+    loop: MainLoop,
+    data: tuple[_KanpanState, Future[subprocess.CompletedProcess[str]], CustomCommand, AgentName] | None,
 ) -> None:
     """Poll for custom command completion."""
+    assert data is not None
     state, future, cmd, agent_name = data
     if not future.done():
         loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_custom_command_poll, data)
@@ -2507,8 +2511,9 @@ def _update_refresh_stamp(state: _KanpanState) -> None:
     state.steady_footer_text = _refresh_stamp(seconds_ago, state.last_fetch_seconds)
 
 
-def _on_stamp_tick(loop: MainLoop, state: _KanpanState) -> None:
+def _on_stamp_tick(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback: age the relative refresh stamp and re-render the footer."""
+    assert state is not None
     _update_refresh_stamp(state)
     _render_footer(state)
     loop.set_alarm_in(_STAMP_TICK_SECONDS, _on_stamp_tick, state)
@@ -2591,8 +2596,9 @@ def _ensure_animation_running(state: _KanpanState) -> None:
         state.animation_alarm = state.loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _on_animation_tick, state)
 
 
-def _on_animation_tick(loop: MainLoop, state: _KanpanState) -> None:
+def _on_animation_tick(loop: MainLoop, state: _KanpanState | None) -> None:
     """Advance the spinner and re-render; reschedule while any animated work is active."""
+    assert state is not None
     state.animation_alarm = None
     state.spinner_index += 1
     _render_footer(state)
@@ -2686,8 +2692,9 @@ def _cancel_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
         state.deferred_refresh_alarm = None
 
 
-def _on_deferred_refresh(loop: MainLoop, state: _KanpanState) -> None:
+def _on_deferred_refresh(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback for a deferred (cooldown-delayed) refresh."""
+    assert state is not None
     state.deferred_refresh_alarm = None
     if state.refresh_future is None:
         _start_refresh(loop, state)
@@ -2707,7 +2714,7 @@ def _request_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     _start_local_refresh(loop, state)
 
 
-def _on_local_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
+def _on_local_refresh_alarm(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback for the periodic local refresh.
 
     A tick that lands while the previous one is still running is skipped rather than
@@ -2720,6 +2727,7 @@ def _on_local_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
     deference is one-way -- the full refresh reads `refresh_future` alone, so however often
     this one runs it can neither take that field nor keep a full refresh from starting.
     """
+    assert state is not None
     if state.local_refresh_future is None and state.refresh_future is None:
         _start_periodic_local_refresh(loop, state)
     _schedule_next_local_refresh(loop, state)
@@ -2752,8 +2760,9 @@ def _start_periodic_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_periodic_local_refresh, state)
 
 
-def _poll_periodic_local_refresh(loop: MainLoop, state: _KanpanState) -> None:
+def _poll_periodic_local_refresh(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback: watch the periodic local refresh and apply it when it lands."""
+    assert state is not None
     future = state.local_refresh_future
     if future is None:
         return
@@ -2854,12 +2863,13 @@ def _schedule_refresh_poll(loop: MainLoop, state: _KanpanState) -> None:
     loop.set_alarm_in(SPINNER_INTERVAL_SECONDS, _poll_refresh_completion, state)
 
 
-def _poll_refresh_completion(loop: MainLoop, state: _KanpanState) -> None:
+def _poll_refresh_completion(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback: poll the in-flight refresh and finish it when done.
 
     The spinner glyph is animated by `_on_animation_tick`; this loop only watches
     for completion so the footer has a single writer.
     """
+    assert state is not None
     if state.refresh_future is None:
         return
 
@@ -3615,7 +3625,7 @@ def _schedule_next_refresh(loop: MainLoop, state: _KanpanState) -> None:
     loop.set_alarm_in(state.refresh_interval_seconds, _on_auto_refresh_alarm, state)
 
 
-def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
+def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState | None) -> None:
     """Alarm callback for the periodic full refresh.
 
     A firing that lands while a full refresh is already running is skipped: the interval says
@@ -3627,6 +3637,7 @@ def _on_auto_refresh_alarm(loop: MainLoop, state: _KanpanState) -> None:
     the chain alive down every path a refresh can take, including the ones that never reach
     completion.
     """
+    assert state is not None
     if state.refresh_future is None:
         _start_refresh(loop, state)
     else:

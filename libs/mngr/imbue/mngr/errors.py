@@ -1,4 +1,5 @@
 import re
+import sys
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -6,7 +7,6 @@ from typing import Final
 from typing import IO
 
 from click import ClickException
-from click import get_text_stream
 
 from imbue.mngr.colors import ERROR_COLOR
 from imbue.mngr.colors import RESET_COLOR
@@ -54,7 +54,7 @@ class MngrError(ClickException):
         mirroring the colored ``ERROR:`` prefix that ``logger.error`` already uses.
         """
         if file is None:
-            file = get_text_stream("stderr")
+            file = sys.stderr
         message = f"Error: {self.format_message()}"
         if should_use_color(file):
             message = f"{ERROR_COLOR}{message}{RESET_COLOR}"

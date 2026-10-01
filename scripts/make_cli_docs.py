@@ -146,6 +146,12 @@ def _format_option_default(option: click.Option) -> str:
     """Format option default value for display."""
     if option.default is None:
         return "None"
+    if option.is_bool_flag and not isinstance(option.default, bool):
+        # click 8.5 leaves an undeclared default as its UNSET sentinel rather than
+        # False, but the value a boolean flag actually hands the command is still
+        # False. Flag-value options (several flags sharing one destination) are not
+        # bool flags and keep reporting no default.
+        return "`False`"
     if isinstance(option.default, bool):
         return f"`{option.default}`"
     if isinstance(option.default, str):

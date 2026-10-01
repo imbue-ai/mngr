@@ -9,8 +9,15 @@ dependencies = [
     "imbue-mngr-vps==0.1.10",
     "azure-identity>=1.25",
     "azure-mgmt-compute>=37",
-    "azure-mgmt-network>=30",
-    "azure-mgmt-resource>=25",
+    # Capped below the "hybrid models" rewrite, which client.py does not target
+    # yet: flat constructor kwargs become a nested ``properties=`` model, reads
+    # move behind ``.properties``, and ResourceManagementClient moves to
+    # azure.mgmt.resource.resources. azure-mgmt-network 31 already declares the
+    # nested overloads (it only keeps the flat form working at runtime) and 32
+    # drops the flat form outright, so 30.x is the last release this code is
+    # actually written against. MIND-300.
+    "azure-mgmt-network>=30,<31",
+    "azure-mgmt-resource>=25,<26",
     "azure-mgmt-authorization>=4",
     "azure-core>=1.41",
     "azure-storage-blob>=12.28",

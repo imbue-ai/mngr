@@ -68,8 +68,10 @@ class _WizardInputFilter(MutableModel):
 
     state: _WizardState
 
-    def __call__(self, keys: list[str], raw: list[int]) -> list[str]:
-        result: list[str] = []
+    def __call__(
+        self, keys: list[str | tuple[str, int, int, int]], raw: list[int]
+    ) -> list[str | tuple[str, int, int, int]]:
+        result: list[str | tuple[str, int, int, int]] = []
         for key in keys:
             if key == "enter":
                 self.state.is_confirmed = True

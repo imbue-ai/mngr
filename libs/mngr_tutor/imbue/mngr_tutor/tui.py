@@ -204,8 +204,9 @@ def _schedule_next_check(loop: MainLoop, state: _LessonRunnerState) -> None:
     loop.set_alarm_in(CHECK_INTERVAL_SECONDS, _on_check_alarm, state)
 
 
-def _on_check_alarm(loop: MainLoop, state: _LessonRunnerState) -> None:
+def _on_check_alarm(loop: MainLoop, state: _LessonRunnerState | None) -> None:
     """Alarm callback that runs the check for the current step."""
+    assert state is not None
     current_idx = _get_current_step_index(state.step_completed)
     if current_idx is None:
         # All steps already complete

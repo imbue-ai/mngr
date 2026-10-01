@@ -46,6 +46,7 @@ not byte-match the real CLI:
   it). Same for the empty text block inside ``content_block_start``.
 - ``tool_use`` blocks: the real binary emits ``"caller":{"type":"direct"}``; mngr cannot observe
   the caller of a transcript-sourced tool call, so our ``ToolUseBlock`` dump emits ``"caller":null``.
+  The dump also carries ``"toolset_name":null`` (a Python-model field the TS wire omits).
 - the assistant ``Message`` wrapper: our dump adds ``"container":null`` (absent on the wire) and
   omits ``diagnostics`` / ``context_management`` (present-but-null on the wire); neither field
   exists on the Python ``Message`` model.
