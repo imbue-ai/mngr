@@ -21,6 +21,7 @@ import type {
   UpdateState,
   UpdateStatus,
 } from "../electron-bridge";
+import { BrowserImportModel } from "./browserImport";
 import type { NotificationPrefs, NotificationStyle } from "./notificationsUi";
 import {
   DEFAULT_NOTIFICATION_PREFS,
@@ -45,7 +46,7 @@ export interface SettingsOverview {
 }
 
 export type SettingsSection =
-  "notifications" | "display" | "error-reporting" | "updates" | "backups";
+  "notifications" | "display" | "browser-import" | "error-reporting" | "updates" | "backups";
 
 export const SETTINGS_SECTIONS: {
   name: SettingsSection;
@@ -54,6 +55,7 @@ export const SETTINGS_SECTIONS: {
 }[] = [
   { name: "notifications", label: "Notifications", group: "Other" },
   { name: "display", label: "Display", group: "Other" },
+  { name: "browser-import", label: "Browser cookies", group: "Other" },
   { name: "error-reporting", label: "Error reporting", group: "Other" },
   { name: "updates", label: "Updates", group: "Other" },
   { name: "backups", label: "Master password", group: "Other" },
@@ -121,7 +123,7 @@ export class SettingsModel {
   isLoadFailed = false;
   activeSection: SettingsSection = "notifications";
 
-  // -- Release channels (desktop only) --
+  // Release channels (desktop only)
   updateState: UpdateState | null = null;
   peekedChannels: Record<string, PeekedChannel> = {};
   /** Set when a switch would park the user; cleared by confirm or cancel. */
@@ -134,7 +136,7 @@ export class SettingsModel {
   isUpdateInstalling = false;
   updateError = "";
 
-  // -- Display zoom (desktop only) --
+  // Display zoom (desktop only)
   /** The stored zoom percent; null in the browser build, where the panel
    * points at the browser's own zoom instead. */
   displayZoomPercent: number | null = null;
@@ -156,6 +158,8 @@ export class SettingsModel {
   masterPasswordResults: MasterPasswordResult[] | null = null;
   isMasterPasswordAllOk = false;
   isMasterPasswordBusy = false;
+  /** The Chrome sign-in import the Browser cookies panel runs on demand. */
+  readonly browserImport: BrowserImportModel;
 
   private readonly fetchImpl: FetchLike;
   private readonly redraw: () => void;
@@ -169,6 +173,7 @@ export class SettingsModel {
   ) {
     this.fetchImpl = fetchImpl;
     this.redraw = redraw;
+    this.browserImport = new BrowserImportModel(fetchImpl, redraw);
   }
 
   async load(): Promise<void> {

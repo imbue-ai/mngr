@@ -171,6 +171,55 @@ second gateway URL or a different agent skill.
    response event log via `/ui/api/inbox/resolutions`. Once the
    transcript's own classified resolution lands, it takes over.
 
+## Skipping the login: importing Chrome sign-ins
+
+The browser a sign-in opens is latchkey's own, with its own session, so out
+of the box the user logs in to every service afresh, however many times they
+have done so in their everyday browser. Latchkey (>= 3.16) can instead start
+from what Google Chrome already has: `latchkey auth import-chrome` copies the
+cookies of the user's default Chrome profile, and the localStorage of the
+login pages of the services latchkey knows, into the encrypted browser state
+(`browser_state.json.enc`), which every machine store shares with the
+desktop's, so one import serves every machine's sign-ins. Chrome itself is
+not changed. The run takes tens of seconds (the profile is copied and read
+back through a headless Chrome) and needs Chrome installed with a default
+profile; otherwise it fails with latchkey's reason.
+
+Imbue Studio offers it **once**, at the moment it is worth the most: the
+first Approve that is about to open a browser for a sign-in (nothing signed
+in to the service yet, the account picker on "+ Add account", or a custom
+service with a login URL). Before submitting the approval, the dialog asks
+"Want to skip logging in?" with two answers:
+
+* **Import from Chrome** runs the import, showing progress, and then goes on
+  to the sign-in, whose browser window is now already logged in. A failed
+  import shows latchkey's reason and offers "Continue to sign in" (or a
+  retry); nothing has been approved yet either way.
+* **Not now** goes straight on to the sign-in. Clicking the backdrop instead
+  approves nothing, leaving the Approve button for a click that means it.
+
+Shown is what counts: the desktop client records the offer as made
+(`is_browser_import_offered` in `~/.minds/config.toml`) as soon as the
+question is up, so a user who waved it away is not asked on their next
+Approve. A user who has already signed in through the browser on this
+computer has already paid the login the offer exists to skip, so the first
+time the offer is asked about, latchkey's browser state
+(`browser_state.json.enc`, written only by a completed sign-in or by the
+import itself) counts as the offer having been made, and is recorded as such;
+the import stays reachable from Settings. The offer is a convenience, so an
+Approve never waits on a backend that cannot say whether it is due, and an
+installation with no settings storage is never asked. Whether the offer is
+due is read from
+`GET /ui/api/settings/browser-import`, the mark is
+`POST /ui/api/settings/browser-import/offered`, and the import itself is
+`POST /ui/api/settings/browser-import`, which blocks for the run like the
+sign-in an Approve runs and answers 200 with latchkey's outcome, success or
+not; the same run marks the offer as made.
+
+For later, and for running it again once Chrome has new sign-ins, Settings
+has a **Browser cookies** section with the same import behind an "Import
+from Chrome" button, its outcome shown beside it.
+
 ## Creating a connection an agent asks for
 
 Most third-party services come from Imbue Studio's shipped catalog. When an agent needs

@@ -143,7 +143,7 @@ export function CustomServicePermissionDetailView(): m.Component<CustomServicePe
         headerLabel: `Storing credentials for ${detail.base_api_url}`,
         mark: m(Icon16, { name: "globe", extra: "text-primary" }),
         rationale: detail.rationale,
-        approveLabel: detail.login_url === null ? "Approve" : "Sign in & approve",
+        approveLabel: model.isBrowserSignInPending() ? "Sign in & approve" : "Approve",
         progressLabel:
           detail.login_url === null
             ? `Storing the credentials for ${detail.domain}…`

@@ -80,6 +80,9 @@ class FakeLatchkey(Latchkey):
     _auth_list_calls: list[bool] = PrivateAttr(default_factory=list)
     _accounts_by_service: dict[str, tuple[ServiceAccountCredential, ...]] = PrivateAttr(default_factory=dict)
     _auth_list_error: BaseException | None = PrivateAttr(default=None)
+    # What ``import_chrome_browser_state`` reports, and how often it was asked.
+    _import_chrome_result: tuple[bool, str] = PrivateAttr(default=(True, ""))
+    _import_chrome_call_count: int = PrivateAttr(default=0)
 
     # Auth / services-info doubles. The credential-grant flow now lives in the
     # real ``Latchkey.auth_browser`` (tested against a fake binary in
@@ -105,6 +108,7 @@ class FakeLatchkey(Latchkey):
         service_info: LatchkeyServiceInfo | None = None,
         accounts_by_service: dict[str, tuple[ServiceAccountCredential, ...]] | None = None,
         auth_list_error: BaseException | None = None,
+        import_chrome_result: tuple[bool, str] | None = None,
     ) -> None:
         """Install the given doubles, leaving everything not passed as it was.
 
@@ -133,6 +137,8 @@ class FakeLatchkey(Latchkey):
         if accounts_by_service is not None:
             # What ``auth_list`` reports: the stored accounts per service.
             self._accounts_by_service = accounts_by_service
+        if import_chrome_result is not None:
+            self._import_chrome_result = import_chrome_result
 
     @property
     def services_info_calls(self) -> tuple[tuple[str, bool], ...]:
@@ -187,6 +193,15 @@ class FakeLatchkey(Latchkey):
     def add_account(self, service_name: str) -> tuple[bool, str]:
         del service_name
         return (True, "")
+
+    @property
+    def import_chrome_call_count(self) -> int:
+        """How many times ``import_chrome_browser_state`` has been called."""
+        return self._import_chrome_call_count
+
+    def import_chrome_browser_state(self) -> tuple[bool, str]:
+        self._import_chrome_call_count += 1
+        return self._import_chrome_result
 
     def initialize(self) -> None:
         # No-op: the real implementation runs ``latchkey --version`` and

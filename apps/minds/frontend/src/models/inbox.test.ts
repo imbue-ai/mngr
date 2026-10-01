@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { jsonResponse } from "../testing";
+import { jsonResponse, settle } from "../testing";
 import type { InboxModelOptions } from "./inbox";
 import { forgetWarmedRequestDetails, warmRequestDetail } from "./requestDetailPrefetch";
 import {
@@ -1102,5 +1102,203 @@ describe("InboxModel custom-service requests", () => {
     expect(model.manualCredentialsPrompt()?.message).toBe("The token was rejected.");
     expect(model.isManualCredentialsFailureShown()).toBe(true);
     expect(model.takePendingFailureScroll()).toBe(true);
+  });
+});
+
+describe("the Chrome sign-in import offer", () => {
+  // Nothing signed in: the picker offers only the new-account sentinel, so
+  // Approve is about to open a browser.
+  const SIGN_IN_DETAIL: PredefinedPermissionDetail = {
+    ...PREDEFINED_DETAIL,
+    account_choices: [
+      {
+        value: ":new-account",
+        label: "+ Add account",
+        hint: "",
+        is_credential_setup_needed: true,
+        is_account_name_needed: false,
+      },
+    ],
+    selected_account_value: ":new-account",
+    will_open_browser: true,
+  };
+
+  let calls: string[] = [];
+
+  function makeOfferModel(
+    responses: Record<string, () => Response | Promise<Response>>,
+    detail: PredefinedPermissionDetail = SIGN_IN_DETAIL,
+  ): InboxModel {
+    calls = [];
+    const model = new InboxModel({
+      fetcher: (url, init) => {
+        const key = `${init?.method ?? "GET"} ${url.split("?")[0]}`;
+        calls.push(key);
+        const producer = responses[key];
+        if (!producer) throw new Error(`Unexpected fetch: ${key}`);
+        return Promise.resolve(producer());
+      },
+    });
+    model.detail = detail;
+    model.selectedId = detail.request_id;
+    model.checkedPermissions = new Set(detail.checked_permissions);
+    model.selectedAccount = detail.selected_account_value;
+    return model;
+  }
+
+  const OFFER_DUE = { "GET /ui/api/settings/browser-import": () => jsonResponse({ is_offered: false, is_available: true }) };
+  const GRANTED = { "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED" }) };
+  const MARKED = { "POST /ui/api/settings/browser-import/offered": () => jsonResponse({ is_offered: true, is_available: true }) };
+
+  it("knows when Approve is about to sign in", () => {
+    expect(makeOfferModel({}, SIGN_IN_DETAIL).isBrowserSignInPending()).toBe(true);
+    // A stored account rides without a browser...
+    expect(makeOfferModel({}, PREDEFINED_DETAIL).isBrowserSignInPending()).toBe(false);
+    // ...until the picker is moved to "+ Add account".
+    const staged = makeOfferModel({}, PREDEFINED_DETAIL);
+    staged.selectedAccount = PREDEFINED_DETAIL.new_account_value;
+    expect(staged.isBrowserSignInPending()).toBe(true);
+    // A service with no browser flow connects by typed credentials instead.
+    expect(makeOfferModel({}, MANUAL_DETAIL).isBrowserSignInPending()).toBe(false);
+  });
+
+  it("holds the first sign-in Approve behind the offer, and marks it as made", async () => {
+    const model = makeOfferModel({ ...OFFER_DUE, ...MARKED, ...GRANTED });
+
+    await model.approve();
+    await settle();
+
+    expect(model.isBrowserImportOfferOpen).toBe(true);
+    expect(model.isApproveBusy).toBe(false);
+    expect(calls).toEqual([
+      "GET /ui/api/settings/browser-import",
+      "POST /ui/api/settings/browser-import/offered",
+    ]);
+  });
+
+  it("goes straight to the approval when the offer was already made, or cannot be checked", async () => {
+    const made = makeOfferModel({
+      "GET /ui/api/settings/browser-import": () => jsonResponse({ is_offered: true, is_available: true }),
+      ...GRANTED,
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+    });
+    await made.approve();
+    expect(made.isBrowserImportOfferOpen).toBe(false);
+    expect(calls).toContain("POST /requests/evt-a/grant");
+
+    const unknowable = makeOfferModel({
+      "GET /ui/api/settings/browser-import": () => new Response("", { status: 500 }),
+      ...GRANTED,
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+    });
+    await unknowable.approve();
+    expect(unknowable.isBrowserImportOfferOpen).toBe(false);
+    expect(calls).toContain("POST /requests/evt-a/grant");
+  });
+
+  it("never asks on an Approve that opens no browser", async () => {
+    const model = makeOfferModel(GRANTED, PREDEFINED_DETAIL);
+
+    await model.approve();
+
+    expect(calls).toEqual(["POST /requests/evt-a/grant"]);
+  });
+
+  it("declining goes on to the approval, and the offer is not made again on this page", async () => {
+    const model = makeOfferModel({ ...OFFER_DUE, ...MARKED, ...GRANTED, "GET /ui/api/inbox": () => jsonResponse({ cards: [] }) });
+    await model.approve();
+    await settle();
+
+    model.declineBrowserImport();
+    await settle();
+
+    expect(model.isBrowserImportOfferOpen).toBe(false);
+    expect(calls.filter((call) => call === "POST /requests/evt-a/grant")).toHaveLength(1);
+    // A failed approval leaves the request pending; the next Approve must not
+    // ask again.
+    expect(calls.filter((call) => call === "GET /ui/api/settings/browser-import")).toHaveLength(1);
+  });
+
+  it("accepting runs the import and then the approval", async () => {
+    const model = makeOfferModel({
+      ...OFFER_DUE,
+      ...MARKED,
+      ...GRANTED,
+      "POST /ui/api/settings/browser-import": () => jsonResponse({ is_success: true, detail: "" }),
+      "GET /ui/api/inbox": () => jsonResponse({ cards: [] }),
+    });
+    await model.approve();
+    await settle();
+
+    await model.acceptBrowserImport();
+
+    expect(model.isBrowserImportOfferOpen).toBe(false);
+    const order = calls.filter((call) => call.startsWith("POST"));
+    expect(order.indexOf("POST /ui/api/settings/browser-import")).toBeLessThan(order.indexOf("POST /requests/evt-a/grant"));
+  });
+
+  it("a failed import keeps the offer up with the reason, and approves nothing yet", async () => {
+    const model = makeOfferModel({
+      ...OFFER_DUE,
+      ...MARKED,
+      ...GRANTED,
+      "POST /ui/api/settings/browser-import": () =>
+        jsonResponse({ is_success: false, detail: "Google Chrome is not installed." }),
+    });
+    await model.approve();
+    await settle();
+
+    await model.acceptBrowserImport();
+
+    expect(model.isBrowserImportOfferOpen).toBe(true);
+    expect(model.browserImport.outcome?.detail).toBe("Google Chrome is not installed.");
+    expect(calls).not.toContain("POST /requests/evt-a/grant");
+  });
+
+  it("dismissing the offer approves nothing, and holds while the import runs", async () => {
+    const model = makeOfferModel({
+      ...OFFER_DUE,
+      ...MARKED,
+      "POST /ui/api/settings/browser-import": () => new Promise<Response>(() => undefined),
+    });
+    await model.approve();
+    await settle();
+
+    model.dismissBrowserImportOffer();
+    expect(model.isBrowserImportOfferOpen).toBe(false);
+    expect(calls).not.toContain("POST /requests/evt-a/grant");
+
+    model.isBrowserImportOfferOpen = true;
+    void model.acceptBrowserImport();
+    model.dismissBrowserImportOffer();
+    expect(model.isBrowserImportOfferOpen).toBe(true);
+  });
+
+  it("answers given after the popup moved to another request approve nothing", async () => {
+    const declined = makeOfferModel({ ...OFFER_DUE, ...MARKED, ...GRANTED });
+    await declined.approve();
+    await settle();
+    declined.selectedId = "evt-b";
+
+    declined.declineBrowserImport();
+    await settle();
+
+    expect(declined.isBrowserImportOfferOpen).toBe(false);
+    expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual([]);
+
+    const imported = makeOfferModel({
+      ...OFFER_DUE,
+      ...MARKED,
+      ...GRANTED,
+      "POST /ui/api/settings/browser-import": () => jsonResponse({ is_success: true, detail: "" }),
+    });
+    await imported.approve();
+    await settle();
+    imported.selectedId = "evt-b";
+
+    await imported.acceptBrowserImport();
+
+    expect(imported.isBrowserImportOfferOpen).toBe(false);
+    expect(calls.filter((call) => call.startsWith("POST /requests/"))).toEqual([]);
   });
 });

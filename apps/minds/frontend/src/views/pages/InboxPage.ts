@@ -18,6 +18,7 @@ import { InboxModel } from "../../models/inbox";
 import { Icon16 } from "../components/Icon";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
+import { BrowserImportOffer } from "./inbox/BrowserImportOffer";
 import { requestDetailView } from "./inbox/RequestDetail";
 
 /** The eyebrow: "Permission request for <dot> <machine>". The trailing three
@@ -169,6 +170,7 @@ function InboxPageComponent(): m.Component {
             : null,
           detailPane(activeModel),
         ]),
+        m(BrowserImportOffer, { model: activeModel }),
       ]);
     },
   };

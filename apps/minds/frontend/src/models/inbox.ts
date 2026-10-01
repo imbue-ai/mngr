@@ -16,6 +16,11 @@
 // closing takes them (see returnToPanelAfterRequest).
 
 import type { FolderSyncConflict, UiPermissionGrantGroup } from "../generated/ui";
+import {
+  BrowserImportModel,
+  isBrowserImportOfferDue,
+  markBrowserImportOffered,
+} from "./browserImport";
 import { forgetWarmedRequestDetails, readWarmedRequestDetail, requestDetailUrl } from "./requestDetailPrefetch";
 
 export interface InboxCard {
@@ -275,6 +280,13 @@ export interface InboxModelOptions {
   redraw?: () => void;
 }
 
+/** Whether nothing is signed in to the service yet: every choice the dialog
+ * offers is the "+ Add account" sentinel (the server always appends that one,
+ * so the raw choice list is never empty and its length says nothing). */
+export function hasNoStoredAccount(detail: PredefinedPermissionDetail): boolean {
+  return detail.account_choices.every((choice) => choice.value === detail.new_account_value);
+}
+
 export class InboxModel {
   cards: InboxCard[] = [];
   /** True once a list load ATTEMPT finished (even a failed one). */
@@ -315,6 +327,18 @@ export class InboxModel {
   /** Whether the predefined dialog shows its full editor instead of the summary. */
   isPermissionEditorShown = false;
 
+  /** The one-time "import your Chrome sign-ins" offer: up between an Approve
+   * click that is about to open a browser and the approval itself. */
+  isBrowserImportOfferOpen = false;
+  /** The import the offer runs, with its busy state and outcome. */
+  readonly browserImport: BrowserImportModel;
+  /** Whether the offer question is settled for this page -- made just now,
+   * made some earlier time, or unanswerable -- so Approve stops asking. */
+  private isBrowserImportOfferSettled = false;
+  /** The request the open offer stands in for, so an answer given after the
+   * popup was re-pointed at another request approves nothing. */
+  private browserImportOfferRequestId: string | null = null;
+
   /** Whether a list load is in flight, so a reconciliation that lands while
    * one is running joins it rather than starting a second. */
   private isListLoading = false;
@@ -333,6 +357,7 @@ export class InboxModel {
 
   constructor(options: InboxModelOptions = {}) {
     this.options = options;
+    this.browserImport = new BrowserImportModel(this.fetcher(), () => this.redraw());
   }
 
   private fetcher(): FetchLike {
@@ -680,7 +705,101 @@ export class InboxModel {
     form.append("account_name", this.manualAccountName);
   }
 
+  /** Whether Approve will run a browser sign-in before it grants anything.
+   *
+   * For a catalog service, two ways in: nothing is signed in yet, or the picker
+   * is sitting on "+ Add account", which is a staged choice rather than an
+   * account -- picking it signs nothing in until Approve is pressed. Reading
+   * the selection and not just the payload is the point: the second one
+   * changes as the user works the dropdown, which is why the payload's own
+   * `will_open_browser` (computed for the account it was built with) cannot
+   * stand in. Neither counts for a service latchkey cannot sign in to at all
+   * (AWS, Coolify), which connects by the credentials the dialog asks for --
+   * `manual_credentials` is non-null exactly then.
+   *
+   * A custom service signs in through a browser exactly when the request
+   * carries a login URL. */
+  isBrowserSignInPending(): boolean {
+    const detail = this.detail;
+    if (detail === null) return false;
+    if (detail.kind === "predefined") {
+      if (detail.manual_credentials !== null) return false;
+      return hasNoStoredAccount(detail) || this.selectedAccount === detail.new_account_value;
+    }
+    if (detail.kind === "custom_service") return detail.login_url !== null;
+    return false;
+  }
+
+  /** Approve: first the one-time Chrome sign-in import offer, when this click
+   * is the first that is about to open a browser and it has never been made;
+   * otherwise the approval itself. The offer is a convenience, so a backend
+   * that cannot say whether it is due is read as "not due" rather than holding
+   * the approval up. */
   async approve(): Promise<void> {
+    if (this.selectedId === null || !this.isApproveAllowed()) return;
+    // Busy across the status read, so a second click cannot start a second
+    // approval while the first is finding out whether to ask.
+    this.isApproveBusy = true;
+    this.redraw();
+    const isOfferDue = await this.shouldOfferBrowserImport();
+    this.isApproveBusy = false;
+    if (isOfferDue) {
+      this.isBrowserImportOfferOpen = true;
+      this.browserImportOfferRequestId = this.selectedId;
+      // Shown is what counts, whatever the answer: it is offered once.
+      void markBrowserImportOffered(this.fetcher());
+      this.redraw();
+      return;
+    }
+    await this.submitApproval();
+  }
+
+  private async shouldOfferBrowserImport(): Promise<boolean> {
+    if (this.isBrowserImportOfferSettled || !this.isBrowserSignInPending()) return false;
+    this.isBrowserImportOfferSettled = true;
+    return isBrowserImportOfferDue(this.fetcher());
+  }
+
+  /** "Import from Chrome": run the import, then on to the sign-in the Approve
+   * was about to run -- straight away when it worked (the browser that opens
+   * is then already logged in), or once the user has read why it did not and
+   * chosen to go on. */
+  async acceptBrowserImport(): Promise<void> {
+    const isImported = await this.browserImport.run();
+    if (!isImported) return;
+    await this.continueToApproval();
+  }
+
+  /** "Not now" (or "Continue to sign in" after a failed import): on to the
+   * approval the click was for. */
+  declineBrowserImport(): void {
+    if (this.browserImport.isBusy) return;
+    void this.continueToApproval();
+  }
+
+  /** Close the offer and submit the approval it was holding -- unless the
+   * popup has been re-pointed at another request meanwhile, in which case the
+   * click that opened the offer was for a request no longer on screen, and
+   * the Approve button of the one that is stays for a click that means it. */
+  private async continueToApproval(): Promise<void> {
+    this.isBrowserImportOfferOpen = false;
+    if (this.selectedId !== this.browserImportOfferRequestId) {
+      this.redraw();
+      return;
+    }
+    await this.submitApproval();
+  }
+
+  /** Backdrop click: the offer goes away and nothing is approved; the Approve
+   * button is still there for a click that means it. Ignored while the
+   * import runs, since there is no taking that back. */
+  dismissBrowserImportOffer(): void {
+    if (this.browserImport.isBusy) return;
+    this.isBrowserImportOfferOpen = false;
+    this.redraw();
+  }
+
+  private async submitApproval(): Promise<void> {
     const resolvedId = this.selectedId;
     if (resolvedId === null || !this.isApproveAllowed()) return;
     const body = this.buildGrantForm();

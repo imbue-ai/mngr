@@ -31,6 +31,14 @@ def test_onboarding_complete_defaults_false_and_round_trips(tmp_path: Path) -> N
     assert _make_config(tmp_path).get_is_onboarding_complete() is True
 
 
+def test_browser_import_offered_defaults_false_and_round_trips(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    assert config.get_is_browser_import_offered() is False
+    config.set_is_browser_import_offered(True)
+    assert config.get_is_browser_import_offered() is True
+    assert _make_config(tmp_path).get_is_browser_import_offered() is True
+
+
 @pytest.mark.parametrize(
     ("stored_default_account_id", "signed_in_user_ids", "expected"),
     [

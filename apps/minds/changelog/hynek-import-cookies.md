@@ -1,0 +1,9 @@
+Approving a permission request can now start from the sign-ins the user already has in Google Chrome.
+
+- The first time Approve is about to open a browser for a sign-in (nothing signed in to the service yet, "+ Add account" selected, or a custom service with a login URL), the permission dialog first asks "Want to skip logging in?" and offers to import the user's cookies and site logins from Chrome's default profile into latchkey's browser state, so the browser window that then opens (and every later one) is already logged in. "Import from Chrome" runs `latchkey auth import-chrome` (tens of seconds, with progress shown) and goes on to the sign-in when it completes; a failed import shows latchkey's reason and offers to continue to the sign-in anyway. "Not now" goes straight on to the sign-in; clicking the backdrop approves nothing.
+
+- The offer is made once per installation, whatever the answer: `is_browser_import_offered` in `~/.minds/config.toml` records that it was shown, and the dialog does not ask again. A computer whose latchkey already holds a browser session from a completed sign-in (an install upgraded after its user had logged in through the browser) counts as already offered, so the offer only ever reaches a user who has not logged in through the browser yet. Without settings storage it is never made.
+
+- Settings gains a **Browser cookies** section with an "Import from Chrome" button that runs the same import on demand, for a user who declined the offer or has since signed in to something new in Chrome. The outcome (success, or why nothing was imported) is shown beside the button.
+
+- New routes on the desktop client: `GET /ui/api/settings/browser-import` (whether the offer is still due, and whether an import can run at all), `POST /ui/api/settings/browser-import` (runs the import, blocking for its duration, and counts as the offer having been made), and `POST /ui/api/settings/browser-import/offered` (records the offer as shown).

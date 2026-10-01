@@ -117,6 +117,11 @@ _FOREIGN_STORE_TIMEOUT_SECONDS: Final[float] = 15.0
 # flows it never waits on a human, so it must not run unbounded.
 _AUTH_SET_TIMEOUT_SECONDS: Final[float] = 60.0
 
+# ``auth import-chrome`` copies the Chrome profile's cookie and localStorage
+# files and reads them back through a headless Chrome: tens of seconds as a
+# rule, longer on a large profile or a slow disk, never interactive.
+_IMPORT_CHROME_TIMEOUT_SECONDS: Final[float] = 300.0
+
 # ``latchkey --version`` is normally a print-and-exit, but the upstream CLI
 # runs its credential-store data-format migrations before printing anything --
 # e.g. latchkey 3.0's migration to the multiple-accounts format makes
@@ -167,10 +172,9 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # Move it in lockstep with the versions we install
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template) rather than to track what the
-# code strictly needs: the newest release with a hard dependency here is 3.2.0,
-# the first to report the account whose credentials it injects to detent as
-# ``customMetadata.account`` -- what the per-account permission grants
-# (:mod:`imbue.mngr_latchkey.account_scopes`) read.
+# code strictly needs: the newest release with a hard dependency here is
+# 3.16.0, the first with ``auth import-chrome``, which
+# :meth:`Latchkey.import_chrome_browser_state` runs.
 LATCHKEY_MIN_VERSION: Final[str] = "3.16.1"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
@@ -1926,6 +1930,39 @@ class Latchkey(MutableModel):
             timeout_seconds=_AUTH_SET_TIMEOUT_SECONDS,
         )
 
+    def import_chrome_browser_state(self) -> tuple[bool, str]:
+        """Run ``latchkey auth import-chrome`` (latchkey >= 3.16) and report the outcome.
+
+        Imports the cookies of the user's default Google Chrome profile, and the
+        localStorage of the login pages of the services latchkey knows, into
+        this directory's encrypted browser state, so the browser latchkey opens
+        for a sign-in starts out logged in wherever Chrome is. The browser state
+        is one of the files every machine store shares with the desktop's (see
+        ``remote/_mirror.py``), so one import serves every machine's sign-ins.
+
+        Latchkey copies the profile and reads it through a headless Chrome, so
+        the call takes tens of seconds; it is bounded by
+        :data:`_IMPORT_CHROME_TIMEOUT_SECONDS`. Returns ``(True, "")`` on a
+        clean exit -- the exit status is the whole contract; what latchkey
+        prints about the import only reaches the log -- or ``(False, detail)``
+        with the reason (no Chrome installed, no default profile, ...).
+        """
+        result = self._run_latchkey_subprocess(
+            log_label="auth import-chrome",
+            argv=["auth", "import-chrome"],
+            name="latchkey auth import-chrome",
+            timeout_seconds=_IMPORT_CHROME_TIMEOUT_SECONDS,
+        )
+        if result.returncode == 0:
+            logger.info("latchkey auth import-chrome succeeded: {}", result.stdout.strip())
+            return True, ""
+        if result.is_timed_out:
+            logger.warning("latchkey auth import-chrome timed out after {}s", _IMPORT_CHROME_TIMEOUT_SECONDS)
+            return False, f"Importing from Chrome did not finish within {_IMPORT_CHROME_TIMEOUT_SECONDS:.0f} seconds."
+        raw_message = result.stderr.strip() or result.stdout.strip() or "latchkey auth import-chrome failed"
+        logger.warning("latchkey auth import-chrome exited {}: {}", result.returncode, raw_message)
+        return False, summarize_latchkey_failure(raw_message, fallback="latchkey auth import-chrome failed")
+
     def _run_latchkey_auth_command(
         self,
         log_label: str,
@@ -1954,23 +1991,13 @@ class Latchkey(MutableModel):
         is exported to the child so any browser flow starts from a clean session
         (used by :meth:`add_account`).
         """
-        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
-        if is_ephemeral:
-            env[LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR] = "1"
-        cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
-        with cg:
-            # Without an explicit timeout the child is unbounded, which is what
-            # ``auth browser`` needs: it waits on a real human completing the
-            # browser sign-in flow, which can take arbitrarily long. ``auth
-            # browser-prepare`` is typically non-interactive but may still hit
-            # the network, so it keeps the same untimed treatment.
-            result = cg.run_process_to_completion(
-                command=[self.latchkey_binary, *argv],
-                timeout=timeout_seconds,
-                is_checked_after=False,
-                env=env,
-                name=f"latchkey {log_label} {service_name}",
-            )
+        result = self._run_latchkey_subprocess(
+            log_label=log_label,
+            argv=argv,
+            name=f"latchkey {log_label} {service_name}",
+            is_ephemeral=is_ephemeral,
+            timeout_seconds=timeout_seconds,
+        )
         if result.returncode == 0:
             logger.info("latchkey {} {} succeeded", log_label, service_name)
             return True, ""
@@ -1983,6 +2010,41 @@ class Latchkey(MutableModel):
             raw_message,
         )
         return False, summarize_latchkey_failure(raw_message, fallback=f"latchkey {log_label} failed")
+
+    def _run_latchkey_subprocess(
+        self,
+        log_label: str,
+        argv: list[str],
+        *,
+        name: str,
+        is_ephemeral: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> FinishedProcess:
+        """Run one ``latchkey`` subcommand against this directory and return the finished process.
+
+        ``name`` is the log-safe process label (the argv may carry credentials,
+        so it must never be logged). ``timeout_seconds`` bounds the child; leave
+        it ``None`` for the interactive flows that wait on a human. When
+        ``is_ephemeral`` is set, :data:`LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR` is
+        exported so any browser flow starts from a clean session.
+        """
+        env = _build_env_with_latchkey_directory(self.latchkey_directory, encryption_key=self._load_encryption_key())
+        if is_ephemeral:
+            env[LATCHKEY_EPHEMERAL_BROWSER_ENV_VAR] = "1"
+        cg = ConcurrencyGroup(name=f"latchkey-{log_label.replace(' ', '-')}")
+        with cg:
+            # Without an explicit timeout the child is unbounded, which is what
+            # ``auth browser`` needs: it waits on a real human completing the
+            # browser sign-in flow, which can take arbitrarily long. ``auth
+            # browser-prepare`` is typically non-interactive but may still hit
+            # the network, so it keeps the same untimed treatment.
+            return cg.run_process_to_completion(
+                command=[self.latchkey_binary, *argv],
+                timeout=timeout_seconds,
+                is_checked_after=False,
+                env=env,
+                name=name,
+            )
 
     # Internals
 

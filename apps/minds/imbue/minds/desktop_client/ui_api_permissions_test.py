@@ -24,8 +24,6 @@ from imbue.minds.desktop_client.folder_sync_store import FolderSyncRecord
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
-from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
-from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.machine_access import MachineAccess
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperator
@@ -33,8 +31,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
 from imbue.minds.desktop_client.latchkey.testing import FakeAccountsLatchkey
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
-from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
-from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
+from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.latchkey.testing import seed_connector_grant
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_accounts_permission_request
@@ -42,7 +39,6 @@ from imbue.minds.desktop_client.testing import create_file_sharing_permission_re
 from imbue.minds.desktop_client.testing import create_predefined_permission_request
 from imbue.minds.desktop_client.testing import create_workspace_permission_request
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
-from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import account_scope_key
@@ -106,26 +102,6 @@ class _WorkspaceResolver(StaticBackendResolver):
         return self.name_by_agent.get(str(agent_id))
 
 
-def _build_handler(
-    tmp_path: Path,
-    latchkey: Latchkey,
-    gateway_client: FakeLatchkeyGatewayClient | None = None,
-) -> LatchkeyPermissionGrantHandler:
-    return LatchkeyPermissionGrantHandler(
-        data_dir=tmp_path,
-        latchkey=latchkey,
-        services_catalog=build_permissions_test_catalog(),
-        mngr_message_sender=MngrMessageSender(
-            mngr_caller=RecordingMngrCaller(),
-            # These routes never send messages; an un-entered group satisfies
-            # the required field.
-            concurrency_group=ConcurrencyGroup(name="ui-api-permissions-test-unused"),
-        ),
-        gateway_client=gateway_client if gateway_client is not None else build_fake_gateway_client(),
-        carry_grant_to_machine=leave_grant_on_this_computer,
-    )
-
-
 def _build_client(
     tmp_path: Path,
     latchkey: Latchkey,
@@ -147,7 +123,7 @@ def _build_client(
         name_by_agent={str(agent_id): _WORKSPACE_NAME for agent_id in agent_ids},
         host_by_agent=host_by_agent if host_by_agent is not None else {},
     )
-    handlers = (_build_handler(tmp_path, latchkey, gateway_client),) if has_handler else ()
+    handlers = (build_permission_grant_handler(tmp_path, latchkey, gateway_client),) if has_handler else ()
     client, _app, _auth_store = build_desktop_client_for_test(
         tmp_path,
         is_authenticated=is_authenticated,
@@ -1158,7 +1134,7 @@ def test_waiting_requests_exclude_other_workspaces(tmp_path: Path) -> None:
         tmp_path,
         is_authenticated=True,
         backend_resolver=resolver,
-        request_event_handlers=(_build_handler(tmp_path, _latchkey(tmp_path)),),
+        request_event_handlers=(build_permission_grant_handler(tmp_path, _latchkey(tmp_path)),),
         pending_requests=StaticPendingRequests(pending=(other_request,)),
     )
 

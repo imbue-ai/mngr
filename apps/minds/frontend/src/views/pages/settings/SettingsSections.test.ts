@@ -927,3 +927,39 @@ describe("Display panel", () => {
     });
   });
 });
+
+describe("the Browser cookies panel", () => {
+  function browserImportModel(): SettingsModel {
+    const model = new SettingsModel(undefined, () => {});
+    model.activeSection = "browser-import";
+    return model;
+  }
+
+  function runButton(model: SettingsModel): AnyVnode | undefined {
+    return collectVnodes(renderRoot(SettingsSections, { model })).find((node) => attrsOf(node).id === "browser-import-run");
+  }
+
+  it("is listed among the sections and offers the import", () => {
+    expect(SETTINGS_SECTIONS.map((section) => section.name)).toContain("browser-import");
+    const model = browserImportModel();
+    expect(panelText(model)).toContain("Import from Chrome");
+    expect(attrsOf(runButton(model)!).disabled).toBe(false);
+  });
+
+  it("refuses a second click while the import runs", () => {
+    const model = browserImportModel();
+    model.browserImport.isBusy = true;
+    expect(attrsOf(runButton(model)!).disabled).toBe(true);
+    expect(panelText(model)).toContain("Importing");
+  });
+
+  it("states what the last run came back with", () => {
+    const succeeded = browserImportModel();
+    succeeded.browserImport.outcome = { is_success: true, detail: "" };
+    expect(panelText(succeeded)).toContain("Imported your Chrome cookies.");
+
+    const failed = browserImportModel();
+    failed.browserImport.outcome = { is_success: false, detail: "Google Chrome is not installed." };
+    expect(panelText(failed)).toContain("Google Chrome is not installed.");
+  });
+});

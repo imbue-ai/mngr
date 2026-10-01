@@ -322,6 +322,19 @@ def _make_fake_latchkey_binary(tmp_path: Path) -> Path:
         "    out = _os.path.join(destination, 'credentials.json.enc')\n"
         "    open(out, 'w').write(_json.dumps(payload))\n"
         "    sys.exit(0)\n"
+        # ``auth import-chrome`` succeeds with latchkey's own summary unless a
+        # ``no-chrome`` marker sits in the latchkey directory, which makes it
+        # fail the way a computer without Chrome does.
+        'if sys.argv[1:3] == ["auth", "import-chrome"]:\n'
+        "    import os as _os\n"
+        "    directory = _os.environ['LATCHKEY_DIRECTORY']\n"
+        "    if _os.path.exists(_os.path.join(directory, 'no-chrome')):\n"
+        "        print('Error: Google Chrome is not installed in any of the standard locations.', file=sys.stderr)\n"
+        "        sys.exit(1)\n"
+        "    print('Imported 12 cookie(s) and the localStorage of 2 origin(s) into ' + directory + '/browser_state.json.enc.')\n"
+        "    print('  https://slack.com')\n"
+        "    print('  https://github.com')\n"
+        "    sys.exit(0)\n"
         "import os, socket, signal\n"
         'assert sys.argv[1] == "gateway"\n'
         "host = os.environ['LATCHKEY_GATEWAY_LISTEN_HOST']\n"
@@ -3516,3 +3529,23 @@ def test_add_account_notion_mcp_pins_redirect_uri_before_ephemeral_sign_in(tmp_p
     # Only the browser flows run from a fresh session; pinning the redirect
     # URI opens no browser.
     assert [record["env_ephemeral"] for record in records] == ["", "1", "1"]
+
+
+def test_import_chrome_browser_state_reports_a_clean_exit_as_success(tmp_path: Path) -> None:
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+
+    assert manager.import_chrome_browser_state() == (True, "")
+
+
+def test_import_chrome_browser_state_surfaces_latchkeys_reason_on_failure(tmp_path: Path) -> None:
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    (tmp_path / "no-chrome").write_text("")
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+
+    is_success, detail = manager.import_chrome_browser_state()
+
+    assert is_success is False
+    assert "Google Chrome is not installed" in detail

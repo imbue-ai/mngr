@@ -14,13 +14,17 @@ from pydantic import Field
 from pydantic import JsonValue
 from pydantic import PrivateAttr
 
+from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.latchkey.gateway_client import FileSharingAccess
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClient
 from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.permission_overview import SELF_SCOPE
+from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import build_account_grant
@@ -248,6 +252,30 @@ def leave_permissions_on_this_computer(workspace_agent_id: str) -> None:
     """
 
 
+def build_permission_grant_handler(
+    data_dir: Path,
+    latchkey: Latchkey,
+    gateway_client: FakeLatchkeyGatewayClient | None = None,
+) -> LatchkeyPermissionGrantHandler:
+    """A real grant handler over ``latchkey``, for routes that reach the desktop's latchkey through it.
+
+    The message sender and the machine handover are inert: the routes that need
+    this never send a verdict or carry a grant anywhere. ``gateway_client``
+    defaults to a fresh :func:`build_fake_gateway_client`.
+    """
+    return LatchkeyPermissionGrantHandler(
+        data_dir=data_dir,
+        latchkey=latchkey,
+        services_catalog=build_permissions_test_catalog(),
+        mngr_message_sender=MngrMessageSender(
+            mngr_caller=RecordingMngrCaller(),
+            concurrency_group=ConcurrencyGroup(name="permission-grant-handler-test-unused"),
+        ),
+        gateway_client=gateway_client if gateway_client is not None else build_fake_gateway_client(),
+        carry_grant_to_machine=leave_grant_on_this_computer,
+    )
+
+
 def build_fake_gateway_client() -> FakeLatchkeyGatewayClient:
     """Return a :class:`FakeLatchkeyGatewayClient` ready for use in tests.
 
@@ -260,7 +288,7 @@ def build_fake_gateway_client() -> FakeLatchkeyGatewayClient:
     return FakeLatchkeyGatewayClient()
 
 
-# -- The latchkey CLI's account surface -------------------------------------
+# The latchkey CLI's account surface
 
 
 # AWS is the browser-less service of the catalog below: latchkey cannot sign in

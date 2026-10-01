@@ -13,10 +13,10 @@ import type {
 } from "../../../generated/ui";
 import type {
   InboxModel,
-  PermissionAccountChoice,
   PredefinedPermissionDetail as Detail,
 } from "../../../models/inbox";
 import {
+  hasNoStoredAccount,
   isPermissionCheckboxDisabled,
   submittedPermissions,
 } from "../../../models/inbox";
@@ -48,54 +48,19 @@ function summaryRows(
   );
 }
 
-/** The accounts that are a real answer to "which account?", as opposed to the
- * sentinel that starts a new sign-in (the server always appends that one, so
- * the raw choice list is never empty and its length says nothing). */
-function realAccountChoices(detail: Detail): PermissionAccountChoice[] {
-  return detail.account_choices.filter(
-    (choice) => choice.value !== detail.new_account_value,
-  );
-}
-
-/** The dialog has two shapes, not three.
- *
- * Nothing signed in yet: no picker at all, and Approve says "Sign in & approve"
- * so the browser hop is not a surprise. Anything signed in: the picker, with
- * the account the grant will ride on already selected and "+ Add account"
- * last -- including when there is only one, where naming it is what stops a
- * service the user holds several accounts on from reading as ambiguous.
- *
- * A single account used to ride silently, and a middle state that named it in
- * the header replaced that; both are gone, because one control that always
- * says which account beats three arrangements the user has to tell apart. */
-function hasNoAccount(detail: Detail): boolean {
-  return realAccountChoices(detail).length === 0;
-}
-
-/** Whether Approve will run a browser sign-in before it grants anything.
- *
- * Two ways in: nothing is signed in yet, or the picker is sitting on
- * "+ Add account", which is a staged choice rather than an account -- picking it
- * signs nothing in until Approve is pressed. Both make the next click open a
- * browser, so both say so on the button. Reading the model and not just the
- * payload is the point: the second one changes as the user works the dropdown.
- *
- * Neither counts for a service latchkey cannot sign in to at all (AWS, Coolify),
- * which connects by the credentials the dialog asks for -- `manual_credentials`
- * is non-null exactly then. Saying "Sign in" there would contradict the form
- * right below the button. `will_open_browser` cannot stand in: it is
- * computed for the account the payload was built with, so it does not move as
- * the user works the dropdown. */
-function willSignIn(model: InboxModel, detail: Detail): boolean {
-  if (detail.manual_credentials !== null) return false;
-  return hasNoAccount(detail) || model.selectedAccount === detail.new_account_value;
-}
-
 /** The account the grant rides on -- shown whenever there is one to name.
  * Gated on the payload, never on the selection: choosing "+ Add account" must
- * not take the dropdown away, or there would be no way back to a real one. */
+ * not take the dropdown away, or there would be no way back to a real one.
+ *
+ * The dialog has two shapes, not three. Nothing signed in yet: no picker at
+ * all, and Approve says "Sign in & approve" so the browser hop is not a
+ * surprise. Anything signed in: the picker, with the account the grant will
+ * ride on already selected and "+ Add account" last -- including when there
+ * is only one, where naming it is what stops a service the user holds several
+ * accounts on from reading as ambiguous. One control that always says which
+ * account beats several arrangements the user has to tell apart. */
 function accountPicker(model: InboxModel, detail: Detail): m.Children {
-  if (hasNoAccount(detail)) return null;
+  if (hasNoStoredAccount(detail)) return null;
   return m("div", { id: "permissions-account", class: "flex flex-col gap-1.5" }, [
     m("h3", { class: "type-section text-tertiary" }, "Account"),
     m(
@@ -289,7 +254,10 @@ export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissi
         ),
         rationale: detail.rationale,
         account: accountPicker(model, detail),
-        approveLabel: willSignIn(model, detail) ? "Sign in & approve" : "Approve",
+        // Says what approving will do, so the browser hop is not a surprise
+        // (and for AWS and the like never contradicts the credential form
+        // right below the button).
+        approveLabel: model.isBrowserSignInPending() ? "Sign in & approve" : "Approve",
         progressLabel: detail.will_open_browser
           ? `Opening a browser window for you to sign in to ${detail.display_name}…`
           : "Granting permission...",

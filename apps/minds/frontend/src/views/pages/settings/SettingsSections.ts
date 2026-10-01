@@ -1,5 +1,5 @@
 // The app-level settings sections: left nav + one panel each for
-// notifications, display, error reporting, updates, and the master password. What an
+// notifications, display, browser sign-ins, error reporting, updates, and the master password. What an
 // agent may reach is not here: credentials and grants belong to one machine
 // each, so they live on that machine's Permissions tab. Port of
 // templates/AppSettingsSections.jinja with the interactivity of
@@ -19,11 +19,13 @@ import {
   DISPLAY_ZOOM_PERCENTS,
 } from "../../../models/settings";
 import { formatRelativeAgo } from "../../../models/backups";
+import { BROWSER_IMPORT_SUCCESS_MESSAGE } from "../../../models/browserImport";
 import type { NotificationStyle } from "../../../models/notificationsUi";
 import { electronBridge } from "../../../electron-bridge";
 import { Button } from "../../components/Button";
 import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
+import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { updateInstallingCopy, updateReadyCopy } from "../../shell/UpdateReadyCard";
 import { installTermsOf } from "../../shell/update-ready";
@@ -312,6 +314,60 @@ function displayPanel(model: SettingsModel): m.Children {
           model.displayZoomError,
         )
       : null,
+  ]);
+}
+
+/** The import the permission dialog offers once, kept here for later and for
+ * running again: Chrome's sign-ins change, and what was imported does not
+ * follow them. */
+function browserImportPanel(model: SettingsModel): m.Children {
+  const { browserImport } = model;
+  const outcome = browserImport.outcome;
+  return m("section", [
+    m("h2", { class: "type-heading-lg text-primary mb-2" }, "Browser cookies"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      "When a permission request needs you to sign in to a service, Imbue Studio opens a browser window " +
+        "of its own. Import your cookies from Google Chrome and that window is already " +
+        "logged in wherever Chrome is.",
+    ),
+    m("div", { class: "flex flex-col gap-2 py-3 border-b border-subtle" }, [
+      m("div", { class: "flex items-center justify-between gap-3" }, [
+        m("span", { class: "type-body text-primary" }, "Import from Google Chrome's default profile."),
+        m(
+          Button,
+          {
+            variant: "secondary",
+            size: "md",
+            id: "browser-import-run",
+            disabled: browserImport.isBusy,
+            onclick: () => void browserImport.run(),
+          },
+          browserImport.isBusy
+            ? [m(Spinner, { size: "sm", extra: "mr-1.5" }), "Importing…"]
+            : "Import from Chrome",
+        ),
+      ]),
+      browserImport.isBusy
+        ? m("span", { class: "type-helper text-tertiary", role: "status" }, "This can take a moment.")
+        : null,
+      outcome !== null && outcome.is_success
+        ? m(
+            "span",
+            { class: "type-helper", role: "status", id: "browser-import-result" },
+            BROWSER_IMPORT_SUCCESS_MESSAGE,
+          )
+        : null,
+      outcome !== null && !outcome.is_success
+        ? m(Notice, { variant: "error", role: "alert", id: "browser-import-result" }, outcome.detail)
+        : null,
+    ]),
+    m(
+      "p",
+      { class: "type-helper text-tertiary mt-3" },
+      "Run it again whenever you have signed in to something new in Chrome. Chrome itself is not changed.",
+    ),
   ]);
 }
 
@@ -997,6 +1053,7 @@ export function SettingsSections(): m.Component<SectionsAttrs> {
               ? notificationsPanel(model)
               : null,
             model.activeSection === "display" ? displayPanel(model) : null,
+            model.activeSection === "browser-import" ? browserImportPanel(model) : null,
             model.activeSection === "error-reporting"
               ? errorReportingPanel(model)
               : null,

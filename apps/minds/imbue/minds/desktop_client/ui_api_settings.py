@@ -42,6 +42,7 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
 from imbue.minds.utils.sentry.core import write_latchkey_forward_sentry_consent
+from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
 
 _WriteT = TypeVar("_WriteT", bound=FrozenModel)
 
@@ -88,6 +89,20 @@ class UiSettingsOverview(FrozenModel):
     )
     update_window_start_hour: int = Field(description="Local hour scheduled machine updates may start running at")
     update_window_end_hour: int = Field(description="Local hour scheduled machine updates stop running at")
+
+
+class UiBrowserImportStatus(FrozenModel):
+    """Where the one-time Chrome sign-in import offer stands."""
+
+    is_offered: bool = Field(description="Whether the permission dialog has already made the one-time offer")
+    is_available: bool = Field(description="Whether this desktop has a latchkey to import into at all")
+
+
+class UiBrowserImportResult(FrozenModel):
+    """Outcome of one ``latchkey auth import-chrome`` run."""
+
+    is_success: bool = Field(description="Whether the import completed")
+    detail: str = Field(description="Why the import did not happen; empty on success")
 
 
 class UiErrorReportingWrite(FrozenModel):
@@ -355,6 +370,87 @@ def _handle_test_notification() -> Response:
     return _json_response(UiTestNotificationResult(is_electron=dispatcher.is_electron))
 
 
+def _has_completed_a_browser_sign_in(handler: LatchkeyPermissionGrantHandler) -> bool:
+    """Whether this computer's latchkey holds a browser session from a completed sign-in.
+
+    Latchkey writes the browser state only at the end of a completed,
+    non-ephemeral browser sign-in (or of the import itself), and every machine
+    store reaches the desktop's copy through a symlink, so the one file says
+    whether the user has already logged in through the browser here.
+    """
+    return (handler.latchkey.latchkey_directory / BROWSER_STATE_FILENAME).is_file()
+
+
+def _browser_import_status() -> UiBrowserImportStatus:
+    """The offer's standing, settling it from the browser state when nothing has recorded it yet.
+
+    A user who has already signed in through the browser has already paid the
+    login the offer exists to skip, so the offer is recorded as made the first
+    time it is asked about, and the import stays reachable from Settings. Done
+    here rather than at startup so an install that has never been asked stays
+    untouched, and recorded rather than re-derived so the answer holds still
+    even if the state file later goes away.
+    """
+    minds_config = get_state().minds_config
+    handler = _find_permission_grant_handler()
+    if minds_config is None:
+        is_offered = True
+    else:
+        is_offered = minds_config.get_is_browser_import_offered()
+        if not is_offered and handler is not None and _has_completed_a_browser_sign_in(handler):
+            minds_config.set_is_browser_import_offered(True)
+            is_offered = True
+    return UiBrowserImportStatus(is_offered=is_offered, is_available=handler is not None)
+
+
+def _handle_browser_import_status() -> Response:
+    """GET /ui/api/settings/browser-import: whether the one-time offer is still due, and whether an import can run.
+
+    Without settings storage there is nowhere to remember an offer, so it reads
+    as already made rather than being repeated on every Approve.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    return _json_response(_browser_import_status())
+
+
+def _handle_browser_import_offered() -> Response:
+    """POST /ui/api/settings/browser-import/offered: record that the one-time offer has been shown.
+
+    Shown is what counts, whatever the answer was: the offer is made once, and a
+    user who waved it away is not asked again on their next Approve. The import
+    stays reachable from Settings.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    minds_config = get_state().minds_config
+    if minds_config is None:
+        return _error_response("Settings storage is not configured", 503)
+    minds_config.set_is_browser_import_offered(True)
+    return _json_response(_browser_import_status())
+
+
+def _handle_browser_import_run() -> Response:
+    """POST /ui/api/settings/browser-import: import the user's Chrome cookies and site logins into latchkey.
+
+    Blocks for the whole run (tens of seconds), like the browser sign-in an
+    Approve runs: the caller shows a spinner and reads the outcome from the
+    body. A failed import answers 200 with ``is_success`` false and latchkey's
+    reason, so the dialog can show it and go on to the sign-in. Also counts as
+    the offer having been made, since running it is one way of answering it.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    handler = _find_permission_grant_handler()
+    if handler is None:
+        return _error_response("Browser cookies are not configured on this desktop", 503)
+    minds_config = get_state().minds_config
+    if minds_config is not None:
+        minds_config.set_is_browser_import_offered(True)
+    is_success, detail = handler.latchkey.import_chrome_browser_state()
+    return _json_response(UiBrowserImportResult(is_success=is_success, detail=detail))
+
+
 def _handle_update_window_write() -> Response:
     """POST /ui/api/settings/update-window: set the local hours scheduled updates run in.
 
@@ -483,5 +579,15 @@ def register_settings_routes(blueprint: Blueprint) -> None:
     blueprint.add_url_rule("/api/settings/notifications", view_func=_handle_notification_prefs_write, methods=["POST"])
     blueprint.add_url_rule("/api/settings/notifications/test", view_func=_handle_test_notification, methods=["POST"])
     blueprint.add_url_rule("/api/settings/update-window", view_func=_handle_update_window_write, methods=["POST"])
+    blueprint.add_url_rule("/api/settings/browser-import", view_func=_handle_browser_import_status)
+    blueprint.add_url_rule(
+        "/api/settings/browser-import",
+        view_func=_handle_browser_import_run,
+        methods=["POST"],
+        endpoint="browser_import_run",
+    )
+    blueprint.add_url_rule(
+        "/api/settings/browser-import/offered", view_func=_handle_browser_import_offered, methods=["POST"]
+    )
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)
     blueprint.add_url_rule("/api/ai-keys", view_func=_handle_ai_keys_context)

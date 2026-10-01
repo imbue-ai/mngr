@@ -2,10 +2,12 @@ import json
 from pathlib import Path
 
 import pytest
+from flask.testing import FlaskClient
 from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
@@ -14,6 +16,8 @@ from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
 from imbue.minds.desktop_client.ui_api_settings import compute_notification_prefs_version
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
+from imbue.mngr_latchkey.core import BROWSER_STATE_FILENAME
+from imbue.mngr_latchkey.testing import FakeLatchkey
 
 
 def test_settings_overview_requires_authentication(tmp_path: Path) -> None:
@@ -430,3 +434,97 @@ _CONNECTOR_CATALOG_PAYLOAD: dict[str, object] = {
 
 # The signed-in account the connector fixtures grant permissions to.
 _TEST_ACCOUNT: str = "hynek@imbue-ai"
+
+
+def _build_client_with_latchkey(
+    tmp_path: Path, latchkey: FakeLatchkey, minds_config: MindsConfig | None
+) -> FlaskClient:
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        minds_config=minds_config,
+        request_event_handlers=(build_permission_grant_handler(tmp_path, latchkey),),
+    )
+    return client
+
+
+def test_browser_import_status_requires_authentication(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
+
+    assert client.get("/ui/api/settings/browser-import").status_code == 401
+    assert client.post("/ui/api/settings/browser-import").status_code == 401
+    assert client.post("/ui/api/settings/browser-import/offered").status_code == 401
+
+
+def test_browser_import_is_due_once_and_available_with_a_latchkey(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client = _build_client_with_latchkey(tmp_path, FakeLatchkey(latchkey_directory=tmp_path), minds_config)
+
+    assert json.loads(client.get("/ui/api/settings/browser-import").data) == {
+        "is_offered": False,
+        "is_available": True,
+    }
+
+    response = client.post("/ui/api/settings/browser-import/offered")
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["is_offered"] is True
+    assert minds_config.get_is_browser_import_offered() is True
+    assert json.loads(client.get("/ui/api/settings/browser-import").data)["is_offered"] is True
+
+
+def test_a_completed_browser_sign_in_counts_as_the_offer_having_been_made(tmp_path: Path) -> None:
+    # A user who has already logged in through the browser has already paid the
+    # login the offer exists to skip. The state file is what latchkey leaves
+    # behind after a completed sign-in.
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    (tmp_path / BROWSER_STATE_FILENAME).write_text("encrypted")
+    client = _build_client_with_latchkey(tmp_path, FakeLatchkey(latchkey_directory=tmp_path), minds_config)
+
+    assert json.loads(client.get("/ui/api/settings/browser-import").data)["is_offered"] is True
+    # Recorded, not re-derived: the answer holds even once the state file is gone.
+    assert minds_config.get_is_browser_import_offered() is True
+    (tmp_path / BROWSER_STATE_FILENAME).unlink()
+    assert json.loads(client.get("/ui/api/settings/browser-import").data)["is_offered"] is True
+
+
+def test_browser_import_reads_as_offered_and_unavailable_without_storage_or_a_latchkey(tmp_path: Path) -> None:
+    # Nowhere to remember an offer means it is never made, rather than made on
+    # every Approve; no latchkey means nothing to import into.
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=True)
+
+    assert json.loads(client.get("/ui/api/settings/browser-import").data) == {
+        "is_offered": True,
+        "is_available": False,
+    }
+    assert client.post("/ui/api/settings/browser-import/offered").status_code == 503
+    assert client.post("/ui/api/settings/browser-import").status_code == 503
+
+
+def test_browser_import_runs_latchkeys_import_once_and_counts_as_the_offer(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    latchkey = FakeLatchkey(latchkey_directory=tmp_path)
+    client = _build_client_with_latchkey(tmp_path, latchkey, minds_config)
+
+    response = client.post("/ui/api/settings/browser-import")
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"is_success": True, "detail": ""}
+    assert latchkey.import_chrome_call_count == 1
+    assert minds_config.get_is_browser_import_offered() is True
+
+
+def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -> None:
+    latchkey = FakeLatchkey(latchkey_directory=tmp_path)
+    latchkey.configure(
+        import_chrome_result=(False, "Google Chrome is not installed in any of the standard locations.")
+    )
+    client = _build_client_with_latchkey(tmp_path, latchkey, MindsConfig(data_dir=tmp_path / "config"))
+
+    response = client.post("/ui/api/settings/browser-import")
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {
+        "is_success": False,
+        "detail": "Google Chrome is not installed in any of the standard locations.",
+    }

@@ -283,6 +283,18 @@ class MindsConfig(MutableModel):
         """Record whether the installation has been taken past the first-run start flow."""
         self._set_bool("is_onboarding_complete", is_complete)
 
+    def get_is_browser_import_offered(self) -> bool:
+        """Return whether the one-time offer to import the user's Chrome sign-ins has been shown. Default: False.
+
+        The permission dialog makes the offer once, on the first Approve that is about
+        to open a browser for a sign-in; after that the import lives in Settings only.
+        """
+        return self._get_bool("is_browser_import_offered", default=False)
+
+    def set_is_browser_import_offered(self, is_offered: bool) -> None:
+        """Record whether the one-time Chrome sign-in import offer has been shown."""
+        self._set_bool("is_browser_import_offered", is_offered)
+
     def get_report_unexpected_errors(self) -> bool:
         """Return whether unexpected errors (with their log/traceback attachments) are reported to
         Sentry automatically. Default: True.
