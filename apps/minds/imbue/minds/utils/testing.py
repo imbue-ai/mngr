@@ -5,6 +5,7 @@ exercised through the tests that import them.
 """
 
 import threading
+from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -75,6 +76,32 @@ class RecordingMngrCaller(MngrCaller):
     def called_event(self) -> threading.Event:
         """Set once at least one call has been recorded; lets tests await a background send."""
         return self._called_event
+
+
+class HookedMngrCaller(RecordingMngrCaller):
+    """A :class:`RecordingMngrCaller` that runs a test's hook with each call's argv before returning.
+
+    The hook plays something changing while the call is in flight (a verdict
+    landing, the machine answering again), so the code under test sees the
+    change only after its call returns.
+    """
+
+    _on_call: Callable[[Sequence[str]], None] | None = PrivateAttr(default=None)
+
+    def set_on_call(self, hook: Callable[[Sequence[str]], None]) -> None:
+        self._on_call = hook
+
+    def call(
+        self,
+        argv: Sequence[str],
+        timeout: float | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        cwd: Path | None = None,
+    ) -> MngrCallResult:
+        result = super().call(argv, timeout=timeout, env_overrides=env_overrides, cwd=cwd)
+        if self._on_call is not None:
+            self._on_call(argv)
+        return result
 
 
 class ScriptedMngrCaller(RecordingMngrCaller):

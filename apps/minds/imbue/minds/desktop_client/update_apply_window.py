@@ -267,18 +267,22 @@ class UpdateApplyWindowManager(MutableModel):
         return max(remaining, _EXPIRY_PASS_INTERVAL_SECONDS)
 
     def open_window(self, agent_id: AgentId, *, apply_updated_at: datetime | None = None) -> None:
-        """Arm the window for ``agent_id``: probe grace on, activity APPLYING.
+        """Arm the window for an apply the workspace reported: probe grace on, activity APPLYING.
 
         Re-arming extends the deadline rather than stacking. The row moves only while a
         run still owns it, so a verdict that landed during the guard's probe is kept.
         """
+        self._arm_window(agent_id, apply_updated_at=apply_updated_at)
+        self.store.set_activity(agent_id, UpdateActivity.APPLYING, only_from=IN_FLIGHT_ACTIVITIES)
+
+    def _arm_window(self, agent_id: AgentId, *, apply_updated_at: datetime | None) -> None:
+        """Arm the probe grace and the deadline, leaving the row's activity alone."""
         window_seconds = self._window_seconds_for(apply_updated_at)
         deadline = time.monotonic() + window_seconds
         with self._lock:
             was_open = str(agent_id) in self._deadline_by_agent
             self._deadline_by_agent[str(agent_id)] = deadline
         self.tracker.begin_probe_grace(agent_id, ProbeGracePurpose.UPDATE_APPLY, deadline)
-        self.store.set_activity(agent_id, UpdateActivity.APPLYING, only_from=IN_FLIGHT_ACTIVITIES)
         if was_open:
             logger.debug("Extended the update apply window for {} ({:.0f}s)", agent_id, window_seconds)
         else:
@@ -306,24 +310,33 @@ class UpdateApplyWindowManager(MutableModel):
         if not self.store.get(agent_id).is_run_in_flight:
             return False
         probe = self.probe_run(agent_id)
-        if probe.is_probe_answered and not probe.is_apply_in_progress:
+        if probe.is_apply_in_progress:
+            logger.info("Declined unattended recovery for {}: its update's apply is under way", agent_id)
+            self.open_window(agent_id, apply_updated_at=probe.apply_updated_at)
+            return True
+        # The probe can take its whole budget, and a machine that answered again in the
+        # meantime has no outage left to recover or to stand back from.
+        if self.tracker.get_health(agent_id) is not AgentHealth.STUCK:
+            logger.info(
+                "Declined unattended recovery for {}: it was no longer stuck once asked about its update", agent_id
+            )
+            return True
+        if probe.is_probe_answered:
             logger.info(
                 "Machine {} is stuck with an update in flight but no apply under way; treating it as a real outage",
                 agent_id,
             )
             return False
-        if probe.is_probe_answered:
-            logger.info("Declined unattended recovery for {}: its update's apply is under way", agent_id)
-        else:
-            # Unreachable is not evidence of "no apply". Arming (not just declining) matters:
-            # the stuck edge fires once per episode, so only the window's expiry can still
-            # restart a machine that really did die.
-            logger.info(
-                "Declined unattended recovery for {}: its update is in flight and it could not say "
-                "whether an apply is under way",
-                agent_id,
-            )
-        self.open_window(agent_id, apply_updated_at=probe.apply_updated_at)
+        # Unreachable is not evidence of "no apply", but not evidence of one either, so the row
+        # keeps saying the run is preparing. Arming (not just declining) matters: the stuck edge
+        # fires once per episode, so only the window's expiry can still restart a machine that
+        # really did die.
+        logger.info(
+            "Declined unattended recovery for {}: its update is in flight and it could not say "
+            "whether an apply is under way",
+            agent_id,
+        )
+        self._arm_window(agent_id, apply_updated_at=None)
         return True
 
     def probe_run(self, agent_id: AgentId) -> UpdateRunProbe:

@@ -28,6 +28,17 @@ Feature: The apply step's outage
     And the app does not restart a workspace that reports an apply under way
     And the app restarts a workspace that reports no apply under way
     And the app does not restart a workspace that cannot answer either way
+    And the app does not report a workspace that cannot answer either way as applying its update
+
+  @answered-while-asked
+  Scenario: A workspace that answers again while the app is asking about its apply is left alone
+    Asking takes long enough that a brief outage can be over before the answer arrives.
+    Given a workspace with an update in flight
+    And that workspace stops answering before the app has seen its apply begin
+    When that workspace answers again while the app is asking whether its apply is under way
+    And that workspace does not report an apply under way
+    Then the app does not restart that workspace
+    And the app does not report that workspace as applying its update
 
   @wedged-apply-recovered
   Scenario: An apply that never finishes is recovered once the app stops standing back

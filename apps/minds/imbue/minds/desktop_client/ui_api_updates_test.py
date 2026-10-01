@@ -2,7 +2,6 @@
 
 import json
 import threading
-from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
@@ -11,7 +10,6 @@ from typing import Any
 import pytest
 from flask import Flask
 from flask.testing import FlaskClient
-from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
@@ -34,6 +32,7 @@ from imbue.minds.desktop_client.ui_api_updates import build_workspace_updates_me
 from imbue.minds.desktop_client.ui_api_updates import format_update_window
 from imbue.minds.desktop_client.ui_api_updates import run_bulk_dispatch
 from imbue.minds.desktop_client.ui_models import UiWorkspaceUpdate
+from imbue.minds.desktop_client.update_apply_window import AGENTS_BEGIN_SENTINEL
 from imbue.minds.desktop_client.update_chat import UPDATE_SKILL_NAME
 from imbue.minds.desktop_client.update_chat import build_update_chat_message
 from imbue.minds.desktop_client.update_service import UpdateDispatch
@@ -47,6 +46,7 @@ from imbue.minds.desktop_client.update_status import describe_skip_reason
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.mngr_caller import MngrCaller
+from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.minds.utils.testing import ScriptedMngrCaller
 from imbue.mngr.primitives import AgentId
@@ -395,40 +395,22 @@ def test_an_unanswered_probe_does_not_demote_a_waiting_row(
     assert service.state_store.get(agent_id).activity is UpdateActivity.WAITING
 
 
-class _VerdictLandsMidProbeMngrCaller(RecordingMngrCaller):
-    """Answers the liveness probe after running the test's hook, which plays a verdict landing mid-probe."""
-
-    _on_probe: Callable[[], None] | None = PrivateAttr(default=None)
-
-    def set_on_probe(self, hook: Callable[[], None]) -> None:
-        self._on_probe = hook
-
-    def call(
-        self,
-        argv: Sequence[str],
-        timeout: float | None = None,
-        env_overrides: Mapping[str, str] | None = None,
-        cwd: Path | None = None,
-    ) -> MngrCallResult:
-        result = super().call(argv, timeout, env_overrides, cwd)
-        if self._on_probe is not None and any("MNGR_UPDATE_AGENTS_BEGIN" in arg for arg in argv):
-            self._on_probe()
-        return result
-
-
 def test_a_verdict_landing_while_the_probe_is_in_flight_is_kept_over_the_poll_s_stalled(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
 ) -> None:
     """The agent goes DONE only after emitting its verdict, so a "gone" probe may be racing one; the verdict wins."""
-    caller = _VerdictLandsMidProbeMngrCaller(result=MngrCallResult(returncode=0, stdout=_GONE_AGENT_STDOUT))
+    caller = HookedMngrCaller(result=MngrCallResult(returncode=0, stdout=_GONE_AGENT_STDOUT))
     _client, app = _build_client(tmp_path, root_concurrency_group, mngr_caller=caller)
     service = _service(app)
     service.state_store.set_activity(agent_id, UpdateActivity.RUNNING)
-    caller.set_on_probe(
-        lambda: service.state_store.adopt_run_record(
-            agent_id, landed_verdict(UpdateVerdict.UPDATED, resulting_ref="minds-v0.4.1")
-        )
-    )
+
+    def land_verdict_during_probe(argv: Sequence[str]) -> None:
+        if any(AGENTS_BEGIN_SENTINEL in arg for arg in argv):
+            service.state_store.adopt_run_record(
+                agent_id, landed_verdict(UpdateVerdict.UPDATED, resulting_ref="minds-v0.4.1")
+            )
+
+    caller.set_on_call(land_verdict_during_probe)
 
     service.poll_in_flight_runs()
 

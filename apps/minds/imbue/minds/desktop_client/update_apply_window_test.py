@@ -31,6 +31,7 @@ from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.utils.mngr_caller import MngrCallResult
+from imbue.minds.utils.testing import HookedMngrCaller
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -65,6 +66,7 @@ def _make_manager(
     tmp_path: Path,
     *,
     probe_stdout: str = _NO_RUN_STDOUT,
+    mngr_caller: RecordingMngrCaller | None = None,
     fallback_window_seconds: float = 300.0,
     backend_resolver: MngrCliBackendResolver | None = None,
 ) -> tuple[UpdateApplyWindowManager, SystemInterfaceHealthTracker, WorkspaceUpdateStateStore, _RestartRecorder]:
@@ -74,7 +76,9 @@ def _make_manager(
     manager = UpdateApplyWindowManager(
         tracker=tracker,
         store=store,
-        mngr_caller=RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout)),
+        mngr_caller=mngr_caller
+        if mngr_caller is not None
+        else RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout)),
         backend_resolver=backend_resolver if backend_resolver is not None else MngrCliBackendResolver(),
         concurrency_group=root_concurrency_group,
         dispatch_restart=restarts,
@@ -374,9 +378,10 @@ def test_a_stuck_edge_with_no_update_in_flight_dispatches_normally(
 def test_a_prepare_phase_outage_dispatches_recovery_normally(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:
-    manager, _, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout=_NO_RUN_STDOUT)
+    manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout=_NO_RUN_STDOUT)
     agent_id = AgentId.generate()
     _begin_run(store, agent_id)
+    tracker.mark_stuck(agent_id)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is False
     assert manager.is_window_open(agent_id) is False
@@ -393,19 +398,39 @@ def test_an_apply_under_way_at_the_stuck_edge_arms_the_window_and_declines(
 
     assert manager.should_decline_recovery_dispatch(agent_id) is True
     assert manager.is_window_open(agent_id) is True
+    assert store.get(agent_id).activity is UpdateActivity.APPLYING
     assert _is_failure_suppressed(tracker, agent_id) is True
 
 
 @pytest.mark.witnesses("workspace-updates.record-settles-the-race", partial="the cannot-answer-either-way case only")
-def test_a_stuck_edge_a_machine_cannot_answer_is_declined_rather_than_restarted(
+def test_a_stuck_edge_a_machine_cannot_answer_is_declined_but_not_reported_as_applying(
     root_concurrency_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:
-    manager, _, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout="")
+    manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, probe_stdout="")
     agent_id = AgentId.generate()
     _begin_run(store, agent_id)
+    tracker.mark_stuck(agent_id)
 
     assert manager.should_decline_recovery_dispatch(agent_id) is True
     assert manager.is_window_open(agent_id) is True
+    assert store.get(agent_id).activity is UpdateActivity.RUNNING
+
+
+@pytest.mark.witnesses("workspace-updates.answered-while-asked")
+@pytest.mark.parametrize("probe_stdout", [_NO_RUN_STDOUT, ""], ids=["no-apply", "unanswered"])
+def test_a_machine_that_answers_again_during_the_guards_probe_is_left_alone(
+    root_concurrency_group: ConcurrencyGroup, tmp_path: Path, probe_stdout: str
+) -> None:
+    caller = HookedMngrCaller(result=MngrCallResult(returncode=0, stdout=probe_stdout))
+    manager, tracker, store, _ = _make_manager(root_concurrency_group, tmp_path, mngr_caller=caller)
+    agent_id = AgentId.generate()
+    _begin_run(store, agent_id)
+    tracker.mark_stuck(agent_id)
+    caller.set_on_call(lambda _argv: tracker.record_probe_success(agent_id))
+
+    assert manager.should_decline_recovery_dispatch(agent_id) is True
+    assert manager.is_window_open(agent_id) is False
+    assert store.get(agent_id).activity is UpdateActivity.RUNNING
 
 
 def test_an_already_open_window_declines_without_probing(
