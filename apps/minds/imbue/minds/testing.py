@@ -1,3 +1,4 @@
+import base64
 import os
 import subprocess
 from collections.abc import Mapping
@@ -5,7 +6,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
+import httpx
 import pytest
+from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 
@@ -15,6 +18,45 @@ from imbue.minds.bootstrap import mngr_host_dir_for
 from imbue.mngr_vps.container_setup import LABEL_HOST_ID
 from imbue.mngr_vps.container_setup import container_tmp_tmpfs_size_mib
 from imbue.mngr_vps.host_setup import expected_container_memory_cap_bytes
+
+DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO: Final[str] = "imbue-ai/default-workspace-template"
+
+
+def fetch_default_workspace_template_file(repo_relative_path: str) -> str | None:
+    """Fetch a file from default-workspace-template's default branch via the GitHub contents API.
+
+    The repo is public, so no token is needed. Returns None on any fetch or
+    decode failure, so the caller can surface a single "could not fetch" assertion.
+    """
+    url = f"https://api.github.com/repos/{DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO}/contents/{repo_relative_path}"
+    try:
+        response = httpx.get(
+            url,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "mngr-template-alignment-test"},
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as e:
+        logger.trace("fetch of {} failed: {}", url, e)
+        return None
+    try:
+        payload = response.json()
+    except ValueError as e:
+        logger.trace("JSON parse of {} failed: {}", url, e)
+        return None
+    # GitHub answers a directory path with a list, and an odd error path with a non-object body.
+    if not isinstance(payload, dict):
+        return None
+    content_b64 = payload.get("content")
+    if not isinstance(content_b64, str):
+        return None
+    try:
+        return base64.b64decode(content_b64).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as e:
+        logger.trace("base64/utf-8 decode of {} failed: {}", url, e)
+        return None
+
 
 _GIT_TEST_ENV_KEYS: Final[dict[str, str]] = {
     "GIT_AUTHOR_NAME": "test",

@@ -1169,6 +1169,31 @@ def test_restore_script_skips_the_safety_snapshot_only_when_asked(tmp_path: Path
     assert [entry for entry in entries if "pre-restore" in (entry.get("tags") or [])] == []
 
 
+def _restore_and_list_its_snapshots(
+    tmp_path: Path, host: Path, code: Path, restic_repo: Path, snapshot_id: str
+) -> tuple[str, str]:
+    """Run a successful restore of `snapshot_id`; return `restic ls` of its safety and restored-state snapshots."""
+    stub_bin = _stub_bin_with_restic(tmp_path)
+    run = _run_script(
+        code,
+        BACKUP_RESTORE_SCRIPT,
+        _restore_args(restic_repo, snapshot_id),
+        extra_path=stub_bin,
+        env_overrides={"MNGR_HOST_DIR": str(host)},
+    )
+    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
+    assert payload is not None, run
+    assert payload["status"] == "ok", payload
+    entries = _snapshot_entries(restic_repo)
+    listings = []
+    for tag in ("pre-restore", "restored"):
+        tagged = [entry for entry in entries if tag in (entry.get("tags") or [])]
+        assert len(tagged) == 1, (tag, entries)
+        listings.append(_restic_for_test(restic_repo, "ls", tagged[0]["id"]))
+    safety_listing, restored_listing = listings
+    return safety_listing, restored_listing
+
+
 @pytest.mark.timeout(120)
 @pytest.mark.parametrize("backup_toml_relpath", ["data/system/backup.toml", "runtime/backup.toml"])
 def test_restore_script_honors_the_current_backup_toml_excludes(tmp_path: Path, backup_toml_relpath: str) -> None:
@@ -1189,22 +1214,33 @@ def test_restore_script_honors_the_current_backup_toml_excludes(tmp_path: Path, 
     (excluded / "huge.txt").write_text("user excluded this from backups\n")
     (code / "file.txt").write_text("version 2\n")
 
-    stub_bin = _stub_bin_with_restic(tmp_path)
-    run = _run_script(
-        code,
-        BACKUP_RESTORE_SCRIPT,
-        _restore_args(restic_repo, snapshot_id),
-        extra_path=stub_bin,
-        env_overrides={"MNGR_HOST_DIR": str(host)},
-    )
-    payload = extract_marker_json(run["stdout"], RESTORE_RESULT_MARKER)
-    assert payload is not None, run
-    assert payload["status"] == "ok", payload
-    safety = [entry for entry in _snapshot_entries(restic_repo) if "pre-restore" in (entry.get("tags") or [])]
-    assert len(safety) == 1
-    listing = _restic_for_test(restic_repo, "ls", safety[0]["id"])
+    listing, _ = _restore_and_list_its_snapshots(tmp_path, host, code, restic_repo, snapshot_id)
     assert "excluded-dir" not in listing
     assert "file.txt" in listing
+
+
+@pytest.mark.timeout(120)
+def test_restore_script_snapshots_skip_extra_excludes_and_marked_caches(tmp_path: Path) -> None:
+    # The source snapshot holds the excluded and marked trees, so the restore
+    # brings them back for the restored-state snapshot to skip too.
+    host, code, restic_repo = _make_restore_workspace(tmp_path)
+    backup_toml = code / "data" / "system" / "backup.toml"
+    backup_toml.parent.mkdir(parents=True, exist_ok=True)
+    backup_toml.write_text('extra_excludes = ["**/extra-excluded"]\n')
+    for relpath in ("extra-excluded/big.bin", ".venv/lib.py", "marked-cache/tree/main.py"):
+        (code / relpath).parent.mkdir(parents=True, exist_ok=True)
+        (code / relpath).write_text(relpath)
+    (code / "marked-cache" / ".nobackup").touch()
+    _restic_for_test(restic_repo, "backup", str(host))
+    snapshot_id = _snapshot_entries(restic_repo)[0]["id"]
+    (code / "file.txt").write_text("version 2\n")
+
+    for listing in _restore_and_list_its_snapshots(tmp_path, host, code, restic_repo, snapshot_id):
+        assert "extra-excluded" not in listing
+        assert ".venv" not in listing
+        assert "marked-cache/.nobackup" in listing
+        assert "marked-cache/tree" not in listing
+        assert "file.txt" in listing
 
 
 @pytest.mark.timeout(120)

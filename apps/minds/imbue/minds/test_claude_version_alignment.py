@@ -11,22 +11,19 @@ version Y." (see `libs/mngr_claude/.../plugin.py::provision`).
 This test reads both values and asserts they match.
 """
 
-import base64
-import json
 import re
 import tomllib
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 import pytest
 from loguru import logger
 
+from imbue.minds.testing import DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO
+from imbue.minds.testing import fetch_default_workspace_template_file
+
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DOCKERFILE_PATH = _REPO_ROOT / "libs" / "mngr" / "imbue" / "mngr" / "resources" / "Dockerfile"
-_TEMPLATE_OWNER_REPO = "imbue-ai/default-workspace-template"
 _TEMPLATE_SETTINGS_PATH = ".mngr/settings.toml"
-_TEMPLATE_CONTENTS_URL = f"https://api.github.com/repos/{_TEMPLATE_OWNER_REPO}/contents/{_TEMPLATE_SETTINGS_PATH}"
 
 
 def _parse_dockerfile_claude_version(dockerfile_text: str) -> str:
@@ -46,38 +43,9 @@ def _parse_dockerfile_claude_version(dockerfile_text: str) -> str:
 
 
 def _fetch_template_claude_version() -> str | None:
-    """Fetch default-workspace-template's pinned claude version via the GitHub contents API.
-
-    default-workspace-template is public so no auth token is needed. Returns
-    the version string on success, or None on any fetch / parse failure
-    so the caller can surface a single "fetch or parse failed" assertion.
-    """
-    request = urllib.request.Request(
-        _TEMPLATE_CONTENTS_URL,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "mngr-claude-version-alignment-test",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read())
-    except (urllib.error.URLError, OSError, ValueError) as e:
-        logger.trace("fetch/parse of {} failed: {}", _TEMPLATE_CONTENTS_URL, e)
-        return None
-    # Guard against non-dict JSON (e.g. GitHub returning a list for a
-    # directory endpoint, or a null/string body on an unusual error path).
-    # Calling `.get` on a non-dict would raise AttributeError and escape
-    # the documented "return None on any parse failure" contract.
-    if not isinstance(payload, dict):
-        return None
-    content_b64 = payload.get("content")
-    if not isinstance(content_b64, str):
-        return None
-    try:
-        settings_toml_text = base64.b64decode(content_b64).decode("utf-8")
-    except (ValueError, UnicodeDecodeError) as e:
-        logger.trace("base64/utf-8 decode of template settings failed: {}", e)
+    """Fetch default-workspace-template's pinned claude version, or None on any fetch / parse failure."""
+    settings_toml_text = fetch_default_workspace_template_file(_TEMPLATE_SETTINGS_PATH)
+    if settings_toml_text is None:
         return None
     # tomllib.loads raises tomllib.TOMLDecodeError (a ValueError subclass) on
     # malformed content. Catch it so callers see the documented "return None on
@@ -112,12 +80,13 @@ def test_claude_code_version_matches_default_workspace_template_pin() -> None:
     dockerfile_version = _parse_dockerfile_claude_version(_DOCKERFILE_PATH.read_text())
     template_version = _fetch_template_claude_version()
     assert template_version is not None, (
-        f"Failed to fetch or parse {_TEMPLATE_CONTENTS_URL}. Check template repo reachability."
+        f"Failed to fetch or parse {DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO}:{_TEMPLATE_SETTINGS_PATH}. "
+        "Check template repo reachability."
     )
     assert dockerfile_version == template_version, (
         f"Dockerfile CLAUDE_CODE_VERSION={dockerfile_version!r} does not match "
         f"default-workspace-template's agent_types.claude.version={template_version!r}. "
         f"Bump one of them to match the other. See "
         f"{_DOCKERFILE_PATH} and "
-        f"https://github.com/{_TEMPLATE_OWNER_REPO}/blob/main/{_TEMPLATE_SETTINGS_PATH}"
+        f"https://github.com/{DEFAULT_WORKSPACE_TEMPLATE_OWNER_REPO}/blob/main/{_TEMPLATE_SETTINGS_PATH}"
     )

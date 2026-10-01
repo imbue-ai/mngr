@@ -742,6 +742,9 @@ _RESTIC_DOWNLOAD_TIMEOUT_SECONDS = 300.0
 # out of snapshots (excluded below): it is a regenerable 25MB binary.
 _FALLBACK_RESTIC_DIR_NAME = ".minds-restic"
 _FALLBACK_RESTIC_EXCLUDE = "**/" + _FALLBACK_RESTIC_DIR_NAME
+# host_backup's marker for a directory an app can rebuild: the snapshots keep
+# only the marker file, as the hourly backups do.
+_NO_BACKUP_MARKER_FILENAME = ".nobackup"
 # Forward at most one restic --json status line per interval: restic emits
 # them far faster than a human (or the SSE log stream) needs.
 _PROGRESS_INTERVAL_SECONDS = 2.0
@@ -766,6 +769,8 @@ _DEFAULT_SNAPSHOT_EXCLUDES = (
     "**/.rustup/downloads",
     "**/.ssh/authorized_keys",
     "**/data/.state/update-apply/snapshots",
+    "**/data/.state/isolated-instances/*/copies",
+    "**/data/.state/isolated-instances/*/scratch",
 )
 # Paths the in-place restore never touches, whatever the snapshot holds.
 # Snapshots never carry authorized_keys, so a restore would delete it; on
@@ -956,11 +961,12 @@ def _resolve_restic_binary(backup_root, result):
 
 
 def _read_snapshot_excludes(code_dir):
-    # The user's current backup.toml excludes, or host_backup's defaults when
-    # absent/unreadable. The file lives at data/system/backup.toml on the
-    # decluttered template layout and runtime/backup.toml on pre-declutter
-    # machines; read whichever exists so the safety/restored snapshots
-    # honor the same excludes as the machine's own hourly snapshots.
+    # The user's current backup.toml excludes (or host_backup's defaults when
+    # absent/unreadable) plus its extra_excludes. The file lives at
+    # data/system/backup.toml on the decluttered template layout and
+    # runtime/backup.toml on pre-declutter machines; read whichever exists so
+    # the safety/restored snapshots honor the same excludes as the machine's
+    # own hourly snapshots.
     toml_path = _os.path.join(code_dir, "data", "system", "backup.toml")
     if not _os.path.isfile(toml_path):
         toml_path = _os.path.join(code_dir, "runtime", "backup.toml")
@@ -974,8 +980,23 @@ def _read_snapshot_excludes(code_dir):
         configured = raw.get("excludes")
         if isinstance(configured, list) and configured and all(isinstance(p, str) for p in configured):
             excludes = list(configured)
+        extra = raw.get("extra_excludes")
+        if isinstance(extra, list) and all(isinstance(p, str) for p in extra):
+            excludes += extra
     # The downloaded restic fallback binary is regenerable; never snapshot it.
     return excludes + [_FALLBACK_RESTIC_EXCLUDE]
+
+
+def _snapshot_backup_args(backup_root, tags, excludes):
+    # `restic backup` args for the safety/restored snapshots, leaving out what
+    # the hourly backups leave out.
+    args = ["backup", backup_root]
+    for tag in tags:
+        args += ["--tag", tag]
+    args += ["--exclude-if-present", _NO_BACKUP_MARKER_FILENAME]
+    for pattern in excludes:
+        args += ["--exclude", pattern]
+    return args
 
 
 def _human_bytes(count):
@@ -1189,9 +1210,7 @@ def _main():
     # step failed.
     if not is_safety_snapshot_skipped:
         _progress("Backing up the current state (safety snapshot)...")
-        backup_args = ["backup", backup_root, "--tag", "pre-restore"]
-        for pattern in excludes:
-            backup_args += ["--exclude", pattern]
+        backup_args = _snapshot_backup_args(backup_root, ["pre-restore"], excludes)
         backed_up, backup_output = _restic_step_with_unlock_retry(backup_args, env_map, restic_binary)
         if backed_up != 0:
             detail = "pre-restore safety snapshot failed: %s" % backup_output[-500:]
@@ -1255,11 +1274,10 @@ def _main():
     # succeeded and the next backup tick would capture this state anyway, so a
     # failure here must not fail the operation.
     _progress("Recording the restored state in the backup timeline...")
-    restored_backup_args = ["backup", backup_root, "--tag", "restored"]
+    restored_tags = ["restored"]
     if source_time:
-        restored_backup_args += ["--tag", "restored-from:%s" % source_time]
-    for pattern in excludes:
-        restored_backup_args += ["--exclude", pattern]
+        restored_tags.append("restored-from:%s" % source_time)
+    restored_backup_args = _snapshot_backup_args(backup_root, restored_tags, excludes)
     restored_snapshot, _restored_output = _restic_step_with_unlock_retry(
         restored_backup_args, env_map, restic_binary
     )
