@@ -172,10 +172,11 @@ PERMISSIONS_CONFIG_FILENAME: Final[str] = "permissions.json"
 # Move it in lockstep with the versions we install
 # (:data:`imbue.mngr_latchkey.remote.provisioning.LATCHKEY_VERSION` and the
 # in-workspace pin in default-workspace-template) rather than to track what the
-# code strictly needs: the newest release with a hard dependency here is
-# 3.16.0, the first with ``auth import-chrome``, which
-# :meth:`Latchkey.import_chrome_browser_state` runs.
-LATCHKEY_MIN_VERSION: Final[str] = "3.16.1"
+# code strictly needs: the newest release with a hard dependency here is 3.2.0,
+# the first to report the account whose credentials it injects to detent as
+# ``customMetadata.account`` -- what the per-account permission grants
+# (:mod:`imbue.mngr_latchkey.account_scopes`) read.
+LATCHKEY_MIN_VERSION: Final[str] = "3.16.2"
 
 # Fixed port at which every containerized/VM/VPS agent reaches the Latchkey
 # gateway. A desktop-gateway agent sees it on its own 127.0.0.1 (a per-agent
