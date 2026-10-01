@@ -16,6 +16,27 @@ set -uo pipefail
 
 log() { printf '[reset] %s\n' "$*" >&2; }
 
+# The app bundles, and every root an install writes to: the canonical three,
+# plus the legacy dotfolder older builds used and the current one migrates off.
+# A runner that has run both needs all of them gone to be reproducible. The
+# pre-rename names are here for the same reason the old bundles are: crash
+# reporting can write under the product name before the app narrows its own
+# userData path.
+# CLEANUP: drop the ImbueStudio, Mind and Minds bundles and roots once every
+# runner has been reset past them; "Imbue Studio" is the current name and stays
+# (specs/imbue-studio-rename/05_cleanup.md).
+APP_BUNDLES=()
+DATA_ROOTS=()
+for app_name in "Imbue Studio" ImbueStudio Mind Minds; do
+  APP_BUNDLES+=("/Applications/$app_name.app")
+  DATA_ROOTS+=(
+    "$HOME/Library/Application Support/$app_name"
+    "$HOME/Library/Caches/$app_name"
+    "$HOME/Library/Logs/$app_name"
+  )
+done
+DATA_ROOTS+=("$HOME/.minds")
+
 # Old bundles are quit and removed too, so an install from before the rename
 # cannot survive a reset and claim the deeplink scheme beside the new one.
 # CLEANUP: drop ImbueStudio, Mind and Minds once every runner has been reset
@@ -31,11 +52,15 @@ for _ in 1 2 3 4 5; do
   [[ -z "$pids" ]] && break
   sleep 1
 done
-pids=$(pgrep -f '/Applications/(Imbue Studio|ImbueStudio|Minds?)\.app/Contents/' || true)
-for pid in $pids; do
-  log "force-kill straggler $pid"
-  kill -9 "$pid" 2>/dev/null || true
-done
+
+# The detached `mngr latchkey forward` and its children outlive the quit and can
+# still write into the data roots.
+cleanup_failed=0
+log "killing every process with a file under the app bundles or the data roots"
+if ! bash "$(dirname "$0")/kill-processes-under.sh" "${APP_BUNDLES[@]}" "${DATA_ROOTS[@]}"; then
+  log "ERROR: could not stop every process with a file under the app bundles or the data roots"
+  cleanup_failed=1
+fi
 
 BUNDLED_LIMACTL="/Applications/Imbue Studio.app/Contents/Resources/lima/bin/limactl"
 LIMACTL=""
@@ -111,43 +136,9 @@ log "wiping leftover /tmp diagnostic artifacts from prior runs"
 # scripts that no longer exist.
 rm -f /tmp/minds-electron.log 2>/dev/null || true
 
-# Every root an install writes to: the canonical three, plus the legacy
-# dotfolder older builds used and the current one migrates off. A runner that
-# has run both needs all of them gone to be reproducible. The pre-rename names
-# are here for the same reason the old bundles are: crash reporting can write
-# under the product name before the app narrows its own userData path.
-# CLEANUP: drop the ImbueStudio, Mind and Minds roots once every runner has
-# been reset past them; "Imbue Studio" is the current name and stays
-# (specs/imbue-studio-rename/05_cleanup.md).
-DATA_ROOTS=()
-for app_name in "Imbue Studio" ImbueStudio Mind Minds; do
-  DATA_ROOTS+=(
-    "$HOME/Library/Application Support/$app_name"
-    "$HOME/Library/Caches/$app_name"
-    "$HOME/Library/Logs/$app_name"
-  )
-done
-DATA_ROOTS+=("$HOME/.minds")
-
 log "removing the data roots and the installed app bundles"
-# `rm -rf` can race against a not-yet-fully-dead backend process that is still
-# writing to the state root's Chromium cache. Retry a few times with a short
-# backoff before giving up.
-for root in "${DATA_ROOTS[@]}"; do
-  [[ -e "$root" ]] || continue
-  for attempt in 1 2 3 4 5; do
-    if rm -rf "$root" 2>/dev/null; then
-      break
-    fi
-    log "  rm '$root' attempt $attempt failed (likely still being written); waiting 2s"
-    sleep 2
-    if [[ $attempt -eq 5 ]]; then
-      log "  forcing one more pass with verbose errors"
-      rm -rf "$root" || true
-    fi
-  done
-done
-sudo rm -rf "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"
+rm -rf "${DATA_ROOTS[@]}"
+sudo rm -rf "${APP_BUNDLES[@]}"
 
 URL="${1:-}"
 
@@ -157,7 +148,6 @@ URL="${1:-}"
 # runner. Assert the post-conditions and exit non-zero so the caller's job
 # goes red. A pure cleanup (no install URL) also expects the app to be gone;
 # when a URL is given the install below puts a fresh one back.
-cleanup_failed=0
 surviving_vms=$(find "$HOME/.lima" -maxdepth 1 -type d -name 'minds-host-*' 2>/dev/null | wc -l | tr -d ' ')
 if [[ "$surviving_vms" -gt 0 ]]; then
   log "ERROR: $surviving_vms minds-host-* VM dir(s) survived cleanup under ~/.lima"
@@ -174,7 +164,7 @@ for root in "${DATA_ROOTS[@]}"; do
     cleanup_failed=1
   fi
 done
-for bundle in "/Applications/Imbue Studio.app" "/Applications/ImbueStudio.app" "/Applications/Mind.app" "/Applications/Minds.app"; do
+for bundle in "${APP_BUNDLES[@]}"; do
   if [[ -z "$URL" && -e "$bundle" ]]; then
     log "ERROR: $bundle survived cleanup"
     cleanup_failed=1

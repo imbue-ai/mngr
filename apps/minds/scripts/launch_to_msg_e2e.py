@@ -1384,8 +1384,9 @@ def pre_run_sweep() -> None:
     The sweep is idempotent and safe to call when there's nothing to clean.
     """
     logger.info("=== pre-run runner sweep ===")
-    # mac-runner-reset.sh already kills every /Applications/Imbue Studio.app/...
-    # process, wipes ~/.minds, and removes the .app entirely BEFORE we run.
+    # mac-runner-reset.sh already kills every process with a file under the
+    # .app or the data roots, wipes the roots, and removes the .app entirely
+    # BEFORE we run.
     # So orphan mngr forward / mngr event / Imbue Studio.app processes can't exist
     # by the time we get here. The state below is what mac-runner-reset.sh
     # does NOT cover: host-side mocking residue and a stray caffeinate.

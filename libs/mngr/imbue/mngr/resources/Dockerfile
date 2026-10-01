@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     git-lfs \
     jq \
+    lsof \
     nano \
     openssh-server \
     procps \
