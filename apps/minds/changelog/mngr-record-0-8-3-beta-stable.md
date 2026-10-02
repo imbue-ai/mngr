@@ -1,0 +1,1 @@
+- Recorded the minds 0.8.3 beta and stable promotion in `docs/deploy/history/minds-v0.8.3.md`: the published feeds, and production deploy `20261002T005351Z` from `main` `8906c93efa`, which puts the 0.8.3 mac download fallback live. `next_deploy.md` drops the now-done production deploy item and names the tree each tier runs.
