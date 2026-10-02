@@ -3,13 +3,20 @@
 // list of them reads as one idiom. Open state belongs to the caller (the page
 // keeps a set of open ids), which keeps the component free of state and lets a
 // redraw from anywhere preserve what the reader opened.
+//
+// One dress for the disclosure in `disclosureAttrs`, not the only one: the
+// behaviour and the wiring to the screen reader live there, and what is left
+// here is styling.
 
 import m from "mithril";
+import { DISCLOSURE_FOCUS_CLASS, disclosureAttrs } from "./disclosureAttrs";
 import { Icon16 } from "./Icon";
 
 interface DisclosureAttrs extends m.Attributes {
   isOpen: boolean;
   onToggle: () => void;
+  /** Unique on the page; ties this summary to the detail it opens. */
+  id: string;
   /** The always-visible line the marker sits in front of. */
   summary: m.Children;
   /**
@@ -26,47 +33,68 @@ interface DisclosureAttrs extends m.Attributes {
 export function Disclosure(): m.Component<DisclosureAttrs> {
   return {
     view(vnode) {
-      const { isOpen, onToggle, summary, markerStartAtMs, markerFadeMs } = vnode.attrs;
+      const { isOpen, onToggle, id, summary, markerStartAtMs, markerFadeMs } =
+        vnode.attrs;
       const isMarkerStreamed = markerStartAtMs !== undefined;
-      return m("div", { class: "flex flex-col", "data-disclosure": isOpen ? "open" : "closed" }, [
-        m(
-          "button",
-          {
-            type: "button",
-            class:
-              "flex items-start gap-2 text-left cursor-pointer bg-transparent border-0 p-0 " +
-              "text-primary hover:text-accent",
-            "aria-expanded": isOpen ? "true" : "false",
-            onclick: onToggle,
-          },
-          [
-            // No color of its own: Icon16 fills with currentColor, so the
-            // chevron darkens on hover and turns with the rest of the row
-            // rather than sitting a shade apart from the words it introduces.
-            m(
-              "span",
-              {
-                class:
-                  // A fixed-width column, so the summary begins where the open
-                  // detail's indent lands. mt-0.5 sets the glyph against the
-                  // first line of a summary that wraps.
-                  "mt-0.5 w-4 shrink-0 transition-transform duration-150 " +
-                  (isOpen ? "rotate-90 " : "") +
-                  (isMarkerStreamed ? "start-char" : ""),
-                style: isMarkerStreamed
-                  ? `--start-char-delay: ${markerStartAtMs}ms; --start-char-fade: ${markerFadeMs ?? 70}ms;`
-                  : undefined,
-                "aria-hidden": "true",
-              },
-              // One chevron rotated, not a second glyph swapped in, so opening
-              // and closing is a turn rather than a cut.
-              m(Icon16, { name: "chevron-right" }),
-            ),
-            m("span", { class: "leading-[1.5] " + (isOpen ? "font-bold" : "") }, summary),
-          ],
-        ),
-        isOpen ? m("div", { class: "ml-6 mt-1 mb-2 text-primary leading-[1.5]" }, vnode.children) : null,
-      ]);
+      const parts = disclosureAttrs({ isOpen, onToggle, id });
+      return m(
+        "div",
+        {
+          class: "flex flex-col",
+          "data-disclosure": isOpen ? "open" : "closed",
+        },
+        [
+          m(
+            "button",
+            {
+              ...parts.trigger,
+              class:
+                "flex items-start gap-2 text-left cursor-pointer bg-transparent border-0 p-0 " +
+                "text-primary hover:text-accent " +
+                DISCLOSURE_FOCUS_CLASS,
+            },
+            [
+              // No color of its own: Icon16 fills with currentColor, so the
+              // chevron darkens on hover and turns with the rest of the row
+              // rather than sitting a shade apart from the words it introduces.
+              m(
+                "span",
+                {
+                  class:
+                    // A fixed-width column, so the summary begins where the open
+                    // detail's indent lands. mt-0.5 sets the glyph against the
+                    // first line of a summary that wraps.
+                    "mt-0.5 w-4 shrink-0 transition-transform duration-150 " +
+                    (isOpen ? "rotate-90 " : "") +
+                    (isMarkerStreamed ? "start-char" : ""),
+                  style: isMarkerStreamed
+                    ? `--start-char-delay: ${markerStartAtMs}ms; --start-char-fade: ${markerFadeMs ?? 70}ms;`
+                    : undefined,
+                  "aria-hidden": "true",
+                },
+                // One chevron rotated, not a second glyph swapped in, so opening
+                // and closing is a turn rather than a cut.
+                m(Icon16, { name: "chevron-right" }),
+              ),
+              m(
+                "span",
+                { class: "leading-[1.5] " + (isOpen ? "font-bold" : "") },
+                summary,
+              ),
+            ],
+          ),
+          isOpen
+            ? m(
+                "div",
+                {
+                  ...parts.panel,
+                  class: "ml-6 mt-1 mb-2 text-primary leading-[1.5]",
+                },
+                vnode.children,
+              )
+            : null,
+        ],
+      );
     },
   };
 }

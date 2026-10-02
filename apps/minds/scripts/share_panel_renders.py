@@ -1,4 +1,4 @@
-"""Render the share panel in the seven frames of the B2 mock, from the real components.
+"""Render the share panel in the frames of the B2 mock, plus the states the mock has none of.
 
 Each frame is a fixture state of the panel (``blueprint/share-panel/plan-share-panel.md``,
 "Frames to model state"). The built SPA bundle is served with the same fixture
@@ -16,7 +16,8 @@ answers and by what is then done to the panel.
     uv run apps/minds/scripts/share_panel_renders.py
     uv run apps/minds/scripts/share_panel_renders.py --skip-build --only b24
 
-Captures land in ``blueprint/share-panel/renders/`` as ``b21.png`` ... ``b27.png``.
+Captures land in ``blueprint/share-panel/renders/`` as ``b21.png`` ... ``b27.png``,
+plus ``b25-inherited.png`` for a state the mock has no frame of.
 """
 
 import json
@@ -135,6 +136,10 @@ BOB_ROW: Final[str] = "email:bob@example.org"
 DAN_ROW: Final[str] = "email:dan@example.org"
 ERIN_ROW: Final[str] = "email:erin@example.org"
 
+# Long enough for the disclosure marker to finish turning (duration-150); a
+# shot taken during the turn catches a chevron at an angle it never rests at.
+_MARKER_TURN_MS: Final[int] = 300
+
 SAVING_TEXT: Final[str] = "Securely granting access"
 # A refused write is reported in the workspace's own words, so the words the stub
 # refuses with are the ones a failed row will be waited for.
@@ -161,16 +166,16 @@ class SharePanelRenderError(MindError):
 class ShareRenderArguments(FrozenModel):
     """Parsed command line arguments for the share panel render capture."""
 
-    output_dir: Path = Field(description="Directory the seven captures are written to")
+    output_dir: Path = Field(description="Directory the captures are written to")
     copy_dir: Path | None = Field(description="Extra directory each capture is copied into, prefixed 'built-'")
     is_build_skipped: bool = Field(description="Whether to reuse the bundle already in static/ui")
-    slugs: tuple[str, ...] = Field(description="Which frame slugs to capture; empty means all seven")
+    slugs: tuple[str, ...] = Field(description="Which frame slugs to capture; empty means every one")
 
 
 class ShareFrame(FrozenModel):
     """One frame of the mock: what the routes answer, and what is then done to the panel."""
 
-    slug: str = Field(description="The capture's file name, b21 through b27")
+    slug: str = Field(description="The capture's file name")
     title: str = Field(description="The frame's heading in the mock")
     sharing: MachineSharingResponse = Field(description="What GET /workspace-sharing/<id> answers")
     readiness: SharingReadinessResponse = Field(description="What the readiness poll answers")
@@ -391,9 +396,38 @@ def _drive_published(page: Page) -> None:
     _hover_for_tooltip(page, f'[data-grant-row="{ACME_ROW}"]')
 
 
-def _drive_app_pane(page: Page) -> None:
+def _open_inherited(page: Page) -> None:
+    """The app pane with its inherited permissions showing, scrolled to where they end.
+
+    Not a frame of the mock, which predates the group: the rows the pane only
+    inherits are drawn nowhere else, so without this the one state they appear
+    in has no capture to check them against.
+
+    Scrolled to the foot of the list rather than the head of it, because the
+    thing worth looking at is the seam -- railed, inset rows the workspace
+    granted, then the app's own flush beneath them -- and the header holding
+    its place above both.
+    """
+    _select_app_pane(page)
+    page.click("#ws-share-inherited-trigger")
+    page.wait_for_selector("#ws-share-inherited-panel")
+    page.wait_for_timeout(_MARKER_TURN_MS)
+    page.hover("#ws-share-grants")
+    page.mouse.wheel(0, 600)
+    page.wait_for_function(
+        "() => { const list = document.getElementById('ws-share-grants');"
+        " return list.scrollTop + list.clientHeight >= list.scrollHeight - 1; }",
+        timeout=5000,
+    )
+
+
+def _select_app_pane(page: Page) -> None:
     page.click('[data-share-target="notes"]')
     page.wait_for_selector("#ws-share-inherited")
+
+
+def _drive_app_pane(page: Page) -> None:
+    _select_app_pane(page)
     page.select_option("#ws-share-add-kind", "email_domain")
     _add_grant(page, "gmail.com")
     page.wait_for_selector("#ws-share-refusal")
@@ -491,6 +525,15 @@ def _frames() -> tuple[ShareFrame, ...]:
             published=None,
             grants_replies=(GrantsReply.ECHO,),
             drive=_drive_app_pane,
+        ),
+        ShareFrame(
+            slug="b25-inherited",
+            title="B2.5a The notes app, inherited permissions open",
+            sharing=live_five,
+            readiness=idle_readiness,
+            published=None,
+            grants_replies=(GrantsReply.ECHO,),
+            drive=_open_inherited,
         ),
         ShareFrame(
             slug="b26",
@@ -623,7 +666,7 @@ def _capture(arguments: ShareRenderArguments) -> None:
     "--output",
     default=str(DEFAULT_OUTPUT_DIR),
     type=click.Path(),
-    help="Directory the seven captures are written to",
+    help="Directory the captures are written to",
 )
 @click.option(
     "--copy-to",
@@ -639,10 +682,10 @@ def _capture(arguments: ShareRenderArguments) -> None:
 @click.option(
     "--only",
     default="",
-    help="Comma-separated frame slugs to capture (b21..b27); default is all seven",
+    help="Comma-separated frame slugs to capture; default is every one",
 )
 def capture_share_panel_renders(output: str, copy_to: str | None, skip_build: bool, only: str) -> None:
-    """Screenshot the share panel in the seven fixture states of the B2 mock."""
+    """Screenshot the share panel in each of its fixture states."""
     setup_logging()
     arguments = ShareRenderArguments(
         output_dir=Path(output),

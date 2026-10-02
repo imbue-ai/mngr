@@ -161,7 +161,11 @@ describe("class builders keep the legacy recipes", () => {
   });
 
   it("Notice keeps the recipe classes when a caller adds spacing via extra", () => {
-    const root = renderRoot(Notice, { extra: "mb-4" }, "hello") as unknown as ElementVnode;
+    const root = renderRoot(
+      Notice,
+      { extra: "mb-4" },
+      "hello",
+    ) as unknown as ElementVnode;
     const className = String(root.attrs.className);
     // The full notice recipe survives (extra APPENDS; it must never replace
     // the recipe the way a passthrough `class:` attr would).
@@ -176,7 +180,11 @@ describe("class builders keep the legacy recipes", () => {
     // passthrough after the computed class would otherwise let one stray
     // `class:` replace a component's entire recipe (the bug that shipped
     // twice as unstyled Notices).
-    const root = renderRoot(Notice, { class: "mb-4" }, "hello") as unknown as ElementVnode;
+    const root = renderRoot(
+      Notice,
+      { class: "mb-4" },
+      "hello",
+    ) as unknown as ElementVnode;
     const className = String(root.attrs.className);
     for (const recipePart of noticeClass("info").split(" ")) {
       expect(className).toContain(recipePart);
@@ -270,9 +278,13 @@ describe("routeLinkAttrs", () => {
     // document reload; the helper's onclick must intercept it instead.
     const attrs = routeLinkAttrs("/workspaces/destroyed");
     expect(attrs.href).toBe("/workspaces/destroyed");
-    const routeSet = vi.spyOn(m.route, "set").mockImplementation(() => undefined);
+    const routeSet = vi
+      .spyOn(m.route, "set")
+      .mockImplementation(() => undefined);
     const preventDefault = vi.fn();
-    (attrs.onclick as (event: { preventDefault(): void }) => void)({ preventDefault });
+    (attrs.onclick as (event: { preventDefault(): void }) => void)({
+      preventDefault,
+    });
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(routeSet).toHaveBeenCalledWith("/workspaces/destroyed");
     routeSet.mockRestore();
@@ -309,6 +321,7 @@ describe("icon catalogs", () => {
 
 describe("Disclosure", () => {
   interface Attrs {
+    id: string;
     isOpen: boolean;
     onToggle: () => void;
     summary: m.Children;
@@ -316,8 +329,16 @@ describe("Disclosure", () => {
     markerFadeMs?: number;
   }
 
-  function partsOf(attrs: Attrs): { marker: m.Vnode; summary: m.Vnode; detail: m.Vnode | null } {
-    const root = renderRoot(Disclosure, attrs, "the explanation") as unknown as m.Vnode;
+  function partsOf(attrs: Omit<Attrs, "id">): {
+    marker: m.Vnode;
+    summary: m.Vnode;
+    detail: m.Vnode | null;
+  } {
+    const root = renderRoot(
+      Disclosure,
+      { id: "a-point", ...attrs },
+      "the explanation",
+    ) as unknown as m.Vnode;
     const [button, detail] = root.children as (m.Vnode | null)[];
     const [marker, summary] = (button as m.Vnode).children as m.Vnode[];
     return { marker, summary, detail: detail as m.Vnode | null };
@@ -326,28 +347,46 @@ describe("Disclosure", () => {
   it("leaves the marker uncolored so it follows the row it introduces", () => {
     // The row is text-primary and turns accent on hover; a marker with a color
     // of its own would sit a shade apart and stay put through the hover.
-    const { marker } = partsOf({ isOpen: false, onToggle: () => undefined, summary: "a point" });
+    const { marker } = partsOf({
+      isOpen: false,
+      onToggle: () => undefined,
+      summary: "a point",
+    });
     const icon = (marker.children as m.Vnode[])[0];
     expect((icon.attrs as Record<string, unknown>).name).toBe("chevron-right");
     expect(tokensOf(marker)).not.toContain("text-tertiary");
-    expect(tokensOf(marker).some((token) => token.startsWith("text-"))).toBe(false);
+    expect(tokensOf(marker).some((token) => token.startsWith("text-"))).toBe(
+      false,
+    );
   });
 
   it("opens the detail flush with the summary, under a fixed-width marker", () => {
     // The marker's column is as wide as the detail's indent less the row's
     // gap, so a narrow glyph does not leave the detail indented past its label.
-    const { marker, detail } = partsOf({ isOpen: true, onToggle: () => undefined, summary: "a point" });
+    const { marker, detail } = partsOf({
+      isOpen: true,
+      onToggle: () => undefined,
+      summary: "a point",
+    });
     expect(tokensOf(marker)).toContain("w-4");
     expect(tokensOf(detail)).toContain("ml-6");
   });
 
   it("turns the marker and emphasizes the line when open", () => {
-    const closed = partsOf({ isOpen: false, onToggle: () => undefined, summary: "a point" });
+    const closed = partsOf({
+      isOpen: false,
+      onToggle: () => undefined,
+      summary: "a point",
+    });
     expect(tokensOf(closed.marker)).not.toContain("rotate-90");
     expect(tokensOf(closed.summary)).not.toContain("font-bold");
     expect(closed.detail).toBeNull();
 
-    const open = partsOf({ isOpen: true, onToggle: () => undefined, summary: "a point" });
+    const open = partsOf({
+      isOpen: true,
+      onToggle: () => undefined,
+      summary: "a point",
+    });
     expect(tokensOf(open.marker)).toContain("rotate-90");
     expect(tokensOf(open.summary)).toContain("font-bold");
     expect(tokensOf(open.detail)).toContain("text-primary");
@@ -364,6 +403,8 @@ describe("Disclosure", () => {
       markerFadeMs: 70,
     });
     expect(tokensOf(marker)).toContain("start-char");
-    expect(String((marker.attrs as Record<string, unknown>).style)).toContain("--start-char-delay: 900ms");
+    expect(String((marker.attrs as Record<string, unknown>).style)).toContain(
+      "--start-char-delay: 900ms",
+    );
   });
 });

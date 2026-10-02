@@ -683,7 +683,7 @@ describe("SharePanelModel removing a grant", () => {
 });
 
 describe("SharePanelModel row order", () => {
-  it("puts domain grants first and keeps every row's place across a readback", async () => {
+  it("puts domain grants first and sorts each group by name, across a readback", async () => {
     const { model } = makeSharePanel((url, init) => {
       if (init?.method === "PUT")
         return okResult(
@@ -709,8 +709,8 @@ describe("SharePanelModel row order", () => {
     model.addGrant(WHOLE, "email", "second@example.com");
     model.addGrant(WHOLE, "email_domain", "example.com");
     expect(grantValues(model)).toEqual([
-      "example.org",
       "example.com",
+      "example.org",
       "first@example.com",
       "second@example.com",
     ]);
@@ -718,14 +718,14 @@ describe("SharePanelModel row order", () => {
     await settle();
 
     expect(grantValues(model)).toEqual([
-      "example.org",
       "example.com",
+      "example.org",
       "first@example.com",
       "second@example.com",
     ]);
   });
 
-  it("appends the rows a readback introduces within their own group", async () => {
+  it("sorts the rows a readback introduces in among the ones already there", async () => {
     const { model } = makeSharePanel((url, init) => {
       if (init?.method === "PUT")
         return okResult(
@@ -751,10 +751,10 @@ describe("SharePanelModel row order", () => {
     await settle();
 
     expect(grantValues(model)).toEqual([
-      "example.org",
       "elsewhere.example",
-      "mine@example.com",
+      "example.org",
       "later@example.com",
+      "mine@example.com",
       "theirs@example.com",
     ]);
   });
@@ -801,10 +801,10 @@ describe("SharePanelModel target selection", () => {
 
     expect(model.grantCount(WHOLE)).toBe(2);
     expect(model.grantCount("web")).toBe(1);
-    expect(model.inheritedCounts()).toEqual({
-      domainCount: 1,
-      individualCount: 1,
-    });
+    expect(model.inheritedGrants().map((grant) => grant.key)).toEqual([
+      "email_domain:example.org",
+      "email:friend@example.com",
+    ]);
 
     model.selectTarget("web");
     expect(model.currentTarget).toBe("web");
@@ -1246,8 +1246,8 @@ describe("SharePanelModel validation before the row", () => {
     expect(model.addRow(WHOLE).refusalMessage).toBeNull();
     expect(model.addRow(WHOLE).value).toBe("");
     expect(grantValues(model)).toEqual([
-      "friend@example.com",
       "colleague@example.com",
+      "friend@example.com",
     ]);
   });
 
@@ -1286,8 +1286,8 @@ describe("SharePanelModel validation before the row", () => {
     model.addGrant(WHOLE, "email", "  Colleague@Example.COM ");
 
     expect(grantValues(model)).toEqual([
-      "friend@example.com",
       "colleague@example.com",
+      "friend@example.com",
     ]);
   });
 

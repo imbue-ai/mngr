@@ -634,8 +634,8 @@ describe("ShareTab grant list", () => {
     expect(labels).toEqual([
       "Remove anyone at acme.example",
       "Remove Carol Reyes",
-      "Remove newcomer@example.com",
       "Remove erin@example.org",
+      "Remove newcomer@example.com",
     ]);
   });
 
@@ -838,47 +838,141 @@ describe("ShareTab off notice", () => {
 
 describe("ShareTab inherited grants", () => {
   async function appPanel(workspaceGrants: {
-    emails: string[];
-    email_domains: string[];
+    emails?: string[];
+    email_domains?: string[];
   }): Promise<SharePanelModel> {
     const share = await publishedPanel({
-      grants: { workspace: workspaceGrants, services: {} },
+      grants: {
+        workspace: {
+          emails: workspaceGrants.emails ?? [],
+          email_domains: workspaceGrants.email_domains ?? [],
+        },
+        services: {},
+      },
     });
     share.selectTarget("web");
     return share;
   }
 
-  it("counts what the whole workspace's grants add, and leads to them", async () => {
+  it("counts the inherited permissions and keeps them shut until asked", async () => {
     const share = await appPanel({
       emails: ["one@example.com", "two@example.com"],
       email_domains: ["acme.example"],
     });
 
-    const line = byId(renderTab(share), "ws-share-inherited");
-    expect(allText(line)).toContain(
-      "Permissions granted to the whole workspace",
-    );
-    expect(allText(line)).toContain(
-      "will also apply here. 1 domain and 2 individuals have been granted access.",
-    );
+    const group = byId(renderTab(share), "ws-share-inherited");
 
-    const link = collectVnodes(line).find(
-      (vnode) => typeof attrsOf(vnode).onclick === "function",
+    expect(allText(group)).toContain(
+      "3 permissions inherited from the whole workspace",
     );
-    (attrsOf(link as AnyVnode).onclick as () => void)();
-
-    expect(share.currentTarget).toBe(WHOLE);
+    // Shut, the rows are not drawn at all, so nothing reaches them -- not the
+    // keyboard, not a screen reader.
+    expect(allText(group)).not.toContain("one@example.com");
   });
 
-  it("counts one of each in the singular", async () => {
+  it("counts a lone inherited permission in the singular", async () => {
+    const share = await appPanel({ emails: ["one@example.com"] });
+
+    expect(allText(byId(renderTab(share), "ws-share-inherited"))).toContain(
+      "1 permission inherited from the whole workspace",
+    );
+  });
+
+  it("shows the inherited grants under the header once it is opened", async () => {
+    const share = await appPanel({
+      emails: ["one@example.com", "two@example.com"],
+      email_domains: ["acme.example"],
+    });
+
+    const draw = mountedTab(share);
+
+    const trigger = byId(draw(), "ws-share-inherited-trigger") as AnyVnode;
+    expect(attrsOf(trigger)["aria-expanded"]).toBe("false");
+    (attrsOf(trigger).onclick as () => void)();
+
+    const opened = byId(draw(), "ws-share-inherited");
+    expect(
+      attrsOf(byId(draw(), "ws-share-inherited-trigger") as AnyVnode)[
+        "aria-expanded"
+      ],
+    ).toBe("true");
+    const text = allText(opened);
+    expect(text).toContain("Anyone at acme.example");
+    expect(text.indexOf("acme.example")).toBeLessThan(
+      text.indexOf("one@example.com"),
+    );
+    expect(text.indexOf("one@example.com")).toBeLessThan(
+      text.indexOf("two@example.com"),
+    );
+  });
+
+  it("ties the header to the rows it opens, for a screen reader", async () => {
+    const share = await appPanel({ emails: ["one@example.com"] });
+
+    const draw = mountedTab(share);
+    const trigger = byId(draw(), "ws-share-inherited-trigger") as AnyVnode;
+    (attrsOf(trigger).onclick as () => void)();
+
+    const root = draw();
+    const opened = byId(root, "ws-share-inherited-trigger") as AnyVnode;
+    const panel = byId(root, "ws-share-inherited-panel") as AnyVnode;
+    expect(attrsOf(opened)["aria-controls"]).toBe("ws-share-inherited-panel");
+    expect(attrsOf(panel).role).toBe("region");
+    expect(attrsOf(panel)["aria-labelledby"]).toBe(
+      "ws-share-inherited-trigger",
+    );
+  });
+
+  it("rails and sets in the rows this pane only inherits", async () => {
+    const share = await appPanel({ emails: ["one@example.com"] });
+    const draw = mountedTab(share);
+
+    (
+      attrsOf(byId(draw(), "ws-share-inherited-trigger") as AnyVnode)
+        .onclick as () => void
+    )();
+
+    // A rail marks them as the whole workspace's rather than this app's, and
+    // the indent beside it still lands a row's contents under the summary.
+    const panel = byId(draw(), "ws-share-inherited-panel") as AnyVnode;
+    const tokens = classTokensOf(panel);
+    expect(tokens).toContain("border-l-2");
+    expect(tokens).toContain("ml-3");
+    expect(tokens).toContain("pl-[10px]");
+  });
+
+  it("offers no remove control on a row this pane only inherits", async () => {
     const share = await appPanel({
       emails: ["one@example.com"],
       email_domains: ["acme.example"],
     });
+    const draw = mountedTab(share);
 
-    expect(allText(byId(renderTab(share), "ws-share-inherited"))).toContain(
-      "1 domain and 1 individual have been granted access.",
+    (
+      attrsOf(byId(draw(), "ws-share-inherited-trigger") as AnyVnode)
+        .onclick as () => void
+    )();
+
+    const panel = byId(draw(), "ws-share-inherited-panel") as AnyVnode;
+    const removes = collectVnodes(panel).filter((vnode) =>
+      String(attrsOf(vnode)["aria-label"] ?? "").startsWith("Remove"),
     );
+    // The grant is the whole workspace's, so a control here would either do
+    // nothing or revoke it somewhere the reader is not looking.
+    expect(removes).toEqual([]);
+  });
+
+  it("keeps the header above the rows it names while they are in view", async () => {
+    const share = await appPanel({ emails: ["one@example.com"] });
+
+    const trigger = byId(
+      renderTab(share),
+      "ws-share-inherited-trigger",
+    ) as AnyVnode;
+    // Sticky against the group rather than the scroller, so the header leaves
+    // with the rows it labels instead of outliving them.
+    expect(classTokensOf(trigger)).toContain("sticky");
+    expect(classTokensOf(trigger)).toContain("top-0");
   });
 
   it("says nothing about inherited grants on the whole workspace itself", async () => {
@@ -968,7 +1062,9 @@ describe("ShareTab while the link is being prepared", () => {
     expect(allText(byId(root, "ws-share-provisioning"))).toContain(
       "Connecting to the relay",
     );
-    expect(allText(rowByText(root, "bob@example.org"))).toContain("Securely granting access");
+    expect(allText(rowByText(root, "bob@example.org"))).toContain(
+      "Securely granting access",
+    );
     expect(allText(byId(root, "ws-share-link"))).toContain(
       "Preparing the link",
     );
@@ -1091,7 +1187,7 @@ describe("ShareTab on an app pane", () => {
 
     const root = renderTab(share);
     expect(allText(byId(root, "ws-share-inherited"))).toContain(
-      "1 domain and 1 individual have been granted access.",
+      "2 permissions inherited from the whole workspace",
     );
     expect(allText(byId(root, "ws-share-refusal"))).toBe(
       "gmail.com cannot be granted permissions because it is a public email provider.",

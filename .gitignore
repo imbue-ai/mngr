@@ -390,3 +390,10 @@ apps/minds/package-lock.json
 # mngr witness run output: archives, manifest, and report, written to
 # <pipeline name>_<execution name>/ in the repo root by default
 **/witness_[0-9]*/
+
+# Share panel fixture captures: apps/minds/scripts/share_panel_renders.py
+# writes them here, and they are made to be looked at rather than kept -- a
+# picture of a live panel is stale as soon as anyone touches the panel, and two
+# runs of one build differ by whatever a spinner or a fade was doing when the
+# shot was taken. The per-frame notes beside them (README.md) are what is kept.
+blueprint/share-panel/renders/*.png

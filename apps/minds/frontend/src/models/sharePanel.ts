@@ -357,10 +357,8 @@ export class SharePanelModel {
   }
 
   /** What the whole workspace's grants admit on top of an app's own list. */
-  inheritedCounts(): { domainCount: number; individualCount: number } {
-    const grants = this.mutableGrants(this.options.wholeService);
-    const domainCount = grants.filter(isDomainGrant).length;
-    return { domainCount, individualCount: grants.length - domainCount };
+  inheritedGrants(): readonly Grant[] {
+    return this.mutableGrants(this.options.wholeService);
   }
 
   /** The add row of a target, created empty on first use. */
@@ -495,7 +493,7 @@ export class SharePanelModel {
     this.discardPendingRemoval(target, grantee);
     const grants = this.mutableGrants(target);
     grants.push(grant);
-    this.grantsByTarget.set(target, orderGrants(grants));
+    this.grantsByTarget.set(target, orderGrants(grants, this.identities));
     this.enqueueGrantsWrite();
     if (kind === "email")
       void this.upgradeGrantToAccount(target, grant.key, value);
@@ -926,7 +924,7 @@ export class SharePanelModel {
         };
         grants.splice(Math.min(removal.idx, grants.length), 0, removal.grant);
       }
-      this.grantsByTarget.set(target, orderGrants(grants));
+      this.grantsByTarget.set(target, orderGrants(grants, this.identities));
     }
   }
 
@@ -1059,7 +1057,10 @@ export class SharePanelModel {
     const added = live
       .filter((_entry, idx) => !matchedIdxes.has(idx))
       .map(grantFromEntry);
-    this.grantsByTarget.set(target, orderGrants([...kept, ...added]));
+    this.grantsByTarget.set(
+      target,
+      orderGrants([...kept, ...added], this.identities),
+    );
   }
 
   /** Forget the removals this document no longer carries: they have landed. */
@@ -1127,11 +1128,41 @@ function isDomainGrant(grant: Grant): boolean {
 }
 
 /** Domain grants first, then individuals, each keeping the order it arrived in. */
-function orderGrants(grants: Grant[]): Grant[] {
+/**
+ * The one order every grant list in the panel is drawn in: domains first,
+ * then people, each group alphabetical by what its row reads as.
+ *
+ * Domains lead because one of them admits more people than any row below it,
+ * and a reader scanning for who can get in should meet the widest grants
+ * first. Sorting on the rendered text rather than the stored value is what
+ * makes the list scannable: a row showing an account's display name sorts
+ * under that name, not under the address or the id behind it.
+ */
+function orderGrants(
+  grants: Grant[],
+  identities: Record<string, IdentityRecord>,
+): Grant[] {
+  const byRenderedName = (one: Grant, other: Grant): number =>
+    grantSortKey(one, identities).localeCompare(
+      grantSortKey(other, identities),
+    );
   return [
-    ...grants.filter(isDomainGrant),
-    ...grants.filter((grant) => !isDomainGrant(grant)),
+    ...grants.filter(isDomainGrant).sort(byRenderedName),
+    ...grants.filter((grant) => !isDomainGrant(grant)).sort(byRenderedName),
   ];
+}
+
+/** What a row reads as, folded for comparison; mirrors the view's grantText. */
+function grantSortKey(
+  grant: Grant,
+  identities: Record<string, IdentityRecord>,
+): string {
+  const grantee = grant.grantee;
+  if (grantee.kind !== "user") return (grantee.value ?? "").toLowerCase();
+  const record = identities[grantee.userId];
+  const shown =
+    record?.display_name || record?.email || grantee.value || grantee.userId;
+  return shown.toLowerCase();
 }
 
 function grantKey(grantee: Grantee): GrantKey {

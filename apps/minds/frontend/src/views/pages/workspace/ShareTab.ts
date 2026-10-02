@@ -5,6 +5,10 @@
 import m from "mithril";
 import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
+import {
+  DISCLOSURE_FOCUS_CLASS,
+  disclosureAttrs,
+} from "../../components/disclosureAttrs";
 import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
 import { CopyField } from "../../components/Layout";
@@ -99,6 +103,8 @@ export interface ShareTabAttrs {
 
 interface ShareTabLocalState {
   isConfirmOpen: boolean;
+  /** Whether the app pane's inherited-permissions group is expanded. */
+  isInheritedOpen: boolean;
   copied: CopiedLink | null;
   copyFlashHandle: ScheduleHandle | null;
 }
@@ -116,6 +122,7 @@ type ScheduleHandle = ReturnType<SharePanelModel["schedule"]>;
 export function ShareTab(): m.Component<ShareTabAttrs> {
   const local: ShareTabLocalState = {
     isConfirmOpen: false,
+    isInheritedOpen: false,
     copied: null,
     copyFlashHandle: null,
   };
@@ -409,7 +416,7 @@ function renderTargetPane(
             isWhole ? OFF_NOTICE_WORKSPACE : OFF_NOTICE_APP,
           ),
         ),
-    renderGrantList(share),
+    renderGrantList(share, local),
   ];
 }
 
@@ -428,7 +435,6 @@ function renderAddRow(share: SharePanelModel): m.Children {
     : { "aria-disabled": "true", "data-tooltip": ADD_OFF_TOOLTIP };
   return m("section", { id: "ws-share-add", class: "mt-6 shrink-0" }, [
     m(FormLabel, { target: "ws-share-add-value" }, "Grant permission to"),
-    target === share.wholeService ? null : renderInheritedLine(share),
     m(
       "div",
       {
@@ -501,35 +507,6 @@ function renderAddRow(share: SharePanelModel): m.Children {
   ]);
 }
 
-/**
- * A count stands in for the names, so the line stays one line however many
- * there are.
- */
-function renderInheritedLine(share: SharePanelModel): m.Children {
-  const { domainCount, individualCount } = share.inheritedCounts();
-  return m(
-    "p",
-    { id: "ws-share-inherited", class: "mb-1.5 type-helper text-tertiary" },
-    [
-      m(
-        "button",
-        {
-          type: "button",
-          class: "text-accent cursor-pointer hover:underline",
-          onclick: () => share.selectTarget(share.wholeService),
-        },
-        "Permissions granted to the whole workspace",
-      ),
-      ` will also apply here. ${plural(domainCount, "domain")} and ` +
-        `${plural(individualCount, "individual")} have been granted access.`,
-    ],
-  );
-}
-
-function plural(count: number, noun: string): string {
-  return count === 1 ? `${count} ${noun}` : `${count} ${noun}s`;
-}
-
 function submitAddRow(share: SharePanelModel): void {
   if (!share.canAdd) return;
   const target = share.currentTarget;
@@ -537,10 +514,20 @@ function submitAddRow(share: SharePanelModel): void {
   share.addGrant(target, row.kind, row.value);
 }
 
-/** The target's own grant list: the one part of the pane that scrolls. */
-function renderGrantList(share: SharePanelModel): m.Children {
+/** The target's own grant list: the one part of the pane that scrolls.
+ *
+ * An app's pane leads with what the whole workspace already admits, collapsed,
+ * because those permissions apply here too and a reader deciding who can reach
+ * this app has to count them in.
+ */
+function renderGrantList(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
   const grants = share.grantsFor(share.currentTarget);
-  if (grants.length === 0)
+  const inherited =
+    share.currentTarget === share.wholeService ? [] : share.inheritedGrants();
+  if (grants.length === 0 && inherited.length === 0)
     return m(
       "p",
       {
@@ -560,11 +547,113 @@ function renderGrantList(share: SharePanelModel): m.Children {
         "mt-4 flex flex-1 min-h-0 flex-col gap-1.5 overflow-y-auto " +
         "[scrollbar-gutter:stable]",
     },
-    grants.map((grant) => renderGrantRow(share, grant)),
+    // Every row carries a key, and Mithril wants all of a list's children
+    // keyed or none of them: the inherited group is built in rather than left
+    // as a hole beside them.
+    [
+      ...(inherited.length === 0
+        ? []
+        : [renderInheritedGroup(share, local, inherited)]),
+      ...grants.map((grant) => renderGrantRow(share, grant)),
+    ],
   );
 }
 
-function renderGrantRow(share: SharePanelModel, grant: Grant): m.Children {
+/**
+ * The inherited permissions, behind one row that opens them.
+ *
+ * The header sticks while the group it names is on screen and leaves with it,
+ * which is what `sticky` does once the scrolling ancestor is this wrapper
+ * rather than the list: the rows it labels cannot scroll away from their
+ * label, and the reader is never left with a heading for rows that are gone.
+ */
+function renderInheritedGroup(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+  inherited: readonly Grant[],
+): m.Children {
+  const isOpen = local.isInheritedOpen;
+  const parts = disclosureAttrs({
+    isOpen,
+    onToggle: () => {
+      local.isInheritedOpen = !local.isInheritedOpen;
+    },
+    id: "ws-share-inherited",
+  });
+  return m(
+    "div",
+    {
+      key: "inherited",
+      id: "ws-share-inherited",
+      class: "flex flex-none flex-col gap-1.5",
+    },
+    [
+      m(
+        "button",
+        {
+          ...parts.trigger,
+          class:
+            ROW_CLASS +
+            " sticky top-0 z-10 w-full cursor-pointer bg-surface-primary " +
+            "border-subtle text-left type-helper text-tertiary " +
+            "hover:text-secondary " +
+            DISCLOSURE_FOCUS_CLASS,
+        },
+        [
+          m(
+            "span",
+            {
+              class:
+                "w-4 shrink-0 transition-transform duration-150 " +
+                (isOpen ? "rotate-90" : ""),
+              "aria-hidden": "true",
+            },
+            m(Icon16, { name: "chevron-right" }),
+          ),
+          inheritedSummary(inherited.length),
+        ],
+      ),
+      isOpen
+        ? m(
+            "div",
+            {
+              ...parts.panel,
+              // A rail down the group, and rows set in beside it: an inherited
+              // row is the whole workspace's, and nothing else in the list is,
+              // so it has to be legible as a different kind of row even once
+              // the header it hangs from has scrolled away.
+              //
+              // The three add to the 24px (12 + 2 + 10) that, with the row's
+              // own padding, begins its contents under the summary's first
+              // letter rather than under the marker.
+              class:
+                "ml-3 flex flex-col gap-1.5 border-l-2 border-strong pl-[10px]",
+            },
+            inherited.map((grant) => renderGrantRow(share, grant, false)),
+          )
+        : null,
+    ],
+  );
+}
+
+function inheritedSummary(count: number): string {
+  const noun = count === 1 ? "permission" : "permissions";
+  return `${count} ${noun} inherited from the whole workspace`;
+}
+
+/**
+ * One grant, as a row.
+ *
+ * `isOwned` is false for a row this pane only inherits: it belongs to the
+ * whole workspace, and the controls that would change it are left off rather
+ * than drawn dead. Revoking it is the whole workspace's pane to do, which is
+ * also the only place the change would read as what it is.
+ */
+function renderGrantRow(
+  share: SharePanelModel,
+  grant: Grant,
+  isOwned: boolean = true,
+): m.Children {
   const grantee = grant.grantee;
   const isDomain = grantee.kind === "email_domain";
   const text = grantText(share, grant);
@@ -618,20 +707,24 @@ function renderGrantRow(share: SharePanelModel, grant: Grant): m.Children {
         class: "flex h-6 shrink-0 items-center",
       }),
       renderGrantState(share, grant),
-      m(
-        "button",
-        {
-          type: "button",
-          class:
-            "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
-            "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
-          "aria-label": isDomain
-            ? `Remove anyone at ${grantee.value}`
-            : `Remove ${text.primary}`,
-          onclick: () => share.removeGrant(share.currentTarget, grant.key),
-        },
-        m(Icon16, { name: "close" }),
-      ),
+      isOwned
+        ? m(
+            "button",
+            {
+              type: "button",
+              class:
+                "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-md text-tertiary " +
+                "hover:bg-fill-hover hover:text-important cursor-pointer transition-colors",
+              "aria-label": isDomain
+                ? `Remove anyone at ${grantee.value}`
+                : `Remove ${text.primary}`,
+              onclick: () => share.removeGrant(share.currentTarget, grant.key),
+            },
+            m(Icon16, { name: "close" }),
+          )
+        : // The row keeps the width the control would have taken, so an
+          // inherited row lines up with the pane's own rows below it.
+          m("span", { class: "h-6 w-6 shrink-0" }),
     ],
   );
 }

@@ -1,0 +1,13 @@
+An app's share pane now shows the permissions it inherits from the whole workspace, instead of counting them in a sentence.
+
+The sentence that said "1 domain and 2 individuals have been granted access" is gone. In its place, the first entry of the app's permission list is a row that reads "3 permissions inherited from the whole workspace" and opens to show them. It starts closed, so the pane still opens on what the app itself grants; expanded, the inherited rows sit directly under it and are drawn exactly like the app's own. Its header stays at the top of the list while those rows are on screen and scrolls away with them, so a reader is never left with a heading for rows that have gone.
+
+Expanded, the inherited rows are set in from the left and railed down their edge, so they read as the whole workspace's rather than this app's even once the header they hang from has scrolled away. The indent beside the rail still lands a row's contents directly under the words of the summary. Their surfaces are untouched: a domain grant still reads as a domain among them, because the rail says whose the row is while the surface goes on saying what it grants.
+
+An inherited row carries no remove control. The grant belongs to the whole workspace, so a control here would either do nothing or revoke it somewhere the reader is not looking; the whole workspace's own pane is where it comes off. The row keeps the width the control would have taken, so it still lines up with the app's own rows.
+
+Every grant list in the panel is now drawn in one order: domains first, then people, each group alphabetical by what its row reads as. Domains lead because one of them admits more people than any row below it. Sorting on the rendered text is what makes a long list scannable -- a row showing an account's display name sorts under that name rather than under the address or the id behind it. Previously rows kept the order they arrived in, so a newly added one landed at the end of its group; it now lands where its name puts it.
+
+The disclosure behaviour behind the new row -- a control that says whether it is open and what it opens, a panel that names its control back, and a panel that is not drawn at all while closed rather than merely hidden -- is now shared with the app's other collapsible sections rather than written again. Those sections gain the parts they were missing: a control and panel that name each other for a screen reader, and a focus ring for keyboard users.
+
+Also removed with the sentence: the link in it that jumped to the whole workspace's own pane. The inherited permissions are readable in place now, which is what that link was for.

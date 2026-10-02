@@ -9,7 +9,10 @@
 // agent-authored text is the rationale, which the shell renders under Reason.
 
 import m from "mithril";
-import type { CustomServicePermissionDetail as Detail, InboxModel } from "../../../models/inbox";
+import type {
+  CustomServicePermissionDetail as Detail,
+  InboxModel,
+} from "../../../models/inbox";
 import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
 import { Notice } from "../../components/Notice";
@@ -48,11 +51,20 @@ export interface CustomServicePermissionDetailAttrs {
  * carries it. Collapsed by default so the ordinary case stays two sentences;
  * a service that named its own header is exactly the one whose user should
  * be able to check it against the provider's docs. */
-function renderHeaderDisclosure(detail: Detail, isOpen: boolean, onToggle: () => void): m.Children {
+function renderHeaderDisclosure(
+  detail: Detail,
+  isOpen: boolean,
+  onToggle: () => void,
+): m.Children {
   if (detail.credential_header === null) return null;
   return m(
     Disclosure,
-    { isOpen, onToggle, summary: "How this will be sent" },
+    {
+      id: "custom-service-header",
+      isOpen,
+      onToggle,
+      summary: "How this will be sent",
+    },
     m("p", { class: "type-body text-secondary" }, [
       `Every request to ${detail.base_api_url} will carry the header `,
       m(
@@ -70,9 +82,17 @@ function renderHeaderDisclosure(detail: Detail, isOpen: boolean, onToggle: () =>
  * happens: nothing is reached until an agent later sends a request. The origin
  * is repeated rather than referred to, so the first sentence stands on its own
  * if it is all that is read. */
-function summary(detail: Detail, isHeaderOpen: boolean, onToggleHeader: () => void): m.Children {
+function summary(
+  detail: Detail,
+  isHeaderOpen: boolean,
+  onToggleHeader: () => void,
+): m.Children {
   const lines: m.Children[] = [
-    m("p", { class: "type-body text-primary" }, `The agent wants to store credentials for ${detail.base_api_url}.`),
+    m(
+      "p",
+      { class: "type-body text-primary" },
+      `The agent wants to store credentials for ${detail.base_api_url}.`,
+    ),
   ];
   if (detail.is_already_registered) {
     // Another workspace connected this origin already; what is new is only
@@ -143,7 +163,9 @@ export function CustomServicePermissionDetailView(): m.Component<CustomServicePe
         headerLabel: `Storing credentials for ${detail.base_api_url}`,
         mark: m(Icon16, { name: "globe", extra: "text-primary" }),
         rationale: detail.rationale,
-        approveLabel: model.isBrowserSignInPending() ? "Sign in & approve" : "Approve",
+        approveLabel: model.isBrowserSignInPending()
+          ? "Sign in & approve"
+          : "Approve",
         progressLabel:
           detail.login_url === null
             ? `Storing the credentials for ${detail.domain}…`

@@ -8,21 +8,31 @@
 // redraw never restarts one (see the start-* rules in style.css).
 
 import m from "mithril";
-import { CHAT_BUBBLE_MS, CHAT_STREAM_FADE_MS, CHAT_STREAM_STEP_MS, streamDurationMs } from "../../../models/startFlow";
+import {
+  CHAT_BUBBLE_MS,
+  CHAT_STREAM_FADE_MS,
+  CHAT_STREAM_STEP_MS,
+  streamDurationMs,
+} from "../../../models/startFlow";
 import type { DisclosurePoint, TableColumn } from "../../../models/startFlow";
 import { Button } from "../../components/Button";
 import { Disclosure } from "../../components/Disclosure";
 import { Icon16 } from "../../components/Icon";
 
 /** The column every transcript sits in: the chat's 720px measure, 48px between turns. */
-export const TRANSCRIPT_COLUMN_CLASS = "mx-auto flex w-full max-w-[720px] flex-col px-6 py-[100px] type-body text-primary";
+export const TRANSCRIPT_COLUMN_CLASS =
+  "mx-auto flex w-full max-w-[720px] flex-col px-6 py-[100px] type-body text-primary";
 
 /**
  * Text revealed a character at a time. The whole string is in the DOM from the
  * first frame, so the block is its final size at once and nothing reflows as
  * it fills.
  */
-export function streamedText(text: string, startAtMs: number, isInstant: boolean): m.Children {
+export function streamedText(
+  text: string,
+  startAtMs: number,
+  isInstant: boolean,
+): m.Children {
   if (isInstant) return text;
   return [...text].map((character, index) =>
     m(
@@ -42,14 +52,24 @@ export function streamedText(text: string, startAtMs: number, isInstant: boolean
  * delay it would have had, so the emphasis changes how the turn is drawn and
  * not when any of it lands.
  */
-function emphasisedText(text: string, phrase: string, startAtMs: number, isInstant: boolean): m.Children {
+function emphasisedText(
+  text: string,
+  phrase: string,
+  startAtMs: number,
+  isInstant: boolean,
+): m.Children {
   const at = text.indexOf(phrase);
   if (at < 0) return streamedText(text, startAtMs, isInstant);
-  const stepAt = (index: number): number => startAtMs + index * CHAT_STREAM_STEP_MS;
+  const stepAt = (index: number): number =>
+    startAtMs + index * CHAT_STREAM_STEP_MS;
   return [
     streamedText(text.slice(0, at), startAtMs, isInstant),
     m("em", streamedText(phrase, stepAt(at), isInstant)),
-    streamedText(text.slice(at + phrase.length), stepAt(at + phrase.length), isInstant),
+    streamedText(
+      text.slice(at + phrase.length),
+      stepAt(at + phrase.length),
+      isInstant,
+    ),
   ];
 }
 
@@ -62,7 +82,9 @@ interface ArrivalAttrs {
 }
 
 function arrivalStyle(attrs: ArrivalAttrs): string {
-  return attrs.isInstant ? "" : `--start-chat-delay: ${attrs.delayMs}ms; --start-chat-fade: ${CHAT_BUBBLE_MS}ms;`;
+  return attrs.isInstant
+    ? ""
+    : `--start-chat-delay: ${attrs.delayMs}ms; --start-chat-fade: ${CHAT_BUBBLE_MS}ms;`;
 }
 
 function arrivalClass(attrs: ArrivalAttrs): string {
@@ -74,10 +96,16 @@ function arrivalClass(attrs: ArrivalAttrs): string {
  * bottom-right corner is the one that is not 18px, the corner nearest the
  * person who said it.
  */
-export function userTurn(attrs: ArrivalAttrs & { text: string; onUndo?: () => void }): m.Children {
+export function userTurn(
+  attrs: ArrivalAttrs & { text: string; onUndo?: () => void },
+): m.Children {
   return m(
     "div",
-    { key: attrs.key, class: "mt-10 flex justify-end first:mt-0" + arrivalClass(attrs), style: arrivalStyle(attrs) },
+    {
+      key: attrs.key,
+      class: "mt-10 flex justify-end first:mt-0" + arrivalClass(attrs),
+      style: arrivalStyle(attrs),
+    },
     m(
       "div",
       {
@@ -142,12 +170,16 @@ export function agentTurn(attrs: {
 }): m.Children {
   const isInstant = attrs.isInstant ?? false;
   const lead = attrs.lead ?? "";
-  const textAt = lead === "" ? attrs.startAtMs : attrs.startAtMs + streamDurationMs(lead) + CHAT_STREAM_STEP_MS;
+  const textAt =
+    lead === ""
+      ? attrs.startAtMs
+      : attrs.startAtMs + streamDurationMs(lead) + CHAT_STREAM_STEP_MS;
   const text =
     attrs.emphasis === undefined
       ? streamedText(attrs.text, textAt, isInstant)
       : emphasisedText(attrs.text, attrs.emphasis, textAt, isInstant);
-  const body = attrs.textId !== undefined ? m("span", { id: attrs.textId }, text) : text;
+  const body =
+    attrs.textId !== undefined ? m("span", { id: attrs.textId }, text) : text;
   return m(
     "p",
     {
@@ -159,8 +191,20 @@ export function agentTurn(attrs: {
       "data-agent-turn": "",
     },
     [
-      lead === "" ? body : [m("strong", streamedText(lead, attrs.startAtMs, isInstant)), "\n", body],
-      attrs.more ? moreToggle(attrs.more, textAt + streamDurationMs(attrs.text), isInstant) : null,
+      lead === ""
+        ? body
+        : [
+            m("strong", streamedText(lead, attrs.startAtMs, isInstant)),
+            "\n",
+            body,
+          ],
+      attrs.more
+        ? moreToggle(
+            attrs.more,
+            textAt + streamDurationMs(attrs.text),
+            isInstant,
+          )
+        : null,
     ],
   );
 }
@@ -170,7 +214,11 @@ export function agentTurn(attrs: {
  * turn's last character rather than standing there ahead of a sentence that
  * has not finished.
  */
-function moreToggle(more: TurnMore, startAtMs: number, isInstant: boolean): m.Children {
+function moreToggle(
+  more: TurnMore,
+  startAtMs: number,
+  isInstant: boolean,
+): m.Children {
   return [
     " ",
     m(
@@ -183,12 +231,20 @@ function moreToggle(more: TurnMore, startAtMs: number, isInstant: boolean): m.Ch
         class:
           "cursor-pointer border-0 bg-transparent p-0 text-tertiary underline hover:text-primary" +
           (isInstant ? "" : " start-char"),
-        style: isInstant ? undefined : `--start-char-delay: ${startAtMs}ms; --start-char-fade: ${CHAT_STREAM_FADE_MS}ms;`,
+        style: isInstant
+          ? undefined
+          : `--start-char-delay: ${startAtMs}ms; --start-char-fade: ${CHAT_STREAM_FADE_MS}ms;`,
         onclick: more.onToggle,
       },
       more.label,
     ),
-    more.isOpen ? m("em", { class: "mt-2 block text-secondary", "data-turn-more-detail": "" }, more.detail) : null,
+    more.isOpen
+      ? m(
+          "em",
+          { class: "mt-2 block text-secondary", "data-turn-more-detail": "" },
+          more.detail,
+        )
+      : null,
   ];
 }
 
@@ -212,13 +268,20 @@ export function disclosureList(attrs: {
   detailFor?: (point: DisclosurePoint) => m.Children;
 }): m.Children {
   let labelAt = attrs.startAtMs;
-  const arrival: ArrivalAttrs = { key: attrs.key, delayMs: attrs.arriveAtMs ?? 0, isInstant: attrs.arriveAtMs === undefined };
-  const isLabelInstant = (attrs.isInstant ?? false) || attrs.arriveAtMs !== undefined;
+  const arrival: ArrivalAttrs = {
+    key: attrs.key,
+    delayMs: attrs.arriveAtMs ?? 0,
+    isInstant: attrs.arriveAtMs === undefined,
+  };
+  const isLabelInstant =
+    (attrs.isInstant ?? false) || attrs.arriveAtMs !== undefined;
   return m(
     "ul",
     {
       key: attrs.key,
-      class: "mt-3 flex max-w-[calc(100%-100px)] flex-col gap-1.5" + arrivalClass(arrival),
+      class:
+        "mt-3 flex max-w-[calc(100%-100px)] flex-col gap-1.5" +
+        arrivalClass(arrival),
       style: arrivalStyle(arrival),
       "data-disclosure-list": "",
     },
@@ -231,6 +294,7 @@ export function disclosureList(attrs: {
         m(
           Disclosure,
           {
+            id: `disclosure-${point.id}`,
             isOpen: attrs.openIds.has(point.id),
             onToggle: () => attrs.onToggle(point.id),
             summary: streamedText(point.label, startAt, isLabelInstant),
@@ -257,7 +321,10 @@ export interface AnswerButton {
  * green; the quieter one is a ghost.
  */
 export function answerRow(
-  attrs: ArrivalAttrs & { buttons: AnswerButton[]; aside?: { label: string; onPress: () => void } },
+  attrs: ArrivalAttrs & {
+    buttons: AnswerButton[];
+    aside?: { label: string; onPress: () => void };
+  },
 ): m.Children {
   const buttons = m(
     "div",
@@ -285,10 +352,15 @@ export function answerRow(
     "div",
     {
       key: attrs.key,
-      class: "mt-10 flex items-center " + (attrs.aside ? "justify-between gap-6" : "justify-end") + arrivalClass(attrs),
+      class:
+        "mt-10 flex items-center " +
+        (attrs.aside ? "justify-between gap-6" : "justify-end") +
+        arrivalClass(attrs),
       style: arrivalStyle(attrs),
     },
-    attrs.aside ? [asideButton(attrs.aside.label, attrs.aside.onPress), buttons] : buttons,
+    attrs.aside
+      ? [asideButton(attrs.aside.label, attrs.aside.onPress), buttons]
+      : buttons,
   );
 }
 
@@ -297,7 +369,8 @@ function asideButton(label: string, onPress: () => void): m.Children {
     "button",
     {
       type: "button",
-      class: "type-body text-tertiary hover:text-primary hover:underline cursor-pointer bg-transparent border-0 p-0 text-left",
+      class:
+        "type-body text-tertiary hover:text-primary hover:underline cursor-pointer bg-transparent border-0 p-0 text-left",
       "data-aside": "",
       onclick: onPress,
     },
@@ -310,61 +383,86 @@ function asideButton(label: string, onPress: () => void): m.Children {
  * furniture and no more, a rule under the headings, 14px against the chat's
  * body. Each point carries a check, filled in the recommended column.
  */
-export function choiceTable(attrs: ArrivalAttrs & { columns: TableColumn[] }): m.Children {
+export function choiceTable(
+  attrs: ArrivalAttrs & { columns: TableColumn[] },
+): m.Children {
   return m(
     "div",
-    { key: attrs.key, class: "mt-5 w-full max-w-[calc(100%-100px)]" + arrivalClass(attrs), style: arrivalStyle(attrs) },
-    m("table", { class: "w-full table-fixed border-collapse text-left type-body" }, [
-      m(
-        "thead",
+    {
+      key: attrs.key,
+      class: "mt-5 w-full max-w-[calc(100%-100px)]" + arrivalClass(attrs),
+      style: arrivalStyle(attrs),
+    },
+    m(
+      "table",
+      { class: "w-full table-fixed border-collapse text-left type-body" },
+      [
         m(
-          "tr",
-          { class: "border-b border-default" },
-          attrs.columns.map((column) =>
-            m("th", { key: column.title, class: "py-2 pr-6 align-top font-semibold" }, [
-              column.title,
-              column.badge
-                ? m(
-                    "span",
-                    {
-                      class:
-                        "ml-2 inline-flex items-center rounded-md px-2 py-0.5 type-helper font-bold uppercase tracking-wide " +
-                        (column.isEmphasized ? "bg-accent/15 text-accent" : "bg-fill-subtle text-secondary"),
-                    },
-                    column.badge,
-                  )
-                : null,
-            ]),
+          "thead",
+          m(
+            "tr",
+            { class: "border-b border-default" },
+            attrs.columns.map((column) =>
+              m(
+                "th",
+                {
+                  key: column.title,
+                  class: "py-2 pr-6 align-top font-semibold",
+                },
+                [
+                  column.title,
+                  column.badge
+                    ? m(
+                        "span",
+                        {
+                          class:
+                            "ml-2 inline-flex items-center rounded-md px-2 py-0.5 type-helper font-bold uppercase tracking-wide " +
+                            (column.isEmphasized
+                              ? "bg-accent/15 text-accent"
+                              : "bg-fill-subtle text-secondary"),
+                        },
+                        column.badge,
+                      )
+                    : null,
+                ],
+              ),
+            ),
           ),
         ),
-      ),
-      m(
-        "tbody",
         m(
-          "tr",
-          attrs.columns.map((column) =>
-            m(
-              "td",
-              { key: column.title, class: "py-3 pr-6 align-top leading-[1.45]" },
+          "tbody",
+          m(
+            "tr",
+            attrs.columns.map((column) =>
               m(
-                "ul",
-                { class: "flex flex-col gap-1.5" },
-                column.points.map((point) =>
-                  m("li", { key: point, class: "flex items-start gap-2" }, [
-                    m(
-                      "span",
-                      { class: "shrink-0 leading-[1.45]", "aria-hidden": "true" },
-                      column.isEmphasized ? "\u2705" : "\u2713",
-                    ),
-                    point,
-                  ]),
+                "td",
+                {
+                  key: column.title,
+                  class: "py-3 pr-6 align-top leading-[1.45]",
+                },
+                m(
+                  "ul",
+                  { class: "flex flex-col gap-1.5" },
+                  column.points.map((point) =>
+                    m("li", { key: point, class: "flex items-start gap-2" }, [
+                      m(
+                        "span",
+                        {
+                          class: "shrink-0 leading-[1.45]",
+                          "aria-hidden": "true",
+                        },
+                        column.isEmphasized ? "\u2705" : "\u2713",
+                      ),
+                      point,
+                    ]),
+                  ),
                 ),
               ),
             ),
           ),
         ),
-      ),
-    ]),
+      ],
+    ),
   );
 }
 
@@ -419,7 +517,9 @@ export function scrollAnchor(turnCount: number): m.Children {
     key: "scroll-anchor",
     class: "h-8 shrink-0",
     "aria-hidden": "true",
-    oncreate: (vnode: m.VnodeDOM) => transcriptScroller.mounted(vnode.dom as HTMLElement, turnCount),
-    onupdate: (vnode: m.VnodeDOM) => transcriptScroller.updated(vnode.dom as HTMLElement, turnCount),
+    oncreate: (vnode: m.VnodeDOM) =>
+      transcriptScroller.mounted(vnode.dom as HTMLElement, turnCount),
+    onupdate: (vnode: m.VnodeDOM) =>
+      transcriptScroller.updated(vnode.dom as HTMLElement, turnCount),
   });
 }

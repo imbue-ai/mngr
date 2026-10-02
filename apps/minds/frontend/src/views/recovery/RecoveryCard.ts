@@ -544,6 +544,12 @@ interface DisclosureAttrs {
  * The troubleshooting blocks are for the rare reader who is actually
  * debugging; expanded, they push the restart button -- the thing almost
  * everyone came for -- off the bottom of the panel.
+ *
+ * A copy of the shared Disclosure (views/components/Disclosure.ts), which
+ * hardcodes every one of its classes and so could not be dressed for this
+ * card. CLEANUP: drop this copy and draw the two troubleshooting blocks with
+ * the shared one, once that takes its presentation from the caller the way
+ * the rest of views/components does (MIND-393).
  */
 function Disclosure(): m.Component<DisclosureAttrs> {
   return {
