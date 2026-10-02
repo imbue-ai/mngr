@@ -1,0 +1,5 @@
+Changed: the deploy queue (`docs/deploy/next_deploy.md`) no longer asks for the ci tier's `postmark` Vault entry, which has been pushed. It carries all four keys of `.minds/template/postmark.sh` with the switch left empty and the token of Postmark server 21045229 ("Imbue Studio CI", delivery type Sandbox, which accepts a send and delivers nothing), so ci deploys Postmark-free.
+
+The rollout record (`docs/deploy/history/rollouts/postmark-transport.md`) adds two things to what it already recorded for the 0.8.2 deploys. The password-reset workload is now proven on production: a reset for `danver+test@imbue.com` on 2026-10-01, after the every-recipient deploy, and the mail arrived. That is the second of the transport's two workloads, alongside the verification-email rows already recorded. The ci tier's entry and its Sandbox server are described there too.
+
+The record's one open item is now turning the ci transport on, which needs a Postmark Return-Path and DKIM on `studio-ci.imbue.com`; that domain carries neither, while `studio.imbue.com`, `studio-staging.imbue.com` and `studio-dev.imbue.com` all do.
