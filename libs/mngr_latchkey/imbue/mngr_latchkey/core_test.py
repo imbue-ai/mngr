@@ -1593,6 +1593,7 @@ def test_reload_provider_config_reads_a_provider_added_alongside_a_disable_for_a
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
 
         handler.reload_provider_config()

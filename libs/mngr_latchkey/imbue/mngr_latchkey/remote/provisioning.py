@@ -88,7 +88,11 @@ from imbue.mngr_latchkey.docker_bridge import DockerBridgeAddressError
 from imbue.mngr_latchkey.docker_bridge import resolve_docker_bridge_address
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
+from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.owner_exec_vm import provision_owner_exec_vm
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 
 # Re-exported (the redundant alias marks it as such): the desktop app's host
 # diagnostics name the machine's latchkey directory through it, to tail the
@@ -107,6 +111,8 @@ from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
 from imbue.mngr_latchkey.remote._mirror import stored_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import stored_machine_gateway_password
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
+from imbue.mngr_latchkey.remote.credentials import migrate_permissions_and_push
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
 # Re-exported (the redundant alias marks them as such): the pins and locations
@@ -133,6 +139,7 @@ from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import read_permissions_format_version
 
 # Where supervisord writes the gateway's and the tunnel's logs on the machine;
 # consumers outside this plugin tail them there.
@@ -146,6 +153,13 @@ _INSTALL_TIMEOUT_SECONDS: Final[float] = 300.0
 # mirror, slow npm registry) even though it eventually succeeded; warn so we
 # notice before it turns into an outright timeout.
 _SLOW_INSTALL_WARNING_THRESHOLD_SECONDS: Final[float] = 90.0
+
+
+class _PolicySeed(FrozenModel):
+    """The policy a machine with none of its own is handed, and the format it is written in."""
+
+    permissions_json: str = Field(description="The policy the machine's gateway is to enforce.")
+    permissions_format_version: PermissionsFormatVersion = Field(description="The format the policy is written in.")
 
 
 class _MachineKeyDecision(FrozenModel):
@@ -190,8 +204,13 @@ def provision_remote_gateway(
     ``host.docker.internal``, so nothing else is wired for it), this plugin's
     config, and the policy to seed a machine that has none. supervisord keeps
     the gateway running and restarts it on failure. A machine whose policy the
-    read found is adopted here afterwards, since another of the user's
-    computers may have granted something this one has never seen.
+    read found has it adopted here afterwards, since another of the user's
+    computers may have granted something this one has never seen; the policy
+    is then brought to the format this build reads and handed back (see
+    :func:`~imbue.mngr_latchkey.remote.credentials.migrate_permissions_and_push`),
+    so nothing here edits a policy in an older shape. A policy stamped newer
+    than this build knows is left as it is, with a warning: a gateway has to be
+    wired whichever build wrote its policy.
 
     An agent whose ``LATCHKEY_GATEWAY`` names its own loopback instead (see
     :func:`_does_container_need_reverse_tunnel` for how that is recognized)
@@ -250,12 +269,14 @@ def provision_remote_gateway(
         if _does_container_need_reverse_tunnel(host, host_id, state)
         else None
     )
+    seed = _policy_to_seed(latchkey_directory, host_id, state)
     update = RemoteStateUpdate(
         is_credential_store_abandoned=key_decision.is_store_abandoned,
         encryption_key=key_decision.key,
         listen_password=listen_password,
         config_json=_merged_remote_config(host, latchkey_directory, state),
-        permissions_json=_permissions_to_seed(latchkey_directory, host_id, state),
+        permissions_json=seed.permissions_json if seed is not None else None,
+        permissions_format_version=seed.permissions_format_version if seed is not None else None,
         gateway_listen_host=listen_host,
         tunnel=tunnel,
         is_gateway_restarted=True,
@@ -266,6 +287,33 @@ def provision_remote_gateway(
         _record_machine_encryption_key(latchkey_directory, host_id, key_decision.key)
     if state.permissions_json is not None:
         adopt_machine_permissions(latchkey_directory, host_id, state.permissions_json)
+        adopt_machine_permissions_format_version(latchkey_directory, host_id, state.permissions_format_version)
+    _migrate_adopted_permissions_and_push(host, latchkey, host_id)
+
+
+def _migrate_adopted_permissions_and_push(host: OuterHostInterface, latchkey: Latchkey, host_id: HostId) -> None:
+    """Bring the policy just adopted from the machine to the format this build reads, and hand it back.
+
+    A policy stamped newer than this build knows is left alone with a warning
+    rather than failing the pass: the gateway still has to be wired, and a
+    build that does not know the format cannot make it worse by not touching
+    it. Every other failure is the pass's, so it is retried on the next
+    discovery cycle like the rest of provisioning.
+
+    Raises:
+        RemoteGatewayError: when the policy cannot be migrated, the migrated
+            copy here cannot be read back, or the machine does not take it.
+    """
+    try:
+        migrate_permissions_and_push(host, latchkey, host_id)
+    except PermissionsFormatNewerError as e:
+        logger.warning(
+            "Leaving the permissions of host {} as its machine holds them; this build cannot migrate them: {}",
+            host_id,
+            e,
+        )
+    except (PermissionsMigrationError, LatchkeyStoreError) as e:
+        raise RemoteGatewayError(f"Failed to migrate the permissions of host {host_id}: {e}") from e
 
 
 def _install_remote_package(
@@ -401,7 +449,7 @@ def _merged_remote_config(host: OuterHostInterface, latchkey_directory: Path, st
         raise RemoteGatewayError(f"Failed to update the latchkey config on VPS {host.get_name()}: {e}") from e
 
 
-def _permissions_to_seed(latchkey_directory: Path, host_id: HostId, state: RemoteMachineState) -> str | None:
+def _policy_to_seed(latchkey_directory: Path, host_id: HostId, state: RemoteMachineState) -> _PolicySeed | None:
     """The policy to hand a machine that has none yet, or ``None`` for a machine that has one.
 
     A machine's policy lives on the machine (``~/.latchkey/permissions.json``),
@@ -416,21 +464,32 @@ def _permissions_to_seed(latchkey_directory: Path, host_id: HostId, state: Remot
     so this never has to guess which side is newer: a machine that has a policy
     keeps it (and the caller adopts it, exactly as an ordinary refresh does).
     The one write toward the machine is the seed: a machine with no policy yet
-    gets this computer's copy -- or the restrictive deny-all default, so a host
-    with no explicit grants still gets a locked-down gateway.
+    gets this computer's copy, with the format stamp that copy carries -- or
+    the restrictive deny-all default, in the format this build writes, so a
+    host with no explicit grants still gets a locked-down gateway.
 
-    Raises :class:`RemoteGatewayError` if this computer's copy cannot be read.
+    Raises :class:`RemoteGatewayError` if this computer's copy or its stamp
+    cannot be read.
     """
     if state.permissions_json is not None:
         return None
-    local_path = permissions_path_for_host(plugin_data_dir(latchkey_directory), host_id)
+    data_dir = plugin_data_dir(latchkey_directory)
+    local_path = permissions_path_for_host(data_dir, host_id)
     if local_path.is_file():
         try:
-            return local_path.read_text()
+            permissions_json = local_path.read_text()
         except OSError as e:
             raise RemoteGatewayError(f"Failed to read host permissions file {local_path}: {e}") from e
+        try:
+            permissions_format_version = read_permissions_format_version(data_dir, host_id)
+        except LatchkeyStoreError as e:
+            raise RemoteGatewayError(f"Failed to read the permissions format version of host {host_id}: {e}") from e
+        return _PolicySeed(permissions_json=permissions_json, permissions_format_version=permissions_format_version)
     logger.debug("No local permissions file for host {} at {}; using the restrictive default", host_id, local_path)
-    return _default_permissions_json()
+    return _PolicySeed(
+        permissions_json=_default_permissions_json(),
+        permissions_format_version=CURRENT_PERMISSIONS_FORMAT_VERSION,
+    )
 
 
 def _default_permissions_json() -> str:

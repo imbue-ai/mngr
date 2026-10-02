@@ -37,6 +37,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.ids import InvalidRandomIdError
 from imbue.imbue_common.sentry.core import flush_sentry_on_shutdown
 from imbue.mngr.api.discovery_events import resolve_hosts_for_identifiers
 from imbue.mngr.api.providers import get_provider_instance
@@ -67,6 +68,9 @@ from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
+from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
+from imbue.mngr_latchkey.migrations.runner import migrate_permissions
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import has_machine_of_its_own
 from imbue.mngr_latchkey.remote.credentials import read_host_permissions
@@ -74,6 +78,7 @@ from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.sentry import setup_forward_sentry
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import acquire_forward_lock
+from imbue.mngr_latchkey.store import list_host_permissions_paths
 from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import probe_forward_lock
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
@@ -649,6 +654,51 @@ def _resolve_device_identity(mngr_ctx: MngrContext, cli_device_id: str | None) -
     return DesktopDeviceIdentity(device_id=device_id, hostname=socket.gethostname())
 
 
+def _migrate_hosts_without_a_machine(latchkey: Latchkey) -> None:
+    """Bring the policy of every host whose only copy is here to the format this build reads, in place.
+
+    A host with a machine of its own is migrated when its machine is next
+    read, since the machine owns its policy (see
+    :func:`~imbue.mngr_latchkey.remote.credentials.migrate_permissions_and_push`).
+    A host without one -- a local host, or a remote one no provisioning pass
+    from this computer has reached -- has its only copy here, read by the
+    gateway this supervisor is about to start, so it is migrated before that.
+
+    A host whose policy cannot be migrated is logged and left as it is rather
+    than failing the whole supervisor, which serves every other host too.
+    """
+    data_dir = latchkey.plugin_data_dir
+    for permissions_path in list_host_permissions_paths(data_dir):
+        try:
+            host_id = HostId(permissions_path.parent.name)
+        except InvalidRandomIdError as e:
+            logger.warning("Skipping the data at {}, which is not a host's: {}", permissions_path.parent, e)
+            continue
+        try:
+            _migrate_permissions_unless_its_machine_owns_it(latchkey, host_id)
+        except PermissionsFormatNewerError as e:
+            logger.warning(
+                "Leaving the permissions of host {} as they are; this build cannot migrate them: {}", host_id, e
+            )
+        except (PermissionsMigrationError, LatchkeyStoreError) as e:
+            logger.opt(exception=e).error(
+                "Failed to migrate the permissions of host {}; leaving them as they are", host_id
+            )
+
+
+def _migrate_permissions_unless_its_machine_owns_it(latchkey: Latchkey, host_id: HostId) -> None:
+    """Migrate the host's policy in place, unless a machine of its own owns it (and migrates it when next read).
+
+    Raises:
+        PermissionsMigrationError: when the policy cannot be migrated.
+        LatchkeyStoreError: when it cannot be told whether the host has a
+            machine of its own.
+    """
+    if has_machine_of_its_own(latchkey.plugin_data_dir, host_id):
+        return
+    migrate_permissions(latchkey.plugin_data_dir, host_id)
+
+
 def _run_forward_with_error_reporting(run_supervisor: Callable[[], None]) -> None:
     """Run the supervisor body, reporting an unhandled error to Sentry with logs, and always flushing.
 
@@ -695,6 +745,10 @@ def _run_forward_supervisor(
             f"Another ``mngr latchkey forward`` already owns this latchkey directory"
             f"{owner_description}; refusing to start a second supervisor.",
         )
+
+    # Under the lock, so no second forward migrates the same files, and before
+    # the gateway starts reading them.
+    _migrate_hosts_without_a_machine(latchkey)
 
     # Eagerly ensure the gateway is up so users see startup failures
     # immediately, not on the first agent discovery. The discovery

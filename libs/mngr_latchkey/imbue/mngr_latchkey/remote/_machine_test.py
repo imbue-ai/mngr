@@ -11,6 +11,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DeviceRecord
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
@@ -239,3 +240,35 @@ def test_a_read_ignores_what_the_machine_prints_between_its_answers(tmp_path: Pa
     assert state.home == Path("/root")
     # An empty secret file reads as no secret, the way the mirror reads one.
     assert state.encryption_key is None
+
+
+def test_an_update_document_carries_the_data_format_version_as_decimal_text() -> None:
+    document = _update_document(
+        RemoteStateUpdate(permissions_json='{"rules": []}', permissions_format_version=PermissionsFormatVersion(2))
+    )
+
+    assert document == {"permissions_json": b'{"rules": []}', "permissions_format_version": b"2"}
+
+
+def test_a_read_of_a_machine_never_stamped_reads_as_format_version_zero(tmp_path: Path) -> None:
+    outer = _answering(tmp_path, _read_stdout())
+
+    state = read_remote_state(outer, RemoteStateRequest(), "read")
+
+    assert state.permissions_format_version == 0
+
+
+def test_a_read_answers_the_format_version_the_machine_is_stamped_with(tmp_path: Path) -> None:
+    outer = _answering(tmp_path, _read_stdout(_answer("PERMISSIONS_FORMAT_VERSION", b"3\n")))
+
+    state = read_remote_state(outer, RemoteStateRequest(), "read")
+
+    assert state.permissions_format_version == 3
+
+
+@pytest.mark.parametrize("stamp", [b"two", b"-1", b""])
+def test_a_read_whose_format_version_is_not_a_non_negative_integer_is_an_error(tmp_path: Path, stamp: bytes) -> None:
+    outer = _answering(tmp_path, _read_stdout(_answer("PERMISSIONS_FORMAT_VERSION", stamp)))
+
+    with pytest.raises(RemoteGatewayError, match="permissions format version is not the non-negative integer"):
+        read_remote_state(outer, RemoteStateRequest(), "read")

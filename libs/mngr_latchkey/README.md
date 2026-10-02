@@ -456,7 +456,8 @@ invocations its scripts make, only the service and account names travel in
 
 - `read-state` prints prefixed base64 answers: the secrets the gateway runs
   under, whether the machine has a credential store, its config, its policy,
-  its desktop egress rules, whether it holds a reverse tunnel's keypair, when
+  its desktop egress rules, the [format version](#data-format-changes) the
+  policy is written in, whether it holds a reverse tunnel's keypair, when
   the document carries `container_host_id` the `--add-host` mappings that
   host's container was created with, and, when it carries
   `include_credential_store`, its credential store as it holds it, still
@@ -467,7 +468,8 @@ invocations its scripts make, only the service and account names travel in
   order under one `set -e`: the machine's own key and listen password
   (adopted, refused if the machine already runs under different ones), the
   config, a credential bundle to merge or an account to clear, the desktop
-  egress rules, the policy, the address the gateway binds (`gateway.conf`
+  egress rules, the policy, the format version the policy and the rules are
+  written in, the address the gateway binds (`gateway.conf`
   under `~/.latchkey`), the container to tunnel into, and a gateway restart.
   Whatever the document carries, it also refreshes the gateway's extension
   from the package's copy, so a restart loads the installed package's version.
@@ -519,6 +521,7 @@ what it says is about to be shown or acted on, never trusted between times:
     data-format-version           the mirror's own format stamp   (owned)
     latchkey_permissions.json     the machine's policy, cached    (owned)
     proxyRules.json               its desktop egress rules, cached (owned)
+    permissions-format-version    the format the policy is in, cached (owned)
     machine_encryption_key        the machine's own key           (owned)
     machine_gateway_password      the machine's own password      (owned)
     permissions.json           -> latchkey_permissions.json
@@ -622,6 +625,11 @@ same breath, and a push that fails is reported (to the user when there is one to
 report to, to the log otherwise) rather than left behind as a local edit that a
 later refresh would silently discard.
 
+The one write `refresh` makes after adopting is the migration: a machine whose
+policy is in a format older than this build writes has it brought up to date here
+and handed back in a second command (see [Data-format
+changes](#data-format-changes)).
+
 ## Permissions config
 
 The package owns the `latchkey_permissions.json` schema (a subset of
@@ -695,20 +703,54 @@ extension serves, so an account-gated schema would never match them.
 
 ## Data-format changes
 
-The plugin has no data-format migration mechanism. A permissions file is
-whatever the machine that owns it holds, and the shape it is written in is the
-one the installed code produces: `LatchkeyPermissionsConfig` is `extra="ignore"`,
-so a file carrying keys this build does not model still loads, and those keys
-disappear the next time the file is saved.
+A change to the shape of a host's `latchkey_permissions.json` that the readers
+cannot absorb ships as a **permissions migration**
+(`imbue.mngr_latchkey.migrations`). Migrations are per host, because that is
+where the source of truth lives: each host's directory carries a
+`permissions-format-version` stamp, one integer naming the format its policy is
+written in, and a directory without one is at version 0. A host with a machine
+of its own keeps the same stamp beside its policy in the machine's
+`~/.latchkey`, where it is the source of truth; every push of the policy carries
+the stamp of the copy it was taken from, and every read adopts the machine's
+stamp with the policy. (It is a different file from upstream's
+`data-format-version`, which sits in the same directories and stamps the
+credential store.)
 
-That self-healing only covers *extra keys*. It does not cover a change that
-moves data between rule keys, and there is nothing left that would rewrite such
-a file. So a permissions shape change is now a breaking change across desktops:
-since a refresh adopts whatever the machine holds (see "Machine stores" above),
-a newer desktop's push is read verbatim by an older one. Any future mechanism
-for this has to put the version *on the wire* alongside the policy, not only in
-a file on disk -- a local-only stamp cannot help a policy that arrives from
-another computer.
+A migration is a `PermissionsMigration` with a `version` (consecutive from 1)
+and an `apply(permissions)` that takes the parsed policy
+(`LatchkeyPermissionsConfig`) as the version below wrote it and returns it as
+its own version writes it. The runner does the reading, writing and stamping.
+The build's migrations are listed in `migrations/runner.py`
+(`PERMISSIONS_MIGRATIONS`), and the version the last one ends in is what a
+policy this build creates is stamped with, so a fresh file is never migrated.
+
+The runner (`migrate_permissions`) compares a host's stamp against the build's
+and applies the migrations above it in order, feeding each the last one's
+result and re-stamping after each, so a failure leaves the stamp at the last
+step that completed. It runs:
+
+- for a host with a machine of its own, right after the machine's policy has
+  been adopted -- by `MachineCredentials.refresh` and by the provisioning pass
+  -- and the migrated policy is handed back to the machine, stamp and all, in
+  one command (`migrate_permissions_and_push`). So a machine is never left
+  holding a policy this build has read but cannot edit, and a second computer
+  that reads the machine afterwards finds it already migrated.
+- for a host without one (a local host, or a remote host no provisioning pass
+  from this computer has reached), in place, when `mngr latchkey forward`
+  starts and before the gateway that reads the file does.
+
+The stamp is written after the policy it describes, on this computer and on the
+machine alike, so a failure between the two re-runs the migration rather than
+skipping it: a migration must leave a policy already in its target shape alone.
+
+A policy stamped *newer* than a build knows is refused rather than read: a build
+that does not know a format cannot edit a policy in it without corrupting it. A
+refresh raises `PermissionsFormatNewerError` (the Permissions tab says so),
+while the provisioning pass and the forward's startup sweep log a warning and
+leave the policy as it is, since a gateway has to be wired whichever build wrote
+it. An older build's *edits* to such a policy are not guarded against: the
+user's computers are assumed to run builds no further apart than one can
+migrate.
 
 ---
 

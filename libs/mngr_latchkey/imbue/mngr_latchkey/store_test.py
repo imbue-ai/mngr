@@ -7,6 +7,7 @@ import pytest
 from filelock import ReadWriteLock
 
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
@@ -24,11 +25,14 @@ from imbue.mngr_latchkey.store import load_forward_owner
 from imbue.mngr_latchkey.store import load_permissions
 from imbue.mngr_latchkey.store import new_opaque_permissions_path
 from imbue.mngr_latchkey.store import opaque_permissions_dir
+from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import probe_forward_lock
+from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.store import save_permissions
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
+from imbue.mngr_latchkey.store import write_permissions_format_version
 
 # The gateway's bound port is stamped onto the owner record beside the
 # ownership lock; the password is never persisted (callers derive it via
@@ -51,7 +55,7 @@ def test_default_permissions_path_is_top_level(tmp_path: Path) -> None:
     assert path == tmp_path / "latchkey_default_permissions.json"
 
 
-# -- Opaque permissions handle tests --
+# Opaque permissions handle tests
 
 
 def test_opaque_permissions_dir_lives_under_data_dir(tmp_path: Path) -> None:
@@ -200,7 +204,7 @@ def test_point_opaque_handle_repoints_existing_symlink(tmp_path: Path) -> None:
     assert opaque_path.resolve() == host_path.resolve()
 
 
-# -- Permissions config tests --
+# Permissions config tests
 
 
 def test_save_permissions_uses_mode_0o600(tmp_path: Path) -> None:
@@ -253,7 +257,7 @@ def test_permissions_path_for_host_uses_hosts_subdir(tmp_path: Path) -> None:
     assert path == tmp_path / "hosts" / str(host_id) / "latchkey_permissions.json"
 
 
-# -- Admin permissions ---------------------------------------------------------
+# Admin permissions
 
 
 def test_ensure_admin_permissions_file_materializes_wildcard(tmp_path: Path) -> None:
@@ -275,7 +279,7 @@ def test_ensure_admin_permissions_file_is_idempotent(tmp_path: Path) -> None:
     assert path.read_text() == custom
 
 
-# -- Pre-lock forward record ---------------------------------------------------
+# Forward ownership lock
 
 
 def test_forward_lock_path_lives_under_data_dir(tmp_path: Path) -> None:
@@ -420,7 +424,7 @@ def test_load_forward_owner_reads_none_from_an_absent_empty_or_malformed_record(
     assert load_forward_owner(tmp_path) is None
 
 
-# -- schemas block -------------------------------------------------------------
+# schemas block
 
 
 def test_save_and_load_round_trips_schemas(tmp_path: Path) -> None:
@@ -448,3 +452,43 @@ def test_load_drops_a_legacy_include_key(tmp_path: Path) -> None:
     save_permissions(path, load_permissions(path))
 
     assert "include" not in json.loads(path.read_text())
+
+
+# Permissions format stamp
+
+
+def test_permissions_format_version_reads_as_zero_when_never_stamped(tmp_path: Path) -> None:
+    assert read_permissions_format_version(tmp_path, HostId()) == 0
+
+
+def test_permissions_format_version_round_trips_from_the_hosts_directory(tmp_path: Path) -> None:
+    host_id = HostId()
+
+    write_permissions_format_version(tmp_path, host_id, PermissionsFormatVersion(3))
+
+    stamp_path = permissions_format_version_path(tmp_path, host_id)
+    assert stamp_path == permissions_path_for_host(tmp_path, host_id).parent / "permissions-format-version"
+    assert stamp_path.read_text() == "3\n"
+    assert read_permissions_format_version(tmp_path, host_id) == 3
+
+
+@pytest.mark.parametrize("raw", ["banana", "-1", ""])
+def test_a_malformed_permissions_format_version_is_an_error(tmp_path: Path, raw: str) -> None:
+    host_id = HostId()
+    stamp_path = permissions_format_version_path(tmp_path, host_id)
+    stamp_path.parent.mkdir(parents=True)
+    stamp_path.write_text(raw)
+
+    with pytest.raises(LatchkeyStoreError, match="not a non-negative integer"):
+        read_permissions_format_version(tmp_path, host_id)
+
+
+def test_link_opaque_permissions_says_whether_it_created_the_host_file(tmp_path: Path) -> None:
+    host_id = HostId()
+    first_opaque = new_opaque_permissions_path(tmp_path)
+    save_permissions(first_opaque, LatchkeyPermissionsConfig())
+    second_opaque = new_opaque_permissions_path(tmp_path)
+    save_permissions(second_opaque, LatchkeyPermissionsConfig())
+
+    assert link_opaque_permissions_to_host(tmp_path, first_opaque, host_id) is True
+    assert link_opaque_permissions_to_host(tmp_path, second_opaque, host_id) is False

@@ -17,6 +17,7 @@ from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote.credentials import FetchedMachineState
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
@@ -41,7 +42,12 @@ class _RecordingMachine(MachineCredentials):
 
     def refresh(self) -> FetchedMachineState:
         self._note("refresh")
-        return FetchedMachineState(credentials=None, permissions_json=None, desktop_egress_rules_json=None)
+        return FetchedMachineState(
+            credentials=None,
+            permissions_json=None,
+            desktop_egress_rules_json=None,
+            permissions_format_version=PermissionsFormatVersion(0),
+        )
 
     def connect_service(self, service_name: str, account: str) -> None:
         self._note(f"connect {service_name} {account}")

@@ -42,11 +42,16 @@ from imbue.mngr_latchkey.baseline_permissions import AGENT_BASELINE_PERMISSIONS
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
+from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import opaque_permissions_dir
+from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
+from imbue.mngr_latchkey.store import read_permissions_format_version
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import write_permissions_format_version
 from imbue.mngr_latchkey.testing import FakeLatchkey
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
@@ -860,3 +865,64 @@ def test_fall_back_to_reverse_tunneled_gateway_url_is_a_no_op_for_a_host_without
 
     assert did_fall_back is False
     assert ENV_LATCHKEY_GATEWAY not in local_host.get_env_vars()
+
+
+# Stamping the data this build creates
+
+
+def test_finalize_stamps_a_fresh_host_file_with_the_format_this_build_writes(tmp_path: Path) -> None:
+    fake = _full_fake(tmp_path)
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    assert setup.opaque_permissions_path is not None
+    host_id = HostId()
+
+    finalize_host_permissions(fake, setup.opaque_permissions_path, host_id)
+
+    assert permissions_format_version_path(fake.plugin_data_dir, host_id).is_file()
+    assert read_permissions_format_version(fake.plugin_data_dir, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION
+
+
+def test_finalize_keeps_the_stamp_of_a_host_file_it_reuses(tmp_path: Path) -> None:
+    """An existing file is left as it is, stamp included: it may be older data awaiting its migration."""
+    fake = _full_fake(tmp_path)
+    host_id = HostId()
+    save_permissions(permissions_path_for_host(fake.plugin_data_dir, host_id), LatchkeyPermissionsConfig())
+    write_permissions_format_version(fake.plugin_data_dir, host_id, PermissionsFormatVersion(5))
+    setup = prepare_agent_latchkey(fake, is_tunneled=True)
+    assert setup.opaque_permissions_path is not None
+
+    finalize_host_permissions(fake, setup.opaque_permissions_path, host_id)
+
+    assert read_permissions_format_version(fake.plugin_data_dir, host_id) == 5
+
+
+def test_register_agent_for_host_stamps_a_fresh_host_file(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+
+    assert permissions_format_version_path(tmp_path, host_id).is_file()
+    assert read_permissions_format_version(tmp_path, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION
+
+
+def test_register_agent_for_host_keeps_the_stamp_of_an_existing_file(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+    write_permissions_format_version(tmp_path, host_id, PermissionsFormatVersion(5))
+
+    register_agent_for_host(tmp_path, host_id, AgentId.generate())
+
+    assert read_permissions_format_version(tmp_path, host_id) == 5
+
+
+def test_recover_stamps_a_host_file_it_materializes_from_scratch(tmp_path: Path) -> None:
+    """The opaque handle is gone, so the baseline is written fresh: by this build, in its format."""
+    fake = _full_fake(tmp_path)
+    host_id = HostId()
+    opaque_path = opaque_permissions_dir(fake.plugin_data_dir) / "missing-6231.json"
+
+    did_recover = maybe_recover_host_permissions_for_agent(fake, host_id, AgentId(), opaque_path)
+
+    assert did_recover is True
+    assert permissions_format_version_path(fake.plugin_data_dir, host_id).is_file()
+    assert read_permissions_format_version(fake.plugin_data_dir, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION

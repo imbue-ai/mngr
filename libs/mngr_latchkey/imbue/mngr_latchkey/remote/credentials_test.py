@@ -11,6 +11,10 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.migrations.interface import PermissionsFormatNewerError
+from imbue.mngr_latchkey.migrations.mock_permissions_migration_test import RuleAppendingMigration
+from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._mirror import machine_credentials_path
 from imbue.mngr_latchkey.remote._mirror import materialize_machine_store
@@ -18,6 +22,7 @@ from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import write_machine_credentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentials
 from imbue.mngr_latchkey.remote.credentials import MachineCredentialsError
+from imbue.mngr_latchkey.remote.credentials import migrate_permissions_and_push
 from imbue.mngr_latchkey.remote.credentials import read_host_desktop_egress_rules
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.remote.mock_outer_host_test import MACHINE_KEY
@@ -32,6 +37,9 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import read_permissions_format_version
+from imbue.mngr_latchkey.store import write_permissions_format_version
+from imbue.mngr_latchkey.testing import rule_keys_of_permissions_json
 
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
 
@@ -407,6 +415,122 @@ def test_a_read_seeds_a_machine_that_has_no_policy_of_its_own(tmp_path: Path) ->
     MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh()
 
     assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+
+
+def test_a_read_of_a_machine_at_this_builds_format_pushes_nothing_back(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+
+    fetched = credentials.refresh()
+
+    assert fetched.permissions_format_version == CURRENT_PERMISSIONS_FORMAT_VERSION
+    assert len(as_vps(outer).recorded) == 1
+
+
+def test_a_read_adopts_the_machines_stamp_and_refuses_a_policy_a_newer_build_wrote(tmp_path: Path) -> None:
+    """The stamp comes along with the policy it describes; a build that does not know the format then stops."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    as_vps(outer).hold_permissions_format_version(CURRENT_PERMISSIONS_FORMAT_VERSION + 1)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+
+    with pytest.raises(PermissionsFormatNewerError, match=f"format version {CURRENT_PERMISSIONS_FORMAT_VERSION + 1}"):
+        credentials.refresh()
+
+    data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
+    assert permissions_path_for_host(data_dir, host_id).read_text() == SLACK_GRANTED
+    assert read_permissions_format_version(data_dir, host_id) == CURRENT_PERMISSIONS_FORMAT_VERSION + 1
+    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert len(as_vps(outer).recorded) == 1
+
+
+def _migration_to_version_one() -> RuleAppendingMigration:
+    return RuleAppendingMigration(version=PermissionsFormatVersion(1), rule_key="migrated-6231")
+
+
+def test_migrating_a_machines_older_policy_hands_it_back_with_its_stamp(tmp_path: Path) -> None:
+    """What a read adopted is brought up to date here, and the machine is left holding what this build reads."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
+    migration = _migration_to_version_one()
+
+    migrated = migrate_permissions_and_push(outer, latchkey, host_id, (migration,))
+
+    assert migrated is not None
+    assert rule_keys_of_permissions_json(migrated.permissions_json) == ["slack-api", "migrated-6231"]
+    assert migrated.permissions_format_version == 1
+    assert as_vps(outer).machine_permissions() == migrated.permissions_json
+    assert as_vps(outer).machine_permissions_format_version() == 1
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    assert permissions_path_for_host(data_dir, host_id).read_text() == migrated.permissions_json
+    assert read_permissions_format_version(data_dir, host_id) == 1
+    assert len(as_vps(outer).recorded) == 1
+
+
+def test_migrating_a_policy_already_in_this_builds_format_pushes_nothing(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
+    write_permissions_format_version(
+        plugin_data_dir(latchkey.latchkey_directory), host_id, PermissionsFormatVersion(1)
+    )
+    migration = _migration_to_version_one()
+
+    assert migrate_permissions_and_push(outer, latchkey, host_id, (migration,)) is None
+
+    assert migration.applied_to == []
+    assert as_vps(outer).recorded == []
+
+
+def test_migrating_a_policy_leaves_the_machines_rules_alone(tmp_path: Path) -> None:
+    """Only the policy has a format to migrate, so only the policy and its stamp travel back."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=SLACK_GRANTED)
+    as_vps(outer).hold_desktop_egress_rules(_SLACK_ROUTED)
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
+
+    migrate_permissions_and_push(outer, latchkey, host_id, (_migration_to_version_one(),))
+
+    assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
+    assert as_vps(outer).machine_permissions_format_version() == 1
+    assert as_vps(outer).written == []
+
+
+def test_a_push_carries_the_format_stamp_of_this_computers_copy(tmp_path: Path) -> None:
+    """What travels is a snapshot of the copy here, so the machine is stamped as that copy is."""
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={})
+    data_dir = plugin_data_dir(credentials.latchkey.latchkey_directory)
+
+    credentials.set_permissions(SLACK_GRANTED)
+    assert as_vps(outer).machine_permissions_format_version() == 0
+
+    write_permissions_format_version(data_dir, host_id, PermissionsFormatVersion(1))
+    credentials.set_permissions(SLACK_GRANTED)
+    assert as_vps(outer).machine_permissions_format_version() == 1
+
+
+def test_a_seed_carries_this_computers_stamp(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    grant_host_permissions(latchkey, host_id, SLACK_GRANTED)
+    write_permissions_format_version(
+        plugin_data_dir(latchkey.latchkey_directory), host_id, CURRENT_PERMISSIONS_FORMAT_VERSION
+    )
+    outer = fake_vps(tmp_path, machine_permissions=None)
+
+    MachineCredentials(host=outer, latchkey=latchkey, host_id=host_id).refresh()
+
+    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
+    assert len(as_vps(outer).recorded) == 2
 
 
 def test_a_read_adopts_the_desktop_egress_rules_the_machine_holds(tmp_path: Path) -> None:

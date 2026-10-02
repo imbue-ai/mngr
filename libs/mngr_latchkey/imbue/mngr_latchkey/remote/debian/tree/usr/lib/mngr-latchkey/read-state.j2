@@ -2,7 +2,8 @@
 # Assemble everything this machine holds that the user's computer reads, in one
 # run: the secrets its gateway runs under, whether it has a credential store,
 # its config, the policy its gateway enforces, the
-# desktop egress rules its curl router reads, whether it holds a reverse
+# desktop egress rules its curl router reads, the format version the policy is
+# written in, whether it holds a reverse
 # tunnel's keypair, and -- when asked for by an "include_credential_store"
 # entry -- its credential store exactly as it holds it, still encrypted under
 # its own key. Every answer is one prefixed base64 line on stdout (see
@@ -59,6 +60,9 @@ if [ -f "$LK_PERMISSIONS_FILE" ]; then
 fi
 if [ -f "$LK_DESKTOP_EGRESS_RULES_FILE" ]; then
   lk_answer DESKTOP_EGRESS_RULES_JSON < "$LK_DESKTOP_EGRESS_RULES_FILE"
+fi
+if [ -f "$LK_PERMISSIONS_FORMAT_STAMP" ]; then
+  lk_answer PERMISSIONS_FORMAT_VERSION < "$LK_PERMISSIONS_FORMAT_STAMP"
 fi
 
 if lk_doc_has include_credential_store && [ -f "$LK_CREDENTIALS_STORE" ]; then

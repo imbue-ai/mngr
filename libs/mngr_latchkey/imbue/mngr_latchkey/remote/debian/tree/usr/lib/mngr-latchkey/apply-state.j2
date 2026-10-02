@@ -19,6 +19,8 @@
 #   desktop_egress_rules_json     the services the curl router sends out
 #                                 through the desktop
 #   permissions_json              the policy the gateway enforces
+#   permissions_format_version      the format the policy is written in (an
+#                                 integer)
 #   gateway_listen_host           the address the gateway binds (the docker
 #                                 bridge address the agent's container reaches
 #                                 by name), and the reverse tunnel's far end
@@ -94,6 +96,18 @@ if lk_doc_has desktop_egress_rules_json; then
 fi
 if lk_doc_has permissions_json; then
   lk_install_file "$LK_PERMISSIONS_FILE" "$(lk_doc_file permissions_json)"
+fi
+
+# The format the policy above is written in, installed after it: a script
+# that stops between the two leaves the policy ahead of its stamp, which
+# the next read migrates once more, rather than behind it, which nothing would
+# ever migrate.
+if lk_doc_has permissions_format_version; then
+  _lk_format_version="$(lk_doc_get permissions_format_version)"
+  case "$_lk_format_version" in
+    ''|*[!0-9]*) lk_fail "Error: refusing a permissions format version that is not an integer: $_lk_format_version" ;;
+  esac
+  lk_install_file "$LK_PERMISSIONS_FORMAT_STAMP" "$(lk_doc_file permissions_format_version)"
 fi
 
 # The address the gateway binds, read by its program on every start (and by the

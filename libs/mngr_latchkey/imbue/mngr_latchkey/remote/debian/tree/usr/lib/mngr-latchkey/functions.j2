@@ -10,6 +10,10 @@ LK_CREDENTIALS_STORE="$LK_LATCHKEY_DIR/{{ credentials_store_filename }}"
 LK_DATA_FORMAT_STAMP="$LK_LATCHKEY_DIR/{{ data_format_version_filename }}"
 LK_PERMISSIONS_FILE="$LK_LATCHKEY_DIR/{{ permissions_filename }}"
 LK_DESKTOP_EGRESS_RULES_FILE="$LK_LATCHKEY_DIR/{{ desktop_egress_rules_filename }}"
+# The format the policy is written in, as the
+# user's computer stamps it; distinct from latchkey's own stamp above, which
+# describes the credential store.
+LK_PERMISSIONS_FORMAT_STAMP="$LK_LATCHKEY_DIR/{{ permissions_format_version_filename }}"
 LK_CONFIG_FILE="$LK_LATCHKEY_DIR/{{ config_filename }}"
 LK_EXTENSIONS_DIR="$LK_LATCHKEY_DIR/{{ extensions_dir_name }}"
 LK_PACKAGE_EXTENSION='{{ layout.install_dir }}/{{ extensions_dir_name }}/{{ extension_filename }}'

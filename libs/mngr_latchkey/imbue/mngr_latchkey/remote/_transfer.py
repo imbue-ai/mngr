@@ -46,6 +46,7 @@ from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
 from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialClear
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
@@ -61,6 +62,8 @@ from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import load_permissions_from_text
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import read_permissions_format_version
+from imbue.mngr_latchkey.store import write_permissions_format_version
 
 
 class FetchedMachineState(FrozenModel):
@@ -77,6 +80,9 @@ class FetchedMachineState(FrozenModel):
     )
     desktop_egress_rules_json: str | None = Field(
         description="The desktop egress rules the machine's router reads, or ``None`` when it has no rules file."
+    )
+    permissions_format_version: PermissionsFormatVersion = Field(
+        description="The format the machine's policy is written in; 0 when never stamped."
     )
 
 
@@ -119,6 +125,7 @@ def fetch_machine_state(
         data_format_version=store.data_format_version if store is not None else "",
         permissions_json=state.permissions_json,
         desktop_egress_rules_json=state.desktop_egress_rules_json,
+        permissions_format_version=state.permissions_format_version,
     )
 
 
@@ -184,6 +191,27 @@ def adopt_machine_permissions(latchkey_directory: Path, host_id: HostId, permiss
             atomic_write(local_path, permissions_json)
     except OSError as e:
         raise RemoteGatewayError(f"Failed to store the permissions of host {host_id} at {local_path}: {e}") from e
+
+
+def adopt_machine_permissions_format_version(
+    latchkey_directory: Path, host_id: HostId, permissions_format_version: PermissionsFormatVersion
+) -> None:
+    """Take the format version the machine stamps its policy with as the stamp on the copy here.
+
+    Adopted right after the policy it describes, so the copy here says which
+    format it is in -- which is what decides whether a migration has to run
+    on it (see :mod:`imbue.mngr_latchkey.migrations.runner`). Written only
+    when it differs, so an unchanged stamp costs nothing.
+
+    Raises:
+        RemoteGatewayError: when the stamp here cannot be read or written.
+    """
+    data_dir = plugin_data_dir(latchkey_directory)
+    try:
+        if read_permissions_format_version(data_dir, host_id) != permissions_format_version:
+            write_permissions_format_version(data_dir, host_id, permissions_format_version)
+    except LatchkeyStoreError as e:
+        raise RemoteGatewayError(f"Failed to adopt the permissions format version of host {host_id}: {e}") from e
 
 
 def adopt_machine_desktop_egress_rules(
@@ -288,6 +316,7 @@ def push_credentials_with_permissions(
     account: str,
     machine_key: SecretStr,
     permissions_json: str,
+    permissions_format_version: PermissionsFormatVersion,
     config_json: str | None = None,
 ) -> None:
     """Add one account to the machine's store and make ``permissions_json`` its policy, in one round trip.
@@ -295,7 +324,9 @@ def push_credentials_with_permissions(
     What a permission grant asks for: both halves land under one ``set -e``,
     credential first, so the policy is never enforceable before the credential
     it rides on is there, and neither half is reported done without the other.
-    ``config_json`` lands ahead of both (see :func:`push_credentials`).
+    ``config_json`` lands ahead of both (see :func:`push_credentials`), and
+    ``permissions_format_version`` -- the format the snapshot is written in --
+    after the policy (see :func:`push_permissions_snapshot`).
 
     Raises:
         RemoteGatewayError: when the snapshot is not a policy this build can
@@ -316,6 +347,7 @@ def push_credentials_with_permissions(
                 config_json=config_json,
                 credential_merge=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
                 permissions_json=permissions_json,
+                permissions_format_version=permissions_format_version,
             ),
             failure_description=f"add {service_name} to host {host_id} and apply its permissions",
         )
@@ -352,7 +384,12 @@ def clear_remote_credentials(
         )
 
 
-def push_permissions_snapshot(host: OuterHostInterface, host_id: HostId, permissions_json: str) -> None:
+def push_permissions_snapshot(
+    host: OuterHostInterface,
+    host_id: HostId,
+    permissions_json: str,
+    permissions_format_version: PermissionsFormatVersion,
+) -> None:
     """Make ``permissions_json`` the policy ``host_id``'s machine enforces, in one round trip.
 
     How a permissions edit made on this computer reaches the machine: as a full
@@ -360,6 +397,11 @@ def push_permissions_snapshot(host: OuterHostInterface, host_id: HostId, permiss
     made. Validated before it is written -- a snapshot this build cannot parse
     must not become a machine's policy -- and installed atomically, so the
     gateway never reads a half-written file.
+
+    ``permissions_format_version`` is the format the snapshot is written in --
+    the stamp on the copy it was taken from -- and lands on the machine after
+    the policy, so the machine's stamp never runs ahead of its data (see
+    :mod:`imbue.mngr_latchkey.migrations.runner`).
 
     It carries no key: a policy is not encrypted, so it is applied to a
     machine whatever key that machine is running under, and to a machine that
@@ -373,21 +415,29 @@ def push_permissions_snapshot(host: OuterHostInterface, host_id: HostId, permiss
     with log_span("Applying a permissions snapshot for host {} to VPS {}", host_id, host.get_name()):
         apply_remote_state(
             host,
-            RemoteStateUpdate(permissions_json=permissions_json),
+            RemoteStateUpdate(
+                permissions_json=permissions_json, permissions_format_version=permissions_format_version
+            ),
             failure_description=f"apply the permissions of host {host_id}",
         )
 
 
 def push_permissions_and_desktop_egress_rules(
-    host: OuterHostInterface, host_id: HostId, permissions_json: str, desktop_egress_rules_json: str
+    host: OuterHostInterface,
+    host_id: HostId,
+    permissions_json: str,
+    desktop_egress_rules_json: str,
+    permissions_format_version: PermissionsFormatVersion,
 ) -> None:
     """Make both snapshots what ``host_id``'s machine holds -- its policy and its desktop egress rules -- in one round trip.
 
     How turning desktop egress on or off for a service reaches the machine: the
     policy carries the device-gated rule and the rules file carries the routing,
     and they change together. Both are validated before anything is sent, and
-    each is installed atomically. Like :func:`push_permissions_snapshot`, this
-    carries no key, because neither file is encrypted.
+    each is installed atomically, with ``permissions_format_version`` -- the
+    format the policy is written in -- after them. Like
+    :func:`push_permissions_snapshot`, this carries no key, because neither
+    file is encrypted.
 
     Raises:
         RemoteGatewayError: when either snapshot is not one this build can
@@ -400,7 +450,11 @@ def push_permissions_and_desktop_egress_rules(
     ):
         apply_remote_state(
             host,
-            RemoteStateUpdate(permissions_json=permissions_json, desktop_egress_rules_json=desktop_egress_rules_json),
+            RemoteStateUpdate(
+                permissions_json=permissions_json,
+                desktop_egress_rules_json=desktop_egress_rules_json,
+                permissions_format_version=permissions_format_version,
+            ),
             failure_description=f"apply the permissions and desktop egress rules of host {host_id}",
         )
 

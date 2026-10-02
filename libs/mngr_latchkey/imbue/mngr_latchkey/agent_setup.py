@@ -68,6 +68,7 @@ from imbue.mngr_latchkey.baseline_permissions import SCOPE_MINDS_API_PROXY_PER_A
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import link_opaque_permissions_to_host
@@ -77,6 +78,7 @@ from imbue.mngr_latchkey.store import opaque_permissions_dir
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import point_opaque_handle_at_host
 from imbue.mngr_latchkey.store import save_permissions
+from imbue.mngr_latchkey.store import write_permissions_format_version
 
 # Env-var names baked into the upstream latchkey CLI's wire contract.
 # Kept as constants so callers building ``--env`` flags do not have to repeat them.
@@ -309,12 +311,13 @@ def register_agent_for_host(
     over when this returns ``True``.
     """
     path = permissions_path_for_host(plugin_data_dir, host_id)
-    if path.is_file():
-        config = load_permissions(path)
-    else:
+    is_host_file_fresh = not path.is_file()
+    if is_host_file_fresh:
         # First agent on this host: start from the baseline so the
         # gateway-self rules and the minds-api-proxy gate are present.
         config = AGENT_BASELINE_PERMISSIONS
+    else:
+        config = load_permissions(path)
 
     reconciled = reconcile_baseline_permissions(config)
     is_baseline_changed = reconciled != config
@@ -363,6 +366,8 @@ def register_agent_for_host(
         # persisted: this is the common path for a host that already exists.
         if is_baseline_changed:
             save_permissions(path, config)
+            if is_host_file_fresh:
+                _stamp_fresh_permissions(plugin_data_dir, host_id)
         return is_baseline_changed
     new_any_of: list[JsonValue] = list(any_of) + [_build_allowed_agent_anyof_entry(str(agent_id))]
 
@@ -383,7 +388,24 @@ def register_agent_for_host(
     # rebuilding by hand silently drops every other field.
     new_config = config.model_copy_update(to_update(config.field_ref().schemas, schemas))
     save_permissions(path, new_config)
+    if is_host_file_fresh:
+        _stamp_fresh_permissions(plugin_data_dir, host_id)
     return True
+
+
+def _stamp_fresh_permissions(plugin_data_dir: Path, host_id: HostId) -> None:
+    """Stamp a policy this build has just created as written in the format this build writes.
+
+    Every path that creates a host's permissions file from scratch calls this,
+    so a migration never runs on a policy that was never in an older shape. A file
+    adopted from a host's machine carries the machine's stamp instead, and a
+    file from before stamps existed reads as version 0, which is what makes
+    every migration run on it.
+
+    Raises:
+        LatchkeyStoreError: when the stamp cannot be written.
+    """
+    write_permissions_format_version(plugin_data_dir, host_id, CURRENT_PERMISSIONS_FORMAT_VERSION)
 
 
 class AgentLatchkeySetup(FrozenModel):
@@ -550,10 +572,16 @@ def finalize_host_permissions(
     including grants another of the user's computers made. Seeding a
     machine that has no policy of its own is provisioning's job
     (:func:`~imbue.mngr_latchkey.remote.provisioning.provision_remote_gateway`).
+
+    A file promoted here is fresh, so it is stamped with the format this
+    build writes (:func:`_stamp_fresh_permissions`); a file kept from an earlier
+    agent on the same host keeps the stamp it has.
     """
     if opaque_permissions_path is None:
         return
-    link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
+    is_created = link_opaque_permissions_to_host(latchkey.plugin_data_dir, opaque_permissions_path, host_id)
+    if is_created:
+        _stamp_fresh_permissions(latchkey.plugin_data_dir, host_id)
 
 
 def maybe_recover_host_permissions_for_agent(
@@ -637,6 +665,7 @@ def maybe_recover_host_permissions_for_agent(
             # handle at it, so the agent's JWT (which resolves to the handle)
             # starts working again and later grants are visible to it.
             save_permissions(host_path, AGENT_BASELINE_PERMISSIONS)
+            _stamp_fresh_permissions(plugin_data_dir, host_id)
             point_opaque_handle_at_host(plugin_data_dir, opaque_permissions_path, host_id)
         did_repair = True
 

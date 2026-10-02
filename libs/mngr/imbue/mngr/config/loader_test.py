@@ -1536,7 +1536,7 @@ def test_load_config_blocks_a_settings_disabled_plugin_that_is_not_installed(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     plugin_name = f"absent-plugin-{uuid4().hex}"
     profile_dir = get_or_create_profile_dir(tmp_path / ".mngr")
@@ -1558,7 +1558,7 @@ def test_load_config_rejects_a_disable_plugin_flag_naming_an_unknown_plugin(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     plugin_name = f"typo-plugin-{uuid4().hex}"
     with pytest.raises(UserInputError, match=f"Cannot disable plugin '{plugin_name}'"):

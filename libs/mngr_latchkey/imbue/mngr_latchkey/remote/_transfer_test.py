@@ -15,6 +15,7 @@ from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialClear
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
@@ -22,10 +23,12 @@ from imbue.mngr_latchkey.remote._machine import RemoteMachineState
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
 from imbue.mngr_latchkey.remote._machine import RemoteStateUpdate
 from imbue.mngr_latchkey.remote._machine import _MAX_REMOTE_COMMAND_BYTES
+from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import apply_remote_state
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._mirror import latchkey_for_machine
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
 from imbue.mngr_latchkey.remote._transfer import push_credentials
@@ -42,8 +45,11 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import store_accounts
 from imbue.mngr_latchkey.remote.mock_outer_host_test import store_document
 from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
+from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
+from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import read_permissions_format_version
 
 _SLACK_ANY = '{"rules": [{"slack-api": ["any"]}]}'
 _SLACK_ROUTED = '{\n  "slack": true\n}\n'
@@ -426,7 +432,14 @@ def _push_grant(
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
     machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
     push_credentials_with_permissions(
-        outer, machine_latchkey, host_id, "slack", account, SecretStr(MACHINE_KEY), permissions_json
+        outer,
+        machine_latchkey,
+        host_id,
+        "slack",
+        account,
+        SecretStr(MACHINE_KEY),
+        permissions_json,
+        PermissionsFormatVersion(0),
     )
 
 
@@ -518,7 +531,7 @@ def test_a_permissions_snapshot_costs_one_remote_command_and_no_home_probe(tmp_p
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
-    push_permissions_snapshot(outer, host_id, _SLACK_ANY)
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(0))
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -530,7 +543,7 @@ def test_a_permissions_snapshot_is_run_without_its_command_reaching_the_logs(tmp
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
-    push_permissions_snapshot(outer, host_id, _SLACK_ANY)
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(0))
 
     assert [entry.is_kept_out_of_logs for entry in as_vps(outer).recorded] == [True]
 
@@ -554,7 +567,7 @@ def test_a_permissions_snapshot_this_build_cannot_read_never_reaches_the_machine
     outer = fake_vps(tmp_path)
 
     with pytest.raises(RemoteGatewayError, match="unreadable permissions snapshot"):
-        push_permissions_snapshot(outer, host_id, '{"rules": "not-a-list"}')
+        push_permissions_snapshot(outer, host_id, '{"rules": "not-a-list"}', PermissionsFormatVersion(0))
 
     assert as_vps(outer).recorded == []
 
@@ -563,7 +576,7 @@ def test_permissions_and_desktop_egress_rules_cost_one_remote_command_between_th
     host_id = HostId.generate()
     outer = fake_vps(tmp_path)
 
-    push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, _SLACK_ROUTED)
+    push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(0))
 
     assert len(as_vps(outer).recorded) == 1
     assert as_vps(outer).written == []
@@ -579,7 +592,9 @@ def test_desktop_egress_rules_the_router_could_not_read_never_reach_the_machine(
     outer = fake_vps(tmp_path)
 
     with pytest.raises(RemoteGatewayError, match="unreadable desktop egress rules"):
-        push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, desktop_egress_rules_json)
+        push_permissions_and_desktop_egress_rules(
+            outer, host_id, _SLACK_ANY, desktop_egress_rules_json, PermissionsFormatVersion(0)
+        )
 
     assert as_vps(outer).recorded == []
 
@@ -589,7 +604,9 @@ def test_an_unreadable_policy_stops_the_desktop_egress_rules_from_reaching_the_m
     outer = fake_vps(tmp_path)
 
     with pytest.raises(RemoteGatewayError, match="unreadable permissions snapshot"):
-        push_permissions_and_desktop_egress_rules(outer, host_id, '{"rules": "not-a-list"}', _SLACK_ROUTED)
+        push_permissions_and_desktop_egress_rules(
+            outer, host_id, '{"rules": "not-a-list"}', _SLACK_ROUTED, PermissionsFormatVersion(0)
+        )
 
     assert as_vps(outer).recorded == []
 
@@ -659,6 +676,108 @@ def test_adopting_desktop_egress_rules_this_build_cannot_read_keeps_the_copy_it_
         adopt_machine_desktop_egress_rules(tmp_path, host_id, '["slack"]')
 
     assert local_path.read_text() == _SLACK_ROUTED
+
+
+# The format stamp the machine keeps beside its policy.
+
+
+def test_a_read_answers_the_format_version_the_machine_stamps_its_policy_with(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    outer = fake_vps(tmp_path, machine_permissions=_SLACK_ANY)
+    as_vps(outer).hold_permissions_format_version(2)
+
+    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+
+    assert fetched.permissions_format_version == 2
+
+
+def test_a_read_of_an_unstamped_machine_answers_format_version_zero(tmp_path: Path) -> None:
+    """A machine provisioned before stamps existed holds data in the format from before every migration."""
+    host_id = HostId.generate()
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={})
+    outer = fake_vps(tmp_path, machine_permissions=_SLACK_ANY)
+
+    fetched = fetch_machine_state(outer, latchkey, host_id, SecretStr(MACHINE_KEY))
+
+    assert fetched.permissions_format_version == 0
+
+
+def test_the_stamp_is_installed_beside_the_policy_it_describes(tmp_path: Path) -> None:
+    vps = as_vps(fake_vps(tmp_path))
+
+    _apply(
+        vps,
+        RemoteStateUpdate(permissions_json=_SLACK_ANY, permissions_format_version=PermissionsFormatVersion(1)),
+        failure_description="policy and stamp",
+    )
+
+    assert vps.machine_permissions() == _SLACK_ANY
+    assert vps.machine_permissions_format_version() == 1
+    stamp_path = vps.latchkey_dir / PERMISSIONS_FORMAT_VERSION_FILENAME
+    assert stamp_path.read_text() == "1"
+    assert stat.S_IMODE(stamp_path.stat().st_mode) == 0o600
+    assert vps.latchkey_dir_entries() == [
+        REMOTE_EXTENSIONS_DIR_NAME,
+        PERMISSIONS_FORMAT_VERSION_FILENAME,
+        PERMISSIONS_CONFIG_FILENAME,
+    ]
+
+
+def test_a_stamp_that_is_not_an_integer_is_refused_by_the_machine(tmp_path: Path) -> None:
+    """The script validates what it installs, since a stamp it cannot read would stop every later read."""
+    vps = as_vps(fake_vps(tmp_path))
+
+    result = vps.execute_idempotent_command(
+        _remote_command(
+            "apply-state", {"permissions_json": _SLACK_ANY.encode("utf-8"), "permissions_format_version": b"two"}
+        )
+    )
+
+    assert result.success is False
+    assert "not an integer" in result.stderr
+    assert vps.machine_permissions_format_version() is None
+
+
+def test_adopting_the_machines_format_version_stamps_the_copy_here_only_when_it_differs(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    data_dir = plugin_data_dir(tmp_path)
+
+    adopt_machine_permissions_format_version(tmp_path, host_id, PermissionsFormatVersion(0))
+    assert not permissions_format_version_path(data_dir, host_id).exists()
+
+    adopt_machine_permissions_format_version(tmp_path, host_id, PermissionsFormatVersion(2))
+    assert read_permissions_format_version(data_dir, host_id) == 2
+    modified_at_before = permissions_format_version_path(data_dir, host_id).stat().st_mtime_ns
+
+    adopt_machine_permissions_format_version(tmp_path, host_id, PermissionsFormatVersion(2))
+    assert permissions_format_version_path(data_dir, host_id).stat().st_mtime_ns == modified_at_before
+
+
+def test_every_push_of_a_policy_carries_its_format_stamp(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
+    as_vps(outer).run_under_key(MACHINE_KEY)
+    latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
+    machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
+
+    push_permissions_snapshot(outer, host_id, _SLACK_ANY, PermissionsFormatVersion(1))
+    assert as_vps(outer).machine_permissions_format_version() == 1
+
+    push_permissions_and_desktop_egress_rules(outer, host_id, _SLACK_ANY, _SLACK_ROUTED, PermissionsFormatVersion(2))
+    assert as_vps(outer).machine_permissions_format_version() == 2
+
+    push_credentials_with_permissions(
+        outer,
+        machine_latchkey,
+        host_id,
+        "slack",
+        "a@example.com",
+        SecretStr(MACHINE_KEY),
+        _SLACK_ANY,
+        PermissionsFormatVersion(3),
+    )
+    assert as_vps(outer).machine_permissions_format_version() == 3
 
 
 def test_a_grant_to_a_rebooted_machine_lands_in_one_round_trip(tmp_path: Path) -> None:

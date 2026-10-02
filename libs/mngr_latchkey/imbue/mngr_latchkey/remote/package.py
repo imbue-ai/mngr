@@ -86,6 +86,7 @@ from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import TMPFS_SECRETS_DIR
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
+from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 
 # Version of the upstream ``latchkey`` CLI the package installs on the machine.
 LATCHKEY_VERSION: Final[str] = "3.16.2"
@@ -382,6 +383,9 @@ class RemotePackageContext(FrozenModel):
     desktop_egress_rules_filename: str = Field(
         description="The file naming the services the curl router sends out through the desktop."
     )
+    permissions_format_version_filename: str = Field(
+        description="The stamp naming the format the policy is written in."
+    )
     config_filename: str = Field(description="Upstream's config filename.")
     extensions_dir_name: str = Field(description="The gateway's extensions directory, under its latchkey directory.")
     extension_filename: str = Field(description="The forwarding extension's filename.")
@@ -490,6 +494,7 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         data_format_version_filename=UPSTREAM_DATA_FORMAT_VERSION_FILENAME,
         permissions_filename=PERMISSIONS_CONFIG_FILENAME,
         desktop_egress_rules_filename=DESKTOP_EGRESS_RULES_FILENAME,
+        permissions_format_version_filename=PERMISSIONS_FORMAT_VERSION_FILENAME,
         config_filename=CONFIG_FILENAME,
         extensions_dir_name=REMOTE_EXTENSIONS_DIR_NAME,
         extension_filename=REMOTE_GATEWAY_EXTENSION_FILENAME,

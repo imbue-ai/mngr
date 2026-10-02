@@ -38,12 +38,14 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.providers.local.instance import get_or_create_local_host_id
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
 from imbue.mngr_latchkey.cli import ENV_DEVICE_ID
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _ignore_sighup_until_handlers_installed
+from imbue.mngr_latchkey.cli import _migrate_hosts_without_a_machine
 from imbue.mngr_latchkey.cli import _resolve_device_identity
 from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import _run_forward_with_error_reporting
@@ -52,16 +54,23 @@ from imbue.mngr_latchkey.cli import latchkey
 from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
+from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
+from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._mirror import generate_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyForwardOwner
 from imbue.mngr_latchkey.store import acquire_forward_lock
 from imbue.mngr_latchkey.store import forward_lock_path
 from imbue.mngr_latchkey.store import forward_owner_path
+from imbue.mngr_latchkey.store import hosts_dir
+from imbue.mngr_latchkey.store import permissions_format_version_path
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
+from imbue.mngr_latchkey.store import write_permissions_format_version
+from imbue.mngr_latchkey.testing import write_raw_host_permissions
 
 # A version string the upstream ``Latchkey.initialize`` is happy with.
 # Pinned to ``LATCHKEY_MIN_VERSION`` so the fake binary we drop on $PATH
@@ -928,6 +937,74 @@ def test_startup_sighup_guard_sets_ignore_disposition() -> None:
         assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
     finally:
         signal.signal(signal.SIGHUP, original_handler)
+
+
+# The forward's startup migration of hosts whose only copy is here. The build
+# ships no migration to observe running, so a stamp one above what it knows,
+# which the runner refuses before it looks at the registry, is what shows a host
+# was looked at.
+
+
+def _host_with_a_policy_here(latchkey: Latchkey, policy: str) -> HostId:
+    host_id = HostId.generate()
+    write_raw_host_permissions(latchkey.plugin_data_dir, host_id, policy)
+    return host_id
+
+
+def _stamp_newer_than_this_build(latchkey: Latchkey, host_id: HostId) -> None:
+    write_permissions_format_version(
+        latchkey.plugin_data_dir, host_id, PermissionsFormatVersion(CURRENT_PERMISSIONS_FORMAT_VERSION + 1)
+    )
+
+
+def _left_as_they_are(host_id: HostId) -> str:
+    return f"Leaving the permissions of host {host_id} as they are"
+
+
+def test_the_forward_looks_at_hosts_without_a_machine_and_leaves_the_rest_to_their_machines(tmp_path: Path) -> None:
+    """A host with a machine of its own is migrated when the machine is read, since the machine owns its policy."""
+    latchkey = Latchkey(latchkey_directory=tmp_path / "latchkey")
+    local_host_id = _host_with_a_policy_here(latchkey, '{"rules": []}')
+    _stamp_newer_than_this_build(latchkey, local_host_id)
+    remote_host_id = _host_with_a_policy_here(latchkey, '{"rules": []}')
+    _stamp_newer_than_this_build(latchkey, remote_host_id)
+    store_machine_encryption_key(latchkey.plugin_data_dir, remote_host_id, generate_machine_encryption_key())
+
+    with capture_loguru() as log:
+        _migrate_hosts_without_a_machine(latchkey)
+
+    assert _left_as_they_are(local_host_id) in log.getvalue()
+    assert _left_as_they_are(remote_host_id) not in log.getvalue()
+
+
+def test_the_forward_keeps_going_when_one_hosts_policy_cannot_be_migrated(tmp_path: Path) -> None:
+    """One host's bad stamp must not keep the supervisor, which serves every other host, from starting."""
+    latchkey = Latchkey(latchkey_directory=tmp_path / "latchkey")
+    broken_host_id = _host_with_a_policy_here(latchkey, '{"rules": []}')
+    permissions_format_version_path(latchkey.plugin_data_dir, broken_host_id).write_text("banana\n")
+    newer_host_id = _host_with_a_policy_here(latchkey, '{"rules": []}')
+    _stamp_newer_than_this_build(latchkey, newer_host_id)
+
+    with capture_loguru() as log:
+        _migrate_hosts_without_a_machine(latchkey)
+
+    assert f"Failed to migrate the permissions of host {broken_host_id}" in log.getvalue()
+    assert _left_as_they_are(newer_host_id) in log.getvalue()
+
+
+def test_the_forward_skips_a_hosts_directory_that_is_not_a_hosts(tmp_path: Path) -> None:
+    latchkey = Latchkey(latchkey_directory=tmp_path / "latchkey")
+    host_id = _host_with_a_policy_here(latchkey, '{"rules": []}')
+    _stamp_newer_than_this_build(latchkey, host_id)
+    stray_dir = hosts_dir(latchkey.plugin_data_dir) / "not-a-host-id"
+    stray_dir.mkdir()
+    (stray_dir / permissions_path_for_host(latchkey.plugin_data_dir, host_id).name).write_text('{"rules": []}')
+
+    with capture_loguru() as log:
+        _migrate_hosts_without_a_machine(latchkey)
+
+    assert f"Skipping the data at {stray_dir}" in log.getvalue()
+    assert _left_as_they_are(host_id) in log.getvalue()
 
 
 def test_the_forward_device_identity_prefers_the_flag_then_the_env_then_the_local_host_id(

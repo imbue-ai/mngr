@@ -62,6 +62,7 @@ from imbue.imbue_common.model_update import to_update
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.file_utils import atomic_write
 from imbue.mngr.utils.polling import poll_for_value
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 
 # Sub-directory under the user's ``latchkey_directory`` that holds every
 # file written by this plugin (gateway record, default permissions,
@@ -114,7 +115,7 @@ class LatchkeyStoreError(Exception):
     """Base exception for this package's on-disk persistence failures."""
 
 
-# -- Forward ownership lock ----------------------------------------------------
+# Forward ownership lock
 
 
 class LatchkeyForwardOwner(FrozenModel):
@@ -288,7 +289,7 @@ def load_forward_owner(data_dir: Path) -> LatchkeyForwardOwner | None:
         return None
 
 
-# -- Forward logs --------------------------------------------------------------
+# Forward logs
 
 
 def forward_log_path(data_dir: Path) -> Path:
@@ -337,7 +338,7 @@ def ensure_browser_log_path(data_dir: Path) -> Path:
     return data_dir / "latchkey_ensure_browser.log"
 
 
-# -- Permissions config (latchkey_permissions.json) ---------------------------
+# Permissions config (latchkey_permissions.json)
 
 
 class LatchkeyPermissionsConfig(FrozenModel):
@@ -391,6 +392,59 @@ def permissions_path_for_host(data_dir: Path, host_id: HostId) -> Path:
 def desktop_egress_rules_path_for_host(data_dir: Path, host_id: HostId) -> Path:
     """Return the path to this computer's copy of a remote host's desktop egress rules file."""
     return data_dir / _HOSTS_DIR_NAME / str(host_id) / DESKTOP_EGRESS_RULES_FILENAME
+
+
+# The stamp the migrations in :mod:`imbue.mngr_latchkey.migrations.runner` keep
+# in a host's directory. Named apart from upstream's ``data-format-version``,
+# which sits in the same directory (a machine store is a latchkey directory)
+# and stamps the credential mirror instead.
+PERMISSIONS_FORMAT_VERSION_FILENAME: Final[str] = "permissions-format-version"
+
+
+def permissions_format_version_path(data_dir: Path, host_id: HostId) -> Path:
+    """Return the path to the stamp saying which format ``host_id``'s policy here is written in."""
+    return data_dir / _HOSTS_DIR_NAME / str(host_id) / PERMISSIONS_FORMAT_VERSION_FILENAME
+
+
+def read_permissions_format_version(data_dir: Path, host_id: HostId) -> PermissionsFormatVersion:
+    """Return the format version ``host_id``'s policy here is stamped with, or 0 when it never was.
+
+    Raises:
+        LatchkeyStoreError: when the stamp exists but cannot be read, or is
+            not the integer it should be.
+    """
+    path = permissions_format_version_path(data_dir, host_id)
+    if not path.is_file():
+        return PermissionsFormatVersion(0)
+    try:
+        raw = path.read_text().strip()
+    except OSError as e:
+        raise LatchkeyStoreError(
+            f"Failed to read the permissions format version of host {host_id} at {path}: {e}"
+        ) from e
+    try:
+        return PermissionsFormatVersion(int(raw))
+    except ValueError as e:
+        raise LatchkeyStoreError(
+            f"The permissions format version of host {host_id} at {path} is not a non-negative integer: {raw!r}"
+        ) from e
+
+
+def write_permissions_format_version(data_dir: Path, host_id: HostId, version: PermissionsFormatVersion) -> None:
+    """Stamp ``host_id``'s policy here as written in format ``version``.
+
+    Raises:
+        LatchkeyStoreError: when the stamp cannot be written.
+    """
+    path = permissions_format_version_path(data_dir, host_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(path, f"{version}\n")
+    except OSError as e:
+        raise LatchkeyStoreError(
+            f"Failed to stamp the permissions format version of host {host_id} at {path}: {e}"
+        ) from e
+    logger.debug("Stamped the permissions of host {} as format version {}", host_id, version)
 
 
 def list_host_permissions_paths(data_dir: Path) -> list[Path]:
@@ -492,7 +546,9 @@ def link_opaque_permissions_to_host(
     data_dir: Path,
     opaque_path: Path,
     host_id: HostId,
-) -> None:
+    # whether the canonical file was created from the handle's baseline, rather
+    # than an existing one kept
+) -> bool:
     """Replace ``opaque_path`` with a symlink to the host's canonical permissions file.
 
     Called once after ``mngr create`` returns the canonical host id.
@@ -510,8 +566,9 @@ def link_opaque_permissions_to_host(
     """
     host_path = permissions_path_for_host(data_dir, host_id)
     host_path.parent.mkdir(parents=True, exist_ok=True)
+    is_existing_file_kept = host_path.is_file() and not host_path.is_symlink()
     try:
-        if host_path.is_file() and not host_path.is_symlink():
+        if is_existing_file_kept:
             # Re-use case: another agent on the same host already has a
             # permissions file with prior grants. Keep them and discard
             # the freshly-created baseline.
@@ -524,6 +581,7 @@ def link_opaque_permissions_to_host(
         raise LatchkeyStoreError(f"Failed to link opaque permissions handle {opaque_path} to {host_path}: {e}") from e
     point_opaque_handle_at_host(data_dir, opaque_path, host_id)
     logger.debug("Linked opaque latchkey permissions handle {} -> {}", opaque_path, host_path)
+    return not is_existing_file_kept
 
 
 def point_opaque_handle_at_host(

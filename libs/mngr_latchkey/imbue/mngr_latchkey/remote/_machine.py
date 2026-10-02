@@ -6,10 +6,10 @@ two commands the package provides, each one remote command:
 
 * ``mngr-latchkey read-state`` assembles what the machine holds -- the secrets
   its gateway runs under, its config, the policy it enforces, the desktop
-  egress rules its curl router reads, how the agent's container was created
-  (when asked about one), and (when asked) its credential store, still
-  encrypted under the machine's own key -- and prints it as prefixed base64
-  lines (:func:`read_remote_state`).
+  egress rules its curl router reads, the format version the policy is written
+  in, how the agent's container was created (when asked about one), and (when
+  asked) its credential store, still encrypted under the machine's own key --
+  and prints it as prefixed base64 lines (:func:`read_remote_state`).
 * ``mngr-latchkey apply-state`` makes the machine match a document of what this
   computer wants it to hold, applied in one ``set -e`` script on the machine
   (:func:`apply_remote_state`).
@@ -55,6 +55,7 @@ from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr_latchkey.core import EncryptedCredentialStore
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
 from imbue.mngr_latchkey.devices import DeviceRecord
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
 # Name of the latchkey directory on the machine, under the remote user's home.
@@ -163,6 +164,7 @@ _ENTRY_CLEAR_SERVICE: Final[str] = "clear_service"
 _ENTRY_CLEAR_ACCOUNT: Final[str] = "clear_account"
 _ENTRY_DESKTOP_EGRESS_RULES_JSON: Final[str] = "desktop_egress_rules_json"
 _ENTRY_PERMISSIONS_JSON: Final[str] = "permissions_json"
+_ENTRY_PERMISSIONS_FORMAT_VERSION: Final[str] = "permissions_format_version"
 _ENTRY_GATEWAY_LISTEN_HOST: Final[str] = "gateway_listen_host"
 _ENTRY_TUNNEL_HOST_ID: Final[str] = "tunnel_host_id"
 _ENTRY_TUNNEL_SSH_USER: Final[str] = "tunnel_ssh_user"
@@ -182,6 +184,7 @@ _ANSWER_HAS_CREDENTIAL_STORE: Final[str] = "HAS_CREDENTIAL_STORE"
 _ANSWER_CONFIG_JSON: Final[str] = "CONFIG_JSON"
 _ANSWER_PERMISSIONS_JSON: Final[str] = "PERMISSIONS_JSON"
 _ANSWER_DESKTOP_EGRESS_RULES_JSON: Final[str] = "DESKTOP_EGRESS_RULES_JSON"
+_ANSWER_PERMISSIONS_FORMAT_VERSION: Final[str] = "PERMISSIONS_FORMAT_VERSION"
 _ANSWER_CREDENTIALS: Final[str] = "CREDENTIALS"
 _ANSWER_DATA_FORMAT_VERSION: Final[str] = "DATA_FORMAT_VERSION"
 _ANSWER_HAS_CONTAINER_TUNNEL_KEY: Final[str] = "HAS_CONTAINER_TUNNEL_KEY"
@@ -238,6 +241,12 @@ class RemoteMachineState(FrozenModel):
     )
     desktop_egress_rules_json: str | None = Field(
         description="The desktop egress rules the machine's curl router reads, or ``None`` when it has no rules file."
+    )
+    permissions_format_version: PermissionsFormatVersion = Field(
+        description=(
+            "The format the machine's policy is written in (see "
+            ":mod:`imbue.mngr_latchkey.migrations.runner`); 0 for a machine never stamped."
+        )
     )
     credential_store: EncryptedCredentialStore | None = Field(
         description=(
@@ -316,6 +325,10 @@ class RemoteStateUpdate(FrozenModel):
         default=None, description="The desktop egress rules the machine's curl router is to read."
     )
     permissions_json: str | None = Field(default=None, description="The policy the gateway is to enforce.")
+    permissions_format_version: PermissionsFormatVersion | None = Field(
+        default=None,
+        description="The format the policy this update carries is written in, installed after it.",
+    )
     gateway_listen_host: str | None = Field(
         default=None,
         description=(
@@ -412,6 +425,8 @@ def _update_document(update: RemoteStateUpdate) -> dict[str, bytes]:
         document[_ENTRY_DESKTOP_EGRESS_RULES_JSON] = update.desktop_egress_rules_json.encode("utf-8")
     if update.permissions_json is not None:
         document[_ENTRY_PERMISSIONS_JSON] = update.permissions_json.encode("utf-8")
+    if update.permissions_format_version is not None:
+        document[_ENTRY_PERMISSIONS_FORMAT_VERSION] = str(update.permissions_format_version).encode("utf-8")
     if update.gateway_listen_host is not None:
         document[_ENTRY_GATEWAY_LISTEN_HOST] = update.gateway_listen_host.encode("utf-8")
     if update.tunnel is not None:
@@ -546,6 +561,7 @@ def _machine_state_from_answers(
     config_json = _optional_text(answers, _ANSWER_CONFIG_JSON, host, failure_description)
     permissions_json = _optional_text(answers, _ANSWER_PERMISSIONS_JSON, host, failure_description)
     desktop_egress_rules_json = _optional_text(answers, _ANSWER_DESKTOP_EGRESS_RULES_JSON, host, failure_description)
+    permissions_format_version = _permissions_format_version(answers, host, failure_description)
     credentials = answers.get(_ANSWER_CREDENTIALS)
     if (credentials is None) != (data_format_version is None):
         raise RemoteGatewayError(
@@ -561,6 +577,7 @@ def _machine_state_from_answers(
         config_json=config_json,
         permissions_json=permissions_json,
         desktop_egress_rules_json=desktop_egress_rules_json,
+        permissions_format_version=permissions_format_version,
         credential_store=(
             EncryptedCredentialStore(content=credentials, data_format_version=data_format_version)
             if credentials is not None and data_format_version is not None
@@ -573,6 +590,27 @@ def _machine_state_from_answers(
             else None
         ),
     )
+
+
+def _permissions_format_version(
+    answers: Mapping[str, bytes], host: OuterHostInterface, failure_description: str
+) -> PermissionsFormatVersion:
+    """The format version the machine's policy is stamped with; 0 when it never was.
+
+    Raises:
+        RemoteGatewayError: when the stamp is not the non-negative integer the
+            desktop writes.
+    """
+    answer = _optional_text(answers, _ANSWER_PERMISSIONS_FORMAT_VERSION, host, failure_description)
+    if answer is None:
+        return PermissionsFormatVersion(0)
+    try:
+        return PermissionsFormatVersion(int(answer.strip()))
+    except ValueError as e:
+        raise RemoteGatewayError(
+            f"Failed to {failure_description} on VPS {host.get_name()}: the machine's permissions format version is not "
+            f"the non-negative integer it should be: {answer!r}"
+        ) from e
 
 
 def _container_extra_hosts(host: OuterHostInterface, answer: str, failure_description: str) -> tuple[str, ...]:

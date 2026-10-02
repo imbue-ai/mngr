@@ -27,21 +27,34 @@ Nothing is queued and nothing is applied later, so a change the user is told
 happened is a change the machine has taken -- and one that fails is reported
 while there is still a caller to report it to, instead of becoming a
 notification about a click made minutes ago.
+
+The one exception to "one command" is a read that finds the machine's policy in
+a format older than this build writes: the policy is migrated here, once adopted,
+and carried back in a second command (:func:`migrate_permissions_and_push`), so
+the machine is never left holding a policy this build has read but cannot edit.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 
+from loguru import logger
 from pydantic import Field
 from pydantic import SecretStr
 from pydantic import SkipValidation
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import custom_service_registration_entries
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.custom_services import is_custom_service_name
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigration
+from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationError
+from imbue.mngr_latchkey.migrations.runner import PERMISSIONS_MIGRATIONS
+from imbue.mngr_latchkey.migrations.runner import migrate_permissions
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 
 # Re-exported (the redundant alias marks them as such): the read side of the
 # machine store that outside consumers -- notably the Minds desktop app -- are
@@ -55,6 +68,7 @@ from imbue.mngr_latchkey.remote._transfer import FetchedMachineState as FetchedM
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_credentials
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_desktop_egress_rules
 from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions
+from imbue.mngr_latchkey.remote._transfer import adopt_machine_permissions_format_version
 from imbue.mngr_latchkey.remote._transfer import clear_remote_credentials
 from imbue.mngr_latchkey.remote._transfer import fetch_machine_state
 from imbue.mngr_latchkey.remote._transfer import push_credentials
@@ -66,6 +80,7 @@ from imbue.mngr_latchkey.store import LatchkeyStoreError
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import read_permissions_format_version
 
 
 class MachineCredentialsError(RemoteGatewayError):
@@ -89,13 +104,14 @@ class MachineCredentials(FrozenModel):
     host_id: HostId = Field(description="The host whose machine store caches these credentials.")
 
     def refresh(self) -> FetchedMachineState:
-        """Read the machine back and reconcile it with this computer, and return what it held.
+        """Read the machine back and reconcile it with this computer, and return what it holds.
 
         Everything comes back in one command: the credential store the
         machine's gateway is refreshing tokens in, re-encrypted for this
-        computer, the policy that gateway is enforcing, and the desktop egress
-        rules its router reads. They are reconciled differently, because they
-        are owned differently.
+        computer, the policy that gateway is enforcing, the desktop egress
+        rules its router reads, and the format version the policy is written
+        in. They are reconciled differently, because they are owned
+        differently.
 
         The **credentials are the machine's**. Only it can rotate the tokens it
         holds, so what it says is simply adopted, and the copy here goes back to
@@ -115,26 +131,53 @@ class MachineCredentials(FrozenModel):
         policy is, and are adopted the same way. Unlike the policy they are
         never seeded from here: the machine's gateway run script creates the
         file, and a machine without one routes nothing.
+
+        The **format version is the machine's** because it describes the
+        machine's policy. Once everything is adopted, a policy in a format older
+        than this build writes is migrated here and carried back
+        (:func:`migrate_permissions_and_push`), so what is returned -- and what
+        the machine then holds -- is in the format this build reads.
+
+        Raises:
+            PermissionsMigrationError: when the machine's policy is in a format
+                newer than this build knows, or cannot be migrated to the one it
+                does.
+            RemoteGatewayError: when the machine cannot be read, or does not
+                take the migrated policy back.
+            LatchkeyStoreError: when the migrated copy here cannot be read
+                back.
         """
         fetched = fetch_machine_state(self.host, self.latchkey, self.host_id, self._machine_key())
         adopt_machine_credentials(self.latchkey, self.host_id, fetched)
-        self._reconcile_permissions(fetched.permissions_json)
+        self._reconcile_permissions(fetched.permissions_json, fetched.permissions_format_version)
         adopt_machine_desktop_egress_rules(
             self.latchkey.latchkey_directory, self.host_id, fetched.desktop_egress_rules_json
         )
-        return fetched
+        migrated = migrate_permissions_and_push(self.host, self.latchkey, self.host_id)
+        if migrated is None:
+            return fetched
+        return fetched.model_copy_update(
+            to_update(fetched.field_ref().permissions_json, migrated.permissions_json),
+            to_update(fetched.field_ref().permissions_format_version, migrated.permissions_format_version),
+        )
 
-    def _reconcile_permissions(self, machine_permissions_json: str | None) -> None:
+    def _reconcile_permissions(
+        self, machine_permissions_json: str | None, machine_permissions_format_version: PermissionsFormatVersion
+    ) -> None:
         """Settle the one policy the machine and this computer should both hold (see :meth:`refresh`).
 
         The machine wins whenever it has one, because another of the user's
-        computers may have granted something this one has never seen. The only
-        write toward the machine is the seed: a machine with no policy at all
-        permits everything, so it is handed this computer's copy rather than
-        left open.
+        computers may have granted something this one has never seen; the
+        format version it stamps that policy with comes along, since it
+        describes it. The only write toward the machine is the seed: a machine
+        with no policy at all permits everything, so it is handed this
+        computer's copy rather than left open.
         """
         if machine_permissions_json is not None:
             adopt_machine_permissions(self.latchkey.latchkey_directory, self.host_id, machine_permissions_json)
+            adopt_machine_permissions_format_version(
+                self.latchkey.latchkey_directory, self.host_id, machine_permissions_format_version
+            )
             return
         local_permissions_json = read_host_permissions(plugin_data_dir(self.latchkey.latchkey_directory), self.host_id)
         if local_permissions_json is not None:
@@ -182,6 +225,7 @@ class MachineCredentials(FrozenModel):
             account,
             self._machine_key(),
             permissions_json,
+            self._permissions_format_version(),
             config_json=self._config_for(service_name),
         )
 
@@ -191,8 +235,10 @@ class MachineCredentials(FrozenModel):
         The one operation that needs no credential material, and so no key:
         a policy is not encrypted (see
         :func:`~imbue.mngr_latchkey.remote._transfer.push_permissions_snapshot`).
+        The snapshot is of this computer's copy, so it travels with that
+        copy's format stamp.
         """
-        push_permissions_snapshot(self.host, self.host_id, permissions_json)
+        push_permissions_snapshot(self.host, self.host_id, permissions_json, self._permissions_format_version())
 
     def set_permissions_and_desktop_egress_rules(self, permissions_json: str, desktop_egress_rules_json: str) -> None:
         """Make both snapshots what the machine holds: the policy its gateway enforces and the rules its router reads.
@@ -201,10 +247,12 @@ class MachineCredentials(FrozenModel):
         edits this computer's copies first and hands over snapshots of them
         (:func:`read_host_permissions`, :func:`read_host_desktop_egress_rules`),
         and nothing here writes those copies. Both land in one remote command,
-        and neither needs a key (see
+        with the copies' format stamp, and neither needs a key (see
         :func:`~imbue.mngr_latchkey.remote._transfer.push_permissions_and_desktop_egress_rules`).
         """
-        push_permissions_and_desktop_egress_rules(self.host, self.host_id, permissions_json, desktop_egress_rules_json)
+        push_permissions_and_desktop_egress_rules(
+            self.host, self.host_id, permissions_json, desktop_egress_rules_json, self._permissions_format_version()
+        )
 
     def disconnect_account(self, service_name: str, account: str) -> None:
         """Clear one account from the machine's own store.
@@ -251,6 +299,67 @@ class MachineCredentials(FrozenModel):
 
     def _machine_latchkey(self) -> Latchkey:
         return latchkey_for_machine(self.latchkey, plugin_data_dir(self.latchkey.latchkey_directory), self.host_id)
+
+    def _permissions_format_version(self) -> PermissionsFormatVersion:
+        """The format this computer's copy of the host's policy is stamped with: what a snapshot of it travels with.
+
+        Raises:
+            MachineCredentialsError: when the stamp cannot be read.
+        """
+        try:
+            return read_permissions_format_version(plugin_data_dir(self.latchkey.latchkey_directory), self.host_id)
+        except LatchkeyStoreError as e:
+            raise MachineCredentialsError(
+                f"Could not read the permissions format version of host {self.host_id}: {e}"
+            ) from e
+
+
+class MigratedPermissions(FrozenModel):
+    """What a migration left this computer's copy of a host's policy as, and so what its machine was handed."""
+
+    permissions_json: str = Field(description="The host's policy, in the format the migrations end in.")
+    permissions_format_version: PermissionsFormatVersion = Field(description="The format it is now stamped with.")
+
+
+def migrate_permissions_and_push(
+    host: OuterHostInterface,
+    latchkey: Latchkey,
+    host_id: HostId,
+    migrations: Sequence[PermissionsMigration] = PERMISSIONS_MIGRATIONS,
+    # what was migrated and pushed back, or ``None`` when the policy was already in this build's format
+) -> MigratedPermissions | None:
+    """Bring this computer's copy of ``host_id``'s policy to the format this build reads, and hand it to its machine.
+
+    Run right after a read adopted what the machine holds, so what is migrated
+    is the machine's own policy, and the machine is left holding what this
+    build reads: the policy and its stamp travel back in one command. A policy
+    already in this build's format costs nothing beyond reading the stamp.
+
+    Raises:
+        PermissionsMigrationError: when the policy is in a format newer than
+            ``migrations`` know, or cannot be brought to the one they end in.
+        LatchkeyStoreError: when the migrated copy cannot be read back.
+        RemoteGatewayError: when the machine does not take it.
+    """
+    data_dir = plugin_data_dir(latchkey.latchkey_directory)
+    if not migrate_permissions(data_dir, host_id, migrations):
+        return None
+    permissions_json = read_host_permissions(data_dir, host_id)
+    if permissions_json is None:
+        raise PermissionsMigrationError(
+            f"Migrated the permissions of host {host_id}, but there is no policy left to push"
+        )
+    migrated = MigratedPermissions(
+        permissions_json=permissions_json,
+        permissions_format_version=read_permissions_format_version(data_dir, host_id),
+    )
+    logger.info(
+        "Migrated the permissions of host {} to format version {}; handing them back to the machine",
+        host_id,
+        migrated.permissions_format_version,
+    )
+    push_permissions_snapshot(host, host_id, migrated.permissions_json, migrated.permissions_format_version)
+    return migrated
 
 
 def _recorded_machine_key(latchkey: Latchkey, host_id: HostId) -> SecretStr:

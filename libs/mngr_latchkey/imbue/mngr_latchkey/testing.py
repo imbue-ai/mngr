@@ -23,6 +23,7 @@ import pytest
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
+from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr_latchkey.core import CredentialStatus
 from imbue.mngr_latchkey.core import LATCHKEY_AUTH_OPTION_BROWSER
@@ -31,6 +32,7 @@ from imbue.mngr_latchkey.core import LatchkeyError
 from imbue.mngr_latchkey.core import LatchkeyJwtMintError
 from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
+from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.05
 
@@ -362,6 +364,20 @@ def read_deb_control_field(content: bytes, field_name: str) -> str:
         if line.startswith(f"{field_name}: "):
             return line.removeprefix(f"{field_name}: ")
     raise AssertionError(f"no {field_name} field in the control file:\n{control}")
+
+
+def rule_keys_of_permissions_json(permissions_json: str | None) -> list[str]:
+    """The key of every rule in a policy, in order: which grants it carries, as a migration leaves them."""
+    assert permissions_json is not None
+    return [key for rule in json.loads(permissions_json)["rules"] for key in rule]
+
+
+def write_raw_host_permissions(data_dir: Path, host_id: HostId, permissions_json: str) -> Path:
+    """Make ``permissions_json``, verbatim, this computer's policy for ``host_id``, and return where it landed."""
+    path = permissions_path_for_host(data_dir, host_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(permissions_json)
+    return path
 
 
 def _node_extension_driver_script(extension_path: Path) -> str:

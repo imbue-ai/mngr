@@ -77,6 +77,7 @@ from imbue.mngr_latchkey.remote.package import TUNNEL_CONF_FILENAME
 from imbue.mngr_latchkey.remote.package import build_remote_package
 from imbue.mngr_latchkey.remote.package import remote_package_context
 from imbue.mngr_latchkey.store import DESKTOP_EGRESS_RULES_FILENAME
+from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 from imbue.mngr_latchkey.testing import extract_deb_data
@@ -210,6 +211,11 @@ class FakeVps(MutableModel):
         self.latchkey_dir.mkdir(parents=True, exist_ok=True)
         (self.latchkey_dir / CONFIG_FILENAME).write_text(config_json)
 
+    def hold_permissions_format_version(self, version: int) -> None:
+        """Stamp the machine's policy and rules as written in format ``version``, as a desktop's push leaves them."""
+        self.latchkey_dir.mkdir(parents=True, exist_ok=True)
+        (self.latchkey_dir / PERMISSIONS_FORMAT_VERSION_FILENAME).write_text(str(version))
+
     def run_under(self, secret_filename: str, value: str) -> None:
         """Put a secret in the machine's RAM-backed directory, as its running gateway would have it."""
         self.secrets_dir.mkdir(parents=True, exist_ok=True)
@@ -257,6 +263,10 @@ class FakeVps(MutableModel):
     def machine_config(self) -> str | None:
         path = self.latchkey_dir / CONFIG_FILENAME
         return path.read_text() if path.is_file() else None
+
+    def machine_permissions_format_version(self) -> int | None:
+        path = self.latchkey_dir / PERMISSIONS_FORMAT_VERSION_FILENAME
+        return int(path.read_text().strip()) if path.is_file() else None
 
     def tunnel_conf(self) -> str | None:
         path = self.latchkey_dir / TUNNEL_CONF_FILENAME

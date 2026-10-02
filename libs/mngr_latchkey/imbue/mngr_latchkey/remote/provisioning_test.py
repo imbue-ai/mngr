@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from imbue.imbue_common.model_update import to_update
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.core import CONFIG_FILENAME
 from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
@@ -21,6 +22,8 @@ from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.migrations.runner import CURRENT_PERMISSIONS_FORMAT_VERSION
+from imbue.mngr_latchkey.primitives import PermissionsFormatVersion
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
@@ -48,8 +51,12 @@ from imbue.mngr_latchkey.remote.package import TUNNEL_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.provisioning import _do_extra_hosts_resolve_outer_host
 from imbue.mngr_latchkey.remote.provisioning import _does_container_need_reverse_tunnel
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
+from imbue.mngr_latchkey.store import PERMISSIONS_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
+from imbue.mngr_latchkey.store import read_permissions_format_version
+from imbue.mngr_latchkey.store import write_permissions_format_version
+from imbue.mngr_latchkey.testing import write_raw_host_permissions
 
 # This computer's own gateway listen password, as every provisioning call here
 # hands it over to seed a fresh machine with. A distinct string from a
@@ -67,6 +74,7 @@ _DEVICE_RECORD = DeviceRecord(
 
 _GRANTED_HERE = '{"rules": [{"slack-api": ["slack-read-all"]}]}'
 _GRANTED_ELSEWHERE = '{"rules": [{"github-rest-api": ["github-read-all"]}]}'
+_SLACK_ROUTED = '{\n  "slack": true\n}\n'
 
 
 def _desktop_latchkey(latchkey_directory: Path) -> Latchkey:
@@ -97,13 +105,6 @@ def _latchkey_directory(tmp_path: Path) -> Path:
     latchkey_directory = tmp_path / "latchkey"
     latchkey_directory.mkdir()
     return latchkey_directory
-
-
-def _write_local_permissions(latchkey_directory: Path, host_id: HostId, policy: str) -> Path:
-    path = permissions_path_for_host(plugin_data_dir(latchkey_directory), host_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(policy)
-    return path
 
 
 def _latchkey_commands(vps: FakeVps) -> list[str]:
@@ -173,6 +174,7 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
     assert config["settings"]["hideBuiltinServices"] == ["notion"]
     assert set(config["registeredServices"]) == set(additional_service_registration_entries())
     assert vps.machine_permissions() == '{\n  "rules": []\n}'
+    assert vps.machine_permissions_format_version() == 0
     # The gateway's extension is the package's copy, where the gateway loads it from.
     shipped_extension = vps.latchkey_dir / REMOTE_EXTENSIONS_DIR_NAME / REMOTE_GATEWAY_EXTENSION_FILENAME
     assert shipped_extension.read_text() == bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME)
@@ -180,6 +182,7 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
         CONFIG_FILENAME,
         REMOTE_EXTENSIONS_DIR_NAME,
         GATEWAY_CONF_FILENAME,
+        PERMISSIONS_FORMAT_VERSION_FILENAME,
         PERMISSIONS_CONFIG_FILENAME,
     ]
     # The apply left no scratch behind in RAM: only the secrets, and the
@@ -737,7 +740,7 @@ def test_provisioning_raises_on_an_invalid_remote_config(tmp_path: Path) -> None
 def test_provisioning_seeds_a_machine_with_no_policy_from_the_local_file(tmp_path: Path) -> None:
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
-    _write_local_permissions(latchkey_directory, host_id, _GRANTED_HERE)
+    write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
     outer = fake_vps(tmp_path)
 
     _provision(outer, latchkey_directory, host_id)
@@ -754,7 +757,7 @@ def test_provisioning_adopts_the_policy_the_machine_holds(tmp_path: Path) -> Non
     """
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
-    local_path = _write_local_permissions(latchkey_directory, host_id, _GRANTED_HERE)
+    local_path = write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
     outer = fake_vps(tmp_path, machine_permissions=_GRANTED_ELSEWHERE)
 
     _provision(outer, latchkey_directory, host_id)
@@ -767,7 +770,7 @@ def test_provisioning_leaves_an_unchanged_local_copy_untouched(tmp_path: Path) -
     """Adopting an identical policy must not rewrite the local file (nothing to say, nothing to churn)."""
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
-    local_path = _write_local_permissions(latchkey_directory, host_id, _GRANTED_HERE)
+    local_path = write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
     modified_at_before = local_path.stat().st_mtime_ns
     outer = fake_vps(tmp_path, machine_permissions=_GRANTED_HERE)
 
@@ -780,13 +783,63 @@ def test_provisioning_refuses_a_policy_it_cannot_read_rather_than_storing_it(tmp
     """A policy this build cannot parse must not replace one it can enforce."""
     latchkey_directory = _latchkey_directory(tmp_path)
     host_id = HostId.generate()
-    local_path = _write_local_permissions(latchkey_directory, host_id, _GRANTED_HERE)
+    local_path = write_raw_host_permissions(plugin_data_dir(latchkey_directory), host_id, _GRANTED_HERE)
     outer = fake_vps(tmp_path, machine_permissions='{"rules": "not-a-list"}')
 
     with pytest.raises(RemoteGatewayError, match="cannot read"):
         _provision(outer, latchkey_directory, host_id)
 
     assert local_path.read_text() == _GRANTED_HERE
+
+
+# The format of the machine's policy.
+
+
+def test_the_default_seed_is_stamped_with_the_format_this_build_writes(tmp_path: Path) -> None:
+    """A fresh machine's deny-all policy is this build's, so nothing has to migrate it later."""
+    outer = fake_vps(tmp_path)
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
+
+    _provision(outer, latchkey_directory, host_id)
+
+    assert as_vps(outer).machine_permissions() == '{\n  "rules": []\n}'
+    assert as_vps(outer).machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
+
+
+def test_seeding_from_the_local_copy_carries_its_stamp(tmp_path: Path) -> None:
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
+    data_dir = plugin_data_dir(latchkey_directory)
+    write_raw_host_permissions(data_dir, host_id, _GRANTED_HERE)
+    write_permissions_format_version(data_dir, host_id, PermissionsFormatVersion(CURRENT_PERMISSIONS_FORMAT_VERSION))
+    outer = fake_vps(tmp_path)
+
+    _provision(outer, latchkey_directory, host_id)
+
+    assert as_vps(outer).machine_permissions() == _GRANTED_HERE
+    assert as_vps(outer).machine_permissions_format_version() == CURRENT_PERMISSIONS_FORMAT_VERSION
+
+
+def test_provisioning_adopts_the_stamp_with_the_policy_and_leaves_a_newer_builds_policy_alone(tmp_path: Path) -> None:
+    """A gateway has to be wired whichever build wrote its policy; the policy is not this build's to touch."""
+    latchkey_directory = _latchkey_directory(tmp_path)
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, machine_permissions=_GRANTED_ELSEWHERE)
+    newer_version = CURRENT_PERMISSIONS_FORMAT_VERSION + 1
+    as_vps(outer).hold_permissions_format_version(newer_version)
+
+    with capture_loguru() as log:
+        _provision(outer, latchkey_directory, host_id)
+
+    assert "this build cannot migrate them" in log.getvalue()
+    vps = as_vps(outer)
+    assert vps.machine_permissions() == _GRANTED_ELSEWHERE
+    assert vps.machine_permissions_format_version() == newer_version
+    assert vps.supervisorctl_calls() == [f"restart {GATEWAY_PROGRAM_NAME}"]
+    data_dir = plugin_data_dir(latchkey_directory)
+    assert permissions_path_for_host(data_dir, host_id).read_text() == _GRANTED_ELSEWHERE
+    assert read_permissions_format_version(data_dir, host_id) == newer_version
 
 
 # What a read answers about the container.
