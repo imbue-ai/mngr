@@ -52,11 +52,13 @@ from imbue.mngr_latchkey.core import CREDENTIALS_STORE_FILENAME
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
+from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_LATCHKEY_DIR_NAME
+from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CONTAINER_TUNNEL_KEY
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HAS_CREDENTIAL_STORE
 from imbue.mngr_latchkey.remote._machine import _ANSWER_HOME
@@ -232,6 +234,14 @@ class FakeVps(MutableModel):
     def secret_mode(self, filename: str) -> int:
         return stat.S_IMODE((self.secrets_dir / filename).stat().st_mode)
 
+    def device_records(self) -> dict[str, str]:
+        """The records of the desktops announced to the machine, by file name."""
+        devices_dir = self.secrets_dir / DEVICES_DIR_NAME
+        return {path.name: path.read_text() for path in sorted(devices_dir.iterdir())} if devices_dir.is_dir() else {}
+
+    def device_record_path(self, filename: str) -> Path:
+        return self.secrets_dir / DEVICES_DIR_NAME / filename
+
     def machine_accounts(self) -> dict[str, list[str]]:
         path = self.latchkey_dir / CREDENTIALS_STORE_FILENAME
         return store_accounts(path.read_bytes()) if path.is_file() else {}
@@ -274,7 +284,12 @@ class FakeVps(MutableModel):
         return sorted(path.name for path in self.latchkey_dir.iterdir()) if self.latchkey_dir.is_dir() else []
 
     def secrets_dir_entries(self) -> list[str]:
-        return sorted(path.name for path in self.secrets_dir.iterdir()) if self.secrets_dir.is_dir() else []
+        """The secret files the machine holds in RAM (the connected desktops' records live in a directory beside them)."""
+        return (
+            sorted(path.name for path in self.secrets_dir.iterdir() if path.is_file())
+            if self.secrets_dir.is_dir()
+            else []
+        )
 
     def supervisorctl_calls(self) -> list[str]:
         path = self.root / "supervisorctl.log"
@@ -542,7 +557,7 @@ def scripted_outer(**kwargs: object) -> tuple[OuterHostInterface, ScriptedOuter]
 
 
 def canned_machine_answer(command: str, home: Path) -> CommandResult | None:
-    """What a machine holding nothing answers one of the package's two commands with; ``None`` for any other command."""
+    """What a machine holding nothing answers one of the package's commands with; ``None`` for any other command."""
     first_line = command.split("\n", 1)[0]
     if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_READ_STATE_SUBCOMMAND}"):
         answers = {
@@ -553,7 +568,9 @@ def canned_machine_answer(command: str, home: Path) -> CommandResult | None:
         }
         lines = [f"{ANSWER_PREFIX}{name}={base64.b64encode(value).decode('ascii')}" for name, value in answers.items()]
         return CommandResult(stdout="\n".join((*lines, OUTCOME_DONE_MARKER)) + "\n", stderr="", success=True)
-    if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_APPLY_STATE_SUBCOMMAND}"):
+    if first_line.startswith(f"{REMOTE_COMMAND_NAME} {_APPLY_STATE_SUBCOMMAND}") or first_line.startswith(
+        f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}"
+    ):
         return CommandResult(stdout=f"{OUTCOME_DONE_MARKER}\n", stderr="", success=True)
     return None
 

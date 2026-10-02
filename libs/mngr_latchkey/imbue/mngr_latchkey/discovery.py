@@ -9,9 +9,11 @@ Exposes two callables:
   reverse-tunneled onto its own loopback. A remote agent receives the VPS
   gateway, which its container reaches over the docker bridge as
   ``host.docker.internal`` (see :mod:`imbue.mngr_latchkey.remote.provisioning`
-  for the container that predates that mapping), while a separate
-  desktop-to-VPS tunnel lets that gateway's forwarding extension reach
-  Minds-owned endpoints on the desktop. An agent whose gateway location cannot
+  for the container that predates that mapping), while a desktop-to-VPS tunnel
+  of this computer's own, announced to the machine on every cycle together with
+  the port it was assigned, lets that gateway's forwarding extension reach
+  Minds-owned endpoints on this desktop (and, over their own tunnels, on the
+  user's other desktops). An agent whose gateway location cannot
   be resolved yet receives *neither*: guessing the desktop gateway would
   half-work while exposing it to an agent that is not entitled to it (see
   ``_warn_unresolved_gateway_route``).
@@ -31,6 +33,7 @@ existing tunnel and exit.
 """
 
 import threading
+import time
 from collections.abc import Iterator
 from enum import auto
 from typing import Final
@@ -59,6 +62,7 @@ from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import MngrError
 from imbue.mngr.hosts.outer_host import is_transient_ssh_error
 from imbue.mngr.hosts.outer_host import is_unreachable_peer_connect_error
+from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.interfaces.provider_instance import ProviderInstanceInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentInstanceKey
@@ -72,9 +76,10 @@ from imbue.mngr_forward.ssh_tunnel import SSHTunnelPhase
 from imbue.mngr_latchkey.core import AGENT_SIDE_LATCHKEY_PORT
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
+from imbue.mngr_latchkey.devices import DeviceRecord
+from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote.provisioning import DEFAULT_REMOTE_PACKAGE_LAYOUT
-from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
-from imbue.mngr_latchkey.remote.provisioning import DesktopGatewaySecrets
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
@@ -84,6 +89,11 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 # long enough that a blip never reports, short enough that a real misconfiguration (a
 # rotated key, a firewall) is not hidden by the retry.
 TRANSIENT_FAILURE_REPORT_THRESHOLD: Final[int] = 10
+
+# The least time between two announcements of this computer to one host's
+# machine. Every agent on a host runs its own setup each discovery cycle (30s),
+# and one announcement per cycle per machine is what keeps its record fresh.
+_DEVICE_ANNOUNCEMENT_MIN_INTERVAL_SECONDS: Final[float] = 20.0
 
 
 class _ContainerEndpoint(FrozenModel):
@@ -125,6 +135,7 @@ class _RemoteWiringStep(UpperCaseStrEnum):
     DESKTOP_GATEWAY_TUNNEL = auto()
     DESKTOP_TO_VPS_TUNNEL = auto()
     VPS_GATEWAY_PROVISIONING = auto()
+    DEVICE_ANNOUNCEMENT = auto()
 
 
 class _TransientFailureStreakKey(FrozenModel):
@@ -221,6 +232,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
     mngr_ctx: MngrContext = Field(
         description="Mngr context used to open an agent's outer host (VPS) for the VPS-resident gateway path"
     )
+    device: DesktopDeviceIdentity = Field(
+        description="Who this computer is to the machines it connects to: what it announces itself as on each"
+    )
 
     _pending_remote_agents: set[str] = PrivateAttr(default_factory=set)
     _pending_lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
@@ -257,6 +271,16 @@ class LatchkeyDiscoveryHandler(MutableModel):
     # transient SSH error. A success deletes the entry. Guarded by
     # ``_remote_hosts_lock``.
     _transient_failure_streak_by_key: dict[_TransientFailureStreakKey, int] = PrivateAttr(default_factory=dict)
+    # When (``time.monotonic``) this computer last announced itself to each
+    # host's machine, so the several agents of one host cost one announcement
+    # per cycle between them; and the hosts with an announcement in flight, so
+    # two of them never run one at once. Both guarded by ``_remote_hosts_lock``.
+    _last_announcement_at_by_host_id: dict[str, float] = PrivateAttr(default_factory=dict)
+    _announcing_hosts: set[str] = PrivateAttr(default_factory=set)
+    # The desktop-target JWT each announcement carries, minted once per host:
+    # it names the host's permissions file on this computer, which does not
+    # move, and minting one is a latchkey CLI run.
+    _permissions_override_by_host_id: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def __call__(
         self,
@@ -360,7 +384,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 self._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, host_side_port)
             else:
                 self._remove_stale_desktop_to_container_tunnel(agent_id, host_id, ssh_info, host_side_port)
-                self._setup_desktop_gateway_reachability_on_vps(
+                device_port = self._setup_desktop_gateway_reachability_on_vps(
                     agent_id,
                     host_id,
                     route.outer_ssh_info,
@@ -368,8 +392,14 @@ class LatchkeyDiscoveryHandler(MutableModel):
                     provider_name,
                 )
                 is_pending_handed_off = self._maybe_dispatch_remote_gateway_provisioning(
-                    agent_id, host_id, ssh_info, provider_name
+                    agent_id, host_id, ssh_info, provider_name, device_port
                 )
+                # A provisioning pass announces this computer itself, once the
+                # machine has the command; afterwards every cycle refreshes the
+                # record, which is what keeps this computer on the machine's
+                # list of connected desktops.
+                if not is_pending_handed_off and device_port is not None and self._is_provisioned(host_id):
+                    self._announce_device_if_due(host_id, provider_name, device_port)
         finally:
             # The provisioning thread owns clearing the pending flag once the
             # heavy work finishes; otherwise (local agents, or provisioning was
@@ -434,6 +464,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             if is_winner:
                 del self._gateway_route_by_host_id[host_id_str]
                 self._provisioned_hosts.discard(host_id_str)
+                self._last_announcement_at_by_host_id.pop(host_id_str, None)
         if not is_winner:
             # The worker that retired the route also removed its tunnel; doing
             # it again here could tear down the one it has since dialed.
@@ -513,6 +544,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
             logger.debug("Removed {} reverse tunnel(s) for stopped agent {}", removed_tunnel_count, agent_id)
         with self._remote_hosts_lock:
             self._provisioned_hosts.discard(str(host_id))
+            self._last_announcement_at_by_host_id.pop(str(host_id), None)
             for key in [key for key in self._transient_failure_streak_by_key if key.host_id == host_id]:
                 del self._transient_failure_streak_by_key[key]
 
@@ -553,8 +585,13 @@ class LatchkeyDiscoveryHandler(MutableModel):
         outer_ssh_info: RemoteSSHInfo,
         host_side_port: int,
         provider_name: str,
-    ) -> None:
-        """Expose the desktop gateway on the VPS loopback for the proxy extension.
+    ) -> int | None:
+        """Expose the desktop gateway on the VPS loopback for the proxy extension, on a port of this computer's own.
+
+        The port is assigned by the machine's sshd, so each of the user's
+        computers gets one of its own and none of them contend for it; the
+        announcement that follows tells the machine which port is this
+        computer's. Returns that port, or ``None`` on failure.
 
         The VPS currently has a one-to-one relationship with its workspace and
         main agent. Tagging the tunnel with that agent instance preserves the
@@ -570,10 +607,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
         the provider's hosts every cycle.
         """
         try:
-            self.tunnel_manager.setup_reverse_tunnel(
+            device_port = self.tunnel_manager.setup_reverse_tunnel(
                 ssh_info=outer_ssh_info,
                 local_port=host_side_port,
-                remote_port=DESKTOP_GATEWAY_VPS_PORT,
+                remote_port=0,
                 agent_id=AgentInstanceKey.build(agent_id, host_id),
             )
         except (SSHTunnelError, OSError, paramiko.SSHException) as e:
@@ -583,10 +620,98 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 host_id,
                 _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL,
                 e,
-                f"expose the desktop Latchkey gateway on VPS port {DESKTOP_GATEWAY_VPS_PORT} for host {host_id}",
+                f"expose the desktop Latchkey gateway on the VPS of host {host_id}",
             )
-            return
+            return None
         self._record_wiring_step_success(host_id, _RemoteWiringStep.DESKTOP_TO_VPS_TUNNEL)
+        return device_port
+
+    def _is_provisioned(self, host_id: HostId) -> bool:
+        with self._remote_hosts_lock:
+            return str(host_id) in self._provisioned_hosts
+
+    def _announce_device_if_due(self, host_id: HostId, provider_name: str, device_port: int) -> None:
+        """Refresh this computer's record on the host's machine, at most once per cycle and one at a time per host.
+
+        The record's age is what the machine's gateway extension reads as
+        whether this computer is still connected, so every cycle refreshes it
+        (carrying the current tunnel port, which a repaired tunnel may have
+        changed). A transient failure is retried by the next cycle like the
+        other wiring steps.
+        """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            last_announced_at = self._last_announcement_at_by_host_id.get(host_id_str)
+            is_recent = (
+                last_announced_at is not None
+                and time.monotonic() - last_announced_at < _DEVICE_ANNOUNCEMENT_MIN_INTERVAL_SECONDS
+            )
+            if is_recent or host_id_str in self._announcing_hosts:
+                return
+            self._announcing_hosts.add(host_id_str)
+        try:
+            provider = self._provider_for_route(provider_name)
+            with provider.outer_host_for(host_id) as outer:
+                if outer is None or outer.is_local:
+                    return
+                self._try_announce_device(outer, host_id, device_port)
+        except (MngrError, OSError, paramiko.SSHException, EOFError) as e:
+            self._record_wiring_step_failure(
+                host_id,
+                _RemoteWiringStep.DEVICE_ANNOUNCEMENT,
+                e,
+                f"reach the machine of host {host_id} to announce this computer to it",
+            )
+        finally:
+            with self._remote_hosts_lock:
+                self._announcing_hosts.discard(host_id_str)
+
+    def _try_announce_device(self, outer: OuterHostInterface, host_id: HostId, device_port: int) -> None:
+        """Announce this computer to an opened machine, recording a failure as this step's rather than raising.
+
+        An announcement is its own wiring step: one that fails right after a
+        provisioning pass must not fail the pass (which would re-provision the
+        machine on the next cycle), only be retried by the next cycle's
+        announcement.
+        """
+        try:
+            self._announce_device(outer, host_id, device_port)
+        except (MngrError, LatchkeyError, OSError, paramiko.SSHException, EOFError) as e:
+            self._record_wiring_step_failure(
+                host_id,
+                _RemoteWiringStep.DEVICE_ANNOUNCEMENT,
+                e,
+                f"announce this computer to the machine of host {host_id}",
+            )
+
+    def _announce_device(self, outer: OuterHostInterface, host_id: HostId, device_port: int) -> None:
+        """Hand the machine this computer's record: its tunnel port and the secrets for the hop back here.
+
+        Raises whatever minting the secrets or the machine command raises
+        (``LatchkeyError``, ``RemoteGatewayError``); the caller decides whether
+        it is transient.
+        """
+        host_id_str = str(host_id)
+        with self._remote_hosts_lock:
+            permissions_override = self._permissions_override_by_host_id.get(host_id_str)
+        if permissions_override is None:
+            permissions_override = self.latchkey.create_permissions_override_jwt(
+                permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
+            )
+            with self._remote_hosts_lock:
+                self._permissions_override_by_host_id[host_id_str] = permissions_override
+        record = DeviceRecord(
+            device_id=self.device.device_id,
+            hostname=self.device.hostname,
+            port=device_port,
+            gateway_password=self.latchkey.derive_gateway_password(),
+            permissions_override=permissions_override,
+        )
+        announce_device(outer, record, failure_description=f"announce this computer to the machine of host {host_id}")
+        with self._remote_hosts_lock:
+            self._last_announcement_at_by_host_id[host_id_str] = time.monotonic()
+        self._record_wiring_step_success(host_id, _RemoteWiringStep.DEVICE_ANNOUNCEMENT)
+        logger.debug("Announced this computer to the machine of host {} on port {}", host_id, device_port)
 
     def _record_wiring_step_success(self, host_id: HostId, step: _RemoteWiringStep) -> None:
         """Forget a host's transient-failure streak for a step that just succeeded."""
@@ -646,6 +771,10 @@ class LatchkeyDiscoveryHandler(MutableModel):
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
+        # The machine port this computer's tunnel holds, for the announcement a
+        # pass ends with; ``None`` when the tunnel could not be set up this
+        # cycle, in which case the next cycle announces.
+        device_port: int | None,
     ) -> bool:
         """Dispatch VPS-resident gateway provisioning for agents whose host has an outer host.
 
@@ -690,7 +819,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         try:
             self.concurrency_group.start_new_thread(
                 target=self._run_remote_gateway_provisioning,
-                args=(agent_id, host_id, ssh_info, provider_name),
+                args=(agent_id, host_id, ssh_info, provider_name, device_port),
                 name=f"latchkey-provision-{str(agent_id)}",
                 is_checked=False,
             )
@@ -935,6 +1064,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
+        device_port: int | None,
     ) -> None:
         """Fire-and-forget worker: stand up the VPS-resident gateway for a remote agent.
 
@@ -947,7 +1077,7 @@ class LatchkeyDiscoveryHandler(MutableModel):
         always cleared in ``finally`` so a later discovery fire retries.
         """
         try:
-            self._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name)
+            self._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name, device_port)
         except (MngrError, LatchkeyError, OSError, paramiko.SSHException, EOFError) as e:
             if not is_transient_remote_wiring_error(e):
                 raise
@@ -972,8 +1102,9 @@ class LatchkeyDiscoveryHandler(MutableModel):
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
+        device_port: int | None,
     ) -> None:
-        """Open the agent's outer host, provision its gateway, and record the host as provisioned."""
+        """Open the agent's outer host, provision its gateway, announce this computer to it, and record the host as provisioned."""
         provider = get_provider_instance(ProviderInstanceName(provider_name), self.mngr_ctx)
         with provider.outer_host_for(host_id) as outer:
             if outer is None:
@@ -1002,24 +1133,20 @@ class LatchkeyDiscoveryHandler(MutableModel):
             # loopback port here; otherwise the two coincide and we fall back.
             loopback_ssh_port = provider.get_container_loopback_ssh_port(host_id)
             container_ssh_port = loopback_ssh_port if loopback_ssh_port is not None else ssh_info.port
-            # This computer's own gateway secrets: the machine's forwarding
-            # extension presents them on the hop back here, replacing
-            # whatever the computer that provisioned it last left behind.
-            desktop_secrets = DesktopGatewaySecrets(
-                gateway_password=self.latchkey.derive_gateway_password(),
-                permissions_override=self.latchkey.create_permissions_override_jwt(
-                    permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)
-                ),
-            )
             provision_remote_gateway(
                 outer,
                 host_id=host_id,
                 container_ssh_user=ssh_info.user,
                 container_ssh_port=container_ssh_port,
                 latchkey=self.latchkey,
-                desktop_secrets=desktop_secrets,
+                desktop_gateway_password=self.latchkey.derive_gateway_password(),
                 package_layout=DEFAULT_REMOTE_PACKAGE_LAYOUT,
             )
+            # The machine has the command now, and this computer's tunnel is
+            # up: tell it which port is this computer's before the next cycle
+            # would, so the desktop-owned routes work as soon as the gateway does.
+            if device_port is not None:
+                self._try_announce_device(outer, host_id, device_port)
         logger.info("Provisioned VPS-resident Latchkey gateway for agent {} on host {}", agent_id, host_id)
         # Record success so later discovery cycles skip the expensive re-run.
         # Only reached when provisioning completed without raising (a failure

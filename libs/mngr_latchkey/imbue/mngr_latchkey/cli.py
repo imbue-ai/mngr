@@ -23,6 +23,7 @@ surfaced as a non-zero exit (no ``--allow-degraded`` mode).
 
 import os
 import signal
+import socket
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -51,6 +52,7 @@ from imbue.mngr.errors import MngrError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.providers.local.instance import get_or_create_local_host_id
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
@@ -60,6 +62,8 @@ from imbue.mngr_latchkey.config import LatchkeyPluginConfig
 from imbue.mngr_latchkey.core import LATCHKEY_BINARY
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.core import LatchkeyError
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery_stream import DiscoveryStreamConsumer
@@ -78,6 +82,9 @@ from imbue.mngr_latchkey.store import update_forward_owner_gateway_port
 # CLI help and in the spec.
 ENV_LATCHKEY_DIRECTORY: Final[str] = "MNGR_LATCHKEY_DIRECTORY"
 ENV_LATCHKEY_BINARY: Final[str] = "MNGR_LATCHKEY_BINARY"
+# Env-var override for the id ``mngr latchkey forward`` announces itself to
+# remote hosts' machines under; an embedder passes its own device id.
+ENV_DEVICE_ID: Final[str] = "MNGR_LATCHKEY_DEVICE_ID"
 
 # Built-in fallback for the latchkey root directory when no override is
 # supplied via CLI flag, env var, or ``settings.toml``.
@@ -139,6 +146,7 @@ class _ForwardCliOptions(_LatchkeyCommonCliOptions):
     """Backing options object for ``mngr latchkey forward``."""
 
     mngr_binary: str = "mngr"
+    device_id: str | None = None
 
 
 def _add_common_latchkey_options(command: click.Command) -> click.Command:
@@ -222,6 +230,9 @@ def _build_initialized_latchkey(
     mngr_ctx: MngrContext,
     cli_directory: str | None,
     cli_binary: str | None,
+    # The desktop the shared gateway reports itself as; only ``forward``, which
+    # spawns that gateway, has one to give.
+    device: DesktopDeviceIdentity | None = None,
 ) -> Latchkey:
     """Build a :class:`Latchkey`, run ``initialize()``, translate failures to ``ClickException``.
 
@@ -232,7 +243,7 @@ def _build_initialized_latchkey(
     :class:`LatchkeyError` and is translated to ``ClickException`` below.
     """
     directory, binary = _resolve_latchkey_settings(mngr_ctx, cli_directory, cli_binary)
-    latchkey = Latchkey(latchkey_binary=binary, latchkey_directory=directory)
+    latchkey = Latchkey(latchkey_binary=binary, latchkey_directory=directory, device=device)
     try:
         latchkey.initialize()
     except LatchkeyError as e:
@@ -565,6 +576,15 @@ add_pager_help_option(_register_agent_command)
     show_default=True,
     help="Path to the mngr binary used to spawn the underlying ``mngr observe`` subprocess.",
 )
+@click.option(
+    "--device-id",
+    "device_id",
+    default=None,
+    help=(
+        "The id this computer announces itself to remote hosts' machines under, so an agent can tell the "
+        f"user's desktops apart. Falls back to ${ENV_DEVICE_ID}, then to the mngr local host id."
+    ),
+)
 @add_common_options
 @click.pass_context
 def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
@@ -591,7 +611,8 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
     # bounces only the ``mngr observe`` child (see the signal handlers below)
     # so an embedder can refresh our provider set mid-session without
     # dropping the gateway or any reverse tunnels.
-    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary)
+    device = _resolve_device_identity(mngr_ctx, opts.device_id)
+    latchkey = _build_initialized_latchkey(mngr_ctx, opts.latchkey_directory, opts.latchkey_binary, device=device)
 
     # Initialize Sentry for this long-running daemon now that ``setup_command_context``
     # has wired up the loguru sinks and the latchkey paths are known. Off unless opted
@@ -602,7 +623,30 @@ def _forward_command(ctx: click.Context, **kwargs: Any) -> None:
 
     # Run the supervisor body inside a single error-reporting boundary (logs unhandled errors through
     # loguru so they reach Sentry with the daemon's logs attached, then flushes on every exit path).
-    _run_forward_with_error_reporting(lambda: _run_forward_supervisor(mngr_ctx=mngr_ctx, opts=opts, latchkey=latchkey))
+    _run_forward_with_error_reporting(
+        lambda: _run_forward_supervisor(mngr_ctx=mngr_ctx, opts=opts, latchkey=latchkey, device=device)
+    )
+
+
+def _resolve_device_identity(mngr_ctx: MngrContext, cli_device_id: str | None) -> DesktopDeviceIdentity:
+    """Who this computer is to the machines it connects to: CLI flag > env var > the mngr local host id.
+
+    The local host id is what early installs of the desktop app adopted as
+    their device id, so a standalone forward and the app agree on it. The
+    hostname is this computer's own, for a human reading a list of desktops.
+    """
+    env_device_id = os.environ.get(ENV_DEVICE_ID)
+    if cli_device_id is not None:
+        raw_device_id = cli_device_id
+    elif env_device_id:
+        raw_device_id = env_device_id
+    else:
+        raw_device_id = str(get_or_create_local_host_id(mngr_ctx.config.default_host_dir.expanduser()))
+    try:
+        device_id = DesktopDeviceId(raw_device_id)
+    except ValueError as e:
+        raise click.ClickException(f"Invalid device id {raw_device_id!r}: {e}") from e
+    return DesktopDeviceIdentity(device_id=device_id, hostname=socket.gethostname())
 
 
 def _run_forward_with_error_reporting(run_supervisor: Callable[[], None]) -> None:
@@ -631,6 +675,7 @@ def _run_forward_supervisor(
     mngr_ctx: MngrContext,
     opts: _ForwardCliOptions,
     latchkey: Latchkey,
+    device: DesktopDeviceIdentity,
 ) -> None:
     """Run the shared gateway + reverse-tunnel supervisor until shutdown is signalled.
 
@@ -679,6 +724,7 @@ def _run_forward_supervisor(
         tunnel_manager=tunnel_manager,
         concurrency_group=mngr_ctx.concurrency_group,
         mngr_ctx=mngr_ctx,
+        device=device,
     )
     destruction_handler = LatchkeyDestructionHandler(tunnel_manager=tunnel_manager)
 
@@ -927,7 +973,11 @@ CommandHelpMetadata(
    reverse-tunneled onto the loopback of a local agent's host, or the VPS
    gateway, which a remote agent's container reaches over its docker bridge as
    ``host.docker.internal`` and which forwards the extension routes Imbue Studio
-   owns back to the desktop over a separate VPS-loopback tunnel.
+   owns back to the user's desktops over a VPS-loopback tunnel of each
+   desktop's own. Every discovery cycle, this computer announces itself to
+   each such machine under its device id (``--device-id``), with the port
+   its tunnel holds there; a machine lists the desktops it has heard from on
+   the gateway's ``/devices`` route.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics

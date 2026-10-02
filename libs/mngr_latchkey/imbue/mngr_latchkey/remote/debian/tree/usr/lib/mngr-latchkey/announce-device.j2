@@ -1,0 +1,30 @@
+#!/bin/sh
+# Record one of the user's desktops as connected to this machine, or refresh
+# its record. The document (see lk_read_document) carries:
+#
+#   device_id                     names the record's file: letters, digits,
+#                                 "-", "_" and "." only
+#   device_record_json            what the gateway's extension and the curl
+#                                 router read about the desktop: the loopback
+#                                 port its tunnel binds here and the secrets
+#                                 they present on the hop back to it
+#
+# The record's modification time is what says the desktop is still connected,
+# so an unchanged record is written over all the same. The last stdout line
+# says the script ran to its end.
+set -eu
+umask 077
+. '{{ layout.install_dir }}/functions'
+
+lk_require_secrets_dir
+_lk_scratch="$(mktemp -d "$LK_SECRETS_DIR/announce.XXXXXX")"
+trap 'rm -rf "$_lk_scratch"' EXIT
+lk_read_document "$_lk_scratch/doc"
+
+_lk_device_id="$(lk_doc_get device_id)"
+case "$_lk_device_id" in
+  ''|.*|*[!A-Za-z0-9_.-]*) lk_fail "Error: refusing a device id with unexpected characters: $_lk_device_id" ;;
+esac
+lk_install_file "$LK_DEVICES_DIR/$_lk_device_id{{ device_record_suffix }}" "$(lk_doc_file device_record_json)"
+
+printf '%s\n' "$LK_OUTCOME_DONE"

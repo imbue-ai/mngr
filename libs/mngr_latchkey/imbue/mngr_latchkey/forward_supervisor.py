@@ -275,6 +275,16 @@ class LatchkeyForwardSupervisor(MutableModel):
         ),
     )
 
+    device_id: str | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The id the forward announces this computer under to remote hosts' machines, passed as "
+            "``--device-id``. An embedder passes its own device id; ``None`` lets the forward fall back to the "
+            "mngr local host id."
+        ),
+    )
+
     spawn_ownership_timeout_seconds: float = Field(
         default=_SPAWN_OWNERSHIP_TIMEOUT_SECONDS,
         frozen=True,
@@ -346,6 +356,7 @@ class LatchkeyForwardSupervisor(MutableModel):
                         log_path=log_path,
                         extra_env=self.extra_env,
                         cwd=self.cwd,
+                        device_id=self.device_id,
                     )
                 except OSError as e:
                     raise LatchkeyError(f"Failed to spawn 'mngr latchkey forward': {e}") from e

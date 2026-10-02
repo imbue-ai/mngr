@@ -61,6 +61,8 @@ from imbue.mngr_latchkey.additional_services import AdditionalServicesCatalogErr
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
 from imbue.mngr_latchkey.app_name_prefix import inject_app_name_prefix_into_env
 from imbue.mngr_latchkey.custom_services import custom_service_catalog_payload
+from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
+from imbue.mngr_latchkey.devices import build_local_device_env
 from imbue.mngr_latchkey.encryption_key import LATCHKEY_ENCRYPTION_KEY_ENV_VAR
 from imbue.mngr_latchkey.encryption_key import LatchkeyEncryptionKeyPermissionError
 from imbue.mngr_latchkey.encryption_key import inject_encryption_key_into_env
@@ -226,6 +228,7 @@ SERVICES_CATALOG_FILENAME: Final[str] = "services.json"
 # :func:`read_registered_services` reads the latter back.
 CONFIG_FILENAME: Final[str] = "config.json"
 DESKTOP_GATEWAY_EXTENSION_FILENAMES: Final[tuple[str, ...]] = (
+    "device_list.mjs",
     "minds_api_proxy.mjs",
     "permission_requests.mjs",
     "permissions.mjs",
@@ -702,6 +705,9 @@ def _build_gateway_env(
     permissions_config_path: Path,
     listen_password: str,
     extension_permissions_root: Path,
+    # The desktop this gateway runs on, as its ``device_list.mjs`` extension
+    # reports it on ``/devices``; ``None`` leaves that route unconfigured.
+    local_device: DesktopDeviceIdentity | None,
     encryption_key: SecretStr | None = None,
 ) -> dict[str, str]:
     """Build the env dict for the ``latchkey gateway`` subprocess.
@@ -727,6 +733,8 @@ def _build_gateway_env(
     # to add none. Latchkey refuses that unless uninjected forwarding is on.
     # The permission check still runs, and denies whatever no rule allows.
     env["LATCHKEY_PASSTHROUGH_UNKNOWN"] = "1"
+    if local_device is not None:
+        env.update(build_local_device_env(local_device))
     inject_encryption_key_into_env(env, encryption_key)
     inject_app_name_prefix_into_env(env)
     return env
@@ -1030,6 +1038,15 @@ class Latchkey(MutableModel):
     """
 
     latchkey_binary: str = Field(default=LATCHKEY_BINARY, frozen=True, description="Path to Latchkey binary")
+    device: DesktopDeviceIdentity | None = Field(
+        default=None,
+        frozen=True,
+        description=(
+            "The desktop this computer is to the machines it connects to, which the shared gateway's "
+            "``device_list.mjs`` extension reports on ``/devices``. Only a ``Latchkey`` that spawns the gateway "
+            "needs one; ``None`` leaves that route answering that no device is configured."
+        ),
+    )
     listen_host: str = Field(
         default=_DEFAULT_LISTEN_HOST,
         frozen=True,
@@ -2188,6 +2205,7 @@ class Latchkey(MutableModel):
             permissions_config_path=default_perms,
             listen_password=password,
             extension_permissions_root=plugin_dir,
+            local_device=self.device,
             encryption_key=self._load_encryption_key(),
         )
 

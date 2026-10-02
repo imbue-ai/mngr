@@ -362,7 +362,7 @@ describe("PermissionsTab connection panel", () => {
   it("draws no desktop egress row when the server says it is not supported", async () => {
     const { root } = await render(permissionsView());
     expect(withAttr(root, "data-perm-desktop-egress")).toHaveLength(0);
-    expect(allText(root)).not.toContain("Proxy through this desktop");
+    expect(allText(root)).not.toContain("Proxy through my desktop");
     expect(switches(root)).toHaveLength(2);
   });
 
@@ -374,7 +374,7 @@ describe("PermissionsTab connection panel", () => {
     );
     const rows = withAttr(root, "data-perm-desktop-egress");
     expect(rows).toHaveLength(1);
-    expect(allText(rows[0])).toContain("Proxy through this desktop");
+    expect(allText(rows[0])).toContain("Proxy through my desktop");
     expect(allText(rows[0])).toContain(
       "Requests this workspace makes to Slack leave from this computer instead of from the workspace's " +
         "machine. This computer has to be running and connected for them to succeed.",
@@ -386,7 +386,7 @@ describe("PermissionsTab connection panel", () => {
       "slack-chat-write",
     ]);
     expect(attrsOf(controls[0])["aria-checked"]).toBe("true");
-    expect(attrsOf(controls[0])["aria-label"]).toBe("Proxy through this desktop");
+    expect(attrsOf(controls[0])["aria-label"]).toBe("Proxy through my desktop");
   });
 
   it("flips desktop egress through the model with the service name", async () => {

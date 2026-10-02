@@ -12,6 +12,9 @@ case "${1:-}" in
     supervisorctl update >/dev/null 2>&1 || true
     systemctl disable '{{ firewall_unit_name }}' >/dev/null 2>&1 || true
     systemctl daemon-reload >/dev/null 2>&1 || true
+    for _lk_sshd_unit in ssh sshd; do
+      systemctl is-active --quiet "$_lk_sshd_unit" && systemctl reload "$_lk_sshd_unit" >/dev/null 2>&1 || true
+    done
     ;;
   *) ;;
 esac

@@ -41,8 +41,10 @@ the secrets its gateway runs under, the address it binds, its config, the
 policy to seed a fresh machine with, and -- only for a container that needs it
 -- the container to tunnel into. Which secrets those are is decided here, from
 what the read found: the machine's own key and listen password are adopted
-from a machine already running under them, while the pair its forwarding
-extension presents to this computer is always this computer's. A machine
+from a machine already running under them. (What its forwarding extension
+presents to this computer is not provisioning's business: each connected
+desktop announces its own pair, on every discovery cycle, with
+:func:`imbue.mngr_latchkey.remote._machine.announce_device`.) A machine
 holding a store that neither it nor this computer knows the key to has the
 desktop's key tried against that store before the store is given up on; the
 read hands the store over whenever this computer has no key recorded for the
@@ -114,7 +116,6 @@ from imbue.mngr_latchkey.remote.package import CONTAINER_TUNNEL_KEY_FILENAME as 
 from imbue.mngr_latchkey.remote.package import CURL_SHIMS_SHA256_BY_TRIPLE as CURL_SHIMS_SHA256_BY_TRIPLE
 from imbue.mngr_latchkey.remote.package import CURL_SHIMS_VERSION as CURL_SHIMS_VERSION
 from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT as DEFAULT_REMOTE_PACKAGE_LAYOUT
-from imbue.mngr_latchkey.remote.package import DESKTOP_GATEWAY_VPS_PORT as DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote.package import GATEWAY_PROGRAM_NAME as GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.package import LATCHKEY_VERSION as LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote.package import OUTER_PORT as OUTER_PORT
@@ -147,28 +148,6 @@ _INSTALL_TIMEOUT_SECONDS: Final[float] = 300.0
 _SLOW_INSTALL_WARNING_THRESHOLD_SECONDS: Final[float] = 90.0
 
 
-class DesktopGatewaySecrets(FrozenModel):
-    """What the machine's forwarding extension presents to the desktop gateway it proxies to.
-
-    Both belong to the computer that is currently connected, not to the machine:
-    the password is that computer's own gateway listen password, and the JWT is
-    signed by its encryption key and names a path on its disk. So a provisioning
-    pass overwrites both -- which is how an agent created from one of the
-    user's computers keeps reaching the desktop-owned endpoint families after
-    the user moves to another -- while the machine's own key and listen password
-    are adopted rather than replaced.
-
-    They are handed to the extension as files it reads per request, so
-    overwriting them is enough: the gateway does not have to be restarted for
-    the new computer's values to take effect.
-    """
-
-    gateway_password: str = Field(description="The desktop gateway's own listen password.")
-    permissions_override: str = Field(
-        description="A JWT targeting the host's permissions file on the desktop that minted it."
-    )
-
-
 class _MachineKeyDecision(FrozenModel):
     """The key a machine's gateway is to run under, and whether its store had to be given up for it."""
 
@@ -190,7 +169,10 @@ def provision_remote_gateway(
     container_ssh_user: str,
     container_ssh_port: int,
     latchkey: Latchkey,
-    desktop_secrets: DesktopGatewaySecrets,
+    # This computer's own gateway listen password: what the hosts it
+    # creates are given, and so what a machine being provisioned for the first
+    # time is seeded with.
+    desktop_gateway_password: str,
     package_layout: RemotePackageLayout,
 ) -> None:
     """Stand up a VPS-resident latchkey gateway where the agent's container can reach it.
@@ -202,8 +184,8 @@ def provision_remote_gateway(
     it should hold in one update: this machine's own
     encryption key (so it can decrypt the credentials it is given) and its own
     listen password (so it accepts the traffic of the agents on it) -- both
-    adopted from a machine already running under them -- plus ``desktop_secrets``
-    for the forwarding extension's hop to this computer, the VPS's docker
+    adopted from a machine already running under them, the password seeded from
+    ``desktop_gateway_password`` on a machine that has none -- plus the VPS's docker
     bridge address for the gateway to bind (which the container reaches as
     ``host.docker.internal``, so nothing else is wired for it), this plugin's
     config, and the policy to seed a machine that has none. supervisord keeps
@@ -260,9 +242,7 @@ def provision_remote_gateway(
         failure_description=f"read the latchkey state of host {host_id}",
     )
     key_decision = _resolve_machine_encryption_key(latchkey, host_id, state, recorded_key)
-    listen_password = _resolve_machine_gateway_password(
-        latchkey_directory, host_id, state, desktop_secrets.gateway_password
-    )
+    listen_password = _resolve_machine_gateway_password(latchkey_directory, host_id, state, desktop_gateway_password)
     # CLEANUP: drop the tunnel target together with the reverse tunnel; see the
     # comment above ``_does_container_need_reverse_tunnel``.
     tunnel = (
@@ -274,8 +254,6 @@ def provision_remote_gateway(
         is_credential_store_abandoned=key_decision.is_store_abandoned,
         encryption_key=key_decision.key,
         listen_password=listen_password,
-        desktop_gateway_password=desktop_secrets.gateway_password,
-        desktop_permissions_override=desktop_secrets.permissions_override,
         config_json=_merged_remote_config(host, latchkey_directory, state),
         permissions_json=_permissions_to_seed(latchkey_directory, host_id, state),
         gateway_listen_host=listen_host,

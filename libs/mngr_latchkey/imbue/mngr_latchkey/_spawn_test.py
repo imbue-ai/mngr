@@ -243,6 +243,39 @@ def test_spawn_detached_mngr_latchkey_forward_points_at_structured_log_file(
     assert wait_for_process_exit(pid)
 
 
+def test_spawn_detached_mngr_latchkey_forward_passes_the_device_id_only_when_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_binary = _make_argv_reporter_mngr_binary(tmp_path)
+    report_path = tmp_path / "report.json"
+    monkeypatch.setenv("FAKE_MNGR_REPORT", str(report_path))
+    latchkey_directory = tmp_path / "latchkey"
+    plugin_dir = plugin_data_dir(latchkey_directory)
+
+    pid = spawn_detached_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+        device_id="desktop-3382",
+    )
+    assert _wait_for_file_content(report_path)
+    argv = json.loads(report_path.read_text())
+    assert argv[argv.index("--device-id") + 1] == "desktop-3382"
+    assert wait_for_process_exit(pid)
+
+    report_path.unlink()
+    pid_without = spawn_detached_mngr_latchkey_forward(
+        mngr_binary=str(fake_binary),
+        latchkey_binary="latchkey",
+        latchkey_directory=latchkey_directory,
+        log_path=forward_log_path(plugin_dir),
+    )
+    assert _wait_for_file_content(report_path)
+    assert "--device-id" not in json.loads(report_path.read_text())
+    assert wait_for_process_exit(pid_without)
+
+
 def test_spawn_writes_timestamped_marker_above_child_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The raw capture opens with a marker dating the run that follows it.
 

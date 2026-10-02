@@ -95,7 +95,7 @@ const catalogFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: 
 const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";
 const CONNECTOR_TOGGLE_BLOCKED_TITLE = "Connect this account before granting permissions.";
-const DESKTOP_EGRESS_LABEL = "Proxy through this desktop";
+const DESKTOP_EGRESS_LABEL = "Proxy through my desktop";
 /** Identifies the desktop egress switch among a panel's permission switches. */
 const DESKTOP_EGRESS_SWITCH_ID = "desktop-egress";
 /** Why every other control is inert while one change is being applied. */

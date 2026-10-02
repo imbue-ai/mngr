@@ -349,6 +349,9 @@ def run(
         # never starts. A dead producer means no discovery snapshots, which the
         # discovery-health watchdog escalates to a terminal BLOCKED takeover.
         cwd=Path.home(),
+        # What this computer announces itself as to each remote workspace's
+        # machine, so a workspace can tell the user's desktops apart.
+        device_id=str(device_id),
         extra_env={
             MINDS_API_PROXY_URL_ENV_VAR: f"http://127.0.0.1:{port}",
             MINDS_API_PROXY_KEY_ENV_VAR: minds_api_key,

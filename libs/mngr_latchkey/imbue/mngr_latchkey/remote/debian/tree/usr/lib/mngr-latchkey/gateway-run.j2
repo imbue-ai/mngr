@@ -5,11 +5,13 @@
 # tracks the gateway's own PID and no secret ever appears in the supervisord
 # config or a process listing.
 #
-# The desktop-owned pair is handed over as file paths: the forwarding extension
-# reads them on every request it proxies, so a provisioning pass from another
-# of the user's computers takes effect without a restart. Their absence is not
-# a launch failure either -- the extension answers the desktop-owned routes
-# with a 503 saying so, while third-party calls keep working.
+# The desktops connected to this machine are handed over as the directory their
+# records live in: the forwarding extension reads it on every request it
+# proxies, and the curl router on every request it routes out through a
+# desktop, so a desktop announcing itself takes effect without a restart, and a
+# machine with no connected desktop is not a launch failure either -- the
+# extension answers the desktop-owned routes with a 503 saying so, while
+# third-party calls keep working.
 set -eu
 . '{{ layout.install_dir }}/functions'
 
@@ -26,9 +28,8 @@ LATCHKEY_ENCRYPTION_KEY="$(lk_secret_value "$LK_ENCRYPTION_KEY_FILE")"
 LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")"
 export LATCHKEY_ENCRYPTION_KEY LATCHKEY_GATEWAY_LISTEN_PASSWORD
 export LATCHKEY_DIRECTORY="$LK_LATCHKEY_DIR"
-export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE="$LK_DESKTOP_PASSWORD_FILE"
-export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE="$LK_DESKTOP_OVERRIDE_FILE"
-export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL='http://127.0.0.1:{{ desktop_gateway_vps_port }}'
+export {{ devices_dir_env_var }}="$LK_DEVICES_DIR"
+export {{ device_announcement_interval_env_var }}={{ device_announcement_interval_seconds }}
 # The gateway binds the machine's docker bridge address only (never a public
 # interface): the agent's container reaches it there by docker's name for its
 # host, and the reverse tunnel into a container that predates that route

@@ -21,6 +21,7 @@ from typing import Final
 from pydantic import JsonValue
 
 from imbue.mngr_latchkey.additional_services import additional_service_schemas
+from imbue.mngr_latchkey.devices import DEVICES_ROUTE
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 
 # Detent schema names and host string for the gateway-self baseline that
@@ -32,6 +33,10 @@ SCOPE_LATCHKEY_SELF: Final[str] = "latchkey-self"
 _PERM_CREATE_PERMISSION_REQUEST: Final[str] = "latchkey-self-create-permission-request"
 _PERM_READ_SELF_PERMISSIONS: Final[str] = "latchkey-self-read-self-permissions"
 _PERM_READ_AVAILABLE_PERMISSIONS: Final[str] = "latchkey-self-read-available-permissions"
+# The list of the user's desktops the gateway knows (connected or not), which
+# is how an agent learns which desktop to address a desktop-owned request to.
+# Not agent-scoped, and it carries nothing but device ids and hostnames.
+_PERM_READ_DEVICES: Final[str] = "latchkey-self-read-devices"
 
 # Regex matching ``/permissions/available/<service_name>`` where the
 # service name segment is one or more lowercase letters, digits, hyphens
@@ -133,6 +138,7 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
                 _PERM_CREATE_PERMISSION_REQUEST,
                 _PERM_READ_SELF_PERMISSIONS,
                 _PERM_READ_AVAILABLE_PERMISSIONS,
+                _PERM_READ_DEVICES,
                 # Requests that made it through the first rule (= not unauthorized agents) can now access the agent-scoped Minds API endpoint.
                 _PERM_MINDS_API_PROXY_PER_AGENT,
                 # Every agent may read the (non-agent-scoped) API schema document.
@@ -214,6 +220,13 @@ AGENT_BASELINE_PERMISSIONS: Final[LatchkeyPermissionsConfig] = LatchkeyPermissio
                     "type": "string",
                     "pattern": _AVAILABLE_PERMISSIONS_PATH_PATTERN,
                 },
+            },
+            "required": ["method", "path"],
+        },
+        _PERM_READ_DEVICES: {
+            "properties": {
+                "method": {"const": "GET"},
+                "path": {"const": DEVICES_ROUTE},
             },
             "required": ["method", "path"],
         },

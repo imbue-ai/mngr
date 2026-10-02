@@ -30,7 +30,11 @@ created before containers carried the mapping) is pointed at
 gateway.
 
 `mngr latchkey forward` spawns the shared gateway eagerly on startup
-and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). Any in-flight
+and stops it on `SIGINT`/`SIGTERM` (coupled lifetime). It announces this
+computer to every remote host's machine under a device id (`--device-id`, or
+`MNGR_LATCHKEY_DEVICE_ID`, falling back to the mngr local host id; an embedder
+such as the desktop app passes its own device id), which is how a workspace
+tells the user's desktops apart (see [Desktops](#desktops)). Any in-flight
 agents lose their gateway endpoint until the next `mngr latchkey
 forward` is started; the per-host permissions files survive across
 restarts.
@@ -240,14 +244,13 @@ A request to a routed service takes these steps:
 3. The machine's gateway runs curl through the curl router
    (`LATCHKEY_CURL`). The router looks up the matched service in the rules
    file, finds that it is routed, removes the `X-Latchkey-Matched-Service`
-   header, and sends the request to the desktop gateway over the
-   desktop-to-VPS reverse tunnel, with a header asking the desktop gateway to
-   inject no credentials. It authenticates with the connected computer's
-   gateway password and that computer's permissions-override JWT for this
-   host, read on every request from the two files provisioning writes for the
-   forwarding extension
-   (`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE` and
-   `LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE`).
+   header, and sends the request to the most recently announced desktop's
+   gateway over that desktop's reverse tunnel, with a header asking the
+   desktop gateway to inject no credentials. It picks the desktop the way the
+   forwarding extension does (see [Desktops](#desktops)), from the same
+   records (`LATCHKEY_EXTENSION_DEVICES_DIR`), and authenticates with the
+   gateway password and the permissions-override JWT for this host that the
+   record carries.
 4. The desktop gateway runs its own permission check, then makes the request
    to the third party from the user's computer.
 
@@ -292,17 +295,19 @@ gateway:
   script that exports the variable also creates the file.
 - The router reads the file on every request, so an edit takes effect without
   restarting the gateway.
-- The values are booleans rather than device ids. A machine can reach only one
-  desktop gateway, because the reverse tunnel binds one port on the VPS, so
-  there is no second desktop to choose. The router treats any truthy JSON
-  value as on, in the JavaScript sense: an empty list or object is on.
+- The values are booleans rather than device ids. The router sends every
+  routed request to the most recently announced desktop (see
+  [Desktops](#desktops)); which desktop that is is not a per-service choice.
+  The router treats any truthy JSON value as on, in the JavaScript sense: an
+  empty list or object is on.
 
 This needs latchkey 3.15.0 or later, which added `LATCHKEY_DIAGNOSTIC_HEADERS`,
-and latchkey-curl-shims v0.4.0 or later, which reads service-keyed rules. Both
-are what the install pins. With an older latchkey nothing is routed, because it
-ignores the variable and so never names the service. With an older router
-nothing is routed either: it looks for a key that the request URL starts with,
-and no URL starts with a service name.
+and latchkey-curl-shims v0.5.0 or later, which reads service-keyed rules and
+picks the desktop from the device records. Both are what the install pins. With an
+older latchkey nothing is routed, because it ignores the variable and so never
+names the service. With an older router nothing is routed either: it expects a
+fixed desktop URL and a secret pair in two files, none of which the machine
+provides anymore.
 
 This computer keeps a copy of the file at
 `<latchkey_directory>/mngr_latchkey/hosts/<host_id>/proxyRules.json`, handled
@@ -406,6 +411,7 @@ DEBIAN/control, postinst, prerm, postrm      the package, and what installing it
 usr/bin/mngr-latchkey                        the one command the desktop drives the machine through
 usr/lib/mngr-latchkey/read-state             "mngr-latchkey read-state": assemble what the machine holds
 usr/lib/mngr-latchkey/apply-state            "mngr-latchkey apply-state": make the machine match a document
+usr/lib/mngr-latchkey/announce-device        "mngr-latchkey announce-device": record a desktop as connected
 usr/lib/mngr-latchkey/gateway-run            what supervisord runs as latchkey-gateway
 usr/lib/mngr-latchkey/tunnel-run             what supervisord runs as latchkey-tunnel (see below)
 usr/lib/mngr-latchkey/functions              sourced by all of the above
@@ -441,7 +447,7 @@ set up, and registers the supervisord programs. The package is installed before 
 daemon is provisioned, for the same reason. apt is never run from a maintainer
 script (dpkg holds its lock), which is why the bootstrap exists.
 
-Every exchange with a provisioned machine afterwards is one of the two
+Every exchange with a provisioned machine afterwards is one of the three
 commands, each a single remote command with a document on its stdin
 (`<key> <base64>` lines in a quoted heredoc: data the shell never interprets,
 and nothing from it reaches the `argv` of `mngr-latchkey`; of the `latchkey`
@@ -460,14 +466,16 @@ invocations its scripts make, only the service and account names travel in
 - `apply-state` applies whichever entries the document carries, in a fixed
   order under one `set -e`: the machine's own key and listen password
   (adopted, refused if the machine already runs under different ones), the
-  desktop-owned pair (replaced), the config, a credential bundle to merge or an
-  account to clear, the desktop egress rules, the policy, the address the
-  gateway binds (`gateway.conf`
+  config, a credential bundle to merge or an account to clear, the desktop
+  egress rules, the policy, the address the gateway binds (`gateway.conf`
   under `~/.latchkey`), the container to tunnel into, and a gateway restart.
   Whatever the document carries, it also refreshes the gateway's extension
   from the package's copy, so a restart loads the installed package's version.
   A machine that lost its key to a reboot is handed it back inside the same
   document, so that costs no extra round trip.
+- `announce-device` records the desktop that sent it as connected to the
+  machine (see [Desktops](#desktops)): its record, named by its device id,
+  lands under the RAM-backed `devices/` directory.
 
 The gateway binds the VPS's docker bridge address, which the agent's container
 reaches as `http://host.docker.internal:1989` through the `--add-host` mapping
@@ -489,6 +497,7 @@ clients of it. To look at a machine by hand:
 ```sh
 dpkg -l mngr-latchkey
 mngr-latchkey read-state </dev/null
+ls -l /run/mngr-latchkey/devices/
 supervisorctl status latchkey-gateway latchkey-tunnel
 tail /var/log/mngr-latchkey/gateway.log
 ```
@@ -848,48 +857,117 @@ drops any other new connection arriving from the docker bridge, so those two
 ports are all the workspace can reach on its VPS (not its sshd, for one).
 Third-party requests terminate there so the VPS can inject the credentials its
 own store holds. The VPS gateway loads one dedicated `desktop_gateway_proxy.mjs`
-extension for the endpoint families whose state remains on the user's computer:
-`/permissions`, `/permission-requests`, and `/minds-api-proxy` (including all
-subpaths). It forwards those requests to the desktop gateway over a
-desktop-to-VPS reverse tunnel, authenticating that hop with the desktop's own
-gateway password and a dedicated desktop-target permissions JWT -- both of which
-*replace* whatever the caller sent, since the caller's password authenticates it
-to the VPS gateway and its override would let it choose the policy the desktop
-evaluates it against. Native VPS requests carry no override and are authorized
-by the machine's own `~/.latchkey/permissions.json` (seeded at provisioning,
-then rewritten by the full permission snapshot the desktop pushes on every
-edit).
-
-Those two desktop-owned secrets are handed to the extension as *paths* into the
-machine's tmpfs secrets directory (`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE`,
-`LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PERMISSIONS_OVERRIDE_FILE`), and it reads
-both afresh on every request it proxies. Both belong to whichever of the user's
-computers is currently on the other end of the tunnel -- the password is that
-gateway's own, and the JWT is signed by that computer's encryption key and names
-a path on its disk -- so both change when the user moves to another computer,
-while the machine (and the workspace it serves) keeps running. Every
-provisioning pass overwrites the files, and the per-request read is what makes
-the new computer's values take effect without restarting the VPS gateway. It
-also means the machine's *own* listen password is a distinct secret that
-provisioning adopts rather than rewrites, so a new computer never locks the
-workspaces out of their own gateway (see [Machine stores](#machine-stores)).
-When neither file is there -- a rebooted machine awaiting its next provisioning
-pass -- the desktop-owned routes answer HTTP 503 saying so, while third-party
-calls, which need neither secret, keep working.
-
-One computer at a time is assumed. Two of the user's computers running at once
-contend for both the desktop-to-VPS tunnel (whose VPS port only one can bind)
-and these files (which the last provisioning pass wins), so the desktop-owned
-routes can end up presenting one computer's secrets to the other's gateway and
-failing with 401 until the computer holding the tunnel provisions again.
+extension for the endpoint families whose state remains on the user's
+computers: `/permissions`, `/permission-requests`, and `/minds-api-proxy`
+(including all subpaths), plus `/devices`. It forwards those requests to a
+desktop gateway over that desktop's own reverse tunnel, authenticating the hop
+with the desktop's own gateway password and a desktop-target permissions JWT
+it minted for this host -- both of which *replace* whatever the caller sent,
+since the caller's password authenticates it to the VPS gateway and its
+override would let it choose the policy the desktop evaluates it against.
+Native VPS requests carry no override and are authorized by the machine's own
+`~/.latchkey/permissions.json` (seeded at provisioning, then rewritten by the
+full permission snapshot the desktop pushes on every edit). Which desktop a
+request goes to is described under [Desktops](#desktops).
 
 The workspace therefore always has one gateway URL and one agent-side skill.
 If the user's computer is offline, third-party calls through the VPS gateway
 continue to work, while desktop-owned extension routes fail with a clear HTTP
-502 response. That includes calls carrying an *expiring* credential -- an OAuth
-connection or Zoom: the store the VPS gateway runs on is the machine's own, so
-it renews the tokens in it itself rather than waiting for the desktop to (see
+503 (no desktop connected) or 502 (a desktop that stopped answering) response.
+That includes calls carrying an *expiring* credential -- an OAuth connection or
+Zoom: the store the VPS gateway runs on is the machine's own, so it renews the
+tokens in it itself rather than waiting for the desktop to (see
 [Machine stores](#machine-stores)).
+
+### Desktops
+
+Every one of the user's computers running `mngr latchkey forward` is a
+*desktop* to the machines it connects to, and each keeps a tunnel of its own to
+each of them, so two desktops running at once never contend for one. On every
+discovery cycle the forward supervisor asks the machine's sshd for a loopback
+port of this desktop's own (`setup_reverse_tunnel` with a dynamic remote port),
+and announces itself with `mngr-latchkey announce-device`: one record per
+desktop under the RAM-backed `/run/mngr-latchkey/devices/`, named
+`<device id>.json` and carrying
+
+```json
+{
+  "device_id": "host-3f9c...",
+  "hostname": "laptop.local",
+  "port": 41988,
+  "gateway_password": "<this desktop gateway's listen password>",
+  "permissions_override": "<a JWT naming this host's permissions file on that desktop>"
+}
+```
+
+(`imbue.mngr_latchkey.devices.DeviceRecord` is the one owner of that shape).
+The record's modification time says when the desktop was last heard from, and
+the extension reports it rather than judging it: `/devices` gives each
+desktop's `last_seen_at` beside the interval a connected desktop refreshes its
+record at (`DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS`, the discovery cycle), so a
+caller can read a record's age for itself, and a request goes to the desktop
+it names, or to the most recently announced one, whatever that record's age.
+What retires a desktop that went to sleep, offline or quit is its tunnel, not
+its record: the package ships an sshd drop-in (`ClientAliveInterval 30`,
+`ClientAliveCountMax 3`) so the machine's sshd drops a session that stops
+answering probes within 90 seconds, and the forwarded port with it, after
+which a request for that desktop is refused at once (a 502 naming the desktop)
+instead of hanging on a channel that never opens. Since every connected
+desktop keeps announcing, the most recently announced one is a live one
+whenever any desktop is connected. The extension reads the directory on every
+request, so a desktop arriving or leaving takes effect without a gateway
+restart, and a repaired tunnel's new port reaches the machine with the next
+announcement. The records live in RAM beside the machine's own secrets because
+each carries that desktop's; a reboot wipes them together, and the next
+announcement from a connected desktop recreates its record. The device id is
+the one the desktop app identifies this install by; a standalone forward uses
+the mngr local host id, which the earliest installs of the desktop app adopted
+as their device id.
+
+The extension exposes the desktops it knows and lets a caller pick among them:
+
+* `GET /devices` answers `{"devices": [{"device_id", "hostname",
+  "last_seen_at"}, ...], "announcement_interval_seconds": 30}`, most recently
+  seen first. It is granted to every agent by the baseline
+  (`latchkey-self-read-devices`), so a workspace can learn which desktops
+  exist before it addresses one.
+* An `X-Latchkey-Desktop` header on a `/permissions`, `/permission-requests`
+  or `/minds-api-proxy` request names where it goes:
+  * absent: the most recently announced desktop, which is what every
+    workspace built before the header did (503 when none has ever announced
+    itself);
+  * one device id: that desktop (503 for one the gateway does not know);
+  * `*`: every desktop the gateway knows, or a comma-separated list of device
+    ids: each named desktop the gateway knows (the others are ignored). When
+    that comes down to no desktop, the answer is 503, as for a request without
+    the header when no desktop has announced itself. When it comes down to
+    exactly one desktop, the request is forwarded to it and
+    its response relayed as is, streaming included. Otherwise the request goes
+    to every target (the body read whole first, since it is sent once per
+    desktop) and the answer is `200` with the responses side by side:
+    `{"responses": [{"device_id", "hostname", "status", "content_type",
+    "body"}, ...]}`, where a desktop
+    that could not be reached contributes an entry carrying an `error` (and
+    the status it would have answered alone) instead of a body. Such an
+    aggregated answer, and only it, carries the response header
+    `X-Latchkey-Multiple-Desktops-Matched: true`, so a caller can tell it from
+    a single desktop's response without inspecting the body. A streaming
+    request (`?follow=true`) is only ever forwarded to a single desktop.
+
+The desktop gateway does not load this extension: it serves the desktop-owned
+routes itself and ignores the header, and a small `device_list.mjs` extension
+answers `/devices` there with the desktop it runs on as the one device
+(`LATCHKEY_EXTENSION_LOCAL_DEVICE_ID` and `..._HOSTNAME`, set by the forward
+supervisor from its `--device-id` and the hostname). Since a machine that
+resolves the header to one desktop answers with that desktop's own response,
+a workspace asks about desktops and addresses them the same way whether its
+gateway runs on a machine or on the desktop.
+
+Desktop egress reads the same records: the curl router sends a routed request
+to the most recently announced desktop, over that desktop's tunnel and with
+the pair its record carries, exactly as a request without the header is
+forwarded. It never takes the header, so it cannot be pointed at a particular
+desktop yet.
 
 ### `permissions` extension
 

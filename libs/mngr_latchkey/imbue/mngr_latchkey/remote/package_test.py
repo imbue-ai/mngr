@@ -12,6 +12,10 @@ from imbue.mngr_latchkey.core import GATEWAY_MAX_BODY_SIZE_BYTES
 from imbue.mngr_latchkey.core import LATCHKEY_MIN_VERSION
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
+from imbue.mngr_latchkey.devices import DEVICES_DIR_ENV_VAR
+from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
+from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR
+from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_FIREWALL_UNIT_NAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
 from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
@@ -22,7 +26,6 @@ from imbue.mngr_latchkey.remote.mock_outer_host_test import rooted_layout
 from imbue.mngr_latchkey.remote.package import CURL_SHIMS_SHA256_BY_TRIPLE
 from imbue.mngr_latchkey.remote.package import CURL_SHIMS_VERSION
 from imbue.mngr_latchkey.remote.package import DEFAULT_REMOTE_PACKAGE_LAYOUT
-from imbue.mngr_latchkey.remote.package import DESKTOP_GATEWAY_VPS_PORT
 from imbue.mngr_latchkey.remote.package import GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.package import LATCHKEY_VERSION
 from imbue.mngr_latchkey.remote.package import MINIMUM_NODE_MAJOR_VERSION
@@ -30,6 +33,7 @@ from imbue.mngr_latchkey.remote.package import OUTER_PORT
 from imbue.mngr_latchkey.remote.package import PACKAGE_NAME
 from imbue.mngr_latchkey.remote.package import RemotePackageArtifact
 from imbue.mngr_latchkey.remote.package import RemotePackageLayout
+from imbue.mngr_latchkey.remote.package import SSHD_DROP_IN_FILENAME
 from imbue.mngr_latchkey.remote.package import TUNNEL_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.package import _read_package_sources
 from imbue.mngr_latchkey.remote.package import _render
@@ -92,9 +96,8 @@ def test_minimum_version_is_not_newer_than_the_version_we_install() -> None:
     )
 
 
-def test_workspace_and_vps_gateway_ports_are_consistent() -> None:
+def test_the_vps_gateway_binds_the_port_the_workspace_expects() -> None:
     assert OUTER_PORT == AGENT_SIDE_LATCHKEY_PORT
-    assert DESKTOP_GATEWAY_VPS_PORT != OUTER_PORT
 
 
 # The archive.
@@ -144,10 +147,12 @@ def test_the_package_lays_its_files_out_where_the_scripts_expect_them() -> None:
 
     assert {name for name in entries if entries[name].isfile()} == {
         "./etc/nftables.d/mngr-bridge-services.nft",
+        f"./etc/ssh/sshd_config.d/{SSHD_DROP_IN_FILENAME}",
         "./etc/supervisor/conf.d/latchkey-gateway.conf",
         "./etc/supervisor/conf.d/latchkey-tunnel.conf",
         "./etc/systemd/system/mngr-bridge-services-firewall.service",
         "./usr/bin/mngr-latchkey",
+        "./usr/lib/mngr-latchkey/announce-device",
         "./usr/lib/mngr-latchkey/apply-state",
         "./usr/lib/mngr-latchkey/extensions/desktop_gateway_proxy.mjs",
         "./usr/lib/mngr-latchkey/functions",
@@ -175,7 +180,7 @@ def test_the_package_carries_the_bundled_forwarding_extension(tmp_path: Path) ->
     shipped = (root / "usr/lib/mngr-latchkey/extensions" / REMOTE_GATEWAY_EXTENSION_FILENAME).read_text()
 
     assert shipped == bundled_gateway_extension_content(REMOTE_GATEWAY_EXTENSION_FILENAME)
-    assert "Desktop latchkey gateway is unreachable" in shipped
+    assert "X-Latchkey-Desktop" in shipped
 
 
 def test_every_script_is_well_formed_posix_shell(tmp_path: Path) -> None:
@@ -323,6 +328,22 @@ def test_postinst_installs_the_curl_shims_version_gated(tmp_path: Path) -> None:
     assert f'_lk_curl_want="{CURL_SHIMS_VERSION} ${{_lk_triple}}"' in postinst
 
 
+def test_the_package_makes_sshd_retire_a_dead_desktops_tunnel_within_ninety_seconds(tmp_path: Path) -> None:
+    """A sleeping desktop's forwarded port must go away on its own, since nothing else refuses requests for it."""
+    _, root = _unpacked(tmp_path)
+
+    drop_in = _code_lines((root / f"etc/ssh/sshd_config.d/{SSHD_DROP_IN_FILENAME}").read_text())
+    postinst = _code_lines((root / "DEBIAN/postinst").read_text())
+    postrm = _code_lines((root / "DEBIAN/postrm").read_text())
+
+    assert drop_in == "ClientAliveInterval 30\nClientAliveCountMax 3"
+    # A running sshd re-reads its configuration, but only one that accepts it:
+    # reloading a rejected configuration is what locks a machine out at boot.
+    assert postinst.index("if ! sshd -t; then") < postinst.index('systemctl reload "$_lk_sshd_unit"')
+    assert 'if systemctl is-active --quiet "$_lk_sshd_unit"; then' in postinst
+    assert 'systemctl reload "$_lk_sshd_unit"' in postrm
+
+
 def test_the_package_fences_the_bridge_bound_ports_onto_the_docker_bridge(tmp_path: Path) -> None:
     """The nftables policy and the oneshot that loads it at boot ship in the package; postinst loads it first."""
     _, root = _unpacked(tmp_path)
@@ -422,19 +443,22 @@ def test_the_gateway_wrapper_reads_its_secrets_from_files_and_execs_the_gateway(
     assert "export LATCHKEY_DISABLE_COUNTING=1" in run_script
     # The machine renews its own tokens: the store it runs on is its own.
     assert "LATCHKEY_DISABLE_CREDENTIALS_REFRESH" not in run_script
-    assert f"export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_URL='http://127.0.0.1:{DESKTOP_GATEWAY_VPS_PORT}'" in run_script
     # exec so supervisord tracks the gateway PID directly, with the same
     # body-size limit the desktop-side gateway uses.
     assert f"exec latchkey gateway --max-body-size {GATEWAY_MAX_BODY_SIZE_BYTES}" in run_script
     # The machine's own secrets are read from their 0600 files into the
-    # environment; the desktop-owned pair is handed over as file *paths*, read
-    # per request, so another computer's pass takes effect without a restart.
+    # environment; the connected desktops are handed over as the directory
+    # their records live in, read per request, so a desktop announcing itself
+    # takes effect without a restart.
     assert 'LATCHKEY_ENCRYPTION_KEY="$(lk_secret_value "$LK_ENCRYPTION_KEY_FILE")"' in run_script
     assert 'LATCHKEY_GATEWAY_LISTEN_PASSWORD="$(lk_secret_value "$LK_LISTEN_PASSWORD_FILE")"' in run_script
-    assert 'export LATCHKEY_EXTENSION_DESKTOP_GATEWAY_PASSWORD_FILE="$LK_DESKTOP_PASSWORD_FILE"' in run_script
-    assert 'LK_DESKTOP_PASSWORD_FILE="$LK_SECRETS_DIR/desktop_gateway_password"' in functions
-    assert 'LK_DESKTOP_OVERRIDE_FILE="$LK_SECRETS_DIR/desktop_permissions_override"' in functions
+    assert f'export {DEVICES_DIR_ENV_VAR}="$LK_DEVICES_DIR"' in run_script
+    assert f"export {DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR}={DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS}\n" in run_script
+    assert f'LK_DEVICES_DIR="$LK_SECRETS_DIR/{DEVICES_DIR_NAME}"' in functions
     assert "LK_SECRETS_DIR='/run/mngr-latchkey'" in functions
+    # The curl router reads the same records; nothing else names a desktop.
+    assert "LATCHKEY_EXTENSION_DESKTOP_GATEWAY" not in run_script
+    assert "LK_DESKTOP_PASSWORD_FILE" not in functions
     # Routes latchkey through the curl router, unconditionally.
     assert "export LATCHKEY_CURL='/usr/local/bin/latchkey-curl-router'" in run_script
     # The router fails every request when the rules file it is pointed at is
@@ -455,9 +479,9 @@ def test_the_gateway_wrapper_reads_its_secrets_from_files_and_execs_the_gateway(
     # header, and latchkey sends the header only when this variable asks for it.
     assert "export LATCHKEY_DIAGNOSTIC_HEADERS=1\n" in run_script
     # Refuses to launch a keyless gateway when the RAM-backed secrets are gone;
-    # the desktop-owned pair is deliberately not part of that gate.
+    # the connected desktops are deliberately not part of that gate.
     assert "awaiting re-provision" in run_script
-    assert 'LK_DESKTOP_OVERRIDE_FILE" ]' not in run_script
+    assert 'LK_DEVICES_DIR" ]' not in run_script
 
 
 def test_the_supervisord_programs_keep_both_processes_up(tmp_path: Path) -> None:
@@ -523,12 +547,12 @@ def test_a_message_with_an_apostrophe_is_quoted_into_the_script(tmp_path: Path) 
     assert DIFFERENT_MACHINE_PASSWORD_MESSAGE.replace("'", "'\"'\"'") in apply_state
 
 
-def test_the_command_dispatches_only_the_two_state_scripts(tmp_path: Path) -> None:
+def test_the_command_dispatches_only_the_three_scripts(tmp_path: Path) -> None:
     _, root = _unpacked(tmp_path)
 
     command = (root / "usr/bin" / REMOTE_COMMAND_NAME).read_text()
 
-    assert "read-state|apply-state)" in command
+    assert "read-state|apply-state|announce-device)" in command
     assert "exec '/usr/lib/mngr-latchkey'/\"$1\"" in command
 
 

@@ -4,11 +4,11 @@
 set -eu
 
 case "${1:-}" in
-  read-state|apply-state)
+  read-state|apply-state|announce-device)
     exec '{{ layout.install_dir }}'/"$1"
     ;;
   *)
-    printf 'usage: %s read-state|apply-state\n' "$0" >&2
+    printf 'usage: %s read-state|apply-state|announce-device\n' "$0" >&2
     exit 2
     ;;
 esac

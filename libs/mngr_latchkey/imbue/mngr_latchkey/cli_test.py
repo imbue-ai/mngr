@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -36,11 +37,14 @@ from imbue.mngr.config.data_types import PluginConfig
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
+from imbue.mngr.providers.local.instance import get_or_create_local_host_id
 from imbue.mngr_latchkey.agent_setup import _extract_agent_id_from_anyof_entry
+from imbue.mngr_latchkey.cli import ENV_DEVICE_ID
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_BINARY
 from imbue.mngr_latchkey.cli import ENV_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _DEFAULT_LATCHKEY_DIRECTORY
 from imbue.mngr_latchkey.cli import _ignore_sighup_until_handlers_installed
+from imbue.mngr_latchkey.cli import _resolve_device_identity
 from imbue.mngr_latchkey.cli import _resolve_latchkey_settings
 from imbue.mngr_latchkey.cli import _run_forward_with_error_reporting
 from imbue.mngr_latchkey.cli import _run_sighup_bounce_watcher
@@ -924,3 +928,20 @@ def test_startup_sighup_guard_sets_ignore_disposition() -> None:
         assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
     finally:
         signal.signal(signal.SIGHUP, original_handler)
+
+
+def test_the_forward_device_identity_prefers_the_flag_then_the_env_then_the_local_host_id(
+    temp_mngr_ctx: MngrContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A standalone forward announces itself under the mngr local host id, which early desktop-app installs adopted too."""
+    monkeypatch.delenv(ENV_DEVICE_ID, raising=False)
+
+    from_host_id = _resolve_device_identity(temp_mngr_ctx, None)
+
+    assert from_host_id.device_id == str(get_or_create_local_host_id(temp_mngr_ctx.config.default_host_dir))
+    assert from_host_id.hostname == socket.gethostname()
+    monkeypatch.setenv(ENV_DEVICE_ID, "desktop-from-env")
+    assert _resolve_device_identity(temp_mngr_ctx, None).device_id == "desktop-from-env"
+    assert _resolve_device_identity(temp_mngr_ctx, "desktop-from-flag").device_id == "desktop-from-flag"
+    with pytest.raises(click.ClickException, match="Invalid device id"):
+        _resolve_device_identity(temp_mngr_ctx, "../not-a-file-name")

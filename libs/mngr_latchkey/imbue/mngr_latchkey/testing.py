@@ -5,7 +5,15 @@ are exercised through the tests that import them.
 """
 
 import io
+import json
+import shutil
+import subprocess
 import tarfile
+import urllib.error
+import urllib.request
+from collections.abc import Generator
+from collections.abc import Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlsplit
@@ -354,3 +362,78 @@ def read_deb_control_field(content: bytes, field_name: str) -> str:
         if line.startswith(f"{field_name}: "):
             return line.removeprefix(f"{field_name}: ")
     raise AssertionError(f"no {field_name} field in the control file:\n{control}")
+
+
+def _node_extension_driver_script(extension_path: Path) -> str:
+    # A request the extension leaves alone is answered by a stand-in for the
+    # next extension, so a test can tell a request that passed through from
+    # one that was handled.
+    return f"""
+import http from 'node:http';
+import handler from {json.dumps(extension_path.as_uri())};
+const server = http.createServer((request, response) => {{
+  handler(request, response).then((handled) => {{
+    if (!handled && !response.headersSent) {{
+      response.writeHead(200, {{'Content-Type': 'application/json'}});
+      response.end(JSON.stringify({{served_locally: true, path: request.url}}));
+    }}
+  }});
+}});
+server.listen(0, '127.0.0.1', () => {{
+  process.stdout.write(`PORT=${{server.address().port}}\\n`);
+}});
+process.on('SIGTERM', () => server.close(() => process.exit(0)));
+"""
+
+
+@contextmanager
+def node_extension_gateway(extension_path: Path, env: Mapping[str, str]) -> Generator[str, None, None]:
+    """Serve one gateway extension from a node process with ``env``, yielding its base URL.
+
+    A request the extension does not handle is answered ``{"served_locally": true, "path": ...}``.
+    """
+    node_binary = shutil.which("node")
+    assert node_binary is not None
+    process = subprocess.Popen(
+        [node_binary, "--input-type=module", "-e", _node_extension_driver_script(extension_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", **env},
+    )
+    try:
+        assert process.stdout is not None
+        line = process.stdout.readline().strip()
+        assert line.startswith("PORT="), process.stderr.read() if process.stderr is not None else ""
+        yield f"http://127.0.0.1:{int(line.removeprefix('PORT='))}"
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+
+
+def http_request_with_headers(
+    url: str, method: str = "GET", headers: dict[str, str] | None = None, body: bytes | None = None
+) -> tuple[int, dict[str, str], bytes]:
+    """Send one HTTP request and return its status, lower-cased response headers and body, an error status included."""
+    request = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
+    try:
+        with urllib.request.urlopen(request, timeout=5.0) as response:
+            return (
+                int(response.status),
+                {name.lower(): value for name, value in response.headers.items()},
+                response.read(),
+            )
+    except urllib.error.HTTPError as error:
+        return int(error.code), {name.lower(): value for name, value in error.headers.items()}, error.read()
+
+
+def http_request(
+    url: str, method: str = "GET", headers: dict[str, str] | None = None, body: bytes | None = None
+) -> tuple[int, bytes]:
+    """Send one HTTP request and return its status and body, an error status included."""
+    status, _response_headers, response_body = http_request_with_headers(url, method, headers, body)
+    return status, response_body

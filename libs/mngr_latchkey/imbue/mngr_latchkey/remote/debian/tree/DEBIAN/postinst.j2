@@ -76,13 +76,16 @@ if [ "$(node -p 'require(process.argv[1]).version' "$(npm root -g)/latchkey/pack
   _lk_gateway_needs_restart=1
 fi
 
-# What the ad-hoc provisioning this package replaces left on a machine it set
-# up: the gateway wrapper it wrote beside the store (supervisord runs the
-# package's now), the extension copy it staged, and the secrets a build before
-# the RAM-backed directory kept on disk.
+# What earlier builds left on a machine they set up: the gateway wrapper the
+# ad-hoc provisioning wrote beside the store (supervisord runs the package's
+# now), the extension copy it staged, the secrets a build before the RAM-backed
+# directory kept on disk, and the one desktop's secret pair a build before the
+# per-desktop records kept for the curl router.
 rm -f "$LK_LATCHKEY_DIR/{{ encryption_key_filename }}" \
   "$LK_LATCHKEY_DIR/{{ listen_password_filename }}" \
-  "$LK_LATCHKEY_DIR/{{ desktop_permissions_override_filename }}" \
+  "$LK_LATCHKEY_DIR/desktop_permissions_override" \
+  "$LK_SECRETS_DIR/desktop_gateway_password" \
+  "$LK_SECRETS_DIR/desktop_permissions_override" \
   "$LK_LATCHKEY_DIR/{{ legacy_gateway_run_script_filename }}" \
   "$LK_EXTENSIONS_DIR/{{ extension_filename }}{{ legacy_extension_candidate_suffix }}"
 
@@ -98,6 +101,20 @@ lk_require_secrets_dir
 systemctl daemon-reload
 systemctl enable --now '{{ firewall_unit_name }}'
 systemctl restart '{{ firewall_unit_name }}'
+
+# The keepalive drop-in for the desktops' tunnel sessions is in place; a
+# running sshd is told to re-read its configuration so it applies to sessions
+# from now on (the ones open now, this install's included, are not touched).
+# Checked first: sshd refusing its configuration is what would lock this
+# machine out at the next boot, so it is never reloaded into that.
+if ! sshd -t; then
+  lk_fail "sshd rejects its configuration with the mngr-latchkey drop-in in place; not reloading it"
+fi
+for _lk_sshd_unit in ssh sshd; do
+  if systemctl is-active --quiet "$_lk_sshd_unit"; then
+    systemctl reload "$_lk_sshd_unit"
+  fi
+done
 
 # Register (or re-register) the supervisord programs.
 supervisorctl reread

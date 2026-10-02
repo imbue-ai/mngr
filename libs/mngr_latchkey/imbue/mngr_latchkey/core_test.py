@@ -1,3 +1,4 @@
+import base64
 import errno
 import hashlib
 import json
@@ -60,6 +61,8 @@ from imbue.mngr_latchkey.core import MINDS_OAUTH_REDIRECT_URI_BY_SERVICE
 from imbue.mngr_latchkey.core import _log_gateway_output_line
 from imbue.mngr_latchkey.core import merge_minds_latchkey_config
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.devices import DesktopDeviceIdentity
 from imbue.mngr_latchkey.discovery import LatchkeyDestructionHandler
 from imbue.mngr_latchkey.discovery import LatchkeyDiscoveryHandler
 from imbue.mngr_latchkey.discovery import TRANSIENT_FAILURE_REPORT_THRESHOLD
@@ -68,13 +71,20 @@ from imbue.mngr_latchkey.discovery import _GatewayRoute
 from imbue.mngr_latchkey.discovery import _RemoteWiringStep
 from imbue.mngr_latchkey.discovery import is_transient_remote_wiring_error
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
+from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
+from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
-from imbue.mngr_latchkey.remote.provisioning import DESKTOP_GATEWAY_VPS_PORT
+from imbue.mngr_latchkey.remote.mock_outer_host_test import ScriptedOuter
 from imbue.mngr_latchkey.store import admin_permissions_path
 from imbue.mngr_latchkey.store import default_permissions_path
 from imbue.mngr_latchkey.store import ensure_browser_log_path
 
 _POLL_INTERVAL_SECONDS = 0.05
+
+# Who the handlers under test are to the machines they connect to.
+_DEVICE = DesktopDeviceIdentity(device_id=DesktopDeviceId("desktop-test"), hostname="test-laptop")
+# The port the recording tunnel manager's "machine" assigns a dynamically-requested tunnel.
+_ASSIGNED_DEVICE_PORT = 41988
 
 
 @contextmanager
@@ -421,7 +431,7 @@ def test_start_gateway_drops_bundled_extensions(tmp_path: Path) -> None:
         port = manager.start_gateway(cg)
         assert _wait_for_listening("127.0.0.1", port)
         mjs_files = sorted(p.name for p in extensions_dir.iterdir() if p.suffix == ".mjs")
-        assert mjs_files == ["minds_api_proxy.mjs", "permission_requests.mjs", "permissions.mjs"]
+        assert mjs_files == ["device_list.mjs", "minds_api_proxy.mjs", "permission_requests.mjs", "permissions.mjs"]
         assert not stale_remote_proxy.exists()
         # The destination files must be non-empty -- ``importlib.resources``
         # silently produces empty reads if the wheel does not actually
@@ -1100,6 +1110,7 @@ def test_discovery_handler_spawns_shared_gateway_for_every_provider(
                 tunnel_manager=tunnel_manager,
                 concurrency_group=cg,
                 mngr_ctx=temp_mngr_ctx,
+                device=_DEVICE,
             )
             for provider_name in ("local", "docker", "lima", "vultr", "modal"):
                 # ssh_info=None is fine here -- it keeps the test off the SSH path.
@@ -1140,7 +1151,7 @@ class _RecordingTunnelManager(SSHTunnelManager):
         agent_id: str | None = None,
     ) -> int:
         self._calls.append((ssh_info, local_port, remote_port, agent_id))
-        return remote_port
+        return remote_port if remote_port != 0 else _ASSIGNED_DEVICE_PORT
 
     def remove_reverse_tunnels_for_agent(self, agent_id: str) -> int:
         self._removed_agent_ids.append(agent_id)
@@ -1191,6 +1202,7 @@ def test_discovery_handler_sets_up_reverse_tunnel_when_ssh_info_given(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler(agent_id, host_id, ssh_info, "local", HostState.RUNNING)
 
@@ -1238,6 +1250,7 @@ def test_discovery_handler_skips_reverse_tunnel_when_ssh_info_missing(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler(AgentId(), HostId(), None, "local", HostState.RUNNING)
 
@@ -1262,6 +1275,7 @@ def test_discovery_handler_swallows_gateway_errors(tmp_path: Path, temp_mngr_ctx
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler(AgentId(), HostId(), None, "local", HostState.RUNNING)
     assert not manager.is_gateway_running
@@ -1275,9 +1289,12 @@ _CONTAINER_SSH_INFO = RemoteSSHInfo(user="root", host="192.0.2.1", port=2222, ke
 
 
 class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
-    """Handler stub that records VPS gateway provisioning passes instead of running them."""
+    """Handler stub that records VPS gateway provisioning passes and announcements instead of running them."""
 
     _provisioned: list[tuple[AgentId, HostId]] = PrivateAttr(default_factory=list)
+    # The tunnels each recorded pass was handed, for the announcement it ends with.
+    _provisioning_ports: list[int | None] = PrivateAttr(default_factory=list)
+    _announcements: list[tuple[HostId, int]] = PrivateAttr(default_factory=list)
 
     def _provision_remote_gateway_for_agent(
         self,
@@ -1285,12 +1302,18 @@ class _ProvisionRecordingHandler(LatchkeyDiscoveryHandler):
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
+        device_port: int | None,
     ) -> None:
         del ssh_info, provider_name
         self._provisioned.append((agent_id, host_id))
+        self._provisioning_ports.append(device_port)
         with self._remote_hosts_lock:
             self._provisioned_hosts.add(str(host_id))
         self._record_wiring_step_success(host_id, _RemoteWiringStep.VPS_GATEWAY_PROVISIONING)
+
+    def _announce_device_if_due(self, host_id: HostId, provider_name: str, device_port: int) -> None:
+        del provider_name
+        self._announcements.append((host_id, device_port))
 
 
 class _FixedVpsRouteHandler(_ProvisionRecordingHandler):
@@ -1321,6 +1344,7 @@ def test_discovery_does_not_cache_an_unresolvable_gateway_route(tmp_path: Path, 
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
 
         assert handler._resolve_gateway_route(host_id, "not-a-configured-provider", _CONTAINER_SSH_INFO) is None
@@ -1428,6 +1452,7 @@ def test_discovery_refreshes_a_stale_provider_listing_before_giving_up(
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
             provider=_StaleListingProvider(outer_ssh_info=outer_ssh_info),
         )
 
@@ -1453,6 +1478,7 @@ def test_discovery_caches_the_desktop_route_for_a_provider_without_an_outer_host
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
 
         route = handler._resolve_gateway_route(host_id, "local", _CONTAINER_SSH_INFO)
@@ -1479,6 +1505,7 @@ def test_discovery_warns_once_per_host_and_rearms_after_a_resolution(
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
 
         handler._warn_unresolved_gateway_route(host_id, "not-a-configured-provider")
@@ -1518,6 +1545,7 @@ def test_reload_provider_config_picks_up_a_new_provider_and_drops_what_it_replac
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         # A route resolved against the previous provider set, which caches that
         # set's provider instance against the context it was resolved through.
@@ -1604,6 +1632,7 @@ def _relocatable_handler(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
             provider=provider,
         )
         try:
@@ -1645,7 +1674,7 @@ def test_discovery_follows_a_host_restored_onto_new_coordinates(tmp_path: Path, 
         _wait_for_provisioning_passes(handler, 2)
 
     tag = _instance_tag(agent_id, host_id)
-    assert calls_before_move == [(_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, tag)]
+    assert calls_before_move == [(_VPS_OUTER_SSH_INFO, host_side_port, 0, tag)]
     # Exactly one re-resolution, on fresh provider data.
     assert provider._reset_count == 1
     assert provider._outer_host_open_count == 2
@@ -1653,7 +1682,7 @@ def test_discovery_follows_a_host_restored_onto_new_coordinates(tmp_path: Path, 
     # to the old one is removed by its exact key rather than by agent tag.
     assert tunnel_manager._calls == [
         *calls_before_move,
-        (_MOVED_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, tag),
+        (_MOVED_VPS_OUTER_SSH_INFO, host_side_port, 0, tag),
     ]
     assert (_VPS_OUTER_SSH_INFO, host_side_port) in tunnel_manager._removed_endpoints
     assert tunnel_manager._removed_agent_ids == []
@@ -1681,7 +1710,7 @@ def test_discovery_keeps_the_cached_route_while_the_host_stays_put(tmp_path: Pat
     assert provider._outer_host_open_count == 1
     # The desktop->VPS tunnel is (idempotently) ensured on every cycle, always
     # against the same outer endpoint; nothing is torn down by outer endpoint.
-    assert tunnel_manager._calls == [(_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, tag)] * 2
+    assert tunnel_manager._calls == [(_VPS_OUTER_SSH_INFO, host_side_port, 0, tag)] * 2
     assert (_VPS_OUTER_SSH_INFO, host_side_port) not in tunnel_manager._removed_endpoints
     assert handler._provisioned == [(agent_id, host_id)]
 
@@ -1825,7 +1854,7 @@ def test_a_move_reported_after_an_outer_tunnel_failure_is_still_followed(
     # pass, and the tunnel to the old outer endpoint removed by its exact key.
     assert handler._provisioned == [(agent_id, host_id), (agent_id, host_id)]
     assert (_VPS_OUTER_SSH_INFO, host_side_port) in tunnel_manager._removed_endpoints
-    assert tunnel_manager._calls[-1] == (_MOVED_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, tag)
+    assert tunnel_manager._calls[-1] == (_MOVED_VPS_OUTER_SSH_INFO, host_side_port, 0, tag)
     assert handler._gateway_route_by_host_id[str(host_id)] == _GatewayRoute(
         outer_ssh_info=_MOVED_VPS_OUTER_SSH_INFO,
         container_endpoint=_ContainerEndpoint.from_ssh_info(_MOVED_CONTAINER_SSH_INFO),
@@ -1869,6 +1898,7 @@ def test_discovery_route_resolution_failure_wires_nothing_then_retries(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         host_side_port = manager.start_gateway(cg)
 
@@ -1885,9 +1915,7 @@ def test_discovery_route_resolution_failure_wires_nothing_then_retries(
         assert tunnel_manager._removed_agent_ids == []
         assert tunnel_manager._removed_endpoints == [(agent_ssh_info, host_side_port)]
         # The only tunnel ever opened is the desktop->VPS one, once the route resolved.
-        assert tunnel_manager._calls == [
-            (_VPS_OUTER_SSH_INFO, host_side_port, DESKTOP_GATEWAY_VPS_PORT, _instance_tag(agent_id, host_id))
-        ]
+        assert tunnel_manager._calls == [(_VPS_OUTER_SSH_INFO, host_side_port, 0, _instance_tag(agent_id, host_id))]
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
 
@@ -1909,6 +1937,7 @@ def test_discovery_handler_routes_remote_workspace_only_through_vps_gateway(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.RUNNING)
         host_side_port = manager.start_gateway(cg)
@@ -1916,16 +1945,10 @@ def test_discovery_handler_routes_remote_workspace_only_through_vps_gateway(
         _wait_for_provisioning_passes(handler, 1)
 
         # No desktop->container tunnel is opened. The only desktop tunnel lands
-        # on the VPS loopback where the remote extension can reach it, and is
-        # tagged with the agent id so normal stop/destruction cleanup removes it.
-        assert tunnel_manager._calls == [
-            (
-                _VPS_OUTER_SSH_INFO,
-                host_side_port,
-                DESKTOP_GATEWAY_VPS_PORT,
-                _instance_tag(agent_id, host_id),
-            )
-        ]
+        # on the VPS loopback where the remote extension can reach it, on a
+        # port of this computer's own, and is tagged with the agent id so
+        # normal stop/destruction cleanup removes it.
+        assert tunnel_manager._calls == [(_VPS_OUTER_SSH_INFO, host_side_port, 0, _instance_tag(agent_id, host_id))]
         # Any stale desktop->container tunnel is cleared by endpoint, not by
         # agent tag -- the agent-keyed removal would take the desktop->VPS
         # tunnel above down with it on every discovery cycle.
@@ -1953,6 +1976,7 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_to_vps_tunne
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler(agent_id, host_id, ssh_info, "imbue_cloud", HostState.RUNNING)
 
@@ -1961,6 +1985,156 @@ def test_discovery_handler_dispatches_vps_provisioning_when_desktop_to_vps_tunne
         # The desktop tunnel raised, yet the VPS provisioning was still dispatched.
         assert handler._provisioned == [(agent_id, host_id)]
         manager.stop_gateway()
+
+
+def test_a_vps_cycle_hands_provisioning_the_tunnel_port_and_later_cycles_announce_it(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    """The pass that stands the machine up announces this computer itself; every cycle after refreshes the record.
+
+    The record's age is what the machine reads as whether this computer is
+    still connected, so a provisioned host is announced to on each cycle, with
+    the port this computer's tunnel currently holds.
+    """
+    tunnel_manager = _RecordingTunnelManager()
+    agent_id = AgentId()
+    host_id = HostId()
+    with _relocatable_handler(tmp_path, temp_mngr_ctx, tunnel_manager) as (handler, _provider, host_side_port):
+        handler._run_remote_setup(agent_id, host_id, _CONTAINER_SSH_INFO, "imbue_cloud", host_side_port)
+        _wait_for_provisioning_passes(handler, 1)
+        announcements_before_provisioned = list(handler._announcements)
+        handler._run_remote_setup(agent_id, host_id, _CONTAINER_SSH_INFO, "imbue_cloud", host_side_port)
+
+    assert handler._provisioning_ports == [_ASSIGNED_DEVICE_PORT]
+    assert announcements_before_provisioned == []
+    assert handler._announcements == [(host_id, _ASSIGNED_DEVICE_PORT)]
+
+
+class _AnnouncementRecordingHandler(_StubProviderHandler):
+    """Stub-provider handler that runs the real announcement scheduling and records what it would announce."""
+
+    _announced: list[tuple[HostId, int]] = PrivateAttr(default_factory=list)
+    _announcement_error: BaseException | None = PrivateAttr(default=None)
+
+    def _announce_device_if_due(self, host_id: HostId, provider_name: str, device_port: int) -> None:
+        LatchkeyDiscoveryHandler._announce_device_if_due(self, host_id, provider_name, device_port)
+
+    def _announce_device(self, outer: OuterHostInterface, host_id: HostId, device_port: int) -> None:
+        del outer
+        if self._announcement_error is not None:
+            raise self._announcement_error
+        self._announced.append((host_id, device_port))
+        with self._remote_hosts_lock:
+            self._last_announcement_at_by_host_id[str(host_id)] = time.monotonic()
+
+
+def test_announcements_are_made_once_per_cycle_per_host(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """Every agent on a host runs its own setup each cycle; the host's machine hears from this computer once."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    provider = _StubProvider(outer_ssh_info=_VPS_OUTER_SSH_INFO)
+    host_id = HostId()
+    other_host_id = HostId()
+    port = _ASSIGNED_DEVICE_PORT
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _AnnouncementRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+            provider=provider,
+        )
+        handler._announce_device_if_due(host_id, "imbue_cloud", port)
+        handler._announce_device_if_due(host_id, "imbue_cloud", port)
+        handler._announce_device_if_due(other_host_id, "imbue_cloud", port)
+        announced_within_the_cycle = list(handler._announced)
+        # The next cycle comes around.
+        with handler._remote_hosts_lock:
+            handler._last_announcement_at_by_host_id[str(host_id)] -= 60.0
+        handler._announce_device_if_due(host_id, "imbue_cloud", port)
+
+    assert announced_within_the_cycle == [(host_id, port), (other_host_id, port)]
+    assert handler._announced == [(host_id, port), (other_host_id, port), (host_id, port)]
+    # Each announcement opened the machine once; the coalesced repeat did not.
+    assert provider._outer_host_open_count == 3
+
+
+def test_an_announcement_the_machine_refuses_is_reported_and_retried_next_cycle(
+    tmp_path: Path, temp_mngr_ctx: MngrContext
+) -> None:
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    host_id = HostId()
+    port = _ASSIGNED_DEVICE_PORT
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = _AnnouncementRecordingHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+            provider=_StubProvider(outer_ssh_info=_VPS_OUTER_SSH_INFO),
+        )
+        handler._announcement_error = RemoteGatewayError("Failed to announce: the machine said no")
+        with _captured_log_records() as captured:
+            handler._announce_device_if_due(host_id, "imbue_cloud", port)
+        with handler._remote_hosts_lock:
+            is_announcing = str(host_id) in handler._announcing_hosts
+            last_announced_at = handler._last_announcement_at_by_host_id.get(str(host_id))
+        handler._announcement_error = None
+        handler._announce_device_if_due(host_id, "imbue_cloud", port)
+
+    # A refusal is not transient, so it is an error at once; nothing about it
+    # stops the next cycle from trying again.
+    assert len(_error_messages_mentioning(captured, host_id)) == 1
+    assert not is_announcing
+    assert last_announced_at is None
+    assert handler._announced == [(host_id, port)]
+
+
+def _announcement_document(command: str) -> dict[str, bytes]:
+    first_line, *lines = command.splitlines()
+    assert first_line.startswith(f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}")
+    return {name: base64.b64decode(value) for name, value in (line.split(" ", 1) for line in lines[:-1])}
+
+
+def test_announcing_hands_the_machine_this_computers_record(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
+    """The record names this computer, its tunnel port, and the secrets for the hop back to its gateway."""
+    fake_binary = _make_fake_latchkey_binary(tmp_path)
+    manager = Latchkey(latchkey_directory=tmp_path, latchkey_binary=str(fake_binary))
+    manager.initialize()
+    outer = ScriptedOuter()
+    host_id = HostId()
+    with ConcurrencyGroup(name=f"test-{uuid4().hex}") as cg:
+        handler = LatchkeyDiscoveryHandler(
+            latchkey=manager,
+            tunnel_manager=_RecordingTunnelManager(),
+            concurrency_group=cg,
+            mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
+        )
+        handler._announce_device(cast(OuterHostInterface, outer), host_id, _ASSIGNED_DEVICE_PORT)
+        handler._announce_device(cast(OuterHostInterface, outer), host_id, _ASSIGNED_DEVICE_PORT + 1)
+        with handler._remote_hosts_lock:
+            last_announced_at = handler._last_announcement_at_by_host_id.get(str(host_id))
+
+    first, second = (_announcement_document(command) for command in outer.recorded_commands())
+    first_record = json.loads(first["device_record_json"])
+    second_record = json.loads(second["device_record_json"])
+    assert first["device_id"] == b"desktop-test"
+    assert first_record["device_id"] == "desktop-test"
+    assert first_record["hostname"] == "test-laptop"
+    assert first_record["port"] == _ASSIGNED_DEVICE_PORT
+    assert first_record["gateway_password"] == manager.derive_gateway_password()
+    assert first_record["permissions_override"]
+    assert set(first) == {"device_id", "device_record_json"}
+    # A repaired tunnel's new port travels the same way; the JWT is minted
+    # once per host and reused.
+    assert second_record["port"] == _ASSIGNED_DEVICE_PORT + 1
+    assert second_record["permissions_override"] == first_record["permissions_override"]
+    assert all(entry.is_kept_out_of_logs for entry in outer.recorded)
+    assert last_announced_at is not None
 
 
 def test_discovery_handler_tears_down_tunnel_for_stopped_host(tmp_path: Path, temp_mngr_ctx: MngrContext) -> None:
@@ -1984,6 +2158,7 @@ def test_discovery_handler_tears_down_tunnel_for_stopped_host(tmp_path: Path, te
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler(agent_id, host_id, ssh_info, "local", HostState.STOPPED)
 
@@ -2016,6 +2191,7 @@ def test_stopped_host_skips_provisioning_and_clears_provisioned_marker(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         # The host was provisioned earlier this session, while it was running.
         with handler._remote_hosts_lock:
@@ -2058,6 +2234,7 @@ def test_unauthenticated_host_warns_once_instead_of_skipping_silently(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         # Provisioned earlier this session, back when the key still worked.
         with handler._remote_hosts_lock:
@@ -2106,12 +2283,15 @@ def test_provisioning_coalesces_when_host_pass_already_in_flight(tmp_path: Path,
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         # Simulate a provisioning pass already in flight for this host.
         with handler._remote_hosts_lock:
             handler._provisioning_hosts.add(str(host_id))
 
-        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(AgentId(), host_id, ssh_info, "imbue_cloud")
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
+            AgentId(), host_id, ssh_info, "imbue_cloud", None
+        )
 
         # Coalesced: no second pass was dispatched, and the in-flight guard is
         # left intact for the pass that is already running.
@@ -2146,12 +2326,15 @@ def test_provisioning_skips_host_already_provisioned_this_session(tmp_path: Path
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         # Mark the host as already provisioned this session.
         with handler._remote_hosts_lock:
             handler._provisioned_hosts.add(str(host_id))
 
-        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(AgentId(), host_id, ssh_info, "imbue_cloud")
+        dispatched = handler._maybe_dispatch_remote_gateway_provisioning(
+            AgentId(), host_id, ssh_info, "imbue_cloud", None
+        )
 
         # Skipped: no new pass dispatched and nothing marked in flight.
         assert dispatched is False
@@ -2244,6 +2427,7 @@ def test_transient_tunnel_failures_report_an_error_only_once_the_streak_reaches_
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         with _captured_log_records() as captured:
             for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
@@ -2313,6 +2497,7 @@ def test_an_unreachable_outer_host_is_reported_only_once_the_streak_reaches_the_
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         with _captured_log_records() as captured:
             for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
@@ -2348,6 +2533,7 @@ def test_non_transient_tunnel_failure_is_reported_as_an_error_at_once(
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         with _captured_log_records() as captured:
             handler._setup_desktop_gateway_reachability(agent_id, host_id, ssh_info, 41989)
@@ -2381,6 +2567,7 @@ def test_stopping_a_host_forgets_its_transient_failure_streaks(tmp_path: Path, t
             tunnel_manager=tunnel_manager,
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
             handler._setup_desktop_gateway_reachability_on_vps(
@@ -2413,10 +2600,11 @@ class _ProvisionFailureHandler(_FixedVpsRouteHandler):
         host_id: HostId,
         ssh_info: RemoteSSHInfo,
         provider_name: str,
+        device_port: int | None,
     ) -> None:
         if self._error_to_raise is not None:
             raise self._error_to_raise
-        super()._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name)
+        super()._provision_remote_gateway_for_agent(agent_id, host_id, ssh_info, provider_name, device_port)
 
 
 def _mark_provisioning_in_flight(handler: LatchkeyDiscoveryHandler, agent_id: AgentId, host_id: HostId) -> None:
@@ -2449,6 +2637,7 @@ def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reporte
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler._error_to_raise = _raised_from(
             RemoteGatewayError("Failed to hand the machine its permissions"),
@@ -2456,7 +2645,7 @@ def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reporte
         )
         with _captured_log_records() as captured:
             _mark_provisioning_in_flight(handler, agent_id, host_id)
-            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
             with handler._remote_hosts_lock:
                 provisioning_hosts_after_failure = set(handler._provisioning_hosts)
                 provisioned_hosts_after_failure = set(handler._provisioned_hosts)
@@ -2466,12 +2655,12 @@ def test_transient_provisioning_failure_is_retried_by_the_next_cycle_and_reporte
 
             for _ in range(TRANSIENT_FAILURE_REPORT_THRESHOLD - 1):
                 _mark_provisioning_in_flight(handler, agent_id, host_id)
-                handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+                handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
             errors_at_threshold = _error_messages_mentioning(captured, host_id)
 
             handler._error_to_raise = None
             _mark_provisioning_in_flight(handler, agent_id, host_id)
-            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
             with handler._remote_hosts_lock:
                 streaks_after_success = dict(handler._transient_failure_streak_by_key)
                 provisioned_hosts_after_success = set(handler._provisioned_hosts)
@@ -2506,11 +2695,12 @@ def test_non_transient_provisioning_failure_still_escapes_the_worker(
             tunnel_manager=_RecordingTunnelManager(),
             concurrency_group=cg,
             mngr_ctx=temp_mngr_ctx,
+            device=_DEVICE,
         )
         handler._error_to_raise = RemoteGatewayError("Malformed permissions file")
         _mark_provisioning_in_flight(handler, agent_id, host_id)
         with pytest.raises(RemoteGatewayError, match="Malformed permissions file"):
-            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud")
+            handler._run_remote_gateway_provisioning(agent_id, host_id, ssh_info, "imbue_cloud", None)
         with handler._remote_hosts_lock:
             provisioning_hosts = set(handler._provisioning_hosts)
             streaks = dict(handler._transient_failure_streak_by_key)

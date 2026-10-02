@@ -13,7 +13,9 @@ container's docker bridge as `http://host.docker.internal:1989` (an nftables
 policy on the VPS keeps that port reachable from the bridge and the VPS's own
 loopback only, and the bridge from reaching anything else on the VPS); its
 bundled forwarding extension proxies `/permissions`, `/permission-requests`, and
-`/minds-api-proxy` requests back to the desktop gateway over an SSH tunnel. (A
+`/minds-api-proxy` requests back to a desktop gateway over that desktop's own
+SSH tunnel (see [Desktops](#desktops) for how a request picks one when the
+user has several). (A
 remote workspace whose container predates the `host.docker.internal` mapping,
 such as one adopted from a pool host baked by an older mngr, is pointed at
 `http://127.0.0.1:1989` when it is created and reaches the same VPS-resident
@@ -445,6 +447,43 @@ Details worth knowing:
 * If the example has no `<placeholder>` at all (or is not a latchkey
   invocation), there is nothing to ask for: the dialog shows that as an
   error and offers **no Approve button**, leaving Deny as the only action.
+
+## Desktops
+
+A user may run Minds on several computers at once, and each of them connects to
+every remote workspace's machine with a reverse SSH tunnel of its own (the app
+hands the forward supervisor its device id, under which the supervisor announces
+this computer to each machine every discovery cycle). The workspace's gateway
+therefore knows the user's desktops, and lets a workspace address them:
+
+* `GET /devices` on the gateway lists every desktop the gateway knows,
+  `{"devices": [{"device_id", "hostname", "last_seen_at"}, ...],
+  "announcement_interval_seconds": 30}`, most recently heard from first. A
+  connected desktop refreshes its entry every interval, so how stale an entry
+  is says how likely that desktop is to answer; the gateway leaves that
+  judgement to the caller. Every agent may read it: it is part of the baseline.
+* An `X-Latchkey-Desktop` header on a `/permissions`, `/permission-requests` or
+  `/minds-api-proxy` request says which desktop it is for: one device id; `*`
+  for every desktop; or a comma-separated list of ids, of which unknown ones
+  are ignored. When the two plural forms come down to no desktop, the answer
+  is a 503; when they come down to a single desktop, its response comes back
+  as is; otherwise the request goes to each desktop and
+  the answer holds the responses side by side (`{"responses": [{"device_id",
+  "hostname", "status", "content_type", "body"}, ...]}`, a desktop that could
+  not be reached carrying an `error` instead), and only that aggregated answer
+  carries the `X-Latchkey-Multiple-Desktops-Matched: true` response header.
+  Without the header the request goes to the most recently announced
+  desktop, which is what every workspace built before the header did, so
+  nothing has to change at once. A desktop that has gone to sleep is refused
+  quickly rather than waited on: the machine's sshd drops its tunnel within 90
+  seconds of it going quiet.
+
+A local workspace sees the same: its desktop gateway lists this computer as
+the one desktop and answers every request itself, whatever the header says,
+just as a remote workspace's gateway does when the header comes down to one
+desktop. So workspace logic does not depend on whether the workspace is local
+or remote. The
+mechanism is described under "Desktops" in `libs/mngr_latchkey/README.md`.
 
 ## Per-agent isolation
 
@@ -911,11 +950,11 @@ that cannot be reached shows as "permissions can't be loaded" rather than
 an empty, misleading "nothing granted", and does not take the share panel
 or Machine settings down with it.
 
-### Proxy through this desktop
+### Proxy through my desktop
 
 Some services refuse requests that come from the datacenter IP ranges a remote
 workspace's machine sits in. Each connection panel of a remote workspace
-therefore has a **Proxy through this desktop** toggle. While it is on, the
+therefore has a **Proxy through my desktop** toggle. While it is on, the
 requests the workspace makes to that service leave from this computer instead
 of from the workspace's machine. This computer has to be running and connected
 to the workspace for those requests to succeed. The mechanism is described
@@ -967,12 +1006,11 @@ A flip posts `{ "service_name", "enabled" }` to
    (`MachineOperator.push_permissions_and_desktop_egress_rules`). The response
    is the refreshed view, as for every other write in this tab.
 
-A machine can reach only one desktop at a time, because its reverse tunnel
-binds one port. When the user turns the toggle on from a second computer,
-that computer adds its own grant and nothing is taken away from the first. The
-computer that is connected to the machine is the one that forwards, and it
-forwards only when it has a grant of its own. A computer without one refuses
-the routed requests.
+The machine sends a routed request to the most recently connected of the user's
+computers (see [Desktops](#desktops)). When the user turns the toggle on from a
+second computer, that computer adds its own grant and nothing is taken away
+from the first. The computer the request reaches forwards it only when it has a
+grant of its own; a computer without one refuses the routed requests.
 
 Some addresses are used by several services. The Google Drive files API, for
 example, is used by Google Drive, Google Docs and Google Sheets. The machine

@@ -232,7 +232,11 @@ Long-running foreground process that:
    reverse-tunneled onto the loopback of a local agent's host, or the VPS
    gateway, which a remote agent's container reaches over its docker bridge as
    ``host.docker.internal`` and which forwards the extension routes Imbue Studio
-   owns back to the desktop over a separate VPS-loopback tunnel.
+   owns back to the user's desktops over a VPS-loopback tunnel of each
+   desktop's own. Every discovery cycle, this computer announces itself to
+   each such machine under its device id (``--device-id``), with the port
+   its tunnel holds there; a machine lists the desktops it has heard from on
+   the gateway's ``/devices`` route.
 4. On agent destruction, drops that agent's reverse tunnel.
 5. On SIGINT/SIGTERM, terminates the observe subprocess, all reverse
    tunnels, *and* the shared gateway. The coupled-lifetime semantics
@@ -275,6 +279,7 @@ mngr latchkey forward [OPTIONS]
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--mngr-binary` | text | Path to the mngr binary used to spawn the underlying ``mngr observe`` subprocess. | `mngr` |
+| `--device-id` | text | The id this computer announces itself to remote hosts' machines under, so an agent can tell the user's desktops apart. Falls back to $MNGR_LATCHKEY_DEVICE_ID, then to the mngr local host id. | None |
 | `--latchkey-binary` | text | Path to the upstream ``latchkey`` CLI. Falls back to $MNGR_LATCHKEY_BINARY, then ``[plugins.latchkey].latchkey_binary`` in settings.toml, then 'latchkey' on PATH. | None |
 | `--latchkey-directory` | path | Root directory for ``LATCHKEY_DIRECTORY`` and the plugin's ``mngr_latchkey/`` metadata subtree. Falls back to $MNGR_LATCHKEY_DIRECTORY, then ``[plugins.latchkey].directory`` in settings.toml, then '~/.mngr/latchkey'. | None |
 

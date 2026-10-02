@@ -160,6 +160,9 @@ def spawn_detached_mngr_latchkey_forward(
     log_path: Path,
     extra_env: Mapping[str, str] | None = None,
     cwd: Path | None = None,
+    # The id the forward announces this computer under to remote hosts'
+    # machines (``--device-id``); ``None`` lets the forward pick its own.
+    device_id: str | None = None,
 ) -> int:
     """Start a detached ``mngr latchkey forward`` and return its PID.
 
@@ -213,6 +216,7 @@ def spawn_detached_mngr_latchkey_forward(
     env = dict(os.environ)
     if extra_env is not None:
         env.update(extra_env)
+    device_id_args = ["--device-id", device_id] if device_id is not None else []
 
     _rotate_raw_capture_if_too_large(log_path)
     log_file = log_path.open("ab")
@@ -229,6 +233,7 @@ def spawn_detached_mngr_latchkey_forward(
                 latchkey_binary,
                 "--mngr-binary",
                 mngr_binary,
+                *device_id_args,
                 "--log-file",
                 str(events_log_path),
                 # Suppress the detached child's loguru console handler so its

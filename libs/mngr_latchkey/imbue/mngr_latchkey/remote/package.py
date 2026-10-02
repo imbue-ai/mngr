@@ -3,10 +3,12 @@
 Everything a remote host's machine (the VPS) needs from this computer, other
 than its data, travels as one ``.deb``: the supervisord programs for the
 gateway and the reverse tunnel, the wrapper scripts they run, the forwarding
-extension the gateway loads, and the two commands this computer drives the
+extension the gateway loads, and the commands this computer drives the
 machine through afterwards -- ``mngr-latchkey read-state``, which assembles
-what the machine holds, and ``mngr-latchkey apply-state``, which makes the
-machine match a document handed to it (see :mod:`imbue.mngr_latchkey.remote._machine`).
+what the machine holds, ``mngr-latchkey apply-state``, which makes the
+machine match a document handed to it, and ``mngr-latchkey announce-device``,
+which records this computer as a desktop connected to the machine (see
+:mod:`imbue.mngr_latchkey.remote._machine`).
 Its ``postinst`` installs the pinned latchkey CLI and the curl shims, loads
 the nftables policy that keeps the machine's bridge-bound services on the
 docker bridge (shipped with its boot-time systemd unit), scrubs what the
@@ -63,6 +65,11 @@ from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import UPSTREAM_DATA_FORMAT_VERSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
+from imbue.mngr_latchkey.devices import DEVICES_DIR_ENV_VAR
+from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
+from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR
+from imbue.mngr_latchkey.devices import DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS
+from imbue.mngr_latchkey.devices import DEVICE_RECORD_SUFFIX
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_FIREWALL_UNIT_NAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_POLICY_FILENAME
 from imbue.mngr_latchkey.docker_bridge import BRIDGE_SERVICES_NFT_TABLE
@@ -70,8 +77,6 @@ from imbue.mngr_latchkey.docker_bridge import DOCKER_BRIDGE_INTERFACE_NAME
 from imbue.mngr_latchkey.docker_bridge import NFT_BINARY_PATH
 from imbue.mngr_latchkey.owner_exec_vm import VM_EXEC_PORT
 from imbue.mngr_latchkey.remote._machine import ANSWER_PREFIX
-from imbue.mngr_latchkey.remote._machine import DESKTOP_GATEWAY_PASSWORD_FILENAME
-from imbue.mngr_latchkey.remote._machine import DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_KEY_MESSAGE
 from imbue.mngr_latchkey.remote._machine import DIFFERENT_MACHINE_PASSWORD_MESSAGE
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
@@ -93,13 +98,13 @@ LATCHKEY_VERSION: Final[str] = "3.16.2"
 # build is fetched, so it runs on any VPS image regardless of how old its glibc
 # is.
 CURL_SHIMS_REPO: Final[str] = "imbue-ai/latchkey-curl-shims"
-CURL_SHIMS_VERSION: Final[str] = "v0.4.0"
+CURL_SHIMS_VERSION: Final[str] = "v0.5.0"
 # sha256 of each tarball a machine can fetch, from the release's ``SHA256SUMS``.
 # Pinned here rather than downloaded beside the tarball, so a tarball replaced
 # on the release fails the install instead of verifying against its own sum.
 CURL_SHIMS_SHA256_BY_TRIPLE: Final[Mapping[str, str]] = {
-    "x86_64-unknown-linux-musl": "7173b301133c4a465174481041ade5c1f8fffac4ae4b86d54cdf4279ac7a0f93",
-    "aarch64-unknown-linux-musl": "afa65e2c795dce9acfd32ad22d732c27509a07382e6db00626a98e1ec93f8f76",
+    "x86_64-unknown-linux-musl": "d31279a6004838f0cf07555a31ff6c9027a3e0993bc1cec0e1e8c2ec24d9f39a",
+    "aarch64-unknown-linux-musl": "28b6d416318057a0316563f418600d0a3b837cac6f3a652175847cae0e507df5",
 }
 # ``uname -m`` patterns, as ``case`` alternatives, and the build each selects.
 CURL_SHIMS_TRIPLE_BY_UNAME_PATTERN: Final[tuple[tuple[str, str], ...]] = (
@@ -114,10 +119,6 @@ CURL_STAGED_SUFFIX: Final[str] = ".new"
 # Records which release and target triple the installed shims came from; the
 # binaries live under version-less names, so this is what a bump reaches.
 CURL_VERSION_STAMP_FILENAME: Final[str] = ".latchkey-curl-version"
-
-# Port on the machine's loopback where the desktop gateway is reverse-tunneled.
-# The forwarding extension sends the desktop-owned endpoint families here.
-DESKTOP_GATEWAY_VPS_PORT: Final[int] = 1988
 
 # Port the latchkey gateway binds on the machine's docker bridge address. It is
 # the same fixed agent-side port a desktop-gateway agent uses, so every agent's
@@ -162,6 +163,15 @@ _SUPERVISOR_LOG_BACKUPS: Final[int] = 3
 _SSH_SERVER_ALIVE_INTERVAL_SECONDS: Final[int] = 30
 _SSH_SERVER_ALIVE_COUNT_MAX: Final[int] = 3
 _SSH_CONNECT_TIMEOUT_SECONDS: Final[int] = 15
+
+# The machine's sshd probes each desktop's tunnel session the same way, so a
+# desktop that went to sleep has its forwarded port retired within the product
+# of the two (90s) instead of when TCP gives up on the session, hours later.
+# Shipped as a drop-in under sshd's ``sshd_config.d``, which the Debian and
+# Ubuntu releases a VPS runs include ahead of their own settings.
+SSHD_DROP_IN_FILENAME: Final[str] = "mngr-latchkey.conf"
+_SSHD_CLIENT_ALIVE_INTERVAL_SECONDS: Final[int] = 30
+_SSHD_CLIENT_ALIVE_COUNT_MAX: Final[int] = 3
 
 # Absolute paths to the interpreters named in supervisord ``command=`` lines
 # (supervisord resolves programs via its *own* PATH) and in the tunnel wrapper.
@@ -232,6 +242,7 @@ _BIN_DIR_IN_TREE: Final[str] = "usr/bin"
 _SUPERVISOR_CONFD_DIR_IN_TREE: Final[str] = "etc/supervisor/conf.d"
 _NFTABLES_CONFD_DIR_IN_TREE: Final[str] = "etc/nftables.d"
 _SYSTEMD_UNIT_DIR_IN_TREE: Final[str] = "etc/systemd/system"
+_SSHD_CONFD_DIR_IN_TREE: Final[str] = "etc/ssh/sshd_config.d"
 # The log directory ships empty (supervisord creates the logs), so it is not in
 # the tree and is added to the package as a bare directory entry.
 _LOG_DIR_IN_TREE: Final[str] = "var/log/mngr-latchkey"
@@ -247,6 +258,7 @@ _REQUIRED_SOURCE_DIRS_IN_TREE: Final[tuple[str, ...]] = (
     _SUPERVISOR_CONFD_DIR_IN_TREE,
     _NFTABLES_CONFD_DIR_IN_TREE,
     _SYSTEMD_UNIT_DIR_IN_TREE,
+    _SSHD_CONFD_DIR_IN_TREE,
 )
 
 # Fixed timestamp every packaged file carries, so a build is reproducible.
@@ -291,6 +303,7 @@ class RemotePackageLayout(FrozenModel):
     supervisor_confd_dir: Path = Field(description="supervisord's drop-in directory the program configs land in.")
     nftables_confd_dir: Path = Field(description="Where the bridge-services nftables policy lands.")
     systemd_unit_dir: Path = Field(description="Where the unit that loads that policy at boot lands.")
+    sshd_confd_dir: Path = Field(description="sshd's drop-in directory the tunnel keepalive settings land in.")
     curl_install_dir: Path = Field(description="Where the curl shims are installed.")
     artifact_dir: Path = Field(description="Where the built package is uploaded to before it is installed.")
 
@@ -309,6 +322,7 @@ class RemotePackageLayout(FrozenModel):
             ("supervisor_confd_dir", self.supervisor_confd_dir, _SUPERVISOR_CONFD_DIR_IN_TREE),
             ("nftables_confd_dir", self.nftables_confd_dir, _NFTABLES_CONFD_DIR_IN_TREE),
             ("systemd_unit_dir", self.systemd_unit_dir, _SYSTEMD_UNIT_DIR_IN_TREE),
+            ("sshd_confd_dir", self.sshd_confd_dir, _SSHD_CONFD_DIR_IN_TREE),
         ):
             if not directory.as_posix().endswith(f"/{path_in_tree}"):
                 raise RemoteGatewayError(
@@ -326,6 +340,7 @@ DEFAULT_REMOTE_PACKAGE_LAYOUT: Final[RemotePackageLayout] = RemotePackageLayout(
     supervisor_confd_dir=Path("/etc/supervisor/conf.d"),
     nftables_confd_dir=Path("/etc/nftables.d"),
     systemd_unit_dir=Path("/etc/systemd/system"),
+    sshd_confd_dir=Path("/etc/ssh/sshd_config.d"),
     curl_install_dir=Path("/usr/local/bin"),
     # Exists on every machine before anything is installed, which is what an
     # upload ahead of the install needs.
@@ -359,7 +374,6 @@ class RemotePackageContext(FrozenModel):
         description="Port the gateway binds on the machine's docker bridge address (the port the agent's container reaches it at)."
     )
     agent_side_port: int = Field(description="Loopback port the tunnel binds in the container.")
-    desktop_gateway_vps_port: int = Field(description="Loopback port the desktop gateway is tunneled to.")
     max_body_size_bytes: int = Field(description="The gateway's request body limit.")
     remote_latchkey_dir_name: str = Field(description="The latchkey directory's name under the machine's home.")
     credentials_store_filename: str = Field(description="Upstream's credential store filename.")
@@ -378,12 +392,21 @@ class RemotePackageContext(FrozenModel):
     listen_password_filename: str = Field(
         description="The machine's own listen password, under the secrets directory."
     )
-    desktop_gateway_password_filename: str = Field(
-        description="The desktop gateway's password, under the secrets directory."
+    devices_dir_name: str = Field(
+        description="Where the connected desktops' records live, under the secrets directory."
     )
-    desktop_permissions_override_filename: str = Field(
-        description="The desktop-target JWT, under the secrets directory."
+    device_record_suffix: str = Field(description="The suffix of a desktop's record file, after its device id.")
+    devices_dir_env_var: str = Field(description="How the gateway's extension is told where the records are.")
+    device_announcement_interval_env_var: str = Field(
+        description="How the extension is told how often a connected desktop refreshes its record."
     )
+    device_announcement_interval_seconds: int = Field(
+        description="How often a connected desktop refreshes its record."
+    )
+    sshd_client_alive_interval_seconds: int = Field(
+        description="sshd ``ClientAliveInterval`` for the tunnel sessions."
+    )
+    sshd_client_alive_count_max: int = Field(description="sshd ``ClientAliveCountMax`` for the tunnel sessions.")
     ram_backed_filesystem_types: tuple[str, ...] = Field(
         description="Filesystem types accepted for the secrets directory."
     )
@@ -461,7 +484,6 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         curl_version_stamp_path=layout.curl_install_dir / CURL_VERSION_STAMP_FILENAME,
         outer_port=OUTER_PORT,
         agent_side_port=AGENT_SIDE_LATCHKEY_PORT,
-        desktop_gateway_vps_port=DESKTOP_GATEWAY_VPS_PORT,
         max_body_size_bytes=GATEWAY_MAX_BODY_SIZE_BYTES,
         remote_latchkey_dir_name=REMOTE_LATCHKEY_DIR_NAME,
         credentials_store_filename=CREDENTIALS_STORE_FILENAME,
@@ -476,8 +498,13 @@ def remote_package_context(layout: RemotePackageLayout) -> RemotePackageContext:
         tunnel_conf_filename=TUNNEL_CONF_FILENAME,
         encryption_key_filename=GATEWAY_ENCRYPTION_KEY_FILENAME,
         listen_password_filename=GATEWAY_LISTEN_PASSWORD_FILENAME,
-        desktop_gateway_password_filename=DESKTOP_GATEWAY_PASSWORD_FILENAME,
-        desktop_permissions_override_filename=DESKTOP_PERMISSIONS_OVERRIDE_FILENAME,
+        devices_dir_name=DEVICES_DIR_NAME,
+        device_record_suffix=DEVICE_RECORD_SUFFIX,
+        devices_dir_env_var=DEVICES_DIR_ENV_VAR,
+        device_announcement_interval_env_var=DEVICE_ANNOUNCEMENT_INTERVAL_ENV_VAR,
+        device_announcement_interval_seconds=DEVICE_ANNOUNCEMENT_INTERVAL_SECONDS,
+        sshd_client_alive_interval_seconds=_SSHD_CLIENT_ALIVE_INTERVAL_SECONDS,
+        sshd_client_alive_count_max=_SSHD_CLIENT_ALIVE_COUNT_MAX,
         ram_backed_filesystem_types=_RAM_BACKED_FILESYSTEM_TYPES,
         docker_bridge_interface_name=DOCKER_BRIDGE_INTERFACE_NAME,
         bridge_service_ports=_BRIDGE_SERVICE_PORTS,

@@ -1,9 +1,12 @@
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
 
+from imbue.imbue_common.model_update import to_update
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.additional_services import additional_service_registration_entries
@@ -14,13 +17,17 @@ from imbue.mngr_latchkey.core import PERMISSIONS_CONFIG_FILENAME
 from imbue.mngr_latchkey.core import REMOTE_GATEWAY_EXTENSION_FILENAME
 from imbue.mngr_latchkey.core import bundled_gateway_extension_content
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
+from imbue.mngr_latchkey.devices import DEVICES_DIR_NAME
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.encryption_key import load_or_create_encryption_key
-from imbue.mngr_latchkey.remote._machine import DESKTOP_GATEWAY_PASSWORD_FILENAME
-from imbue.mngr_latchkey.remote._machine import DESKTOP_PERMISSIONS_OVERRIDE_FILENAME
 from imbue.mngr_latchkey.remote._machine import GATEWAY_ENCRYPTION_KEY_FILENAME
 from imbue.mngr_latchkey.remote._machine import GATEWAY_LISTEN_PASSWORD_FILENAME
 from imbue.mngr_latchkey.remote._machine import REMOTE_COMMAND_NAME
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
+from imbue.mngr_latchkey.remote._machine import _ANNOUNCE_DEVICE_SUBCOMMAND
+from imbue.mngr_latchkey.remote._machine import _remote_command
+from imbue.mngr_latchkey.remote._machine import announce_device
 from imbue.mngr_latchkey.remote._machine import read_remote_state
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.remote._mirror import store_machine_gateway_password
@@ -38,18 +45,23 @@ from imbue.mngr_latchkey.remote.package import GATEWAY_CONF_FILENAME
 from imbue.mngr_latchkey.remote.package import GATEWAY_PROGRAM_NAME
 from imbue.mngr_latchkey.remote.package import REMOTE_EXTENSIONS_DIR_NAME
 from imbue.mngr_latchkey.remote.package import TUNNEL_PROGRAM_NAME
-from imbue.mngr_latchkey.remote.provisioning import DesktopGatewaySecrets
 from imbue.mngr_latchkey.remote.provisioning import _do_extra_hosts_resolve_outer_host
 from imbue.mngr_latchkey.remote.provisioning import _does_container_need_reverse_tunnel
 from imbue.mngr_latchkey.remote.provisioning import provision_remote_gateway
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import plugin_data_dir
 
-# This computer's own gateway secrets, as every provisioning call here hands
-# them over. Distinct strings from the machine's own listen password so a test
-# can tell which secret landed where.
-_DESKTOP_SECRETS = DesktopGatewaySecrets(
-    gateway_password="desktop-password",
+# This computer's own gateway listen password, as every provisioning call here
+# hands it over to seed a fresh machine with. A distinct string from a
+# machine's own, so a test can tell which one landed.
+_DESKTOP_PASSWORD = "desktop-password"
+
+# This computer, as it announces itself to a machine.
+_DEVICE_RECORD = DeviceRecord(
+    device_id=DesktopDeviceId("desktop-2461"),
+    hostname="laptop.example",
+    port=41988,
+    gateway_password=_DESKTOP_PASSWORD,
     permissions_override="desktop-override-jwt",
 )
 
@@ -72,9 +84,13 @@ def _provision(outer: OuterHostInterface, latchkey_directory: Path, host_id: Hos
         container_ssh_user="root",
         container_ssh_port=2222,
         latchkey=_desktop_latchkey(latchkey_directory),
-        desktop_secrets=_DESKTOP_SECRETS,
+        desktop_gateway_password=_DESKTOP_PASSWORD,
         package_layout=as_vps(outer).layout,
     )
+
+
+def _announce(outer: OuterHostInterface, record: DeviceRecord) -> None:
+    announce_device(outer, record, failure_description="announce the desktop")
 
 
 def _latchkey_directory(tmp_path: Path) -> Path:
@@ -128,13 +144,13 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
     assert "dpkg -i" in commands[0]
     assert commands[1].startswith(f"{REMOTE_COMMAND_NAME} read-state")
     assert commands[2].startswith(f"{REMOTE_COMMAND_NAME} apply-state")
-    # The machine's own secrets and the desktop-owned pair landed in RAM, owner-only.
+    # The machine's own secrets landed in RAM, owner-only; nothing of the
+    # desktop's own beyond the password the machine is seeded with (each
+    # desktop announces its own pair separately).
     recorded_key = stored_machine_encryption_key(plugin_data_dir(latchkey_directory), host_id)
     assert recorded_key is not None
     assert vps.secret(GATEWAY_ENCRYPTION_KEY_FILENAME) == recorded_key.get_secret_value()
     assert vps.secret(GATEWAY_LISTEN_PASSWORD_FILENAME) == "desktop-password"
-    assert vps.secret(DESKTOP_GATEWAY_PASSWORD_FILENAME) == "desktop-password"
-    assert vps.secret(DESKTOP_PERMISSIONS_OVERRIDE_FILENAME) == "desktop-override-jwt"
     assert all(vps.secret_mode(name) == 0o600 for name in vps.secrets_dir_entries())
     # No secret ever traveled as a file write or in a bare command.
     assert [entry.path for entry in vps.written if b"desktop-password" in entry.content] == []
@@ -166,13 +182,11 @@ def test_provision_remote_gateway_installs_the_package_and_wires_a_fresh_machine
         GATEWAY_CONF_FILENAME,
         PERMISSIONS_CONFIG_FILENAME,
     ]
-    # The apply left no scratch behind in RAM.
-    assert vps.secrets_dir_entries() == [
-        DESKTOP_GATEWAY_PASSWORD_FILENAME,
-        DESKTOP_PERMISSIONS_OVERRIDE_FILENAME,
-        GATEWAY_ENCRYPTION_KEY_FILENAME,
-        GATEWAY_LISTEN_PASSWORD_FILENAME,
-    ]
+    # The apply left no scratch behind in RAM: only the secrets, and the
+    # (empty) directory the desktops announce themselves into.
+    assert vps.secrets_dir_entries() == [GATEWAY_ENCRYPTION_KEY_FILENAME, GATEWAY_LISTEN_PASSWORD_FILENAME]
+    assert (vps.secrets_dir / DEVICES_DIR_NAME).is_dir()
+    assert vps.device_records() == {}
 
 
 def test_provisioning_again_adopts_what_the_machine_runs_under_and_bounces_only_the_gateway(
@@ -421,7 +435,7 @@ def test_a_rewired_container_restarts_the_tunnel(tmp_path: Path) -> None:
         container_ssh_user="agent",
         container_ssh_port=2223,
         latchkey=_desktop_latchkey(latchkey_directory),
-        desktop_secrets=_DESKTOP_SECRETS,
+        desktop_gateway_password=_DESKTOP_PASSWORD,
         package_layout=vps.layout,
     )
 
@@ -634,13 +648,12 @@ def test_a_machine_nobody_has_provisioned_yet_takes_this_computers_password(tmp_
     assert stored_machine_gateway_password(plugin_data_dir(latchkey_directory), host_id) == "desktop-password"
 
 
-def test_provisioning_keeps_the_machines_password_while_replacing_the_desktops(tmp_path: Path) -> None:
+def test_provisioning_keeps_the_machines_password(tmp_path: Path) -> None:
     """Moving to another computer must not re-key the gateway its workspaces authenticate to.
 
     Another of the user's computers created this machine's workspaces, and
     their env file is fixed: writing this computer's own password here would
-    answer every request they make with a 401. The secrets for the hop back to
-    the user's computer become this computer's.
+    answer every request they make with a 401.
     """
     outer = fake_vps(tmp_path)
     as_vps(outer).run_under(GATEWAY_LISTEN_PASSWORD_FILENAME, "other-computers-password\n")
@@ -650,8 +663,6 @@ def test_provisioning_keeps_the_machines_password_while_replacing_the_desktops(t
     _provision(outer, latchkey_directory, host_id)
 
     assert as_vps(outer).secret(GATEWAY_LISTEN_PASSWORD_FILENAME) == "other-computers-password"
-    assert as_vps(outer).secret(DESKTOP_GATEWAY_PASSWORD_FILENAME) == "desktop-password"
-    assert as_vps(outer).secret(DESKTOP_PERMISSIONS_OVERRIDE_FILENAME) == "desktop-override-jwt"
     assert stored_machine_gateway_password(plugin_data_dir(latchkey_directory), host_id) == "other-computers-password"
 
 
@@ -809,3 +820,75 @@ def test_a_read_asked_about_a_container_the_machine_lacks_fails(tmp_path: Path) 
 
     with pytest.raises(RemoteGatewayError, match=f"no container labeled com.imbue.mngr.host-id={host_id}"):
         read_remote_state(outer, RemoteStateRequest(container_host_id=host_id), failure_description="read")
+
+
+# Announcing this computer to the machine.
+
+
+def test_announcing_a_desktop_records_it_in_ram_and_refreshes_the_record(tmp_path: Path) -> None:
+    """The record lands under the secrets directory, owner-only, and a repeat announcement is a newer file.
+
+    Its age is what the gateway's extension reads as whether the desktop is
+    still connected, so an unchanged record has to be written over all the
+    same; a repaired tunnel's new port travels the same way.
+    """
+    outer = fake_vps(tmp_path)
+    vps = as_vps(outer)
+
+    _announce(outer, _DEVICE_RECORD)
+
+    record_name = f"{_DEVICE_RECORD.device_id}.json"
+    assert vps.device_records() == {record_name: _DEVICE_RECORD.model_dump_json()}
+    assert stat.S_IMODE(vps.device_record_path(record_name).stat().st_mode) == 0o600
+    # The record is all the announcement leaves; nothing lands beside the machine's own secrets.
+    assert vps.secrets_dir_entries() == []
+    # The record carries the desktop's secrets, so the command that carried it stayed out of the logs.
+    assert [entry.is_kept_out_of_logs for entry in vps.recorded] == [True]
+    assert vps.recorded[0].command.startswith(f"{REMOTE_COMMAND_NAME} {_ANNOUNCE_DEVICE_SUBCOMMAND}")
+
+    # An earlier announcement, and then a repeat carrying a repaired tunnel's port.
+    aged_at = vps.device_record_path(record_name).stat().st_mtime - 600
+    os.utime(vps.device_record_path(record_name), (aged_at, aged_at))
+    repaired = _DEVICE_RECORD.model_copy_update(to_update(_DEVICE_RECORD.field_ref().port, 41999))
+    _announce(outer, repaired)
+
+    assert vps.device_records() == {record_name: repaired.model_dump_json()}
+    assert vps.device_record_path(record_name).stat().st_mtime > aged_at + 300
+
+
+def test_every_desktop_keeps_a_record_of_its_own(tmp_path: Path) -> None:
+    outer = fake_vps(tmp_path)
+    other = DeviceRecord(
+        device_id=DesktopDeviceId("desktop-7130"),
+        hostname="other.example",
+        port=41990,
+        gateway_password="other-password",
+        permissions_override="other-jwt",
+    )
+
+    _announce(outer, other)
+    _announce(outer, _DEVICE_RECORD)
+
+    assert as_vps(outer).device_records() == {
+        f"{other.device_id}.json": other.model_dump_json(),
+        f"{_DEVICE_RECORD.device_id}.json": _DEVICE_RECORD.model_dump_json(),
+    }
+
+
+@pytest.mark.parametrize("device_id", ["../escape", ".hidden", "with space", ""])
+def test_the_machine_refuses_a_device_id_that_is_not_a_safe_file_name(tmp_path: Path, device_id: str) -> None:
+    """The id names a file under the secrets directory, so the script holds it to safe characters itself."""
+    outer = fake_vps(tmp_path)
+    command = _remote_command(
+        _ANNOUNCE_DEVICE_SUBCOMMAND,
+        {
+            "device_id": device_id.encode("utf-8"),
+            "device_record_json": _DEVICE_RECORD.model_dump_json().encode("utf-8"),
+        },
+    )
+
+    result = outer.execute_idempotent_command(command)
+
+    assert not result.success
+    assert "refusing a device id" in result.stderr
+    assert as_vps(outer).device_records() == {}

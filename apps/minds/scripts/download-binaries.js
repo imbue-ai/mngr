@@ -62,7 +62,7 @@ const LIMA_VERSION = '2.0.3';
 // in EXPECTED_SHA256 to match (the tarball filename is version-less, so the
 // old hash would otherwise be checked against the new bytes and fail).
 const CURL_SHIMS_REPO = 'imbue-ai/latchkey-curl-shims';
-const CURL_SHIMS_VERSION = 'v0.4.0';
+const CURL_SHIMS_VERSION = 'v0.5.0';
 
 /**
  * SHA256 hashes for each downloaded archive, pinned by filename.
@@ -101,10 +101,10 @@ const EXPECTED_SHA256 = {
   'lima-2.0.3-Linux-aarch64.tar.gz':    'd0f9c30b82fdbd06b5c951b76bf3378b68cc658aebfe243f777949e131b6ea28',
   // From the `SHA256SUMS` of the latchkey-curl-shims release named by
   // CURL_SHIMS_VERSION.
-  'latchkey-curl-shims-aarch64-apple-darwin.tar.gz':      '6c732538997aafd2192905711d71b725cecf468549d605c9daecd6e5f2b0da19',
-  'latchkey-curl-shims-x86_64-apple-darwin.tar.gz':       'f3d729892aa076bcde20876434dd071113ffaa1aa87bf2f7ef86a67d6a25ff46',
-  'latchkey-curl-shims-x86_64-unknown-linux-musl.tar.gz': '7173b301133c4a465174481041ade5c1f8fffac4ae4b86d54cdf4279ac7a0f93',
-  'latchkey-curl-shims-aarch64-unknown-linux-musl.tar.gz': 'afa65e2c795dce9acfd32ad22d732c27509a07382e6db00626a98e1ec93f8f76',
+  'latchkey-curl-shims-aarch64-apple-darwin.tar.gz':      'fdb52adb26805e565659c75bc7648826184ce7027aba4dde8187442e62bdced9',
+  'latchkey-curl-shims-x86_64-apple-darwin.tar.gz':       '1404031698eea4fcdf537835c74909b47986f181154d943dc9bc8b97a2553a77',
+  'latchkey-curl-shims-x86_64-unknown-linux-musl.tar.gz': 'd31279a6004838f0cf07555a31ff6c9027a3e0993bc1cec0e1e8c2ec24d9f39a',
+  'latchkey-curl-shims-aarch64-unknown-linux-musl.tar.gz': '28b6d416318057a0316563f418600d0a3b837cac6f3a652175847cae0e507df5',
 };
 
 const MAX_REDIRECTS = 5;

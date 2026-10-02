@@ -135,6 +135,7 @@ def test_prepare_full_wiring_tunneled(tmp_path: Path) -> None:
                 "latchkey-self-create-permission-request",
                 "latchkey-self-read-self-permissions",
                 "latchkey-self-read-available-permissions",
+                "latchkey-self-read-devices",
                 "minds-api-proxy-per-agent",
                 "minds-api-schema-read",
                 "minds-app-version-read",

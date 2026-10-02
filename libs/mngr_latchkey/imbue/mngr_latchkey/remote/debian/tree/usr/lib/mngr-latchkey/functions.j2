@@ -20,8 +20,7 @@ LK_TUNNEL_CONF="$LK_LATCHKEY_DIR/{{ tunnel_conf_filename }}"
 LK_SECRETS_DIR='{{ layout.secrets_dir }}'
 LK_ENCRYPTION_KEY_FILE="$LK_SECRETS_DIR/{{ encryption_key_filename }}"
 LK_LISTEN_PASSWORD_FILE="$LK_SECRETS_DIR/{{ listen_password_filename }}"
-LK_DESKTOP_PASSWORD_FILE="$LK_SECRETS_DIR/{{ desktop_gateway_password_filename }}"
-LK_DESKTOP_OVERRIDE_FILE="$LK_SECRETS_DIR/{{ desktop_permissions_override_filename }}"
+LK_DEVICES_DIR="$LK_SECRETS_DIR/{{ devices_dir_name }}"
 
 LK_GATEWAY_PROGRAM='{{ gateway_program_name }}'
 LK_TUNNEL_PROGRAM='{{ tunnel_program_name }}'
@@ -38,6 +37,8 @@ lk_fail() {
 # disk-snapshot threat model. So before anything is written there, the
 # directory is checked to really be on a RAM-backed filesystem, and a machine
 # whose /run is not one is refused rather than quietly given a key on disk.
+# The records of the connected desktops live under it, so the same check covers
+# the secrets each of them carries.
 lk_require_secrets_dir() {
   mkdir -p "$LK_SECRETS_DIR"
   chmod 700 "$LK_SECRETS_DIR"
@@ -46,6 +47,8 @@ lk_require_secrets_dir() {
     {{ ram_backed_filesystem_types | join('|') }}) ;;
     *) lk_fail "refusing to store the latchkey encryption key: $LK_SECRETS_DIR is on a $_lk_fstype filesystem, not RAM-backed ({{ ram_backed_filesystem_types | join('/') }})" ;;
   esac
+  mkdir -p "$LK_DEVICES_DIR"
+  chmod 700 "$LK_DEVICES_DIR"
 }
 
 # A document is what the user's computer hands a script on stdin: one

@@ -13,6 +13,11 @@ two commands the package provides, each one remote command:
 * ``mngr-latchkey apply-state`` makes the machine match a document of what this
   computer wants it to hold, applied in one ``set -e`` script on the machine
   (:func:`apply_remote_state`).
+* ``mngr-latchkey announce-device`` records this computer as one of the
+  desktops connected to the machine: the loopback port its tunnel binds there
+  and the secrets the gateway's extension and the curl router present on the
+  hop back to it (:func:`announce_device`). Rewritten on every discovery cycle,
+  so the record's age is what says whether the desktop is still connected.
 
 The document travels on the command's stdin (a quoted heredoc in the one
 command string), as ``<key> <base64>`` lines, so a payload is visibly data
@@ -49,6 +54,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.command_logging import commands_kept_out_of_logs
 from imbue.mngr_latchkey.core import EncryptedCredentialStore
 from imbue.mngr_latchkey.core import summarize_latchkey_failure
+from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 
 # Name of the latchkey directory on the machine, under the remote user's home.
@@ -56,10 +62,11 @@ from imbue.mngr_latchkey.remote.errors import RemoteGatewayError
 # LATCHKEY_DIRECTORY it reads its credentials and permissions from.
 REMOTE_LATCHKEY_DIR_NAME: Final[str] = ".latchkey"
 
-# The command the package puts on the machine's PATH, and its two subcommands.
+# The command the package puts on the machine's PATH, and its subcommands.
 REMOTE_COMMAND_NAME: Final[str] = "mngr-latchkey"
 _READ_STATE_SUBCOMMAND: Final[str] = "read-state"
 _APPLY_STATE_SUBCOMMAND: Final[str] = "apply-state"
+_ANNOUNCE_DEVICE_SUBCOMMAND: Final[str] = "announce-device"
 
 # One ``read-state`` or ``apply-state``. The slowest shape is provisioning's
 # apply, which runs ``latchkey`` (a Node startup plus a store rewrite, a second
@@ -95,8 +102,9 @@ OUTCOME_DONE_MARKER: Final[str] = "MNGR_LATCHKEY_OUTCOME=DONE"
 ANSWER_PREFIX: Final[str] = "MNGR_LATCHKEY_"
 
 # tmpfs (RAM-backed) directory holding the gateway's secrets: the machine's own
-# encryption key and listen password, plus the pair the forwarding extension
-# presents to the desktop it proxies to. ``/run`` is the FHS location for runtime
+# encryption key and listen password, and the records of the desktops connected
+# to it (each carrying the pair presented on the hop back to that desktop).
+# ``/run`` is the FHS location for runtime
 # state, is root-owned, and is a tmpfs under systemd (which we already require
 # for the supervisor service), so it is wiped on reboot -- the key is never
 # persisted to the VPS disk beside the encrypted credential store (which would
@@ -122,15 +130,6 @@ TMPFS_SECRETS_DIR: Final[Path] = Path("/run/mngr-latchkey")
 GATEWAY_ENCRYPTION_KEY_FILENAME: Final[str] = "gateway_encryption_key"
 GATEWAY_LISTEN_PASSWORD_FILENAME: Final[str] = "gateway_listen_password"
 
-# The desktop-owned pair, read afresh by the forwarding extension on every
-# request it proxies to the desktop gateway: that gateway's own listen password,
-# and a JWT (signed by that computer's key, naming a path on its disk) targeting
-# the host's desktop-side permissions file. Both belong to whichever of the
-# user's computers is currently connected, so every provisioning pass overwrites
-# them -- unlike the machine's own secrets above, which are adopted.
-DESKTOP_GATEWAY_PASSWORD_FILENAME: Final[str] = "desktop_gateway_password"
-DESKTOP_PERMISSIONS_OVERRIDE_FILENAME: Final[str] = "desktop_permissions_override"
-
 # What the logs say in place of a machine command. Its document carries secret
 # material -- a credential store, the gateway's secrets, the policy being
 # applied -- so its text is
@@ -155,8 +154,6 @@ _ENTRY_ABANDON_CREDENTIAL_STORE: Final[str] = "abandon_credential_store"
 _ENTRY_ENCRYPTION_KEY: Final[str] = "encryption_key"
 _ENTRY_FALLBACK_ENCRYPTION_KEY: Final[str] = "fallback_encryption_key"
 _ENTRY_LISTEN_PASSWORD: Final[str] = "listen_password"
-_ENTRY_DESKTOP_GATEWAY_PASSWORD: Final[str] = "desktop_gateway_password"
-_ENTRY_DESKTOP_PERMISSIONS_OVERRIDE: Final[str] = "desktop_permissions_override"
 _ENTRY_CONFIG_JSON: Final[str] = "config_json"
 _ENTRY_CREDENTIAL_BUNDLE: Final[str] = "credential_bundle"
 _ENTRY_CREDENTIAL_DATA_FORMAT_VERSION: Final[str] = "credential_data_format_version"
@@ -173,6 +170,8 @@ _ENTRY_TUNNEL_SSH_PORT: Final[str] = "tunnel_ssh_port"
 _ENTRY_RESTART_GATEWAY: Final[str] = "restart_gateway"
 _ENTRY_INCLUDE_CREDENTIAL_STORE: Final[str] = "include_credential_store"
 _ENTRY_CONTAINER_HOST_ID: Final[str] = "container_host_id"
+_ENTRY_DEVICE_ID: Final[str] = "device_id"
+_ENTRY_DEVICE_RECORD_JSON: Final[str] = "device_record_json"
 
 # The answers ``read-state`` prints, by the name after :data:`ANSWER_PREFIX`.
 _ANSWER_PACKAGE_VERSION: Final[str] = "PACKAGE_VERSION"
@@ -306,12 +305,6 @@ class RemoteStateUpdate(FrozenModel):
     listen_password: str | None = Field(
         default=None, description="The machine's own gateway listen password, adopted the way the key is."
     )
-    desktop_gateway_password: str | None = Field(
-        default=None, description="This computer's gateway password, for the forwarding extension's hop back here."
-    )
-    desktop_permissions_override: str | None = Field(
-        default=None, description="This computer's desktop-target JWT, for the same hop."
-    )
     config_json: str | None = Field(default=None, description="The gateway's ``config.json`` to install.")
     credential_merge: RemoteCredentialMerge | None = Field(
         default=None, description="A store to merge into the machine's own."
@@ -339,6 +332,17 @@ class RemoteStateUpdate(FrozenModel):
     )
     is_gateway_restarted: bool = Field(
         default=False, description="Whether to restart the gateway afterwards so rewritten secrets take effect."
+    )
+
+
+def announce_device(host: OuterHostInterface, record: DeviceRecord, failure_description: str) -> None:
+    """Record this computer as connected to the machine (or refresh the record), in one round trip.
+
+    Raises:
+        RemoteGatewayError: when the machine refuses or fails the command.
+    """
+    _run_remote_command(
+        host, _remote_command(_ANNOUNCE_DEVICE_SUBCOMMAND, _announcement_document(record)), failure_description
     )
 
 
@@ -391,10 +395,6 @@ def _update_document(update: RemoteStateUpdate) -> dict[str, bytes]:
         document[_ENTRY_FALLBACK_ENCRYPTION_KEY] = update.fallback_encryption_key.get_secret_value().encode("utf-8")
     if update.listen_password is not None:
         document[_ENTRY_LISTEN_PASSWORD] = update.listen_password.encode("utf-8")
-    if update.desktop_gateway_password is not None:
-        document[_ENTRY_DESKTOP_GATEWAY_PASSWORD] = update.desktop_gateway_password.encode("utf-8")
-    if update.desktop_permissions_override is not None:
-        document[_ENTRY_DESKTOP_PERMISSIONS_OVERRIDE] = update.desktop_permissions_override.encode("utf-8")
     if update.config_json is not None:
         document[_ENTRY_CONFIG_JSON] = update.config_json.encode("utf-8")
     if update.credential_merge is not None:
@@ -421,6 +421,14 @@ def _update_document(update: RemoteStateUpdate) -> dict[str, bytes]:
     if update.is_gateway_restarted:
         document[_ENTRY_RESTART_GATEWAY] = _FLAG_TRUE
     return document
+
+
+@pure
+def _announcement_document(record: DeviceRecord) -> dict[str, bytes]:
+    return {
+        _ENTRY_DEVICE_ID: str(record.device_id).encode("utf-8"),
+        _ENTRY_DEVICE_RECORD_JSON: record.model_dump_json().encode("utf-8"),
+    }
 
 
 @pure

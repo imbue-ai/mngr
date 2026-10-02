@@ -10,8 +10,6 @@
 #                                 none (a reboot wiped it)
 #   listen_password               the machine's own gateway password (adopted)
 #   abandon_credential_store      remove the store: nobody present holds its key
-#   desktop_gateway_password      what the forwarding extension presents to the
-#   desktop_permissions_override  desktop gateway (this computer's; replaced)
 #   config_json                   the gateway's config.json
 #   credential_bundle             a store to merge into this machine's, with
 #   credential_data_format_version   its format stamp, the one
@@ -58,14 +56,6 @@ fi
 
 if lk_doc_has abandon_credential_store; then
   rm -f "$LK_CREDENTIALS_STORE"
-fi
-
-# The desktop-owned pair.
-if lk_doc_has desktop_gateway_password; then
-  lk_write_secret "$LK_DESKTOP_PASSWORD_FILE" desktop_gateway_password
-fi
-if lk_doc_has desktop_permissions_override; then
-  lk_write_secret "$LK_DESKTOP_OVERRIDE_FILE" desktop_permissions_override
 fi
 
 if lk_doc_has config_json; then

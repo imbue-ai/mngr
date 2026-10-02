@@ -9,11 +9,14 @@ from imbue.mngr.interfaces.data_types import CommandResult
 from imbue.mngr.interfaces.host import OuterHostInterface
 from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.testing import capture_loguru
+from imbue.mngr_latchkey.devices import DesktopDeviceId
+from imbue.mngr_latchkey.devices import DeviceRecord
 from imbue.mngr_latchkey.remote._machine import OUTCOME_DONE_MARKER
 from imbue.mngr_latchkey.remote._machine import RemoteCredentialMerge
 from imbue.mngr_latchkey.remote._machine import RemoteStateRequest
 from imbue.mngr_latchkey.remote._machine import RemoteStateUpdate
 from imbue.mngr_latchkey.remote._machine import RemoteTunnelTarget
+from imbue.mngr_latchkey.remote._machine import _announcement_document
 from imbue.mngr_latchkey.remote._machine import _remote_command
 from imbue.mngr_latchkey.remote._machine import _request_document
 from imbue.mngr_latchkey.remote._machine import _update_document
@@ -62,6 +65,21 @@ def test_an_update_document_names_the_tunnel_target() -> None:
         "tunnel_host_id": str(host_id).encode("utf-8"),
         "tunnel_ssh_user": b"root",
         "tunnel_ssh_port": b"2222",
+    }
+
+
+def test_an_announcement_document_names_the_record_by_the_device_id() -> None:
+    record = DeviceRecord(
+        device_id=DesktopDeviceId("desktop-9021"),
+        hostname="laptop",
+        port=41988,
+        gateway_password="pw-9021",
+        permissions_override="jwt-9021",
+    )
+
+    assert _announcement_document(record) == {
+        "device_id": b"desktop-9021",
+        "device_record_json": record.model_dump_json().encode("utf-8"),
     }
 
 

@@ -1,0 +1,10 @@
+# Shipped by the mngr-latchkey package.
+# A desktop reaches this machine's gateway through a reverse tunnel its sshd
+# holds open. A desktop that goes to sleep leaves that session dead without a
+# FIN, and sshd would keep its forwarded port listening (and hand every
+# connection to it a channel that never opens) until TCP gave up on the
+# session, hours later. Probing the client instead retires the session, and
+# with it the listener, within {{ sshd_client_alive_interval_seconds * sshd_client_alive_count_max }} seconds, so a request for
+# a desktop that is gone is refused at once rather than left hanging.
+ClientAliveInterval {{ sshd_client_alive_interval_seconds }}
+ClientAliveCountMax {{ sshd_client_alive_count_max }}
