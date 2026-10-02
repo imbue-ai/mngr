@@ -1,0 +1,5 @@
+- Recorded the minds 0.8.3 release in `docs/deploy/history/minds-v0.8.3.md`: the thorough-path cut on the latest mngr and template, the bundle-lock check that accepted three deliberate downgrades from the dependency relock, both launch-to-msg runs, the ROLLOVER deploys that ship the signup-time verification email, the bakes on both tiers, and the alpha promotion (mac and web; Linux held on 0.7.4).
+
+- Reset `next_deploy.md` for the next release: the staging rehearsal, Stage F, the beta/stable promotion and the device-login check now target 0.8.3, and the rehearsal list gains 0.8.3's own changes; the pool keep-list gains `minds-v0.8.3` and notes that staging has no free machine left; and the `feb11eae` item now asks to investigate its slice ordinal 3 by resetting that slot cleanly outside a bake.
+
+- The pool-hosts runbook now names the symptom of an `IdentityAgent` pointing at a locked agent: every box `unaudited` with `slice disk list failed (exit code -15)`, fixed by running with `-o IdentityAgent=none`.
