@@ -17,6 +17,7 @@ Currently registered (see each module for the exact guards):
 
 - mngr (this module)
 - modal_proxy (`imbue.modal_proxy.register_guards`)
+- mngr_docker (`imbue.mngr_docker.register_guards`)
 - mngr_lima (`imbue.mngr_lima.register_guards`)
 
 To add a new guard from a new library:
@@ -34,8 +35,6 @@ To add a new guard from a new library:
 See `libs/resource_guards/README.md` for the underlying library API.
 """
 
-from imbue.mngr.register_guards_docker import register_docker_cli_guard
-from imbue.mngr.register_guards_docker import register_docker_sdk_guard
 from imbue.resource_guards.resource_guards import register_resource_guard
 
 
@@ -44,5 +43,3 @@ def register_mngr_guards() -> None:
     register_resource_guard("tmux")
     register_resource_guard("rsync")
     register_resource_guard("unison")
-    register_docker_cli_guard()
-    register_docker_sdk_guard()

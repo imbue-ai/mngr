@@ -4,13 +4,10 @@ import pytest
 
 from imbue.mngr.errors import UnknownBackendError
 from imbue.mngr.primitives import ProviderBackendName
-from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.local.config import LocalProviderConfig
 from imbue.mngr.providers.registry import get_config_class
 
-# =============================================================================
 # Tests for get_config_class
-# =============================================================================
 
 
 def test_get_config_class_returns_local_config() -> None:
@@ -25,24 +22,10 @@ def test_get_config_class_raises_for_unknown_backend() -> None:
         get_config_class("nonexistent")
 
 
-# =============================================================================
 # Tests for LocalProviderConfig
-# =============================================================================
 
 
 def test_local_provider_config_default_backend() -> None:
     """LocalProviderConfig should have 'local' as default backend."""
     config = LocalProviderConfig()
     assert config.backend == ProviderBackendName("local")
-
-
-# =============================================================================
-# Tests for DockerProviderConfig
-# =============================================================================
-
-
-def test_docker_provider_config_default_values() -> None:
-    """DockerProviderConfig should have correct default values."""
-    config = DockerProviderConfig(isolate_host_volumes=False)
-    assert config.backend == ProviderBackendName("docker")
-    assert config.host == ""

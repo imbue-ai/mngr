@@ -111,6 +111,12 @@ _guard_plugin_manager: pluggy.PluginManager | None = None
 # Populated by register_sdk_guard() before create_sdk_resource_guards() runs.
 _registered_sdk_guards: list[tuple[str, Callable[[], None], Callable[[], None]]] = []
 
+# Callables to run once at the end of every pytest session, in registration
+# order. Populated by register_session_cleanup_callback(), typically from a
+# resource_guards entry point, so a library that owns an external resource can
+# sweep what its tests leaked wherever its guards are active.
+_session_cleanup_callbacks: list[Callable[[], None]] = []
+
 
 def register_resource_guard(name: str) -> None:
     """Register a binary to be guarded by PATH wrapper scripts.
@@ -131,6 +137,32 @@ def register_resource_guard(name: str) -> None:
 def get_guarded_resource_names() -> tuple[str, ...]:
     """Return the guarded resource names (binary + SDK guards)."""
     return tuple(_guarded_resources)
+
+
+def register_session_cleanup_callback(callback: Callable[[], None]) -> None:
+    """Register a callable to run once at the end of every pytest session.
+
+    Runs from the session-finish hook, after the last test's teardown, so the
+    per-test guard environment is gone and the callback may use guarded
+    resources freely (a session fixture tears down inside the last test's
+    teardown, where the guard still enforces that test's marks). Meant for
+    sweeping external resources that tests leaked (containers, sandboxes);
+    register it from a resource_guards entry point alongside the resource's
+    guards so it is active exactly where they are.
+
+    Duplicate registrations of the same callable are ignored.
+    """
+    if callback not in _session_cleanup_callbacks:
+        _session_cleanup_callbacks.append(callback)
+
+
+def run_session_cleanup_callbacks() -> None:
+    """Run every registered session-cleanup callable, in registration order.
+
+    Call this from pytest_sessionfinish, before stop_resource_guards().
+    """
+    for callback in _session_cleanup_callbacks:
+        callback()
 
 
 def register_all_resource_guards(
@@ -317,9 +349,7 @@ def cleanup_resource_guard_wrappers() -> None:
     _owns_guard_wrapper_dir = False
 
 
-# ---------------------------------------------------------------------------
 # SDK resource guards (monkeypatch-based, for Python SDK chokepoints)
-# ---------------------------------------------------------------------------
 
 
 def enforce_sdk_guard(resource: str) -> None:
@@ -510,9 +540,7 @@ def stop_resource_guards() -> None:
     cleanup_resource_guard_wrappers()
 
 
-# ---------------------------------------------------------------------------
 # Pytest hook implementations
-# ---------------------------------------------------------------------------
 
 
 def _build_guard_env(marks: set[str], tracking_dir: str) -> dict[str, str]:
@@ -573,9 +601,7 @@ def _detect_guard_violations(
     return None
 
 
-# ---------------------------------------------------------------------------
 # Fixture-level resource guard scope (opt-in)
-# ---------------------------------------------------------------------------
 #
 # @fixture_uses_resources declares which resources a fixture itself uses.
 # Such fixtures run setup/teardown under their own guard scope rather than

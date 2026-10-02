@@ -20,8 +20,6 @@ from loguru import logger
 
 from imbue.imbue_common.conftest_hooks import register_conftest_hooks
 from imbue.imbue_common.conftest_hooks import register_marker
-from imbue.mngr.register_guards_docker import register_docker_cli_guard
-from imbue.mngr.register_guards_docker import register_docker_sdk_guard
 from imbue.mngr.utils.logging import suppress_warnings
 from imbue.mngr.utils.testing import WARNINGS_ALLOWED_STACK
 from imbue.resource_guards.resource_guards import register_resource_guard
@@ -32,8 +30,6 @@ register_resource_guard("tmux")
 register_resource_guard("modal")
 register_resource_guard("rsync")
 register_resource_guard("unison")
-register_docker_cli_guard()
-register_docker_sdk_guard()
 
 register_marker(
     "allow_warnings(match=None): opt out of the autouse 'no unexpected loguru warnings' check; "

@@ -128,7 +128,7 @@ def test_create_docker_custom_dockerfile(e2e: E2eSession) -> None:
     # host (openssh-server, tmux, python3, rsync). `alpine` lacks apt-get, so
     # the runtime package install would fail; `debian:bookworm-slim` provides
     # apt-get and lets us pre-bake the packages, mirroring the proven pattern in
-    # providers/docker/test_docker_create.py::test_mngr_create_with_dockerfile_on_docker.
+    # libs/mngr_docker's test_docker_create.py::test_mngr_create_with_dockerfile_on_docker.
     # Bake a marker file into the image so we can later prove the container was
     # built from *this* Dockerfile rather than mngr's default image.
     expect(

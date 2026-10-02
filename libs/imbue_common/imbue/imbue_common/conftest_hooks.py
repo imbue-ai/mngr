@@ -54,6 +54,7 @@ from imbue.imbue_common.test_profiles import ScopedProfile
 from imbue.imbue_common.test_profiles import resolve_active_profile
 from imbue.resource_guards.resource_guards import register_all_resource_guards
 from imbue.resource_guards.resource_guards import register_guarded_resource_markers
+from imbue.resource_guards.resource_guards import run_session_cleanup_callbacks
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
@@ -559,18 +560,24 @@ def _pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.hookimpl(trylast=True)
 def _pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Check that the total test session time is under the configured limit.
+    """Print per-test durations, run the session-cleanup sweeps, stop the resource guards, and enforce the time limit.
 
-    Prints per-test durations before checking the limit so that timing data
-    is always visible in CI output, even when the suite exceeds the limit.
+    The durations come first so that timing data is always visible in CI
+    output, even when a sweep or the time limit ends the session with
+    ``pytest.exit``.
     """
-    stop_resource_guards()
-
-    # Print test durations before checking the time limit, so they are
-    # visible in the CI output even when pytest.exit() aborts the session.
     terminalreporter = session.config.pluginmanager.get_plugin("terminalreporter")
     if terminalreporter is not None:
         _print_test_durations_for_ci(terminalreporter)
+
+    # Sweeps of leaked external resources run here, after every test's teardown
+    # and while the resource guards' registrations are still in place. A sweep
+    # may end the session (pytest.exit on a leak it attributes to this worker),
+    # so the guards are torn down whichever way it exits.
+    try:
+        run_session_cleanup_callbacks()
+    finally:
+        stop_resource_guards()
 
     if hasattr(session, "start_time"):
         duration = time.time() - session.start_time

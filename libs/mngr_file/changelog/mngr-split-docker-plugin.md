@@ -1,0 +1,1 @@
+- The offline-host tests now build their volume-backed host from mngr's generic mock provider instead of the docker provider, which moved into its own plugin. No behavior change.

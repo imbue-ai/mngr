@@ -369,9 +369,9 @@ If your plugin depends on another plugin, declare it as a standard Python packag
 And for the basic provider backends:
 
 - **local**: Local host backend
-- **docker**: Docker-based host backend
-- **modal**: Modal cloud host backend
 - **ssh**: SSH-based host backend (connects to pre-configured hosts) [experimental]
+
+Every other provider backend is a separately installed plugin, for example `imbue-mngr-docker` (**docker**), `imbue-mngr-modal` (**modal**), and `imbue-mngr-lima` (**lima**). The install script offers the ones whose tool it detects; `mngr plugin add imbue-mngr-docker` adds one later.
 
 Utility plugins [future] for additional features:
 

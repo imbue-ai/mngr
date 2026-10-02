@@ -4,7 +4,7 @@ A **provider instance** creates and manages [hosts](./hosts.md). Each provider i
 
 From the perspective of `[pyinfra](https://pyinfra.com/)` (the tool we suggest for [provisioning](./provisioning.md)), you can think of provider instances as "something that mutates the inventory" (eg, create, destroy, stop, start, etc.)
 
-A default provider instance is automatically created for each registered backend (e.g., `local`, `docker`), but you can also define your own in your `mngr` settings:
+A default provider instance is automatically created for each registered backend (e.g., `local`, and `docker` once the `imbue-mngr-docker` plugin is installed), but you can also define your own in your `mngr` settings:
 
 ```toml
 [providers.my-aws-prod]
@@ -35,7 +35,7 @@ backend = "mngr"
 url = "https://mngr.internal.company.com"
 ```
 
-## Built-in Provider Instances
+## Default Provider Instances
 
 ### local
 
@@ -43,7 +43,7 @@ Runs agents directly on your machine with no isolation. Always available--no con
 
 ### docker
 
-Runs agents in Docker containers. Available as long as `docker` is installed.
+Runs agents in Docker containers. Provided by the `imbue-mngr-docker` plugin (`mngr plugin add imbue-mngr-docker`, or `uv tool install imbue-mngr --with imbue-mngr-docker`); available as long as `docker` is installed.
 
 Provides container isolation while keeping everything local or on a remote Docker daemon. Uses SSH for host operations after initial container setup.
 

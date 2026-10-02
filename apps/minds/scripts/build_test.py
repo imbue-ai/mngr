@@ -59,6 +59,7 @@ WORKSPACE_PACKAGES = [
     "imbue-mngr-claude",
     "imbue-mngr-gcp",
     "imbue-mngr-codex",
+    "imbue-mngr-docker",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",

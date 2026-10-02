@@ -1460,7 +1460,7 @@ class VpsProvider(BaseProviderInstance):
             # a belt-and-suspenders extra -- a failed snapshot loses no data, and
             # blocking a requested stop over it would be worse. Mirrors the Modal and
             # Docker providers (mngr_modal/instance.py "Failed to create snapshot
-            # before termination"; providers/docker/instance.py "Failed to create
+            # before termination"; mngr_docker/instance.py "Failed to create
             # snapshot before stop").
             try:
                 self.create_snapshot(host_id)

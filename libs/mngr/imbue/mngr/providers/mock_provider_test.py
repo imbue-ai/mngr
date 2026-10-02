@@ -1,3 +1,6 @@
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
 from typing import Any
 from typing import Mapping
 from typing import Sequence
@@ -9,6 +12,8 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.hosts.offline_host import OfflineHost
+from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
+from imbue.mngr.hosts.offline_host import make_readable_offline_host
 from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import CpuResources
 from imbue.mngr.interfaces.data_types import HostResources
@@ -16,6 +21,7 @@ from imbue.mngr.interfaces.data_types import ProviderResourceInfo
 from imbue.mngr.interfaces.data_types import SnapshotInfo
 from imbue.mngr.interfaces.data_types import VolumeInfo
 from imbue.mngr.interfaces.host import HostInterface
+from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import AgentName
 from imbue.mngr.primitives import DiscoveredAgent
@@ -23,10 +29,12 @@ from imbue.mngr.primitives import DiscoveredHost
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import HostState
+from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.providers.base_provider import BaseProviderInstance
+from imbue.mngr.providers.local.volume import LocalVolume
 
 
 class MockProviderInstance(BaseProviderInstance):
@@ -39,6 +47,7 @@ class MockProviderInstance(BaseProviderInstance):
     mock_supports_snapshots: bool = Field(default=True)
     mock_supports_shutdown_hosts: bool = Field(default=True)
     mock_supports_volumes: bool = Field(default=False)
+    mock_host_volume: HostVolume | None = Field(default=None)
     mock_snapshots: list[SnapshotInfo] = Field(default_factory=list)
     mock_volumes: list[VolumeInfo] = Field(default_factory=list)
     mock_provider_resources: list[ProviderResourceInfo] = Field(default_factory=list)
@@ -86,6 +95,19 @@ class MockProviderInstance(BaseProviderInstance):
 
     def list_persisted_agent_data_for_host(self, host_id: HostId) -> list[dict]:
         return self.mock_agent_data
+
+    def persist_agent_data(self, host_id: HostId, agent_data: Mapping[str, object]) -> None:
+        record = dict(agent_data)
+        self.mock_agent_data = [r for r in self.mock_agent_data if r.get("id") != record.get("id")] + [record]
+
+    def remove_persisted_agent_data(self, host_id: HostId, agent_id: AgentId) -> None:
+        self.mock_agent_data = [r for r in self.mock_agent_data if r.get("id") != str(agent_id)]
+
+    def get_volume_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        return self.mock_host_volume
+
+    def get_volume_reference_for_host(self, host: HostInterface | HostId) -> HostVolume | None:
+        return self.mock_host_volume
 
     def get_host(self, host: HostId | HostName) -> HostInterface:
         for h in self.mock_hosts:
@@ -219,3 +241,32 @@ class DiscoveryRecordingProvider(MockProviderInstance):
     ) -> tuple[DiscoveredHost, list[DiscoveredAgent]]:
         self.pinned_read_host_ids.append(host_id)
         return super().discover_host_and_agents(cg=cg, host_id=host_id)
+
+
+def make_local_volume_provider(mngr_ctx: MngrContext, volume_root: Path) -> MockProviderInstance:
+    """A provider whose every host's file volume is the local directory ``volume_root``.
+
+    Lets tests exercise the volume-backed offline host paths (file reads and
+    writes, agent state preserved from a stopped host) without any real
+    provider: the host's ``host_dir`` maps onto ``volume_root``.
+    """
+    return MockProviderInstance(
+        name=ProviderInstanceName("mock-volume"),
+        host_dir=Path("/mngr"),
+        mngr_ctx=mngr_ctx,
+        mock_supports_volumes=True,
+        mock_host_volume=HostVolume(volume=LocalVolume(root_path=volume_root)),
+    )
+
+
+def make_offline_host_with_volume(
+    host_id: HostId,
+    provider: MockProviderInstance,
+    mngr_ctx: MngrContext,
+) -> OfflineHostWithVolume:
+    """A readable, writable offline host on ``provider``, which must carry a ``mock_host_volume``."""
+    now = datetime.now(timezone.utc)
+    certified_data = CertifiedHostData(host_id=str(host_id), host_name="h", created_at=now, updated_at=now)
+    host = make_readable_offline_host(make_offline_host(certified_data, provider, mngr_ctx))
+    assert isinstance(host, OfflineHostWithVolume)
+    return host

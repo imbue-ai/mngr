@@ -1,40 +1,17 @@
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 from imbue.mngr.config.data_types import MngrContext
-from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
-from imbue.mngr.providers.docker.host_store import HostRecord
-from imbue.mngr.providers.docker.instance import DockerProviderInstance
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
+from imbue.mngr.providers.mock_provider_test import make_local_volume_provider
+from imbue.mngr.providers.mock_provider_test import make_offline_host_with_volume
 from imbue.mngr_file.cli.target import ResolveFileTargetResult
 from imbue.mngr_file.cli.target import _compute_agent_base_path
 from imbue.mngr_file.cli.target import resolve_full_path
 from imbue.mngr_file.data_types import PathRelativeTo
 
 _HOST_ID = "host-00000000000000000000000000000001"
-
-
-def _make_readable_offline_host(
-    provider: DockerProviderInstance,
-    host_id: HostId,
-) -> OfflineHostWithVolume:
-    """Build a volume-backed readable offline host, as resolve_file_target would."""
-    record = HostRecord(
-        certified_host_data=CertifiedHostData(
-            host_id=str(host_id),
-            host_name="h",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
-    )
-    host = provider._create_host_from_host_record(record)
-    assert isinstance(host, OfflineHostWithVolume)
-    return host
 
 
 # --- resolve_full_path ---
@@ -85,8 +62,8 @@ def test_resolve_file_target_result_is_online_false_for_offline_host(
     temp_mngr_ctx: MngrContext,
     tmp_path: Path,
 ) -> None:
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    host = _make_readable_offline_host(provider, HostId(_HOST_ID))
+    provider = make_local_volume_provider(temp_mngr_ctx, tmp_path)
+    host = make_offline_host_with_volume(HostId(_HOST_ID), provider, temp_mngr_ctx)
 
     result = ResolveFileTargetResult(
         host=host,

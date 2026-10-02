@@ -71,7 +71,7 @@ def test_prevent_bare_except() -> None:
 
 
 def test_prevent_broad_exception_catch() -> None:
-    rc.check_broad_exception_catch(_DIR, snapshot(7))
+    rc.check_broad_exception_catch(_DIR, snapshot(6))
 
 
 def test_prevent_base_exception_catch() -> None:
@@ -159,9 +159,6 @@ def test_prevent_hardcoded_claude_dir() -> None:
     rc.check_hardcoded_claude_dir(_DIR, snapshot(0))
 
 
-# The non-zero count covers the session-scoped dockerd-startup fixture in conftest.py,
-# which is autouse and fires for tests without @pytest.mark.docker, so it must bypass
-# the PATH wrapper (which would otherwise block the docker invocation).
 def test_prevent_hardcoded_guarded_binary() -> None:
     rc.check_hardcoded_guarded_binary(_DIR, snapshot(0))
 

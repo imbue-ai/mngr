@@ -2,6 +2,8 @@
 
 The Docker provider creates agents in Docker containers with SSH access. Each container runs sshd and is accessed via pyinfra's SSH connector, following the same pattern as the Modal provider.
 
+It is the `imbue-mngr-docker` plugin (source: `libs/mngr_docker/`). The install script offers it when a Docker daemon is detected; add it to an existing install with `mngr plugin add imbue-mngr-docker`, or install both at once with `uv tool install imbue-mngr --with imbue-mngr-docker`.
+
 ## Usage
 
 ```bash

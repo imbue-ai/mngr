@@ -71,6 +71,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SSHInfo
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.providers.registry import load_local_backend_only
 from imbue.mngr.providers.ssh.instance import SSHHostConfig
 from imbue.mngr.providers.ssh.instance import SSHProviderInstance
@@ -79,22 +80,12 @@ from imbue.mngr.utils.env_utils import TEST_ENV_PREFIX
 from imbue.mngr.utils.polling import poll_until
 from imbue.mngr.utils.polling import wait_for
 
-# =============================================================================
 # Resource tracking lists for cleanup verification
-# =============================================================================
 
 # Track test IDs used by this worker/process for cleanup verification.
 # Each xdist worker is a separate process with isolated memory, so this
 # list only contains IDs from tests run by THIS worker.
 worker_test_ids: list[str] = []
-
-# Track the mngr prefixes under which this worker's docker fixtures may have
-# created a singleton state container. Each xdist worker is a separate process,
-# so this only holds prefixes from THIS worker's tests. The session cleanup uses
-# it to attribute leaked state containers to us (and fail), as opposed to
-# containers from other concurrent workers/sessions (which it can only
-# warn-and-clean). Mirrors worker_test_ids.
-worker_docker_state_prefixes: list[str] = []
 
 # Track Modal app names that were created during tests for cleanup verification.
 # This enables detection of leaked apps that weren't properly cleaned up.
@@ -1216,9 +1207,42 @@ def setup_claude_trust_config_for_subprocess(
     return get_subprocess_test_env(root_name=root_name)
 
 
-# =============================================================================
+# Config loader test utilities
+
+
+def isolate_load_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Undo the autouse ``setup_test_mngr_env`` fixture's MNGR_* settings for a ``load_config`` test.
+
+    With them gone, ``load_config`` resolves ``~/.mngr`` under the fixture's temp
+    HOME (the user/profile config base) instead of the fixture-supplied host dir /
+    prefix / root, and ``root_name`` collapses to ``"mngr"`` so the project config
+    dir is ``<git-root>/.mngr/``. Pair it with the ``temp_git_repo_cwd`` fixture so
+    the loader's git-worktree-root walk lands in an isolated repo rather than the
+    developer's real checkout; project and local config then go under
+    ``<git-root>/.mngr/`` (or wherever ``MNGR_PROJECT_CONFIG_DIR`` points).
+    """
+    monkeypatch.delenv("MNGR_PREFIX", raising=False)
+    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
+    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
+
+
+def setup_layered_config_test_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[pluggy.PluginManager, Path]:
+    """A fresh plugin manager with every registry loaded, and the project-config dir for layered TOML.
+
+    Builds on ``isolate_load_config_env`` and re-clamps the project-config dir to
+    ``tmp_path`` so ``load_config`` reads only the settings files a test writes there.
+    """
+    pm = pluggy.PluginManager("mngr")
+    pm.add_hookspecs(hookspecs)
+    load_all_registries(pm)
+    isolate_load_config_env(monkeypatch)
+    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
+    return pm, tmp_path
+
+
 # SSH test utilities
-# =============================================================================
 
 
 def find_free_port() -> int:
@@ -1548,9 +1572,7 @@ def in_process_paramiko_sshd(
         listener.close()
 
 
-# =============================================================================
 # Discovery event test factories
-# =============================================================================
 
 
 def make_test_discovered_agent() -> DiscoveredAgent:

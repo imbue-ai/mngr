@@ -240,6 +240,9 @@ This installs [uv](https://docs.astral.sh/uv/) and mngr (`uv tool install imbue-
 ```bash
 uv tool install imbue-mngr
 
+# most provider backends are plugins, e.g. docker:
+uv tool install imbue-mngr --with imbue-mngr-docker
+
 # or run without installing
 uvx --from imbue-mngr mngr
 ```
@@ -400,6 +403,7 @@ This is a monorepo that contains the code for `mngr` here:
 
 As well as the code for some plugins that we maintain, including:
 
+- [libs/mngr_docker/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_docker/README.md)
 - [libs/mngr_modal/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_modal/README.md)
 - [libs/mngr_claude/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_claude/README.md)
 - [libs/mngr_robinhood/](https://github.com/imbue-ai/mngr/blob/main/libs/mngr_robinhood/README.md)

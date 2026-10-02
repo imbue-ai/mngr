@@ -18,6 +18,7 @@ dependencies = [
     "imbue-mngr-claude>=0.2.0",
     "imbue-mngr-gcp>=0.1.0",
     "imbue-mngr-codex>=0.1.0",
+    "imbue-mngr-docker>=0.1.0",
     "imbue-mngr-forward>=0.1.0",
     "imbue-mngr-imbue-cloud>=0.1.0",
     "imbue-mngr-latchkey>=0.1.0",
@@ -56,6 +57,7 @@ imbue-mngr-azure = { path = "../../../../libs/mngr_azure", editable = true }
 imbue-mngr-claude = { path = "../../../../libs/mngr_claude", editable = true }
 imbue-mngr-gcp = { path = "../../../../libs/mngr_gcp", editable = true }
 imbue-mngr-codex = { path = "../../../../libs/mngr_codex", editable = true }
+imbue-mngr-docker = { path = "../../../../libs/mngr_docker", editable = true }
 imbue-mngr-forward = { path = "../../../../libs/mngr_forward", editable = true }
 imbue-mngr-imbue-cloud = { path = "../../../../libs/mngr_imbue_cloud", editable = true }
 imbue-mngr-latchkey = { path = "../../../../libs/mngr_latchkey", editable = true }

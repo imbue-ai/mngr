@@ -37,6 +37,8 @@ from imbue.resource_guards.resource_guards import register_all_resource_guards
 from imbue.resource_guards.resource_guards import register_guarded_resource_markers
 from imbue.resource_guards.resource_guards import register_resource_guard
 from imbue.resource_guards.resource_guards import register_sdk_guard
+from imbue.resource_guards.resource_guards import register_session_cleanup_callback
+from imbue.resource_guards.resource_guards import run_session_cleanup_callbacks
 from imbue.resource_guards.resource_guards import start_resource_guards
 from imbue.resource_guards.resource_guards import stop_resource_guards
 
@@ -94,9 +96,7 @@ def pytest_sessionfinish(session, exitstatus):
 pytest_plugins = ["pytester"]
 
 
-# ---------------------------------------------------------------------------
 # Script generation (unit tests)
-# ---------------------------------------------------------------------------
 
 
 def test_generate_stub_wrapper_script_contains_shebang_and_exit() -> None:
@@ -121,9 +121,7 @@ def test_generate_wrapper_script_contains_guard_check() -> None:
     assert '"allow"' in script
 
 
-# ---------------------------------------------------------------------------
 # End-to-end guard behavior (pytester)
-# ---------------------------------------------------------------------------
 
 
 def test_marked_test_that_calls_resource_passes(pytester: pytest.Pytester, clean_guard_env: None) -> None:
@@ -254,9 +252,7 @@ def test_unmarked_test_that_does_not_call_resource_passes(pytester: pytest.Pytes
     result.assert_outcomes(passed=1)
 
 
-# ---------------------------------------------------------------------------
 # Fixture-scope guard (@fixture_uses_resources)
-# ---------------------------------------------------------------------------
 
 
 def test_fixture_declaring_resource_authorizes_setup_calls(pytester: pytest.Pytester, clean_guard_env: None) -> None:
@@ -1001,9 +997,7 @@ def test_session_scoped_tagged_fixture_spans_multiple_test_files(
     result.assert_outcomes(passed=2)
 
 
-# ---------------------------------------------------------------------------
 # Session lifecycle
-# ---------------------------------------------------------------------------
 
 
 def test_create_and_cleanup_round_trip(isolated_guard_state: None) -> None:
@@ -1132,9 +1126,7 @@ def test_start_and_stop_resource_guards_owner_case_unregisters_plugin(
             pluginmanager.register(outer_plugin, "resource_guards")
 
 
-# ---------------------------------------------------------------------------
 # SDK guard lifecycle (unit tests)
-# ---------------------------------------------------------------------------
 
 
 def test_register_sdk_guard_adds_entry(isolated_guard_state: None) -> None:
@@ -1328,9 +1320,7 @@ def test_custom_sdk_guard_end_to_end(
     assert len(originals) == 0
 
 
-# ---------------------------------------------------------------------------
 # create_sdk_method_guard (unit tests)
-# ---------------------------------------------------------------------------
 
 
 def test_create_sdk_method_guard_sync(
@@ -1446,9 +1436,7 @@ def test_create_sdk_method_guard_async_gen(
     assert Client.stream is original_stream
 
 
-# ---------------------------------------------------------------------------
 # _build_guard_env (unit tests)
-# ---------------------------------------------------------------------------
 
 
 def test_build_guard_env_sets_allow_for_marked_resources(
@@ -1464,9 +1452,7 @@ def test_build_guard_env_sets_allow_for_marked_resources(
     assert env["_PYTEST_GUARD_RSYNC"] == "block"
 
 
-# ---------------------------------------------------------------------------
 # _check_guard_violations (unit tests)
-# ---------------------------------------------------------------------------
 
 
 class _FakeReport:
@@ -1739,9 +1725,7 @@ def test_check_guard_violations_reports_blocked_and_undeclared_together(
     assert "missing @pytest.mark.ls" in longrepr
 
 
-# ---------------------------------------------------------------------------
 # Fixture-scope helpers (unit tests)
-# ---------------------------------------------------------------------------
 
 
 def test_fixture_uses_resources_records_declaration(isolated_guard_state: None) -> None:
@@ -2353,9 +2337,7 @@ def test_pytest_runtest_setup_defers_closure_violation_until_after_yield(
     item._guard_state.env_patcher.stop()
 
 
-# ---------------------------------------------------------------------------
 # SDK guard: enforce_sdk_guard (unit tests)
-# ---------------------------------------------------------------------------
 
 
 def test_enforce_sdk_guard_blocks_when_unmarked(
@@ -2412,9 +2394,7 @@ def test_enforce_sdk_guard_skips_when_no_phase_set(
     assert not (tmp_path / "blocked_mysdk").exists()
 
 
-# ---------------------------------------------------------------------------
 # SDK guard: end-to-end behavior (pytester)
-# ---------------------------------------------------------------------------
 
 # Conftest for SDK guard pytester tests. Registers a no-op SDK guard, then uses
 # start/stop_resource_guards to initialize the infrastructure. Tests trigger the
@@ -2530,9 +2510,7 @@ def test_sdk_unmarked_test_that_does_not_trigger_guard_passes(
     result.assert_outcomes(passed=1)
 
 
-# ---------------------------------------------------------------------------
 # Mark auto-registration via register_guarded_resource_markers (pytester)
-# ---------------------------------------------------------------------------
 
 # Conftest that mirrors the README example: standalone pytest_configure
 # using register_guarded_resource_markers() (no conftest_hooks).
@@ -2577,3 +2555,31 @@ def test_standalone_pytest_configure_registers_marks(
     """)
     result = pytester.runpytest_subprocess("-n0", "--no-header", "-p", "no:cacheprovider", "--strict-markers")
     result.assert_outcomes(passed=1)
+
+
+def test_run_session_cleanup_callbacks_runs_each_registered_callable_once_in_order(
+    isolated_guard_state: None,
+) -> None:
+    calls: list[str] = []
+
+    def _sweep_alpha() -> None:
+        calls.append("alpha")
+
+    def _sweep_beta() -> None:
+        calls.append("beta")
+
+    register_session_cleanup_callback(_sweep_alpha)
+    register_session_cleanup_callback(_sweep_beta)
+    # A second registration of the same callable (register_all_resource_guards
+    # may run more than once per process) must not run it twice.
+    register_session_cleanup_callback(_sweep_alpha)
+
+    run_session_cleanup_callbacks()
+
+    assert calls == ["alpha", "beta"]
+
+
+def test_run_session_cleanup_callbacks_is_a_no_op_with_nothing_registered(
+    isolated_guard_state: None,
+) -> None:
+    run_session_cleanup_callbacks()

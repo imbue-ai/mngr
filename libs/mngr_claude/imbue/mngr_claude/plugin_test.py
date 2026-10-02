@@ -73,11 +73,11 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.primitives import SystemPromptText
 from imbue.mngr.primitives import TransferMode
 from imbue.mngr.primitives import WaitingReason
-from imbue.mngr.providers.docker.host_store import HostRecord
-from imbue.mngr.providers.docker.instance import DockerProviderInstance
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
 from imbue.mngr.providers.local.instance import LOCAL_HOST_NAME
 from imbue.mngr.providers.local.instance import LocalProviderInstance
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
+from imbue.mngr.providers.mock_provider_test import make_local_volume_provider
+from imbue.mngr.providers.mock_provider_test import make_offline_host_with_volume
 from imbue.mngr.utils.testing import capture_loguru
 from imbue.mngr.utils.testing import init_git_repo
 from imbue.mngr.utils.testing import make_mngr_ctx
@@ -6402,42 +6402,25 @@ def test_preserve_session_files_from_volume_no_data(
     assert not dest_dir.exists()
 
 
-def _write_docker_agent_record(
-    host_id: HostId,
-    volume_root: Path,
+def _persist_claude_agent_record(
+    provider: MockProviderInstance,
     agent_id: AgentId,
     agent_name: AgentName,
     *,
     isolate_local_config_dir: bool,
 ) -> None:
-    """Persist a Claude agent record so the offline host's discover_agents() returns it.
-
-    The docker host store reads agent records from ``host_state/<host_id>/*.json``
-    on its state volume (rooted at ``volume_root``).
-    """
-    record_dir = volume_root / "host_state" / str(host_id)
-    record_dir.mkdir(parents=True, exist_ok=True)
-    (record_dir / f"{agent_id}.json").write_text(
-        json.dumps(
-            {
-                "id": str(agent_id),
-                "name": str(agent_name),
-                "type": "claude",
-                "agent_config": {
-                    "preserve_sessions_on_destroy": True,
-                    "isolate_local_config_dir": isolate_local_config_dir,
-                },
-            }
-        )
+    """Persist a Claude agent record so the offline host's discover_agents() returns it."""
+    provider.mock_agent_data.append(
+        {
+            "id": str(agent_id),
+            "name": str(agent_name),
+            "type": "claude",
+            "agent_config": {
+                "preserve_sessions_on_destroy": True,
+                "isolate_local_config_dir": isolate_local_config_dir,
+            },
+        }
     )
-
-
-def _docker_host_volume_root(host_id: HostId, volume_root: Path) -> Path:
-    """Return the on-disk directory backing the host's file volume (its host_dir root)."""
-    vol_id = DockerProviderInstance._volume_id_for_host(host_id)
-    root = volume_root / "volumes" / str(vol_id)
-    root.mkdir(parents=True, exist_ok=True)
-    return root
 
 
 def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
@@ -6456,23 +6439,13 @@ def test_on_before_host_destroy_offline_skips_projects_in_shared_config_mode(
     host_id = HostId("host-0000000000000000000000000000beef")
     agent_id = AgentId.generate()
     agent_name = AgentName("test-offline-hook")
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    _write_docker_agent_record(host_id, tmp_path, agent_id, agent_name, isolate_local_config_dir=False)
-
-    record = HostRecord(
-        certified_host_data=CertifiedHostData(
-            host_id=str(host_id),
-            host_name="h",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
-    )
-    host = provider._create_host_from_host_record(record)
-    assert isinstance(host, OfflineHostWithVolume)
+    provider = make_local_volume_provider(temp_mngr_ctx, tmp_path)
+    _persist_claude_agent_record(provider, agent_id, agent_name, isolate_local_config_dir=False)
+    host = make_offline_host_with_volume(host_id, provider, temp_mngr_ctx)
 
     # Populate the agent's on-volume state (under the host's file volume root),
     # including the per-agent projects dir that shared-config mode must skip.
-    _populate_volume_session_files(_docker_host_volume_root(host_id, tmp_path), agent_id)
+    _populate_volume_session_files(tmp_path, agent_id)
 
     on_before_host_destroy(host, temp_mngr_ctx)
 

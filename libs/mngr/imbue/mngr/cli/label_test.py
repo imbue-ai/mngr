@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 from typing import Any
-from typing import cast
 
 import pluggy
 import pytest
@@ -15,6 +14,7 @@ from imbue.mngr.cli.label import apply_labels_to_agents_offline
 from imbue.mngr.cli.label import label
 from imbue.mngr.cli.label import parse_label_string
 from imbue.mngr.cli.testing import create_test_agent_state
+from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
 from imbue.mngr.errors import AgentNotFoundOnHostError
 from imbue.mngr.errors import UserInputError
@@ -25,18 +25,14 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
 from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.base_provider import BaseProviderInstance
-from imbue.mngr.providers.docker.host_store import DockerHostStore
-from imbue.mngr.providers.local.volume import LocalVolume
+from imbue.mngr.providers.mock_provider_test import MockProviderInstance
 
 
 def _make_output_opts(fmt: OutputFormat = OutputFormat.HUMAN) -> OutputOptions:
     return OutputOptions(output_format=fmt, format_template=None)
 
 
-# =============================================================================
 # Pure function tests
-# =============================================================================
 
 
 @pytest.mark.parametrize(
@@ -80,9 +76,7 @@ def test_merge_labels(current: dict[str, str], new: dict[str, str], expected: di
     assert _merge_labels(current, new) == expected
 
 
-# =============================================================================
 # Output tests
-# =============================================================================
 
 
 def test_output_human(capsys) -> None:
@@ -134,9 +128,7 @@ def test_output_result_empty_changes(capsys) -> None:
     assert captured.out == ""
 
 
-# =============================================================================
 # CLI validation tests
-# =============================================================================
 
 
 def test_label_requires_label_flag(
@@ -168,9 +160,7 @@ def test_label_requires_agent(
     assert "Must specify at least one agent" in result.output
 
 
-# =============================================================================
 # Integration tests (online path)
-# =============================================================================
 
 
 def test_label_applies_labels_to_agent(
@@ -235,26 +225,22 @@ def test_label_json_output(
     assert output["changes"][0]["labels"]["key"] == "value"
 
 
-# =============================================================================
 # Offline path tests
-# =============================================================================
 
 
-def test_apply_labels_offline_updates_persisted_data(
-    tmp_path: Path,
-) -> None:
+def _make_persisting_provider(temp_mngr_ctx: MngrContext, tmp_path: Path) -> MockProviderInstance:
+    return MockProviderInstance(name=ProviderInstanceName("mock"), host_dir=tmp_path, mngr_ctx=temp_mngr_ctx)
+
+
+def test_apply_labels_offline_updates_persisted_data(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """apply_labels_to_agents_offline should merge labels in persisted data."""
-    # Set up a DockerHostStore backed by a local filesystem volume
-    vol_path = tmp_path / "state_vol"
-    vol_path.mkdir()
-    volume = LocalVolume(root_path=vol_path)
-    store = DockerHostStore(volume=volume)
+    provider = _make_persisting_provider(temp_mngr_ctx, tmp_path)
 
     host_id = HostId.generate()
     agent_id = AgentId.generate()
 
     # Seed persisted agent data with existing labels
-    store.persist_agent_data(
+    provider.persist_agent_data(
         host_id,
         {"id": str(agent_id), "name": "offline-agent", "labels": {"existing": "old"}},
     )
@@ -264,12 +250,12 @@ def test_apply_labels_offline_updates_persisted_data(
         agent_name=AgentName("offline-agent"),
         host_id=host_id,
         host_name=HostName("offline-host"),
-        provider_name=ProviderInstanceName("docker"),
+        provider_name=ProviderInstanceName("mock"),
     )
 
     changes: list[dict[str, Any]] = []
     apply_labels_to_agents_offline(
-        provider=cast(BaseProviderInstance, store),
+        provider=provider,
         host_id=host_id,
         agent_matches=[agent_match],
         labels_to_set={"new_key": "new_val", "existing": "updated"},
@@ -281,36 +267,31 @@ def test_apply_labels_offline_updates_persisted_data(
     assert changes[0]["labels"] == {"existing": "updated", "new_key": "new_val"}
 
     # Verify the persisted data was actually written
-    records = store.list_persisted_agent_data_for_host(host_id)
+    records = provider.list_persisted_agent_data_for_host(host_id)
     assert len(records) == 1
     assert records[0]["labels"] == {"existing": "updated", "new_key": "new_val"}
 
 
-def test_apply_labels_offline_raises_when_agent_not_found(
-    tmp_path: Path,
-) -> None:
+def test_apply_labels_offline_raises_when_agent_not_found(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """apply_labels_to_agents_offline should raise when agent is missing from persisted data."""
-    vol_path = tmp_path / "state_vol"
-    vol_path.mkdir()
-    volume = LocalVolume(root_path=vol_path)
-    store = DockerHostStore(volume=volume)
+    provider = _make_persisting_provider(temp_mngr_ctx, tmp_path)
 
     host_id = HostId.generate()
     agent_id = AgentId.generate()
 
-    # No persisted data seeded -- agent does not exist in store
+    # No persisted data seeded -- the provider has no record of this agent
     agent_match = AgentMatch(
         agent_id=agent_id,
         agent_name=AgentName("missing-agent"),
         host_id=host_id,
         host_name=HostName("offline-host"),
-        provider_name=ProviderInstanceName("docker"),
+        provider_name=ProviderInstanceName("mock"),
     )
 
     changes: list[dict[str, Any]] = []
     with pytest.raises(AgentNotFoundOnHostError):
         apply_labels_to_agents_offline(
-            provider=cast(BaseProviderInstance, store),
+            provider=provider,
             host_id=host_id,
             agent_matches=[agent_match],
             labels_to_set={"key": "val"},

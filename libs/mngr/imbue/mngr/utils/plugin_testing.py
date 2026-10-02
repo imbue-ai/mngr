@@ -199,6 +199,18 @@ def temp_git_repo(tmp_path: Path, setup_git_config: None) -> Path:
 
 
 @pytest.fixture
+def temp_git_repo_cwd(temp_git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a temporary git repository and chdir into it.
+
+    Combines temp_git_repo with monkeypatch.chdir so tests that need a git
+    repo as the working directory (e.g. for project-scope config discovery)
+    don't need to request both fixtures separately.
+    """
+    monkeypatch.chdir(temp_git_repo)
+    return temp_git_repo
+
+
+@pytest.fixture
 def mngr_test_id() -> str:
     """Generate a unique test ID for isolation."""
     return uuid4().hex
@@ -377,6 +389,7 @@ def register_plugin_test_fixtures(namespace: dict[str, Any]) -> None:
     namespace["stub_mngr_log_sh"] = stub_mngr_log_sh
     namespace["temp_config"] = temp_config
     namespace["temp_git_repo"] = temp_git_repo
+    namespace["temp_git_repo_cwd"] = temp_git_repo_cwd
     namespace["temp_host_dir"] = temp_host_dir
     namespace["temp_mngr_ctx"] = temp_mngr_ctx
     namespace["temp_profile_dir"] = temp_profile_dir

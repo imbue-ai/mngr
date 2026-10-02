@@ -26,6 +26,7 @@ _HEAVY_PROVIDER_SDK_PREFIXES: tuple[str, ...] = (
     "google.cloud.compute_v1",
     "azure.mgmt.compute",
     "anthropic",
+    "docker",
 )
 
 

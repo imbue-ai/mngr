@@ -23,6 +23,8 @@ dependencies = [
     "imbue-mngr-aws",
     "imbue-mngr-azure",
     "imbue-mngr-gcp",
+    # The local-container compute provider (LaunchMode.DOCKER).
+    "imbue-mngr-docker",
     "imbue-mngr-forward",
     "imbue-mngr-imbue-cloud",
     "imbue-mngr-latchkey",
@@ -85,6 +87,7 @@ imbue-mngr-azure = { workspace = true }
 imbue-mngr-gcp = { workspace = true }
 imbue-mngr-claude = { workspace = true }
 imbue-mngr-codex = { workspace = true }
+imbue-mngr-docker = { workspace = true }
 imbue-mngr-forward = { workspace = true }
 imbue-mngr-imbue-cloud = { workspace = true }
 imbue-mngr-latchkey = { workspace = true }

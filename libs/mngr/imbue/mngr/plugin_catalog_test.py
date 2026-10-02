@@ -9,9 +9,7 @@ from imbue.mngr.plugin_catalog import get_catalog_entry
 from imbue.mngr.plugin_catalog import get_installable_packages
 from imbue.mngr.primitives import PluginTier
 
-# =============================================================================
 # PLUGIN_CATALOG structure
-# =============================================================================
 
 
 def test_catalog_entry_point_names_are_unique() -> None:
@@ -60,6 +58,19 @@ def test_lima_plugin_detects_its_cli() -> None:
     assert entry.gate.signal.command == ("limactl", "--version")
 
 
+def test_docker_plugin_detects_its_daemon() -> None:
+    """docker is recommended and pre-selected when a Docker daemon answers.
+
+    Unlike the CLI-presence signals above, its signal asks the daemon for its
+    version, so a machine with only the client binary is not pre-selected.
+    """
+    entry = get_catalog_entry("docker")
+    assert entry is not None
+    assert entry.is_recommended is True
+    assert isinstance(entry.gate, SignalGate)
+    assert entry.gate.signal.command == ("docker", "version", "--format", "{{.Server.Version}}")
+
+
 def test_catalog_entries_sharing_signal_use_same_instance() -> None:
     """Entries that share a signal should reference the exact same SignalCheck object."""
     claude_entry = get_catalog_entry("claude")
@@ -95,9 +106,7 @@ def test_agent_usage_providers_require_agent_and_base_usage() -> None:
         assert set(entry.gate.packages) == {agent_package, "imbue-mngr-usage"}
 
 
-# =============================================================================
 # get_catalog_entry
-# =============================================================================
 
 
 def test_get_catalog_entry_found() -> None:
@@ -111,9 +120,7 @@ def test_get_catalog_entry_not_found() -> None:
     assert get_catalog_entry("nonexistent_plugin_xyz") is None
 
 
-# =============================================================================
 # get_all_cataloged_entry_point_names
-# =============================================================================
 
 
 def test_get_all_cataloged_entry_point_names_matches_catalog() -> None:
@@ -122,9 +129,7 @@ def test_get_all_cataloged_entry_point_names_matches_catalog() -> None:
     assert names == expected
 
 
-# =============================================================================
 # check_signal
-# =============================================================================
 
 
 def test_check_signal_succeeds_for_true_command() -> None:
@@ -154,9 +159,7 @@ def test_check_signal_succeeds_for_shell_grep_match() -> None:
     assert check_signal(signal) is True
 
 
-# =============================================================================
 # get_installable_packages
-# =============================================================================
 
 
 def test_get_installable_packages_deduplicates_by_package_name() -> None:

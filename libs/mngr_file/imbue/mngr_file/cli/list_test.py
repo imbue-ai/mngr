@@ -8,14 +8,11 @@ import pytest
 
 from imbue.mngr.config.data_types import MngrContext
 from imbue.mngr.config.data_types import OutputOptions
-from imbue.mngr.hosts.offline_host import OfflineHostWithVolume
-from imbue.mngr.interfaces.data_types import CertifiedHostData
 from imbue.mngr.interfaces.data_types import VolumeFile
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import OutputFormat
-from imbue.mngr.providers.docker.host_store import HostRecord
-from imbue.mngr.providers.docker.instance import DockerProviderInstance
-from imbue.mngr.providers.docker.testing import make_docker_provider_with_local_volume
+from imbue.mngr.providers.mock_provider_test import make_local_volume_provider
+from imbue.mngr.providers.mock_provider_test import make_offline_host_with_volume
 from imbue.mngr_file.cli.list import _emit_list_result
 from imbue.mngr_file.cli.list import _entry_to_json_dict
 from imbue.mngr_file.cli.list import _get_field_value
@@ -197,38 +194,13 @@ def test_emit_list_result_jsonl(capsys: pytest.CaptureFixture[str]) -> None:
 # --- list through a readable offline host ---
 
 
-def _make_readable_offline_host(
-    provider: DockerProviderInstance,
-    host_id: HostId,
-) -> OfflineHostWithVolume:
-    record = HostRecord(
-        certified_host_data=CertifiedHostData(
-            host_id=str(host_id),
-            host_name="h",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
-    )
-    host = provider._create_host_from_host_record(record)
-    assert isinstance(host, OfflineHostWithVolume)
-    return host
-
-
-def _host_volume_root(provider: DockerProviderInstance, host_id: HostId, volume_root: Path) -> Path:
-    """Return the on-disk directory backing the host's volume (host_dir root)."""
-    vol_id = DockerProviderInstance._volume_id_for_host(host_id)
-    root = volume_root / "volumes" / str(vol_id)
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
 def test_offline_host_list_directory_returns_entries(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """Listing a directory through a volume-backed offline host yields entries with permissions=None."""
     host_id = HostId(_HOST_ID)
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    host = _make_readable_offline_host(provider, host_id)
+    provider = make_local_volume_provider(temp_mngr_ctx, tmp_path)
+    host = make_offline_host_with_volume(host_id, provider, temp_mngr_ctx)
 
-    root = _host_volume_root(provider, host_id, tmp_path)
+    root = tmp_path
     (root / "file1.txt").write_text("hello")
     (root / "file2.bin").write_bytes(b"\x00" * 100)
     (root / "subdir").mkdir()
@@ -252,10 +224,10 @@ def test_offline_host_list_directory_returns_entries(temp_mngr_ctx: MngrContext,
 
 def test_offline_host_list_directory_recursive(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     host_id = HostId(_HOST_ID)
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    host = _make_readable_offline_host(provider, host_id)
+    provider = make_local_volume_provider(temp_mngr_ctx, tmp_path)
+    host = make_offline_host_with_volume(host_id, provider, temp_mngr_ctx)
 
-    root = _host_volume_root(provider, host_id, tmp_path)
+    root = tmp_path
     (root / "top.txt").write_text("top")
     sub = root / "subdir"
     sub.mkdir()
@@ -269,10 +241,10 @@ def test_offline_host_list_directory_recursive(temp_mngr_ctx: MngrContext, tmp_p
 def test_offline_host_read_file_by_absolute_path(temp_mngr_ctx: MngrContext, tmp_path: Path) -> None:
     """A volume-backed offline host reads files addressed by absolute host_dir paths."""
     host_id = HostId(_HOST_ID)
-    provider = make_docker_provider_with_local_volume(temp_mngr_ctx, tmp_path)
-    host = _make_readable_offline_host(provider, host_id)
+    provider = make_local_volume_provider(temp_mngr_ctx, tmp_path)
+    host = make_offline_host_with_volume(host_id, provider, temp_mngr_ctx)
 
-    root = _host_volume_root(provider, host_id, tmp_path)
+    root = tmp_path
     (root / "agents").mkdir()
     (root / "agents" / "state.json").write_text("payload")
 

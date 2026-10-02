@@ -62,6 +62,7 @@ const WORKSPACE_PACKAGES = {
   'imbue-mngr-claude':      'libs/mngr_claude',
   'imbue-mngr-gcp':         'libs/mngr_gcp',
   'imbue-mngr-codex':       'libs/mngr_codex',
+  'imbue-mngr-docker':      'libs/mngr_docker',
   'imbue-mngr-forward':     'libs/mngr_forward',
   'imbue-mngr-imbue-cloud': 'libs/mngr_imbue_cloud',
   'imbue-mngr-latchkey':    'libs/mngr_latchkey',

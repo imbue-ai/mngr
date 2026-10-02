@@ -100,13 +100,26 @@ def register_my_guard():
     register_resource_guard("my_tool")
 ```
 
-The consumer's `conftest.py` then replaces explicit `register_resource_guard(...)` calls with a single `register_all_resource_guards()`, which imports and invokes every entry point in the group:
+A library that owns an external resource can also register, alongside its guards, a callable that sweeps whatever its tests leaked (containers, sandboxes). `register_session_cleanup_callback(callable)` records it; the consumer runs every registered callable once at the end of the session with `run_session_cleanup_callbacks()`, after the last test's teardown (so the per-test guard environment is gone and the sweep may use the resource freely) and before the guards are stopped. Duplicate registrations of one callable are ignored.
+
+```python
+# library's register_guards.py
+from imbue.resource_guards.resource_guards import register_resource_guard
+from imbue.resource_guards.resource_guards import register_session_cleanup_callback
+
+def register_my_guard():
+    register_resource_guard("my_tool")
+    register_session_cleanup_callback(sweep_leaked_my_tool_resources)
+```
+
+The consumer's `conftest.py` then replaces explicit `register_resource_guard(...)` calls with a single `register_all_resource_guards()`, which imports and invokes every entry point in the group, and runs the registered sweeps from `pytest_sessionfinish`:
 
 ```python
 # consumer's conftest.py
 from imbue.resource_guards.resource_guards import (
     register_all_resource_guards,
     register_guarded_resource_markers,
+    run_session_cleanup_callbacks,
     start_resource_guards,
     stop_resource_guards,
 )
@@ -120,7 +133,10 @@ def pytest_sessionstart(session):
     start_resource_guards(session)
 
 def pytest_sessionfinish(session, exitstatus):
-    stop_resource_guards()
+    try:
+        run_session_cleanup_callbacks()
+    finally:
+        stop_resource_guards()
 ```
 
 ## Writing a custom SDK guard

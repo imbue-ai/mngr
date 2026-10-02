@@ -72,6 +72,7 @@ git rev-parse HEAD > .mngr/image_commit_hash
 unset UV_INDEX_URL
 uv sync --all-packages
 uv tool install -e "$CODE_DIR/libs/mngr" \
+    --with-editable "$CODE_DIR/libs/mngr_docker" \
     --with-editable "$CODE_DIR/libs/mngr_modal" \
     --with-editable "$CODE_DIR/libs/mngr_schedule" \
     --with-editable "$CODE_DIR/libs/mngr_claude"

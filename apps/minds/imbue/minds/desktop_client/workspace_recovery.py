@@ -374,8 +374,8 @@ def is_network_dependent_workspace(backend_resolver: BackendResolverInterface, a
     ``docker``. It is the config field rather than ``DOCKER_HOST`` because that
     field alone is what mngr builds each container's coordinate from; a daemon
     reached through the environment variable or the docker context is reported
-    at ``127.0.0.1``, which mngr cannot connect to either (see mngr's
-    ``docs/concepts/docker_usage.md``).
+    at ``127.0.0.1``, which mngr cannot connect to either (see ``mngr help
+    docker_usage``, the docker plugin's usage page).
 
     With no coordinate reported, the provider's backend answers instead:
     ``local``, ``docker`` and ``lima`` run their machines on this device, so a

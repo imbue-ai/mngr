@@ -91,6 +91,12 @@ class PiSignalCheck(SignalCheck):
     command: tuple[str, ...] = ("sh", "-c", "pi --help 2>&1 | grep -q 'pi - AI coding assistant'")
 
 
+class DockerSignalCheck(SignalCheck):
+    """Detects whether a Docker daemon answers."""
+
+    command: tuple[str, ...] = ("docker", "version", "--format", "{{.Server.Version}}")
+
+
 class ModalSignalCheck(SignalCheck):
     """Detects whether Modal credentials are configured."""
 
@@ -127,6 +133,7 @@ _OPENCODE_SIGNAL: Final[OpenCodeSignalCheck] = OpenCodeSignalCheck()
 _CODEX_SIGNAL: Final[CodexSignalCheck] = CodexSignalCheck()
 _ANTIGRAVITY_SIGNAL: Final[AntigravitySignalCheck] = AntigravitySignalCheck()
 _PI_SIGNAL: Final[PiSignalCheck] = PiSignalCheck()
+_DOCKER_SIGNAL: Final[DockerSignalCheck] = DockerSignalCheck()
 _MODAL_SIGNAL: Final[ModalSignalCheck] = ModalSignalCheck()
 _LIMA_SIGNAL: Final[LimaSignalCheck] = LimaSignalCheck()
 _AWS_SIGNAL: Final[AwsSignalCheck] = AwsSignalCheck()
@@ -231,6 +238,14 @@ PLUGIN_CATALOG: Final[tuple[CatalogEntry, ...]] = (
         description="Pi coding agent type plugin for mngr",
         tier=PluginTier.INDEPENDENT,
         gate=SignalGate(signal=_PI_SIGNAL),
+        is_recommended=True,
+    ),
+    CatalogEntry(
+        entry_point_name="docker",
+        package_name="imbue-mngr-docker",
+        description="Docker provider backend plugin for mngr",
+        tier=PluginTier.INDEPENDENT,
+        gate=SignalGate(signal=_DOCKER_SIGNAL),
         is_recommended=True,
     ),
     CatalogEntry(

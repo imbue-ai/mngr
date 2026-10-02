@@ -1,6 +1,5 @@
 """Tests for config loader."""
 
-from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -51,7 +50,6 @@ from imbue.mngr.config.loader import parse_config
 from imbue.mngr.config.plugin_registry import _plugin_config_registry
 from imbue.mngr.config.plugin_registry import register_plugin_config
 from imbue.mngr.config.pre_readers import OPT_IN_PLUGINS
-from imbue.mngr.config.provider_config_registry import register_provider_config
 from imbue.mngr.errors import ConfigParseError
 from imbue.mngr.errors import UserInputError
 from imbue.mngr.plugins import hookspecs
@@ -60,35 +58,13 @@ from imbue.mngr.primitives import LogLevel
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.primitives import ProviderBackendName
 from imbue.mngr.primitives import ProviderInstanceName
-from imbue.mngr.providers.docker.config import DockerProviderConfig
 from imbue.mngr.providers.registry import load_all_registries
 from imbue.mngr.utils.logging import LoggingConfig
+from imbue.mngr.utils.testing import isolate_load_config_env
+from imbue.mngr.utils.testing import setup_layered_config_test_env
 from imbue.overlay.markers import ScalarTuple
 
 hookimpl = pluggy.HookimplMarker("mngr")
-
-
-def _isolate_load_config_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Undo the autouse ``setup_test_mngr_env`` fixture's MNGR_* settings so
-    ``load_config`` resolves ``~/.mngr`` to ``tmp_path/.mngr`` (the user/profile
-    config base) instead of the fixture-supplied host dir / prefix / root, and so
-    ``root_name`` collapses to ``"mngr"`` (making the project config dir
-    ``<git-root>/.mngr/``).
-
-    Tests using this helper pair it with the ``temp_git_repo_cwd`` fixture, which
-    chdirs into an isolated empty git repo so the loader's git-worktree-root walk
-    resolves the project config dir to that repo (and not the developer's real
-    checkout). Project/local config is written under ``<git-root>/.mngr/`` (or via
-    ``MNGR_PROJECT_CONFIG_DIR``); the user/profile config stays HOME-based.
-
-    HOME is already pointed at ``tmp_path`` by the autouse fixture (via
-    ``isolate_home``), so no ``setenv("HOME", ...)`` is needed here. Tests with
-    extra env tweaks (MNGR_HEADLESS, MNGR_ALLOW_UNKNOWN_CONFIG, MNGR__*,
-    MNGR_PROJECT_CONFIG_DIR, PYTEST_CURRENT_TEST) apply those inline.
-    """
-    monkeypatch.delenv("MNGR_PREFIX", raising=False)
-    monkeypatch.delenv("MNGR_HOST_DIR", raising=False)
-    monkeypatch.delenv("MNGR_ROOT_NAME", raising=False)
 
 
 # Tests for _parse_mngr_env_overrides / _collect_env_overrides
@@ -950,7 +926,7 @@ def test_load_config_threads_every_field_from_toml(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.delenv("MNGR_HEADLESS", raising=False)
 
     mngr_dir = tmp_path / ".mngr"
@@ -1002,7 +978,7 @@ def test_load_config_disabled_plugins_includes_opt_in_plugin(
     # (and lets load_config's strict block pass re-affirm the block as a no-op).
     pm.set_blocked(opt_in_name)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     assert opt_in_name in mngr_ctx.config.disabled_plugins
@@ -1022,7 +998,7 @@ def test_load_config_disabled_plugins_excludes_explicitly_enabled_opt_in_plugin(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     mngr_dir = tmp_path / ".mngr"
     mngr_dir.mkdir(parents=True, exist_ok=True)
@@ -1049,7 +1025,7 @@ def test_load_config_disabled_plugins_omits_opt_in_plugin_when_loading_all(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("MNGR_LOAD_ALL_PLUGINS", "1")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1173,7 +1149,7 @@ def test_on_load_config_hook_is_called(
     load_all_registries(pm)
 
     # Ensure no config files interfere
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     # Call load_config
     load_config(
@@ -1204,7 +1180,7 @@ def test_on_load_config_hook_can_modify_config(
     load_all_registries(pm)
 
     # Ensure no config files interfere
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     # Call load_config
     mngr_ctx = load_config(
@@ -1236,7 +1212,7 @@ def test_on_load_config_hook_can_add_new_fields(
     load_all_registries(pm)
 
     # Ensure no config files interfere
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     # Call load_config
     mngr_ctx = load_config(
@@ -1423,7 +1399,7 @@ def test_load_config_rejects_unknown_fields_by_default(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.delenv("MNGR_ALLOW_UNKNOWN_CONFIG", raising=False)
 
     mngr_dir = tmp_path / ".mngr"
@@ -1451,7 +1427,7 @@ def test_load_config_allows_unknown_fields_with_env_var(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("MNGR_ALLOW_UNKNOWN_CONFIG", "1")
 
     mngr_dir = tmp_path / ".mngr"
@@ -1476,7 +1452,7 @@ def test_load_config_preserves_default_destroyed_host_persisted_seconds_from_tom
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
 
     # Write a user config with custom default_destroyed_host_persisted_seconds
     mngr_dir = tmp_path / ".mngr"
@@ -1704,7 +1680,7 @@ def test_load_config_raises_when_in_pytest_and_not_allowed(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # Write config that disables pytest
@@ -1730,7 +1706,7 @@ def test_load_config_allows_pytest_when_config_opts_in(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     mngr_dir = tmp_path / ".mngr"
@@ -1754,7 +1730,7 @@ def test_load_config_raises_when_in_pytest_and_config_omits_opt_in(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # A real config file that sets an unrelated key but does not opt in.
@@ -1784,7 +1760,7 @@ def test_load_config_raises_when_one_layer_opts_in_but_another_does_not(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # Lower-precedence user/profile layer: a real config that does NOT opt in.
@@ -1795,7 +1771,7 @@ def test_load_config_raises_when_one_layer_opts_in_but_another_does_not(
     user_settings_path.write_text('prefix = "custom-"\n')
 
     # Higher-precedence project layer opts in. root_name collapses to "mngr" under
-    # _isolate_load_config_env, so this resolves to <git-root>/.mngr/. The merged
+    # isolate_load_config_env, so this resolves to <git-root>/.mngr/. The merged
     # is_allowed_in_pytest is therefore True (project overrides user).
     project_config_dir = temp_git_repo_cwd / ".mngr"
     project_config_dir.mkdir(parents=True, exist_ok=True)
@@ -1820,7 +1796,7 @@ def test_load_config_allows_pytest_when_no_config_file_loaded(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_something")
 
     # No settings.toml is written anywhere: the HOME-based profile dir is empty
@@ -1841,7 +1817,7 @@ def test_load_config_applies_mngr_env_overrides(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("MNGR__COMMANDS__CREATE__CONNECT", "false")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1859,7 +1835,7 @@ def test_load_config_headless_default_is_false(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.delenv("MNGR_HEADLESS", raising=False)
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1875,7 +1851,7 @@ def test_load_config_mngr_headless_env_var_true(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("MNGR_HEADLESS", "true")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1891,7 +1867,7 @@ def test_load_config_mngr_headless_env_var_false(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.setenv("MNGR_HEADLESS", "false")
 
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
@@ -1907,7 +1883,7 @@ def test_load_config_headless_from_config_file(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     monkeypatch.delenv("MNGR_HEADLESS", raising=False)
 
     # Write a project settings file with headless = true. is_allowed_in_pytest
@@ -1929,7 +1905,7 @@ def test_load_config_mngr_headless_env_overrides_config_file(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     # Config file says headless = true, but env var says false
     monkeypatch.setenv("MNGR_HEADLESS", "false")
 
@@ -2145,7 +2121,7 @@ def test_load_config_narrowing_raises_by_default(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
@@ -2161,7 +2137,7 @@ def test_load_config_narrowing_allowed_when_opted_in(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     _write_two_layer_narrowing_config(tmp_path, allow_narrowing=True)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
@@ -2183,7 +2159,7 @@ def test_load_config_narrowing_skipped_when_guard_disabled(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     _write_two_layer_narrowing_config(tmp_path, allow_narrowing=None)
     monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
 
@@ -2203,7 +2179,7 @@ def test_load_config_extend_avoids_narrowing_without_opt_in(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     (tmp_path / "settings.toml").write_text('is_allowed_in_pytest = true\n\n[commands.create]\nenv = ["X=4"]\n')
     (tmp_path / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[commands.create]\nenv__extend = ["X=5"]\n'
@@ -2226,7 +2202,7 @@ def test_load_config_local_command_defaults_add_to_the_projects(
     pm.add_hookspecs(hookspecs)
     load_all_registries(pm)
 
-    _isolate_load_config_env(monkeypatch)
+    isolate_load_config_env(monkeypatch)
     (tmp_path / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[commands.create]\nconnect = false\nhost_env__extend = ["A=1"]\n'
     )
@@ -2252,26 +2228,11 @@ def test_load_config_local_command_defaults_add_to_the_projects(
 # must raise unless the user opts in (and ``__extend`` is the natural workaround).
 
 
-def _setup_layered_test_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[pluggy.PluginManager, Path]:
-    """Shared boilerplate for the narrowing integration tests below.
-
-    Returns a fresh plugin manager and the project-config dir to write TOML into.
-    The autouse fixtures clamp HOME/MNGR_* so the loader can't pick up the
-    developer's real config; we re-clamp the project-config dir to tmp_path.
-    """
-    pm = pluggy.PluginManager("mngr")
-    pm.add_hookspecs(hookspecs)
-    load_all_registries(pm)
-    _isolate_load_config_env(monkeypatch)
-    monkeypatch.setenv("MNGR_PROJECT_CONFIG_DIR", str(tmp_path))
-    return pm, tmp_path
-
-
 def test_load_config_narrowing_raises_on_agent_type_cli_args_replacement(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
 ) -> None:
     """A local layer that re-assigns a non-empty ``agent_types.<name>.cli_args`` raises by default."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\nparent_type = "claude"\ncli_args = ["--debug"]\n'
     )
@@ -2287,7 +2248,7 @@ def test_load_config_extend_avoids_narrowing_on_agent_type_cli_args(
 ) -> None:
     """``cli_args__extend`` in the local layer preserves the project layer's entries
     and merges them in precedence order, without tripping the guard."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\nparent_type = "claude"\ncli_args = ["--debug"]\n'
     )
@@ -2304,7 +2265,7 @@ def test_load_config_narrowing_raises_on_create_template_options_replacement(
 ) -> None:
     """A local layer that re-assigns a non-empty list inside
     ``create_templates.<name>.options`` raises by default."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[create_templates.dev]\nenv = ["X=1"]\n'
     )
@@ -2320,7 +2281,7 @@ def test_load_config_extend_avoids_narrowing_on_create_template_options(
 ) -> None:
     """``env__extend`` inside ``[create_templates.dev]`` walks through the
     ``options`` mapping and merges with the project layer's entries."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[create_templates.dev]\nenv = ["X=1"]\n'
     )
@@ -2338,7 +2299,7 @@ def test_load_config_allows_adding_new_agent_type_in_local(
     """Adding a brand-new agent_type entry in the local layer never narrows --
     the per-key container merge preserves the project layer's entry alongside the
     new one. Sanity-check that the safety net doesn't fire on pure additions."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\nparent_type = "claude"\ncli_args = ["--debug"]\n'
     )
@@ -2358,7 +2319,7 @@ def test_load_config_extend_in_new_template_preserves_extend_suffix(
     extend the runtime params at template-application time (rather than collapsing
     into a bare assign that would narrow over the create command's runtime env).
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.local.toml").write_text(
         'is_allowed_in_pytest = true\n\n[create_templates.coder_local]\ntype = "claude"\nenv__extend = ["X=1"]\n'
     )
@@ -2379,7 +2340,7 @@ def test_load_config_extend_in_new_template_extends_runtime_env(
     should compose with the create command's runtime env (which itself comes from
     a separate config block) rather than narrowing over it.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.local.toml").write_text(
         "is_allowed_in_pytest = true\n"
         "\n"
@@ -2412,7 +2373,7 @@ def test_load_config_string_cli_args_replacement_does_not_narrow(
     and should not trigger the narrowing guard against the lower layer's tokenized
     tuple, even when the resulting tokens differ.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         'is_allowed_in_pytest = true\n\n[agent_types.my_claude]\nparent_type = "claude"\ncli_args = "--foo --bar"\n'
     )
@@ -2479,7 +2440,7 @@ def test_load_config_narrowing_raises_on_settings_overrides_bare_drop(
     the project layer's ``permissions`` dict, so the narrowing is recorded at the
     ``permissions`` path.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     _write_settings_overrides_narrowing_config(project_dir)
     with pytest.raises(ConfigParseError) as exc_info:
         load_config(pm=pm, concurrency_group=cg)
@@ -2493,7 +2454,7 @@ def test_load_config_settings_overrides_narrowing_allowed_when_opted_in(
 ) -> None:
     """Setting ``allow_settings_key_assignment_narrowing = true`` silences the
     cross-scope ``settings_overrides`` narrowing; the local layer's value wins."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n"
         "allow_settings_key_assignment_narrowing = true\n\n"
@@ -2518,7 +2479,7 @@ def test_load_config_extend_avoids_settings_overrides_narrowing(
     """Declaring ``permissions.allow`` as ``extend`` in the local layer's ``__mngr_merge``
     map accumulates onto the project layer's entries rather than narrowing, so no opt-in
     is needed."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     _write_settings_overrides_narrowing_config(project_dir, higher_op="extend")
     mngr_ctx = load_config(pm=pm, concurrency_group=cg)
     settings_overrides = mngr_ctx.config.agent_types[AgentTypeName("my_claude")].model_dump()["settings_overrides"]
@@ -2537,7 +2498,7 @@ def test_load_config_assign_avoids_settings_overrides_narrowing(
     config-load whenever a lower scope already set the key, so the no-warn intent was lost
     and the guard errored on exactly the key the user opted out of.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
         '[agent_types.my_claude]\nparent_type = "claude"\n'
@@ -2567,7 +2528,7 @@ def test_load_config_settings_overrides_accumulation_does_not_narrow(
     """A cross-scope ``settings_overrides`` that only *adds* a new key (a superset,
     never dropping a lower-scope aggregate) loads fine without any opt-in -- the
     accumulating-patch behavior is unchanged for the non-narrowing case."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
         '[agent_types.my_claude]\nparent_type = "claude"\n'
@@ -2594,7 +2555,7 @@ def test_load_config_settings_overrides_narrowing_error_attributes_both_sides(
     """The cross-scope ``settings_overrides`` narrowing error names both the
     assigning local layer and the dropped-from project layer, with scopes and
     paths, reusing the standard ``_build_narrowing_error`` attribution path."""
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     _write_settings_overrides_narrowing_config(project_dir)
     with pytest.raises(ConfigParseError) as exc_info:
         load_config(pm=pm, concurrency_group=cg)
@@ -2617,7 +2578,7 @@ def test_load_config_narrowing_attributes_dropped_from_for_suffixed_lower_key(
     (``permissions__assign``) while the narrowing path is bare (``...permissions``), so
     provenance attribution must normalize the operator suffix to match.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text(
         "is_allowed_in_pytest = true\n\n"
         '[agent_types.my_claude]\nparent_type = "claude"\n'
@@ -2693,7 +2654,7 @@ def test_load_config_narrowing_error_names_both_sides_with_paths_and_scopes(
     dropped, each with the resolved file path and matching ``config set --scope``
     flag, so the user knows exactly which files are implicated.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     _write_two_layer_narrowing_config(project_dir, allow_narrowing=None)
 
     with pytest.raises(ConfigParseError) as exc_info:
@@ -2719,7 +2680,7 @@ def test_load_config_narrowing_error_names_env_var_layer(
     as the scopeless env layer (no path, no ``config set --scope`` flag) while the
     dropped-from side still names the file and its scope.
     """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
+    pm, project_dir = setup_layered_config_test_env(monkeypatch, tmp_path)
     (project_dir / "settings.toml").write_text('is_allowed_in_pytest = true\n\n[commands.create]\nenv = ["X=4"]\n')
     monkeypatch.setenv("MNGR__COMMANDS__CREATE__ENV", '["X=5"]')
 
@@ -2732,36 +2693,3 @@ def test_load_config_narrowing_error_names_env_var_layer(
     # Dropped-from side: the project file (home contracted to ``~``), with its scope flag.
     assert "~/settings.toml" in message
     assert "mngr config set --scope project" in message
-
-
-# Tests for provider config fields merged across settings layers
-
-
-def test_load_config_accepts_docker_bind_address_unreachable_from_a_remote_daemon_host_set_in_another_layer(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, temp_git_repo_cwd: Path, cg: ConcurrencyGroup
-) -> None:
-    """A docker provider whose merged host and bind address cannot work together still loads.
-
-    The lower layer points docker at a remote daemon; the higher layer (shaped like a project
-    template's) disables docker and pins a loopback bind. Only creating a docker container can
-    fail on that combination, so every other command -- e.g. creating on another provider --
-    must still load its config.
-    """
-    pm, project_dir = _setup_layered_test_env(monkeypatch, tmp_path)
-    register_provider_config("docker", DockerProviderConfig)
-    (project_dir / "settings.toml").write_text(
-        "is_allowed_in_pytest = true\n\n"
-        '[providers.docker]\nbackend = "docker"\nhost = "ssh://user@daemon-host"\nisolate_host_volumes = true\n'
-    )
-    (project_dir / "settings.local.toml").write_text(
-        "is_allowed_in_pytest = true\n\n[providers.docker]\nis_enabled = false\n"
-        'isolate_host_volumes = true\nssh_bind_address = "127.0.0.1"\n'
-    )
-
-    mngr_ctx = load_config(pm=pm, concurrency_group=cg)
-
-    docker_config = mngr_ctx.config.providers[ProviderInstanceName("docker")]
-    assert isinstance(docker_config, DockerProviderConfig)
-    assert docker_config.host == "ssh://user@daemon-host"
-    assert docker_config.ssh_bind_address == IPv4Address("127.0.0.1")
-    assert docker_config.is_enabled is False

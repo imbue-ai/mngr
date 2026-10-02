@@ -224,17 +224,12 @@ def test_prevent_unittest_mock_imports() -> None:
     rc.check_unittest_mock_imports(_DIR, snapshot(1))
 
 
-# The +1 here is the new `monkeypatch.setattr(resource_guards,
-# "_fixture_resource_marks", {})` line in testing.py::isolate_guard_state.
-# It mirrors the existing pattern of resetting every module-level guard state
-# attribute via monkeypatch so each test gets a clean slate; the new decorator
-# storage needs the same treatment to keep tests isolated.
-# The +1 after that is the new unit test for _pytest_runtest_setup that needs
-# to pretend the session-level guard wrapper directory exists; it sets the
-# module-level _guard_wrapper_dir via monkeypatch.setattr for the same reason
-# isolate_guard_state does.
+# testing.py::isolate_guard_state resets every module-level guard state attribute
+# (including the session-cleanup callback list) via monkeypatch so each test gets a
+# clean slate, and the _pytest_runtest_setup unit test sets _guard_wrapper_dir the
+# same way to pretend the session-level wrapper directory exists.
 def test_prevent_monkeypatch_setattr() -> None:
-    rc.check_monkeypatch_setattr(_DIR, snapshot(11))
+    rc.check_monkeypatch_setattr(_DIR, snapshot(12))
 
 
 def test_prevent_test_container_classes() -> None:

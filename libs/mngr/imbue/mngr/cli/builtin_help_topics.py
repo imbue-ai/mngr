@@ -73,7 +73,6 @@ _DOC_TOPICS: tuple[TopicHelpPage, ...] = (
     _doc_topic("agent_types", "Agent Types", "concepts/agent_types.md"),
     _doc_topic("agents", "Agents", "concepts/agents.md"),
     _doc_topic("api", "mngr Plugin API", "concepts/api.md"),
-    _doc_topic("docker_usage", "Using Docker", "concepts/docker_usage.md"),
     _doc_topic("environment_variables", "Environment Variables", "concepts/environment_variables.md"),
     _doc_topic("hosts", "Hosts", "concepts/hosts.md"),
     _doc_topic("idle_detection", "Idle Detection", "concepts/idle_detection.md"),

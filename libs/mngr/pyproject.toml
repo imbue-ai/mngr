@@ -26,10 +26,6 @@ dependencies = [
     "concurrency-group==0.1.20",
     "coolname>=3.0.0",
     "cryptography>=42.0",
-    # pinning docker because the guard registration module
-    # (register_guards_docker.py) monkeypatches its internal methods for test
-    # resource guards; new versions may move or rename them.
-    "docker==7.1.0",
     "packaging>=21.0",
     "pydantic>=2.0",
     # Parses the YAML frontmatter of output-style files (agents/output_styles.py).
@@ -47,9 +43,6 @@ dependencies = [
     "pluggy>=1.5.0",
     "pygtail>=0.14.0",
     "markdown-it-py>=2.2.0",
-    # requests is the transport docker-py is built on; we catch its connection
-    # exceptions directly to tell "daemon unreachable" from "daemon errored".
-    "requests>=2.26",
     "rich>=13.0",
     "tabulate>=0.9.0",
     "tenacity>=8.0",
@@ -128,9 +121,6 @@ omit = [
   "*/utils/testing.py",
   "*/utils/plugin_testing.py",
   "*/utils/mock_provider.py",
-  "*/providers/docker/instance.py",
-  "*/providers/docker/volume.py",
-  "*/providers/docker/testing.py",
 ]
 
 [tool.coverage.report]
@@ -144,9 +134,6 @@ omit = [
   "*/utils/testing.py",
   "*/utils/plugin_testing.py",
   "*/utils/mock_provider.py",
-  "*/providers/docker/instance.py",
-  "*/providers/docker/volume.py",
-  "*/providers/docker/testing.py",
   # Minds app has its own coverage configuration (apps/minds/pyproject.toml)
   "*/minds/*",
   # These packages are gated individually by their own (lower) fail_under
