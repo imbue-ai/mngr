@@ -45,6 +45,14 @@ def test_build_account_plan_view_maps_every_quota_row() -> None:
     assert rows_by_label["Synced machines"]["used"] == "4"
 
 
+def test_build_account_plan_view_shows_the_free_plan_as_limited() -> None:
+    info = _account_info()
+    info["plan_name"] = "free"
+    view = build_account_plan_view(info)
+    assert view["plan_name"] == "free"
+    assert view["plan_display_name"] == "Limited"
+
+
 def test_build_account_plan_view_flags_over_storage_quota() -> None:
     under = build_account_plan_view(_account_info())
     assert under["is_over_storage_quota"] is False

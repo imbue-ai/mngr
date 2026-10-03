@@ -160,6 +160,21 @@ describe("the plan switcher's explorer agreement", () => {
   });
 });
 
+describe("the plan switcher's plan names", () => {
+  it("offers the free plan as Limited and keeps its stored name", () => {
+    const render = mountCard(modelOnPlan("explorer"));
+    const options = collectVnodes(render()).filter(
+      (node) => node.tag === "option",
+    );
+    const freeOption = options.find((node) => attrsOf(node).value === "free");
+    expect(freeOption).toBeDefined();
+    expect(collectText(freeOption).join("").trim()).toBe("Limited");
+    expect(
+      options.map((node) => collectText(node).join("").trim()),
+    ).not.toContain("Free");
+  });
+});
+
 describe("a signed-out account's card", () => {
   it("signs back in to close on landing, with no confirmation over the list", () => {
     const start = vi

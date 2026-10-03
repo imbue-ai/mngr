@@ -20,15 +20,24 @@ interface AccountCardAttrs {
   account: UiAccountEntry;
 }
 
-// Shared plan copy (mirrors the hosted signup page's plan selector).
+// Shared plan copy (mirrors the hosted signup page's plan selector -- keep in
+// sync with SIGNUP_PLANS in apps/remote_service_connector/frontend/src/plans.ts).
 const PLAN_DESCRIPTION_BY_NAME: Record<string, string> = {
   explorer:
     "2 free cloud workspaces. You agree to share product data from those workspaces with Imbue " +
     "to help improve Imbue Studio.",
   free:
-    "1 free cloud workspace. Your workspace may be temporarily paused when idle or when capacity " +
-    "is low. Our goal is to make your data private and secure.",
+    "1 free cloud workspace. Your workspace may be paused when idle. Availability depends on host " +
+    "capacity: if hosts run out, this plan is limited first. Our goal is to make your data private " +
+    "and secure.",
 };
+
+// The stored plan name "free" is shown to people as "Limited".
+const PLAN_LABEL_BY_NAME: Record<string, string> = { free: "Limited" };
+
+function planLabel(planName: string): string {
+  return PLAN_LABEL_BY_NAME[planName] ?? planName.charAt(0).toUpperCase() + planName.slice(1);
+}
 
 // Switching TO explorer is the analytics consent, so it needs an explicit
 // affirmative agreement, not just a dropdown pick.
@@ -157,7 +166,7 @@ function planSection(
                 m(
                   "option",
                   { value: plan_name, selected: plan_name === selectedPlan },
-                  plan_name.charAt(0).toUpperCase() + plan_name.slice(1),
+                  planLabel(plan_name),
                 ),
               ),
             ),

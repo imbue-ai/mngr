@@ -19,9 +19,13 @@ def format_gb(byte_count: int) -> str:
     return f"{byte_count / _BYTES_PER_GB:.1f} GB"
 
 
+# The stored plan name "free" is shown to people as "Limited".
+_PLAN_DISPLAY_NAME_BY_NAME: Final[dict[str, str]] = {"free": "Limited"}
+
+
 @pure
 def _plan_display_name(plan_name: str) -> str:
-    return plan_name.capitalize()
+    return _PLAN_DISPLAY_NAME_BY_NAME.get(plan_name, plan_name.capitalize())
 
 
 @pure
