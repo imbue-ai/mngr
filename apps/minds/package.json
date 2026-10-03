@@ -1,7 +1,7 @@
 {
   "name": "imbue-studio",
   "productName": "Imbue Studio",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Imbue Studio - Self-improving, persistent AI agents",
   "homepage": "https://github.com/imbue-ai/mngr",
   "author": "Imbue <dev@imbue.com>",
