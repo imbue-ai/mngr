@@ -8,6 +8,7 @@
 
 import m from "mithril";
 import type {
+  UiBringAppToFrontMessage,
   UiHealthMessage,
   UiNotificationsMessage,
   UiOpenHelpMessage,
@@ -43,6 +44,8 @@ export interface ChannelOptions {
   onWorkspaceStopped?: (message: UiWorkspaceStoppedMessage) => void;
   onOpenHelp?: (message: UiOpenHelpMessage) => void;
   onWorkspaceRefresh?: (message: UiWorkspaceRefreshMessage) => void;
+  /** A provider sign-in finished in the browser; raise the window showing its workspace. */
+  onBringAppToFront?: (message: UiBringAppToFrontMessage) => void;
   /** Called after each health message lands. The message's own ``is_snapshot``
    * tells a connect-time replay of current state apart from a live edge. */
   onHealthChanged?: (message: UiHealthMessage) => void;
@@ -252,6 +255,9 @@ export class UiChannelClient {
         break;
       case "reload_ui":
         (this.options.reloadPage ?? (() => location.reload()))();
+        break;
+      case "bring_app_to_front":
+        this.options.onBringAppToFront?.(message);
         break;
       default: {
         const unreachable: never = message;

@@ -20,6 +20,7 @@ from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.folder_sync import FolderSyncManager
+from imbue.minds.desktop_client.folder_sync import FolderSyncStatus
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncActivity
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.folder_sync_store import FolderSyncStore
@@ -40,6 +41,7 @@ from imbue.minds.desktop_client.testing import create_file_sharing_permission_re
 from imbue.minds.desktop_client.testing import write_fake_mngr_pair_script
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
+from imbue.mngr.utils.polling import poll_for_value
 from imbue.mngr_latchkey.testing import make_full_fake_latchkey
 
 _HttpxHandler: Final = Callable[[httpx.Request], httpx.Response]
@@ -140,6 +142,19 @@ _DEVICE_ID: Final[str] = "host-0f0e0d0c0b0a09080706050403020100"
 _START_TIMEOUT_SECONDS: Final[float] = 30.0
 
 
+def _wait_until_started(manager: FolderSyncManager, agent_id: str, local_path: str) -> FolderSyncStatus | None:
+    """Wait for a granted sync to come up, including for the converger to launch its run.
+
+    ``wait_until_started`` answers None at once while no run exists yet, and a grant only records
+    the wish; the converger thread launches the run shortly after.
+    """
+    status, _, _ = poll_for_value(
+        lambda: manager.wait_until_started(agent_id, local_path, _START_TIMEOUT_SECONDS),
+        timeout=_START_TIMEOUT_SECONDS,
+    )
+    return status
+
+
 class _ChatWorkspaceResolver(StaticBackendResolver):
     """A workspace whose primary agent and chat agent share one name and host.
 
@@ -212,9 +227,6 @@ def _syncable_setup(
     return client, manager, event, sender
 
 
-# handler.handles_request_type
-
-
 def test_handler_claims_file_sharing_request_type(tmp_path: Path) -> None:
     handler, _sender = _make_file_sharing_handler(tmp_path, lambda r: httpx.Response(200))
     assert handler.handles_request_type() == REQUEST_TYPE_FILE_SHARING
@@ -230,9 +242,6 @@ def test_display_name_returns_path(tmp_path: Path) -> None:
         rationale="need data",
     )
     assert handler.display_name_for_event(event) == "/home/user/data.txt"
-
-
-# apply_grant_request
 
 
 def test_grant_calls_gateway_approve_writes_response_notifies_agent(tmp_path: Path) -> None:
@@ -542,9 +551,6 @@ def test_grant_returns_502_when_gateway_rejects(tmp_path: Path) -> None:
     assert sender.sent_messages == []
 
 
-# apply_deny_request
-
-
 def test_deny_calls_gateway_delete_writes_response_notifies_agent(tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
@@ -610,9 +616,6 @@ def test_deny_still_writes_response_when_gateway_delete_fails(tmp_path: Path) ->
     assert response.get_json()["outcome"] == "DENIED"
     assert len(load_response_events(tmp_path)) == 1
     assert len(sender.sent_messages) == 1
-
-
-# Wiring through the Flask dispatcher
 
 
 def test_build_request_detail_payload_matches_the_fragment_inputs(tmp_path: Path) -> None:
@@ -691,9 +694,6 @@ def test_grant_hands_the_spliced_policy_to_the_workspaces_own_machine(tmp_path: 
     assert carried == [str(agent_id)]
 
 
-# The sync the dialog can ask for alongside the grant
-
-
 def test_grant_with_sync_starts_one_and_tells_the_agent_where_the_copy_lands(
     tmp_path: Path, root_concurrency_group: ConcurrencyGroup
 ) -> None:
@@ -720,7 +720,7 @@ def test_grant_with_sync_starts_one_and_tells_the_agent_where_the_copy_lands(
     assert sender.sent_messages == [
         (event.agent_id, format_resolution_notice(body["message"], event.request_id, RequestStatus.GRANTED))
     ]
-    status = manager.wait_until_started(event.agent_id, str(folder), _START_TIMEOUT_SECONDS)
+    status = _wait_until_started(manager, event.agent_id, str(folder))
     assert status is not None
     assert status.spec.conflict == FolderSyncConflict.WORKSPACE
     assert manager.desired_activity_for(event.agent_id, str(folder)) == FolderSyncActivity.ACTIVE
@@ -925,5 +925,5 @@ def test_a_sync_asked_for_by_a_chat_is_keyed_by_its_workspace(
     assert response.status_code == 200, response.text
     assert manager.desired_activity_for(str(primary), str(folder)) == FolderSyncActivity.ACTIVE
     assert manager.desired_activity_for(str(chat), str(folder)) is None
-    assert manager.wait_until_started(str(primary), str(folder), _START_TIMEOUT_SECONDS) is not None
+    assert _wait_until_started(manager, str(primary), str(folder)) is not None
     manager.stop_all()

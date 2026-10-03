@@ -109,9 +109,6 @@ def _handshaken_client(transport: ScriptedTransport) -> CodexAppServerClient:
     return client
 
 
-# handshake
-
-
 def test_initialize_handshake_sends_experimental_capability_and_initialized() -> None:
     transport = ScriptedTransport()
     transport.respond_result("initialize", _initialize_result())
@@ -231,9 +228,6 @@ def test_thread_compact_start_propagates_error() -> None:
     assert exc_info.value.code == -32600
 
 
-# submit: idle -> started, busy -> steered
-
-
 def test_submit_when_idle_starts_a_turn() -> None:
     transport = ScriptedTransport()
     client = _handshaken_client(transport)
@@ -267,9 +261,6 @@ def test_submit_requires_a_bound_thread() -> None:
     client.initialize("mngr", "0.1")
     with pytest.raises(CodexAppServerError):
         client.submit("hello", "cid-1")
-
-
-# submit: ABA -32600 re-decide-once
 
 
 def test_submit_aba_redecides_as_start_when_turn_ended() -> None:
@@ -332,9 +323,6 @@ def test_submit_reraises_a_non_aba_error() -> None:
         client.submit("x", "cid-5")
     assert exc_info.value.code == -32000
     assert len(transport.sent_of("turn/steer")) == 1
-
-
-# interrupt / model_list / settings_update
 
 
 def test_interrupt_sends_turn_interrupt_for_the_bound_thread() -> None:
@@ -431,9 +419,6 @@ def test_settings_update_defaults_send_only_the_thread_id() -> None:
     assert transport.sent_of("thread/settings/update")[0]["params"] == {"threadId": "thread-1"}
 
 
-# notifications / activity tracking / errors
-
-
 def test_notification_handlers_receive_events_and_track_active_turn() -> None:
     transport = ScriptedTransport()
     client = _handshaken_client(transport)
@@ -520,9 +505,6 @@ def test_malformed_and_untyped_frames_are_ignored() -> None:
     client.poll_notifications()
     assert client.active_turn_id is None
     assert seen == ["item/completed", "turn/diff/updated"]
-
-
-# thread_resume / thread_read / result-shape guards
 
 
 def test_thread_resume_binds_and_returns_seed() -> None:
@@ -692,9 +674,6 @@ def test_steer_raises_when_result_lacks_a_turn_id() -> None:
         client.submit("hello", "cid-1")
 
 
-# real WebSocket transport (against a fake connection)
-
-
 class _FakeConnection:
     def __init__(self) -> None:
         self.sent: list[str] = []
@@ -743,3 +722,133 @@ def test_websocket_transport_maps_connection_closed_to_transport_error() -> None
         transport.receive(1.0)
     with pytest.raises(TransportClosedError):
         transport.send("hello")
+
+
+def _initialized_client(transport: ScriptedTransport) -> CodexAppServerClient:
+    transport.respond_result("initialize", _initialize_result())
+    client = CodexAppServerClient(transport=transport)
+    client.initialize("mngr", "0.1")
+    return client
+
+
+def test_start_chatgpt_login_asks_for_a_browser_login_and_returns_its_url() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+    transport.respond_result(
+        "account/login/start",
+        {"type": "chatgpt", "loginId": "login-4a1", "authUrl": "https://auth.openai.com/oauth/authorize?state=s-9"},
+    )
+
+    started = client.start_chatgpt_login()
+
+    assert (started.login_id, started.auth_url) == ("login-4a1", "https://auth.openai.com/oauth/authorize?state=s-9")
+    assert transport.sent_of("account/login/start")[0]["params"] == {"type": "chatgpt"}
+
+
+def test_start_device_login_asks_for_a_device_code() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+    transport.respond_result(
+        "account/login/start",
+        {
+            "type": "chatgptDeviceCode",
+            "loginId": "login-7b2",
+            "verificationUrl": "https://auth.openai.com/codex/device",
+            "userCode": "ABCD-1234",
+        },
+    )
+
+    started = client.start_device_login()
+
+    assert (started.login_id, started.verification_url, started.user_code) == (
+        "login-7b2",
+        "https://auth.openai.com/codex/device",
+        "ABCD-1234",
+    )
+    assert transport.sent_of("account/login/start")[0]["params"] == {"type": "chatgptDeviceCode"}
+
+
+def test_wait_login_completed_returns_the_completion_for_its_login_and_dispatches_the_rest() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+    seen: list[str] = []
+    client.add_notification_handler(lambda method, _params: seen.append(method))
+    transport.push({"jsonrpc": "2.0", "method": "account/updated", "params": {}})
+    transport.push(
+        {"jsonrpc": "2.0", "method": "account/login/completed", "params": {"loginId": "login-other", "success": False}}
+    )
+    transport.push(
+        {"jsonrpc": "2.0", "method": "account/login/completed", "params": {"loginId": "login-4a1", "success": True}}
+    )
+
+    completed = client.wait_login_completed("login-4a1", timeout_seconds=5.0)
+
+    assert (completed.login_id, completed.success, completed.error) == ("login-4a1", True, None)
+    assert seen == ["account/updated", "account/login/completed", "account/login/completed"]
+
+
+def test_wait_login_completed_sees_a_completion_another_request_read_off_the_connection() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+
+    def answer_model_list(request: Mapping[str, Any]) -> None:
+        transport.push(
+            {
+                "jsonrpc": "2.0",
+                "method": "account/login/completed",
+                "params": {"loginId": "login-4a1", "success": True},
+            }
+        )
+        transport.push({"jsonrpc": "2.0", "id": request["id"], "result": {"data": []}})
+
+    transport.respond("model/list", answer_model_list)
+
+    # A request issued while the wait is under way reads the completion before the wait's own loop does.
+    def list_models_on_account_update(method: str, _params: Mapping[str, Any]) -> None:
+        if method == "account/updated":
+            client.model_list()
+
+    client.add_notification_handler(list_models_on_account_update)
+    transport.push({"jsonrpc": "2.0", "method": "account/updated", "params": {}})
+
+    completed = client.wait_login_completed("login-4a1", timeout_seconds=5.0)
+
+    assert (completed.login_id, completed.success) == ("login-4a1", True)
+    assert len(transport.sent_of("model/list")) == 1
+
+
+def test_wait_login_completed_reports_a_failed_login() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+    transport.push(
+        {
+            "jsonrpc": "2.0",
+            "method": "account/login/completed",
+            "params": {"loginId": "login-4a1", "success": False, "error": "user cancelled"},
+        }
+    )
+
+    completed = client.wait_login_completed("login-4a1", timeout_seconds=5.0)
+
+    assert (completed.success, completed.error) == (False, "user cancelled")
+
+
+def test_wait_login_completed_skips_an_unreadable_completion() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+    transport.push({"jsonrpc": "2.0", "method": "account/login/completed", "params": {"loginId": "login-4a1"}})
+    transport.push(
+        {"jsonrpc": "2.0", "method": "account/login/completed", "params": {"loginId": "login-4a1", "success": True}}
+    )
+
+    completed = client.wait_login_completed("login-4a1", timeout_seconds=5.0)
+
+    assert (completed.login_id, completed.success) == ("login-4a1", True)
+
+
+def test_wait_login_completed_raises_when_the_login_never_completes() -> None:
+    transport = ScriptedTransport()
+    client = _initialized_client(transport)
+
+    with pytest.raises(CodexAppServerError, match="did not complete"):
+        client.wait_login_completed("login-4a1", timeout_seconds=0.2)

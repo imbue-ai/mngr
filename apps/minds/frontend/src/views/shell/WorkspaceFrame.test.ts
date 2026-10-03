@@ -85,6 +85,9 @@ function makeContract() {
     OPEN_HELP: "minds:open-help",
     OPEN_AI_KEYS_PAGE: "minds:open-ai-keys-page",
     OPEN_AI_KEYS_ACK: "minds:open-ai-keys-ack",
+    PROVIDER_SIGN_IN: "minds:provider-sign-in",
+    PROVIDER_SIGN_IN_ACK: "minds:provider-sign-in-ack",
+    PROVIDER_SIGN_IN_END: "minds:provider-sign-in-end",
     BRING_APP_TO_FRONT: "minds:bring-app-to-front",
     OPEN_SHARE_SETTINGS: "minds:open-share-settings",
     CLOSE_ACTIVE_TAB: "minds:close-active-tab",
@@ -103,12 +106,15 @@ function makeContract() {
 
 const WORKSPACE_AGENT_ID = "agent-ab12";
 
-function makeHandlers(options: { canPopOut?: boolean } = {}) {
+function makeHandlers(options: { canPopOut?: boolean; isRelaying?: boolean } = {}) {
   const contract = makeContract();
   const navigations: { path: string; params?: Record<string, string> }[] = [];
   const popupOpens: (string | null)[] = [];
   const acks: string[] = [];
   const ackPayloads: (Record<string, unknown> | undefined)[] = [];
+  const sent: { type: string; payload?: Record<string, unknown> }[] = [];
+  const relayArms: { flowId: string; url: string }[] = [];
+  const relayStops: string[] = [];
   const popoutCalls: unknown[] = [];
   let frontCount = 0;
   let readyCount = 0;
@@ -118,9 +124,17 @@ function makeHandlers(options: { canPopOut?: boolean } = {}) {
     sendAck: (type, payload) => {
       acks.push(type);
       ackPayloads.push(payload);
+      sent.push({ type, payload });
     },
     bringAppToFront: () => {
       frontCount += 1;
+    },
+    armProviderRelay: (flowId, url) => {
+      relayArms.push({ flowId, url });
+      return Promise.resolve(options.isRelaying ?? true);
+    },
+    stopProviderRelay: (flowId) => {
+      relayStops.push(flowId);
     },
     workspaceAgentId: () => WORKSPACE_AGENT_ID,
     openRequestPopup: (requestId) => popupOpens.push(requestId),
@@ -145,6 +159,9 @@ function makeHandlers(options: { canPopOut?: boolean } = {}) {
     popupOpens,
     acks,
     ackPayloads,
+    sent,
+    relayArms,
+    relayStops,
     popoutCalls,
     frontCount: () => frontCount,
     readyCount: () => readyCount,
@@ -227,6 +244,38 @@ describe("buildEmbedHandlers", () => {
     const { contract, handlers, popupOpens } = makeHandlers();
     handlers[contract.OPEN_REQUEST_MODAL]({ requestId: "evt-1/../admin" });
     expect(popupOpens).toEqual([null]);
+  });
+
+  it("arms the relay for a sign-in and acks whether it is relaying, only once the relay answered", async () => {
+    const { contract, handlers, relayArms, sent, navigations } =
+      makeHandlers();
+    const url = "https://claude.ai/oauth/authorize?state=s-1";
+    handlers[contract.PROVIDER_SIGN_IN]({ url, flowId: "flow-7c" });
+    expect(relayArms).toEqual([{ flowId: "flow-7c", url }]);
+    await Promise.resolve();
+    expect(sent).toEqual([
+      { type: contract.PROVIDER_SIGN_IN_ACK, payload: { relay: true } },
+    ]);
+    expect(navigations).toEqual([]);
+  });
+
+  it("acks a sign-in the desktop cannot relay, so the workspace falls back at once", async () => {
+    const { contract, handlers, sent } = makeHandlers({ isRelaying: false });
+    handlers[contract.PROVIDER_SIGN_IN]({
+      url: "https://claude.ai/oauth/authorize",
+      flowId: "flow-8d",
+    });
+    await Promise.resolve();
+    expect(sent).toEqual([
+      { type: contract.PROVIDER_SIGN_IN_ACK, payload: { relay: false } },
+    ]);
+  });
+
+  it("stops the relay for a sign-in the workspace says has ended", () => {
+    const { contract, handlers, relayStops, sent } = makeHandlers();
+    handlers[contract.PROVIDER_SIGN_IN_END]({ flowId: "flow-9e" });
+    expect(relayStops).toEqual(["flow-9e"]);
+    expect(sent).toEqual([]);
   });
 
   it("acknowledges the AI-keys page only after routing to it", () => {

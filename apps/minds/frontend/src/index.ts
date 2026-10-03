@@ -133,6 +133,10 @@ function main(): void {
     onNotificationsChanged: (message) => {
       notificationsUi.handleNotificationsMessage(message);
     },
+    onBringAppToFront: (message) => {
+      // Every window gets the frame; only the one showing the workspace that signed in comes forward.
+      if (shell.isWorkspaceFrameOn(message.agent_id)) electronBridge.bringAppToFront();
+    },
     onOpenHelp: (message) => {
       // An in-workspace agent escalated its diagnosis. In Electron, main
       // routes the (window-broadcast) event to exactly ONE window and asks

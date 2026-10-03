@@ -91,6 +91,32 @@ describe("SettingsModel", () => {
     expect(write?.ifMatch).toBe("v-one");
   });
 
+  it("writes the sign-in browser and shows it, and keeps the old one when the write is refused", async () => {
+    const bodies: unknown[] = [];
+    let isRefusing = false;
+    const model = new SettingsModel(
+      async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/sign-in-browser")) {
+          bodies.push(JSON.parse(String(init?.body)));
+          return isRefusing ? jsonResponse({ error: "That browser is not installed" }, 400) : jsonResponse({});
+        }
+        return jsonResponse(settingsOverview());
+      },
+      () => {},
+    );
+    await model.load();
+
+    await model.setSignInBrowser("/Applications/Firefox.app");
+    expect(model.overview?.sign_in_browser_id).toBe("/Applications/Firefox.app");
+
+    isRefusing = true;
+    await model.setSignInBrowser("/Applications/Gone.app");
+    expect(model.overview?.sign_in_browser_id).toBe("/Applications/Firefox.app");
+    expect(model.signInBrowserError).toBe("That browser is not installed");
+    expect(bodies).toEqual([{ browser_id: "/Applications/Firefox.app" }, { browser_id: "/Applications/Gone.app" }]);
+  });
+
   it("surfaces a refused error-reporting write with the server's reason", async () => {
     const model = new SettingsModel(
       async (input) => {

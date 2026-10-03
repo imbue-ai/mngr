@@ -11,6 +11,8 @@ from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_h
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
+from imbue.minds.desktop_client.mock_sign_in_browser_test import RecordingSignInBrowsers
+from imbue.minds.desktop_client.sign_in_browser import InstalledBrowser
 from imbue.minds.desktop_client.testing import RecordingNotificationDispatcher
 from imbue.minds.desktop_client.testing import WriteCountingMindsConfig
 from imbue.minds.desktop_client.ui_api_settings import compute_error_reporting_version
@@ -64,6 +66,67 @@ def test_update_window_write_round_trips_onto_the_overview(tmp_path: Path) -> No
     assert minds_config.get_update_window() == (23, 3)
     reread = json.loads(client.get("/ui/api/settings").data)
     assert (reread["update_window_start_hour"], reread["update_window_end_hour"]) == (23, 3)
+
+
+_FIREFOX = InstalledBrowser(
+    browser_id="/Applications/Firefox.app", label="Firefox", command_template="open -a /Applications/Firefox.app %s"
+)
+_CHROME = InstalledBrowser(
+    browser_id="/Applications/Google Chrome.app",
+    label="Google Chrome",
+    command_template="open -a '/Applications/Google Chrome.app' %s",
+)
+
+
+def test_sign_in_browser_write_round_trips_onto_the_overview_and_back_to_the_default(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        minds_config=minds_config,
+        sign_in_browsers=RecordingSignInBrowsers(browsers=(_FIREFOX, _CHROME)),
+    )
+    overview = json.loads(client.get("/ui/api/settings").data)
+    assert overview["sign_in_browsers"] == [
+        {"browser_id": "/Applications/Firefox.app", "label": "Firefox"},
+        {"browser_id": "/Applications/Google Chrome.app", "label": "Google Chrome"},
+    ]
+    assert overview["sign_in_browser_id"] is None
+
+    chosen = client.post("/ui/api/settings/sign-in-browser", json={"browser_id": "/Applications/Google Chrome.app"})
+
+    assert chosen.status_code == 200
+    assert json.loads(client.get("/ui/api/settings").data)["sign_in_browser_id"] == "/Applications/Google Chrome.app"
+    assert client.post("/ui/api/settings/sign-in-browser", json={"browser_id": None}).status_code == 200
+    assert minds_config.get_sign_in_browser_id() is None
+
+
+def test_sign_in_browser_write_refuses_a_browser_that_is_not_installed(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        minds_config=minds_config,
+        sign_in_browsers=RecordingSignInBrowsers(browsers=(_FIREFOX,)),
+    )
+
+    response = client.post("/ui/api/settings/sign-in-browser", json={"browser_id": "/Applications/Evil.app"})
+
+    assert response.status_code == 400
+    assert minds_config.get_sign_in_browser_id() is None
+
+
+def test_a_chosen_sign_in_browser_that_was_removed_reads_as_the_default(tmp_path: Path) -> None:
+    minds_config = MindsConfig(data_dir=tmp_path / "config")
+    minds_config.set_sign_in_browser_id("/Applications/Google Chrome.app")
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path,
+        is_authenticated=True,
+        minds_config=minds_config,
+        sign_in_browsers=RecordingSignInBrowsers(browsers=(_FIREFOX,)),
+    )
+
+    assert json.loads(client.get("/ui/api/settings").data)["sign_in_browser_id"] is None
 
 
 @pytest.mark.parametrize(

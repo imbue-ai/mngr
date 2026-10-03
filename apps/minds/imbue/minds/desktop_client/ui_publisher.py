@@ -33,6 +33,7 @@ from imbue.imbue_common.mutable_model import MutableModel
 from imbue.minds.desktop_client.ui_channel import UiChannelBroadcaster
 from imbue.minds.desktop_client.ui_models import UI_SCHEMA_VERSION
 from imbue.minds.desktop_client.ui_models import UiAccountsMessage
+from imbue.minds.desktop_client.ui_models import UiBringAppToFrontMessage
 from imbue.minds.desktop_client.ui_models import UiDiscoveryHealthMessage
 from imbue.minds.desktop_client.ui_models import UiEnvironmentMessage
 from imbue.minds.desktop_client.ui_models import UiHealthMessage
@@ -52,7 +53,13 @@ from imbue.mngr.errors import MngrError
 
 # The one-shot message types a producer pushes directly (no diffing): health
 # edges ride through publish_health so connect-time snapshots stay coherent.
-UiOneShotMessage = UiWorkspaceStoppedMessage | UiOpenHelpMessage | UiWorkspaceRefreshMessage | UiReloadMessage
+UiOneShotMessage = (
+    UiWorkspaceStoppedMessage
+    | UiOpenHelpMessage
+    | UiWorkspaceRefreshMessage
+    | UiReloadMessage
+    | UiBringAppToFrontMessage
+)
 
 
 class UiStatePublisher(MutableModel):
@@ -119,7 +126,7 @@ class UiStatePublisher(MutableModel):
         self.broadcaster.broadcast(message.model_dump_json())
 
     def publish_one_shot(self, message: UiOneShotMessage) -> None:
-        """Broadcast a fire-and-forget event frame (workspace_stopped / open_help / workspace_refresh / reload_ui)."""
+        """Broadcast a fire-and-forget event frame."""
         self.broadcaster.broadcast(message.model_dump_json())
 
     def build_snapshot(self) -> UiSnapshot:

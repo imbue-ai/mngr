@@ -10,6 +10,7 @@ import type {
   UiAccountEntry,
   UiAccountsMessage,
   UiBootstrap,
+  UiBringAppToFrontMessage,
   UiDiscoveryHealthMessage,
   UiEnvironmentMessage,
   UiHealthMessage,
@@ -37,6 +38,7 @@ export type {
   UiAccountEntry,
   UiAccountsMessage,
   UiBootstrap,
+  UiBringAppToFrontMessage,
   UiDiscoveryHealthMessage,
   UiEnvironmentMessage,
   UiHealthMessage,
@@ -79,7 +81,8 @@ export type UiServerMessage =
   | Framed<UiWorkspaceStoppedMessage, "workspace_stopped">
   | Framed<UiOpenHelpMessage, "open_help">
   | Framed<UiWorkspaceRefreshMessage, "workspace_refresh">
-  | Framed<UiReloadMessage, "reload_ui">;
+  | Framed<UiReloadMessage, "reload_ui">
+  | Framed<UiBringAppToFrontMessage, "bring_app_to_front">;
 
 export interface UiClientState {
   type: "client_state";
@@ -115,6 +118,7 @@ export function parseServerMessage(raw: string): UiServerMessage | null {
     case "open_help":
     case "workspace_refresh":
     case "reload_ui":
+    case "bring_app_to_front":
       return data as UiServerMessage;
     default:
       // Tolerant policy: unknown types are ignored, mirroring the embed
