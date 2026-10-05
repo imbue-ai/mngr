@@ -1,0 +1,7 @@
+The share panel's "Enable sharing" switch no longer reads No while the panel is still finding out. Reading a workspace's sharing status takes seconds (a connector lookup plus an exec into the workspace), and the switch used to render off until that read answered, so a shared workspace opened its panel on the wrong answer.
+
+- Every wait is shown in the switch itself, with no label beside it: a small ring spinning in the spot the knob sits in. Until the first answer of a session arrives there is no knob, only the ring at the off side, so nothing reads as off before it is known to be. If that read fails with nothing to show, the bare switch is greyed out over the existing error notice.
+
+- Opening the panel again draws what it showed last time at once (the switch, the grant list, the link) and reads afresh behind it, the ring spinning in the knob meanwhile. The answers live in a shared TanStack Query cache (`@tanstack/query-core`, new frontend dependency) for thirty minutes after the panel closes.
+
+- Throwing the switch cancels the status read still out, so a stale answer can no longer flip the switch back, and the ring spins in the knob on the side the switch was thrown to, in place of the dimmed switch shown before. The toggle runs as a mutation in the same client's ledger: a panel closed and reopened while a toggle is in flight shows it in flight and takes its answer, and the answer is written through to the cache so the next panel starts from it.

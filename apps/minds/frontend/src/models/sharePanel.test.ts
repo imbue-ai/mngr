@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { settle, sharePanelOptions } from "../testing";
+import { createAppQueryClient } from "./queryClient";
 import type {
   MachineSharingResponse,
   SharingGrantList,
@@ -820,6 +821,161 @@ describe("SharePanelModel target selection", () => {
     expect(model.targetUrl(WHOLE)).toBe("https://shell-r4nd.m.relay.example/");
     expect(model.hasLink("docs")).toBe(false);
     expect(model.targetUrl("docs")).toBeNull();
+  });
+});
+
+describe("SharePanelModel publication state", () => {
+  it("does not claim the switch is off before the status read answers", async () => {
+    const read = deferred();
+    const { model } = makeSharePanel(() => read.promise);
+
+    const loading = model.load();
+
+    expect(model.isPublicationKnown).toBe(false);
+    expect(model.isCheckingPublication).toBe(true);
+
+    read.resolve(okResult(sharingResponse()));
+    await loading;
+
+    expect(model.isPublicationKnown).toBe(true);
+    expect(model.isCheckingPublication).toBe(false);
+    expect(model.isPublished).toBe(true);
+  });
+
+  it("leaves the switch undrawn, not off, when the first read fails", async () => {
+    const { model } = makeSharePanel(() => ({
+      ok: false,
+      status: 502,
+      body: { error: "relay down" },
+    }));
+
+    await model.load();
+
+    expect(model.isPublicationKnown).toBe(false);
+    expect(model.isCheckingPublication).toBe(false);
+    expect(model.loadStatus).toBe("load_failed");
+  });
+
+  it("draws what an earlier panel read at once, and reads again behind it", async () => {
+    const queryClient = createAppQueryClient();
+    const earlier = makeSharePanel(
+      () =>
+        okResult(
+          sharingResponse({
+            grants: grantsDocument({ emails: ["friend@example.com"] }),
+          }),
+        ),
+      { queryClient },
+    );
+    await earlier.model.load();
+    earlier.model.dispose();
+    const read = deferred();
+    const { model, requests } = makeSharePanel(() => read.promise, {
+      queryClient,
+    });
+
+    const loading = model.load();
+
+    expect(model.isPublicationKnown).toBe(true);
+    expect(model.isPublished).toBe(true);
+    expect(model.isLive).toBe(true);
+    expect(model.isRevalidating).toBe(true);
+    expect(model.loadStatus).toBe("ready");
+    expect(grantValues(model)).toEqual(["friend@example.com"]);
+
+    read.resolve(okResult(sharingResponse({ enabled: false, url: null })));
+    await loading;
+
+    expect(requests).toHaveLength(1);
+    expect(model.isRevalidating).toBe(false);
+    expect(model.isPublished).toBe(false);
+    expect(grantValues(model)).toEqual([]);
+  });
+
+  it("cancels the read behind a cached switch when it is thrown, so a stale answer cannot move it back", async () => {
+    const queryClient = createAppQueryClient();
+    const earlier = makeSharePanel(
+      () => okResult(sharingResponse({ enabled: false, url: null })),
+      { queryClient },
+    );
+    await earlier.model.load();
+    earlier.model.dispose();
+    const read = deferred();
+    const { model } = makeSharePanel(
+      (url, init) =>
+        init?.method === "PUT" ? okResult(sharingResponse()) : read.promise,
+      { queryClient },
+    );
+    const loading = model.load();
+    expect(model.isPublished).toBe(false);
+    expect(model.isRevalidating).toBe(true);
+
+    await model.publish();
+
+    expect(model.isPublished).toBe(true);
+    expect(model.isRevalidating).toBe(false);
+
+    read.resolve(okResult(sharingResponse({ enabled: false, url: null })));
+    await loading;
+
+    expect(model.isPublished).toBe(true);
+    expect(model.machineUrl).toBe("https://m.relay.example/");
+    expect(model.loadStatus).toBe("ready");
+  });
+
+  it("starts a later panel from the publication the switch reached", async () => {
+    const queryClient = createAppQueryClient();
+    const earlier = makeSharePanel(
+      (url, init) =>
+        okResult(
+          init?.method === "PUT"
+            ? sharingResponse()
+            : sharingResponse({ enabled: false, url: null }),
+        ),
+      { queryClient },
+    );
+    await earlier.model.load();
+    await earlier.model.publish();
+    earlier.model.dispose();
+    const { model } = makeSharePanel(() => new Promise(() => undefined), {
+      queryClient,
+    });
+
+    void model.load();
+
+    expect(model.isPublished).toBe(true);
+    expect(model.machineUrl).toBe("https://m.relay.example/");
+  });
+
+  it("shows a toggle an earlier panel left in flight, and takes its answer", async () => {
+    const queryClient = createAppQueryClient();
+    const write = deferred();
+    const earlier = makeSharePanel(
+      (url, init) =>
+        init?.method === "PUT"
+          ? write.promise
+          : okResult(sharingResponse({ enabled: false, url: null })),
+      { queryClient },
+    );
+    await earlier.model.load();
+    const publishing = earlier.model.publish();
+    earlier.model.dispose();
+    const { model } = makeSharePanel(() => new Promise(() => undefined), {
+      queryClient,
+    });
+    void model.load();
+
+    expect(model.isPublished).toBe(true);
+    expect(model.publishWrite).toEqual({ state: "publishing" });
+    expect(model.isLive).toBe(false);
+
+    write.resolve(okResult(sharingResponse()));
+    await publishing;
+
+    expect(model.isPublished).toBe(true);
+    expect(model.publishWrite).toEqual({ state: "idle" });
+    expect(model.machineUrl).toBe("https://m.relay.example/");
+    expect(model.isAwaitingLink).toBe(true);
   });
 });
 

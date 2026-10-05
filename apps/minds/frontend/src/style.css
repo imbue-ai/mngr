@@ -603,13 +603,14 @@ body:has(#notice-band) .workspace-surface {
  * whose 20px white knob carries a small accent check when on (empty when
  * off), the track filling with the accent in the on state. The knob is the
  * ::after pseudo-element; the check is a ::before masked to a check glyph so
- * it takes the accent token in both themes, riding the same transform as the
+ * it takes the accent token in both themes, riding the same translate as the
  * knob. Disabled switches fade rather than disappear, so a grant that can't
  * be restored from here is still legible.
  */
 .perm-switch,
 .perm-switch-input {
   position: relative;
+  display: inline-block;
   width: 44px;
   height: 24px;
   margin: 0;
@@ -630,7 +631,7 @@ body:has(#notice-band) .workspace-surface {
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
-  transition: transform 150ms ease;
+  transition: translate 150ms ease;
 }
 /* The knob's check glyph: masked so it takes the accent color, sitting over
    the knob (::before paints after ::after here thanks to the explicit
@@ -651,20 +652,22 @@ body:has(#notice-band) .workspace-surface {
     center / contain no-repeat;
   opacity: 0;
   transition:
-    transform 150ms ease,
+    translate 150ms ease,
     opacity 150ms ease;
 }
 .perm-switch[aria-checked="true"],
 .perm-switch-input:checked {
   background: var(--c-accent);
 }
+/* The individual ``translate`` property rather than ``transform``, which the
+   nested wait below needs free for its rotation. */
 .perm-switch[aria-checked="true"]::after,
 .perm-switch-input:checked::after {
-  transform: translateX(20px);
+  translate: 20px 0;
 }
 .perm-switch[aria-checked="true"]::before,
 .perm-switch-input:checked::before {
-  transform: translateX(20px);
+  translate: 20px 0;
   opacity: 1;
 }
 .perm-switch:disabled,
@@ -679,6 +682,54 @@ body:has(#notice-band) .workspace-surface {
 .perm-switch.is-busy:disabled {
   opacity: 0.6;
   cursor: progress;
+}
+/*
+ * A wait nested in the switch itself: the glyph pseudo redrawn as a 16px ring
+ * (2px stroke) concentric with the focus the knob sits on. It rides the knob's
+ * translate, so the last known value picks its side, and inside the knob it
+ * keeps the knob's own 2px step from the cap. ``is-checking`` is the wait
+ * before any value is known: no knob, so nothing reads as off, and the ring
+ * stands at the off focus. ``is-settling`` is a known value being re-read or
+ * written. ``is-unknown`` is a read that failed with nothing to show: the bare
+ * track, greyed out.
+ */
+.perm-switch.is-checking,
+.perm-switch.is-unknown {
+  cursor: default;
+}
+.perm-switch.is-checking::after,
+.perm-switch.is-unknown::after {
+  opacity: 0;
+}
+.perm-switch.is-unknown {
+  opacity: 0.5;
+}
+.perm-switch.is-checking::before,
+.perm-switch.is-settling::before {
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  -webkit-mask: none;
+  mask: none;
+  background: transparent;
+  border: 2px solid var(--switch-ring-base);
+  border-top-color: var(--switch-ring-arc);
+  border-radius: 50%;
+  opacity: 1;
+  animation: spin 800ms linear infinite;
+}
+.perm-switch.is-checking {
+  --switch-ring-base: var(--c-border-strong);
+  --switch-ring-arc: var(--c-text-secondary);
+}
+/* Over the knob, which is white in both themes. */
+.perm-switch.is-settling {
+  --switch-ring-base: rgb(0 0 0 / 0.12);
+  --switch-ring-arc: rgb(0 0 0 / 0.55);
+}
+.perm-switch.is-settling[aria-checked="true"] {
+  --switch-ring-arc: var(--c-accent);
 }
 .perm-switch:focus-visible,
 .perm-switch-input:focus-visible {

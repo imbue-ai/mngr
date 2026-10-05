@@ -8,6 +8,7 @@ import type {
   UiNotificationEntry,
   UiWorkspacesMessage,
 } from "./channel/messages";
+import { createAppQueryClient } from "./models/queryClient";
 import type { SettingsOverview } from "./models/settings";
 import type { SharePanelModelOptions } from "./models/sharePanel";
 
@@ -148,7 +149,8 @@ export function settingsOverview(
 }
 
 /** SharePanelModel options for a workspace granted by owner@example.com, with
- * inert redraw/timer hooks; tests pass the `fetchJson` stub they want answered. */
+ * inert redraw/timer hooks and a query client of its own, so no case reads
+ * what another cached; tests pass the `fetchJson` stub they want answered. */
 export function sharePanelOptions(
   overrides: Partial<SharePanelModelOptions> = {},
 ): SharePanelModelOptions {
@@ -163,6 +165,7 @@ export function sharePanelOptions(
     setTimer: () => 0,
     clearTimer: () => undefined,
     monotonicNowMs: () => 0,
+    queryClient: createAppQueryClient(),
     ...overrides,
   };
 }

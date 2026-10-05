@@ -10,6 +10,7 @@ import {
   settle,
   sharePanelOptions,
 } from "../../../testing";
+import { createAppQueryClient } from "../../../models/queryClient";
 import type { MachineSharingResponse } from "../../../models/workspaceOptions";
 import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
 import type { SharePanelModelOptions } from "../../../models/sharePanel";
@@ -154,6 +155,8 @@ describe("ShareTab publish widget", () => {
     expect(attrsOf(control as AnyVnode).role).toBe("switch");
     expect(attrsOf(control as AnyVnode)["aria-label"]).toBe("Enable sharing");
     expect(attrsOf(control as AnyVnode)["aria-checked"]).toBe("false");
+    expect(attrsOf(control as AnyVnode)["aria-busy"]).toBeUndefined();
+    expect(classTokensOf(control as AnyVnode)).not.toContain("is-settling");
     expect(allText(widget)).toContain("No");
   });
 
@@ -171,6 +174,131 @@ describe("ShareTab publish widget", () => {
     expect(allText(widget)).toContain(
       "Sharing gives this workspace an address on the internet. " +
         "Only people granted access can open it.",
+    );
+  });
+
+  it("draws no switch, and spins the wait at the off side, until the publication is known", async () => {
+    const share = new SharePanelModel(
+      sharePanelOptions({ fetchJson: () => new Promise(() => undefined) }),
+    );
+    void share.load();
+
+    const widget = byId(renderTab(share), "ws-share-publish");
+
+    expect(byId(widget, "ws-share-publish-switch")).toBeUndefined();
+    const placeholder = byId(widget, "ws-share-publish-unknown") as AnyVnode;
+    expect(placeholder.tag).toBe("span");
+    expect(classTokensOf(placeholder)).toEqual(
+      expect.arrayContaining(["perm-switch", "is-checking"]),
+    );
+    expect(attrsOf(placeholder).role).toBe("status");
+    expect(attrsOf(placeholder)["aria-busy"]).toBe("true");
+    expect(attrsOf(placeholder)["aria-label"]).toBe(
+      "Checking whether sharing is enabled",
+    );
+    // The wait is the switch's own: no word beside it and no second spinner.
+    expect(allText(widget)).not.toMatch(/\b(No|Yes|Checking)\b/);
+    expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
+      false,
+    );
+    // The add row waits too, and says why in the same terms: nothing is off.
+    for (const control of addControls(renderTab(share))) {
+      expect(attrsOf(control)["aria-disabled"]).toBe("true");
+      expect(attrsOf(control)["data-tooltip"]).toBe(
+        "Permissions cannot be granted until the sharing status has loaded",
+      );
+    }
+  });
+
+  it("greys the switch out, rather than drawing it off, when the first read failed", async () => {
+    const share = new SharePanelModel(
+      sharePanelOptions({
+        fetchJson: () =>
+          Promise.resolve({
+            ok: false,
+            status: 502,
+            body: { error: "relay down" },
+          }),
+      }),
+    );
+    await share.load();
+
+    const widget = byId(renderTab(share), "ws-share-publish");
+
+    expect(byId(widget, "ws-share-publish-switch")).toBeUndefined();
+    const placeholder = byId(widget, "ws-share-publish-unknown") as AnyVnode;
+    expect(classTokensOf(placeholder)).toEqual(
+      expect.arrayContaining(["perm-switch", "is-unknown"]),
+    );
+    expect(classTokensOf(placeholder)).not.toContain("is-checking");
+    expect(attrsOf(placeholder)["aria-busy"]).toBeUndefined();
+    expect(attrsOf(placeholder)["aria-label"]).toBe("Sharing status unknown");
+    expect(allText(widget)).not.toMatch(/\b(No|Yes|Checking|Unknown)\b/);
+    expect(allText(widget)).toContain("relay down");
+    expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
+      false,
+    );
+  });
+
+  it("spins the wait in the switch's knob while a toggle is in flight, without dimming it", async () => {
+    const share = await readyPanel(
+      {},
+      {
+        fetchJson: (_url: string, init?: RequestInit) =>
+          init?.method === "PUT"
+            ? new Promise(() => undefined)
+            : Promise.resolve({
+                ok: true,
+                status: 200,
+                body: {
+                  enabled: false,
+                  url: null,
+                  grants: {
+                    workspace: { emails: [], email_domains: [] },
+                    services: {},
+                  },
+                },
+              }),
+      },
+    );
+    void share.publish();
+
+    const widget = byId(renderTab(share), "ws-share-publish");
+
+    const control = byId(widget, "ws-share-publish-switch") as AnyVnode;
+    expect(attrsOf(control)["aria-checked"]).toBe("true");
+    expect(attrsOf(control)["aria-busy"]).toBe("true");
+    expect(classTokensOf(control)).toContain("is-settling");
+    expect(classTokensOf(control)).not.toContain("is-busy");
+    expect(allText(widget)).toContain("Yes");
+  });
+
+  it("draws the switch from what an earlier panel read, with the fresh read spinning in its knob", async () => {
+    const queryClient = createAppQueryClient();
+    const earlier = await readyPanel(
+      { enabled: true, url: "https://m.relay.example/" },
+      { queryClient },
+    );
+    earlier.dispose();
+    const share = new SharePanelModel(
+      sharePanelOptions({
+        fetchJson: () => new Promise(() => undefined),
+        queryClient,
+      }),
+    );
+    void share.load();
+
+    const widget = byId(renderTab(share), "ws-share-publish");
+
+    const control = byId(widget, "ws-share-publish-switch") as AnyVnode;
+    expect(attrsOf(control)["aria-checked"]).toBe("true");
+    expect(attrsOf(control)["aria-busy"]).toBe("true");
+    expect(classTokensOf(control)).toContain("is-settling");
+    expect(classTokensOf(control)).not.toContain("is-busy");
+    expect(allText(widget)).toContain("Yes");
+    expect(byId(widget, "ws-share-publish-unknown")).toBeUndefined();
+    expect(collectVnodes(widget).some((vnode) => vnode.tag === Spinner)).toBe(
+      false,
     );
   });
 
@@ -1046,9 +1174,10 @@ describe("ShareTab while the link is being prepared", () => {
               }),
       },
     );
+    // The fixture holds every PUT, so this publish stays in flight.
+    void share.publish();
     share.isLive = false;
     share.isCertIssued = true;
-    share.publishWrite = { state: "publishing" };
     type(renderTab(share), "bob@example.org");
     pressAdd(renderTab(share));
     return share;

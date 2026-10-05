@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@tanstack/query-core':
+        specifier: ^5.103.2
+        version: 5.103.2
       dompurify:
         specifier: ^3.4.13
         version: 3.4.13
@@ -589,6 +592,9 @@ packages:
     resolution: {integrity: sha512-yYU8cogLeSh/ms2jh8Fj7jaba/EWa7Ja6GoUqYZaraEuCI5YS6ms6ObZgjjedm+jm6XZjdNRWBpPP6Z86oOxcw==}
     peerDependencies:
       vite: ^5.2.0 || ^6 || ^7 || ^8
+
+  '@tanstack/query-core@5.103.2':
+    resolution: {integrity: sha512-I8DkFXls5jXLqtm8+QpOhEmG07hIblhSZFzafg9wHsMSEvMzULy9hK17wU1T/ahfhMbtITJhbxutwwCoihkR7A==}
 
   '@types/chai@5.2.3':
     resolution: {integrity: sha512-Mw558oeA9fFbv65/y4mHtXDs9bPnFMZAL/jxdPFUpOHHIXX91mcgEHbS5Lahr+pwZFR8A7GQleRWeI6cGFC2UA==}
@@ -1763,6 +1769,8 @@ snapshots:
       '@tailwindcss/oxide': 4.3.3
       tailwindcss: 4.3.3
       vite: 6.4.3(@types/node@25.9.5)(jiti@2.7.0)(lightningcss@1.32.0)
+
+  '@tanstack/query-core@5.103.2': {}
 
   '@types/chai@5.2.3':
     dependencies:

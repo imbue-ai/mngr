@@ -2,8 +2,26 @@
 // coalesced writes that save them. Every edit lands here at once and its write
 // runs behind it; one write is in flight per workspace, and each answers with
 // the status document, read back over the edits that have not landed yet.
+//
+// The status document is read through the shared query client, so a panel
+// opened again draws what it drew last time at once and reads afresh behind
+// it; the switch is a mutation in the client's ledger, so a toggle outlives
+// the panel that threw it and cancels the read it would otherwise race.
 
+import type {
+  Mutation,
+  MutationCacheNotifyEvent,
+  MutationKey,
+  QueryClient,
+  QueryKey,
+} from "@tanstack/query-core";
+import {
+  MutationObserver as QueryMutationObserver,
+  QueryObserver,
+  matchMutation,
+} from "@tanstack/query-core";
 import m from "mithril";
+import { getAppQueryClient } from "./queryClient";
 import type {
   FetchJson,
   IdentityRecord,
@@ -32,6 +50,38 @@ const READINESS_FAST_INTERVAL_MS = 2000;
 const READINESS_SLOW_INTERVAL_MS = 5000;
 const READINESS_FAST_PHASE_MS = 30_000;
 const READINESS_DEADLINE_MS = 5 * 60_000;
+
+const SHARING_QUERY_SCOPE = "workspace-sharing";
+
+/** The cache entry holding a workspace's status document. */
+function sharingQueryKey(coordinate: string): QueryKey {
+  return [SHARING_QUERY_SCOPE, coordinate];
+}
+
+/** The ledger entry under which a workspace's switch is thrown. */
+function publicationMutationKey(coordinate: string): MutationKey {
+  return [SHARING_QUERY_SCOPE, coordinate, "publication"];
+}
+
+/** A sharing route that answered with a failure, in its own words. */
+export class SharingRequestError extends Error {}
+
+/** One throw of the switch, as its mutation remembers it: the token by which
+ * an answer is told to be the newest attempt's, and the place of the write
+ * among the panel's status requests. */
+interface PublicationAttempt {
+  readonly owner: SharePanelModel;
+  readonly sequence: StatusSequence;
+}
+
+function isPublicationAttempt(value: unknown): value is PublicationAttempt {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "owner" in value &&
+    "sequence" in value
+  );
+}
 
 /** What a grant can be typed as, in the order the add row offers them. */
 export const GRANT_ADD_KINDS = ["email", "email_domain"] as const;
@@ -140,6 +190,9 @@ export interface SharePanelModelOptions {
   setTimer?: (callback: () => void, delayMs: number) => number;
   clearTimer?: (timerId: number) => void;
   monotonicNowMs?: () => number;
+  /** The cache the status read is answered from and the ledger the switch is
+   * thrown in, shared across panels; the app's unless a test brings its own. */
+  queryClient?: QueryClient;
 }
 
 /** A row taken out of the list whose removal has not been saved yet. */
@@ -151,9 +204,6 @@ interface PendingRemoval {
 export class SharePanelModel {
   loadStatus: ShareLoadStatus = "idle";
   loadErrorMessage: string | null = null;
-  /** Flipped the moment the switch is thrown, before the route answers. */
-  isPublished = false;
-  publishWrite: PublishWrite = { state: "idle" };
   machineUrl: string | null = null;
   isLive = false;
   isCertIssued = false;
@@ -192,9 +242,21 @@ export class SharePanelModel {
   // cannot overwrite a newer document.
   private statusRequestCount = 0;
   private adoptedStatusSequence: StatusSequence | null = null;
-  // Bumped by every publish and unpublish, so the answer to the call the
-  // switch is waiting on is the only one that moves it.
-  private publishGeneration = 0;
+  /** The publication as the newest document has it; the switch reads this
+   * only while no toggle is in flight. */
+  private isPublishedByDocument = false;
+  private readonly queryClient: QueryClient;
+  private readonly queryKey: QueryKey;
+  private readonly publicationMutationKey: MutationKey;
+  private readonly statusQuery: QueryObserver<MachineSharingResponse, Error>;
+  private readonly publicationWrite: QueryMutationObserver<
+    MachineSharingResponse,
+    Error,
+    boolean,
+    PublicationAttempt
+  >;
+  private readonly unsubscribeStatusQuery: () => void;
+  private readonly unsubscribeMutations: () => void;
   private readinessTimerId: number | null = null;
   private pollingTarget: string | null = null;
   // Bumped whenever polling stops, so a probe whose round trip outlived its
@@ -213,6 +275,84 @@ export class SharePanelModel {
       options.publicEmailDomains.map(normalizeGrantDomain),
     );
     this.currentTarget = options.wholeService;
+    this.queryClient = options.queryClient ?? getAppQueryClient();
+    const coordinate = options.agentId ?? options.hostId;
+    this.queryKey = sharingQueryKey(coordinate);
+    this.publicationMutationKey = publicationMutationKey(coordinate);
+    this.statusQuery = new QueryObserver<MachineSharingResponse, Error>(
+      this.queryClient,
+      {
+        queryKey: this.queryKey,
+        queryFn: () => this.readStatusDocument(),
+        // Read only when the panel asks: a read costs the desktop client a
+        // connector lookup and an exec into the workspace.
+        enabled: false,
+      },
+    );
+    this.unsubscribeStatusQuery = this.statusQuery.subscribe(() =>
+      this.redraw(),
+    );
+    this.publicationWrite = new QueryMutationObserver(this.queryClient, {
+      mutationKey: this.publicationMutationKey,
+      mutationFn: (isPublishing) => this.writePublication(isPublishing),
+      onMutate: (): PublicationAttempt => {
+        // A read still out answers with the publication as it was before the
+        // switch was thrown.
+        void this.queryClient.cancelQueries({ queryKey: this.queryKey });
+        return { owner: this, sequence: this.nextStatusSequence() };
+      },
+      onSuccess: (document, _isPublishing, attempt) => {
+        // The newest attempt's answer is the one a panel opened later starts
+        // from. This runs whether or not the panel that threw the switch is
+        // still open.
+        if (this.latestPublicationMutation()?.state.context === attempt)
+          this.queryClient.setQueryData(this.queryKey, document);
+      },
+    });
+    this.unsubscribeMutations = this.queryClient
+      .getMutationCache()
+      .subscribe((event) => this.onMutationEvent(event));
+  }
+
+  /** Flipped the moment the switch is thrown, before the route answers. */
+  get isPublished(): boolean {
+    const pending = this.pendingPublication;
+    return pending === null ? this.isPublishedByDocument : pending;
+  }
+
+  get publishWrite(): PublishWrite {
+    const latest = this.latestPublicationMutation();
+    if (latest === undefined) return { state: "idle" };
+    const { status, variables, error } = latest.state;
+    if (status === "pending")
+      return { state: variables === true ? "publishing" : "unpublishing" };
+    if (status === "error")
+      return {
+        state: "failed",
+        message: error?.message ?? "Could not change sharing",
+      };
+    return { state: "idle" };
+  }
+
+  /** Whether there is anything to draw the switch from: a document read or
+   * shown from the cache, or a toggle whose direction is known. */
+  get isPublicationKnown(): boolean {
+    return this.isPublishWriteInFlight || this.adoptedStatusSequence !== null;
+  }
+
+  /** Nothing is known yet, and the read that will say is still out. */
+  get isCheckingPublication(): boolean {
+    return (
+      !this.isPublicationKnown && this.statusQuery.getCurrentResult().isFetching
+    );
+  }
+
+  /** An earlier answer is on screen while a fresh read runs behind it. */
+  get isRevalidating(): boolean {
+    return (
+      this.adoptedStatusSequence !== null &&
+      this.statusQuery.getCurrentResult().isFetching
+    );
   }
 
   get wholeService(): string {
@@ -257,10 +397,15 @@ export class SharePanelModel {
   }
 
   private get isPublishWriteInFlight(): boolean {
-    return (
-      this.publishWrite.state === "publishing" ||
-      this.publishWrite.state === "unpublishing"
-    );
+    return this.pendingPublication !== null;
+  }
+
+  /** The direction of the newest toggle while it has not answered; null once
+   * it has, or when none was ever thrown. */
+  private get pendingPublication(): boolean | null {
+    const latest = this.latestPublicationMutation();
+    if (latest === undefined || latest.state.status !== "pending") return null;
+    return latest.state.variables === true;
   }
 
   get isProvisioningHalted(): boolean {
@@ -297,55 +442,20 @@ export class SharePanelModel {
 
   /** Give the workspace an address on the internet. Admits nobody by itself. */
   async publish(): Promise<void> {
-    const generation = ++this.publishGeneration;
-    this.publishWrite = { state: "publishing" };
-    this.isPublished = true;
     this.beginProvisioningWait();
-    this.redraw();
-    const sequence = this.nextStatusSequence();
-    const result = await this.fetchJson(this.shareApiBase(), { method: "PUT" });
-    if (this.isDisposed || generation !== this.publishGeneration) return;
-    if (!result.ok) {
-      this.isPublished = false;
-      this.publishWrite = {
-        state: "failed",
-        message: errorMessageFromBody(result.body, `HTTP ${result.status}`),
-      };
-    } else {
-      this.publishWrite = { state: "idle" };
-      this.adoptStatusDocument(result.body, sequence);
-      // The route that created the link is the authority on it, even when a
-      // write served after it has already brought the grants forward.
-      this.adoptPublication(result.body as MachineSharingResponse);
-    }
-    this.syncReadinessPolling();
-    this.redraw();
+    await this.throwSwitch(true);
   }
 
   /** Take the workspace's address away, keeping every grant it was admitting on. */
   async unpublish(): Promise<void> {
-    const generation = ++this.publishGeneration;
-    this.publishWrite = { state: "unpublishing" };
-    this.isPublished = false;
-    this.redraw();
-    const sequence = this.nextStatusSequence();
-    const result = await this.fetchJson(this.shareApiBase(), {
-      method: "DELETE",
-    });
-    if (this.isDisposed || generation !== this.publishGeneration) return;
-    if (!result.ok) {
-      this.isPublished = true;
-      this.publishWrite = {
-        state: "failed",
-        message: errorMessageFromBody(result.body, `HTTP ${result.status}`),
-      };
-    } else {
-      this.publishWrite = { state: "idle" };
-      this.adoptStatusDocument(result.body, sequence);
-      this.adoptPublication(result.body as MachineSharingResponse);
-    }
-    this.syncReadinessPolling();
-    this.redraw();
+    await this.throwSwitch(false);
+  }
+
+  /** The toggle runs in the shared ledger, where every panel on this workspace
+   * reads it (onMutationEvent); it resolves once the write has answered. */
+  private async throwSwitch(isPublishing: boolean): Promise<void> {
+    // A failure is reported through publishWrite, not thrown at the caller.
+    await this.publicationWrite.mutate(isPublishing).catch(() => undefined);
   }
 
   grantsFor(target: string): readonly Grant[] {
@@ -418,22 +528,45 @@ export class SharePanelModel {
     return (this.options.monotonicNowMs ?? (() => performance.now()))();
   }
 
+  /**
+   * Draw the document the cache holds for this workspace, if any, and read a
+   * fresh one behind it. The first read of a session leaves the switch
+   * undrawn (isCheckingPublication) until it answers.
+   */
   async load(): Promise<void> {
-    this.loadStatus = "loading";
     this.loadErrorMessage = null;
+    const cached = this.statusQuery.getCurrentResult().data;
+    if (cached !== undefined && this.adoptedStatusSequence === null)
+      this.adoptLoadedDocument(cached, this.nextStatusSequence());
+    if (this.adoptedStatusSequence === null) this.loadStatus = "loading";
     this.redraw();
     const sequence = this.nextStatusSequence();
-    const result = await this.fetchJson(this.shareApiBase());
+    const query = this.statusQuery.getCurrentQuery();
+    const documentsBefore = query.state.dataUpdateCount;
+    const result = await this.statusQuery.refetch({ cancelRefetch: false });
     if (this.isDisposed) return;
-    if (!result.ok) {
+    if (result.isError) {
       this.loadStatus = "load_failed";
       this.loadErrorMessage =
-        "Could not load sharing status: " +
-        errorMessageFromBody(result.body, `HTTP ${result.status}`);
+        "Could not load sharing status: " + result.error.message;
       this.redraw();
       return;
     }
-    const data = result.body as MachineSharingResponse;
+    // A read the switch cancelled leaves the document as it was; the toggle
+    // that cancelled it owns the switch now.
+    if (
+      result.data === undefined ||
+      query.state.dataUpdateCount === documentsBefore
+    )
+      return;
+    this.adoptLoadedDocument(result.data, sequence);
+  }
+
+  /** Take in a document a read answered with, or the cache held. */
+  private adoptLoadedDocument(
+    data: MachineSharingResponse,
+    sequence: StatusSequence,
+  ): void {
     if (data.grants === null) {
       // A failed read of the workspace, not an empty policy.
       this.loadStatus = "load_failed";
@@ -554,6 +687,11 @@ export class SharePanelModel {
   dispose(): void {
     this.isDisposed = true;
     this.stopReadinessPolling();
+    // A read still out finishes into the cache for the next panel; a toggle
+    // still out keeps running in the ledger. This panel just stops watching.
+    this.unsubscribeStatusQuery();
+    this.unsubscribeMutations();
+    this.publicationWrite.reset();
   }
 
   /**
@@ -841,7 +979,9 @@ export class SharePanelModel {
     if (result.ok) {
       // Read back before settling: the merge keeps every row still saving, and
       // this write's rows are settled on top of what came back.
-      this.adoptStatusDocument(result.body, sequence);
+      const document = result.body as MachineSharingResponse;
+      if (this.adoptStatusDocument(document, sequence))
+        this.queryClient.setQueryData(this.queryKey, document);
       this.markCarriedRows(carriedRows, { state: "settled" });
       this.redraw();
       return;
@@ -996,8 +1136,70 @@ export class SharePanelModel {
   }
 
   private adoptPublication(data: MachineSharingResponse): void {
-    this.isPublished = Boolean(data.enabled);
+    this.isPublishedByDocument = Boolean(data.enabled);
     this.machineUrl = data.url ?? null;
+  }
+
+  /** The newest throw of this workspace's switch, from any panel, answered or
+   * not; undefined when none is remembered. */
+  private latestPublicationMutation(): Mutation | undefined {
+    return this.queryClient
+      .getMutationCache()
+      .findAll({ mutationKey: this.publicationMutationKey, exact: true })
+      .at(-1);
+  }
+
+  /** A throw of this workspace's switch moved on, in this panel or another. */
+  private onMutationEvent(event: MutationCacheNotifyEvent): void {
+    const mutation = event.mutation;
+    if (
+      mutation === undefined ||
+      !matchMutation(
+        { mutationKey: this.publicationMutationKey, exact: true },
+        mutation,
+      )
+    )
+      return;
+    if (
+      event.type === "updated" &&
+      event.action.type === "success" &&
+      mutation === this.latestPublicationMutation()
+    ) {
+      const document = event.action.data as MachineSharingResponse;
+      const attempt = mutation.state.context;
+      // A toggle thrown from an earlier panel predates everything this one has
+      // read, so only this panel's own write takes a place among its status
+      // requests; the grants arrive with the read this panel has out.
+      if (isPublicationAttempt(attempt) && attempt.owner === this)
+        this.adoptStatusDocument(document, attempt.sequence);
+      // The route that created the link is the authority on it, even when a
+      // write served after it has already brought the grants forward.
+      this.adoptPublication(document);
+      this.syncReadinessPolling();
+    }
+    this.redraw();
+  }
+
+  private async readStatusDocument(): Promise<MachineSharingResponse> {
+    const result = await this.fetchJson(this.shareApiBase());
+    if (!result.ok)
+      throw new SharingRequestError(
+        errorMessageFromBody(result.body, `HTTP ${result.status}`),
+      );
+    return result.body as MachineSharingResponse;
+  }
+
+  private async writePublication(
+    isPublishing: boolean,
+  ): Promise<MachineSharingResponse> {
+    const result = await this.fetchJson(this.shareApiBase(), {
+      method: isPublishing ? "PUT" : "DELETE",
+    });
+    if (!result.ok)
+      throw new SharingRequestError(
+        errorMessageFromBody(result.body, `HTTP ${result.status}`),
+      );
+    return result.body as MachineSharingResponse;
   }
 
   private mergeServiceLabels(labels: Record<string, string> | undefined): void {

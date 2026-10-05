@@ -57,6 +57,9 @@ const SAVING_LABEL = "Securely granting access";
 
 const ADD_OFF_TOOLTIP = "Permissions cannot be granted while sharing is off";
 
+const ADD_UNKNOWN_TOOLTIP =
+  "Permissions cannot be granted until the sharing status has loaded";
+
 /** What each kind of grant is called at the add row, and the example it shows. */
 const ADD_KIND_TEXT: Record<
   GrantAddKind,
@@ -95,6 +98,12 @@ const COUNT_BADGE_CLASS =
 
 const ROW_LEAD_CLASS =
   "shrink-0 inline-flex h-6 w-6 items-center justify-center rounded-full";
+
+// The word beside the switch keeps the width of its wider value in every
+// state, so the switch stands still when the word comes or goes.
+const PUBLISH_WORD_CLASS =
+  "type-body text-secondary after:invisible after:block after:h-0 " +
+  "after:content-['Yes']";
 
 export interface ShareTabAttrs {
   share: SharePanelModel;
@@ -154,9 +163,6 @@ function renderPublishWidget(
   local: ShareTabLocalState,
 ): m.Children {
   const publishWrite = share.publishWrite;
-  const isWriting =
-    publishWrite.state === "publishing" ||
-    publishWrite.state === "unpublishing";
   return m(
     "section",
     { id: "ws-share-publish", class: "shrink-0 flex flex-col gap-2" },
@@ -164,24 +170,13 @@ function renderPublishWidget(
       m("div", { class: "flex items-center justify-between gap-4" }, [
         m("h2", { class: "type-heading text-primary" }, "Enable sharing"),
         m("span", { class: "flex shrink-0 items-center gap-2" }, [
-          m("button", {
-            id: "ws-share-publish-switch",
-            type: "button",
-            role: "switch",
-            "aria-checked": share.isPublished ? "true" : "false",
-            "aria-label": "Enable sharing",
-            class: isWriting
-              ? "perm-switch shrink-0 is-busy"
-              : "perm-switch shrink-0",
-            onclick: () => {
-              if (share.isPublished) void share.unpublish();
-              else local.isConfirmOpen = true;
-            },
-          }),
+          share.isPublicationKnown
+            ? renderPublishSwitch(share, local)
+            : renderPublishPlaceholder(share),
           m(
             "span",
-            { class: "type-body text-secondary" },
-            share.isPublished ? "Yes" : "No",
+            { class: PUBLISH_WORD_CLASS },
+            share.isPublicationKnown ? (share.isPublished ? "Yes" : "No") : "",
           ),
         ]),
       ]),
@@ -209,6 +204,53 @@ function renderPublishWidget(
           ),
     ],
   );
+}
+
+/** The switch. It stays live through a toggle and through a fresh read of the
+ * value on screen; either wait spins in its knob rather than beside it. */
+function renderPublishSwitch(
+  share: SharePanelModel,
+  local: ShareTabLocalState,
+): m.Children {
+  const publishWrite = share.publishWrite;
+  const isSettling =
+    share.isRevalidating ||
+    publishWrite.state === "publishing" ||
+    publishWrite.state === "unpublishing";
+  return m("button", {
+    id: "ws-share-publish-switch",
+    type: "button",
+    role: "switch",
+    "aria-checked": share.isPublished ? "true" : "false",
+    "aria-label": "Enable sharing",
+    ...(isSettling ? { "aria-busy": "true" } : {}),
+    class: isSettling
+      ? "perm-switch shrink-0 is-settling"
+      : "perm-switch shrink-0",
+    onclick: () => {
+      if (share.isPublished) void share.unpublish();
+      else local.isConfirmOpen = true;
+    },
+  });
+}
+
+/** What stands where the switch will, while nothing says which way it should
+ * point: a switch drawn off before the answer would be read as the answer. The
+ * wait spins at the off side with no knob under it; a read that failed with
+ * nothing to show leaves the bare track greyed out. */
+function renderPublishPlaceholder(share: SharePanelModel): m.Children {
+  const isChecking = share.isCheckingPublication;
+  return m("span", {
+    id: "ws-share-publish-unknown",
+    role: "status",
+    "aria-label": isChecking
+      ? "Checking whether sharing is enabled"
+      : "Sharing status unknown",
+    ...(isChecking ? { "aria-busy": "true" } : {}),
+    class: isChecking
+      ? "perm-switch shrink-0 is-checking"
+      : "perm-switch shrink-0 is-unknown",
+  });
 }
 
 function renderConfirmDialog(
@@ -432,7 +474,12 @@ function renderAddRow(share: SharePanelModel): m.Children {
   const row = share.addRow(target);
   const offAttrs = share.canAdd
     ? {}
-    : { "aria-disabled": "true", "data-tooltip": ADD_OFF_TOOLTIP };
+    : {
+        "aria-disabled": "true",
+        "data-tooltip": share.isPublicationKnown
+          ? ADD_OFF_TOOLTIP
+          : ADD_UNKNOWN_TOOLTIP,
+      };
   return m("section", { id: "ws-share-add", class: "mt-6 shrink-0" }, [
     m(FormLabel, { target: "ws-share-add-value" }, "Grant permission to"),
     m(
