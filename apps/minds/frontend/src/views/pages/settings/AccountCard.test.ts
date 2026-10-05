@@ -160,6 +160,37 @@ describe("the plan switcher's explorer agreement", () => {
   });
 });
 
+describe("a cached plan being refreshed", () => {
+  function refreshIndicator(root: m.Vnode): AnyVnode | undefined {
+    return collectVnodes(root).find(
+      (node) => attrsOf(node)["aria-label"] === "Refreshing plan and usage",
+    );
+  }
+
+  it("shows a quiet spinner beside the plan while the fresh read is in flight", () => {
+    const model = modelOnPlan("free");
+    model.planStateFor(ACCOUNT.user_id).isRefreshing = true;
+    const render = mountCard(model);
+
+    const root = render();
+    expect(refreshIndicator(root)).toBeDefined();
+    expect(collectText(root).join(" ")).toContain("Limited");
+
+    model.planStateFor(ACCOUNT.user_id).isRefreshing = false;
+    expect(refreshIndicator(render())).toBeUndefined();
+  });
+
+  it("says the figures are earlier ones when the refresh failed", () => {
+    const model = modelOnPlan("free");
+    model.planStateFor(ACCOUNT.user_id).isRefreshFailed = true;
+
+    const text = collectText(mountCard(model)()).join(" ");
+
+    expect(text).toContain("Could not refresh -- showing earlier figures");
+    expect(text).toContain("Limited");
+  });
+});
+
 describe("the plan switcher's plan names", () => {
   it("offers the free plan as Limited and keeps its stored name", () => {
     const render = mountCard(modelOnPlan("explorer"));

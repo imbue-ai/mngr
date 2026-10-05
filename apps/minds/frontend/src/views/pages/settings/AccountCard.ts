@@ -141,13 +141,31 @@ function planSection(
         ])
       : null,
     m("div", { class: "flex items-center justify-between mb-2" }, [
-      m("div", { class: "type-label text-secondary" }, [
-        "Plan: ",
-        m(
-          "span",
-          { class: "font-semibold text-primary" },
-          view.plan_display_name,
-        ),
+      m("div", { class: "flex items-center gap-2 type-label text-secondary" }, [
+        m("span", [
+          "Plan: ",
+          m(
+            "span",
+            { class: "font-semibold text-primary" },
+            view.plan_display_name,
+          ),
+        ]),
+        plan.isRefreshing
+          ? m(Spinner, {
+              size: "sm",
+              extra: "opacity-50",
+              "aria-hidden": "false",
+              role: "status",
+              "aria-label": "Refreshing plan and usage",
+              title: "Refreshing plan and usage",
+            })
+          : plan.isRefreshFailed
+            ? m(
+                "span",
+                { class: "type-helper text-tertiary" },
+                "Could not refresh -- showing earlier figures",
+              )
+            : null,
       ]),
       view.available_plans.length > 1
         ? m("div", { class: "flex items-center gap-2" }, [

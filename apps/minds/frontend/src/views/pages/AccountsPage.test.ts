@@ -2,6 +2,7 @@ import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearAppContextForTests, registerAppContext } from "../../app-context";
 import type { UiAccountEntry } from "../../channel/messages";
+import { clearAccountPlanCacheForTests } from "../../models/accountsDetail";
 import { createEmptyStores } from "../../models/boot";
 import { webLogin } from "../../models/webLogin";
 import type { AnyVnode } from "../../testing";
@@ -26,6 +27,7 @@ const BOB = secondAccountEntry();
 
 afterEach(() => {
   clearAppContextForTests();
+  clearAccountPlanCacheForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

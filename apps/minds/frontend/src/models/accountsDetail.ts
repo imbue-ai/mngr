@@ -4,6 +4,11 @@
 // kept current by the channel. While a backup trim runs the plan section
 // re-polls so progress stays visible.
 //
+// The last plan each account loaded is kept for the life of the window, so
+// reopening the page shows it at once while a fresh read replaces it. It is
+// held in memory rather than localStorage: the backend takes a new port each
+// launch, so the page's origin (and its storage) changes with it.
+//
 // The mutating account actions reuse the legacy form-POST routes unchanged
 // (set-default, logout, plan switch, trim); their 303-redirect success
 // responses are followed by fetch and land on the SPA index, so response.ok
@@ -37,6 +42,10 @@ export interface TrimStatus {
 export interface AccountPlanState {
   isLoaded: boolean;
   isUnavailable: boolean;
+  /** The plan shown is a previous visit's, and a fresh read is in flight. */
+  isRefreshing: boolean;
+  /** The last read failed, so the plan shown is an older one. */
+  isRefreshFailed: boolean;
   planView: AccountPlanView | null;
   trimStatus: TrimStatus | null;
   privacyPolicyUrl: string;
@@ -54,7 +63,20 @@ export interface VerifyEmailPrompt {
   wasResent: boolean;
 }
 
+interface CachedAccountPlan {
+  planView: AccountPlanView;
+  privacyPolicyUrl: string;
+}
+
 const TRIM_POLL_MS = 4000;
+
+// Shared by every mount of the page. Trim status is not kept: it is the
+// backend's live state, and a stale "running" would be wrong.
+const cachedPlanByUserId = new Map<string, CachedAccountPlan>();
+
+export function clearAccountPlanCacheForTests(): void {
+  cachedPlanByUserId.clear();
+}
 
 type FetchLike = typeof fetch;
 type ScheduleLike = (callback: () => void, delayMs: number) => void;
@@ -94,16 +116,28 @@ export class AccountsDetailModel {
   /** Load the plan section of each account that is newly listed or was just
    * signed back in, dropping its old answer: a plan loaded while signed out
    * reads as unavailable, and a sign-in while the page is open must replace
-   * it. */
+   * it. The cached plan, when there is one, is shown until the read lands. */
   syncPlans(accounts: readonly UiAccountEntry[]): void {
     const previous = this.listedIsEnabledByUserId;
     this.listedIsEnabledByUserId = new Map(
       accounts.map((account) => [account.user_id, account.is_enabled]),
     );
+    for (const userId of cachedPlanByUserId.keys()) {
+      if (!this.listedIsEnabledByUserId.has(userId)) cachedPlanByUserId.delete(userId);
+    }
     for (const account of accounts) {
       const wasEnabled = previous.get(account.user_id);
       if (wasEnabled === undefined || (!wasEnabled && account.is_enabled)) {
         this.planByUserId.delete(account.user_id);
+        // A signed-out account's read cannot succeed, so its old figures would only mislead.
+        const cached = account.is_enabled ? cachedPlanByUserId.get(account.user_id) : undefined;
+        if (cached !== undefined) {
+          const state = this.planStateFor(account.user_id);
+          state.isLoaded = true;
+          state.isRefreshing = true;
+          state.planView = cached.planView;
+          state.privacyPolicyUrl = cached.privacyPolicyUrl;
+        }
         void this.loadPlan(account.user_id);
       }
     }
@@ -115,6 +149,8 @@ export class AccountsDetailModel {
     const fresh: AccountPlanState = {
       isLoaded: false,
       isUnavailable: false,
+      isRefreshing: false,
+      isRefreshFailed: false,
       planView: null,
       trimStatus: null,
       privacyPolicyUrl: "",
@@ -139,17 +175,26 @@ export class AccountsDetailModel {
         trim_status: TrimStatus | null;
         privacy_policy_url?: string;
       };
-      state.isLoaded = true;
-      state.isUnavailable = payload.plan_view === null;
-      state.planView = payload.plan_view;
       state.trimStatus = payload.trim_status;
       state.privacyPolicyUrl = payload.privacy_policy_url ?? "";
+      if (payload.plan_view === null) {
+        markReadFailed(state);
+      } else {
+        state.isLoaded = true;
+        state.isUnavailable = false;
+        state.isRefreshing = false;
+        state.isRefreshFailed = false;
+        state.planView = payload.plan_view;
+        cachedPlanByUserId.set(userId, {
+          planView: payload.plan_view,
+          privacyPolicyUrl: state.privacyPolicyUrl,
+        });
+      }
       if (payload.trim_status?.is_running && !this.isDisposed) {
         this.schedule(() => void this.loadPlan(userId), TRIM_POLL_MS);
       }
     } catch {
-      state.isLoaded = true;
-      state.isUnavailable = true;
+      markReadFailed(state);
     }
     this.redraw();
   }
@@ -298,6 +343,18 @@ export class AccountsDetailModel {
       {},
     );
     await this.loadPlan(userId);
+  }
+}
+
+/** A plan already on screen stays there, marked as not current; with none
+ * the section reads as unavailable. */
+function markReadFailed(state: AccountPlanState): void {
+  state.isLoaded = true;
+  state.isRefreshing = false;
+  if (state.planView === null) {
+    state.isUnavailable = true;
+  } else {
+    state.isRefreshFailed = true;
   }
 }
 

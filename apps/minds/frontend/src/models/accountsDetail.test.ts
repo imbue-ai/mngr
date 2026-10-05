@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   accountEntry,
   jsonResponse,
@@ -6,7 +6,11 @@ import {
   settle,
   withReceiverGuardedGlobalFetch,
 } from "../testing";
-import { AccountsDetailModel, type AccountPlanView } from "./accountsDetail";
+import {
+  AccountsDetailModel,
+  clearAccountPlanCacheForTests,
+  type AccountPlanView,
+} from "./accountsDetail";
 
 const ACCOUNT = accountEntry();
 
@@ -18,6 +22,10 @@ const PLAN_VIEW: AccountPlanView = {
   is_over_storage_quota: false,
   is_at_bucket_quota: false,
 };
+
+afterEach(() => {
+  clearAccountPlanCacheForTests();
+});
 
 describe("AccountsDetailModel", () => {
   it("invokes the default fetch as a plain call (Illegal-invocation regression guard)", async () => {
@@ -200,6 +208,107 @@ describe("AccountsDetailModel", () => {
 
     expect(observedBody).toBe("user_id=user-1");
     expect(observedContentType).toBe("application/x-www-form-urlencoded");
+  });
+});
+
+describe("the cached plan", () => {
+  const UPDATED_VIEW: AccountPlanView = { ...PLAN_VIEW, plan_display_name: "Explorer (updated)" };
+
+  /** A model whose plan reads wait until the test answers them. */
+  function modelWithHeldReads(): {
+    model: AccountsDetailModel;
+    answer: (planView: AccountPlanView | null) => void;
+  } {
+    let release: (response: Response) => void = () => {};
+    const model = new AccountsDetailModel(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+      () => {},
+      (callback) => callback(),
+    );
+    return {
+      model,
+      answer: (planView) => release(jsonResponse({ plan_view: planView, trim_status: null })),
+    };
+  }
+
+  async function visitOnce(planView: AccountPlanView): Promise<void> {
+    const model = new AccountsDetailModel(
+      async () => jsonResponse({ plan_view: planView, trim_status: null }),
+      () => {},
+      (callback) => callback(),
+    );
+    model.syncPlans([ACCOUNT]);
+    await settle();
+    model.dispose();
+  }
+
+  it("shows a previous visit's plan at once, then replaces it with the fresh read", async () => {
+    await visitOnce(PLAN_VIEW);
+    const { model, answer } = modelWithHeldReads();
+
+    model.syncPlans([ACCOUNT]);
+    const shown = model.planStateFor(ACCOUNT.user_id);
+    expect(shown.isLoaded).toBe(true);
+    expect(shown.planView).toEqual(PLAN_VIEW);
+    expect(shown.isRefreshing).toBe(true);
+
+    answer(UPDATED_VIEW);
+    await settle();
+
+    expect(shown.planView).toEqual(UPDATED_VIEW);
+    expect(shown.isRefreshing).toBe(false);
+    expect(shown.isRefreshFailed).toBe(false);
+  });
+
+  it("keeps the earlier plan on screen, marked, when the refresh cannot reach the cloud", async () => {
+    await visitOnce(PLAN_VIEW);
+    const { model, answer } = modelWithHeldReads();
+
+    model.syncPlans([ACCOUNT]);
+    answer(null);
+    await settle();
+
+    const shown = model.planStateFor(ACCOUNT.user_id);
+    expect(shown.planView).toEqual(PLAN_VIEW);
+    expect(shown.isUnavailable).toBe(false);
+    expect(shown.isRefreshing).toBe(false);
+    expect(shown.isRefreshFailed).toBe(true);
+  });
+
+  it("does not show a signed-out account's earlier plan, which reads as unavailable", async () => {
+    await visitOnce(PLAN_VIEW);
+    const { model, answer } = modelWithHeldReads();
+
+    model.syncPlans([{ ...ACCOUNT, is_enabled: false }]);
+    const shown = model.planStateFor(ACCOUNT.user_id);
+    expect(shown.isLoaded).toBe(false);
+    expect(shown.planView).toBeNull();
+
+    answer(null);
+    await settle();
+
+    expect(shown.isUnavailable).toBe(true);
+    expect(shown.isRefreshFailed).toBe(false);
+  });
+
+  it("drops a logged-out account's plan, so adding it back loads from scratch", async () => {
+    await visitOnce(PLAN_VIEW);
+    const pruner = new AccountsDetailModel(
+      async () => jsonResponse({ plan_view: null, trim_status: null }),
+      () => {},
+      (callback) => callback(),
+    );
+    pruner.syncPlans([]);
+    const { model } = modelWithHeldReads();
+
+    model.syncPlans([ACCOUNT]);
+
+    const shown = model.planStateFor(ACCOUNT.user_id);
+    expect(shown.isLoaded).toBe(false);
+    expect(shown.planView).toBeNull();
   });
 });
 
