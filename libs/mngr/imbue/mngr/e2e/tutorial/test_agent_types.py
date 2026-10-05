@@ -288,7 +288,7 @@ def test_create_custom_yolo_agent_type(e2e: E2eSession) -> None:
     """
     expect(
         e2e.run(
-            "EDITOR=/bin/true mngr config edit --scope project",
+            "EDITOR=true mngr config edit --scope project",
             comment="open project config",
         )
     ).to_succeed()

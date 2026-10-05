@@ -384,13 +384,13 @@ def test_config_edit_editor_failure(e2e: E2eSession) -> None:
 
     Scope: the unhappy path of the same block. When $EDITOR exits non-zero,
     `config edit` does not swallow the failure -- it propagates the editor's
-    exact exit code (1 from /bin/false) and reports "Editor exited with error".
+    exact exit code (1 from `false`) and reports "Editor exited with error".
     """
-    # /bin/false exits 1, standing in for an editor that the user aborted or
+    # `false` exits 1, standing in for an editor that the user aborted or
     # that crashed.
-    result = e2e.run("EDITOR=/bin/false mngr config edit", comment="editor exits with an error")
+    result = e2e.run("EDITOR=false mngr config edit", comment="editor exits with an error")
     # The command must not swallow the editor's failure: it propagates the
-    # editor's exact exit code (1 from /bin/false), not just some non-zero code.
+    # editor's exact exit code (1 from `false`), not just some non-zero code.
     expect(result).to_have_exit_code(1)
     expect(result.stderr).to_contain("Editor exited with error")
 
@@ -414,10 +414,10 @@ def test_config_edit_scope(e2e: E2eSession) -> None:
     project_config_path = path_result.stdout.strip()
     assert project_config_path, "expected `config path --scope project` to print a path"
 
-    # `mngr config edit` spawns $EDITOR; force it to /bin/true so the command
+    # `mngr config edit` spawns $EDITOR; force it to `true` so the command
     # returns immediately with success instead of blocking on a real editor.
     result = e2e.run(
-        "EDITOR=/bin/true mngr config edit --scope project",
+        "EDITOR=true mngr config edit --scope project",
         comment="open a specific scope's config file",
     )
     expect(result).to_succeed()

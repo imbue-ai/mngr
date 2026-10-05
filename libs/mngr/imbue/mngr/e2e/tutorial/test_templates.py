@@ -55,7 +55,7 @@ def test_templates_setup_via_config_edit(e2e: E2eSession) -> None:
     """
     expect(
         e2e.run(
-            "EDITOR=/bin/true mngr config edit --scope project",
+            "EDITOR=true mngr config edit --scope project",
             comment="open the project config",
         )
     ).to_succeed()

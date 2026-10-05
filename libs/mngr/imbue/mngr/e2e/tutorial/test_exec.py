@@ -4,6 +4,9 @@ Each test corresponds 1:1 to a tutorial script block. Each test creates real
 agents with the names the block references so the exec command has a target.
 """
 
+import re
+from pathlib import Path
+
 import pytest
 
 from imbue.mngr.e2e.conftest import E2eSession
@@ -141,16 +144,18 @@ def test_exec_cwd(e2e: E2eSession) -> None:
     that happened to already be /tmp.
     """
     _create_my_task(e2e, 100404)
-    # With --cwd, the command runs in the given directory: `pwd` prints exactly /tmp.
+    # `pwd` prints the directory with symlinks resolved, and /tmp is a symlink to
+    # /private/tmp on macOS, so match what the host resolves it to.
+    resolved_tmp = re.escape(str(Path("/tmp").resolve()))
     result = e2e.run('mngr exec my-task --cwd /tmp "pwd"', comment="run a command in a specific working directory")
     expect(result).to_succeed()
-    expect(result.stdout).to_match(r"(?m)^/tmp$")
-    # Without --cwd, the command runs in the agent's work_dir, which is not /tmp.
-    # This confirms --cwd actually changed the directory rather than matching a
-    # default that happened to already be /tmp (the work_dir lives under /tmp).
+    expect(result.stdout).to_match(rf"(?m)^{resolved_tmp}$")
+    # Without --cwd, the command runs in the agent's work_dir. This confirms --cwd
+    # actually changed the directory rather than matching a default that happened
+    # to already be the temp dir.
     default_result = e2e.run('mngr exec my-task "pwd"', comment="by default, commands are run in the agent's work_dir")
     expect(default_result).to_succeed()
-    expect(default_result.stdout).not_to_match(r"(?m)^/tmp$")
+    expect(default_result.stdout).not_to_match(rf"(?m)^{resolved_tmp}$")
 
 
 @pytest.mark.release

@@ -1,6 +1,7 @@
 """Tests for the ADVANCED WORKFLOWS and TIPS AND TRICKS tutorial sections."""
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -353,11 +354,17 @@ def test_tips_exec_env_inspect(e2e: E2eSession) -> None:
     expect(result.stdout).to_contain("MNGR_AGENT_NAME=my-task")
     expect(result.stdout).to_contain(f"MNGR_AGENT_ID={agent_id}")
     # The tutorial pipes env through `sort`; confirm the env block really is
-    # sorted so the demonstrated pipeline behaves as shown.
+    # sorted so the demonstrated pipeline behaves as shown. Checked by re-sorting
+    # with `sort` itself rather than Python: `sort` orders by the host's locale,
+    # which places the underscore in a name like CLAUDE_CODE_BRIDGE_SESSION_ID
+    # differently from Python's codepoint order.
     env_var_lines = [
         line.strip() for line in result.stdout.splitlines() if "=" in line and line.split("=", 1)[0].strip().isupper()
     ]
-    assert env_var_lines == sorted(env_var_lines), "expected the env output to be sorted by `sort`"
+    resorted = subprocess.run(
+        ["sort"], input="\n".join(env_var_lines), capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    assert env_var_lines == resorted, "expected the env output to be sorted by `sort`"
 
 
 @pytest.mark.release
