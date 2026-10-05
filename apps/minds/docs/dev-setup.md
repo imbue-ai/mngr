@@ -112,7 +112,7 @@ which lives outside the public mirror:
 - [ ] **Membership in the `minds-dev` Modal workspace + a matching
       `~/.modal.toml` profile.** `minds-dev` is a *separate*, workspace-bound
       Modal workspace (there's no shared dev token in Vault), so ask in
-      #project-minds-internal-product for an invite, then
+      #project-studio-internal-product for an invite, then
       `modal token new --profile minds-dev` and select that workspace in the
       browser. Verify with `modal profile list`: the `minds-dev` profile must
       show workspace `minds-dev` -- a profile *named* `minds-dev` that holds a
