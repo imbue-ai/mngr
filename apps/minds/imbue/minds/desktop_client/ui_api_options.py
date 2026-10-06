@@ -34,6 +34,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
 from imbue.minds.desktop_client.share_grant_validation import PUBLIC_EMAIL_DOMAINS
+from imbue.minds.desktop_client.share_targets import resolve_share_target_display_names
 from imbue.minds.desktop_client.share_targets import resolve_share_target_labels
 from imbue.minds.desktop_client.share_targets import split_share_targets
 from imbue.minds.desktop_client.state import get_state
@@ -113,6 +114,14 @@ class WorkspaceOptionsData(FrozenModel):
     service_icons: dict[str, str] = Field(
         default_factory=dict,
         description="Registered SVG icon markup per app share target (absent = none registered)",
+    )
+    service_display_names: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "What users read for each per-app share target (absent = the service registered no display "
+            "name, or the workspace predates the field; show its service name instead). The whole-machine "
+            "target is deliberately absent: it is named for what it grants."
+        ),
     )
     whole_service: str = Field(description="The share target name that grants the whole machine")
     public_email_domains: tuple[str, ...] = Field(
@@ -263,6 +272,7 @@ def _handle_workspace_options_data(agent_id: str) -> Response:
         app_services=tuple(app_services),
         service_labels=resolve_share_target_labels(backend_resolver, parsed_agent_id),
         service_icons=service_icons,
+        service_display_names=resolve_share_target_display_names(backend_resolver, parsed_agent_id),
         whole_service=whole_service,
         public_email_domains=tuple(sorted(PUBLIC_EMAIL_DOMAINS)),
         ssh_command=build_ssh_command(backend_resolver, parsed_agent_id),

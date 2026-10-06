@@ -32,6 +32,7 @@ export interface WorkspaceOptionsData {
   app_services: string[];
   service_labels: Record<string, string>;
   service_icons?: Record<string, string>;
+  service_display_names?: Record<string, string>;
   whole_service: string;
   /** The mail providers a domain grant may never name, so the panel can refuse
    * one before the row. */
@@ -293,6 +294,7 @@ export class WorkspaceOptionsModel {
       appServices: data.app_services,
       serviceLabels: data.service_labels,
       serviceIcons: data.service_icons,
+      serviceDisplayNames: data.service_display_names,
       fetchJson: this.fetchJsonImpl,
       redraw: this.redrawImpl,
       ...this.shareOverrides,

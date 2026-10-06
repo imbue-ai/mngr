@@ -164,7 +164,7 @@ Key concepts in the Imbue Studio system:
 
 - **kind**: what a message is about: an invitation, a permission request, a password reset. A kind belongs to exactly one stream of each channel it can use. Channels carry streams; streams carry kinds.
 
-- **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a name and URL for discovery.
+- **service event**: a JSON line in `events/services/events.jsonl` that registers (or deregisters) a service for discovery: its name, URL, origin label, icon, and display name. The name is the identifier (the registry key, and the key of the service's share grants); the display name is what users read, and surfaces that show a service to a person use it.
   The desktop client's MngrStreamManager watches these events to discover agent backends.
   (The path and event vocabulary predate the app rename and are treated as plumbing.)
 

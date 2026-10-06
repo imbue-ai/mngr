@@ -2377,3 +2377,51 @@ describe("SharePanelModel invitations", () => {
     });
   });
 });
+
+describe("what the panel calls a target", () => {
+  const inert = () => ({ ok: true, status: 200, body: {} });
+
+  it("calls an app what the workspace calls it", () => {
+    const { model } = makeSharePanel(inert, {
+      appServices: ["files", "web"],
+      serviceDisplayNames: { files: "File Viewer" },
+    });
+
+    expect(model.targetDisplayName("files")).toBe("File Viewer");
+    // An app that registered no display name is called by its own name.
+    expect(model.targetDisplayName("web")).toBe("web");
+  });
+
+  it("keeps a name that could never be a hostname label", () => {
+    const { model } = makeSharePanel(inert, {
+      appServices: ["imbue-hud"],
+      serviceDisplayNames: { "imbue-hud": "Imbue HUD" },
+    });
+
+    expect(model.targetDisplayName("imbue-hud")).toBe("Imbue HUD");
+  });
+
+  it("marks a name two apps share, so their rows can be told apart", () => {
+    const { model } = makeSharePanel(inert, {
+      appServices: ["hud", "hud-dev", "files"],
+      serviceDisplayNames: {
+        hud: "Imbue HUD",
+        "hud-dev": "Imbue HUD",
+        files: "File Viewer",
+      },
+    });
+
+    expect(model.isDisplayNameAmbiguous("hud")).toBe(true);
+    expect(model.isDisplayNameAmbiguous("hud-dev")).toBe(true);
+    expect(model.isDisplayNameAmbiguous("files")).toBe(false);
+  });
+
+  it("marks nothing when the apps have no display name of their own", () => {
+    const { model } = makeSharePanel(inert, {
+      appServices: ["web", "docs"],
+      serviceDisplayNames: {},
+    });
+
+    expect(model.isDisplayNameAmbiguous("web")).toBe(false);
+  });
+});

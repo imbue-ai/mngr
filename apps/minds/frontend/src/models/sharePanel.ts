@@ -233,6 +233,8 @@ export interface SharePanelModelOptions {
   serviceLabels: Record<string, string>;
   /** Registered SVG icon markup per app service. */
   serviceIcons?: Record<string, string>;
+  /** What users read for each app service; one with none is called by its name. */
+  serviceDisplayNames?: Record<string, string>;
   /** The mail providers a domain grant may never name. */
   publicEmailDomains: string[];
   fetchJson?: FetchJson;
@@ -441,6 +443,24 @@ export class SharePanelModel {
 
   targetIcon(target: string): string | null {
     return this.options.serviceIcons?.[target] ?? null;
+  }
+
+  /** What to call a target: the name the workspace gives it, else its own. A
+   * target's name is an identifier, free of hostname rules, and need not be a
+   * thing anyone would want to read. */
+  targetDisplayName(target: string): string {
+    return this.options.serviceDisplayNames?.[target] || target;
+  }
+
+  /** Whether a target's own name has to be shown beside what it is called,
+   * because another target is called the same: display names need not be
+   * unique, and two rows reading alike would grant different things. */
+  isDisplayNameAmbiguous(target: string): boolean {
+    const shown = this.targetDisplayName(target);
+    if (shown === target) return false;
+    return this.appTargets.some(
+      (other) => other !== target && this.targetDisplayName(other) === shown,
+    );
   }
 
   /** Whether a grant can be made: the workspace has an address to admit anyone

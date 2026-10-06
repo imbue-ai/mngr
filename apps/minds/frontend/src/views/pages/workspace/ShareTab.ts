@@ -366,7 +366,12 @@ function renderTargetNav(share: SharePanelModel): m.Children {
       m(Icon16, { name: "panels-top-left", extra: "shrink-0" }),
     ),
     ...share.appTargets.map((target) =>
-      renderNavEntry(share, target, target, renderAppIcon(share, target)),
+      renderNavEntry(
+        share,
+        target,
+        share.targetDisplayName(target),
+        renderAppIcon(share, target),
+      ),
     ),
   ];
 }
@@ -389,7 +394,15 @@ function renderNavEntry(
     },
     [
       icon,
-      m("span", { class: "grow truncate" }, label),
+      m("span", { class: "grow truncate" }, [
+        label,
+        // Two apps may be called the same; their own names tell the rows apart.
+        // The space is the text's own: a margin is not one, and a reader would
+        // otherwise announce the two names run together.
+        share.isDisplayNameAmbiguous(target)
+          ? m("span", { class: "ml-1.5 type-helper text-tertiary" }, ` ${target}`)
+          : null,
+      ]),
       // An app registers its address when it starts, so one that has never run
       // has no link yet -- which is not the same as having no grants.
       target === share.wholeService || share.isLabelKnown(target)
@@ -414,8 +427,21 @@ function renderAppIcon(share: SharePanelModel, target: string): m.Children {
   return m(
     "span",
     { class: "shrink-0 inline-flex" },
-    m.trust(shareTargetIconMarkup(share.targetIcon(target), target, 16)),
+    m.trust(
+      shareTargetIconMarkup(
+        share.targetIcon(target),
+        share.targetDisplayName(target),
+        16,
+      ),
+    ),
   );
+}
+
+/** What to call a target in prose: what the workspace calls it, and its own name
+ * too when another target is called the same. */
+function targetTitle(share: SharePanelModel, target: string): string {
+  const shown = share.targetDisplayName(target);
+  return share.isDisplayNameAmbiguous(target) ? `${shown} (${target})` : shown;
 }
 
 function renderTargetPane(
@@ -438,7 +464,7 @@ function renderTargetPane(
         { class: "type-heading text-primary" },
         isWhole
           ? "Permissions for the whole workspace"
-          : `Permissions for ${target}`,
+          : `Permissions for ${targetTitle(share, target)}`,
       ),
     ]),
     m(
@@ -446,7 +472,7 @@ function renderTargetPane(
       { class: "mt-1 shrink-0 type-helper text-tertiary" },
       isWhole
         ? WHOLE_SCOPE_LINE
-        : `Permissions below apply only to the ${target} app.`,
+        : `Permissions below apply only to the ${targetTitle(share, target)} app.`,
     ),
     share.isPublished ? renderLinkSection(share, local) : null,
     renderAddRow(share),
@@ -1005,7 +1031,7 @@ function renderLinkSection(
                 "aria-label":
                   target === share.wholeService
                     ? "Copy the link"
-                    : `Copy the link to ${target}`,
+                    : `Copy the link to ${targetTitle(share, target)}`,
                 onclick: () => {
                   void copyLink(share, local, url);
                 },

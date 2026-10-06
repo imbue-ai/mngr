@@ -129,6 +129,20 @@ def test_parse_service_log_records_captures_the_registered_icon() -> None:
     assert bare[0].icon == ""
 
 
+def test_parse_service_log_records_captures_the_display_name() -> None:
+    text = '{"service": "files", "url": "http://127.0.0.1:9100", "display_name": "File Viewer"}\n'
+    records = parse_service_log_records(text)
+
+    assert len(records) == 1
+    assert isinstance(records[0], ServiceLogRecord)
+    assert records[0].display_name == "File Viewer"
+    # No ``display_name`` in the row -> empty: a row with no manifest, or a
+    # workspace whose template predates the field. Callers fall back to the name.
+    bare = parse_service_log_records('{"service": "web", "url": "http://127.0.0.1:9101"}\n')
+    assert isinstance(bare[0], ServiceLogRecord)
+    assert bare[0].display_name == ""
+
+
 def test_parse_service_log_records_returns_empty_for_empty_input() -> None:
     assert parse_service_log_records("") == []
     assert parse_service_log_records("\n") == []
@@ -1405,6 +1419,33 @@ def test_mngr_cli_resolver_replaces_labels_and_defaults_to_empty() -> None:
 
     resolver.update_services(_AGENT_A, {"terminal": "http://127.0.0.1:9100"})
     assert resolver.list_service_labels_for_agent(_AGENT_A) == {}
+
+
+def test_mngr_cli_resolver_exposes_per_service_display_names() -> None:
+    """update_services carries the name users read for each service, keyed by service name."""
+    resolver = MngrCliBackendResolver()
+
+    resolver.update_services(
+        _AGENT_A,
+        {"files": "http://127.0.0.1:9100", "web": "http://127.0.0.1:9200"},
+        {},
+        {},
+        {"files": "File Viewer"},
+    )
+    # A service registered without a manifest (``web``) has no display name and
+    # is omitted; callers fall back to its registered name.
+    assert resolver.list_service_display_names_for_agent(_AGENT_A) == {ServiceName("files"): "File Viewer"}
+
+
+def test_mngr_cli_resolver_replaces_display_names_and_defaults_to_empty() -> None:
+    """A later update_services replaces the display-name map; omitting them clears it."""
+    resolver = MngrCliBackendResolver()
+
+    resolver.update_services(_AGENT_A, {"files": "http://127.0.0.1:9100"}, {}, {}, {"files": "File Viewer"})
+    assert resolver.list_service_display_names_for_agent(_AGENT_A) == {ServiceName("files"): "File Viewer"}
+
+    resolver.update_services(_AGENT_A, {"files": "http://127.0.0.1:9100"})
+    assert resolver.list_service_display_names_for_agent(_AGENT_A) == {}
 
 
 def _make_agents_json_with_ssh(*agents: tuple[str, Mapping[str, object] | None]) -> str:

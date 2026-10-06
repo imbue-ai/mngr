@@ -374,6 +374,43 @@ describe("ShareTab target nav", () => {
     expect(allText(entries[2])).toContain("0");
   });
 
+  it("calls each app what the workspace calls it", async () => {
+    const share = await readyPanel(
+      {},
+      {
+        appServices: ["files", "web"],
+        serviceDisplayNames: { files: "File Viewer" },
+      },
+    );
+
+    const entries = navEntries(renderTab(share));
+
+    expect(allText(entries[1])).toContain("File Viewer");
+    // An app that registered no display name is listed by its own name.
+    expect(allText(entries[2])).toContain("web");
+  });
+
+  it("shows an app's own name only when another app is called the same", async () => {
+    const share = await readyPanel(
+      {},
+      {
+        appServices: ["hud", "hud-dev", "files"],
+        serviceDisplayNames: {
+          hud: "Imbue HUD",
+          "hud-dev": "Imbue HUD",
+          files: "File Viewer",
+        },
+      },
+    );
+
+    const entries = navEntries(renderTab(share));
+
+    expect(allText(entries[1])).toContain("hud");
+    expect(allText(entries[2])).toContain("hud-dev");
+    // The one name nothing collides with stands alone.
+    expect(allText(entries[3])).not.toContain("files");
+  });
+
   it("holds only the entries, with no rule between the whole workspace and the apps", async () => {
     const share = await publishedPanel();
 

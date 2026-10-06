@@ -437,6 +437,10 @@ class EnvelopeStreamConsumer(MutableModel):
     # Carries each service's public origin hostname label (``<name>-<rand>``) so
     # the resolver -- and thus the Share tab -- can build per-service share links.
     _labels_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # Parallel to _services_by_agent: {agent_id_str: {service_name: display name}}.
+    # What users read for each service, so surfaces can call an app what the
+    # workspace calls it; a service with none is shown by its service name.
+    _display_names_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _on_agent_discovered_callbacks: list[OnAgentDiscoveredCallback] = PrivateAttr(default_factory=list)
     _on_agent_destroyed_callbacks: list[OnAgentDestroyedCallback] = PrivateAttr(default_factory=list)
     _on_system_interface_backend_failure_callbacks: list[OnSystemInterfaceBackendFailureCallback] = PrivateAttr(
@@ -840,6 +844,7 @@ class EnvelopeStreamConsumer(MutableModel):
                 self._services_by_agent.pop(str(agent_id), None)
                 self._labels_by_agent.pop(str(agent_id), None)
                 self._icons_by_agent.pop(str(agent_id), None)
+                self._display_names_by_agent.pop(str(agent_id), None)
             self.resolver.update_services(agent_id, {})
             self._fire_destroyed(agent_id)
         for instance_key in delta.added_agent_instances:
@@ -909,10 +914,12 @@ class EnvelopeStreamConsumer(MutableModel):
             services = self._services_by_agent.setdefault(aid_str, {})
             labels = self._labels_by_agent.setdefault(aid_str, {})
             icons = self._icons_by_agent.setdefault(aid_str, {})
+            display_names = self._display_names_by_agent.setdefault(aid_str, {})
             if isinstance(record, ServiceDeregisteredRecord):
                 services.pop(str(record.service), None)
                 labels.pop(str(record.service), None)
                 icons.pop(str(record.service), None)
+                display_names.pop(str(record.service), None)
             else:
                 services[str(record.service)] = record.url
                 if record.label:
@@ -923,10 +930,17 @@ class EnvelopeStreamConsumer(MutableModel):
                     icons[str(record.service)] = record.icon
                 else:
                     icons.pop(str(record.service), None)
+                if record.display_name:
+                    display_names[str(record.service)] = record.display_name
+                else:
+                    display_names.pop(str(record.service), None)
             services_snapshot = dict(services)
             labels_snapshot = dict(labels)
             icons_snapshot = dict(icons)
-        self.resolver.update_services(agent_id, services_snapshot, labels_snapshot, icons_snapshot)
+            display_names_snapshot = dict(display_names)
+        self.resolver.update_services(
+            agent_id, services_snapshot, labels_snapshot, icons_snapshot, display_names_snapshot
+        )
 
     def _handle_forward_payload(self, payload: dict[str, Any]) -> None:
         payload_type = payload.get("type")

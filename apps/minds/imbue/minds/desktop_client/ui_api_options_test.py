@@ -30,12 +30,13 @@ _HOST_ID = "host-" + "f" * 32
 
 
 class _OptionsSeededResolver(StaticBackendResolver):
-    """Static resolver carrying the display info + labels + icons the options endpoint reads."""
+    """Static resolver carrying the display info + labels + icons + display names the options endpoint reads."""
 
     display_info_by_agent_id: dict[str, AgentDisplayInfo] = Field(default_factory=dict, frozen=True)
     color_by_agent_id: dict[str, str] = Field(default_factory=dict, frozen=True)
     labels_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
     icons_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
+    display_names_by_agent_id: dict[str, dict[str, str]] = Field(default_factory=dict, frozen=True)
     errored_providers: tuple[str, ...] = Field(default=(), frozen=True)
 
     def get_agent_display_info(self, agent_id: AgentId) -> AgentDisplayInfo | None:
@@ -49,6 +50,9 @@ class _OptionsSeededResolver(StaticBackendResolver):
 
     def list_service_icons_for_agent(self, agent_id: AgentId) -> dict:
         return dict(self.icons_by_agent_id.get(str(agent_id), {}))
+
+    def list_service_display_names_for_agent(self, agent_id: AgentId) -> dict:
+        return dict(self.display_names_by_agent_id.get(str(agent_id), {}))
 
     def get_provider_errors(self) -> dict:
         return {ProviderInstanceName(name): object() for name in self.errored_providers}
@@ -69,6 +73,7 @@ def _seeded_resolver() -> _OptionsSeededResolver:
         },
         color_by_agent_id={_AGENT_ID: "#9fbbd3"},
         labels_by_agent_id={_AGENT_ID: {"web": "web-r4nd", "system_interface": "shell-r4nd"}},
+        display_names_by_agent_id={_AGENT_ID: {"web": "Web", "system_interface": "Workspace"}},
     )
 
 
@@ -115,9 +120,13 @@ def test_options_data_returns_workspace_context(tmp_path: Path) -> None:
     assert data["account_display_name"] is None
     assert data["account_profile_picture_url"] is None
     assert data["accounts"] == []
-    # The share targets exclude the shell, interface services, and non-DNS names.
-    assert data["app_services"] == ["web"]
+    # The share targets exclude the shell and the interface services. A name that
+    # could never be a hostname label is a target like any other: the link comes
+    # from the service's own origin label, not from its name.
+    assert data["app_services"] == ["bad_name", "web"]
     assert data["service_labels"] == {"web": "web-r4nd", "system_interface": "shell-r4nd"}
+    # Never the shell's: the whole-machine target is named for what it grants.
+    assert data["service_display_names"] == {"web": "Web"}
     assert data["whole_service"] == "system_interface"
     assert data["ssh_command"] == ""
 

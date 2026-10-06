@@ -739,15 +739,18 @@ def make_agents_json(*agent_ids: AgentId, labels: dict[str, str] | None = None, 
     return json.dumps({"agents": [_agent(agent_id) for agent_id in agent_ids]})
 
 
-def make_service_log(service: str, url: str, label: str = "") -> str:
+def make_service_log(service: str, url: str, label: str = "", display_name: str = "") -> str:
     """Build a single JSONL line matching the services/events.jsonl format.
 
     ``label`` is the service's origin label (``<name>-<rand>``); omit it for the
-    legacy (label-less) shape.
+    legacy (label-less) shape. ``display_name`` is what users read for the
+    service; omit it for a service registered without a manifest.
     """
     entry: dict[str, str] = {"service": service, "url": url}
     if label:
         entry["label"] = label
+    if display_name:
+        entry["display_name"] = display_name
     return json.dumps(entry) + "\n"
 
 
@@ -822,12 +825,15 @@ def make_resolver_with_data(
             records = parse_service_log_records(log_content)
             services: dict[str, str] = {}
             labels: dict[str, str] = {}
+            display_names: dict[str, str] = {}
             for record in records:
                 if isinstance(record, ServiceLogRecord):
                     services[str(record.service)] = record.url
                     if record.label:
                         labels[str(record.service)] = record.label
-            resolver.update_services(AgentId(agent_id_str), services, labels)
+                    if record.display_name:
+                        display_names[str(record.service)] = record.display_name
+            resolver.update_services(AgentId(agent_id_str), services, labels, display_names=display_names)
 
     return resolver
 

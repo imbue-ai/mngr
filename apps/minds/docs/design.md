@@ -31,7 +31,7 @@ All configuration lives in the template repository's `.mngr/settings.toml`. The 
 
 Workspaces use space in the host volume (via the agent dir) for persistent data. The structure and format of this data is up to each individual workspace. You can optionally configure them to store their memories in git (but that is less secure, as data would leak out if synced).
 
-Workspaces *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNGR_AGENT_STATE_DIR/events/services/events.jsonl` -- one line per service -- containing the service name and URL, e.g. `{"service": "web", "url": "http://127.0.0.1:9100"}`. An agent may write multiple records for different services (e.g. a "web" UI service and an "api" backend service). Later entries for the same service name override earlier ones. The desktop client reads this via `mngr event <agent-id> services/events.jsonl` to discover all backends.
+Workspaces *must* serve web requests on one or more ports. On startup, they write JSON records to `$MNGR_AGENT_STATE_DIR/events/services/events.jsonl` -- one line per service -- containing the service name and URL, e.g. `{"service": "web", "url": "http://127.0.0.1:9100"}`, optionally with the service's origin `label`, its registered `icon`, and the `display_name` users read for it. An agent may write multiple records for different services (e.g. a "web" UI service and an "api" backend service). Later entries for the same service name override earlier ones. The desktop client reads this via `mngr event <agent-id> services/events.jsonl` to discover all backends.
 
 # Desktop client
 

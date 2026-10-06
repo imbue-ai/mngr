@@ -98,6 +98,14 @@ class ServiceLogRecord(FrozenModel):
             "when the app registered none."
         ),
     )
+    display_name: str = Field(
+        default="",
+        description=(
+            "What users read for the app, from its manifest. Empty for a service registered without one "
+            "(owner-exec, the vm exec service), and for a workspace whose template predates the field; "
+            "callers fall back to the service name."
+        ),
+    )
 
 
 class BackendResolverInterface(MutableModel, ABC):
@@ -277,6 +285,16 @@ class BackendResolverInterface(MutableModel, ABC):
         origin routes on a share. Used by the Share tab to build each share
         link. Default implementation returns an empty mapping (resolvers that
         carry no labels).
+        """
+        return {}
+
+    def list_service_display_names_for_agent(self, agent_id: AgentId) -> dict[ServiceName, str]:
+        """Return the name users read for each known service, keyed by service name.
+
+        A service absent from the result has none (it registered without a
+        manifest, or the workspace's template predates the field), and callers
+        show its service name instead. Default implementation returns an empty
+        mapping (resolvers that carry no display names).
         """
         return {}
 
@@ -580,11 +598,13 @@ def parse_service_log_record(raw: dict[str, object]) -> ServiceLogRecord | Servi
     # labeled.
     label = raw.get("label")
     icon = raw.get("icon")
+    display_name = raw.get("display_name")
     return ServiceLogRecord(
         service=ServiceName(str(service)),
         url=str(url),
         label=str(label) if label else "",
         icon=str(icon) if icon else "",
+        display_name=str(display_name) if display_name else "",
     )
 
 
@@ -885,6 +905,9 @@ class MngrCliBackendResolver(BackendResolverInterface):
     # carrying each service's public origin hostname label (``<name>-<rand>``).
     # A service missing here (a legacy row with no label) falls back to its name.
     _labels_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
+    # agent_id_str -> {service_name: display name}. Parallel to _services_by_agent,
+    # carrying what users read for each service; a service missing here has none.
+    _display_names_by_agent: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
     _initial_discovery_done: bool = PrivateAttr(default=False)
     _provider_by_name: dict[ProviderInstanceName, DiscoveredProvider] = PrivateAttr(default_factory=dict)
     _error_by_provider_name: dict[ProviderInstanceName, DiscoveryError] = PrivateAttr(default_factory=dict)
@@ -1331,19 +1354,23 @@ class MngrCliBackendResolver(BackendResolverInterface):
         services: dict[str, str],
         labels: dict[str, str] | None = None,
         icons: dict[str, str] | None = None,
+        display_names: dict[str, str] | None = None,
     ) -> None:
-        """Replace the known services (and their origin labels and icons) for a single agent. Thread-safe.
+        """Replace the known services (and their origin labels, icons, and display names) for a single agent. Thread-safe.
 
         ``labels`` maps each service name to its public origin hostname label
         (``<name>-<rand>``). Services absent from it (legacy rows written before
         labels existed) have no label and therefore no share link.
         ``icons`` maps each service name to its registered SVG icon markup;
         services absent from it have none.
+        ``display_names`` maps each service name to what users read for it;
+        services absent from it have none and are shown by their service name.
         """
         with self._lock:
             self._services_by_agent[str(agent_id)] = services
             self._labels_by_agent[str(agent_id)] = dict(labels or {})
             self._icons_by_agent[str(agent_id)] = dict(icons or {})
+            self._display_names_by_agent[str(agent_id)] = dict(display_names or {})
         self._fire_on_change()
 
     def get_backend_url(self, agent_id: AgentId, service_name: ServiceName) -> str | None:
@@ -1365,6 +1392,11 @@ class MngrCliBackendResolver(BackendResolverInterface):
         with self._lock:
             icons = self._icons_by_agent.get(str(agent_id), {})
             return {ServiceName(name): icon for name, icon in icons.items() if icon}
+
+    def list_service_display_names_for_agent(self, agent_id: AgentId) -> dict[ServiceName, str]:
+        with self._lock:
+            display_names = self._display_names_by_agent.get(str(agent_id), {})
+            return {ServiceName(name): value for name, value in display_names.items() if value}
 
     def list_known_agent_ids(self) -> tuple[AgentId, ...]:
         with self._lock:
