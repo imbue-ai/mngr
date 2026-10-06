@@ -7,7 +7,8 @@ This folder specifies how the desktop client reports that a workspace is running
 A workspace's *template version* is the `minds-v*` release of the workspace template it is running.
 The app's *supported version* is the template release this build is pinned to; a development build has none.
 
-A workspace is *out of date* only when both versions can be read and the workspace's sorts below the app's.
+A workspace is *out of date* only when both versions can be read and the workspace's is on an earlier minor release than the app's; a prerelease belongs to the minor release it precedes.
+A workspace whose version sorts below the app's within the same minor release has a *patch available*: it is never prompted for, and is updated only when the user asks for it.
 A workspace whose own version sorts below a fixed cutoff (`minds-v0.3.10`) *needs recreation*: no update can be applied to it in place, and the way forward is a new workspace its work is migrated into.
 Every other case is *unknown*, and the reading names which side had no version.
 Unknown is never a weaker form of out of date.

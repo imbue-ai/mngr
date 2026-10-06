@@ -1,9 +1,10 @@
 """Whether each workspace is behind the app's template pin, and what is being done about it.
 
 Detection is a positive read: OUT_OF_DATE only when both sides parse as ``minds-v*``
-and the workspace sorts below; NEEDS_RECREATION when the workspace's own version
-sorts below the hardcoded in-place cutoff, whatever the app is pinned to; anything
-else is UNKNOWN, never reported as behind but still dispatchable (the agent reads
+and the workspace is on an earlier minor release; PATCH_AVAILABLE when it sorts below
+within the same minor release, which is never prompted for; NEEDS_RECREATION when the
+workspace's own version sorts below the hardcoded in-place cutoff, whatever the app is
+pinned to; anything else is UNKNOWN, never reported as behind but still dispatchable (the agent reads
 the workspace's own upstream). Git is read before the create-time label because the
 label never moves after an update. The git read is an ``mngr exec``, so it only
 ever runs in the background sweep, never on a render path.
@@ -89,7 +90,8 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
     about the workspace, not about this build. Past it, both sides must parse as
     ``minds-v*``; a branch ceiling (dev build) makes every workspace UNKNOWN. With
     neither side readable the missing ceiling is reported, since it explains every
-    row at once.
+    row at once. Only a newer minor release is prompted for: a workspace behind by
+    patch or prerelease alone is PATCH_AVAILABLE.
     """
     workspace_version = parse_minds_version(workspace_ref)
     ceiling_version = parse_minds_version(ceiling_ref)
@@ -104,6 +106,8 @@ def derive_update_detection(workspace_ref: str | None, ceiling_ref: str | None) 
             availability=UpdateAvailability.UNKNOWN, unknown_reason=UpdateUnknownReason.NO_MACHINE_VERSION
         )
     if workspace_version < ceiling_version:
+        if workspace_version.is_same_minor_release(ceiling_version):
+            return UpdateDetection(availability=UpdateAvailability.PATCH_AVAILABLE)
         return UpdateDetection(availability=UpdateAvailability.OUT_OF_DATE)
     if ceiling_version < workspace_version:
         return UpdateDetection(availability=UpdateAvailability.APP_BEHIND)

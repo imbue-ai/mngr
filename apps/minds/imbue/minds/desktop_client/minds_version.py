@@ -33,6 +33,10 @@ class MindsVersion(FrozenModel):
     def __lt__(self, other: "MindsVersion") -> bool:
         return self._sort_key() < other._sort_key()
 
+    def is_same_minor_release(self, other: "MindsVersion") -> bool:
+        """Whether both versions share a major and minor version, whatever their patch or prerelease."""
+        return (self.major, self.minor) == (other.major, other.minor)
+
 
 def _prerelease_sort_key(pre: str) -> tuple[tuple[int, int, str], ...]:
     """Order a prerelease's dot-separated identifiers the way semver does.

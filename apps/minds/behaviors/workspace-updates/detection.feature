@@ -1,15 +1,46 @@
 Feature: Detecting an out-of-date workspace
-  The app reports a workspace as out of date only on a positive reading of both versions.
+  The app reports a workspace as out of date only on a positive reading of both versions, and only when the workspace is on an earlier minor release than the app supports.
+  A workspace behind the app within the minor release the app supports has a patch available: the app never prompts the user about it, but the user may still update it or schedule its update by hand.
   An unknown workspace is offered a check, not an update it is assumed to need: the workspace's own update agent reads its upstream and decides what applies, and finding nothing is an ordinary outcome.
   A workspace newer than the app reports that the app is behind.
   A workspace older than the oldest release that can be updated in place is reported as needing recreation, with no update run sent in to find that out.
 
   @behind-the-app
-  Scenario: A workspace on an older release is out of date
+  Scenario: A workspace on an earlier minor release is out of date
     Given the app supports a template release
-    And a workspace running an earlier template release
+    And a workspace running a template release from an earlier minor release
     Then the app reports that workspace as out of date
     And the app offers to update that workspace
+
+  @minor-release-granularity
+  Scenario Outline: Only a newer minor release makes a workspace out of date
+    A prerelease belongs to the minor release it precedes.
+    Given the app's supported release is "<app>"
+    And a workspace whose template version reads "<workspace>"
+    Then the app reports that workspace as "<reading>"
+
+    Examples:
+      | app          | workspace         | reading         |
+      | minds-v0.9.0 | minds-v0.8.3      | out of date     |
+      | minds-v0.8.4 | minds-v0.7.9      | out of date     |
+      | minds-v1.0.0 | minds-v0.9.5      | out of date     |
+      | minds-v0.8.4 | minds-v0.8.3      | patch available |
+      | minds-v0.8.4 | minds-v0.8.0      | patch available |
+      | minds-v0.9.0 | minds-v0.9.0-rc.1 | patch available |
+
+  @patch-available-not-prompted
+  Scenario: A workspace with only a patch available is not prompted to update
+    Given the app supports a template release
+    And a workspace running an earlier patch release of that same minor release
+    Then the app shows no update badge or notice for that workspace
+    And an action covering every workspace with an update available passes over that workspace
+
+  @patch-available-by-hand
+  Scenario: A workspace with only a patch available may still be updated by hand
+    Given the app supports a template release
+    And a workspace running an earlier patch release of that same minor release
+    When the user asks to update that workspace
+    Then an update agent is started in that workspace
 
   @at-the-app
   Scenario: A workspace on the supported release is up to date

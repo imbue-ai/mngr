@@ -59,6 +59,28 @@ def test_a_workspace_above_the_ceiling_reports_the_app_as_behind() -> None:
     assert derive_update_detection("minds-v0.5.0", "minds-v0.4.1").availability is UpdateAvailability.APP_BEHIND
 
 
+@pytest.mark.witnesses("workspace-updates.minor-release-granularity")
+@pytest.mark.parametrize(
+    ("workspace_ref", "ceiling_ref", "expected"),
+    [
+        ("minds-v0.8.3", "minds-v0.9.0", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.7.9", "minds-v0.8.4", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.9.5", "minds-v1.0.0", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.8.3", "minds-v0.9.0-rc.1", UpdateAvailability.OUT_OF_DATE),
+        ("minds-v0.8.3", "minds-v0.8.4", UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.8.0", "minds-v0.8.4", UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.9.0-rc.1", "minds-v0.9.0", UpdateAvailability.PATCH_AVAILABLE),
+        ("minds-v0.8.4", "minds-v0.8.3", UpdateAvailability.APP_BEHIND),
+    ],
+)
+def test_only_a_newer_minor_release_makes_a_workspace_out_of_date(
+    workspace_ref: str, ceiling_ref: str, expected: UpdateAvailability
+) -> None:
+    detection = derive_update_detection(workspace_ref, ceiling_ref)
+    assert detection.availability is expected
+    assert detection.unknown_reason is None
+
+
 @pytest.mark.witnesses("workspace-updates.development-build", partial="the detection verdict only")
 def test_a_dev_build_imposes_no_ceiling() -> None:
     """A branch ceiling cannot name a version, so it must not badge anything."""
@@ -124,6 +146,12 @@ def test_unknown_is_never_claimed_as_behind_but_is_still_worth_asking() -> None:
         settled = _state_with(availability)
         assert settled.is_update_offered is False
         assert settled.is_update_dispatchable is False
+
+
+def test_a_patch_is_never_offered_but_may_be_run_by_hand() -> None:
+    patch_available = _state_with(UpdateAvailability.PATCH_AVAILABLE)
+    assert patch_available.is_update_offered is False
+    assert patch_available.is_update_dispatchable is True
 
 
 @pytest.mark.witnesses("workspace-updates.unknown-names-the-missing-side")

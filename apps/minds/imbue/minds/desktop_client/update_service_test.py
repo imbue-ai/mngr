@@ -30,9 +30,11 @@ from imbue.minds.desktop_client.update_scheduler import UpdateScheduler
 from imbue.minds.desktop_client.update_service import UpdateDispatchOutcome
 from imbue.minds.desktop_client.update_service import WorkspaceUpdateService
 from imbue.minds.desktop_client.update_status import UpdateActivity
+from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateRunStatus
 from imbue.minds.desktop_client.update_status import UpdateVerdict
 from imbue.minds.desktop_client.workspace_lifecycle import MindHostActionOutcome
+from imbue.minds.desktop_client.workspace_update_state import UpdateDetection
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateDetector
 from imbue.minds.desktop_client.workspace_update_state import WorkspaceUpdateStateStore
 from imbue.minds.utils.mngr_caller import MngrCallResult
@@ -174,6 +176,46 @@ def test_a_host_discovery_knows_nothing_about_is_unreachable(
     conditions = service.read_conditions(AgentId.generate())
 
     assert conditions.is_reachable is False
+
+
+@pytest.mark.witnesses("workspace-updates.patch-available-schedule-runs")
+@pytest.mark.parametrize(
+    ("availability", "is_dispatched"),
+    ((UpdateAvailability.PATCH_AVAILABLE, True), (UpdateAvailability.UP_TO_DATE, False)),
+)
+def test_a_schedule_armed_on_a_machine_with_only_a_patch_available_runs_in_the_window(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, availability: UpdateAvailability, is_dispatched: bool
+) -> None:
+    caller = RecordingMngrCaller(result=MngrCallResult(returncode=1, stdout=""))
+    service = _build_service(tmp_path, root_concurrency_group, host_state=HostState.STOPPED, caller=caller)
+    agent_id = AgentId.generate()
+    service.state_store.record_detection(
+        agent_id,
+        detection=UpdateDetection(availability=availability),
+        current_version="minds-v0.4.0",
+        supported_version="minds-v0.4.1",
+        is_version_from_label=False,
+    )
+    service.schedule_store.schedule(agent_id)
+    dispatched: list[AgentId] = []
+
+    def record_dispatch(dispatched_id: AgentId, _target_ref: str) -> bool:
+        dispatched.append(dispatched_id)
+        return True
+
+    scheduler = UpdateScheduler(
+        schedule_store=service.schedule_store,
+        read_update_window=lambda: (2, 5),
+        read_conditions=service.read_conditions,
+        read_host_state=lambda _agent_id: HostState.STOPPED,
+        dispatch=record_dispatch,
+        stop_workspace=lambda _agent_id: None,
+        now=lambda: datetime(2026, 10, 5, 3, 17),
+    )
+
+    scheduler.run_window_pass()
+
+    assert dispatched == ([agent_id] if is_dispatched else [])
 
 
 # The run's chat listed with no live process: the probe's positive "this run is over".

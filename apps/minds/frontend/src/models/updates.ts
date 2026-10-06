@@ -28,8 +28,9 @@ export function isRunInFlight(update: UiWorkspaceUpdate): boolean {
   );
 }
 
-/** Whether the app has positively read this machine as behind: what the badge
- * and band claim, and what "Update all" covers. */
+/** Whether the app has positively read this machine as a minor release behind:
+ * what the badge and band claim, and what "Update all" covers. A machine behind
+ * only by a patch is never prompted for. */
 export function isUpdateOffered(update: UiWorkspaceUpdate): boolean {
   return update.availability === "OUT_OF_DATE";
 }
@@ -55,11 +56,16 @@ export function standingUpdateNotice(update: UiWorkspaceUpdate, isUpdating: bool
   return "none";
 }
 
-/** Whether an update run may be started in this machine at all. Wider than
- * `isUpdateOffered` by the unknown leg: from unknown the offer is the check
- * itself, which the machine's own agent performs. */
+/** Whether an update run may be started or scheduled in this machine at all.
+ * Wider than `isUpdateOffered` by the patch leg, which the user may still take
+ * by hand, and the unknown leg: from unknown the offer is the check itself,
+ * which the machine's own agent performs. */
 export function isUpdateDispatchable(update: UiWorkspaceUpdate): boolean {
-  return update.availability === "OUT_OF_DATE" || update.availability === "UNKNOWN";
+  return (
+    update.availability === "OUT_OF_DATE" ||
+    update.availability === "PATCH_AVAILABLE" ||
+    update.availability === "UNKNOWN"
+  );
 }
 
 /** Whether the last run ended in a way the user has to be told about. */

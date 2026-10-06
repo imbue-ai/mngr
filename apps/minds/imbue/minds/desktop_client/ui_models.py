@@ -423,19 +423,24 @@ class UiWorkspaceUpdate(FrozenModel):
 
     @property
     def is_update_offered(self) -> bool:
-        """Whether the app has positively read that this workspace is behind: the badge, the band, and bulk actions."""
+        """Whether the app has positively read that this workspace is a minor release behind: the badge, the band, and bulk actions."""
         return self.availability is UpdateAvailability.OUT_OF_DATE
 
     @property
     def is_update_dispatchable(self) -> bool:
-        """Whether an update run may be started in this workspace at all.
+        """Whether an update run may be started or scheduled in this workspace at all.
 
-        Wider than :attr:`is_update_offered` by the UNKNOWN leg: ``/update-self``
+        Wider than :attr:`is_update_offered` by the PATCH_AVAILABLE leg, which is
+        behind but never prompted for, and the UNKNOWN leg: ``/update-self``
         resolves its own target against the workspace's upstream, so an unreadable
         workspace is asked rather than guessed about. UP_TO_DATE and APP_BEHIND
         are positive readings that there is nothing to run.
         """
-        return self.availability in (UpdateAvailability.OUT_OF_DATE, UpdateAvailability.UNKNOWN)
+        return self.availability in (
+            UpdateAvailability.OUT_OF_DATE,
+            UpdateAvailability.PATCH_AVAILABLE,
+            UpdateAvailability.UNKNOWN,
+        )
 
     @property
     def is_run_in_flight(self) -> bool:

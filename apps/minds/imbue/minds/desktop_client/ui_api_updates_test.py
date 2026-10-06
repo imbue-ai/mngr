@@ -155,6 +155,16 @@ def _mark_out_of_date(app: Flask, agent_id: AgentId) -> None:
     )
 
 
+def _mark_patch_available(app: Flask, agent_id: AgentId) -> None:
+    _service(app).state_store.record_detection(
+        agent_id,
+        detection=UpdateDetection(availability=UpdateAvailability.PATCH_AVAILABLE),
+        current_version="minds-v0.4.0",
+        supported_version="minds-v0.4.1",
+        is_version_from_label=False,
+    )
+
+
 def _post(client: FlaskClient, path: str, body: dict[str, Any] | None = None) -> Any:
     return client.post(path, json=body if body is not None else {})
 
@@ -185,6 +195,35 @@ def test_a_machine_with_no_readable_version_is_still_sent_its_update_agent(
 
     assert response.status_code == 200
     assert _service(app).state_store.get(agent_id).is_run_in_flight is True
+
+
+@pytest.mark.witnesses("workspace-updates.patch-available-by-hand")
+def test_a_machine_with_only_a_patch_available_is_sent_its_update_agent_when_asked(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
+    )
+    _mark_patch_available(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/now")
+
+    assert response.status_code == 200
+    assert _service(app).state_store.get(agent_id).is_run_in_flight is True
+
+
+def test_a_machine_with_only_a_patch_available_may_have_its_update_scheduled(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, agent_id: AgentId
+) -> None:
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
+    )
+    _mark_patch_available(app, agent_id)
+
+    response = _post(client, f"/ui/api/updates/{agent_id}/schedule")
+
+    assert response.status_code == 200
+    assert _service(app).schedule_store.read(agent_id) is not None
 
 
 @pytest.mark.witnesses("workspace-updates.too-old-to-update-in-place", partial="the dispatch refusal only")
@@ -662,6 +701,26 @@ def test_a_bulk_action_filters_the_requested_list_against_live_state(
 
     assert response.status_code == 200
     assert response.get_json()["scheduled"] == [str(stale_id)]
+
+
+@pytest.mark.witnesses("workspace-updates.patch-available-not-prompted", partial="the bulk actions only")
+@pytest.mark.parametrize("bulk_action", ("now", "schedule"))
+def test_a_bulk_action_passes_over_a_machine_with_only_a_patch_available(
+    tmp_path: Path, root_concurrency_group: ConcurrencyGroup, bulk_action: str
+) -> None:
+    client, app = _build_client(
+        tmp_path, root_concurrency_group, mngr_result=MngrCallResult(returncode=0, stdout=_DISPATCH_READY_STDOUT)
+    )
+    stale_id = AgentId.generate()
+    patch_id = AgentId.generate()
+    _mark_out_of_date(app, stale_id)
+    _mark_patch_available(app, patch_id)
+
+    response = _post(client, f"/ui/api/updates/bulk/{bulk_action}", {"agent_ids": [str(stale_id), str(patch_id)]})
+
+    assert response.status_code == 200
+    accepted_key = "dispatching" if bulk_action == "now" else "scheduled"
+    assert response.get_json()[accepted_key] == [str(stale_id)]
 
 
 def test_bulk_now_answers_with_the_machines_it_accepted_and_passes_over_the_rest(

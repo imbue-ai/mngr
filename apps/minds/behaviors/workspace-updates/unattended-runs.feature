@@ -38,6 +38,14 @@ Feature: Scheduling an update
     When the user updates them all now
     Then that workspace's row reports that its update didn't start, and why
 
+  @patch-available-schedule-runs
+  Scenario: A scheduled update armed by hand on a workspace with only a patch available runs
+    No schedule is ever armed for such a workspace except by the user's own press.
+    Given a workspace with only a patch available
+    And the user has scheduled that workspace's update
+    When the scheduled attempt comes around
+    Then an update agent is started in that workspace
+
   @re-arming-replaces
   Scenario: Re-scheduling replaces the previous intent outright
     Given a workspace whose scheduled update was skipped

@@ -142,6 +142,7 @@ describe("UpdatesStore", () => {
         "agent-stale": OUT_OF_DATE,
         "agent-unknown": { ...OUT_OF_DATE, availability: "UNKNOWN" },
         "agent-current": { ...OUT_OF_DATE, availability: "UP_TO_DATE" },
+        "agent-patch": { ...OUT_OF_DATE, availability: "PATCH_AVAILABLE" },
         "agent-running": { ...OUT_OF_DATE, activity: "RUNNING" },
       }),
     );
@@ -211,6 +212,13 @@ describe("update state predicates", () => {
     const tooOld = { ...OUT_OF_DATE, availability: "NEEDS_RECREATION" as const };
     expect(standingUpdateNotice(tooOld, false)).toBe("needs-recreation");
     expect(standingUpdateNotice(tooOld, true)).toBe("needs-recreation");
+  });
+
+  it("never prompts for a patch, but still lets the user take it", () => {
+    const patch = { ...OUT_OF_DATE, availability: "PATCH_AVAILABLE" as const };
+    expect(isUpdateOffered(patch)).toBe(false);
+    expect(standingUpdateNotice(patch, false)).toBe("none");
+    expect(isUpdateDispatchable(patch)).toBe(true);
   });
 
   it("will still send the update agent into a machine it could not read", () => {
@@ -320,6 +328,14 @@ describe("updateBadgeFor", () => {
 
   it("shows nothing for a machine that is simply up to date", () => {
     expect(updateBadgeFor({ ...OUT_OF_DATE, availability: "UP_TO_DATE" }, false)).toBeNull();
+  });
+
+  it("shows nothing for a machine behind only by a patch, unless the user scheduled it", () => {
+    const patch = { ...OUT_OF_DATE, availability: "PATCH_AVAILABLE" as const };
+    expect(updateBadgeFor(patch, false)).toBeNull();
+    const scheduled = updateBadgeFor({ ...patch, is_scheduled: true }, false);
+    expect(scheduled?.state).toBe("scheduled");
+    expect(scheduled?.tone).toBe("neutral");
   });
 
   it("still badges an up-to-date machine that has an update armed at a version the user named", () => {

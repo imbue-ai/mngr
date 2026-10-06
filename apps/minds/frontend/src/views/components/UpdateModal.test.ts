@@ -268,3 +268,27 @@ describe("the update modal over a machine too old to update in place", () => {
     expect(routeSet).toHaveBeenCalledWith("/create");
   });
 });
+
+describe("the update modal over a machine behind only by a patch", () => {
+  const PATCH: UiWorkspaceUpdate = {
+    ...OUT_OF_DATE,
+    availability: "PATCH_AVAILABLE",
+    current_version: "minds-v0.4.0",
+  };
+
+  it("shows both versions and lets the user schedule the patch", async () => {
+    const { draw, requests } = harness(
+      () => Promise.resolve(jsonResponse({})),
+      PATCH,
+    );
+    const root = draw();
+
+    expect(allText(root)).toContain("v0.4.0");
+    expect(allText(root)).toContain("v0.4.1");
+    expect(pressableWithLabel(root, "Update now")).toBeDefined();
+
+    press(root, "Schedule update");
+    await settleDispatch();
+    expect(requests).toEqual([`/ui/api/updates/${AGENT}/schedule`]);
+  });
+});

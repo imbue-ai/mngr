@@ -51,7 +51,10 @@ class UpdateAvailability(UpperCaseStrEnum):
     UP_TO_DATE = auto()
     """A positive read on both sides, and the workspace is at the ceiling."""
     OUT_OF_DATE = auto()
-    """A positive read on both sides, and the workspace sorts below the ceiling."""
+    """A positive read on both sides, and the workspace is on an earlier minor release than the ceiling."""
+    PATCH_AVAILABLE = auto()
+    """A positive read on both sides, and the workspace sorts below the ceiling within its minor release:
+    never prompted for, but may be updated or scheduled by hand."""
     UNKNOWN = auto()
     """No comparable version on one side or the other; no update UI, no dispatch."""
     APP_BEHIND = auto()

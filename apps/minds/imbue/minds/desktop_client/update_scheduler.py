@@ -50,7 +50,7 @@ class ScheduledRunConditions(FrozenModel):
     """The facts one scheduled attempt is decided on, gathered once per workspace."""
 
     is_offered: bool = Field(
-        description="Whether a run could still sensibly happen here (out of date, or a version we could not read)"
+        description="Whether a run could still sensibly happen here (behind the app, or a version we could not read)"
     )
     is_run_in_flight: bool = Field(description="Whether an update is already running there")
     is_reachable: bool = Field(description="Whether the workspace's host is known and startable")
