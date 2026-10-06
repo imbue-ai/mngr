@@ -42,9 +42,18 @@ import sys
 import time
 from pathlib import Path
 
-# The marker glyph Claude prints at the start of every assistant text block and
-# tool-call block (U+25CF BLACK CIRCLE).
-_MARKER: str = "●"
+# The glyphs Claude prints at the start of every assistant text block and
+# tool-call block.
+_MARKERS: frozenset[str] = frozenset("\u25cf\u23fa")
+
+
+def _find_marker(line: str) -> int:
+    """The index of the first marker glyph in ``line``, or -1 if it holds none."""
+    for index, character in enumerate(line):
+        if character in _MARKERS:
+            return index
+    return -1
+
 
 # Box-drawing characters Claude uses to render markdown tables.
 _BOX_DRAWING_CHARS: frozenset[str] = frozenset("─│┌┐└┘├┤┬┴┼")
@@ -79,9 +88,7 @@ _CSI_RE = re.compile(r"\x1b\[([0-9;]*)([A-Za-z])")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
-# =============================================================================
 # ANSI tokenization helpers
-# =============================================================================
 
 
 def strip_ansi(text: str) -> str:
@@ -116,9 +123,7 @@ def _has_code_color(text: str) -> bool:
     return False
 
 
-# =============================================================================
 # Assistant-marker detection
-# =============================================================================
 
 
 def _is_achromatic_marker_color(params: list[int]) -> bool:
@@ -167,7 +172,7 @@ def _is_achromatic_marker_color(params: list[int]) -> bool:
 
 def _marker_prefix_is_assistant(line: str) -> bool:
     """True if ``line`` begins (after ANSI) with an assistant-text marker glyph."""
-    marker_index = line.find(_MARKER)
+    marker_index = _find_marker(line)
     if marker_index == -1:
         return False
     prefix = line[:marker_index]
@@ -179,15 +184,13 @@ def _marker_prefix_is_assistant(line: str) -> bool:
 
 def _line_is_any_marker(line: str) -> bool:
     """True if the line's first visible character is the marker glyph (any color)."""
-    marker_index = line.find(_MARKER)
+    marker_index = _find_marker(line)
     if marker_index == -1:
         return False
     return strip_ansi(line[:marker_index]).strip() == ""
 
 
-# =============================================================================
 # Block extraction
-# =============================================================================
 
 
 def _deindent_continuation(line: str) -> str:
@@ -228,8 +231,8 @@ def _deindent_continuation(line: str) -> str:
 
 def _strip_marker_prefix(line: str) -> str:
     """Return the content after the assistant marker glyph and its single space."""
-    marker_index = line.find(_MARKER)
-    rest = line[marker_index + len(_MARKER) :]
+    marker_index = _find_marker(line)
+    rest = line[marker_index + 1 :]
     # Drop leading ANSI and a single separating space.
     index = 0
     space_removed = False
@@ -367,9 +370,7 @@ def extract_latest_assistant_block(pane_text: str) -> list[str] | None:
     return result[0]
 
 
-# =============================================================================
 # Inline markdown reconstruction
-# =============================================================================
 
 
 class _InlineState:
@@ -485,9 +486,7 @@ def _flush_run(run: list[str], state: "_InlineState") -> str:
     return rendered
 
 
-# =============================================================================
 # Table reconstruction
-# =============================================================================
 
 
 def _is_table_line(deindented: str) -> bool:
@@ -530,9 +529,7 @@ def _pad_row(row: list[str], column_count: int) -> list[str]:
     return row + [""] * (column_count - len(row))
 
 
-# =============================================================================
 # Block -> markdown (with a deferred trailing table region)
-# =============================================================================
 
 
 class BlockConversion:
@@ -641,9 +638,7 @@ def _convert_body_lines(block_lines: list[str]) -> list[str]:
     return out
 
 
-# =============================================================================
 # Stitching state
-# =============================================================================
 
 
 def compute_overlap(existing: list[str], incoming: list[str]) -> int:
@@ -755,9 +750,7 @@ def format_buffer(last_complete_id: str, body_lines: list[str]) -> str:
     return "\n".join([last_complete_id, *trimmed])
 
 
-# =============================================================================
 # Runtime (host side)
-# =============================================================================
 
 
 def _log(message: str) -> None:

@@ -31,6 +31,22 @@ def test_assistant_marker_is_achromatic_white() -> None:
     assert stream_snapshot._marker_prefix_is_assistant(line)
 
 
+def test_recording_circle_marker_is_recognised() -> None:
+    """Claude draws the content-block marker as U+23FA as well as U+25CF."""
+    line = "\x1b[38;5;231m\u23fa\x1b[39m Eilert Solheim came to the lighthouse"
+    assert stream_snapshot._marker_prefix_is_assistant(line)
+    assert stream_snapshot._line_is_any_marker(line)
+
+
+def test_recording_circle_marker_extracts_the_same_region() -> None:
+    """A real pane capture extracts identically with either marker glyph."""
+    pane = _read_fixture("stream_markdown_demo_full.txt")
+    with_dot = stream_snapshot.extract_message_region(pane)
+    with_record = stream_snapshot.extract_message_region(pane.replace("\u25cf", "\u23fa"))
+    assert with_dot is not None and with_record is not None
+    assert len(with_dot[0]) == len(with_record[0])
+
+
 def test_tool_marker_is_chromatic_and_rejected() -> None:
     # The real tool-call marker uses 256-color 114 (green).
     line = "\x1b[38;5;114m●\x1b[39m Skill(blueprint-generate)"
