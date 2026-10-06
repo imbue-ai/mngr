@@ -48,9 +48,9 @@ rollout_percentage = 100
 platforms = ["mac", "linux"]
 
 [channels.alpha]
-build_id = "261003ret49em92"
-version = "0.8.4"
-fallback_branch = "minds-v0.8.4"
+build_id = "2610066k8bzbhej"
+version = "0.8.5"
+fallback_branch = "minds-v0.8.5"
 rollout_percentage = 100
 platforms = ["mac", "linux"]
 
@@ -75,4 +75,4 @@ template_ref = "minds-v0.8.4"
 template_ref = "minds-v0.8.4"
 
 [web_channels.alpha]
-template_ref = "minds-v0.8.4"
+template_ref = "minds-v0.8.5"
