@@ -21,6 +21,7 @@ import m from "mithril";
 import { getAppContext } from "../../app-context";
 import { Button } from "../components/Button";
 import { CopyField } from "../components/Layout";
+import { Collapsible } from "../components/Collapsible";
 import { DialogCloseButton } from "../components/Modal";
 import { Notice } from "../components/Notice";
 import { Spinner } from "../components/Spinner";
@@ -433,9 +434,9 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
             ),
           ),
           info.device_error_detail
-            ? m(
-                Disclosure,
+            ? collapsibleSection(
                 {
+                  id: "recovery-device-error",
                   label: "Error details",
                   isOpen: isDeviceErrorOpen,
                   onToggle: () => {
@@ -532,7 +533,9 @@ export function RecoveryCardBody(): m.Component<RecoveryCardAttrs> {
   };
 }
 
-interface DisclosureAttrs {
+interface CollapsibleSectionAttrs {
+  /** Unique on the page; ties this summary to the block it opens. */
+  id: string;
   label: string;
   isOpen: boolean;
   onToggle: () => void;
@@ -545,43 +548,31 @@ interface DisclosureAttrs {
  * debugging; expanded, they push the restart button -- the thing almost
  * everyone came for -- off the bottom of the panel.
  *
- * A copy of the shared Disclosure (views/components/Disclosure.ts), which
- * hardcodes every one of its classes and so could not be dressed for this
- * card. CLEANUP: drop this copy and draw the two troubleshooting blocks with
- * the shared one, once that takes its presentation from the caller the way
- * the rest of views/components does (MIND-393).
+ * This card's own dress over `Collapsible`: a text
+ * marker, and a summary at the weight of the headings around it.
  */
-function Disclosure(): m.Component<DisclosureAttrs> {
-  return {
-    view(vnode) {
-      const { label, isOpen, onToggle } = vnode.attrs;
-      return m("div", { class: "flex flex-col gap-2" }, [
-        m(
-          "button",
-          {
-            type: "button",
-            class:
-              "flex items-center gap-1.5 w-full text-left type-label text-secondary hover:text-primary " +
-              "bg-transparent border-0 p-0 cursor-pointer",
-            "aria-expanded": String(isOpen),
-            onclick: onToggle,
-          },
-          [
-            m(
-              "span",
-              {
-                class: "inline-block w-3 text-tertiary",
-                "aria-hidden": "true",
-              },
-              isOpen ? "⌄" : "›",
-            ),
-            label,
-          ],
-        ),
-        isOpen ? vnode.children : null,
-      ]);
+function collapsibleSection(
+  attrs: CollapsibleSectionAttrs,
+  children: m.Children,
+): m.Children {
+  const { id, label, isOpen, onToggle } = attrs;
+  return m(
+    Collapsible,
+    {
+      id,
+      isOpen,
+      onToggle,
+      extra: "flex flex-col gap-2",
+      triggerExtra:
+        "flex items-center gap-1.5 w-full text-left type-label " +
+        "text-secondary hover:text-primary bg-transparent border-0 p-0",
+      // The panel carries the same gap as the row above it, so its children
+      // sit apart the way they would as the row's own.
+      panelExtra: "flex flex-col gap-2",
+      summary: label,
     },
-  };
+    children,
+  );
 }
 
 /**
@@ -626,9 +617,9 @@ export function RecoveryTroubleshooting(): m.Component<{
         [
           m("div", { class: "type-label text-secondary" }, "Troubleshooting"),
           errors.length > 0
-            ? m(
-                Disclosure,
+            ? collapsibleSection(
                 {
+                  id: "recovery-errors",
                   label: "Error details",
                   isOpen: openSection === "errors",
                   onToggle: () => {
@@ -639,9 +630,9 @@ export function RecoveryTroubleshooting(): m.Component<{
               )
             : null,
           isSshOffered
-            ? m(
-                Disclosure,
+            ? collapsibleSection(
                 {
+                  id: "recovery-ssh",
                   label: "Connect over SSH",
                   isOpen: openSection === "ssh",
                   onToggle: () => {

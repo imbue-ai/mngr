@@ -13,7 +13,7 @@ import { spinnerClass } from "./Spinner";
 import { navEntryClass, splitPane } from "./SplitPane";
 import { statusBadgeClass } from "./StatusBadge";
 import { titlebarButtonClass } from "./TitlebarButton";
-import { renderRoot } from "../../testing";
+import { attrsOf, collectVnodes, renderDeep, renderRoot } from "../../testing";
 
 interface ElementVnode {
   tag: string;
@@ -329,19 +329,26 @@ describe("Disclosure", () => {
     markerFadeMs?: number;
   }
 
+  /** The marker, the summary and the detail, found by what they are rather
+   * than by where they sit: the dress and the behaviour are separate
+   * components now, so the shape between them is not this test's business. */
   function partsOf(attrs: Omit<Attrs, "id">): {
     marker: m.Vnode;
     summary: m.Vnode;
     detail: m.Vnode | null;
   } {
-    const root = renderRoot(
-      Disclosure,
-      { id: "a-point", ...attrs },
-      "the explanation",
+    const root = renderDeep(
+      renderRoot(Disclosure, { id: "a-point", ...attrs }, "the explanation"),
+    );
+    const nodes = collectVnodes(root);
+    const trigger = nodes.find(
+      (vnode) => attrsOf(vnode).id === "a-point-trigger",
     ) as unknown as m.Vnode;
-    const [button, detail] = root.children as (m.Vnode | null)[];
-    const [marker, summary] = (button as m.Vnode).children as m.Vnode[];
-    return { marker, summary, detail: detail as m.Vnode | null };
+    const [marker, summary] = trigger.children as m.Vnode[];
+    const detail = nodes.find(
+      (vnode) => attrsOf(vnode).id === "a-point-panel",
+    ) as unknown as m.Vnode | undefined;
+    return { marker, summary, detail: detail ?? null };
   }
 
   it("leaves the marker uncolored so it follows the row it introduces", () => {
@@ -352,8 +359,12 @@ describe("Disclosure", () => {
       onToggle: () => undefined,
       summary: "a point",
     });
-    const icon = (marker.children as m.Vnode[])[0];
-    expect((icon.attrs as Record<string, unknown>).name).toBe("chevron-right");
+    // Rendered through, so the icon is its drawn svg rather than an Icon16
+    // vnode carrying a name.
+    const drawn = collectVnodes(marker).find(
+      (vnode) => vnode.children === ICONS_16["chevron-right"],
+    );
+    expect(drawn).toBeDefined();
     expect(tokensOf(marker)).not.toContain("text-tertiary");
     expect(tokensOf(marker).some((token) => token.startsWith("text-"))).toBe(
       false,

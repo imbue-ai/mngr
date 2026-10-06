@@ -6,6 +6,7 @@ import {
   attrsOf,
   classTokensOf,
   collectVnodes,
+  renderDeep,
   renderRoot,
   settle,
   sharePanelOptions,
@@ -68,6 +69,12 @@ async function publishedPanel(
 
 function renderTab(share: SharePanelModel): m.Vnode {
   return renderRoot(ShareTab, { share, workspaceName: "alpha" });
+}
+
+/** The same, rendered through its components, for the assertions that are
+ * about the markup a component draws rather than what was handed to it. */
+function renderTabDeep(share: SharePanelModel): m.Vnode {
+  return renderDeep(renderTab(share)) as m.Vnode;
 }
 
 /** Draw the panel repeatedly against one component instance, as a mount does:
@@ -988,7 +995,7 @@ describe("ShareTab inherited grants", () => {
       email_domains: ["acme.example"],
     });
 
-    const group = byId(renderTab(share), "ws-share-inherited");
+    const group = byId(renderTabDeep(share), "ws-share-inherited");
 
     expect(allText(group)).toContain(
       "3 permissions inherited from the whole workspace",
@@ -1001,7 +1008,7 @@ describe("ShareTab inherited grants", () => {
   it("counts a lone inherited permission in the singular", async () => {
     const share = await appPanel({ emails: ["one@example.com"] });
 
-    expect(allText(byId(renderTab(share), "ws-share-inherited"))).toContain(
+    expect(allText(byId(renderTabDeep(share), "ws-share-inherited"))).toContain(
       "1 permission inherited from the whole workspace",
     );
   });
@@ -1014,15 +1021,18 @@ describe("ShareTab inherited grants", () => {
 
     const draw = mountedTab(share);
 
-    const trigger = byId(draw(), "ws-share-inherited-trigger") as AnyVnode;
+    const trigger = byId(
+      renderDeep(draw()),
+      "ws-share-inherited-trigger",
+    ) as AnyVnode;
     expect(attrsOf(trigger)["aria-expanded"]).toBe("false");
     (attrsOf(trigger).onclick as () => void)();
 
-    const opened = byId(draw(), "ws-share-inherited");
+    const opened = byId(renderDeep(draw()), "ws-share-inherited");
     expect(
-      attrsOf(byId(draw(), "ws-share-inherited-trigger") as AnyVnode)[
-        "aria-expanded"
-      ],
+      attrsOf(
+        byId(renderDeep(draw()), "ws-share-inherited-trigger") as AnyVnode,
+      )["aria-expanded"],
     ).toBe("true");
     const text = allText(opened);
     expect(text).toContain("Anyone at acme.example");
@@ -1038,10 +1048,13 @@ describe("ShareTab inherited grants", () => {
     const share = await appPanel({ emails: ["one@example.com"] });
 
     const draw = mountedTab(share);
-    const trigger = byId(draw(), "ws-share-inherited-trigger") as AnyVnode;
+    const trigger = byId(
+      renderDeep(draw()),
+      "ws-share-inherited-trigger",
+    ) as AnyVnode;
     (attrsOf(trigger).onclick as () => void)();
 
-    const root = draw();
+    const root = renderDeep(draw());
     const opened = byId(root, "ws-share-inherited-trigger") as AnyVnode;
     const panel = byId(root, "ws-share-inherited-panel") as AnyVnode;
     expect(attrsOf(opened)["aria-controls"]).toBe("ws-share-inherited-panel");
@@ -1056,13 +1069,17 @@ describe("ShareTab inherited grants", () => {
     const draw = mountedTab(share);
 
     (
-      attrsOf(byId(draw(), "ws-share-inherited-trigger") as AnyVnode)
-        .onclick as () => void
+      attrsOf(
+        byId(renderDeep(draw()), "ws-share-inherited-trigger") as AnyVnode,
+      ).onclick as () => void
     )();
 
     // A rail marks them as the whole workspace's rather than this app's, and
     // the indent beside it still lands a row's contents under the summary.
-    const panel = byId(draw(), "ws-share-inherited-panel") as AnyVnode;
+    const panel = byId(
+      renderDeep(draw()),
+      "ws-share-inherited-panel",
+    ) as AnyVnode;
     const tokens = classTokensOf(panel);
     expect(tokens).toContain("border-l-2");
     expect(tokens).toContain("ml-3");
@@ -1077,11 +1094,15 @@ describe("ShareTab inherited grants", () => {
     const draw = mountedTab(share);
 
     (
-      attrsOf(byId(draw(), "ws-share-inherited-trigger") as AnyVnode)
-        .onclick as () => void
+      attrsOf(
+        byId(renderDeep(draw()), "ws-share-inherited-trigger") as AnyVnode,
+      ).onclick as () => void
     )();
 
-    const panel = byId(draw(), "ws-share-inherited-panel") as AnyVnode;
+    const panel = byId(
+      renderDeep(draw()),
+      "ws-share-inherited-panel",
+    ) as AnyVnode;
     const removes = collectVnodes(panel).filter((vnode) =>
       String(attrsOf(vnode)["aria-label"] ?? "").startsWith("Remove"),
     );
@@ -1094,7 +1115,7 @@ describe("ShareTab inherited grants", () => {
     const share = await appPanel({ emails: ["one@example.com"] });
 
     const trigger = byId(
-      renderTab(share),
+      renderTabDeep(share),
       "ws-share-inherited-trigger",
     ) as AnyVnode;
     // Sticky against the group rather than the scroller, so the header leaves
@@ -1310,11 +1331,11 @@ describe("ShareTab on an app pane", () => {
     });
     share.selectTarget("web");
 
-    chooseKind(renderTab(share), "email_domain");
-    type(renderTab(share), "gmail.com");
-    pressAdd(renderTab(share));
+    chooseKind(renderTabDeep(share), "email_domain");
+    type(renderTabDeep(share), "gmail.com");
+    pressAdd(renderTabDeep(share));
 
-    const root = renderTab(share);
+    const root = renderTabDeep(share);
     expect(allText(byId(root, "ws-share-inherited"))).toContain(
       "2 permissions inherited from the whole workspace",
     );
