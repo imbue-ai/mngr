@@ -5,7 +5,10 @@
 import m from "mithril";
 import { shareTargetIconMarkup } from "../../components/appIcon";
 import { Button } from "../../components/Button";
-import { Collapsible } from "../../components/Collapsible";
+import {
+  DISCLOSURE_FOCUS_CLASS,
+  disclosureAttrs,
+} from "../../components/disclosureAttrs";
 import { FormLabel, Select, TextInput } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
 import { CopyField } from "../../components/Layout";
@@ -617,33 +620,66 @@ function renderInheritedGroup(
   inherited: readonly Grant[],
 ): m.Children {
   const isOpen = local.isInheritedOpen;
+  const parts = disclosureAttrs({
+    isOpen,
+    onToggle: () => {
+      local.isInheritedOpen = !local.isInheritedOpen;
+    },
+    id: "ws-share-inherited",
+  });
   return m(
-    Collapsible,
+    "div",
     {
       key: "inherited",
       id: "ws-share-inherited",
-      isOpen,
-      onToggle: () => {
-        local.isInheritedOpen = !local.isInheritedOpen;
-      },
-      extra: "flex flex-none flex-col gap-1.5",
-      triggerExtra:
-        ROW_CLASS +
-        " sticky top-0 z-10 w-full bg-surface-primary " +
-        "border-subtle text-left type-helper text-tertiary hover:text-secondary",
-      // A rail down the group, and rows set in beside it: an inherited row is
-      // the whole workspace's, and nothing else in the list is, so it has to
-      // be legible as a different kind of row even once the header it hangs
-      // from has scrolled away.
-      //
-      // The three add to the 24px (12 + 2 + 10) that, with the row's own
-      // padding, begins its contents under the summary's first letter rather
-      // than under the marker.
-      panelExtra:
-        "ml-3 flex flex-col gap-1.5 border-l-2 border-strong pl-[10px]",
-      summary: inheritedSummary(inherited.length),
+      class: "flex flex-none flex-col gap-1.5",
     },
-    inherited.map((grant) => renderGrantRow(share, grant, false)),
+    [
+      m(
+        "button",
+        {
+          ...parts.trigger,
+          class:
+            ROW_CLASS +
+            " sticky top-0 z-10 w-full cursor-pointer bg-surface-primary " +
+            "border-subtle text-left type-helper text-tertiary " +
+            "hover:text-secondary " +
+            DISCLOSURE_FOCUS_CLASS,
+        },
+        [
+          m(
+            "span",
+            {
+              class:
+                "w-4 shrink-0 transition-transform duration-150 " +
+                (isOpen ? "rotate-90" : ""),
+              "aria-hidden": "true",
+            },
+            m(Icon16, { name: "chevron-right" }),
+          ),
+          inheritedSummary(inherited.length),
+        ],
+      ),
+      isOpen
+        ? m(
+            "div",
+            {
+              ...parts.panel,
+              // A rail down the group, and rows set in beside it: an inherited
+              // row is the whole workspace's, and nothing else in the list is,
+              // so it has to be legible as a different kind of row even once
+              // the header it hangs from has scrolled away.
+              //
+              // The three add to the 24px (12 + 2 + 10) that, with the row's
+              // own padding, begins its contents under the summary's first
+              // letter rather than under the marker.
+              class:
+                "ml-3 flex flex-col gap-1.5 border-l-2 border-strong pl-[10px]",
+            },
+            inherited.map((grant) => renderGrantRow(share, grant, false)),
+          )
+        : null,
+    ],
   );
 }
 

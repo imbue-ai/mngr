@@ -1,7 +1,0 @@
-Every collapsible section in the app -- the manifesto's points and the creation page's reading material, the share panel's inherited permissions, the machine-recovery card's error details and SSH block, and the settings pane's "Update to a specific version" -- now answers to a screen reader and a keyboard the same way.
-
-Each had been written out separately, so each had drifted. All of them said whether they were open; none said *which* block it opened, none let a screen reader move from a summary to the block it controls, and none drew a focus ring for a reader using the keyboard. One of them was a copy of another, made because the shared version hardcoded every class it drew and so could not be dressed for a second place.
-
-They are now one component that holds the behaviour -- the box, the summary, the panel, the wiring between them, and the rule that a shut panel is not drawn at all rather than hidden, so what it holds is out of reach rather than merely out of sight. Each place supplies only what makes it look like itself: its summary and its classes.
-
-They also now open the same way. Three of them had drawn three different markers -- one chevron turned, two chevrons swapped, and two text glyphs swapped -- which rendered as a difference of a few dozen pixels in a thirteen-by-nine box. The turning chevron is now what a collapsible draws unless it asks for otherwise, so opening reads as a turn rather than a cut wherever you meet one. Nothing else moves on screen.

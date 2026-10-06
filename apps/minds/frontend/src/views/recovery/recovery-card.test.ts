@@ -18,10 +18,8 @@ import {
   allText,
   attrsOf,
   collectVnodes,
-  renderDeep,
   renderRoot,
   renderedText,
-  type AnyVnode,
 } from "../../testing";
 
 /** Deps that answer nothing and schedule nothing: these tests render a state,
@@ -88,48 +86,7 @@ async function modelRecoveringOwn(
 
 /** What the card puts on screen for a given reading of the machine. */
 function renderCard(info: RecoveryInfo, model = modelShowing(info)): string {
-  return renderedText(
-    renderDeep(renderRoot(RecoveryCardBody, { model })) as m.Vnode,
-  );
-}
-
-/** Draw a view repeatedly against one instance, as a mount does: which
- * collapsible section is open lives in the view's own closure, and a fresh
- * instance per draw would forget it. */
-function mounted<A>(component: () => m.Component<A>, attrs: A): () => m.Vnode {
-  const instance = component() as unknown as m.Component;
-  return () => {
-    const vnode = m(instance, attrs as m.Attributes) as m.Vnode;
-    return renderDeep(
-      (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
-        instance,
-        vnode,
-      ),
-    ) as m.Vnode;
-  };
-}
-
-/** Open the collapsible section whose summary reads `label`.
- *
- * A shut section draws nothing at all, so what it holds is off the screen and
- * out of the tree until a reader asks for it. A test that wants to assert on
- * that content has to ask too. */
-function openSectionLabeled(rendered: m.Vnode, label: string): void {
-  const trigger = collectVnodes(rendered).find(
-    (vnode) =>
-      attrsOf(vnode)["aria-expanded"] !== undefined &&
-      allText(vnode.children).includes(label),
-  );
-  if (trigger === undefined)
-    throw new Error(`no collapsible section labeled ${label}`);
-  (attrsOf(trigger).onclick as () => void)();
-}
-
-/** What the card says once its "Error details" section has been opened. */
-function cardTextWithErrorDetailsOpen(info: RecoveryInfo): string {
-  const draw = mounted(RecoveryCardBody, { model: modelShowing(info) });
-  openSectionLabeled(draw(), "Error details");
-  return renderedText(draw());
+  return renderedText(renderRoot(RecoveryCardBody, { model }));
 }
 
 /** Press the button reading `label`, so a test can assert what a click does
@@ -557,26 +514,19 @@ describe("RecoveryCardBody", () => {
     // is not its own. Restarting the app is the remedy for both causes that
     // land here, and the verbatim error is what makes a broken install
     // diagnosable at all.
-    const info = {
+    const text = renderCardOnDesktop({
       ...UNRESPONSIVE,
       is_device_cannot_connect: true,
       device_error_detail:
         "No known_hosts file at /keys/known_hosts; refusing to connect",
-    };
-    const text = renderCardOnDesktop(info);
+    });
 
     expect(text).toContain("Can't connect to my-machine from this device");
     expect(text).toContain(
       "the connection failed on this device, before reaching it",
     );
     expect(text).toContain("Restart Imbue Studio");
-    // The verbatim error is offered rather than shown: it sits behind "Error
-    // details", shut, so it does not push the remedy off the card.
-    expect(text).toContain("Error details");
-    expect(text).not.toContain(
-      "No known_hosts file at /keys/known_hosts; refusing to connect",
-    );
-    expect(cardTextWithErrorDetailsOpen(info)).toContain(
+    expect(text).toContain(
       "No known_hosts file at /keys/known_hosts; refusing to connect",
     );
     expect(text).not.toContain("Restart Machine");
@@ -599,12 +549,12 @@ describe("RecoveryCardBody", () => {
     expect(text).toContain(
       "the connection failed on this device, before reaching it",
     );
-    expect(text).toContain("Error details");
+    expect(text).toContain(
+      "No known_hosts file at /keys/known_hosts; refusing to connect",
+    );
     expect(text).toContain("Report a problem");
     expect(text).not.toContain("Restart Imbue Studio");
-    expect(text).not.toContain(
-      "Restarting Imbue Studio rebuilds the connection",
-    );
+    expect(text).not.toContain("Restarting Imbue Studio rebuilds the connection");
   });
 
   it("outranks the restart episode's own account of the machine", () => {
@@ -760,23 +710,7 @@ function renderTroubleshooting(
 ): string {
   const model = modelShowing(info);
   model.recoveryError = recoveryError;
-  return renderedText(
-    renderDeep(renderRoot(RecoveryTroubleshooting, { model })) as m.Vnode,
-  );
-}
-
-/** The block with the section reading `label` opened, as a reader who pressed
- * it would see it. */
-function renderTroubleshootingOpened(
-  label: string,
-  info: RecoveryInfo,
-  recoveryError: string | null = null,
-): string {
-  const model = modelShowing(info);
-  model.recoveryError = recoveryError;
-  const draw = mounted(RecoveryTroubleshooting, { model });
-  openSectionLabeled(draw(), label);
-  return renderedText(draw());
+  return renderedText(renderRoot(RecoveryTroubleshooting, { model }));
 }
 
 describe("RecoveryTroubleshooting", () => {
@@ -787,22 +721,16 @@ describe("RecoveryTroubleshooting", () => {
   });
 
   it("carries the restart error the tracker holds and the one this card's dispatch reported", () => {
-    const info = {
-      ...UNRESPONSIVE,
-      health_error: "Start step of host restart failed: ssh: dead",
-    };
-    const dispatchError = "Could not start the restart (HTTP 409).";
-
-    expect(renderTroubleshooting(info, dispatchError)).toContain(
-      "Troubleshooting",
+    const text = renderTroubleshooting(
+      {
+        ...UNRESPONSIVE,
+        health_error: "Start step of host restart failed: ssh: dead",
+      },
+      "Could not start the restart (HTTP 409).",
     );
-    const opened = renderTroubleshootingOpened(
-      "Error details",
-      info,
-      dispatchError,
-    );
-    expect(opened).toContain("ssh: dead");
-    expect(opened).toContain(dispatchError);
+    expect(text).toContain("Troubleshooting");
+    expect(text).toContain("ssh: dead");
+    expect(text).toContain("Could not start the restart (HTTP 409).");
   });
 
   it("states a failure once when both sources are reporting the same one", () => {
@@ -811,60 +739,15 @@ describe("RecoveryTroubleshooting", () => {
     // sentence twice and reading as two separate faults.
     const message =
       "Start step of host restart failed: exited 1: Agent not found";
-    const text = renderTroubleshootingOpened(
-      "Error details",
+    const text = renderTroubleshooting(
       { ...UNRESPONSIVE, health_error: message },
       message,
     );
     expect(text.split(message).length - 1).toBe(1);
   });
 
-  it("ties each section's summary to the block it opens, for a screen reader", () => {
-    const model = modelShowing({
-      ...UNRESPONSIVE,
-      health_error: "boom",
-      ssh_command: "ssh -i k -p 22 user@h",
-    });
-    const root = renderDeep(renderRoot(RecoveryTroubleshooting, { model }));
-
-    const triggers = collectVnodes(root).filter(
-      (vnode) => attrsOf(vnode)["aria-expanded"] !== undefined,
-    );
-    expect(triggers).toHaveLength(2);
-    for (const trigger of triggers) {
-      const attrs = attrsOf(trigger);
-      expect(attrs["aria-expanded"]).toBe("false");
-      // Shut, so there is no panel yet -- but the summary still says which one
-      // it opens, and the id it names is the one that will carry the block.
-      expect(attrs["aria-controls"]).toBe(
-        `${String(attrs.id)}`.replace("-trigger", "-panel"),
-      );
-    }
-  });
-
-  it("names its summary back from the block, once that block is open", () => {
-    const model = modelShowing({ ...UNRESPONSIVE, health_error: "boom" });
-    const draw = mounted(RecoveryTroubleshooting, { model });
-    openSectionLabeled(draw(), "Error details");
-
-    const opened = collectVnodes(draw());
-    const panel = opened.find((vnode) => attrsOf(vnode).role === "region");
-    expect(panel).toBeDefined();
-    expect(attrsOf(panel as AnyVnode)["aria-labelledby"]).toBe(
-      "recovery-errors-trigger",
-    );
-    expect(allText(panel)).toContain("boom");
-    expect(
-      attrsOf(
-        collectVnodes(draw()).find(
-          (vnode) => attrsOf(vnode).id === "recovery-errors-trigger",
-        ) as AnyVnode,
-      )["aria-expanded"],
-    ).toBe("true");
-  });
-
   it("offers the SSH block only for a machine whose host coordinates are known", () => {
-    const withSsh = renderTroubleshootingOpened("Connect over SSH", {
+    const withSsh = renderTroubleshooting({
       ...UNRESPONSIVE,
       ssh_command: "ssh -i k -p 22 user@h",
     });
@@ -873,6 +756,8 @@ describe("RecoveryTroubleshooting", () => {
       ...UNRESPONSIVE,
       health_error: "boom",
     });
-    expect(withoutSsh).not.toContain("Connect over SSH");
+    expect(withoutSsh).not.toContain(
+      "connect to the machine's host from a terminal",
+    );
   });
 });
