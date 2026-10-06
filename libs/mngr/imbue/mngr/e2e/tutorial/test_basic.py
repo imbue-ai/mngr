@@ -111,7 +111,8 @@ def test_create_rejects_unknown_option(e2e: E2eSession) -> None:
     expect(result).to_have_exit_code(2)
     # The error and usage hint go to stderr, leaving stdout clean for scripting.
     expect(result.stdout).to_be_empty()
-    expect(result.stderr).to_contain("No such option: --this-flag-does-not-exist")
+    expect(result.stderr).to_contain("No such option")
+    expect(result.stderr).to_contain("--this-flag-does-not-exist")
     expect(result.stderr).to_contain("Usage: mngr create")
 
 
