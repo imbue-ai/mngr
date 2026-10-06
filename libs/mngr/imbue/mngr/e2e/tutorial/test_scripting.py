@@ -192,23 +192,20 @@ def test_observe_discovery_pipe_python(e2e: E2eSession) -> None:
 
     Scope: piping `mngr observe --discovery-only` JSONL into a python one-liner.
     Each emitted event is valid JSON the loop parses with json.load; the raw
-    stream carries DISCOVERY_FULL events, and since no event has a top-level
+    stream carries DISCOVERY_PROVIDER events, and since no event has a top-level
     "name", the "unknown" fallback prints for every event -- confirming the
     snapshot flowed end to end through the pipe (observe -> JSONL -> python),
     not merely that the timeout-wrapped command exited 0.
     """
-    # Warm the discovery cache first. `mngr list` runs an unfiltered listing,
-    # which writes a full discovery snapshot to disk; that lets the `observe`
-    # below emit the cached snapshot instantly on its fast path instead of
-    # racing the (provider-querying) initial sync against the timeout. The raw
-    # snapshot is real discovery JSONL: it carries the DISCOVERY_FULL event type.
+    # `mngr list` populates the discovery cache, so the observe below emits
+    # cached snapshots instead of racing provider queries against the timeout.
     expect(e2e.run("mngr list", comment="warm the discovery cache")).to_succeed()
     raw = e2e.run(
         f"{time_bounded(5, 'mngr observe --discovery-only')} || true",
         comment="capture the raw discovery stream",
         timeout=45.0,
     )
-    expect(raw.stdout).to_contain("DISCOVERY_FULL")
+    expect(raw.stdout).to_contain("DISCOVERY_PROVIDER")
     # observe blocks indefinitely; bound it so the while-loop exits.
     pipe_into_python = (
         'bash -c \'mngr observe --discovery-only | while read -r line; do echo "$line" | '
