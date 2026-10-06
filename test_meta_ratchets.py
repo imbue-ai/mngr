@@ -1,6 +1,7 @@
 import ast
 import fnmatch
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -1003,6 +1004,41 @@ def _find_ci_path_gate(workflow: dict, project_dir: Path) -> str | None:
             if "git diff --name-only" in run and f" {project_dir} " in run:
                 return run
     return None
+
+
+_MINDS_EVALS_SETUP_ACTION = _REPO_ROOT / ".github" / "actions" / "setup-minds-evals-tests" / "action.yml"
+
+
+@pytest.mark.skipif(not _IS_SOURCE_OF_TRUTH, reason="the minds_evals setup action is absent on the public mirror")
+def test_minds_evals_setup_action_warms_the_suite_it_installs() -> None:
+    """The setup action must hand the timed pytest sessions a venv that is already warm.
+
+    A freshly installed venv makes the first pytest session that touches it pay a one-time cost no
+    later session pays, which is enough to overrun PYTEST_MAX_DURATION_SECONDS with every test
+    passed. The step's own comment in the action carries why. The collection has to be whole
+    because it warms only what it imports.
+    """
+    assert _MINDS_EVALS_SETUP_ACTION.is_file(), "expected the setup action at {}".format(_MINDS_EVALS_SETUP_ACTION)
+    steps = yaml.safe_load(_MINDS_EVALS_SETUP_ACTION.read_text())["runs"]["steps"]
+    collections = [
+        shlex.split(run)
+        for run in (step.get("run", "") for step in steps)
+        if "pytest" in run and "--collect-only" in run
+    ]
+    assert len(collections) == 1, (
+        "expected exactly one `pytest --collect-only` step in {}, found {}; without it the first "
+        "timed session in `just test-minds-evals` is charged the cold-start cost and can overrun its "
+        "suite-duration budget with every test passed".format(
+            _MINDS_EVALS_SETUP_ACTION.relative_to(_REPO_ROOT), len(collections)
+        )
+    )
+    selectors = [word for word in collections[0][collections[0].index("pytest") + 1 :] if not word.startswith("-")]
+    assert selectors == [], (
+        "the warm-up collection in {} selects {}, so it warms only part of what the timed sessions "
+        "import; pass flags only and let the project's testpaths select the whole suite".format(
+            _MINDS_EVALS_SETUP_ACTION.relative_to(_REPO_ROOT), selectors
+        )
+    )
 
 
 # ty logs this instead of a diagnostic when every path it was handed is excluded.
