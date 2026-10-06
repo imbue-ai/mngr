@@ -1,13 +1,27 @@
 import m from "mithril";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clearAppContextForTests, getAppContext, registerAppContext } from "../../../app-context";
+import {
+  clearAppContextForTests,
+  getAppContext,
+  registerAppContext,
+} from "../../../app-context";
 import { createEmptyStores } from "../../../models/boot";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
-import type { SettingsGroup, WorkspaceOptionsData } from "../../../models/workspaceOptions";
+import type {
+  SettingsGroup,
+  WorkspaceOptionsData,
+} from "../../../models/workspaceOptions";
 import { WorkspaceOptionsModel } from "../../../models/workspaceOptions";
 import { ShellState } from "../../shell/shell-state";
 import type { AnyVnode } from "../../../testing";
-import { allText, attrsOf, collectVnodes, jsonResponse, settle } from "../../../testing";
+import {
+  allText,
+  attrsOf,
+  collectVnodes,
+  jsonResponse,
+  renderDeep,
+  settle,
+} from "../../../testing";
 import { CopyField } from "../../components/Layout";
 import { SettingsGroups } from "./SettingsGroups";
 
@@ -28,46 +42,70 @@ const OUT_OF_DATE: UiWorkspaceUpdate = {
 interface Harness {
   /** Draw the pane for one machine against the same component instance, as a
    * route change would. */
-  draw: (agentId: string, group?: SettingsGroup, data?: Partial<WorkspaceOptionsData>) => m.Children;
+  draw: (
+    agentId: string,
+    group?: SettingsGroup,
+    data?: Partial<WorkspaceOptionsData>,
+  ) => m.Children;
   requests: string[];
 }
 
 /** The Updates group of one drawn pane; the destroy and unlink dialogs carry a
  * "Cancel" of their own. */
 function updatesGroup(root: m.Children): AnyVnode {
-  const group = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "ws-updates-group");
+  const group = collectVnodes(root).find(
+    (vnode) => attrsOf(vnode).id === "ws-updates-group",
+  );
   if (group === undefined) throw new Error("the Updates group was not drawn");
   return group;
 }
 
-function pressableWithLabel(node: AnyVnode, label: string): AnyVnode | undefined {
+/** The same group, rendered through its components, for the assertions that
+ * reach inside one -- the specific-version field lives in a collapsible. */
+function updatesGroupDeep(root: m.Children): AnyVnode {
+  return updatesGroup(renderDeep(root) as m.Children);
+}
+
+function pressableWithLabel(
+  node: AnyVnode,
+  label: string,
+): AnyVnode | undefined {
   return collectVnodes(node).find(
-    (vnode) => typeof attrsOf(vnode).onclick === "function" && allText(vnode.children).includes(label),
+    (vnode) =>
+      typeof attrsOf(vnode).onclick === "function" &&
+      allText(vnode.children).includes(label),
   );
 }
 
 /** The specific-version field of one drawn Updates group. */
 function overrideField(node: AnyVnode): AnyVnode {
-  const field = collectVnodes(node).find((vnode) => attrsOf(vnode).id === "update-override-input");
-  if (field === undefined) throw new Error("the specific-version field was not drawn");
+  const field = collectVnodes(node).find(
+    (vnode) => attrsOf(vnode).id === "update-override-input",
+  );
+  if (field === undefined)
+    throw new Error("the specific-version field was not drawn");
   return field;
 }
 
 /** Type into that field: its oninput is the only writer of the typed ref. */
 function typeOverride(node: AnyVnode, value: string): void {
-  const oninput = attrsOf(overrideField(node)).oninput as (event: InputEvent) => void;
+  const oninput = attrsOf(overrideField(node)).oninput as (
+    event: InputEvent,
+  ) => void;
   oninput({ target: { value } } as unknown as InputEvent);
 }
 
 function press(node: AnyVnode, label: string): void {
   const pressable = pressableWithLabel(node, label);
   if (pressable === undefined) throw new Error(`no "${label}" to press`);
-  if (attrsOf(pressable).disabled === true) throw new Error(`"${label}" is disabled`);
+  if (attrsOf(pressable).disabled === true)
+    throw new Error(`"${label}" is disabled`);
   (attrsOf(pressable).onclick as () => void)();
 }
 
 function harness(
-  respond: (url: string, init?: RequestInit) => Promise<Response> = () => Promise.resolve(jsonResponse({})),
+  respond: (url: string, init?: RequestInit) => Promise<Response> = () =>
+    Promise.resolve(jsonResponse({})),
   sshCommandByAgent: Record<string, string> = {},
 ): Harness {
   const shell = new ShellState(createEmptyStores());
@@ -87,13 +125,19 @@ function harness(
   });
   // No ?override=1, which would open the specific-version field. A successful
   // dispatch enters the machine and redraws; there is no mount for either.
-  vi.spyOn(m.route, "get").mockReturnValue("/workspace/x/options?tab=settings&group=updates");
+  vi.spyOn(m.route, "get").mockReturnValue(
+    "/workspace/x/options?tab=settings&group=updates",
+  );
   vi.spyOn(m.route, "set").mockImplementation(() => undefined);
   vi.spyOn(m, "redraw").mockImplementation(() => undefined);
 
   const models = new Map<string, WorkspaceOptionsModel>();
   const instance = SettingsGroups() as unknown as m.Component;
-  function draw(agentId: string, group: SettingsGroup = "updates", data: Partial<WorkspaceOptionsData> = {}): m.Children {
+  function draw(
+    agentId: string,
+    group: SettingsGroup = "updates",
+    data: Partial<WorkspaceOptionsData> = {},
+  ): m.Children {
     let model = models.get(agentId);
     if (model === undefined) {
       model = new WorkspaceOptionsModel(agentId);
@@ -122,9 +166,16 @@ function harness(
       model.lastSavedColor = model.data.color;
       models.set(agentId, model);
     }
-    const attrs = { model, selectedGroup: group, onSelectGroup: () => undefined };
+    const attrs = {
+      model,
+      selectedGroup: group,
+      onSelectGroup: () => undefined,
+    };
     const vnode = m(instance, attrs as unknown as m.Attributes) as m.Vnode;
-    return (instance.view as unknown as (v: m.Vnode) => m.Children).call(instance, vnode);
+    return (instance.view as unknown as (v: m.Vnode) => m.Children).call(
+      instance,
+      vnode,
+    );
   }
   return { draw, requests };
 }
@@ -162,7 +213,9 @@ describe("the Updates settings group's no-backup question", () => {
     await settleDispatch();
 
     expect(requests).toEqual([`/ui/api/updates/${UNBACKED}/now`]);
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(NO_BACKUP_QUESTION);
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
+      NO_BACKUP_QUESTION,
+    );
   });
 
   it("takes back the press when the question is cancelled", () => {
@@ -211,12 +264,19 @@ describe("the Updates settings group's no-backup question", () => {
     expect(attrsOf(otherButton as AnyVnode).disabled).toBe(false);
 
     (answer as unknown as (response: Response) => void)(
-      jsonResponse({ error: "An update is already running in this machine." }, 409),
+      jsonResponse(
+        { error: "An update is already running in this machine." },
+        409,
+      ),
     );
     await settleDispatch();
 
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain("An update is already running");
-    expect(allText(updatesGroup(draw(BACKED)))).toContain("An update is already running");
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
+      "An update is already running",
+    );
+    expect(allText(updatesGroup(draw(BACKED)))).toContain(
+      "An update is already running",
+    );
   });
 
   it("quotes the machine's own verdict under the refusal", async () => {
@@ -227,7 +287,8 @@ describe("the Updates settings group's no-backup question", () => {
         jsonResponse(
           {
             error: "Couldn't start the update agent in this machine.",
-            detail: "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+            detail:
+              "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
           },
           502,
         ),
@@ -238,8 +299,12 @@ describe("the Updates settings group's no-backup question", () => {
     await settleDispatch();
 
     const refused = allText(updatesGroup(draw(BACKED)));
-    expect(refused).toContain("Couldn't start the update agent in this machine.");
-    expect(refused).toContain("Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']");
+    expect(refused).toContain(
+      "Couldn't start the update agent in this machine.",
+    );
+    expect(refused).toContain(
+      "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']",
+    );
   });
 });
 
@@ -262,12 +327,20 @@ describe("the Updates settings group's scheduled update", () => {
     const { draw, requests } = harness();
     getAppContext().stores.updates.applyUpdatesMessage({
       type: "workspace_updates",
-      updates: { [BACKED]: { ...OUT_OF_DATE, is_backup_configured: true, is_scheduled: true } },
+      updates: {
+        [BACKED]: {
+          ...OUT_OF_DATE,
+          is_backup_configured: true,
+          is_scheduled: true,
+        },
+      },
       update_window: "2:00 AM-5:00 AM",
     });
 
     const group = updatesGroup(draw(BACKED));
-    expect(allText(group)).toContain("Scheduled to update in the next update window (2:00 AM-5:00 AM)");
+    expect(allText(group)).toContain(
+      "Scheduled to update in the next update window (2:00 AM-5:00 AM)",
+    );
     expect(pressableWithLabel(group, "Schedule update")).toBeUndefined();
     press(group, "Cancel schedule");
     await settleDispatch();
@@ -281,10 +354,10 @@ describe("the Updates settings group's specific-version field", () => {
     const { draw } = harness();
 
     // The disclosure is one toggle for the pane, so it stays open across the switch.
-    press(updatesGroup(draw(UNBACKED)), "Update to a specific version");
-    typeOverride(updatesGroup(draw(UNBACKED)), "upstream/some-branch");
+    press(updatesGroupDeep(draw(UNBACKED)), "Update to a specific version");
+    typeOverride(updatesGroupDeep(draw(UNBACKED)), "upstream/some-branch");
 
-    const other = updatesGroup(draw(BACKED));
+    const other = updatesGroupDeep(draw(BACKED));
     expect(attrsOf(overrideField(other)).value).toBe("");
     // Nothing was typed for this machine, so there is nothing to send.
     const otherDispatch = pressableWithLabel(other, "Update to this version");
@@ -292,7 +365,9 @@ describe("the Updates settings group's specific-version field", () => {
     expect(attrsOf(otherDispatch as AnyVnode).disabled).toBe(true);
 
     // Kept for the machine it was typed for, not wiped on every switch.
-    expect(attrsOf(overrideField(updatesGroup(draw(UNBACKED)))).value).toBe("upstream/some-branch");
+    expect(attrsOf(overrideField(updatesGroupDeep(draw(UNBACKED)))).value).toBe(
+      "upstream/some-branch",
+    );
   });
 });
 
@@ -320,7 +395,9 @@ describe("the Updates settings group after an update that never went out", () =>
     const backed = allText(updatesGroup(draw(BACKED)));
     expect(backed).toContain("Couldn't start this machine to run the update.");
     expect(backed).toContain("ERROR: The box behind host-5821 is gone");
-    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain("Couldn't start this machine");
+    expect(allText(updatesGroup(draw(UNBACKED)))).not.toContain(
+      "Couldn't start this machine",
+    );
   });
 
   it("holds the recorded reason back while a new press is out", () => {
@@ -330,25 +407,41 @@ describe("the Updates settings group after an update that never went out", () =>
 
     press(updatesGroup(draw(BACKED)), "Update now");
 
-    expect(allText(updatesGroup(draw(BACKED)))).not.toContain("Couldn't start this machine");
+    expect(allText(updatesGroup(draw(BACKED)))).not.toContain(
+      "Couldn't start this machine",
+    );
   });
 });
 
 describe("the Account settings group on a machine leased from Imbue Cloud", () => {
   /** The drawn Account section's text, whitespace collapsed, and whether it offers an Unlink. */
-  function accountSection(root: m.Children): { text: string; hasUnlink: boolean } {
-    const section = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "account-section");
-    if (section === undefined) throw new Error("the Account section was not drawn");
+  function accountSection(root: m.Children): {
+    text: string;
+    hasUnlink: boolean;
+  } {
+    const section = collectVnodes(root).find(
+      (vnode) => attrsOf(vnode).id === "account-section",
+    );
+    if (section === undefined)
+      throw new Error("the Account section was not drawn");
     return {
-      text: allText(section.children).replace(/\s+/g, " ").replace(/ ([.,])/g, "$1").trim(),
-      hasUnlink: collectVnodes(section).some((vnode) => attrsOf(vnode).id === "disassociate-btn"),
+      text: allText(section.children)
+        .replace(/\s+/g, " ")
+        .replace(/ ([.,])/g, "$1")
+        .trim(),
+      hasUnlink: collectVnodes(section).some(
+        (vnode) => attrsOf(vnode).id === "disassociate-btn",
+      ),
     };
   }
 
   it("says the account cannot change and names the owner, with no Unlink to press", () => {
     const { draw } = harness();
     const section = accountSection(
-      draw(UNBACKED, "account", { is_leased_imbue_cloud: true, leased_owner_email: "owner@example.com" }),
+      draw(UNBACKED, "account", {
+        is_leased_imbue_cloud: true,
+        leased_owner_email: "owner@example.com",
+      }),
     );
 
     expect(section.text).toBe(
@@ -359,33 +452,52 @@ describe("the Account settings group on a machine leased from Imbue Cloud", () =
 
   it("leaves the owner out when it is not known", () => {
     const { draw } = harness();
-    const section = accountSection(draw(UNBACKED, "account", { is_leased_imbue_cloud: true, leased_owner_email: "" }));
+    const section = accountSection(
+      draw(UNBACKED, "account", {
+        is_leased_imbue_cloud: true,
+        leased_owner_email: "",
+      }),
+    );
 
-    expect(section.text).toBe("Machines running in Imbue Cloud can't be moved to a different account.");
+    expect(section.text).toBe(
+      "Machines running in Imbue Cloud can't be moved to a different account.",
+    );
     expect(section.hasUnlink).toBe(false);
   });
 });
 
 describe("the General settings group's color picker", () => {
   function swatch(root: m.Children, hex: string): AnyVnode {
-    const found = collectVnodes(root).find((vnode) => attrsOf(vnode).hex === hex);
+    const found = collectVnodes(root).find(
+      (vnode) => attrsOf(vnode).hex === hex,
+    );
     if (found === undefined) throw new Error(`no ${hex} swatch was drawn`);
     return found;
   }
 
   function hexInput(root: m.Children): AnyVnode {
-    const found = collectVnodes(root).find((vnode) => attrsOf(vnode).id === "color-hex-input");
+    const found = collectVnodes(root).find(
+      (vnode) => attrsOf(vnode).id === "color-hex-input",
+    );
     if (found === undefined) throw new Error("the hex input was not drawn");
     return found;
   }
 
   /** A pane whose color saves record the sent color and stay unanswered until released, oldest first. */
-  function heldSaveHarness(): { draw: Harness["draw"]; sentColors: string[]; releaseOldest: () => void } {
+  function heldSaveHarness(): {
+    draw: Harness["draw"];
+    sentColors: string[];
+    releaseOldest: () => void;
+  } {
     const sentColors: string[] = [];
     const heldReplies: (() => void)[] = [];
     const { draw } = harness((_url, init) => {
-      sentColors.push((JSON.parse(String(init?.body)) as { color: string }).color);
-      return new Promise<Response>((resolve) => heldReplies.push(() => resolve(jsonResponse({}))));
+      sentColors.push(
+        (JSON.parse(String(init?.body)) as { color: string }).color,
+      );
+      return new Promise<Response>((resolve) =>
+        heldReplies.push(() => resolve(jsonResponse({}))),
+      );
     });
     const releaseOldest = (): void => {
       const release = heldReplies.shift();
@@ -398,29 +510,44 @@ describe("the General settings group's color picker", () => {
   it("keeps the swatches live and sends each pick at once while a save is still running", async () => {
     const { draw, sentColors, releaseOldest } = heldSaveHarness();
 
-    (attrsOf(swatch(draw(UNBACKED, "general"), "#e8a7a8")).onclick as () => void)();
+    (
+      attrsOf(swatch(draw(UNBACKED, "general"), "#e8a7a8"))
+        .onclick as () => void
+    )();
     const whileSaving = draw(UNBACKED, "general");
 
     expect(attrsOf(swatch(whileSaving, "#e8a7a8")).selected).toBe(true);
     expect(attrsOf(swatch(whileSaving, "#aabbcc")).disabled).toBe(false);
     expect(allText(whileSaving)).not.toContain("Saving");
 
-    (attrsOf(hexInput(whileSaving)).oninput as (event: unknown) => void)({ target: { value: "#12" } });
-    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#e8a7a8")).selected).toBe(true);
+    (attrsOf(hexInput(whileSaving)).oninput as (event: unknown) => void)({
+      target: { value: "#12" },
+    });
+    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#e8a7a8")).selected).toBe(
+      true,
+    );
 
     (attrsOf(swatch(whileSaving, "#aabbcc")).onclick as () => void)();
-    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#aabbcc")).selected).toBe(true);
+    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#aabbcc")).selected).toBe(
+      true,
+    );
     expect(sentColors).toEqual(["#e8a7a8", "#aabbcc"]);
 
     releaseOldest();
     await settleDispatch();
-    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#aabbcc")).selected).toBe(true);
+    expect(attrsOf(swatch(draw(UNBACKED, "general"), "#aabbcc")).selected).toBe(
+      true,
+    );
   });
 
   it("saves a valid hex draft on blur and then shows the normalized pick", () => {
     const { draw, sentColors } = heldSaveHarness();
 
-    (attrsOf(hexInput(draw(UNBACKED, "general"))).oninput as (event: unknown) => void)({ target: { value: "#123" } });
+    (
+      attrsOf(hexInput(draw(UNBACKED, "general"))).oninput as (
+        event: unknown,
+      ) => void
+    )({ target: { value: "#123" } });
     (attrsOf(hexInput(draw(UNBACKED, "general"))).onblur as () => void)();
     const afterBlur = draw(UNBACKED, "general");
 
@@ -441,7 +568,9 @@ describe("the General settings group's SSH command", () => {
         .map((vnode) => attrsOf(vnode).value);
 
     expect(copyValues(draw(BACKED, "general"))).toEqual([command]);
-    expect(allText(draw(UNBACKED, "general"))).not.toContain("Connect over SSH");
+    expect(allText(draw(UNBACKED, "general"))).not.toContain(
+      "Connect over SSH",
+    );
     expect(copyValues(draw(UNBACKED, "general"))).toEqual([]);
   });
 });

@@ -8,6 +8,7 @@ import { getAppContext } from "../../../app-context";
 import { Button } from "../../components/Button";
 import { ColorSwatch } from "../../components/ColorSwatch";
 import { Icon16 } from "../../components/Icon";
+import { Collapsible } from "../../components/Collapsible";
 import type { IconName } from "../../components/icons";
 import { machineVerdict } from "../../components/MachineVerdict";
 import { Modal } from "../../components/Modal";
@@ -16,8 +17,15 @@ import { routeLinkAttrs } from "../../components/route-link";
 import { CopyField, SectionHeader } from "../../components/Layout";
 import { TextInput } from "../../components/FormControls";
 import type { UiWorkspaceUpdate } from "../../../channel/messages";
-import type { SettingsGroup, WorkspaceOptionsModel } from "../../../models/workspaceOptions";
-import { formatMachineSize, formatPendingMachineSize, normalizeWorkspaceColorHex } from "../../../models/workspaceOptions";
+import type {
+  SettingsGroup,
+  WorkspaceOptionsModel,
+} from "../../../models/workspaceOptions";
+import {
+  formatMachineSize,
+  formatPendingMachineSize,
+  normalizeWorkspaceColorHex,
+} from "../../../models/workspaceOptions";
 import {
   devOverridePrefill,
   isRecreationRequired,
@@ -26,7 +34,11 @@ import {
   standingUpdateNotice,
   updateActivityNotice,
 } from "../../../models/updates";
-import { noBackupConfirmPrompt, scheduledLine, updateVersionRow } from "../../components/UpdateModal";
+import {
+  noBackupConfirmPrompt,
+  scheduledLine,
+  updateVersionRow,
+} from "../../components/UpdateModal";
 import { BackupGroup } from "./BackupGroup";
 import { Spinner } from "../../components/Spinner";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
@@ -58,9 +70,17 @@ interface SettingsGroupsLocalState {
    * "Update now"), which each button's spinner keys off. */
   pendingDispatch: { agentId: string; targetRef: string } | null;
   /** The in-flight schedule write, its machine, and its target ref ("" for the default). */
-  pendingSchedule: { agentId: string; action: "schedule" | "cancel"; targetRef: string } | null;
+  pendingSchedule: {
+    agentId: string;
+    action: "schedule" | "cancel";
+    targetRef: string;
+  } | null;
   /** The press held for the go-ahead-without-backups confirmation, and its machine. */
-  noBackupConfirm: { agentId: string; action: "now" | "schedule"; targetRef: string } | null;
+  noBackupConfirm: {
+    agentId: string;
+    action: "now" | "schedule";
+    targetRef: string;
+  } | null;
   /** The last dispatch's refusal and the machine it was refused for, or null. */
   updateError: { agentId: string; message: string; detail: string } | null;
 }
@@ -68,7 +88,10 @@ interface SettingsGroupsLocalState {
 /** The piece of update state only when it belongs to the machine being drawn:
  * a route change between machines preserves this component instance, so every
  * piece is machine-stamped. */
-function forMachine<T extends { agentId: string }>(held: T | null, agentId: string): T | null {
+function forMachine<T extends { agentId: string }>(
+  held: T | null,
+  agentId: string,
+): T | null {
   return held?.agentId === agentId ? held : null;
 }
 
@@ -91,7 +114,9 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
   // group switches and must not re-open a field the user closed.
   let lastOverrideParam: string | null | undefined;
   function consumeOverrideParam(): void {
-    const param = new URLSearchParams((m.route.get() ?? "").split("?")[1] ?? "").get("override");
+    const param = new URLSearchParams(
+      (m.route.get() ?? "").split("?")[1] ?? "",
+    ).get("override");
     if (param === "1" && lastOverrideParam !== "1") local.isOverrideOpen = true;
     lastOverrideParam = param;
   }
@@ -120,15 +145,26 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
                   class: navEntryClass(group.id === selectedGroup),
                   onclick: () => onSelectGroup(group.id),
                 },
-                [m(Icon16, { name: group.icon, extra: "shrink-0" }), m("span", { class: "truncate" }, group.label)],
+                [
+                  m(Icon16, { name: group.icon, extra: "shrink-0" }),
+                  m("span", { class: "truncate" }, group.label),
+                ],
               ),
             ),
           ),
           content: [
-            selectedGroup === "general" ? renderGeneralGroup(model, local) : null,
-            selectedGroup === "account" ? renderAccountGroup(model, local) : null,
-            selectedGroup === "backup" ? m(BackupGroup, { agentId: data.agent_id }) : null,
-            selectedGroup === "updates" ? renderUpdatesGroup(data.agent_id, local) : null,
+            selectedGroup === "general"
+              ? renderGeneralGroup(model, local)
+              : null,
+            selectedGroup === "account"
+              ? renderAccountGroup(model, local)
+              : null,
+            selectedGroup === "backup"
+              ? m(BackupGroup, { agentId: data.agent_id })
+              : null,
+            selectedGroup === "updates"
+              ? renderUpdatesGroup(data.agent_id, local)
+              : null,
           ],
           extra: "mt-8",
         }),
@@ -146,7 +182,10 @@ export function SettingsGroups(): m.Component<SettingsGroupsAttrs> {
 function outOfDateNotice(agentId: string): m.Children {
   const { stores, shell } = getAppContext();
   const payload = workspacePageNoticeFor(
-    standingUpdateNotice(stores.updates.forAgent(agentId), stores.updates.isUpdating(agentId)),
+    standingUpdateNotice(
+      stores.updates.forAgent(agentId),
+      stores.updates.isUpdating(agentId),
+    ),
   );
   if (payload === null) return null;
   return m(
@@ -155,7 +194,14 @@ function outOfDateNotice(agentId: string): m.Children {
     m("div", { class: "flex items-center justify-between gap-3" }, [
       m("span", payload.message),
       payload.action !== null
-        ? m(Button, { variant: "secondary", onclick: () => shell.openUpdateModal(agentId) }, payload.action.label)
+        ? m(
+            Button,
+            {
+              variant: "secondary",
+              onclick: () => shell.openUpdateModal(agentId),
+            },
+            payload.action.label,
+          )
         : null,
     ]),
   );
@@ -172,14 +218,19 @@ function disabledUpdateReason(update: UiWorkspaceUpdate): m.Children {
         : isRecreationRequired(update)
           ? "This machine is too old to update in place. Create a new machine and ask its agent to migrate your work across."
           : "";
-  return reason ? m("p", { class: "type-helper text-tertiary mt-2" }, reason) : null;
+  return reason
+    ? m("p", { class: "type-helper text-tertiary mt-2" }, reason)
+    : null;
 }
 
 /** The Updates group: versions, the update action, and the collapsed
  * specific-version override. The override is a real feature (an up-to-date
  * machine can be moved to a branch or a newer release) but collapsed because
  * naming a ref is the rare path. */
-function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m.Children {
+function renderUpdatesGroup(
+  agentId: string,
+  local: SettingsGroupsLocalState,
+): m.Children {
   const { stores, shell } = getAppContext();
   const updates = stores.updates;
   const update = updates.forAgent(agentId);
@@ -216,10 +267,17 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
     local.pendingSchedule = inFlight;
     local.updateError = null;
     const call =
-      action === "schedule" ? updates.scheduleUpdate(agentId, targetRef) : updates.cancelSchedule(agentId);
+      action === "schedule"
+        ? updates.scheduleUpdate(agentId, targetRef)
+        : updates.cancelSchedule(agentId);
     void call.then((result) => {
       if (local.pendingSchedule === inFlight) local.pendingSchedule = null;
-      if (!result.isOk) local.updateError = { agentId, message: result.error, detail: result.detail };
+      if (!result.isOk)
+        local.updateError = {
+          agentId,
+          message: result.error,
+          detail: result.detail,
+        };
       m.redraw();
     });
   }
@@ -234,21 +292,31 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
       if (local.pendingDispatch === inFlight) local.pendingDispatch = null;
       // Into the machine, as the modal's Update now does: an attended update is a conversation.
       if (result.isOk) shell.enterWorkspace(agentId);
-      else local.updateError = { agentId, message: result.error, detail: result.detail };
+      else
+        local.updateError = {
+          agentId,
+          message: result.error,
+          detail: result.detail,
+        };
       m.redraw();
     });
   }
 
   const activity = updateActivityNotice(update, isUpdating);
   const held = forMachine(local.noBackupConfirm, agentId);
-  const shownError = forMachine(local.updateError, agentId) ?? recordedDispatchFailure(update, isUpdating);
+  const shownError =
+    forMachine(local.updateError, agentId) ??
+    recordedDispatchFailure(update, isUpdating);
   const errorMessage = shownError.message;
 
   return m("div", { class: "max-w-md" }, [
     m(SectionHeader, "Version"),
     m("div", { class: "flex flex-col gap-1 mb-8" }, [
       updateVersionRow("This machine", update.current_version ?? ""),
-      updateVersionRow("Supported by Imbue Studio", update.supported_version ?? ""),
+      updateVersionRow(
+        "Supported by Imbue Studio",
+        update.supported_version ?? "",
+      ),
     ]),
     m(SectionHeader, "Update"),
     m("div", { id: "ws-updates-group", class: "mb-3" }, [
@@ -272,7 +340,8 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
           noBackupConfirmPrompt({
             onConfirm: () => {
               local.noBackupConfirm = null;
-              if (held.action === "schedule") writeSchedule("schedule", held.targetRef);
+              if (held.action === "schedule")
+                writeSchedule("schedule", held.targetRef);
               else dispatch(held.targetRef);
             },
             onCancel: () => {
@@ -280,145 +349,164 @@ function renderUpdatesGroup(agentId: string, local: SettingsGroupsLocalState): m
             },
           })
         : [
-          update.is_scheduled
-            ? m("p", { class: "type-helper text-secondary mb-3" }, scheduledLine(update, updates.updateWindow))
-            : null,
-          // Schedule first, as in the modal: the update window is when nobody is in the machine.
-          m("div", { class: "flex items-center gap-2" }, [
             update.is_scheduled
               ? m(
-                  Button,
-                  {
-                    variant: "secondary",
-                    id: "ws-update-cancel-schedule-btn",
-                    disabled: isBusy,
-                    onclick: () => writeSchedule("cancel"),
-                  },
-                  pendingSchedule?.action === "cancel" ? m(Spinner, { size: "sm" }) : "Cancel schedule",
+                  "p",
+                  { class: "type-helper text-secondary mb-3" },
+                  scheduledLine(update, updates.updateWindow),
                 )
-              : m(
-                  Button,
-                  {
-                    variant: "primary",
-                    id: "ws-update-schedule-btn",
-                    disabled: isBusy || isUpdating || !isUpdateDispatchable(update),
-                    onclick: () => requestSchedule(""),
-                  },
-                  pendingSchedule?.action === "schedule" && pendingSchedule.targetRef === ""
-                    ? m(Spinner, { size: "sm" })
-                    : "Schedule update",
-                ),
-            m(
-              Button,
-              {
-                variant: "secondary",
-                id: "ws-update-now-btn",
-                disabled: isBusy || isUpdating || !isUpdateDispatchable(update),
-                onclick: () => requestDispatch(""),
-              },
-              pending?.targetRef === "" ? m(Spinner, { size: "sm" }) : "Update now",
-            ),
-          ]),
-          disabledUpdateReason(update),
-          // A named version is applied by the same in-place run, so a machine
-          // too old for one is too old for the other.
-          isRecreationRequired(update)
-            ? null
-            : m("div", { class: "mt-4" }, [
-            m(
-              "button",
-              {
-                type: "button",
-                id: "update-override-toggle",
-                class: "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary cursor-pointer",
-                "aria-expanded": local.isOverrideOpen ? "true" : "false",
-                onclick: () => (local.isOverrideOpen = !local.isOverrideOpen),
-              },
-              [
-                m(Icon16, { name: local.isOverrideOpen ? "chevron-down" : "chevron-right", size: "sm" }),
-                m("span", "Update to a specific version"),
-              ],
-            ),
-            local.isOverrideOpen
-              ? m("div", { class: "flex flex-col gap-2 mt-2" }, [
-                  m("div", { class: "flex items-center gap-2" }, [
-                    m(TextInput, {
-                      id: "update-override-input",
-                      name: "update_override_ref",
-                      value: overrideValue,
-                      placeholder: "minds-v0.4.2, main, or a git ref",
-                      spellcheck: "false",
-                      autocomplete: "off",
-                      "aria-label": "Version to update to",
-                      extra: "flex-1",
-                      oninput: (event: InputEvent) => {
-                        local.overrideDraft = { agentId, value: (event.target as HTMLInputElement).value };
-                      },
-                    }),
-                    m(
-                      Button,
-                      {
-                        variant: "secondary",
-                        id: "update-override-btn",
-                        disabled: isBusy || isUpdating || overrideValue.trim() === "",
-                        onclick: () => requestDispatch(overrideValue.trim()),
-                      },
-                      pending !== null && pending.targetRef !== ""
-                        ? m(Spinner, { size: "sm" })
-                        : "Update to this version",
-                    ),
-                    // The same confirmation the press above is; scheduling only
-                    // changes when the run happens.
-                    m(
-                      Button,
-                      {
-                        variant: "secondary",
-                        id: "update-override-schedule-btn",
-                        disabled: isBusy || isUpdating || overrideValue.trim() === "",
-                        onclick: () => requestSchedule(overrideValue.trim()),
-                      },
-                      pendingSchedule?.action === "schedule" && pendingSchedule.targetRef !== ""
-                        ? m(Spinner, { size: "sm" })
-                        : "Schedule",
-                    ),
-                  ]),
-                  prefill && draft === null
-                    ? m(
-                        "p",
-                        { class: "type-helper text-tertiary" },
-                        "Prefilled with the template ref this build of Imbue Studio runs from.",
-                      )
-                    : null,
-                  m(
-                    "p",
-                    { class: "type-helper text-tertiary" },
-                    "Works on an up-to-date machine too. A version newer than this Imbue Studio app, a branch, or a bare " +
-                      "ref is allowed and applied without further confirmation: it may not be a tested release, " +
-                      "parts of this machine may stop working until the app catches up, and the update agent " +
-                      'offers a rollback afterwards. On a branch, this machine may afterwards read as "version unknown".',
-                  ),
-                ])
               : null,
-          ]),
+            // Schedule first, as in the modal: the update window is when nobody is in the machine.
+            m("div", { class: "flex items-center gap-2" }, [
+              update.is_scheduled
+                ? m(
+                    Button,
+                    {
+                      variant: "secondary",
+                      id: "ws-update-cancel-schedule-btn",
+                      disabled: isBusy,
+                      onclick: () => writeSchedule("cancel"),
+                    },
+                    pendingSchedule?.action === "cancel"
+                      ? m(Spinner, { size: "sm" })
+                      : "Cancel schedule",
+                  )
+                : m(
+                    Button,
+                    {
+                      variant: "primary",
+                      id: "ws-update-schedule-btn",
+                      disabled:
+                        isBusy || isUpdating || !isUpdateDispatchable(update),
+                      onclick: () => requestSchedule(""),
+                    },
+                    pendingSchedule?.action === "schedule" &&
+                      pendingSchedule.targetRef === ""
+                      ? m(Spinner, { size: "sm" })
+                      : "Schedule update",
+                  ),
+              m(
+                Button,
+                {
+                  variant: "secondary",
+                  id: "ws-update-now-btn",
+                  disabled:
+                    isBusy || isUpdating || !isUpdateDispatchable(update),
+                  onclick: () => requestDispatch(""),
+                },
+                pending?.targetRef === ""
+                  ? m(Spinner, { size: "sm" })
+                  : "Update now",
+              ),
+            ]),
+            disabledUpdateReason(update),
+            // A named version is applied by the same in-place run, so a machine
+            // too old for one is too old for the other.
+            isRecreationRequired(update)
+              ? null
+              : m(
+                  Collapsible,
+                  {
+                    id: "update-override",
+                    isOpen: local.isOverrideOpen,
+                    onToggle: () =>
+                      (local.isOverrideOpen = !local.isOverrideOpen),
+                    extra: "mt-4",
+                    triggerExtra:
+                      "inline-flex items-center gap-1 type-helper text-secondary hover:text-primary",
+                    panelExtra: "flex flex-col gap-2 mt-2",
+                    summary: m("span", "Update to a specific version"),
+                  },
+                  [
+                    m("div", { class: "flex items-center gap-2" }, [
+                      m(TextInput, {
+                        id: "update-override-input",
+                        name: "update_override_ref",
+                        value: overrideValue,
+                        placeholder: "minds-v0.4.2, main, or a git ref",
+                        spellcheck: "false",
+                        autocomplete: "off",
+                        "aria-label": "Version to update to",
+                        extra: "flex-1",
+                        oninput: (event: InputEvent) => {
+                          local.overrideDraft = {
+                            agentId,
+                            value: (event.target as HTMLInputElement).value,
+                          };
+                        },
+                      }),
+                      m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          id: "update-override-btn",
+                          disabled:
+                            isBusy || isUpdating || overrideValue.trim() === "",
+                          onclick: () => requestDispatch(overrideValue.trim()),
+                        },
+                        pending !== null && pending.targetRef !== ""
+                          ? m(Spinner, { size: "sm" })
+                          : "Update to this version",
+                      ),
+                      // The same confirmation the press above is; scheduling only
+                      // changes when the run happens.
+                      m(
+                        Button,
+                        {
+                          variant: "secondary",
+                          id: "update-override-schedule-btn",
+                          disabled:
+                            isBusy || isUpdating || overrideValue.trim() === "",
+                          onclick: () => requestSchedule(overrideValue.trim()),
+                        },
+                        pendingSchedule?.action === "schedule" &&
+                          pendingSchedule.targetRef !== ""
+                          ? m(Spinner, { size: "sm" })
+                          : "Schedule",
+                      ),
+                    ]),
+                    prefill && draft === null
+                      ? m(
+                          "p",
+                          { class: "type-helper text-tertiary" },
+                          "Prefilled with the template ref this build of Imbue Studio runs from.",
+                        )
+                      : null,
+                    m(
+                      "p",
+                      { class: "type-helper text-tertiary" },
+                      "Works on an up-to-date machine too. A version newer than this Imbue Studio app, a branch, or a bare " +
+                        "ref is allowed and applied without further confirmation: it may not be a tested release, " +
+                        "parts of this machine may stop working until the app catches up, and the update agent " +
+                        'offers a rollback afterwards. On a branch, this machine may afterwards read as "version unknown".',
+                    ),
+                  ],
+                ),
           ],
       errorMessage
-        ? m("div", { class: "type-helper text-important mt-3", role: "alert" }, [
-            errorMessage,
-            machineVerdict(shownError.detail),
-          ])
+        ? m(
+            "div",
+            { class: "type-helper text-important mt-3", role: "alert" },
+            [errorMessage, machineVerdict(shownError.detail)],
+          )
         : null,
     ]),
   ]);
 }
 
-function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): m.Children {
+function renderGeneralGroup(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
   const data = model.data;
   if (data === null) return null;
   const nameValue = local.nameDraft ?? data.name;
   const shownColor = model.pendingColor ?? data.color;
   const colorValue = local.colorDraft ?? shownColor;
   const normalizedDraft = normalizeWorkspaceColorHex(colorValue);
-  const isCustomColor = normalizedDraft !== null && !Object.values(data.palette).includes(normalizedDraft);
+  const isCustomColor =
+    normalizedDraft !== null &&
+    !Object.values(data.palette).includes(normalizedDraft);
 
   return m("div", [
     m(SectionHeader, "Name"),
@@ -460,10 +548,20 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
           },
           "Save",
         ),
-        model.isRenameSaving ? m("span", { class: "type-section text-secondary" }, "Saving...") : null,
+        model.isRenameSaving
+          ? m("span", { class: "type-section text-secondary" }, "Saving...")
+          : null,
       ]),
       model.renameErrorMessage
-        ? m("p", { id: "rename-error", class: "type-body text-important mt-2", role: "alert" }, model.renameErrorMessage)
+        ? m(
+            "p",
+            {
+              id: "rename-error",
+              class: "type-body text-important mt-2",
+              role: "alert",
+            },
+            model.renameErrorMessage,
+          )
         : null,
     ]),
 
@@ -530,14 +628,26 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
         ],
       ),
       model.colorErrorMessage
-        ? m("p", { id: "color-error", class: "type-body text-important mt-2", role: "alert" }, model.colorErrorMessage)
+        ? m(
+            "p",
+            {
+              id: "color-error",
+              class: "type-body text-important mt-2",
+              role: "alert",
+            },
+            model.colorErrorMessage,
+          )
         : null,
     ]),
 
     renderMachineSizeSection(model),
 
     m(SectionHeader, "ID"),
-    m("p", { class: "type-body font-mono text-secondary mb-8 select-all break-all" }, data.agent_id),
+    m(
+      "p",
+      { class: "type-body font-mono text-secondary mb-8 select-all break-all" },
+      data.agent_id,
+    ),
 
     data.ssh_command
       ? [
@@ -571,7 +681,11 @@ function renderGeneralGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
       "Remove machine",
     ),
     model.destroyErrorMessage
-      ? m("p", { id: "destroy-error", class: "type-body text-important mt-2" }, model.destroyErrorMessage)
+      ? m(
+          "p",
+          { id: "destroy-error", class: "type-body text-important mt-2" },
+          model.destroyErrorMessage,
+        )
       : null,
   ]);
 }
@@ -600,19 +714,26 @@ function renderMachineSizeSection(model: WorkspaceOptionsModel): m.Children {
   ];
 }
 
-function commitHexDraft(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): void {
+function commitHexDraft(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): void {
   if (local.colorDraft === null) return;
   const normalized = normalizeWorkspaceColorHex(local.colorDraft);
   local.colorDraft = null;
   if (normalized === null) {
-    model.colorErrorMessage = "That hex value is not valid. Use #rrggbb or #rgb.";
+    model.colorErrorMessage =
+      "That hex value is not valid. Use #rrggbb or #rgb.";
     m.redraw();
     return;
   }
   void model.pickColor(normalized);
 }
 
-function renderAccountGroup(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): m.Children {
+function renderAccountGroup(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
   const data = model.data;
   if (data === null) return null;
 
@@ -620,10 +741,20 @@ function renderAccountGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
     m(SectionHeader, "Account"),
     m("div", { id: "account-section" }, [
       data.is_leased_imbue_cloud
-        ? m("p", { id: "leased-account-note", class: "type-body text-secondary" }, [
-            "Machines running in Imbue Cloud can't be moved to a different account.",
-            data.leased_owner_email ? [" This machine is owned by ", m("strong", data.leased_owner_email), "."] : null,
-          ])
+        ? m(
+            "p",
+            { id: "leased-account-note", class: "type-body text-secondary" },
+            [
+              "Machines running in Imbue Cloud can't be moved to a different account.",
+              data.leased_owner_email
+                ? [
+                    " This machine is owned by ",
+                    m("strong", data.leased_owner_email),
+                    ".",
+                  ]
+                : null,
+            ],
+          )
         : data.current_account
           ? [
               m("p", { class: "type-body text-primary mb-3" }, [
@@ -654,7 +785,11 @@ function renderAccountGroup(model: WorkspaceOptionsModel, local: SettingsGroupsL
       model.accountErrorMessage
         ? m(
             "p",
-            { id: "disassociate-error", class: "type-body text-important mt-2", role: "alert" },
+            {
+              id: "disassociate-error",
+              class: "type-body text-important mt-2",
+              role: "alert",
+            },
             model.accountErrorMessage,
           )
         : null,
@@ -676,12 +811,20 @@ function renderAssociatePrompt(
       m(
         "p",
         { class: "type-body text-secondary" },
-        m("a", { class: "text-primary underline", ...routeLinkAttrs("/accounts") }, "Sign in or create an account"),
+        m(
+          "a",
+          { class: "text-primary underline", ...routeLinkAttrs("/accounts") },
+          "Sign in or create an account",
+        ),
       ),
     ]);
   }
   return m("div", [
-    m("p", { class: "type-body text-secondary mb-3" }, "Link this machine to one of your accounts:"),
+    m(
+      "p",
+      { class: "type-body text-secondary mb-3" },
+      "Link this machine to one of your accounts:",
+    ),
     m(
       "div",
       { class: "flex flex-col gap-2" },
@@ -700,7 +843,10 @@ function renderAssociatePrompt(
   ]);
 }
 
-function renderDestroyDialog(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): m.Children {
+function renderDestroyDialog(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
   const data = model.data;
   if (data === null) return null;
   return m(
@@ -712,7 +858,11 @@ function renderDestroyDialog(model: WorkspaceOptionsModel, local: SettingsGroups
       },
     },
     [
-      m("h2", { class: "type-heading-lg text-primary mb-3" }, "Remove machine?"),
+      m(
+        "h2",
+        { class: "type-heading-lg text-primary mb-3" },
+        "Remove machine?",
+      ),
       m("p", { class: "type-body text-primary mb-4" }, [
         "This will permanently destroy ",
         m("strong", data.name),
@@ -739,7 +889,8 @@ function renderDestroyDialog(model: WorkspaceOptionsModel, local: SettingsGroups
             onclick: () => {
               void model.destroy().then((isDestroyStarted) => {
                 local.isDestroyDialogOpen = false;
-                if (isDestroyStarted) m.route.set(`/destroying/${model.agentId}`);
+                if (isDestroyStarted)
+                  m.route.set(`/destroying/${model.agentId}`);
               });
             },
           },
@@ -750,7 +901,10 @@ function renderDestroyDialog(model: WorkspaceOptionsModel, local: SettingsGroups
   );
 }
 
-function renderUnlinkDialog(model: WorkspaceOptionsModel, local: SettingsGroupsLocalState): m.Children {
+function renderUnlinkDialog(
+  model: WorkspaceOptionsModel,
+  local: SettingsGroupsLocalState,
+): m.Children {
   const data = model.data;
   if (data === null) return null;
   return m(
@@ -762,7 +916,11 @@ function renderUnlinkDialog(model: WorkspaceOptionsModel, local: SettingsGroupsL
       },
     },
     [
-      m("h2", { class: "type-heading-lg text-primary mb-3" }, "Unlink this machine?"),
+      m(
+        "h2",
+        { class: "type-heading-lg text-primary mb-3" },
+        "Unlink this machine?",
+      ),
       m("p", { class: "type-body text-primary mb-4" }, [
         "This stops all sharing for ",
         m("strong", data.name),

@@ -29,6 +29,42 @@ export function renderRoot<A>(
   );
 }
 
+/**
+ * Render a tree the way a mount would, expanding the components inside it.
+ *
+ * `renderRoot` calls one view and stops. A component nested in what it returns
+ * is left as an opaque vnode, so its markup -- its attributes, and whether it
+ * drew anything at all -- is invisible, while the children handed to it still
+ * sit in the tree and read as though they were on screen. That is how a shut
+ * collapsible's contents can look present to a test and be absent to a reader.
+ * Any assertion about what a reader would see has to render through.
+ */
+export function renderDeep(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(renderDeep);
+  if (node === null || node === undefined || typeof node !== "object")
+    return node;
+  const vnode = node as { tag?: unknown; children?: unknown };
+  const view = viewOf(vnode.tag);
+  if (view !== null) return renderDeep(view(vnode as m.Vnode));
+  if (vnode.children !== undefined)
+    return { ...vnode, children: renderDeep(vnode.children) };
+  return vnode;
+}
+
+/** The view of a component vnode's tag, or null for a plain element. */
+function viewOf(tag: unknown): ((vnode: m.Vnode) => m.Children) | null {
+  const candidate =
+    typeof tag === "function"
+      ? (tag as () => unknown)()
+      : typeof tag === "object" && tag !== null
+        ? tag
+        : null;
+  const view = (candidate as { view?: unknown } | null)?.view;
+  if (typeof view !== "function") return null;
+  return (vnode: m.Vnode) =>
+    (view as (v: m.Vnode) => m.Children).call(candidate, vnode);
+}
+
 /** Every string a rendered tree would put on screen, for the assertions that
  * are about what the reader sees rather than about markup. */
 export function renderedText(vnode: m.Vnode | null): string {
