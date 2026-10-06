@@ -157,10 +157,12 @@ def test_command_agent_dev_server_extra_windows(e2e: E2eSession) -> None:
     # Verify the extra tmux window named "logs" was actually created alongside
     # the main window, since that is the distinguishing behavior of the -w flag.
     # mngr runs the agent's command and its extra windows in a tmux session named
-    # "<prefix><agent>" on the e2e harness's tmux socket ($TMUX_TMPDIR/tmux-0/default,
-    # the same socket the generated destroy-env script manages), so query it there.
+    # "<prefix><agent>" on the e2e harness's tmux socket (the same socket the
+    # generated destroy-env script manages), so query it there. tmux puts that
+    # socket in $TMUX_TMPDIR/tmux-<uid>/, so the uid has to be asked for rather
+    # than assumed.
     windows_result = e2e.run(
-        'tmux -S "$TMUX_TMPDIR/tmux-0/default" list-windows -t mngr_test-dev-env -F "#{window_name}"',
+        'tmux -S "$TMUX_TMPDIR/tmux-$(id -u)/default" list-windows -t mngr_test-dev-env -F "#{window_name}"',
         comment="Verify the extra 'logs' tmux window exists",
     )
     expect(windows_result).to_succeed()
