@@ -41,6 +41,7 @@ from imbue.mngr.primitives import HostId
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
 from imbue.mngr.utils.parent_process import start_parent_death_watcher
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.auth import FileAuthStore
 from imbue.mngr_forward.data_types import ForwardAgentSnapshot
 from imbue.mngr_forward.data_types import ForwardListSnapshot
@@ -849,7 +850,8 @@ def _install_sighup_handler(
             except (OSError, RuntimeError) as e:
                 logger.warning("SIGHUP dispatch failed: {}", e)
 
-    concurrency_group.start_new_thread(
+    start_mngr_thread(
+        concurrency_group=concurrency_group,
         target=_watcher,
         daemon=True,
         name="mngr-forward-sighup-watcher",

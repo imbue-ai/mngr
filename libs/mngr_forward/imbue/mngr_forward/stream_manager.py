@@ -61,6 +61,7 @@ from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import DiscoveredAgent
 from imbue.mngr.utils.cel_utils import apply_cel_filters_to_context
 from imbue.mngr.utils.cel_utils import compile_cel_filters
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.data_types import EventsStreamStatus
 from imbue.mngr_forward.envelope import EnvelopeWriter
 from imbue.mngr_forward.primitives import MNGR_BINARY
@@ -303,7 +304,8 @@ class ForwardStreamManager(MutableModel):
 
     def _start_tail_discovery(self) -> None:
         """Tail the shared discovery events file in-process instead of spawning observe."""
-        self._cg.start_new_thread(
+        start_mngr_thread(
+            concurrency_group=self._cg,
             target=self._run_tail_discovery,
             name="mngr-forward-discovery-tail",
             daemon=True,

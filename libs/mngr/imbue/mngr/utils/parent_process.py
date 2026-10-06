@@ -7,6 +7,7 @@ from loguru import logger
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroupState
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 _PARENT_POLL_INTERVAL_SECONDS: Final[float] = 3.0
 # A process whose parent is init has already been orphaned: its real parent is gone.
@@ -61,7 +62,8 @@ def start_parent_death_watcher(concurrency_group: ConcurrencyGroup) -> None:
 
     stop_event = threading.Event()
 
-    concurrency_group.start_new_thread(
+    start_mngr_thread(
+        concurrency_group=concurrency_group,
         target=_poll_parent_pid_until_changed,
         args=(original_ppid, stop_event, concurrency_group),
         daemon=True,
@@ -190,7 +192,8 @@ def start_grandparent_death_watcher(concurrency_group: ConcurrencyGroup) -> None
 
     stop_event = threading.Event()
 
-    concurrency_group.start_new_thread(
+    start_mngr_thread(
+        concurrency_group=concurrency_group,
         target=_poll_grandparent_until_dead,
         args=(grandparent_pid, stop_event, concurrency_group),
         daemon=True,

@@ -34,6 +34,7 @@ from imbue.imbue_common.logging import log_span
 from imbue.mngr.interfaces.agent import HasCommonTranscriptMixin
 from imbue.mngr.interfaces.agent import HasTranscriptMixin
 from imbue.mngr.interfaces.host import OnlineHostInterface
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 
 def provision_scripts_to_commands_dir(
@@ -57,8 +58,10 @@ def provision_scripts_to_commands_dir(
         script_path = commands_dir / script_name
         with log_span("Writing {} to agent state dir", script_name):
             try:
-                thread = concurrency_group.start_new_thread(
-                    host.write_file, (script_path, script_content.encode(), "0755")
+                thread = start_mngr_thread(
+                    concurrency_group=concurrency_group,
+                    target=host.write_file,
+                    args=(script_path, script_content.encode(), "0755"),
                 )
             except InvalidConcurrencyGroupStateError:
                 logger.debug("Concurrency group shutting down; aborting script provisioning")

@@ -62,8 +62,8 @@ from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.primitives import VolumeId
 from imbue.mngr.utils.name_generator import generate_host_name
 from imbue.mngr.utils.ssh import build_ssh_connect_command
-from imbue.mngr.utils.thread_cleanup import cleanup_thread_local_resources
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 
 def _compute_idle_seconds(
@@ -469,9 +469,7 @@ def _set_bounded_host_read_future(
     """Run one host's read on a daemon thread, recording the outcome on ``future``.
 
     Captures the expected discovery failure modes onto the future so a failed
-    host can be treated as UNKNOWN rather than crashing the poll. Always
-    releases thread-local gevent resources, since this thread may be abandoned and
-    only resolves its future late.
+    host can be treated as UNKNOWN rather than crashing the poll.
     """
     try:
         host_read = read_host()
@@ -479,8 +477,6 @@ def _set_bounded_host_read_future(
         future.set_exception(e)
     else:
         future.set_result(host_read)
-    finally:
-        cleanup_thread_local_resources()
 
 
 class HostDiscoveryReadRegistry(MutableModel):
@@ -550,7 +546,8 @@ def discover_hosts_within_per_host_timeout(
         host_future: Future[BoundedHostRead] = Future()
         active_registry.future_by_host_id[host_id] = host_future
         future_by_host_id[host_id] = host_future
-        cg.start_new_thread(
+        start_mngr_thread(
+            concurrency_group=cg,
             target=_set_bounded_host_read_future,
             args=(read_host, host_future),
             daemon=True,

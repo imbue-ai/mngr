@@ -64,6 +64,7 @@ from imbue.mngr.utils.file_watch import start_event_forwarder
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.jsonl_warn import split_complete_lines_from_bytes
 from imbue.mngr.utils.process_exit_watch import ProcessExitWatch
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 OBSERVE_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agents")
 AGENT_STATES_EVENT_SOURCE: Final[EventSource] = EventSource("mngr/agent_states")
@@ -1110,7 +1111,8 @@ class AgentObserver(MutableModel):
                 self._start_discovery_stream()
 
             # Phase 3: start the activity worker thread
-            activity_worker = self._concurrency_group.start_new_thread(
+            activity_worker = start_mngr_thread(
+                concurrency_group=self._concurrency_group,
                 target=self._activity_worker,
                 daemon=True,
                 name="observe-activity-worker",

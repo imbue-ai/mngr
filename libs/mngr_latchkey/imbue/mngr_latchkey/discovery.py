@@ -69,6 +69,7 @@ from imbue.mngr.primitives import AgentInstanceKey
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import ProviderInstanceName
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.ssh_tunnel import RemoteSSHInfo
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelError
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
@@ -344,7 +345,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 return
             self._pending_remote_agents.add(instance_key_str)
         try:
-            self.concurrency_group.start_new_thread(
+            start_mngr_thread(
+                concurrency_group=self.concurrency_group,
                 target=self._run_remote_setup,
                 args=(agent_id, host_id, ssh_info, provider_name, host_side_port),
                 name=f"latchkey-discovery-setup-{instance_key_str}",
@@ -817,7 +819,8 @@ class LatchkeyDiscoveryHandler(MutableModel):
                 return False
             self._provisioning_hosts.add(host_id_str)
         try:
-            self.concurrency_group.start_new_thread(
+            start_mngr_thread(
+                concurrency_group=self.concurrency_group,
                 target=self._run_remote_gateway_provisioning,
                 args=(agent_id, host_id, ssh_info, provider_name, device_port),
                 name=f"latchkey-provision-{str(agent_id)}",

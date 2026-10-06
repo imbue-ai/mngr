@@ -7,12 +7,14 @@ fresh Hub (and everything the task referenced) is stranded on every call.
 """
 
 import gc
+import os
 
 import gevent
 import pytest
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 
 def _count_live_hubs() -> int:
@@ -54,3 +56,29 @@ def test_worker_hubs_do_not_accumulate_across_polls() -> None:
     # with the number of iterations (one stranded hub each). Allow a small
     # margin for worker threads that happen to be in flight.
     assert growth <= 5, f"gevent hubs accumulated across polls (grew by {growth} over {iterations} polls)"
+
+
+def _count_open_fds() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def test_threads_started_with_start_mngr_thread_do_not_leak_gevent_hub_fds() -> None:
+    """A short-lived thread that touches gevent (as a pyinfra host command does)
+    leaves no descriptor behind once it exits: each thread's Hub holds its event
+    loop's descriptors (a pipe pair on macOS, an epoll fd and an eventfd on Linux)."""
+    thread_count = 20
+    with ConcurrencyGroup(name="start_mngr_thread_test") as cg:
+        fds_before = _count_open_fds()
+        for idx in range(thread_count):
+            thread = start_mngr_thread(
+                concurrency_group=cg,
+                target=gevent.sleep,
+                args=(0.001,),
+                name=f"start-mngr-thread-probe-{idx}",
+            )
+            thread.join(timeout=10.0)
+        fd_growth = _count_open_fds() - fds_before
+
+    # A leak is at least two fds per thread; the slack absorbs unrelated
+    # descriptors other threads of this process open meanwhile.
+    assert fd_growth < thread_count, f"{fd_growth} fds leaked across {thread_count} threads"

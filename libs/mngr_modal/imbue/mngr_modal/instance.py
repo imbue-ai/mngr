@@ -113,6 +113,7 @@ from imbue.mngr.providers.ssh_host_setup import parse_warnings_from_output
 from imbue.mngr.providers.ssh_host_setup import resolve_host_log_dir
 from imbue.mngr.utils.ssh import build_ssh_connect_command
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_modal.config import ModalProviderConfig
 from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import ModalSandboxDiedMngrError
@@ -1278,9 +1279,10 @@ class ModalProviderInstance(BaseProviderInstance):
             if self.config.is_persistent:
                 snapshot_url_future = Future()
                 if os.environ.get("MNGR_MODAL_DISABLE_SNAPSHOT_DEPLOY", "0") != "1":
-                    concurrency_group.start_new_thread(
-                        _set_result,
-                        (
+                    start_mngr_thread(
+                        concurrency_group=concurrency_group,
+                        target=_set_result,
+                        args=(
                             snapshot_url_future,
                             lambda: ensure_function_deployed(
                                 "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
@@ -1288,9 +1290,10 @@ class ModalProviderInstance(BaseProviderInstance):
                         ),
                     )
                 else:
-                    concurrency_group.start_new_thread(
-                        _set_result,
-                        (
+                    start_mngr_thread(
+                        concurrency_group=concurrency_group,
+                        target=_set_result,
+                        args=(
                             snapshot_url_future,
                             lambda: get_function_url(
                                 "snapshot_and_shutdown", self.app_name, self.environment_name, self._modal_interface
@@ -1310,9 +1313,10 @@ class ModalProviderInstance(BaseProviderInstance):
             host_private_key = host_key_path.read_text()
 
             # set up all the data in modal:
-            modal_ops_thread = concurrency_group.start_new_thread(
-                self._create_host_data_records_in_modal,
-                (sandbox, host_id, host_name, user_tags, config, host_data, ssh_host, ssh_port, host_public_key),
+            modal_ops_thread = start_mngr_thread(
+                concurrency_group=concurrency_group,
+                target=self._create_host_data_records_in_modal,
+                args=(sandbox, host_id, host_name, user_tags, config, host_data, ssh_host, ssh_port, host_public_key),
             )
 
             # Start sshd with our host key
@@ -1353,10 +1357,14 @@ class ModalProviderInstance(BaseProviderInstance):
                 host.connect()
 
                 # Record BOOT activity for idle detection
-                set_boot_thread = concurrency_group.start_new_thread(host.record_activity, (ActivitySource.BOOT,))
+                set_boot_thread = start_mngr_thread(
+                    concurrency_group=concurrency_group, target=host.record_activity, args=(ActivitySource.BOOT,)
+                )
 
                 # Write the host data.json (will also update volume via callback since host record already exists)
-                set_certified_data_thread = concurrency_group.start_new_thread(host.set_certified_data, (host_data,))
+                set_certified_data_thread = start_mngr_thread(
+                    concurrency_group=concurrency_group, target=host.set_certified_data, args=(host_data,)
+                )
 
                 # then wait for them both, just a minor optimization to parallelize the writes
                 set_boot_thread.join(60.0)

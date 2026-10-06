@@ -6,7 +6,8 @@ Without explicit cleanup, that pipe leaks when the thread exits.
 
 ``mngr_executor`` is a context manager that yields an executor-like object
 whose ``submit`` wraps each submitted callable with a ``finally`` that
-destroys the thread-local gevent Hub.
+destroys the thread-local gevent Hub. ``start_mngr_thread`` does the same for a
+single thread started on a ``ConcurrencyGroup``.
 """
 
 import functools
@@ -27,6 +28,7 @@ from pydantic import Field
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.executor import ConcurrencyGroupExecutor
+from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.frozen_model import FrozenModel
 
 T = TypeVar("T")
@@ -77,6 +79,48 @@ class _MngrExecutor(FrozenModel):
                 cleanup_thread_local_resources()
 
         return self.executor.submit(wrapped)
+
+
+class _ThreadLocalResourceReleasingThread(ObservableThread):
+    """ObservableThread that releases its thread-local resources once its target has finished."""
+
+    def run(self) -> None:
+        try:
+            super().run()
+        finally:
+            cleanup_thread_local_resources()
+
+
+def start_mngr_thread(
+    concurrency_group: ConcurrencyGroup,
+    target: Callable[..., Any],
+    args: tuple = (),
+    kwargs: dict | None = None,
+    name: str | None = None,
+    daemon: bool = True,
+    silenced_exceptions: tuple[type[BaseException], ...] | None = None,
+    suppressed_exceptions: tuple[type[BaseException], ...] | None = None,
+    is_checked: bool = True,
+    on_failure: Callable[[BaseException], None] | None = None,
+) -> ObservableThread:
+    """Start a thread on the group, like ``ConcurrencyGroup.start_new_thread``, that destroys its gevent Hub on exit.
+
+    Use this instead of ``start_new_thread`` in mngr code: a thread that runs a
+    host command otherwise leaves its Hub's pipe pair open for the life of the
+    process.
+    """
+    thread = _ThreadLocalResourceReleasingThread(
+        target=target,
+        args=args,
+        kwargs=kwargs,
+        name=name,
+        daemon=daemon,
+        silenced_exceptions=silenced_exceptions,
+        suppressed_exceptions=suppressed_exceptions,
+        on_failure=on_failure,
+    )
+    concurrency_group.start_thread(thread, is_checked=is_checked)
+    return thread
 
 
 @contextmanager

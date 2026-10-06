@@ -47,6 +47,7 @@ from imbue.mngr.primitives import OutputFormat
 from imbue.mngr.primitives import SyncDirection
 from imbue.mngr.primitives import UncommittedChangesMode
 from imbue.mngr.utils.git_utils import find_git_worktree_root
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_pair.api import TransferProgress
 from imbue.mngr_pair.api import UnisonSyncer
 from imbue.mngr_pair.api import pair_files
@@ -474,7 +475,8 @@ def pair(ctx: click.Context, **kwargs) -> None:
             on_transfer_change=PairActivityReporter(output_opts=output_opts).on_transfer_change,
         ) as syncer:
             stop_signal = SyncStopSignal(syncer=syncer)
-            mngr_ctx.concurrency_group.start_new_thread(
+            start_mngr_thread(
+                concurrency_group=mngr_ctx.concurrency_group,
                 target=stop_signal.wait_for_syncer,
                 name="mngr-pair-syncer-waiter",
                 daemon=True,

@@ -49,7 +49,7 @@ def check_ratchet_rule_all_files(
     return get_ratchet_failures(source_dir, None, pattern, excluded_path_patterns)
 
 
-# --- Code safety ---
+# Code safety
 
 PREVENT_TODOS = RegexRatchetRule(
     rule_name="TODO comments",
@@ -114,7 +114,7 @@ PREVENT_SETATTR = RegexRatchetRule(
 )
 
 
-# --- Exception handling ---
+# Exception handling
 
 PREVENT_BARE_EXCEPT = RegexRatchetRule(
     rule_name="bare except clauses",
@@ -141,7 +141,7 @@ PREVENT_BUILTIN_EXCEPTION_RAISES = RegexRatchetRule(
 )
 
 
-# --- Import style ---
+# Import style
 
 PREVENT_INLINE_IMPORTS = RegexRatchetRule(
     rule_name="inline imports",
@@ -165,7 +165,7 @@ PREVENT_IMPORT_DATETIME = RegexRatchetRule(
 )
 
 
-# --- Banned libraries and patterns ---
+# Banned libraries and patterns
 
 PREVENT_ASYNCIO_IMPORT = RegexRatchetRule(
     rule_name="asyncio imports",
@@ -229,7 +229,7 @@ PREVENT_EXIT_STACK = RegexRatchetRule(
 )
 
 
-# --- Naming conventions ---
+# Naming conventions
 
 PREVENT_NUM_PREFIX = RegexRatchetRule(
     rule_name="num prefix usage",
@@ -238,7 +238,7 @@ PREVENT_NUM_PREFIX = RegexRatchetRule(
 )
 
 
-# --- Documentation ---
+# Documentation
 
 PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
     rule_name="trailing comments",
@@ -272,7 +272,7 @@ PREVENT_RETURNS_IN_DOCSTRINGS = RegexRatchetRule(
 )
 
 
-# --- Type safety ---
+# Type safety
 
 PREVENT_LITERAL_MULTIPLE_OPTIONS = RegexRatchetRule(
     rule_name="Literal with multiple options",
@@ -302,7 +302,7 @@ PREVENT_SHORT_UUID_IDS = RegexRatchetRule(
 )
 
 
-# --- Pydantic / models ---
+# Pydantic / models
 
 PREVENT_MODEL_COPY = RegexRatchetRule(
     rule_name=".model_copy() usage",
@@ -315,7 +315,7 @@ PREVENT_MODEL_COPY = RegexRatchetRule(
 )
 
 
-# --- Logging ---
+# Logging
 
 PREVENT_FSTRING_LOGGING = RegexRatchetRule(
     rule_name="f-string logging",
@@ -348,7 +348,7 @@ PREVENT_CLICK_ECHO = RegexRatchetRule(
 )
 
 
-# --- Testing conventions ---
+# Testing conventions
 
 PREVENT_UNITTEST_MOCK_IMPORTS = RegexRatchetRule(
     rule_name="unittest.mock imports",
@@ -391,7 +391,7 @@ PREVENT_PYTEST_MARK_INTEGRATION = RegexRatchetRule(
 )
 
 
-# --- AST-based ratchet metadata ---
+# AST-based ratchet metadata
 
 PREVENT_PER_FILE_HOST_UPLOAD = RatchetRuleInfo(
     rule_name="per-file host uploads inside loops",
@@ -468,7 +468,7 @@ PREVENT_ASSERT_ISINSTANCE = RatchetRuleInfo(
 )
 
 
-# --- Process management ---
+# Process management
 
 PREVENT_DIRECT_SUBPROCESS = RegexRatchetRule(
     rule_name="direct subprocess/os.exec usage",
@@ -511,11 +511,25 @@ PREVENT_RAW_CONCURRENCY_GROUP_EXECUTOR = RegexRatchetRule(
         "that runs a host command (pyinfra reads its output with gevent greenlets) otherwise leaves "
         "its Hub behind, pinning a pipe pair and the task's object graph for the life of the process "
         "-- unbounded growth in long-running callers like `mngr observe`, which fan out on every "
-        "poll. This rule only sees the executor: a short-lived thread started any other way "
-        "(start_new_thread, ThreadPoolExecutor, threading.Thread) that runs host commands must call "
-        "cleanup_thread_local_resources() in a finally block itself."
+        "poll. This rule only sees the executor: start threads on a ConcurrencyGroup with "
+        "start_mngr_thread, and a short-lived thread started any other way (ThreadPoolExecutor, "
+        "threading.Thread) that runs host commands must call cleanup_thread_local_resources() in a "
+        "finally block itself."
     ),
     pattern_string=r"(?<!class )\bConcurrencyGroupExecutor\(",
+)
+
+PREVENT_RAW_START_NEW_THREAD = RegexRatchetRule(
+    rule_name="raw ConcurrencyGroup.start_new_thread calls",
+    rule_description=(
+        "Do not call ConcurrencyGroup.start_new_thread directly in production code. In mngr and its "
+        "plugins, use start_mngr_thread from imbue.mngr.utils.thread_cleanup instead: it takes the "
+        "same arguments plus the group, and destroys the thread's gevent Hub when its target "
+        "returns. A thread that runs a host command (pyinfra reads its output with gevent "
+        "greenlets) otherwise leaves its Hub's pipe pair open for the life of the process, so a "
+        "long-running process that starts such threads periodically leaks descriptors without bound."
+    ),
+    pattern_string=r"\.start_new_thread\(",
 )
 
 PREVENT_IMPORTLIB_IMPORT_MODULE = RegexRatchetRule(
@@ -554,7 +568,7 @@ PREVENT_HARDCODED_GUARDED_BINARY = RegexRatchetRule(
 )
 
 
-# --- Modal images ---
+# Modal images
 
 PREVENT_UNPINNED_MODAL_PIP_INSTALL = RegexRatchetRule(
     rule_name="unpinned Modal image pip installs",
@@ -570,7 +584,7 @@ PREVENT_UNPINNED_MODAL_PIP_INSTALL = RegexRatchetRule(
 )
 
 
-# --- Terminal management ---
+# Terminal management
 
 PREVENT_BARE_URWID_TTY_SIGNAL_KEYS = RegexRatchetRule(
     rule_name="bare urwid tty_signal_keys call",

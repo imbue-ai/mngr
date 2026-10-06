@@ -225,6 +225,10 @@ def test_prevent_raw_concurrency_group_executor() -> None:
     rc.check_raw_concurrency_group_executor(_DIR, snapshot(0))
 
 
+def test_prevent_raw_start_new_thread() -> None:
+    rc.check_raw_start_new_thread(_DIR, snapshot(0))
+
+
 # --- AST-based ratchets ---
 
 

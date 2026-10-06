@@ -269,3 +269,10 @@ def test_prevent_code_in_init_files() -> None:
 
 def test_prevent_unpinned_modal_pip_install() -> None:
     rc.check_unpinned_modal_pip_install(_DIR, snapshot(0))
+
+
+# --- Process management ---
+
+
+def test_prevent_raw_start_new_thread() -> None:
+    rc.check_raw_start_new_thread(_DIR, snapshot(44))

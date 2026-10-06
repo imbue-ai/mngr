@@ -54,6 +54,7 @@ from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import PluginName
 from imbue.mngr.providers.local.instance import get_or_create_local_host_id
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_forward.ssh_tunnel import SSHTunnelManager
 from imbue.mngr_latchkey.agent_setup import LatchkeyGatewayLocation
 from imbue.mngr_latchkey.agent_setup import finalize_host_permissions
@@ -800,7 +801,8 @@ def _run_forward_supervisor(
     consumer.start()
     # Dispatch SIGHUP-driven observe bounces off the signal-handler thread so
     # slow subprocess teardown/respawn never runs in signal context.
-    mngr_ctx.concurrency_group.start_new_thread(
+    start_mngr_thread(
+        concurrency_group=mngr_ctx.concurrency_group,
         target=_run_sighup_bounce_watcher,
         args=(bounce_event, shutdown_event, consumer, discovery_handler.reload_provider_config),
         name="latchkey-forward-sighup-watcher",

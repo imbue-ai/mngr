@@ -109,6 +109,7 @@ from imbue.mngr.utils.git_utils import GIT_MIRROR_PUSH_REFSPECS
 from imbue.mngr.utils.name_generator import GENERIC_AGENT_NAME_HINT
 from imbue.mngr.utils.polling import wait_for
 from imbue.mngr.utils.read_deadline import remaining_read_timeout
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 
 @pure
@@ -1350,9 +1351,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             )
             data_path = self.host_dir / "data.json"
             serialized_data = json.dumps(stamped_data.model_dump(by_alias=True, mode="json"), indent=2)
-            direct_write_thread = concurrency_group.start_new_thread(
+            direct_write_thread = start_mngr_thread(
+                concurrency_group=concurrency_group,
                 # must write atomically, otherwise we can get in trouble
-                self.write_file,
+                target=self.write_file,
                 kwargs=dict(path=data_path, content=serialized_data.encode("utf-8"), mode=None, is_atomic=True),
                 name="write_certified_data",
             )
@@ -1764,7 +1766,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self._mkdir(target_path)
 
             # Track generated work dir in a thread to reduce latency
-            track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
+            track_thread = start_mngr_thread(
+                concurrency_group=cg, target=self._add_generated_work_dir, args=(target_path,)
+            )
 
             # Exclude .git if git options are present (git transfer handles it separately).
             exclude_git = options.git is not None
@@ -1799,7 +1803,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             self._mkdir(target_path)
 
             # Track generated work dir in a thread to reduce latency
-            track_thread = cg.start_new_thread(self._add_generated_work_dir, (target_path,))
+            track_thread = start_mngr_thread(
+                concurrency_group=cg, target=self._add_generated_work_dir, args=(target_path,)
+            )
 
             created_branch_name, checked_out_branch_name = self._transfer_git_repo(
                 source_host, source_path, target_path, options
@@ -2767,18 +2773,30 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                 threads: list[ObservableThread] = []
 
                 threads.append(
-                    concurrency_group.start_new_thread(
-                        self.write_text_file, (state_dir / "data.json", json.dumps(data, indent=2))
+                    start_mngr_thread(
+                        concurrency_group=concurrency_group,
+                        target=self.write_text_file,
+                        args=(state_dir / "data.json", json.dumps(data, indent=2)),
                     )
                 )
 
                 # Persist agent data to external storage (e.g., Modal volume)
                 threads.append(
-                    concurrency_group.start_new_thread(self.provider_instance.persist_agent_data, (self.id, data))
+                    start_mngr_thread(
+                        concurrency_group=concurrency_group,
+                        target=self.provider_instance.persist_agent_data,
+                        args=(self.id, data),
+                    )
                 )
 
                 # Record CREATE activity for idle detection
-                threads.append(concurrency_group.start_new_thread(agent.record_activity, (ActivitySource.CREATE,)))
+                threads.append(
+                    start_mngr_thread(
+                        concurrency_group=concurrency_group,
+                        target=agent.record_activity,
+                        args=(ActivitySource.CREATE,),
+                    )
+                )
 
                 # Notify plugins that the agent state directory was created
                 with log_span("Calling on_agent_state_dir_created hooks"):
@@ -2939,8 +2957,10 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
                     raise MngrError("Failed to determine remote home directory: $HOME resolved to an empty string")
 
             # Validate required files exist and execute transfers
-            agent_file_transfer_thread = concurrency_group.start_new_thread(
-                self._execute_agent_file_transfers, (agent, all_file_transfers, remote_home)
+            agent_file_transfer_thread = start_mngr_thread(
+                concurrency_group=concurrency_group,
+                target=self._execute_agent_file_transfers,
+                args=(agent, all_file_transfers, remote_home),
             )
 
             # Write environment variables to agent env file (before agent.provision()
@@ -2951,7 +2971,9 @@ class Host(OuterHost, BaseHost, OnlineHostInterface):
             # Ensure the shared shell libraries (mngr_log.sh, mngr_transcript_lib.sh)
             # exist at both host and agent level so that all bash scripts can source
             # them for logging, timestamp utilities, and raw-transcript primitives.
-            ensure_shared_libs_thread = concurrency_group.start_new_thread(self._ensure_shared_shell_libs, (agent,))
+            ensure_shared_libs_thread = start_mngr_thread(
+                concurrency_group=concurrency_group, target=self._ensure_shared_shell_libs, args=(agent,)
+            )
 
             # files need to be there before provisioning--even making this a thread was just a minor optimization:
             agent_file_transfer_thread.join(60.0)

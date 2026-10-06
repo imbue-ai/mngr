@@ -5,7 +5,7 @@ paths. Lives here so the relay-spin fix for half-closed channels stays in a
 single place.
 """
 
-import select
+import selectors
 import socket
 from typing import Final
 
@@ -17,12 +17,12 @@ _BUFFER_SIZE: Final[int] = 65536
 _SELECT_TIMEOUT_SECONDS: Final[float] = 1.0
 
 
-def relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
+def relay_step(sock: socket.socket, channel: paramiko.Channel, selector: selectors.BaseSelector) -> bool:
     """Perform one relay step: transfer available data between sock and channel.
 
     Returns True to continue relaying, False when either end has closed.
     """
-    r, _, _ = select.select([sock, channel], [], [], _SELECT_TIMEOUT_SECONDS)
+    r = {key.fileobj for key, _ in selector.select(_SELECT_TIMEOUT_SECONDS)}
 
     if sock in r:
         data = sock.recv(_BUFFER_SIZE)
@@ -53,12 +53,16 @@ def relay_step(sock: socket.socket, channel: paramiko.Channel) -> bool:
 def relay_data(sock: socket.socket, channel: paramiko.Channel) -> None:
     """Relay data bidirectionally between a local socket and a paramiko channel.
 
-    Uses select() to multiplex reads from both ends. Terminates when either
-    end closes or an error occurs.
+    Multiplexes reads from both ends with poll(): select() rejects descriptors
+    numbered 1024 or above, which a busy process can hold. Terminates when
+    either end closes or an error occurs.
     """
     try:
-        while relay_step(sock, channel):
-            pass
+        with selectors.PollSelector() as selector:
+            selector.register(sock, selectors.EVENT_READ)
+            selector.register(channel, selectors.EVENT_READ)
+            while relay_step(sock, channel, selector):
+                pass
     except (OSError, EOFError, paramiko.SSHException) as e:
         logger.trace("SSH tunnel relay ended: {}", e)
     finally:

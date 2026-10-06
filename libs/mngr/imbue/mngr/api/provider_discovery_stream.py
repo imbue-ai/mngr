@@ -38,6 +38,7 @@ from imbue.mngr.primitives import ProviderInstanceName
 from imbue.mngr.providers.base_provider import BaseProviderInstance
 from imbue.mngr.utils.jsonl_warn import MalformedJsonLineWarner
 from imbue.mngr.utils.thread_cleanup import mngr_executor
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 # How long the stream's main loop blocks per wait. The main thread has nothing
 # to do but notice a stop -- Ctrl-C interrupts the wait directly and stop_event
@@ -458,7 +459,8 @@ def _start_poller_thread(
     )
     # is_checked=False so one provider's poller crashing cannot fail the whole group
     # (and thus the other providers' pollers); on_failure logs which poller died.
-    return mngr_ctx.concurrency_group.start_new_thread(
+    return start_mngr_thread(
+        concurrency_group=mngr_ctx.concurrency_group,
         target=poller.run,
         args=(stop_event,),
         daemon=True,

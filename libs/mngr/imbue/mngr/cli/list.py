@@ -64,6 +64,7 @@ from imbue.mngr.utils.cel_utils import evaluate_cel_sort_key
 from imbue.mngr.utils.terminal import ANSI_DIM_GRAY
 from imbue.mngr.utils.terminal import ANSI_ERASE_LINE
 from imbue.mngr.utils.terminal import ANSI_RESET
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr.uv_tool import get_installed_plugin_package_names
 
 _DEFAULT_HUMAN_DISPLAY_FIELDS: Final[tuple[str, ...]] = (
@@ -282,7 +283,8 @@ def _list_impl(ctx: click.Context, **kwargs) -> None:
         registered_agent_types = sorted(set(list_registered_agent_types()) | set(list_agent_aliases().keys()))
         topic_names = sorted(get_all_topics().keys())
         installed_plugin_packages = get_installed_plugin_package_names()
-        mngr_ctx.concurrency_group.start_new_thread(
+        start_mngr_thread(
+            concurrency_group=mngr_ctx.concurrency_group,
             target=_refresh_completion_artifacts,
             kwargs={
                 "cli_group": cli_group,

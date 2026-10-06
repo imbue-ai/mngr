@@ -104,6 +104,7 @@ from imbue.mngr.primitives import TransferMode
 from imbue.mngr.primitives import WaitingReason
 from imbue.mngr.utils.git_utils import find_git_source_path
 from imbue.mngr.utils.polling import poll_until
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 from imbue.mngr_claude import hookimpl
 from imbue.mngr_claude import resources as _claude_resources
 from imbue.mngr_claude.claude_config import ClaudeDirectoryNotTrustedError
@@ -286,7 +287,7 @@ APPEND_SYSTEM_PROMPT_SEPARATOR: Final[str] = "\n\n"
 class ClaudeAgentConfig(AgentTypeConfig):
     """Config for the claude agent type."""
 
-    # --- role behaviour, set by a create template and applied by this harness ---
+    # role behaviour, set by a create template and applied by this harness
     #
     # Both are harness-neutral *intent*: a role states them once and each harness applies
     # them its own way. They live on the harness subclasses rather than AgentTypeConfig so
@@ -2082,9 +2083,10 @@ class ClaudeCoreAgent(
             # actually take effect on disk: claude_background_tasks.sh only
             # launches the converter if it finds it in commands/, and we
             # don't write it there if the flag is off.
-            provision_backgroun_script_thread = concurrency_group.start_new_thread(
-                _provision_claude_always_on_scripts,
-                (host, self._get_agent_dir(), concurrency_group),
+            provision_backgroun_script_thread = start_mngr_thread(
+                concurrency_group=concurrency_group,
+                target=_provision_claude_always_on_scripts,
+                args=(host, self._get_agent_dir(), concurrency_group),
             )
             provision_raw_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
             maybe_provision_common_transcript_scripts(self, host, self._get_agent_dir(), concurrency_group)
@@ -2793,7 +2795,7 @@ class ClaudeAgent(
                 "This may indicate a trust dialog appeared or Claude Code failed to start.",
             )
 
-    # --- HasCompactionMixin capability implementation ---
+    # HasCompactionMixin capability implementation
 
     def request_compaction(self, instructions: str | None = None) -> None:
         """Perform context compaction by sending /compact to Claude Code.

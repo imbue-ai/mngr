@@ -16,6 +16,7 @@ from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.concurrency_group.thread_utils import ObservableThread
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
+from imbue.mngr.utils.thread_cleanup import start_mngr_thread
 
 # How often a process the kernel cannot report the exit of is checked instead.
 _POLLED_EXIT_CHECK_SECONDS: Final[float] = 3.0
@@ -223,7 +224,8 @@ class ProcessExitWatch(MutableModel):
             self._wake_read_fd, self._wake_write_fd = os.pipe()
             os.set_blocking(self._wake_read_fd, False)
             os.set_blocking(self._wake_write_fd, False)
-        self._thread = self.concurrency_group.start_new_thread(
+        self._thread = start_mngr_thread(
+            concurrency_group=self.concurrency_group,
             target=self._wait_for_exits,
             args=(self._wake_read_fd,),
             name=self.thread_name,
