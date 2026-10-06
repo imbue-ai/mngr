@@ -247,7 +247,7 @@ PREVENT_TRAILING_COMMENTS = RegexRatchetRule(
         "`# ty: ignore[code]` is exempt, as are hex colors, `#NNNN` issue and PR references (in prose or in a string "
         "literal), and `#{...}` interpolation/format tokens (e.g. tmux format strings), which are not comments."
     ),
-    pattern_string=r"[^\s#].*[ \t](?<![Pp][Rr] )#(?!\{)(?!\d+\b)(?![0-9a-fA-F]{3,6}[;\s])(?!\s*ty:\s*ignore\[)",
+    pattern_string=r"[^\s#].*[ \t](?<![Pp][Rr] )#(?!\{)(?!\d+\b)(?![0-9a-fA-F]{3,6}[;\s\"'])(?!\s*ty:\s*ignore\[)",
 )
 
 PREVENT_INIT_DOCSTRINGS = RegexRatchetRule(

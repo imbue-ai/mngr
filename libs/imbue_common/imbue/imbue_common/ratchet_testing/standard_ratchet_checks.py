@@ -73,7 +73,7 @@ from imbue.imbue_common.ratchet_testing.ratchets import find_per_file_host_uploa
 from imbue.imbue_common.ratchet_testing.ratchets import find_silent_decode_error_catches
 from imbue.imbue_common.ratchet_testing.ratchets import find_underscore_imports
 
-_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py")
+_SELF_EXCLUSION: tuple[str, ...] = ("test_ratchets.py", "standard_ratchet_checks.py", "common_ratchets_test.py")
 
 
 def assert_ratchet(
