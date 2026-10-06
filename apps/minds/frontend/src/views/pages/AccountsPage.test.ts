@@ -70,7 +70,7 @@ describe("AccountsPage", () => {
       ALICE.email,
       BOB.email,
     ]);
-    expect(planUrls).toEqual([
+    expect(planUrls.filter((url) => url.endsWith("/plan"))).toEqual([
       "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-2/plan",
     ]);

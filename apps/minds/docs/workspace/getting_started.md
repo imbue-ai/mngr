@@ -95,6 +95,22 @@ marks the row "Could not save" and offers Retry. A removal takes effect as
 soon as it saves, because the workspace re-reads the list on every
 request.
 
+Granting does not tell anyone. Each person's row offers Invite, which
+sends them an email from Imbue with the target's link and who shared it;
+the row then reads "Invited" with when, or "Could not invite". Once they
+have opened the link the row reads "Joined". A domain grant notifies
+nobody: pass the link on yourself. Invite appears only while the workspace
+is published and its permissions have reached Imbue Cloud, which happens
+behind every save; until then the panel says the permissions have not
+reached Imbue Cloud yet and sends them again on its own. Imbue limits how
+many invitations an account sends in a day and how often the same person
+can be invited; the panel says so when a limit refuses one. See
+`specs/inviting-granted-visitors/spec.md` for the rules.
+
+Anyone can turn these emails off for their own account on the Accounts
+page, under "Email notifications". The emails an account needs, such as a
+password reset, are never affected.
+
 Turning publishing off drops the address, and anyone connected is cut
 off. The list of permissions is preserved but inactive: it stays visible
 and removable while off, and comes back live on the next publish with

@@ -58,27 +58,43 @@ function pendingPlanDetails(
   const learnMore = privacyPolicyUrl
     ? m(
         Link,
-        { href: privacyPolicyUrl, target: "_blank", rel: "noopener", extra: "type-helper" },
+        {
+          href: privacyPolicyUrl,
+          target: "_blank",
+          rel: "noopener",
+          extra: "type-helper",
+        },
         "Learn more.",
       )
     : null;
   return m("div", { class: "mb-2" }, [
     description !== undefined
-      ? m("p", { class: "type-helper text-tertiary mb-1" }, [description, " ", learnMore])
+      ? m("p", { class: "type-helper text-tertiary mb-1" }, [
+          description,
+          " ",
+          learnMore,
+        ])
       : null,
     selectedPlan === "explorer"
-      ? m("label", { class: "flex items-start gap-2 type-helper text-secondary cursor-pointer" }, [
-          m("input", {
-            id: "explorer-agreement-checkbox",
-            type: "checkbox",
-            checked: isAgreementChecked,
-            class: "mt-0.5 cursor-pointer",
-            onchange: (event: Event) => {
-              onAgreementChange((event.target as HTMLInputElement).checked);
-            },
-          }),
-          m("span", EXPLORER_AGREEMENT_COPY),
-        ])
+      ? m(
+          "label",
+          {
+            class:
+              "flex items-start gap-2 type-helper text-secondary cursor-pointer",
+          },
+          [
+            m("input", {
+              id: "explorer-agreement-checkbox",
+              type: "checkbox",
+              checked: isAgreementChecked,
+              class: "mt-0.5 cursor-pointer",
+              onchange: (event: Event) => {
+                onAgreementChange((event.target as HTMLInputElement).checked);
+              },
+            }),
+            m("span", EXPLORER_AGREEMENT_COPY),
+          ],
+        )
       : null,
   ]);
 }
@@ -110,9 +126,12 @@ function planSection(
   const verifyPrompt = model.verifyEmailPromptFor(account.user_id);
   // The draft lives in component state (keyed by user_id): a per-render
   // local would be reset by the redraw that follows the select's onchange.
-  const selectedPlan = selectedPlanByUserId.get(account.user_id) ?? view.plan_name;
-  const isAgreementChecked = isExplorerAgreementCheckedByUserId.get(account.user_id) === true;
-  const isAgreementNeeded = selectedPlan === "explorer" && selectedPlan !== view.plan_name;
+  const selectedPlan =
+    selectedPlanByUserId.get(account.user_id) ?? view.plan_name;
+  const isAgreementChecked =
+    isExplorerAgreementCheckedByUserId.get(account.user_id) === true;
+  const isAgreementNeeded =
+    selectedPlan === "explorer" && selectedPlan !== view.plan_name;
   const isSwitchingPlan = model.isSwitchingPlan(account.user_id);
   return m("div", [
     verifyPrompt !== null
@@ -129,8 +148,7 @@ function planSection(
               {
                 variant: "secondary",
                 disabled: verifyPrompt.isResending,
-                onclick: () =>
-                  void model.resendVerification(account.user_id),
+                onclick: () => void model.resendVerification(account.user_id),
               },
               verifyPrompt.isResending ? "Sending…" : "Resend email",
             ),
@@ -175,7 +193,10 @@ function planSection(
                 name: "plan",
                 width: "w-32",
                 onchange: (event: Event) => {
-                  selectedPlanByUserId.set(account.user_id, (event.target as HTMLSelectElement).value);
+                  selectedPlanByUserId.set(
+                    account.user_id,
+                    (event.target as HTMLSelectElement).value,
+                  );
                   // A new pick invalidates a previously-checked agreement.
                   isExplorerAgreementCheckedByUserId.delete(account.user_id);
                 },
@@ -209,9 +230,15 @@ function planSection(
           ])
         : null,
     ]),
-    pendingPlanDetails(view, plan.privacyPolicyUrl, selectedPlan, isAgreementChecked, (isChecked) => {
-      isExplorerAgreementCheckedByUserId.set(account.user_id, isChecked);
-    }),
+    pendingPlanDetails(
+      view,
+      plan.privacyPolicyUrl,
+      selectedPlan,
+      isAgreementChecked,
+      (isChecked) => {
+        isExplorerAgreementCheckedByUserId.set(account.user_id, isChecked);
+      },
+    ),
     m(
       "table",
       { class: "w-full type-helper" },
@@ -259,11 +286,69 @@ function planSection(
           { class: "mt-2" },
           m(
             Link,
-            { extra: "type-helper", ...routeLinkAttrs("/workspaces/destroyed") },
+            {
+              extra: "type-helper",
+              ...routeLinkAttrs("/workspaces/destroyed"),
+            },
             "Review destroyed machine backups →",
           ),
         )
       : null,
+  ]);
+}
+
+/** The account's notification email, on or off. Invitations to shared
+ * workspaces ride this switch; the email an account needs, such as a password
+ * reset, never does. */
+function notificationSection(
+  model: AccountsDetailModel,
+  account: UiAccountEntry,
+): m.Children {
+  const preferences = model.notificationPreferencesFor(account.user_id);
+  if (!preferences.isLoaded)
+    return m(
+      "div",
+      { class: "flex items-center gap-2 type-helper text-tertiary" },
+      [m(Spinner, { size: "sm" }), "Loading notification settings…"],
+    );
+  if (preferences.channels === null)
+    return m(
+      "div",
+      { class: "type-helper text-tertiary" },
+      "Notification settings are unavailable right now (could not reach Imbue Cloud).",
+    );
+  const isEnabled = preferences.channels.email_enabled;
+  return m("div", { class: "flex items-center justify-between gap-4" }, [
+    m("div", [
+      m("div", { class: "type-label text-secondary" }, "Email notifications"),
+      m(
+        "div",
+        { class: "type-helper text-tertiary" },
+        "Invitations to workspaces shared with you, and other notifications. " +
+          "Emails your account needs, such as password resets, are always sent.",
+      ),
+    ]),
+    m("span", { class: "flex shrink-0 items-center gap-2" }, [
+      preferences.isWriting ? m(Spinner, { size: "sm" }) : null,
+      m("button", {
+        type: "button",
+        role: "switch",
+        "aria-checked": isEnabled ? "true" : "false",
+        "aria-label": "Email notifications",
+        "data-email-notifications": account.user_id,
+        class: preferences.isWriting
+          ? "perm-switch shrink-0 is-busy"
+          : "perm-switch shrink-0",
+        disabled: preferences.isWriting,
+        onclick: () =>
+          void model.setEmailNotifications(account.user_id, !isEnabled),
+      }),
+      m(
+        "span",
+        { class: "type-body text-secondary" },
+        isEnabled ? "On" : "Off",
+      ),
+    ]),
   ]);
 }
 
@@ -303,7 +388,11 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
             !account.is_enabled
               ? m(
                   Button,
-                  { variant: "primary", onclick: () => void webLogin.start("", { isClosedOnSignIn: true }) },
+                  {
+                    variant: "primary",
+                    onclick: () =>
+                      void webLogin.start("", { isClosedOnSignIn: true }),
+                  },
                   "Sign in again",
                 )
               : null,
@@ -341,7 +430,17 @@ export function AccountCard(): m.Component<AccountCardAttrs> {
         m(
           "div",
           { class: "mt-3 pt-3 border-t border-default" },
-          planSection(model, account, selectedPlanByUserId, isExplorerAgreementCheckedByUserId),
+          planSection(
+            model,
+            account,
+            selectedPlanByUserId,
+            isExplorerAgreementCheckedByUserId,
+          ),
+        ),
+        m(
+          "div",
+          { class: "mt-3 pt-3 border-t border-default" },
+          notificationSection(model, account),
         ),
       ]);
     },

@@ -14,6 +14,7 @@ Authentication semantics:
 """
 
 import os
+from collections.abc import Mapping
 from functools import cache
 from importlib import metadata
 from typing import Any
@@ -57,6 +58,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudShareRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
@@ -73,10 +75,13 @@ from imbue.mngr_imbue_cloud.wire_types import AccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AdminAccountInfo
 from imbue.mngr_imbue_cloud.wire_types import AuthRawResponse
 from imbue.mngr_imbue_cloud.wire_types import ContactEntry
+from imbue.mngr_imbue_cloud.wire_types import InvitationOutcomeEntry
+from imbue.mngr_imbue_cloud.wire_types import InvitationResult
 from imbue.mngr_imbue_cloud.wire_types import LeaseResult
 from imbue.mngr_imbue_cloud.wire_types import LeasedHostInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
+from imbue.mngr_imbue_cloud.wire_types import NotificationPreferencesInfo
 from imbue.mngr_imbue_cloud.wire_types import PaidListEntry
 from imbue.mngr_imbue_cloud.wire_types import PublicProfile
 from imbue.mngr_imbue_cloud.wire_types import R2BucketCreateResult
@@ -84,6 +89,7 @@ from imbue.mngr_imbue_cloud.wire_types import R2BucketInfo
 from imbue.mngr_imbue_cloud.wire_types import R2KeyInfo
 from imbue.mngr_imbue_cloud.wire_types import R2KeyMaterial
 from imbue.mngr_imbue_cloud.wire_types import RelayAdminInfo
+from imbue.mngr_imbue_cloud.wire_types import ShareGrantsPushResult
 from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayEndpoint
 from imbue.mngr_imbue_cloud.wire_types import ShareRelayLogin
@@ -1122,6 +1128,106 @@ class ImbueCloudConnectorClient(MutableModel):
         body = self._check(response, ImbueCloudShareError)
         count = body.get("count")
         return int(count) if isinstance(count, int) else len(grantee_user_ids)
+
+    def _raise_if_share_refused(self, response: httpx.Response) -> None:
+        """Map the connector's structured 409 refusals of the grants push and invitation routes."""
+        if response.status_code != 409:
+            return
+        detail = _detail_dict_from_response(response)
+        code = detail.get("code") if detail is not None else None
+        if isinstance(code, str) and code:
+            raise ImbueCloudShareRefusedError(code, str(detail.get("message", code)) if detail else code)
+
+    def push_share_grants(
+        self, access_token: SecretStr, host_id: str, document: Mapping[str, Any]
+    ) -> ShareGrantsPushResult:
+        """Record the workspace's parsed grants document in the centralized grants table; idempotent."""
+        response = self._send(
+            "PUT",
+            self._url(f"/shares/{host_id}/grants"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            json=dict(document),
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_share_refused(response)
+        return validate_wire(ShareGrantsPushResult, self._check(response, ImbueCloudShareError))
+
+    def invite_grantee(
+        self,
+        access_token: SecretStr,
+        host_id: str,
+        user_id: str | None,
+        email: str | None,
+        app: str | None,
+        link: str | None,
+        workspace_name: str | None,
+    ) -> InvitationResult:
+        """Invite the grantee of one user grant or email grant; raises ImbueCloudShareRefusedError on a 409."""
+        body: dict[str, str] = {}
+        if user_id:
+            body["user_id"] = user_id
+        if email:
+            body["email"] = email
+        if app:
+            body["app"] = app
+        if link:
+            body["link"] = link
+        if workspace_name:
+            body["workspace_name"] = workspace_name
+        response = self._send(
+            "POST",
+            self._url(f"/shares/{host_id}/invitations"),
+            exc_cls=ImbueCloudShareError,
+            # A retried POST after a lost response could send a second email.
+            idempotent=False,
+            headers=self._bearer(access_token),
+            json=body,
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_share_refused(response)
+        return validate_wire(InvitationResult, self._check(response, ImbueCloudShareError))
+
+    def list_invitation_outcomes(self, access_token: SecretStr, host_id: str) -> list[InvitationOutcomeEntry]:
+        """The granter-visible outcome of every open user or email grant of the share."""
+        response = self._send(
+            "GET",
+            self._url(f"/shares/{host_id}/invitation-outcomes"),
+            exc_cls=ImbueCloudShareError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        self._raise_if_share_refused(response)
+        body = self._check(response, ImbueCloudShareError)
+        return parse_wire_entries(
+            InvitationOutcomeEntry,
+            body.get("outcomes"),
+            "GET /shares/{host_id}/invitation-outcomes",
+            ImbueCloudShareError,
+        )
+
+    def get_notification_preferences(self, access_token: SecretStr) -> NotificationPreferencesInfo:
+        response = self._send(
+            "GET",
+            self._url("/accounts/me/notification-preferences"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            timeout=self.timeout_seconds,
+        )
+        return validate_wire(NotificationPreferencesInfo, self._check(response, ImbueCloudAccountError))
+
+    def set_notification_preferences(
+        self, access_token: SecretStr, email_enabled: bool, in_app_enabled: bool
+    ) -> NotificationPreferencesInfo:
+        response = self._send(
+            "PUT",
+            self._url("/accounts/me/notification-preferences"),
+            exc_cls=ImbueCloudAccountError,
+            headers=self._bearer(access_token),
+            json={"email_enabled": email_enabled, "in_app_enabled": in_app_enabled},
+            timeout=self.timeout_seconds,
+        )
+        return validate_wire(NotificationPreferencesInfo, self._check(response, ImbueCloudAccountError))
 
     def _check_bucket(self, response: httpx.Response) -> Any:
         """Validate a bucket-route response, mapping status codes to typed errors."""

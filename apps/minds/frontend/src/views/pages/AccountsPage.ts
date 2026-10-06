@@ -20,10 +20,10 @@ export function AccountsPage(): m.Component {
   const model = new AccountsDetailModel();
   return {
     oninit(): void {
-      model.syncPlans(getAppContext().stores.accounts.accounts);
+      model.syncAccounts(getAppContext().stores.accounts.accounts);
     },
     onupdate(): void {
-      model.syncPlans(getAppContext().stores.accounts.accounts);
+      model.syncAccounts(getAppContext().stores.accounts.accounts);
     },
     onremove(): void {
       model.dispose();

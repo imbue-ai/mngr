@@ -38,6 +38,7 @@ from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.minds_config import NotificationStyle
 from imbue.minds.desktop_client.notification import NotificationRequest
+from imbue.minds.desktop_client.session_store import AccountSession
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_auth import is_ui_request_authenticated
 from imbue.minds.utils.sentry.core import latchkey_forward_sentry_consent_path
@@ -116,6 +117,27 @@ class UiUpdateWindowWrite(FrozenModel):
 
     start_hour: int = Field(ge=0, le=23, description="Local hour the window opens")
     end_hour: int = Field(ge=0, le=23, description="Local hour the window closes")
+
+
+class UiNotificationChannels(FrozenModel):
+    """An account's notification preferences on Imbue Cloud, as the accounts page shows them."""
+
+    email_enabled: bool = Field(description="Whether notification email (invitations included) may be sent")
+    in_app_enabled: bool = Field(description="Whether in-app notifications may be delivered")
+
+
+class UiAccountNotificationPreferencesResponse(FrozenModel):
+    """Answer to the account notification-preferences read or write."""
+
+    preferences: UiNotificationChannels | None = Field(
+        description="The preferences; None when Imbue Cloud could not be reached"
+    )
+
+
+class UiAccountNotificationPreferencesWrite(FrozenModel):
+    """Body of the account notification-preferences write: the one switch the app exposes."""
+
+    email_enabled: bool = Field(description="Whether notification email may be sent to the account's address")
 
 
 class UiPlanUsageRow(FrozenModel):
@@ -526,6 +548,52 @@ def _handle_account_plan(user_id: str) -> Response:
     )
 
 
+def _signed_in_account_for(user_id: str) -> AccountSession | None:
+    session_store = get_state().session_store
+    accounts = session_store.list_accounts() if session_store is not None else []
+    return next((account for account in accounts if str(account.user_id) == user_id), None)
+
+
+def _handle_account_notification_preferences(user_id: str) -> Response:
+    """GET/POST /ui/api/accounts/<user_id>/notification-preferences: the account's channels on Imbue Cloud.
+
+    Only the email switch is written: in-app stays as it is (the channel is
+    modelled but not delivered yet). A connector failure degrades to
+    ``preferences: null`` rather than an error status, so the card renders an
+    unavailable state instead of failing.
+    """
+    if not is_ui_request_authenticated():
+        return _unauthenticated_response()
+    account = _signed_in_account_for(user_id)
+    cli = get_state().imbue_cloud_cli
+    if account is None or cli is None:
+        return _json_response(UiAccountNotificationPreferencesResponse(preferences=None))
+    try:
+        if request.method == "POST":
+            body = request.get_json(silent=True, force=True)
+            if not isinstance(body, dict):
+                return _error_response("Invalid JSON body", 400)
+            try:
+                write = UiAccountNotificationPreferencesWrite.model_validate(body)
+            except ValidationError as e:
+                logger.debug("Rejected a malformed notification-preferences write body: {}", e)
+                return _error_response("Invalid JSON body", 400)
+            current = cli.get_notification_preferences(account=str(account.email))
+            info = cli.set_notification_preferences(
+                account=str(account.email), email_enabled=write.email_enabled, in_app_enabled=current.in_app_enabled
+            )
+        else:
+            info = cli.get_notification_preferences(account=str(account.email))
+    except ImbueCloudCliError as exc:
+        logger.debug("Could not reach the notification preferences for {}: {}", account.email, exc)
+        return _json_response(UiAccountNotificationPreferencesResponse(preferences=None))
+    return _json_response(
+        UiAccountNotificationPreferencesResponse(
+            preferences=UiNotificationChannels(email_enabled=info.email_enabled, in_app_enabled=info.in_app_enabled)
+        )
+    )
+
+
 def _handle_ai_keys_context() -> Response:
     """GET /ui/api/ai-keys?workspace=<workspace_id>: context for the mint page.
 
@@ -590,4 +658,9 @@ def register_settings_routes(blueprint: Blueprint) -> None:
         "/api/settings/browser-import/offered", view_func=_handle_browser_import_offered, methods=["POST"]
     )
     blueprint.add_url_rule("/api/accounts/<user_id>/plan", view_func=_handle_account_plan)
+    blueprint.add_url_rule(
+        "/api/accounts/<user_id>/notification-preferences",
+        view_func=_handle_account_notification_preferences,
+        methods=["GET", "POST"],
+    )
     blueprint.add_url_rule("/api/ai-keys", view_func=_handle_ai_keys_context)

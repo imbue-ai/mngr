@@ -41,9 +41,7 @@ describe("AccountsDetailModel", () => {
           (callback) => callback(),
         );
         await model.loadPlan(ACCOUNT.user_id);
-        expect(model.planStateFor(ACCOUNT.user_id).planView).toEqual(
-          PLAN_VIEW,
-        );
+        expect(model.planStateFor(ACCOUNT.user_id).planView).toEqual(PLAN_VIEW);
       },
     );
   });
@@ -63,14 +61,17 @@ describe("AccountsDetailModel", () => {
       (callback) => callback(),
     );
 
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([ACCOUNT]);
     await settle();
-    model.syncPlans([ACCOUNT, secondAccountEntry()]);
+    model.syncAccounts([ACCOUNT, secondAccountEntry()]);
     await settle();
 
+    // The notification preferences ride along with each plan load.
     expect(urls).toEqual([
       "/ui/api/accounts/user-1/plan",
+      "/ui/api/accounts/user-1/notification-preferences",
       "/ui/api/accounts/user-2/plan",
+      "/ui/api/accounts/user-2/notification-preferences",
     ]);
     expect(model.planStateFor("user-1").isUnavailable).toBe(true);
     expect(model.planStateFor("user-1").privacyPolicyUrl).toBe(
@@ -93,20 +94,20 @@ describe("AccountsDetailModel", () => {
     );
     const signedOut = accountEntry({ is_enabled: false });
 
-    model.syncPlans([signedOut]);
+    model.syncAccounts([signedOut]);
     await settle();
     expect(model.planStateFor("user-1").isUnavailable).toBe(true);
 
     planView = PLAN_VIEW;
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([ACCOUNT]);
     await settle();
     expect(model.planStateFor("user-1").planView).toEqual(PLAN_VIEW);
 
-    model.syncPlans([]);
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([]);
+    model.syncAccounts([ACCOUNT]);
     await settle();
 
-    expect(urls).toEqual([
+    expect(urls.filter((url) => url.endsWith("/plan"))).toEqual([
       "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-1/plan",
       "/ui/api/accounts/user-1/plan",
@@ -214,17 +215,25 @@ describe("AccountsDetailModel", () => {
 describe("the cached plan", () => {
   const UPDATED_VIEW: AccountPlanView = { ...PLAN_VIEW, plan_display_name: "Explorer (updated)" };
 
-  /** A model whose plan reads wait until the test answers them. */
+  /** A model whose plan reads wait until the test answers them. The notification
+   * preferences a sync also reads are answered at once, so the held read is
+   * always the plan's. */
   function modelWithHeldReads(): {
     model: AccountsDetailModel;
     answer: (planView: AccountPlanView | null) => void;
   } {
     let release: (response: Response) => void = () => {};
     const model = new AccountsDetailModel(
-      () =>
-        new Promise<Response>((resolve) => {
+      (input) => {
+        if (String(input).endsWith("/notification-preferences")) {
+          return Promise.resolve(
+            jsonResponse({ preferences: { email_enabled: true, in_app_enabled: true } }),
+          );
+        }
+        return new Promise<Response>((resolve) => {
           release = resolve;
-        }),
+        });
+      },
       () => {},
       (callback) => callback(),
     );
@@ -240,7 +249,7 @@ describe("the cached plan", () => {
       () => {},
       (callback) => callback(),
     );
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([ACCOUNT]);
     await settle();
     model.dispose();
   }
@@ -249,7 +258,7 @@ describe("the cached plan", () => {
     await visitOnce(PLAN_VIEW);
     const { model, answer } = modelWithHeldReads();
 
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([ACCOUNT]);
     const shown = model.planStateFor(ACCOUNT.user_id);
     expect(shown.isLoaded).toBe(true);
     expect(shown.planView).toEqual(PLAN_VIEW);
@@ -267,7 +276,7 @@ describe("the cached plan", () => {
     await visitOnce(PLAN_VIEW);
     const { model, answer } = modelWithHeldReads();
 
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([ACCOUNT]);
     answer(null);
     await settle();
 
@@ -282,7 +291,7 @@ describe("the cached plan", () => {
     await visitOnce(PLAN_VIEW);
     const { model, answer } = modelWithHeldReads();
 
-    model.syncPlans([{ ...ACCOUNT, is_enabled: false }]);
+    model.syncAccounts([{ ...ACCOUNT, is_enabled: false }]);
     const shown = model.planStateFor(ACCOUNT.user_id);
     expect(shown.isLoaded).toBe(false);
     expect(shown.planView).toBeNull();
@@ -301,10 +310,10 @@ describe("the cached plan", () => {
       () => {},
       (callback) => callback(),
     );
-    pruner.syncPlans([]);
+    pruner.syncAccounts([]);
     const { model } = modelWithHeldReads();
 
-    model.syncPlans([ACCOUNT]);
+    model.syncAccounts([ACCOUNT]);
 
     const shown = model.planStateFor(ACCOUNT.user_id);
     expect(shown.isLoaded).toBe(false);
@@ -379,7 +388,10 @@ describe("verify-email prompt", () => {
 
   it("keeps a plain 403 as the page error (no prompt)", async () => {
     const model = makeModelWithPlanResponse(
-      () => new Response("The 'ally' plan requires partner access", { status: 403 }),
+      () =>
+        new Response("The 'ally' plan requires partner access", {
+          status: 403,
+        }),
     );
 
     await model.switchPlan("user-1", "ally");
@@ -392,7 +404,11 @@ describe("verify-email prompt", () => {
     const model = makeModelWithPlanResponse(
       () =>
         new Response(
-          JSON.stringify({ code: "email_not_verified", email: "alice@example.com", sent: true }),
+          JSON.stringify({
+            code: "email_not_verified",
+            email: "alice@example.com",
+            sent: true,
+          }),
           { status: 403 },
         ),
       () => jsonResponse({ sent: false, email: "alice@example.com" }),
@@ -411,7 +427,11 @@ describe("verify-email prompt", () => {
       () => {
         planCalls += 1;
         return new Response(
-          JSON.stringify({ code: "email_not_verified", email: "alice@example.com", sent: true }),
+          JSON.stringify({
+            code: "email_not_verified",
+            email: "alice@example.com",
+            sent: true,
+          }),
           { status: 403 },
         );
       },
@@ -484,5 +504,99 @@ describe("plan-switch busy state", () => {
     releaseSwitch(new Response("", { status: 200 }));
     await switchDone;
     expect(model.isSwitchingPlan("user-1")).toBe(false);
+  });
+});
+
+describe("AccountsDetailModel notification preferences", () => {
+  const PREFERENCES_URL = `/ui/api/accounts/${ACCOUNT.user_id}/notification-preferences`;
+
+  it("loads each listed account's channels beside its plan, and writes the email switch", async () => {
+    const calls: { url: string; method: string; body: unknown }[] = [];
+    let isEmailEnabled = true;
+    const model = new AccountsDetailModel(
+      async (input, init) => {
+        const url = String(input);
+        const body =
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as unknown)
+            : null;
+        calls.push({ url, method: init?.method ?? "GET", body });
+        if (!url.endsWith("/notification-preferences"))
+          return jsonResponse({ plan_view: null, trim_status: null });
+        if (init?.method === "POST")
+          isEmailEnabled = (body as { email_enabled: boolean }).email_enabled;
+        return jsonResponse({
+          preferences: { email_enabled: isEmailEnabled, in_app_enabled: true },
+        });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+
+    model.syncAccounts([ACCOUNT]);
+    await settle();
+
+    expect(model.notificationPreferencesFor(ACCOUNT.user_id)).toEqual({
+      isLoaded: true,
+      channels: { email_enabled: true, in_app_enabled: true },
+      isWriting: false,
+    });
+
+    await model.setEmailNotifications(ACCOUNT.user_id, false);
+
+    const write = calls.find((call) => call.method === "POST");
+    expect(write?.url).toBe(PREFERENCES_URL);
+    expect(write?.body).toEqual({ email_enabled: false });
+    expect(model.notificationPreferencesFor(ACCOUNT.user_id).channels).toEqual({
+      email_enabled: false,
+      in_app_enabled: true,
+    });
+    expect(model.actionError).toBe("");
+  });
+
+  it("reads the channels as unavailable when Imbue Cloud cannot be reached, and writes nothing then", async () => {
+    const methods: string[] = [];
+    const model = new AccountsDetailModel(
+      async (_input, init) => {
+        methods.push(init?.method ?? "GET");
+        return jsonResponse({ preferences: null });
+      },
+      () => {},
+      (callback) => callback(),
+    );
+
+    await model.loadNotificationPreferences(ACCOUNT.user_id);
+    await model.setEmailNotifications(ACCOUNT.user_id, false);
+
+    expect(model.notificationPreferencesFor(ACCOUNT.user_id)).toEqual({
+      isLoaded: true,
+      channels: null,
+      isWriting: false,
+    });
+    expect(methods).toEqual(["GET"]);
+  });
+
+  it("leaves the switch where it was and says so when the write fails", async () => {
+    const model = new AccountsDetailModel(
+      async (_input, init) =>
+        init?.method === "POST"
+          ? jsonResponse({ error: "Not authenticated" }, 502)
+          : jsonResponse({
+              preferences: { email_enabled: true, in_app_enabled: true },
+            }),
+      () => {},
+      (callback) => callback(),
+    );
+    await model.loadNotificationPreferences(ACCOUNT.user_id);
+
+    await model.setEmailNotifications(ACCOUNT.user_id, false);
+
+    expect(
+      model.notificationPreferencesFor(ACCOUNT.user_id).channels?.email_enabled,
+    ).toBe(true);
+    expect(model.notificationPreferencesFor(ACCOUNT.user_id).isWriting).toBe(
+      false,
+    );
+    expect(model.actionError).toContain("could not be saved");
   });
 });

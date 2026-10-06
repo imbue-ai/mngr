@@ -879,3 +879,72 @@ def test_save_grants_reads_the_connector_before_it_writes() -> None:
     # Read once, after the probe and before the write exec.
     assert cli.exec_counts_at_status_read == [1]
     assert len([call for call in caller.calls if call and call[0] == "exec"]) == 2
+
+
+# The grants push behind every save while published (specs/inviting-granted-visitors/spec.md, P7)
+
+
+def test_publish_pushes_the_document_as_its_last_step() -> None:
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(
+        is_gateway_present=True,
+        is_share_env_present=False,
+        grants_toml_text='[workspace]\nemails = ["friend@example.com"]\n',
+    )
+    host_id = "host-" + "d" * 32
+
+    document = _publish_workspace_with_cli(
+        host_id,
+        AgentId("agent-" + "c" * 32),
+        "agent-address",
+        cli,
+        "owner@example.com",
+        _client_env_config(),
+        is_cloud_row=True,
+        service_labels={},
+        identity_cache=None,
+        forward_identity=None,
+        owner_account=None,
+        grants=None,
+    )
+
+    assert document["grants_synced"] is True
+    ((account, pushed_host_id, pushed),) = cli.pushed_grants_documents
+    assert (account, pushed_host_id) == ("owner@example.com", host_id)
+    assert pushed["workspace"]["emails"] == ["friend@example.com"]
+
+
+def test_save_while_published_pushes_the_saved_document_and_reports_a_failed_push() -> None:
+    host_id = "host-" + "d" * 32
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=True)
+    cli.add_share("owner@example.com", host_id)
+    grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
+
+    synced = _save_grants_for_test(host_id, AgentId("agent-" + "c" * 32), grants, cli)
+    cli.is_grants_push_failing = True
+    unsynced = _save_grants_for_test(host_id, AgentId("agent-" + "c" * 32), grants, cli)
+
+    assert synced["grants_synced"] is True
+    assert unsynced["grants_synced"] is False
+    assert unsynced["grants"]["workspace"]["emails"] == ["friend@example.com"]
+    assert [pushed["workspace"]["emails"] for _account, _host, pushed in cli.pushed_grants_documents] == [
+        ["friend@example.com"]
+    ]
+
+
+def test_save_while_unpublished_pushes_nothing() -> None:
+    cli = SucceedingCreateShareCli(connector_url=FAKE_CONNECTOR_URL)
+    caller = cli.mngr_caller
+    assert isinstance(caller, RecordingMngrCaller)
+    caller.result = make_share_probe_result(is_gateway_present=True, is_share_env_present=False)
+    grants = SharingGrantsDocument(workspace=SharingGrantList(emails=("friend@example.com",)))
+
+    document = _save_grants_for_test("host-" + "d" * 32, AgentId("agent-" + "c" * 32), grants, cli)
+
+    assert document["grants_synced"] is None
+    assert cli.pushed_grants_documents == []

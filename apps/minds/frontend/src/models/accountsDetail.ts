@@ -1,8 +1,8 @@
 // Accounts page model: each account's asynchronously-loaded plan/usage
-// section (the connector round trip that must never block first paint) and
-// the account actions. The account list itself is the accounts store's,
-// kept current by the channel. While a backup trim runs the plan section
-// re-polls so progress stays visible.
+// section and notification preferences (the connector round trips that must
+// never block first paint) and the account actions. The account list itself
+// is the accounts store's, kept current by the channel. While a backup trim
+// runs the plan section re-polls so progress stays visible.
 //
 // The last plan each account loaded is kept for the life of the window, so
 // reopening the page shows it at once while a fresh read replaces it. It is
@@ -68,6 +68,20 @@ interface CachedAccountPlan {
   privacyPolicyUrl: string;
 }
 
+/** The account's notification channels on Imbue Cloud. Only email is
+ * switchable from here; in-app stays as it is until that channel exists. */
+export interface NotificationChannels {
+  email_enabled: boolean;
+  in_app_enabled: boolean;
+}
+
+export interface NotificationPreferencesState {
+  isLoaded: boolean;
+  /** null once loaded means Imbue Cloud could not be reached. */
+  channels: NotificationChannels | null;
+  isWriting: boolean;
+}
+
 const TRIM_POLL_MS = 4000;
 
 // Shared by every mount of the page. Trim status is not kept: it is the
@@ -84,6 +98,10 @@ type ScheduleLike = (callback: () => void, delayMs: number) => void;
 export class AccountsDetailModel {
   actionError = "";
   planByUserId = new Map<string, AccountPlanState>();
+  notificationPreferencesByUserId = new Map<
+    string,
+    NotificationPreferencesState
+  >();
   verifyEmailPromptByUserId = new Map<string, VerifyEmailPrompt>();
   loggingOutUserIds = new Set<string>();
   switchingPlanUserIds = new Set<string>();
@@ -92,7 +110,7 @@ export class AccountsDetailModel {
   private readonly redraw: () => void;
   private readonly schedule: ScheduleLike;
   private isDisposed = false;
-  // is_enabled by user_id, as of the last syncPlans.
+  // is_enabled by user_id, as of the last syncAccounts.
   private listedIsEnabledByUserId = new Map<string, boolean>();
 
   constructor(
@@ -113,11 +131,12 @@ export class AccountsDetailModel {
     this.isDisposed = true;
   }
 
-  /** Load the plan section of each account that is newly listed or was just
-   * signed back in, dropping its old answer: a plan loaded while signed out
-   * reads as unavailable, and a sign-in while the page is open must replace
-   * it. The cached plan, when there is one, is shown until the read lands. */
-  syncPlans(accounts: readonly UiAccountEntry[]): void {
+  /** Load the plan section and the notification preferences of each account
+   * that is newly listed or was just signed back in, dropping its old
+   * answers: a section loaded while signed out reads as unavailable, and a
+   * sign-in while the page is open must replace it. The cached plan, when
+   * there is one, is shown until the read lands. */
+  syncAccounts(accounts: readonly UiAccountEntry[]): void {
     const previous = this.listedIsEnabledByUserId;
     this.listedIsEnabledByUserId = new Map(
       accounts.map((account) => [account.user_id, account.is_enabled]),
@@ -129,6 +148,7 @@ export class AccountsDetailModel {
       const wasEnabled = previous.get(account.user_id);
       if (wasEnabled === undefined || (!wasEnabled && account.is_enabled)) {
         this.planByUserId.delete(account.user_id);
+        this.notificationPreferencesByUserId.delete(account.user_id);
         // A signed-out account's read cannot succeed, so its old figures would only mislead.
         const cached = account.is_enabled ? cachedPlanByUserId.get(account.user_id) : undefined;
         if (cached !== undefined) {
@@ -139,7 +159,82 @@ export class AccountsDetailModel {
           state.privacyPolicyUrl = cached.privacyPolicyUrl;
         }
         void this.loadPlan(account.user_id);
+        void this.loadNotificationPreferences(account.user_id);
       }
+    }
+  }
+
+  notificationPreferencesFor(userId: string): NotificationPreferencesState {
+    const existing = this.notificationPreferencesByUserId.get(userId);
+    if (existing !== undefined) return existing;
+    const fresh: NotificationPreferencesState = {
+      isLoaded: false,
+      channels: null,
+      isWriting: false,
+    };
+    this.notificationPreferencesByUserId.set(userId, fresh);
+    return fresh;
+  }
+
+  async loadNotificationPreferences(userId: string): Promise<void> {
+    if (this.isDisposed) return;
+    const state = this.notificationPreferencesFor(userId);
+    try {
+      const response = await this.fetchImpl(
+        notificationPreferencesUrl(userId),
+        {
+          credentials: "same-origin",
+        },
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as {
+        preferences?: NotificationChannels | null;
+      };
+      state.channels = payload.preferences ?? null;
+    } catch {
+      state.channels = null;
+    }
+    state.isLoaded = true;
+    this.redraw();
+  }
+
+  /** Turn the account's notification email on or off. The email an account
+   * needs, such as a password reset, is never governed by this switch. */
+  async setEmailNotifications(
+    userId: string,
+    isEnabled: boolean,
+  ): Promise<void> {
+    const state = this.notificationPreferencesFor(userId);
+    if (state.isWriting || state.channels === null) return;
+    state.isWriting = true;
+    this.actionError = "";
+    this.redraw();
+    try {
+      const response = await this.fetchImpl(
+        notificationPreferencesUrl(userId),
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email_enabled: isEnabled }),
+        },
+      );
+      const payload = response.ok
+        ? ((await response.json()) as {
+            preferences: NotificationChannels | null;
+          })
+        : null;
+      if (payload === null || payload.preferences === null) {
+        this.actionError = "The notification preference could not be saved.";
+      } else {
+        state.channels = payload.preferences;
+      }
+    } catch {
+      this.actionError =
+        "The notification preference could not be saved (network error).";
+    } finally {
+      state.isWriting = false;
+      this.redraw();
     }
   }
 
@@ -318,7 +413,9 @@ export class AccountsDetailModel {
       if (response.ok) {
         const body: unknown = await response.json();
         wasResent =
-          typeof body === "object" && body !== null && (body as { sent?: unknown }).sent === true;
+          typeof body === "object" &&
+          body !== null &&
+          (body as { sent?: unknown }).sent === true;
       }
     } catch {
       // A network or parse failure counts as not resent; wasResent stays false.
@@ -358,11 +455,18 @@ function markReadFailed(state: AccountPlanState): void {
   }
 }
 
+function notificationPreferencesUrl(userId: string): string {
+  return `/ui/api/accounts/${encodeURIComponent(userId)}/notification-preferences`;
+}
+
 /** The email and auto-send outcome from a structured email_not_verified 403
  * body, or null when the response is not that refusal. A missing `sent` flag
  * counts as not sent, so the prompt never claims a link the server did not
  * confirm. */
-function parseEmailNotVerified(status: number, bodyText: string): { email: string; wasAutoSent: boolean } | null {
+function parseEmailNotVerified(
+  status: number,
+  bodyText: string,
+): { email: string; wasAutoSent: boolean } | null {
   if (status !== 403) return null;
   let body: unknown;
   try {

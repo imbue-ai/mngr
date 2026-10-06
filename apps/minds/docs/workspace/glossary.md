@@ -135,10 +135,10 @@ Key concepts in the Imbue Studio system:
 - **notification preferences**: a registered account's choice of the channels it accepts notifications on, email and in-app, both on by default. Invitations are one kind of notification among others.
   Unregistered addresses have no preferences. The invitation email's unsubscribe link turns email off for a registered address and adds any address to the suppression list.
 
-- **suppression list**: the addresses Imbue will not email, each with a reason (`bounced`, `complained`, `unsubscribed`, `reported`, or `blocked`) and a source (an email provider webhook, the invitation email's own unsubscribe or report link, or an operator).
-  Checked before every email delivery; a suppressed delivery still counts against the allowance. `reported` means the recipient used the email's link to report the invitation as unwanted, which also counts against the granter.
+- **suppression list**: the addresses Imbue will not send notification email to, each with a reason (`bounced`, `complained`, `unsubscribed`, `reported`, or `blocked`) and a source (an email provider webhook, the invitation email's own unsubscribe or report link, or an operator).
+  Checked before every invitation delivery and never by the essential stream, so a suppressed address still receives verification and password-reset mail; a suppressed delivery still counts against the allowance. `reported` means the recipient used the email's link to report the invitation as unwanted, which also counts against the granter.
 
-- **email provider**: the external service (an ESP) that sends invitation email and reports delivery events by webhook. The design does not name one.
+- **email provider**: the external service (an ESP) that sends invitation email and reports delivery events by webhook. Postmark today, behind an adapter the design keeps provider-agnostic.
 
 - **invitation allowance**: the number of deliveries a granter may attempt per channel in any rolling 24 hours: a constant per channel in one policy object, counted from delivery rows (a per-account override may come later).
   Every attempted delivery counts, including suppressed ones; refused attempts do not. The granter learns of the allowance only when refused.
@@ -155,7 +155,7 @@ Key concepts in the Imbue Studio system:
 
 - **stream**: a lane within a delivery channel (email, or the in-app notification feed) with its own rule for who may decline it.
   Every channel has an *essential* stream, for messages the account relationship requires (email verification, password reset, account suspension, changes to terms), which ignores notification preferences and cannot be unsubscribed; and a *notification* stream, for everything else, invitations included, which notification preferences and unsubscribe govern.
-  On the email channel each stream sends from its own address on Imbue's domain, so a reputation problem on one cannot delay the other. Suppression after a bounce blocks every stream; suppression after a complaint, an unsubscribe, or a report blocks the notification stream only.
+  On the email channel each stream sends from its own address on Imbue's domain, so a reputation problem on one cannot delay the other. Suppression, whatever its reason, blocks the notification stream only; the essential stream never consults the suppression list.
 
 - **grant reason**: why a user grant exists, recorded on the grant in Imbue Cloud's centralized grants table and never changed.
   `direct`: a granter named the account, by choosing it or by typing an address that resolved to it at grant time.

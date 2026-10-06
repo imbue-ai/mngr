@@ -88,3 +88,40 @@ def recheck_storage(account_email: str | None, connector_url: str | None) -> Non
     parsed_account = resolve_account_or_active(store, account_email)
     token = get_active_token(store, client, parsed_account)
     emit_json(client.recheck_storage(token).model_dump(mode="json"))
+
+
+@account.group(name="notification-preferences")
+def notification_preferences() -> None:
+    """Show or set which channels the account accepts notifications on (email, in-app)."""
+
+
+@notification_preferences.command(name="show")
+@click.option("--account", "account_email", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def show_notification_preferences(account_email: str | None, connector_url: str | None) -> None:
+    """Print the account's notification preferences (both channels are on until set otherwise)."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account_email)
+    token = get_active_token(store, client, parsed_account)
+    emit_json(client.get_notification_preferences(token).model_dump(mode="json"))
+
+
+@notification_preferences.command(name="set")
+@click.option("--email/--no-email", "email_enabled", required=True, help="Whether notification email may be sent")
+@click.option(
+    "--in-app/--no-in-app", "in_app_enabled", required=True, help="Whether in-app notifications may be delivered"
+)
+@click.option("--account", "account_email", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def set_notification_preferences(
+    email_enabled: bool, in_app_enabled: bool, account_email: str | None, connector_url: str | None
+) -> None:
+    """Set the account's notification preferences; they govern invitations and other notifications, never account email."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account_email)
+    token = get_active_token(store, client, parsed_account)
+    emit_json(client.set_notification_preferences(token, email_enabled, in_app_enabled).model_dump(mode="json"))

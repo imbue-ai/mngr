@@ -35,8 +35,11 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudSyncConflictCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
+from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import LiteLLMKeyMaterial
 from imbue.minds.desktop_client.imbue_cloud_cli import MachineSizeCliInfo
+from imbue.minds.desktop_client.imbue_cloud_cli import NotificationPreferencesCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliRelayEndpoint
 from imbue.minds.desktop_client.imbue_cloud_cli import SyncRecordsPullResult
@@ -244,6 +247,88 @@ class FakeImbueCloudCli(ImbueCloudCli):
 
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         return {region: tuple(endpoints) for region, endpoints in self.relays_to_return.items()}
+
+    # The invitation surface (specs/inviting-granted-visitors/spec.md)
+
+    pushed_grants_documents: list[tuple[str, str, dict[str, Any]]] = Field(
+        default_factory=list, description="(account email, host id, document) for every push_share_grants call"
+    )
+    is_grants_push_failing: bool = Field(
+        default=False, description="When True, push_share_grants raises ImbueCloudCliError (connector down)"
+    )
+    invite_calls: list[dict[str, Any]] = Field(
+        default_factory=list, description="Every invite_grantee call's arguments"
+    )
+    invite_results: list[InvitationCliResult | ImbueCloudCliError] = Field(
+        default_factory=list,
+        description="What invite_grantee answers, consumed in order (the last repeats); an error is raised",
+    )
+    invitation_outcomes_to_return: list[InvitationOutcomeCliEntry] = Field(
+        default_factory=list, description="What list_invitation_outcomes answers"
+    )
+    invitation_outcomes_error_to_raise: ImbueCloudCliError | None = Field(
+        default=None, description="When set, list_invitation_outcomes raises it"
+    )
+    notification_preferences_by_email: dict[str, NotificationPreferencesCliInfo] = Field(
+        default_factory=dict, description="account email -> preferences (the fake server state; absent means defaults)"
+    )
+    is_notification_preferences_failing: bool = Field(
+        default=False, description="When True, the notification preference calls raise ImbueCloudCliError"
+    )
+
+    def push_share_grants(self, *, account: str, host_id: str, document: Mapping[str, Any]) -> int:
+        if self.is_grants_push_failing:
+            raise ImbueCloudCliError("fake grants push failure")
+        self.pushed_grants_documents.append((account, host_id, dict(document)))
+        return 1
+
+    def invite_grantee(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        user_id: str | None,
+        email: str | None,
+        app: str | None,
+        link: str | None,
+        workspace_name: str | None,
+    ) -> InvitationCliResult:
+        self.invite_calls.append(
+            {
+                "account": account,
+                "host_id": host_id,
+                "user_id": user_id,
+                "email": email,
+                "app": app,
+                "link": link,
+                "workspace_name": workspace_name,
+            }
+        )
+        if not self.invite_results:
+            return InvitationCliResult(outcome="invited", invited_at="2026-09-30T12:00:00+00:00")
+        result = self.invite_results.pop(0) if len(self.invite_results) > 1 else self.invite_results[0]
+        if isinstance(result, ImbueCloudCliError):
+            raise result
+        return result
+
+    def list_invitation_outcomes(self, *, account: str, host_id: str) -> list[InvitationOutcomeCliEntry]:
+        if self.invitation_outcomes_error_to_raise is not None:
+            raise self.invitation_outcomes_error_to_raise
+        return list(self.invitation_outcomes_to_return)
+
+    def get_notification_preferences(self, *, account: str) -> NotificationPreferencesCliInfo:
+        if self.is_notification_preferences_failing:
+            raise ImbueCloudCliError("fake notification preferences failure")
+        return self.notification_preferences_by_email.get(account, NotificationPreferencesCliInfo())
+
+    def set_notification_preferences(
+        self, *, account: str, email_enabled: bool, in_app_enabled: bool
+    ) -> NotificationPreferencesCliInfo:
+        if self.is_notification_preferences_failing:
+            raise ImbueCloudCliError("fake notification preferences failure")
+        info = NotificationPreferencesCliInfo(email_enabled=email_enabled, in_app_enabled=in_app_enabled)
+        self.notification_preferences_by_email[account] = info
+        return info
 
     # In-memory storage-cleanup backend (drives the backup-trim tests)
 

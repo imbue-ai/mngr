@@ -11,6 +11,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudEmailNotVerifiedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudLeaseActiveCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudQuotaExceededCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudWebLoginIncompleteCliError
 from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_LISTEN_SECONDS
 from imbue.minds.desktop_client.imbue_cloud_cli import WEB_LOGIN_SUBPROCESS_TIMEOUT_SECONDS
@@ -23,6 +24,7 @@ from imbue.minds.desktop_client.imbue_cloud_cli import classify_incomplete_web_l
 from imbue.minds.desktop_client.supertokens_routes import _WEB_LOGIN_FLOW_TTL_SECONDS
 from imbue.minds.utils.mngr_caller import MngrCallResult
 from imbue.minds.utils.testing import RecordingMngrCaller
+from imbue.minds.utils.testing import ScriptedMngrCaller
 
 
 def test_expect_success_keeps_traceback_out_of_message_but_on_stderr() -> None:
@@ -510,3 +512,120 @@ def test_auth_login_raises_the_typed_incomplete_error_for_a_refused_code() -> No
 
     assert exc_info.value.reason == WebLoginIncompleteReason.CODE_REFUSED
     assert "plugin said ImbueCloudDeviceCodeRefusedError" in str(exc_info.value)
+
+
+# The invitation surface (specs/inviting-granted-visitors/spec.md)
+
+
+def _refusal_result(code: str) -> MngrCallResult:
+    body = json.dumps(
+        {"error": f"refused: {code}", "error_class": "ImbueCloudShareRefusedError", "code": code}, indent=2
+    )
+    return MngrCallResult(returncode=1, stdout="", stderr=body)
+
+
+def test_push_share_grants_hands_the_document_over_a_temp_file_and_reads_the_count(tmp_path: Path) -> None:
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=json.dumps({"host_id": "host-1", "appended": 3}))
+    )
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+    document = {"workspace": {"users": [], "emails": ["bob@example.com"], "email_domains": []}, "services": {}}
+
+    appended = cli.push_share_grants(account="owner@example.com", host_id="host-1", document=document)
+
+    assert appended == 3
+    (argv,) = caller.calls
+    assert argv[:4] == ["imbue_cloud", "shares", "push-grants", "host-1"]
+    document_path = Path(argv[argv.index("--document-file") + 1])
+    assert not document_path.exists()
+
+
+def test_push_share_grants_and_invite_raise_the_typed_refusal_with_its_code() -> None:
+    caller = RecordingMngrCaller(result=_refusal_result("grants_out_of_date"))
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    with pytest.raises(ImbueCloudShareRefusedCliError) as invite_exc:
+        cli.invite_grantee(
+            account="owner@example.com",
+            host_id="host-1",
+            user_id=None,
+            email="bob@example.com",
+            app="notes",
+            link="https://notes-x.host-1.owner.us1.shares.example/",
+            workspace_name="alpha",
+        )
+    with pytest.raises(ImbueCloudShareRefusedCliError) as push_exc:
+        cli.push_share_grants(account="owner@example.com", host_id="host-1", document={})
+
+    assert invite_exc.value.code == "grants_out_of_date"
+    assert push_exc.value.code == "grants_out_of_date"
+    invite_argv = caller.calls[0]
+    assert invite_argv[:4] == ["imbue_cloud", "shares", "invite", "host-1"]
+    assert (
+        "--email" in invite_argv
+        and "--app" in invite_argv
+        and "--link" in invite_argv
+        and "--workspace-name" in invite_argv
+    )
+    assert "--user-id" not in invite_argv
+
+
+def test_invite_parses_the_outcome_and_outcomes_parse_each_entry() -> None:
+    caller = ScriptedMngrCaller(
+        results=(
+            MngrCallResult(
+                returncode=0, stdout=json.dumps({"outcome": "invited", "invited_at": "2026-09-30T12:00:00+00:00"})
+            ),
+            MngrCallResult(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {"kind": "email", "value": "bob@example.com", "app": "system_interface", "outcome": "invited"},
+                        {"kind": "user", "value": "u-2", "app": "notes", "outcome": None, "joined_at": None},
+                    ]
+                ),
+            ),
+        )
+    )
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    result = cli.invite_grantee(
+        account="owner@example.com",
+        host_id="host-1",
+        user_id="u-2",
+        email=None,
+        app=None,
+        link=None,
+        workspace_name=None,
+    )
+    outcomes = cli.list_invitation_outcomes(account="owner@example.com", host_id="host-1")
+
+    assert result.outcome == "invited"
+    assert result.invited_at == "2026-09-30T12:00:00+00:00"
+    assert [entry.outcome for entry in outcomes] == ["invited", None]
+    assert caller.calls[1][:4] == ["imbue_cloud", "shares", "invitation-outcomes", "host-1"]
+
+
+def test_notification_preferences_round_trip_through_the_plugin() -> None:
+    caller = ScriptedMngrCaller(
+        results=(
+            MngrCallResult(returncode=0, stdout=json.dumps({"email_enabled": True, "in_app_enabled": True})),
+            MngrCallResult(returncode=0, stdout=json.dumps({"email_enabled": False, "in_app_enabled": True})),
+        )
+    )
+    cli = ImbueCloudCli(connector_url=AnyUrl("https://connector.example"), mngr_caller=caller)
+
+    before = cli.get_notification_preferences(account="owner@example.com")
+    after = cli.set_notification_preferences(account="owner@example.com", email_enabled=False, in_app_enabled=True)
+
+    assert before.email_enabled is True
+    assert after.email_enabled is False
+    assert caller.calls[0][:5] == ["imbue_cloud", "account", "notification-preferences", "show", "--account"]
+    assert caller.calls[1][:6] == [
+        "imbue_cloud",
+        "account",
+        "notification-preferences",
+        "set",
+        "--no-email",
+        "--in-app",
+    ]

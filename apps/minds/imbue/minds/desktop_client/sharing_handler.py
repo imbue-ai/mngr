@@ -31,6 +31,7 @@ from typing import Final
 import httpx
 from loguru import logger
 
+from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.minds.config.data_types import ClientEnvConfig
 from imbue.minds.desktop_client.agent_address import build_agent_address
@@ -45,6 +46,9 @@ from imbue.minds.desktop_client.identity_records import record_from_cli_identity
 from imbue.minds.desktop_client.imbue_cloud_cli import ActiveShareCache
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
+from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.provider_display import is_imbue_cloud_provider_name
 from imbue.minds.desktop_client.session_store import AccountSession
@@ -343,6 +347,22 @@ def _publish_grantees(cli: ImbueCloudCli, account_email: str, host_id: str, user
             logger.warning("Could not add grantee {} to the owner's contacts: {}", user_id[:8], exc)
 
 
+def _push_grants_document(cli: ImbueCloudCli, account_email: str, host_id: str, grants: SharingGrantsDocument) -> bool:
+    """Record the document in Imbue Cloud's centralized grants table, which invitations are made from.
+
+    Part of every save while the workspace is published, and of every load of
+    the panel. False when the push did not land: the panel then shows the
+    grants as not yet synced and offers no Invite, and the next save or load
+    retries. The table never admits anyone, so a lost push changes no access.
+    """
+    try:
+        cli.push_share_grants(account=account_email, host_id=host_id, document=grants.model_dump(mode="json"))
+    except ImbueCloudCliError as exc:
+        logger.warning("Could not push the grants document for {} to Imbue Cloud: {}", host_id, exc)
+        return False
+    return True
+
+
 def _record_saved_grants(
     cli: ImbueCloudCli,
     account_email: str,
@@ -594,8 +614,9 @@ def _publish_workspace_with_cli(
     saved_grants = grants_to_store if grants_to_store is not None else (stored_grants or SharingGrantsDocument())
     user_ids = _granted_user_ids(saved_grants)
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
+    is_synced = _push_grants_document(cli, account_email, host_id, saved_grants)
     identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    return _share_status_document(host_id, share, saved_grants, service_labels, identities)
+    return _share_status_document(host_id, share, saved_grants, service_labels, identities, is_synced)
 
 
 def _save_grants_with_cli(
@@ -629,10 +650,12 @@ def _save_grants_with_cli(
     # The connector's grantee index only describes a live share, so an
     # unpublished workspace's save does not touch it; the next publish mirrors
     # whatever the document holds by then.
+    is_synced: bool | None = None
     if share is not None:
         _publish_grantees(cli, account_email, host_id, user_ids)
+        is_synced = _push_grants_document(cli, account_email, host_id, saved_grants)
     identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    return _share_status_document(host_id, share, saved_grants, service_labels, identities)
+    return _share_status_document(host_id, share, saved_grants, service_labels, identities, is_synced)
 
 
 def _write_grants_document(agent_address: str, grants_toml: str, cli: ImbueCloudCli) -> None:
@@ -786,7 +809,7 @@ def migrate_stale_share(
     user_ids = _granted_user_ids(grants)
     _record_saved_grants(cli, account_email, host_id, agent_id, user_ids, forward_identity, owner_account)
     identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
-    document = _share_status_document(host_id, share, grants, service_labels, identities)
+    document = _share_status_document(host_id, share, grants, service_labels, identities, None)
     document["migrated_domain_from"] = stale_share.workspace_domain
     return document
 
@@ -842,6 +865,9 @@ def _share_status_document(
     grants: SharingGrantsDocument,
     service_labels: Mapping[str, str],
     identities: Mapping[str, IdentityRecord],
+    # Whether the document reached Imbue Cloud's centralized grants table;
+    # None while unpublished (nothing is pushed) or when no push was attempted.
+    grants_synced: bool | None,
 ) -> dict[str, Any]:
     workspace_domain = share.workspace_domain if share is not None else None
     return {
@@ -859,6 +885,7 @@ def _share_status_document(
         # The record per granted user id the desktop knows, so the share panel
         # renders a name, email, and profile picture instead of a bare id.
         "identities": {user_id: record.model_dump(mode="json") for user_id, record in identities.items()},
+        "grants_synced": grants_synced,
     }
 
 
@@ -967,10 +994,12 @@ def get_sharing(
     # is reserved for a read that never landed, above.
     grants = _readable_grants_document(grants_toml_text) or SharingGrantsDocument()
     user_ids = _granted_user_ids(grants)
-    identities = _resolve_grant_identities(
-        user_ids, identity_cache, cli, _account_email_or_none(session_store, agent_id)
+    account_email = _account_email_or_none(session_store, agent_id)
+    identities = _resolve_grant_identities(user_ids, identity_cache, cli, account_email)
+    is_synced = (
+        _push_grants_document(cli, account_email, host_id, grants) if share is not None and account_email else None
     )
-    return _share_status_document(host_id, share, grants, service_labels, identities)
+    return _share_status_document(host_id, share, grants, service_labels, identities, is_synced)
 
 
 def _account_email_or_none(session_store: MultiAccountSessionStore | None, agent_id: AgentId) -> str | None:
@@ -986,7 +1015,7 @@ def _unknown_grants_document(
     host_id: str, share: ShareCliInfo | None, service_labels: Mapping[str, str]
 ) -> dict[str, Any]:
     """The machine's document with ``grants: None``: the read never landed (not "the workspace grants nobody")."""
-    document = _share_status_document(host_id, share, SharingGrantsDocument(), service_labels, {})
+    document = _share_status_document(host_id, share, SharingGrantsDocument(), service_labels, {}, None)
     document["grants"] = None
     return document
 
@@ -1141,6 +1170,129 @@ def delete_share_for_host(cli: ImbueCloudCli | None, account_email: str, host_id
             cli.delete_share(account=account_email, host_id=host_id)
     except ImbueCloudCliError as exc:
         logger.warning("Failed to delete the machine share for {}: {}", host_id, exc)
+
+
+def _workspace_display_name(backend_resolver: BackendResolverInterface, agent_id: AgentId) -> str | None:
+    """The workspace's own display name, never the agent's internal name (``system-services`` on every workspace)."""
+    return backend_resolver.get_workspace_name(agent_id) or None
+
+
+def _push_current_document(cli: ImbueCloudCli, account_email: str, host_id: str, agent_address: str) -> None:
+    """Push the document the workspace holds right now, so an invitation refused as out of date can be tried again."""
+    try:
+        probe = probe_share_state_in_agent(agent_address, cli.mngr_caller)
+    except ShareInjectionError as exc:
+        raise SharingError(str(exc)) from exc
+    _push_grants_document(
+        cli, account_email, host_id, _readable_grants_document(probe.grants_toml_text) or SharingGrantsDocument()
+    )
+
+
+class _InvitationAttempt(FrozenModel):
+    """Everything one invitation asks of the connector, so a retry sends exactly the same thing."""
+
+    account_email: str
+    host_id: str
+    user_id: str | None
+    email: str | None
+    app: str | None
+    link: str | None
+    workspace_name: str | None
+
+
+def invite_grantee_for_workspace(
+    host_id: str,
+    user_id: str | None,
+    email: str | None,
+    # The share target the row is on; None for the whole workspace.
+    app: str | None,
+    backend_resolver: BackendResolverInterface,
+) -> InvitationCliResult:
+    """Invite one grant's grantee through the connector and return what the granter may learn.
+
+    The invitation carries the target's own link, built from the labels the
+    workspace has registered, and the workspace's display name. A refusal as
+    ``grants_out_of_date`` is answered by pushing the workspace's document and
+    trying once more; every other refusal propagates as
+    :class:`ImbueCloudShareRefusedCliError` for the route to report by code.
+    Raises :class:`SharingError` when the workspace is unpublished or the
+    connector cannot be reached.
+    """
+    state = get_state()
+    cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    if cli is None:
+        raise SharingError("imbue_cloud CLI is not configured on this app.")
+    session_store = state.session_store
+    agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+    account_email = resolve_account_email_for_workspace(session_store, agent_id)
+    share = _read_active_share(cli, account_email, host_id)
+    if share is None:
+        raise SharingError("Publish this workspace before inviting anyone: the invitation carries its link.")
+    target = app if app else WHOLE_MACHINE_SERVICE
+    label = resolve_share_target_labels(backend_resolver, agent_id).get(target)
+    attempt = _InvitationAttempt(
+        account_email=account_email,
+        host_id=host_id,
+        user_id=user_id,
+        email=email,
+        app=None if target == WHOLE_MACHINE_SERVICE else target,
+        link=f"https://{label}.{share.workspace_domain}/" if label else None,
+        workspace_name=_workspace_display_name(backend_resolver, agent_id),
+    )
+    return _invite_with_one_retry(cli, attempt, build_agent_address(agent_id, backend_resolver))
+
+
+def _invite_with_one_retry(cli: ImbueCloudCli, attempt: _InvitationAttempt, agent_address: str) -> InvitationCliResult:
+    """Invite; a refusal as ``grants_out_of_date`` pushes the workspace's document and tries once more."""
+    try:
+        return _invite_through_cli(cli, attempt)
+    except ImbueCloudShareRefusedCliError as exc:
+        if exc.code != "grants_out_of_date":
+            raise
+        _push_current_document(cli, attempt.account_email, attempt.host_id, agent_address)
+        try:
+            return _invite_through_cli(cli, attempt)
+        except ImbueCloudShareRefusedCliError:
+            raise
+        except ImbueCloudCliError as retry_exc:
+            raise SharingError(f"Could not invite: {describe_connector_failure(retry_exc)}") from retry_exc
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Could not invite: {describe_connector_failure(exc)}") from exc
+
+
+def _invite_through_cli(cli: ImbueCloudCli, attempt: _InvitationAttempt) -> InvitationCliResult:
+    return cli.invite_grantee(
+        account=attempt.account_email,
+        host_id=attempt.host_id,
+        user_id=attempt.user_id,
+        email=attempt.email,
+        app=attempt.app,
+        link=attempt.link,
+        workspace_name=attempt.workspace_name,
+    )
+
+
+def list_invitation_outcomes_for_workspace(
+    host_id: str, backend_resolver: BackendResolverInterface
+) -> list[InvitationOutcomeCliEntry]:
+    """What the granter may learn about each open user or email grant of the workspace; empty while unpublished."""
+    state = get_state()
+    cli: ImbueCloudCli | None = state.imbue_cloud_cli
+    if cli is None:
+        raise SharingError("imbue_cloud CLI is not configured on this app.")
+    session_store = state.session_store
+    agent_id = resolve_agent_for_host(backend_resolver, host_id, session_store)
+    account_email = resolve_account_email_for_workspace(session_store, agent_id)
+    try:
+        return cli.list_invitation_outcomes(account=account_email, host_id=host_id)
+    except ImbueCloudShareRefusedCliError as exc:
+        # An unpublished workspace has nothing to report: no invitation can be
+        # made until it is published again.
+        if exc.code == "not_published":
+            return []
+        raise
+    except ImbueCloudCliError as exc:
+        raise SharingError(f"Could not read the invitation outcomes: {describe_connector_failure(exc)}") from exc
 
 
 def probe_share_readiness(http_client: httpx.Client, probe_host: str) -> bool:

@@ -355,6 +355,50 @@ class ShareInfo(WireModel):
     )
 
 
+class ShareGrantsPushResult(WireModel):
+    """What ``PUT /shares/{host_id}/grants`` answers: how many grant events the push appended."""
+
+    host_id: str = Field(description="The share's host id")
+    appended: int = Field(default=0, description="Events appended to the centralized grants table by this push")
+
+
+class InvitationOutcome(WireEnum):
+    """What a granter may learn about an invitation (specs/inviting-granted-visitors/spec.md, O1)."""
+
+    INVITED = auto()
+    COULD_NOT_INVITE = auto()
+    OVER_ALLOWANCE = auto()
+    TOO_SOON = auto()
+    JOINED = auto()
+    UNKNOWN = auto()
+
+
+class InvitationResult(WireModel):
+    """What ``POST /shares/{host_id}/invitations`` answers."""
+
+    outcome: InvitationOutcome = Field(description="The granter-visible outcome of the attempt")
+    invited_at: str | None = Field(default=None, description="When the delivery was sent, for an invited outcome")
+
+
+class InvitationOutcomeEntry(WireModel):
+    """One open user or email grant of a share and what the granter may learn about it."""
+
+    kind: str = Field(description="'user' or 'email'")
+    value: str = Field(description="The account id or the address")
+    app: str = Field(description="The app the grant is on (system_interface for the whole workspace)")
+    outcome: InvitationOutcome | None = Field(default=None, description="The outcome; None when nothing to say")
+    invited_at: str | None = Field(default=None, description="When the last delivery that left Imbue was sent")
+    joined_at: str | None = Field(default=None, description="The grantee's first authorized visit")
+    last_visited_at: str | None = Field(default=None, description="The grantee's latest authorized visit")
+
+
+class NotificationPreferencesInfo(WireModel):
+    """An account's notification preferences (``/accounts/me/notification-preferences``)."""
+
+    email_enabled: bool = Field(default=True, description="Whether notification email may be sent to the account")
+    in_app_enabled: bool = Field(default=True, description="Whether in-app notifications may be delivered")
+
+
 class ShareRelayMap(WireModel):
     """The relay fleet as reported by the connector: region -> tunnel-control endpoints."""
 

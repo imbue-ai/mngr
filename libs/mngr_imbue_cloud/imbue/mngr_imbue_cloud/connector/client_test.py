@@ -37,6 +37,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRecordFormatTooNewError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudShareError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudShareRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncConflictError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudSyncError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUnreachableError
@@ -49,6 +50,7 @@ from imbue.mngr_imbue_cloud.errors import WorkspaceHasNoStopError
 from imbue.mngr_imbue_cloud.errors import WorkspaceStopKindRouteUnavailableError
 from imbue.mngr_imbue_cloud.errors import WorkspacesEndpointUnavailableError
 from imbue.mngr_imbue_cloud.errors import workspace_hold_message_in
+from imbue.mngr_imbue_cloud.wire_types import InvitationOutcome
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyInfo
 from imbue.mngr_imbue_cloud.wire_types import LiteLLMKeyMaterial
 from imbue.mngr_imbue_cloud.wire_types import SyncKeyBundle
@@ -2550,4 +2552,139 @@ def test_admin_signup_code_methods_hit_their_routes_and_parse(monkeypatch: pytes
         ("POST", "/admin/signup-codes", ""),
         ("GET", "/admin/signup-codes", "email=alice%40imbue.com"),
         ("POST", "/admin/signup-codes/code-1/revoke", ""),
+    ]
+
+
+# Invitations (specs/inviting-granted-visitors/spec.md)
+
+
+def test_push_share_grants_sends_the_document_and_parses_the_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    document = {"workspace": {"users": [], "emails": ["bob@example.com"], "email_domains": []}, "services": {}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PUT"
+        assert request.url.path == "/shares/host-abc/grants"
+        assert _json.loads(request.content) == document
+        return httpx.Response(200, json={"host_id": "host-abc", "appended": 1})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    assert client.push_share_grants(SecretStr("tok"), "host-abc", document).appended == 1
+
+
+def test_push_share_grants_surfaces_the_not_published_refusal_with_its_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": {"code": "not_published", "message": "not published"}})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareRefusedError) as excinfo:
+        client.push_share_grants(SecretStr("tok"), "host-abc", {})
+    assert excinfo.value.code == "not_published"
+
+
+def test_invite_grantee_sends_only_the_fields_given_and_parses_the_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/shares/host-abc/invitations"
+        assert _json.loads(request.content) == {"email": "bob@example.com", "workspace_name": "alpha"}
+        return httpx.Response(200, json={"outcome": "invited", "invited_at": "2026-09-30T12:00:00+00:00"})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    result = client.invite_grantee(
+        SecretStr("tok"),
+        "host-abc",
+        user_id=None,
+        email="bob@example.com",
+        app=None,
+        link=None,
+        workspace_name="alpha",
+    )
+
+    assert result.outcome is InvitationOutcome.INVITED
+    assert result.invited_at == "2026-09-30T12:00:00+00:00"
+
+
+def test_invite_grantee_maps_the_409_codes_and_tolerates_an_unknown_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers = iter(
+        [
+            httpx.Response(409, json={"detail": {"code": "grants_out_of_date", "message": "push first"}}),
+            httpx.Response(409, json={"detail": {"code": "not_invitable", "message": "already joined"}}),
+            httpx.Response(200, json={"outcome": "something_newer", "invited_at": None}),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return next(answers)
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    with pytest.raises(ImbueCloudShareRefusedError) as out_of_date:
+        client.invite_grantee(
+            SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
+        )
+    with pytest.raises(ImbueCloudShareRefusedError) as not_invitable:
+        client.invite_grantee(
+            SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
+        )
+    newer = client.invite_grantee(
+        SecretStr("tok"), "host-abc", user_id="u", email=None, app=None, link=None, workspace_name=None
+    )
+
+    assert out_of_date.value.code == "grants_out_of_date"
+    assert not_invitable.value.code == "not_invitable"
+    assert newer.outcome is InvitationOutcome.UNKNOWN
+
+
+def test_list_invitation_outcomes_parses_each_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/shares/host-abc/invitation-outcomes"
+        return httpx.Response(
+            200,
+            json={
+                "host_id": "host-abc",
+                "outcomes": [
+                    {
+                        "kind": "email",
+                        "value": "bob@example.com",
+                        "app": "system_interface",
+                        "outcome": "invited",
+                        "invited_at": "2026-09-30T12:00:00+00:00",
+                        "joined_at": None,
+                        "last_visited_at": None,
+                    },
+                    {"kind": "user", "value": "u-2", "app": "notes", "outcome": None, "invited_at": None},
+                ],
+            },
+        )
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    outcomes = client.list_invitation_outcomes(SecretStr("tok"), "host-abc")
+
+    assert [entry.outcome for entry in outcomes] == [InvitationOutcome.INVITED, None]
+    assert outcomes[1].joined_at is None
+
+
+def test_notification_preferences_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        if request.method == "PUT":
+            assert _json.loads(request.content) == {"email_enabled": False, "in_app_enabled": True}
+            return httpx.Response(200, json={"email_enabled": False, "in_app_enabled": True})
+        return httpx.Response(200, json={"email_enabled": True, "in_app_enabled": True})
+
+    client = _install_mock_httpx(monkeypatch, handler)
+
+    before = client.get_notification_preferences(SecretStr("tok"))
+    after = client.set_notification_preferences(SecretStr("tok"), email_enabled=False, in_app_enabled=True)
+
+    assert before.email_enabled is True
+    assert after.email_enabled is False
+    assert seen == [
+        ("GET", "/accounts/me/notification-preferences"),
+        ("PUT", "/accounts/me/notification-preferences"),
     ]

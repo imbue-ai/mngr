@@ -388,6 +388,43 @@ class WorkspaceGrantsRequest(ApiRequestModel):
     grants: SharingGrantsDocument = Field(description="The whole document to store, replacing the current one")
 
 
+class InviteGranteeRequest(ApiRequestModel):
+    """Body for inviting one grant's grantee: exactly one of the account id and the address, and the app the row is on."""
+
+    user_id: str | None = Field(default=None, description="The account of a user grant")
+    email: str | None = Field(default=None, description="The address of an email grant")
+    app: str | None = Field(
+        default=None, description="The share target the invitation is for; the whole workspace when absent"
+    )
+
+
+class InvitationResultResponse(FrozenModel):
+    """What the granter may learn about one invitation attempt."""
+
+    outcome: str = Field(description="invited, could_not_invite, over_allowance, or too_soon")
+    invited_at: str | None = Field(default=None, description="When the delivery was sent, for an invited outcome")
+
+
+class InvitationOutcomeEntryResponse(FrozenModel):
+    """One open user or email grant of the workspace with what the granter may learn about it."""
+
+    kind: str = Field(description="'user' or 'email'")
+    value: str = Field(description="The account id or the address")
+    app: str = Field(description="The share target the grant is on (system_interface for the whole workspace)")
+    outcome: str | None = Field(
+        default=None, description="invited, could_not_invite, or joined; None when nothing to say"
+    )
+    invited_at: str | None = Field(default=None, description="When the last delivery that left Imbue was sent")
+    joined_at: str | None = Field(default=None, description="The grantee's first authorized visit")
+    last_visited_at: str | None = Field(default=None, description="The grantee's latest authorized visit")
+
+
+class InvitationOutcomesResponse(FrozenModel):
+    """Every open user or email grant's granter-visible outcome."""
+
+    outcomes: tuple[InvitationOutcomeEntryResponse, ...] = Field(description="One entry per open user or email grant")
+
+
 class BugReportRequest(ApiRequestModel):
     """Body for submitting a bug report on behalf of an in-workspace agent.
 
@@ -710,6 +747,14 @@ class MachineSharingResponse(FrozenModel):
     identities: dict[str, IdentityRecordResponse] = Field(
         default_factory=dict,
         description="Identity record per granted user id the desktop knows (absent ids render as the bare id)",
+    )
+    grants_synced: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the grants document in force has reached Imbue Cloud's centralized grants table, which "
+            "invitations are made from: false when the push after this operation failed (the next save or "
+            "load retries it), null while the workspace is unpublished"
+        ),
     )
     migrated_domain_from: str | None = Field(
         default=None,

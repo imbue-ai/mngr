@@ -271,6 +271,50 @@ mngr imbue_cloud account recheck-storage [OPTIONS]
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 
+## mngr imbue_cloud account notification-preferences
+
+**Usage:**
+
+```text
+mngr imbue_cloud account notification-preferences [OPTIONS] COMMAND [ARGS]...
+```
+**Options:**
+
+
+## mngr imbue_cloud account notification-preferences show
+
+**Usage:**
+
+```text
+mngr imbue_cloud account notification-preferences show [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud account notification-preferences set
+
+**Usage:**
+
+```text
+mngr imbue_cloud account notification-preferences set [OPTIONS]
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--email`, `--no-email` | boolean | Whether notification email may be sent | `False` |
+| `--in-app`, `--no-in-app` | boolean | Whether in-app notifications may be delivered | `False` |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
 ## mngr imbue_cloud hosts
 
 **Usage:**
@@ -722,6 +766,60 @@ mngr imbue_cloud shares set-grantees [OPTIONS] HOST_ID
 | Name | Type | Description | Default |
 | ---- | ---- | ----------- | ------- |
 | `--user-id` | text | A grantee's user id (repeatable); passing none clears the desktop-written index for this share. | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud shares push-grants
+
+**Usage:**
+
+```text
+mngr imbue_cloud shares push-grants [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--document-file` | file | A JSON file holding the workspace's parsed grants document: {"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {"<app>": {...}}}. | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud shares invite
+
+**Usage:**
+
+```text
+mngr imbue_cloud shares invite [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
+| `--user-id` | text | The account of a user grant to invite | None |
+| `--email` | text | The address of an email grant to invite | None |
+| `--app` | text | The app the invitation is for (the whole workspace when omitted) | None |
+| `--link` | text | The share URL of that app; the shell's entry origin when omitted | None |
+| `--workspace-name` | text | The workspace's display name, as the invitation should say it | None |
+| `--account` | text | Account email (defaults to the active account) | None |
+| `--connector-url` | text | Override connector URL | None |
+
+## mngr imbue_cloud shares invitation-outcomes
+
+**Usage:**
+
+```text
+mngr imbue_cloud shares invitation-outcomes [OPTIONS] HOST_ID
+```
+**Options:**
+
+## Other Options
+
+| Name | Type | Description | Default |
+| ---- | ---- | ----------- | ------- |
 | `--account` | text | Account email (defaults to the active account) | None |
 | `--connector-url` | text | Override connector URL | None |
 

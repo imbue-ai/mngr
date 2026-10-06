@@ -886,7 +886,10 @@ describe("SharePanelModel publication state", () => {
     read.resolve(okResult(sharingResponse({ enabled: false, url: null })));
     await loading;
 
-    expect(requests).toHaveLength(1);
+    const statusReads = requests.filter(
+      (request) => !request.url.endsWith("/invitation-outcomes"),
+    );
+    expect(statusReads).toHaveLength(1);
     expect(model.isRevalidating).toBe(false);
     expect(model.isPublished).toBe(false);
     expect(grantValues(model)).toEqual([]);
@@ -1581,6 +1584,8 @@ describe("SharePanelModel stale answers", () => {
           }),
         );
       if (init?.method === "PUT") return okResult(sharingResponse());
+      if (url.endsWith("/invitation-outcomes"))
+        return okResult({ outcomes: [] });
       if (isFirstLoad) {
         isFirstLoad = false;
         return okResult(sharingResponse({ enabled: false, url: null }));
@@ -1912,9 +1917,463 @@ describe("SharePanelModel status read failures", () => {
     model.selectTarget("web");
     await settle();
 
-    expect(requests).toHaveLength(2);
+    const statusReads = requests.filter(
+      (request) => !request.url.endsWith("/invitation-outcomes"),
+    );
+    expect(statusReads).toHaveLength(2);
     expect(model.loadStatus).toBe("ready");
     expect(model.currentTarget).toBe("web");
     expect(grantValues(model)).toEqual(["friend@example.com"]);
+  });
+});
+
+describe("SharePanelModel invitations", () => {
+  const OUTCOMES_SUFFIX = "/invitation-outcomes";
+  const INVITATIONS_SUFFIX = "/invitations";
+  const INVITED_AT = "2026-09-30T12:00:00+00:00";
+
+  /** A published, synced panel: the whole workspace grants one address, one
+   * account and one domain, and the web app grants one more address. The
+   * outcomes route answers with `outcomes`, which a test may grow. */
+  function invitablePanel(
+    respondToInvite: Responder = () =>
+      okResult({ outcome: "invited", invited_at: INVITED_AT }),
+    outcomes: unknown[] = [],
+    overrides: Partial<SharePanelModelOptions> = {},
+    isPublished: () => boolean = () => true,
+  ): { model: SharePanelModel; requests: RecordedRequest[] } {
+    return makeSharePanel((url, init) => {
+      if (url.endsWith(OUTCOMES_SUFFIX)) return okResult({ outcomes });
+      if (url.endsWith(INVITATIONS_SUFFIX)) return respondToInvite(url, init);
+      return okResult(
+        sharingResponse({
+          enabled: init?.method === "DELETE" ? false : isPublished(),
+          grants: grantsDocument(
+            {
+              users: ["user-2"],
+              emails: ["friend@example.com"],
+              email_domains: ["acme.example"],
+            },
+            { web: grantList({ emails: ["dev@example.com"] }) },
+          ),
+          identities: {
+            "user-2": {
+              user_id: "user-2",
+              email: "carol@example.com",
+              display_name: "Carol",
+              profile_picture_url: null,
+            },
+          },
+          grants_synced: true,
+        }),
+      );
+    }, overrides);
+  }
+
+  function rowOf(model: SharePanelModel, target: string, value: string): Grant {
+    const row = model
+      .grantsFor(target)
+      .find((grant) => grant.grantee.value === value);
+    expect(row, `no row for ${value}`).toBeDefined();
+    return row as Grant;
+  }
+
+  function inviteRequests(requests: RecordedRequest[]): RecordedRequest[] {
+    return requests.filter((request) =>
+      request.url.endsWith(INVITATIONS_SUFFIX),
+    );
+  }
+
+  it("reads what the granter may learn about each row once the document is in", async () => {
+    const { model, requests } = invitablePanel(undefined, [
+      {
+        kind: "email",
+        value: "friend@example.com",
+        app: WHOLE,
+        outcome: "invited",
+        invited_at: "2026-09-29T00:00:00+00:00",
+      },
+      {
+        kind: "user",
+        value: "user-2",
+        app: WHOLE,
+        outcome: "joined",
+        joined_at: "2026-09-28T00:00:00+00:00",
+        last_visited_at: "2026-09-29T00:00:00+00:00",
+      },
+      { kind: "email", value: "dev@example.com", app: "web", outcome: null },
+    ]);
+
+    await model.load();
+    await settle();
+
+    expect(
+      requests.filter((request) => request.url.endsWith(OUTCOMES_SUFFIX)),
+    ).toHaveLength(1);
+    expect(model.grantsSynced).toBe(true);
+    expect(
+      model.outcomeFor(WHOLE, rowOf(model, WHOLE, "friend@example.com")),
+    ).toEqual({
+      kind: "invited",
+      invitedAt: "2026-09-29T00:00:00+00:00",
+      joinedAt: null,
+      lastVisitedAt: null,
+    });
+    expect(
+      model.outcomeFor(WHOLE, rowOf(model, WHOLE, "carol@example.com")),
+    ).toEqual({
+      kind: "joined",
+      invitedAt: null,
+      joinedAt: "2026-09-28T00:00:00+00:00",
+      lastVisitedAt: "2026-09-29T00:00:00+00:00",
+    });
+    expect(
+      model.outcomeFor("web", rowOf(model, "web", "dev@example.com")),
+    ).toBeNull();
+  });
+
+  it("offers Invite only for a saved person who has not joined, on a published workspace whose document has reached Imbue Cloud", async () => {
+    let isPublished = true;
+    const { model } = invitablePanel(
+      undefined,
+      [
+        {
+          kind: "user",
+          value: "user-2",
+          app: WHOLE,
+          outcome: "joined",
+          joined_at: "2026-09-28T00:00:00+00:00",
+        },
+      ],
+      {},
+      () => isPublished,
+    );
+    await model.load();
+    await settle();
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    expect(model.canInvite(WHOLE, friend)).toBe(true);
+    expect(model.canInvite("web", rowOf(model, "web", "dev@example.com"))).toBe(
+      true,
+    );
+    // Joined is the one outcome that proves the grant worked: nothing to send.
+    expect(
+      model.canInvite(WHOLE, rowOf(model, WHOLE, "carol@example.com")),
+    ).toBe(false);
+    // Nobody at a domain is ever notified.
+    expect(model.canInvite(WHOLE, rowOf(model, WHOLE, "acme.example"))).toBe(
+      false,
+    );
+
+    model.grantsSynced = false;
+    expect(model.isGrantsSyncPending).toBe(true);
+    expect(model.canInvite(WHOLE, friend)).toBe(false);
+
+    model.grantsSynced = true;
+    expect(model.isGrantsSyncPending).toBe(false);
+
+    // Unpublishing is read from the document, so the panel is taken there by a
+    // load rather than by setting the flag.
+    isPublished = false;
+    await model.load();
+    await settle();
+    expect(model.isPublished).toBe(false);
+    expect(model.canInvite(WHOLE, rowOf(model, WHOLE, "friend@example.com"))).toBe(
+      false,
+    );
+  });
+
+  it("invites an address on the whole workspace and an account on an app, the row pending meanwhile", async () => {
+    const answer = deferred();
+    const outcomes: unknown[] = [];
+    const { model, requests } = invitablePanel(() => answer.promise, outcomes);
+    await model.load();
+    await settle();
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    const inviting = model.invite(WHOLE, friend.key);
+    expect(model.inviteStateFor(friend.key)).toEqual({ state: "inviting" });
+    expect(model.canInvite(WHOLE, friend)).toBe(false);
+    outcomes.push({
+      kind: "email",
+      value: "friend@example.com",
+      app: WHOLE,
+      outcome: "invited",
+      invited_at: INVITED_AT,
+    });
+    answer.resolve(okResult({ outcome: "invited", invited_at: INVITED_AT }));
+    await inviting;
+    await settle();
+
+    expect(inviteRequests(requests).map((request) => request.method)).toEqual([
+      "POST",
+    ]);
+    expect(inviteRequests(requests)[0].body).toEqual({
+      email: "friend@example.com",
+      app: null,
+    });
+    expect(model.inviteStateFor(friend.key)).toEqual({ state: "idle" });
+    expect(model.outcomeFor(WHOLE, friend)).toEqual({
+      kind: "invited",
+      invitedAt: INVITED_AT,
+      joinedAt: null,
+      lastVisitedAt: null,
+    });
+
+    await model.invite("web", rowOf(model, "web", "dev@example.com").key);
+    await model.invite(WHOLE, rowOf(model, WHOLE, "carol@example.com").key);
+
+    expect(
+      inviteRequests(requests)
+        .slice(1)
+        .map((request) => request.body),
+    ).toEqual([
+      { email: "dev@example.com", app: "web" },
+      { user_id: "user-2", app: null },
+    ]);
+  });
+
+  it("says why nothing was sent when the allowance or the cooldown refused, and only until the next load", async () => {
+    let refusal = "too_soon";
+    const { model } = invitablePanel(() => okResult({ outcome: refusal }));
+    await model.load();
+    await settle();
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    await model.invite(WHOLE, friend.key);
+    expect(model.inviteStateFor(friend.key)).toEqual({
+      state: "refused",
+      message: "You invited this person too recently.",
+    });
+    expect(model.outcomeFor(WHOLE, friend)).toBeNull();
+    // A refusal is no bar to trying again.
+    expect(model.canInvite(WHOLE, friend)).toBe(true);
+
+    refusal = "over_allowance";
+    await model.invite(WHOLE, friend.key);
+    expect(model.inviteStateFor(friend.key)).toEqual({
+      state: "refused",
+      message: "You have reached your invitation limit for now.",
+    });
+
+    await model.load();
+    expect(
+      model.inviteStateFor(rowOf(model, WHOLE, "friend@example.com").key),
+    ).toEqual({
+      state: "idle",
+    });
+  });
+
+  it("keeps a could-not-invite answer as the row's outcome, without a reason", async () => {
+    const outcomes: unknown[] = [];
+    const { model } = invitablePanel(() => {
+      outcomes.push({
+        kind: "email",
+        value: "friend@example.com",
+        app: WHOLE,
+        outcome: "could_not_invite",
+      });
+      return okResult({ outcome: "could_not_invite" });
+    }, outcomes);
+    await model.load();
+    await settle();
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    await model.invite(WHOLE, friend.key);
+
+    expect(model.inviteStateFor(friend.key)).toEqual({ state: "idle" });
+    expect(model.outcomeFor(WHOLE, friend)?.kind).toBe("could_not_invite");
+  });
+
+  it("reports the desktop's refusal by its code, and any other failure in its own words", async () => {
+    let answer: FetchResult = {
+      ok: false,
+      status: 409,
+      body: { error: "not_invitable", message: "already joined" },
+    };
+    const { model } = invitablePanel(() => answer);
+    await model.load();
+    await settle();
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    await model.invite(WHOLE, friend.key);
+    expect(model.inviteStateFor(friend.key)).toEqual({
+      state: "refused",
+      message: "This person has already joined.",
+    });
+
+    answer = {
+      ok: false,
+      status: 502,
+      body: { error: "Could not invite: the connector is unreachable" },
+    };
+    await model.invite(WHOLE, friend.key);
+    expect(model.inviteStateFor(friend.key)).toEqual({
+      state: "refused",
+      message: "Could not invite: the connector is unreachable",
+    });
+  });
+
+  it("loads again a moment after a document that did not reach Imbue Cloud, so it is sent again", async () => {
+    const timers: (() => void)[] = [];
+    let isSynced = false;
+    const { model, requests } = makeSharePanel(
+      (url) => {
+        if (url.endsWith(OUTCOMES_SUFFIX)) return okResult({ outcomes: [] });
+        return okResult(
+          sharingResponse({
+            grants: grantsDocument({ emails: ["friend@example.com"] }),
+            grants_synced: isSynced,
+          }),
+        );
+      },
+      {
+        setTimer: (callback) => {
+          timers.push(callback);
+          return timers.length;
+        },
+      },
+    );
+
+    await model.load();
+    await settle();
+    expect(model.isGrantsSyncPending).toBe(true);
+    expect(
+      model.canInvite(WHOLE, rowOf(model, WHOLE, "friend@example.com")),
+    ).toBe(false);
+    expect(timers).toHaveLength(1);
+
+    isSynced = true;
+    timers[0]();
+    await settle();
+
+    expect(model.grantsSynced).toBe(true);
+    expect(model.isGrantsSyncPending).toBe(false);
+    expect(
+      requests.filter(
+        (request) =>
+          request.method === "GET" && !request.url.endsWith(OUTCOMES_SUFFIX),
+      ),
+    ).toHaveLength(2);
+    // Synced now: nothing more to schedule.
+    expect(timers).toHaveLength(1);
+  });
+
+  it("reads the outcomes again after a save lands and after publishing, never while unpublished", async () => {
+    const { model, requests } = invitablePanel();
+    await model.load();
+    await settle();
+    const reads = (): number =>
+      requests.filter((request) => request.url.endsWith(OUTCOMES_SUFFIX))
+        .length;
+    const afterLoad = reads();
+    expect(afterLoad).toBe(1);
+
+    model.addGrant(WHOLE, "email", "newcomer@example.com");
+    await settle();
+    await settle();
+    expect(reads()).toBeGreaterThan(afterLoad);
+    const afterAdd = reads();
+
+    await model.unpublish();
+    await settle();
+    expect(reads()).toBe(afterAdd);
+
+    await model.publish();
+    await settle();
+    expect(reads()).toBeGreaterThan(afterAdd);
+  });
+
+  it("requests an invitation on its own when a person is granted, once the save reaches Imbue Cloud, and never for a domain", async () => {
+    const invitePayloads: { email?: string }[] = [];
+    const invitedAddresses = new Set<string>();
+    const { model } = makeSharePanel((url, init) => {
+      if (url.endsWith(OUTCOMES_SUFFIX))
+        return okResult({
+          outcomes: [...invitedAddresses].map((email) => ({
+            kind: "email",
+            value: email,
+            app: WHOLE,
+            outcome: "invited",
+            invited_at: INVITED_AT,
+          })),
+        });
+      if (url.endsWith(INVITATIONS_SUFFIX)) {
+        const body = JSON.parse(init?.body as string) as { email?: string };
+        invitePayloads.push(body);
+        if (body.email !== undefined) invitedAddresses.add(body.email);
+        return okResult({ outcome: "invited", invited_at: INVITED_AT });
+      }
+      if (init?.method === "PUT" && url.endsWith("/grants"))
+        return okResult(sharingResponse({ grants: sentDocument(init), grants_synced: true }));
+      return okResult(sharingResponse({ grants: grantsDocument(), grants_synced: true }));
+    });
+    await model.load();
+    await settle();
+
+    // Granting a person is what asks: no Invite is pressed.
+    model.addGrant(WHOLE, "email", "newcomer@example.com");
+    await settle();
+    await settle();
+
+    expect(invitePayloads).toEqual([{ email: "newcomer@example.com", app: null }]);
+    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "newcomer@example.com")).kind).toBe("invited");
+
+    // A domain grant notifies nobody, so none is requested for it.
+    model.addGrant(WHOLE, "email_domain", "acme.example");
+    await settle();
+    await settle();
+    expect(invitePayloads).toHaveLength(1);
+
+    // The automatic request fires once; a settled, invited row is left alone.
+    model.addGrant(WHOLE, "email", "newcomer@example.com");
+    await settle();
+    await settle();
+    expect(invitePayloads).toHaveLength(1);
+  });
+
+  it("reduces each row to a single typed status indicator state", async () => {
+    const { model } = invitablePanel(undefined, [
+      { kind: "email", value: "friend@example.com", app: WHOLE, outcome: "invited", invited_at: INVITED_AT },
+      {
+        kind: "user",
+        value: "user-2",
+        app: WHOLE,
+        outcome: "joined",
+        joined_at: "2026-09-28T00:00:00+00:00",
+        last_visited_at: "2026-09-29T00:00:00+00:00",
+      },
+    ]);
+    await model.load();
+    await settle();
+
+    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "friend@example.com"))).toEqual({
+      kind: "invited",
+      at: INVITED_AT,
+      canReinvite: true,
+    });
+    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "carol@example.com"))).toEqual({
+      kind: "joined",
+      firstAt: "2026-09-28T00:00:00+00:00",
+      lastAt: "2026-09-29T00:00:00+00:00",
+    });
+    // A domain row, and a person with nothing known yet, show nothing.
+    expect(model.invitationStatusIndicator(WHOLE, rowOf(model, WHOLE, "acme.example"))).toEqual({ kind: "none" });
+    expect(model.invitationStatusIndicator("web", rowOf(model, "web", "dev@example.com"))).toEqual({ kind: "none" });
+  });
+
+  it("shows the refusal as the status indicator state, with a re-invite still offered", async () => {
+    const { model } = invitablePanel(() => okResult({ outcome: "too_soon" }));
+    await model.load();
+    await settle();
+    const friend = rowOf(model, WHOLE, "friend@example.com");
+
+    await model.invite(WHOLE, friend.key);
+
+    expect(model.invitationStatusIndicator(WHOLE, friend)).toEqual({
+      kind: "refused",
+      message: "You invited this person too recently.",
+      canReinvite: true,
+    });
   });
 });

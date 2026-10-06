@@ -14,7 +14,7 @@ import {
 import { createAppQueryClient } from "../../../models/queryClient";
 import type { MachineSharingResponse } from "../../../models/workspaceOptions";
 import { RESOLVE_USER_URL } from "../../../models/workspaceOptions";
-import type { SharePanelModelOptions } from "../../../models/sharePanel";
+import type { Grant, SharePanelModelOptions } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, SharePanelModel } from "../../../models/sharePanel";
 import { Modal } from "../../components/Modal";
 import { Spinner } from "../../components/Spinner";
@@ -685,23 +685,22 @@ describe("ShareTab grant list", () => {
         (vnode) => attrsOf(vnode)["data-grant-name"] !== undefined,
       );
       expect(name).toBeDefined();
-      expect(classTokensOf(name as AnyVnode)).toContain("whitespace-nowrap");
-      expect(classTokensOf(name as AnyVnode)).not.toContain("truncate");
+      expect(classTokensOf(name as AnyVnode)).toContain("truncate");
+      expect(classTokensOf(name as AnyVnode)).not.toContain("whitespace-nowrap");
     }
   });
 
-  it("keeps an empty status slot and an empty action slot on every row", async () => {
+  it("keeps one empty invitation status indicator on every row, within the row", async () => {
     const share = await panelWithGrants();
 
     for (const row of grantRows(renderTab(share))) {
+      // The row clips its own content, so nothing (a re-invite included) can float outside it.
+      expect(classTokensOf(row)).toContain("overflow-hidden");
       const slots = collectVnodes(row).filter(
         (vnode) => attrsOf(vnode)["data-slot"] !== undefined,
       );
-      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual([
-        "status",
-        "action",
-      ]);
-      for (const slot of slots) expect(allText(slot)).toBe("");
+      expect(slots.map((slot) => attrsOf(slot)["data-slot"])).toEqual(["invitation"]);
+      expect(allText(slots[0])).toBe("");
     }
   });
 
@@ -1505,5 +1504,245 @@ describe("ShareTab moved address", () => {
     expect(allText(renderTab(share))).toContain(
       "Sharing moved to a new address. Links you shared before no longer work.",
     );
+  });
+});
+
+describe("ShareTab invitations", () => {
+  const INVITED_AT = "2026-09-30T12:00:00+00:00";
+
+  interface InvitationFixture {
+    outcomes?: unknown[];
+    isSynced?: boolean;
+    respondToInvite?: () => Promise<{
+      ok: boolean;
+      status: number;
+      body: unknown;
+    }>;
+  }
+
+  /** A published, synced panel over one address, one account and one domain,
+   * with what the outcomes route says about them. */
+  async function invitationPanel(
+    fixture: InvitationFixture = {},
+  ): Promise<{ share: SharePanelModel; inviteCount: () => number }> {
+    let inviteCount = 0;
+    const share = new SharePanelModel(
+      sharePanelOptions({
+        fetchJson: (url: string, init?: RequestInit) => {
+          if (url.endsWith("/invitation-outcomes"))
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              body: { outcomes: fixture.outcomes ?? [] },
+            });
+          if (url.endsWith("/invitations")) {
+            inviteCount += 1;
+            return (
+              fixture.respondToInvite ??
+              (() =>
+                Promise.resolve({
+                  ok: true,
+                  status: 200,
+                  body: { outcome: "invited", invited_at: INVITED_AT },
+                }))
+            )();
+          }
+          expect(init?.method ?? "GET").toBe("GET");
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            body: {
+              enabled: true,
+              url: "https://m.relay.example/",
+              grants: {
+                workspace: {
+                  users: ["user-2"],
+                  emails: ["friend@example.com"],
+                  email_domains: ["acme.example"],
+                },
+                services: {},
+              },
+              identities: {
+                "user-2": {
+                  user_id: "user-2",
+                  email: "carol@example.com",
+                  display_name: "Carol Reyes",
+                  profile_picture_url: null,
+                },
+              },
+              grants_synced: fixture.isSynced ?? true,
+            },
+          });
+        },
+      }),
+    );
+    await share.load();
+    await settle();
+    return { share, inviteCount: () => inviteCount };
+  }
+
+  function slotOf(row: AnyVnode, name: string): AnyVnode {
+    const slot = collectVnodes(row).find(
+      (vnode) => attrsOf(vnode)["data-slot"] === name,
+    );
+    expect(slot).toBeDefined();
+    return slot as AnyVnode;
+  }
+
+  function inviteControl(row: AnyVnode): AnyVnode | undefined {
+    return collectVnodes(row).find(
+      (vnode) => attrsOf(vnode)["data-invite"] !== undefined,
+    );
+  }
+
+  it("fills the one status indicator with what the granter may learn, and nothing about a domain", async () => {
+    const { share } = await invitationPanel({
+      outcomes: [
+        {
+          kind: "email",
+          value: "friend@example.com",
+          app: WHOLE,
+          outcome: "invited",
+          invited_at: INVITED_AT,
+        },
+        {
+          kind: "user",
+          value: "user-2",
+          app: WHOLE,
+          outcome: "joined",
+          joined_at: "2026-09-28T00:00:00+00:00",
+          last_visited_at: "2026-09-29T00:00:00+00:00",
+        },
+      ],
+    });
+
+    const root = renderTab(share);
+
+    expect(
+      allText(slotOf(rowByText(root, "friend@example.com"), "invitation")),
+    ).toMatch(/^Invited .* ago.*|^Invited just now.*/);
+    const joined = slotOf(rowByText(root, "Carol Reyes"), "invitation");
+    expect(allText(joined)).toMatch(/^Joined /);
+    expect(
+      collectVnodes(joined).some((vnode) =>
+        String(attrsOf(vnode)["data-tooltip"] ?? "").includes("last visited"),
+      ),
+    ).toBe(true);
+    // A joined person is in: no re-invite is offered.
+    expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
+    expect(allText(slotOf(rowByText(root, "Anyone at acme.example"), "invitation"))).toBe("");
+  });
+
+  it("says could not invite, and no more than that, plus a re-invite", async () => {
+    const { share } = await invitationPanel({
+      outcomes: [
+        {
+          kind: "email",
+          value: "friend@example.com",
+          app: WHOLE,
+          outcome: "could_not_invite",
+        },
+      ],
+    });
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    expect(allText(slotOf(row, "invitation"))).toContain("Could not invite");
+    expect(allText(inviteControl(row))).toBe("Invite again");
+  });
+
+  it("offers a re-invite once there is an outcome, and nothing for a domain, an untried grant, or someone who joined", async () => {
+    const { share, inviteCount } = await invitationPanel({
+      outcomes: [
+        {
+          kind: "email",
+          value: "friend@example.com",
+          app: WHOLE,
+          outcome: "invited",
+          invited_at: INVITED_AT,
+        },
+      ],
+    });
+    const root = renderTab(share);
+
+    const friend = inviteControl(rowByText(root, "friend@example.com"));
+    expect(friend).toBeDefined();
+    expect(allText(friend)).toBe("Invite again");
+    expect(attrsOf(friend as AnyVnode)["aria-label"]).toBe("Invite again");
+    // The first invitation is automatic, so a person with no outcome shows no button.
+    expect(inviteControl(rowByText(root, "Carol Reyes"))).toBeUndefined();
+    expect(inviteControl(rowByText(root, "Anyone at acme.example"))).toBeUndefined();
+
+    (attrsOf(friend as AnyVnode).onclick as () => void)();
+    await settle();
+
+    expect(inviteCount()).toBe(1);
+  });
+
+  it("offers no re-invite, and says why, while the document has not reached Imbue Cloud", async () => {
+    const { share } = await invitationPanel({
+      isSynced: false,
+      outcomes: [
+        {
+          kind: "email",
+          value: "friend@example.com",
+          app: WHOLE,
+          outcome: "invited",
+          invited_at: INVITED_AT,
+        },
+      ],
+    });
+
+    const root = renderTab(share);
+
+    expect(
+      grantRows(root).some((row) => inviteControl(row) !== undefined),
+    ).toBe(false);
+    expect(allText(byId(root, "ws-share-sync-notice"))).toContain(
+      "have not reached Imbue Cloud",
+    );
+  });
+
+  it("has no sync notice once the document has reached Imbue Cloud", async () => {
+    const { share } = await invitationPanel();
+
+    expect(byId(renderTab(share), "ws-share-sync-notice")).toBeUndefined();
+  });
+
+  it("shows the row inviting with no button, then the refusal in its words and a re-invite", async () => {
+    let answer: (result: {
+      ok: boolean;
+      status: number;
+      body: unknown;
+    }) => void = () => undefined;
+    const { share } = await invitationPanel({
+      respondToInvite: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    });
+    const friend = share
+      .grantsFor(WHOLE)
+      .find((grant) => grant.grantee.value === "friend@example.com");
+    expect(friend).toBeDefined();
+
+    const inviting = share.invite(WHOLE, (friend as Grant).key);
+    const pending = slotOf(
+      rowByText(renderTab(share), "friend@example.com"),
+      "invitation",
+    );
+    expect(allText(pending)).toContain("Inviting");
+    expect(
+      inviteControl(rowByText(renderTab(share), "friend@example.com")),
+    ).toBeUndefined();
+
+    answer({ ok: true, status: 200, body: { outcome: "too_soon" } });
+    await inviting;
+    await settle();
+
+    const row = rowByText(renderTab(share), "friend@example.com");
+    expect(allText(slotOf(row, "invitation"))).toContain(
+      "You invited this person too recently",
+    );
+    expect(allText(inviteControl(row))).toBe("Invite again");
   });
 });

@@ -12,6 +12,7 @@ from datetime import datetime
 from datetime import timezone
 from pathlib import Path
 from typing import Any
+from typing import Final
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,7 @@ from imbue.minds.desktop_client.auth import FileAuthStore
 from imbue.minds.desktop_client.backend_resolver import AgentDisplayInfo
 from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
+from imbue.minds.desktop_client.backend_resolver import WORKSPACE_DISPLAY_NAME_LABEL
 from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.backup_provisioning import BackupSetupRequest
 from imbue.minds.desktop_client.backup_update import BELOW_UPDATE_FLOOR_MESSAGE
@@ -62,6 +64,9 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCli
 from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
+from imbue.minds.desktop_client.imbue_cloud_cli import InvitationCliResult
+from imbue.minds.desktop_client.imbue_cloud_cli import InvitationOutcomeCliEntry
 from imbue.minds.desktop_client.imbue_cloud_cli import ShareCliInfo
 from imbue.minds.desktop_client.minds_config import MindsConfig
 from imbue.minds.desktop_client.session_store import MultiAccountSessionStore
@@ -2107,8 +2112,9 @@ def _sharing_client(
     service_logs: dict[str, str] | None = None,
     mngr_binary: str = "mngr",
     http_client: httpx.Client | None = None,
+    agent_labels: dict[str, str] | None = None,
 ) -> FlaskClient:
-    resolver = make_resolver_with_data(make_agents_json(agent_id), service_logs=service_logs)
+    resolver = make_resolver_with_data(make_agents_json(agent_id, labels=agent_labels), service_logs=service_logs)
     store = _associated_session_store(tmp_path, cli, agent_id, user_id=user_id, email=email)
     return _build_client(
         tmp_path,
@@ -4260,3 +4266,199 @@ def test_workspace_sharing_put_delete_and_readiness_accept_the_workspace_coordin
     assert disabled.status_code == 200
     assert json.loads(disabled.data)["enabled"] is False
     assert cli.deleted_shares == [_TEST_HOST_ID]
+
+
+# Invitations (specs/inviting-granted-visitors/spec.md)
+
+
+_INVITED_WORKSPACE_NAME: Final[str] = "Robot Butler"
+
+
+def _invitation_client(tmp_path: Path, agent_id: AgentId, cli: FakeSharingCli) -> FlaskClient:
+    """A sharing client whose workspace is published, carries a display name, and whose shell registered its label."""
+    cli.share = _active_share()
+    service_logs = {
+        str(agent_id): make_service_log("system_interface", "http://localhost:8000", "system_interface-shl1")
+    }
+    return _sharing_client(
+        tmp_path,
+        agent_id,
+        cli,
+        service_logs=service_logs,
+        agent_labels={"is_primary": "true", WORKSPACE_DISPLAY_NAME_LABEL: _INVITED_WORKSPACE_NAME},
+    )
+
+
+def test_workspace_sharing_grants_put_pushes_the_document_to_imbue_cloud_while_published(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}/grants",
+        headers=_auth_header(),
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["grants_synced"] is True
+    ((account, host_id, document),) = cli.pushed_grants_documents
+    assert host_id == _TEST_HOST_ID
+    assert document["workspace"]["emails"] == ["viewer@example.com"]
+
+
+def test_workspace_sharing_grants_put_reports_a_failed_push_as_not_synced(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        share=_active_share(), mngr_caller=_ShareProbeCaller(is_share_env_present=True), is_grants_push_failing=True
+    )
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}/grants",
+        headers=_auth_header(),
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
+    )
+
+    # The save itself landed; only the mirror did not.
+    assert response.status_code == 200
+    body = json.loads(response.data)
+    assert body["grants"]["workspace"]["emails"] == ["viewer@example.com"]
+    assert body["grants_synced"] is False
+
+
+def test_workspace_sharing_grants_put_pushes_nothing_while_unpublished(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.put(
+        f"/api/v1/workspace-sharing/{agent_id}/grants",
+        headers=_auth_header(),
+        json={"grants": {"workspace": {"emails": ["viewer@example.com"]}}},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["grants_synced"] is None
+    assert cli.pushed_grants_documents == []
+
+
+def test_workspace_sharing_invite_carries_the_targets_link_and_reports_the_outcome(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True))
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations",
+        headers=_auth_header(),
+        json={"email": "bob@example.com"},
+    )
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data) == {"outcome": "invited", "invited_at": "2026-09-30T12:00:00+00:00"}
+    (call,) = cli.invite_calls
+    assert call["email"] == "bob@example.com"
+    assert call["user_id"] is None
+    assert call["app"] is None
+    assert call["link"] == f"https://system_interface-shl1.{_TEST_HOST_ID}.owner1234.us1.shares.example/"
+    assert call["workspace_name"] == _INVITED_WORKSPACE_NAME
+
+
+def test_workspace_sharing_invite_pushes_the_document_and_retries_once_when_out_of_date(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    out_of_date = ImbueCloudShareRefusedCliError("shares invite: refused")
+    out_of_date.code = "grants_out_of_date"
+    cli = _fake_sharing_cli(
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
+        invite_results=[out_of_date, InvitationCliResult(outcome="invited", invited_at="2026-09-30T12:00:00+00:00")],
+    )
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations", headers=_auth_header(), json={"email": "bob@example.com"}
+    )
+
+    assert response.status_code == 200, response.data
+    assert json.loads(response.data)["outcome"] == "invited"
+    assert len(cli.invite_calls) == 2
+    assert len(cli.pushed_grants_documents) == 1
+
+
+def test_workspace_sharing_invite_reports_a_refusal_by_its_code(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    not_invitable = ImbueCloudShareRefusedCliError("shares invite: this person has already joined")
+    not_invitable.code = "not_invitable"
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(is_share_env_present=True), invite_results=[not_invitable])
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    refused = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations", headers=_auth_header(), json={"email": "bob@example.com"}
+    )
+    two_subjects = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations",
+        headers=_auth_header(),
+        json={"email": "bob@example.com", "user_id": "u-1"},
+    )
+
+    assert refused.status_code == 409
+    assert json.loads(refused.data)["error"] == "not_invitable"
+    assert two_subjects.status_code == 400
+    assert len(cli.invite_calls) == 1
+
+
+def test_workspace_sharing_invite_refuses_an_unpublished_workspace(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller())
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.post(
+        f"/api/v1/workspace-sharing/{agent_id}/invitations", headers=_auth_header(), json={"email": "bob@example.com"}
+    )
+
+    assert response.status_code == 502
+    assert "Publish" in json.loads(response.data)["error"]
+    assert cli.invite_calls == []
+
+
+def test_workspace_sharing_invitation_outcomes_lists_each_entry(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    cli = _fake_sharing_cli(
+        mngr_caller=_ShareProbeCaller(is_share_env_present=True),
+        invitation_outcomes_to_return=[
+            InvitationOutcomeCliEntry(
+                kind="email",
+                value="bob@example.com",
+                app="system_interface",
+                outcome="invited",
+                invited_at="2026-09-30T12:00:00+00:00",
+            ),
+            InvitationOutcomeCliEntry(
+                kind="user", value="u-2", app="notes", outcome="joined", joined_at="2026-09-29T00:00:00+00:00"
+            ),
+        ],
+    )
+    client = _invitation_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/invitation-outcomes", headers=_auth_header())
+
+    assert response.status_code == 200, response.data
+    outcomes = json.loads(response.data)["outcomes"]
+    assert [(entry["app"], entry["value"], entry["outcome"]) for entry in outcomes] == [
+        ("system_interface", "bob@example.com", "invited"),
+        ("notes", "u-2", "joined"),
+    ]
+    assert outcomes[1]["joined_at"] == "2026-09-29T00:00:00+00:00"
+    assert outcomes[0]["last_visited_at"] is None
+
+
+def test_workspace_sharing_invitation_outcomes_is_empty_while_unpublished(tmp_path: Path) -> None:
+    agent_id = AgentId()
+    not_published = ImbueCloudShareRefusedCliError("shares invitation-outcomes: not published")
+    not_published.code = "not_published"
+    cli = _fake_sharing_cli(mngr_caller=_ShareProbeCaller(), invitation_outcomes_error_to_raise=not_published)
+    client = _sharing_client(tmp_path, agent_id, cli)
+
+    response = client.get(f"/api/v1/workspace-sharing/{agent_id}/invitation-outcomes", headers=_auth_header())
+
+    assert response.status_code == 200
+    assert json.loads(response.data) == {"outcomes": []}

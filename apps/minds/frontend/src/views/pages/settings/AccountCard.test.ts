@@ -225,3 +225,62 @@ describe("a signed-out account's card", () => {
     expect(start).toHaveBeenCalledWith("", { isClosedOnSignIn: true });
   });
 });
+
+describe("the email notifications switch", () => {
+  function modelWithChannels(
+    channels: { email_enabled: boolean; in_app_enabled: boolean } | null,
+    isLoaded = true,
+  ): AccountsDetailModel {
+    const model = new AccountsDetailModel(undefined, () => {});
+    const state = model.notificationPreferencesFor(ACCOUNT.user_id);
+    state.isLoaded = isLoaded;
+    state.channels = channels;
+    return model;
+  }
+
+  function emailSwitch(root: m.Vnode): AnyVnode | undefined {
+    return collectVnodes(root).find(
+      (node) => attrsOf(node)["data-email-notifications"] !== undefined,
+    );
+  }
+
+  it("reads the account's email channel, and flips it when pressed", () => {
+    const model = modelWithChannels({
+      email_enabled: true,
+      in_app_enabled: true,
+    });
+    const flips: boolean[] = [];
+    vi.spyOn(model, "setEmailNotifications").mockImplementation(
+      async (_userId, isEnabled) => {
+        flips.push(isEnabled);
+      },
+    );
+    const root = mountCard(model)();
+
+    const toggle = emailSwitch(root);
+    expect(toggle).toBeDefined();
+    expect(attrsOf(toggle as AnyVnode)["aria-checked"]).toBe("true");
+    expect(collectText(root).join(" ")).toContain("Email notifications");
+    (attrsOf(toggle as AnyVnode).onclick as () => void)();
+
+    expect(flips).toEqual([false]);
+  });
+
+  it("says the settings are unavailable rather than drawing a switch", () => {
+    const root = mountCard(modelWithChannels(null))();
+
+    expect(emailSwitch(root)).toBeUndefined();
+    expect(collectText(root).join(" ")).toContain(
+      "Notification settings are unavailable",
+    );
+  });
+
+  it("waits in words before the channels are known", () => {
+    const root = mountCard(modelWithChannels(null, false))();
+
+    expect(emailSwitch(root)).toBeUndefined();
+    expect(collectText(root).join(" ")).toContain(
+      "Loading notification settings",
+    );
+  });
+});

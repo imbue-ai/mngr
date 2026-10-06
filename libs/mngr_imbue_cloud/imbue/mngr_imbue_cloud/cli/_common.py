@@ -29,6 +29,7 @@ from imbue.mngr_imbue_cloud.errors import ImbueCloudEmailNotVerifiedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudQuotaExceededError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudRateLimitedError
+from imbue.mngr_imbue_cloud.errors import ImbueCloudShareRefusedError
 from imbue.mngr_imbue_cloud.errors import ImbueCloudUserNotFoundError
 from imbue.mngr_imbue_cloud.primitives import ImbueCloudAccount
 
@@ -197,6 +198,9 @@ def handle_imbue_cloud_errors(func):
             fail_with_json(str(exc), error_class=type(exc).__name__, code="user_not_found")
         except ImbueCloudRateLimitedError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__, code="rate_limited")
+        except ImbueCloudShareRefusedError as exc:
+            # The desktop keys off the code: grants_out_of_date means push, then retry once.
+            fail_with_json(str(exc), error_class=type(exc).__name__, code=exc.code)
         except ImbueCloudError as exc:
             fail_with_json(str(exc), error_class=type(exc).__name__)
 

@@ -1,5 +1,8 @@
 """`mngr imbue_cloud shares ...` subcommands (self-hosted relay sharing)."""
 
+import json
+from pathlib import Path
+
 import click
 
 from imbue.imbue_common.ids import InvalidRandomIdError
@@ -193,3 +196,87 @@ def set_share_grantees(
     token = get_active_token(store, client, parsed_account)
     count = client.set_share_grantees(token, host_id, list(user_ids))
     emit_json({"host_id": host_id, "count": count})
+
+
+@shares.command(name="push-grants")
+@click.argument("host_id")
+@click.option(
+    "--document-file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help=(
+        "A JSON file holding the workspace's parsed grants document: "
+        '{"workspace": {"users": [], "emails": [], "email_domains": []}, "services": {"<app>": {...}}}.'
+    ),
+)
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def push_share_grants(host_id: str, document_file: Path, account: str | None, connector_url: str | None) -> None:
+    """Record the workspace's grants document in Imbue Cloud's centralized grants table.
+
+    Discovery and invitations only: the workspace's own grants file stays the
+    sole authority over who may enter. Pushing the same document twice appends
+    nothing. Fails with code ``not_published`` while the workspace is unpublished.
+    """
+    document = json.loads(document_file.read_text())
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    emit_json(client.push_share_grants(token, host_id, document).model_dump(mode="json"))
+
+
+@shares.command(name="invite")
+@click.argument("host_id")
+@click.option("--user-id", default=None, help="The account of a user grant to invite")
+@click.option("--email", default=None, help="The address of an email grant to invite")
+@click.option("--app", default=None, help="The app the invitation is for (the whole workspace when omitted)")
+@click.option("--link", default=None, help="The share URL of that app; the shell's entry origin when omitted")
+@click.option("--workspace-name", default=None, help="The workspace's display name, as the invitation should say it")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def invite_grantee(
+    host_id: str,
+    user_id: str | None,
+    email: str | None,
+    app: str | None,
+    link: str | None,
+    workspace_name: str | None,
+    account: str | None,
+    connector_url: str | None,
+) -> None:
+    """Invite the grantee of one user grant or one email grant, and print what the granter may learn.
+
+    Exactly one of --user-id and --email. The outcome is one of invited,
+    could_not_invite, over_allowance, or too_soon; the connector never says why
+    a delivery could not be made. Fails with code ``grants_out_of_date`` when
+    the centralized grants table holds no open grant for the subject (push the
+    document, then try once more) and ``not_invitable`` when the grantee has
+    already joined.
+    """
+    if (user_id is None) == (email is None):
+        fail_with_json("pass exactly one of --user-id and --email", error_class="UsageError", exit_code=2)
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    result = client.invite_grantee(
+        token, host_id, user_id=user_id, email=email, app=app, link=link, workspace_name=workspace_name
+    )
+    emit_json(result.model_dump(mode="json"))
+
+
+@shares.command(name="invitation-outcomes")
+@click.argument("host_id")
+@click.option("--account", default=None, help="Account email (defaults to the active account)")
+@click.option("--connector-url", default=None, help="Override connector URL")
+@handle_imbue_cloud_errors
+def list_invitation_outcomes(host_id: str, account: str | None, connector_url: str | None) -> None:
+    """Print, per open user or email grant of the share, what the granter may learn: invited, could_not_invite, or joined."""
+    client = make_connector_client(connector_url)
+    store = make_session_store()
+    parsed_account = resolve_account_or_active(store, account)
+    token = get_active_token(store, client, parsed_account)
+    emit_json([entry.model_dump(mode="json") for entry in client.list_invitation_outcomes(token, host_id)])

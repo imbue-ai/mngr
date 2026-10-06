@@ -25,6 +25,9 @@ import { getAppQueryClient } from "./queryClient";
 import type {
   FetchJson,
   IdentityRecord,
+  InvitationOutcomeEntry,
+  InvitationOutcomesResponse,
+  InvitationResultResponse,
   MachineSharingResponse,
   ShareLoadStatus,
   SharingGrantList,
@@ -83,6 +86,22 @@ function isPublicationAttempt(value: unknown): value is PublicationAttempt {
   );
 }
 
+// A document that did not reach Imbue Cloud is sent again by the next load.
+const GRANTS_SYNC_RETRY_MS = 15_000;
+
+/** What the panel says for each refusal an invite can come back with. The
+ * allowance and the cooldown are named only at the moment of refusal (spec
+ * P5, O5); every other code is the desktop's or the connector's own. */
+const INVITE_REFUSAL_MESSAGES: Record<string, string> = {
+  over_allowance: "You have reached your invitation limit for now.",
+  too_soon: "You invited this person too recently.",
+  grants_out_of_date:
+    "The permissions have not reached Imbue Cloud yet. Try again in a moment.",
+  not_invitable: "This person has already joined.",
+  not_published: "Publish this workspace before inviting anyone.",
+};
+
+const INVITE_FAILURE_MESSAGE = "Could not invite";
 /** What a grant can be typed as, in the order the add row offers them. */
 export const GRANT_ADD_KINDS = ["email", "email_domain"] as const;
 
@@ -158,6 +177,38 @@ export interface GrantAddRow {
   refusalMessage: string | null;
 }
 
+/** What the granter may learn about a grant (spec O1): invited, could not
+ * invite, or joined. Nothing else about a delivery ever reaches the panel. */
+export type GrantOutcomeKind = "invited" | "could_not_invite" | "joined";
+
+export interface GrantOutcome {
+  readonly kind: GrantOutcomeKind;
+  /** The last successful delivery, when invited. */
+  readonly invitedAt: string | null;
+  /** The first visit and the latest one, when joined. */
+  readonly joinedAt: string | null;
+  readonly lastVisitedAt: string | null;
+}
+
+export type InviteState =
+  | { readonly state: "idle" }
+  | { readonly state: "inviting" }
+  /** Said on the row at the moment of refusal, and never again after the
+   * next invite or load (spec O5). */
+  | { readonly state: "refused"; readonly message: string };
+
+/** The one thing a grant's invitation status indicator shows, as a single typed value so exactly one
+ * state is ever on screen (never a status and a stale button at once). The first invitation is
+ * automatic -- granting a person requests one -- so the only button this ever carries is a
+ * re-invite, offered when the invitation can be requested again. */
+export type InvitationStatusIndicator =
+  | { readonly kind: "none" }
+  | { readonly kind: "inviting" }
+  | { readonly kind: "invited"; readonly at: string | null; readonly canReinvite: boolean }
+  | { readonly kind: "could_not_invite"; readonly canReinvite: boolean }
+  | { readonly kind: "refused"; readonly message: string; readonly canReinvite: boolean }
+  | { readonly kind: "joined"; readonly firstAt: string | null; readonly lastAt: string | null };
+
 /** One entry the grants route refused, as the 400 body names it. */
 interface GrantRefusal {
   scope: string;
@@ -222,6 +273,9 @@ export class SharePanelModel {
   /** The rows of each target: the whole workspace under its service name,
    * every other target under its app name. */
   readonly grantsByTarget = new Map<string, Grant[]>();
+  /** Whether the document has reached Imbue Cloud's grants table, which
+   * invitations are made from: null while unpublished or not yet known. */
+  grantsSynced: boolean | null = null;
 
   private readonly options: SharePanelModelOptions;
   // Seeded from the options snapshot, then merged from every response, since
@@ -267,6 +321,17 @@ export class SharePanelModel {
   // relay" means it changed since, because the stamp survives re-publishing.
   private tunnelLoginSnapshot: TunnelLoginSnapshot = { state: "unseen" };
   private isDisposed = false;
+  // Keyed by target and grantee, as the outcomes route lists them.
+  private outcomeByKey = new Map<string, GrantOutcome>();
+  private readonly inviteStateByKey = new Map<GrantKey, InviteState>();
+  // A person is auto-invited once, when their grant first settles and the document has reached
+  // Imbue Cloud; a later re-invite is the granter's own doing.
+  private readonly autoInvitedKeys = new Set<GrantKey>();
+  // Outcome reads are numbered as sent, like status requests, so an older
+  // answer cannot overwrite a newer one.
+  private outcomesRequestCount = 0;
+  private adoptedOutcomesSequence = 0;
+  private grantsSyncRetryTimerId: TimerHandle | null = null;
 
   constructor(options: SharePanelModelOptions) {
     this.options = options;
@@ -386,6 +451,73 @@ export class SharePanelModel {
 
   get isAwaitingLink(): boolean {
     return this.isPublished && !this.isLive && this.machineUrl !== null;
+  }
+
+  /** The document is saved on the workspace but has not reached Imbue Cloud,
+   * so nobody can be invited until the next load sends it again (spec P7). */
+  get isGrantsSyncPending(): boolean {
+    return this.isPublished && this.grantsSynced === false;
+  }
+
+  /** The granter-visible outcome of a row, or null while nothing is known. */
+  outcomeFor(target: string, grant: Grant): GrantOutcome | null {
+    const key = outcomeKey(target, grant.grantee);
+    return key === null ? null : (this.outcomeByKey.get(key) ?? null);
+  }
+
+  inviteStateFor(key: GrantKey): InviteState {
+    return this.inviteStateByKey.get(key) ?? { state: "idle" };
+  }
+
+  /** Whether the row can be invited now: a person rather than a domain, saved,
+   * not yet joined, while the workspace is published and its document has
+   * reached Imbue Cloud (spec P3, P4, P7). */
+  canInvite(target: string, grant: Grant): boolean {
+    if (grant.grantee.kind === "email_domain") return false;
+    if (!this.isPublished || this.grantsSynced !== true) return false;
+    if (grant.status.state !== "settled") return false;
+    if (this.inviteStateFor(grant.key).state === "inviting") return false;
+    return this.outcomeFor(target, grant)?.kind !== "joined";
+  }
+
+  /** The single value the row's invitation status indicator shows (spec P2, P5, P8), reduced from the
+   * in-flight request, the last refusal, and the granter-visible outcome, in that order, so the
+   * view only ever renders one of them. A domain row, and a row with nothing known yet, show
+   * nothing. */
+  invitationStatusIndicator(target: string, grant: Grant): InvitationStatusIndicator {
+    if (grant.grantee.kind === "email_domain") return { kind: "none" };
+    const invite = this.inviteStateFor(grant.key);
+    if (invite.state === "inviting") return { kind: "inviting" };
+    const canReinvite = this.canInvite(target, grant);
+    if (invite.state === "refused")
+      return { kind: "refused", message: invite.message, canReinvite };
+    const outcome = this.outcomeFor(target, grant);
+    if (outcome === null) return { kind: "none" };
+    if (outcome.kind === "joined")
+      return { kind: "joined", firstAt: outcome.joinedAt, lastAt: outcome.lastVisitedAt };
+    if (outcome.kind === "invited")
+      return { kind: "invited", at: outcome.invitedAt, canReinvite };
+    return { kind: "could_not_invite", canReinvite };
+  }
+
+  /** Request one invitation for every newly granted person whose grant has just settled and
+   * reached Imbue Cloud -- granting a person is what asks, so the granter never presses a first
+   * Invite. Fires once per grant (a re-invite is manual); a grant read back from the stored
+   * document, a domain, or a person already invited or joined is left alone. The connector still
+   * applies the cooldown, the allowance, and the suppression list, and its answer becomes the
+   * row's status indicator. */
+  private maybeAutoInviteGrantedPeople(): void {
+    if (!this.isPublished || this.grantsSynced !== true) return;
+    for (const target of this.knownTargets) {
+      for (const grant of this.mutableGrants(target)) {
+        if (grant.addedAtMs === null) continue;
+        if (this.autoInvitedKeys.has(grant.key)) continue;
+        if (this.outcomeFor(target, grant) !== null) continue;
+        if (!this.canInvite(target, grant)) continue;
+        this.autoInvitedKeys.add(grant.key);
+        void this.invite(target, grant.key);
+      }
+    }
   }
 
   /** A target whose link cannot be shown yet because its label has not reached
@@ -535,6 +667,9 @@ export class SharePanelModel {
    */
   async load(): Promise<void> {
     this.loadErrorMessage = null;
+    // A refusal is said once, at the moment it happened (spec O5).
+    for (const [key, state] of this.inviteStateByKey)
+      if (state.state === "refused") this.inviteStateByKey.delete(key);
     const cached = this.statusQuery.getCurrentResult().data;
     if (cached !== undefined && this.adoptedStatusSequence === null)
       this.adoptLoadedDocument(cached, this.nextStatusSequence());
@@ -582,6 +717,8 @@ export class SharePanelModel {
       return;
     }
     if (data.grants === null) this.isGrantsListKnown = false;
+    this.maybeAutoInviteGrantedPeople();
+    void this.refreshOutcomes();
     const migratedDomainFrom = data.migrated_domain_from ?? null;
     if (migratedDomainFrom !== null) {
       // The read itself moved the share to a new address: the new link is not
@@ -640,6 +777,8 @@ export class SharePanelModel {
     if (idx < 0) return;
     const [removed] = grants.splice(idx, 1);
     this.grantsByTarget.set(target, grants);
+    this.inviteStateByKey.delete(key);
+    this.autoInvitedKeys.delete(key);
     const removals = this.removalsByTarget.get(target) ?? [];
     removals.push({ grant: removed, idx });
     this.removalsByTarget.set(target, removals);
@@ -669,6 +808,90 @@ export class SharePanelModel {
     this.redraw();
   }
 
+  /**
+   * Invite the person on a row. The row shows its pending state and nothing
+   * else waits (spec P10); the answer replaces it, and the outcomes route is
+   * read again so the row says what Imbue Cloud now knows (spec P2).
+   */
+  async invite(target: string, key: GrantKey): Promise<void> {
+    const grant = this.mutableGrants(target).find(
+      (candidate) => candidate.key === key,
+    );
+    if (grant === undefined || !this.canInvite(target, grant)) return;
+    const grantee = grant.grantee;
+    const subject =
+      grantee.kind === "user"
+        ? { user_id: grantee.userId }
+        : { email: grantee.value };
+    this.inviteStateByKey.set(key, { state: "inviting" });
+    this.redraw();
+    const result = await this.fetchJson(`${this.shareApiBase()}/invitations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...subject,
+        app: target === this.options.wholeService ? null : target,
+      }),
+    });
+    if (this.isDisposed) return;
+    this.inviteStateByKey.set(
+      key,
+      this.adoptInviteAnswer(target, grantee, result),
+    );
+    this.redraw();
+    void this.refreshOutcomes();
+  }
+
+  /** The row's state after an invite answered, with the outcome the answer
+   * itself carries applied so the row does not wait on the re-read. */
+  private adoptInviteAnswer(
+    target: string,
+    grantee: Grantee,
+    result: { ok: boolean; status: number; body: unknown },
+  ): InviteState {
+    const key = outcomeKey(target, grantee);
+    if (result.ok) {
+      const body = result.body as InvitationResultResponse;
+      if (body.outcome === "invited" || body.outcome === "could_not_invite") {
+        if (key !== null)
+          this.outcomeByKey.set(key, {
+            kind: body.outcome,
+            invitedAt: body.invited_at ?? null,
+            joinedAt: null,
+            lastVisitedAt: null,
+          });
+        return { state: "idle" };
+      }
+      return {
+        state: "refused",
+        message:
+          INVITE_REFUSAL_MESSAGES[body.outcome] ?? INVITE_FAILURE_MESSAGE,
+      };
+    }
+    const code = refusalCodeOf(result.body);
+    const message =
+      code !== null && INVITE_REFUSAL_MESSAGES[code] !== undefined
+        ? INVITE_REFUSAL_MESSAGES[code]
+        : errorMessageFromBody(result.body, INVITE_FAILURE_MESSAGE);
+    return { state: "refused", message };
+  }
+
+  /** Read what the granter may learn about every row. Nothing is readable
+   * while unpublished: no invitation can be made until publishing again. */
+  private async refreshOutcomes(): Promise<void> {
+    if (!this.isPublished) return;
+    const sequence = ++this.outcomesRequestCount;
+    const result = await this.fetchJson(
+      `${this.shareApiBase()}/invitation-outcomes`,
+    );
+    if (this.isDisposed || sequence <= this.adoptedOutcomesSequence) return;
+    if (!result.ok) return;
+    this.adoptedOutcomesSequence = sequence;
+    const entries = (result.body as InvitationOutcomesResponse).outcomes ?? [];
+    this.outcomeByKey = outcomesByKey(entries);
+    this.redraw();
+  }
+
   private buildGrantsDocument(): SharingGrantsDocument {
     const document: SharingGrantsDocument = {
       workspace: this.grantListFor(this.options.wholeService),
@@ -692,6 +915,20 @@ export class SharePanelModel {
     this.unsubscribeStatusQuery();
     this.unsubscribeMutations();
     this.publicationWrite.reset();
+    if (this.grantsSyncRetryTimerId !== null) {
+      this.cancel(this.grantsSyncRetryTimerId);
+      this.grantsSyncRetryTimerId = null;
+    }
+  }
+
+  /** One load, a moment from now, while the document has not reached Imbue
+   * Cloud: the load sends it again (spec P7). */
+  private scheduleGrantsSyncRetry(): void {
+    if (this.grantsSyncRetryTimerId !== null || this.isDisposed) return;
+    this.grantsSyncRetryTimerId = this.schedule(() => {
+      this.grantsSyncRetryTimerId = null;
+      if (this.isGrantsSyncPending && !this.isDisposed) void this.load();
+    }, GRANTS_SYNC_RETRY_MS);
   }
 
   /**
@@ -983,7 +1220,9 @@ export class SharePanelModel {
       if (this.adoptStatusDocument(document, sequence))
         this.queryClient.setQueryData(this.queryKey, document);
       this.markCarriedRows(carriedRows, { state: "settled" });
+      this.maybeAutoInviteGrantedPeople();
       this.redraw();
+      void this.refreshOutcomes();
       return;
     }
     // A refusal saves nothing, so the rest of the document is sent again
@@ -1132,6 +1371,10 @@ export class SharePanelModel {
       this.isGrantsListKnown = true;
       this.adoptGrants(data.grants);
     }
+    if ("grants_synced" in data) {
+      this.grantsSynced = data.grants_synced ?? null;
+      if (this.isGrantsSyncPending) this.scheduleGrantsSyncRetry();
+    }
     return true;
   }
 
@@ -1175,6 +1418,12 @@ export class SharePanelModel {
       // The route that created the link is the authority on it, even when a
       // write served after it has already brought the grants forward.
       this.adoptPublication(document);
+      // Only a workspace that now has a link can be invited to; taking the
+      // address away leaves the outcomes alone (spec O5).
+      if (this.isPublished) {
+        this.maybeAutoInviteGrantedPeople();
+        void this.refreshOutcomes();
+      }
       this.syncReadinessPolling();
     }
     this.redraw();
@@ -1452,6 +1701,48 @@ function isGrantListEmpty(grants: SharingGrantList): boolean {
 
 function pushUnique(values: string[], value: string): void {
   if (!values.includes(value)) values.push(value);
+}
+
+/** The name the outcomes route lists a row under, or null for a domain row,
+ * which is never invited. */
+function outcomeKey(target: string, grantee: Grantee): string | null {
+  if (grantee.kind === "user") return `${target}|user:${grantee.userId}`;
+  if (grantee.kind === "email")
+    return `${target}|email:${normalizeGrantAddress(grantee.value)}`;
+  return null;
+}
+
+function outcomesByKey(
+  entries: InvitationOutcomeEntry[],
+): Map<string, GrantOutcome> {
+  const outcomes = new Map<string, GrantOutcome>();
+  for (const entry of entries) {
+    const kind = entry.outcome;
+    if (kind !== "invited" && kind !== "could_not_invite" && kind !== "joined")
+      continue;
+    const grantee: Grantee =
+      entry.kind === "user"
+        ? { kind: "user", userId: entry.value, value: null }
+        : { kind: "email", value: entry.value };
+    const key = outcomeKey(entry.app, grantee);
+    if (key === null) continue;
+    outcomes.set(key, {
+      kind,
+      invitedAt: entry.invited_at ?? null,
+      joinedAt: entry.joined_at ?? null,
+      lastVisitedAt: entry.last_visited_at ?? null,
+    });
+  }
+  return outcomes;
+}
+
+/** The refusal code of an invite the desktop answered with 409, or null. */
+function refusalCodeOf(body: unknown): string | null {
+  if (body === null || typeof body !== "object") return null;
+  const code = (body as { error?: unknown }).error;
+  return typeof code === "string" && code in INVITE_REFUSAL_MESSAGES
+    ? code
+    : null;
 }
 
 function grantRefusalsFrom(

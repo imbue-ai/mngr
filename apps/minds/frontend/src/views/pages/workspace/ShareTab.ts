@@ -15,9 +15,11 @@ import { Spinner } from "../../components/Spinner";
 import type {
   Grant,
   GrantAddKind,
+  InvitationStatusIndicator,
   SharePanelModel,
 } from "../../../models/sharePanel";
 import { GRANT_ADD_KINDS, toGrantAddKind } from "../../../models/sharePanel";
+import { formatRelativeAgo } from "../../../models/backups";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 
 const JUST_ADDED_MS = 6000;
@@ -57,6 +59,10 @@ const ADD_OFF_TOOLTIP = "Permissions cannot be granted while sharing is off";
 const ADD_UNKNOWN_TOOLTIP =
   "Permissions cannot be granted until the sharing status has loaded";
 
+const SYNC_PENDING_NOTICE =
+  "The permissions have not reached Imbue Cloud yet, so nobody can be " +
+  "invited. They will be sent again in a moment.";
+
 /** What each kind of grant is called at the add row, and the example it shows. */
 const ADD_KIND_TEXT: Record<
   GrantAddKind,
@@ -75,7 +81,7 @@ const LINK_BOX_CLASS =
 // Every row is the same height whatever it holds, so a long list scans as a
 // single column.
 const ROW_CLASS =
-  "flex h-10 flex-none items-center gap-2 rounded-md border px-3";
+  "flex h-10 flex-none items-center gap-2 overflow-hidden rounded-md border px-3";
 
 // A domain row's outline is mixed from its surface, so the two read as one
 // mark.
@@ -444,6 +450,13 @@ function renderTargetPane(
     ),
     share.isPublished ? renderLinkSection(share, local) : null,
     renderAddRow(share),
+    share.isGrantsSyncPending
+      ? m(
+          "div",
+          { id: "ws-share-sync-notice", class: "mt-3 shrink-0" },
+          m(Notice, { variant: "warn" }, SYNC_PENDING_NOTICE),
+        )
+      : null,
     share.isPublished || !hasAnyGrant(share)
       ? null
       : m(
@@ -690,33 +703,30 @@ function renderGrantRow(
     },
     [
       renderGrantLead(share, grant),
+      // The name takes the row's slack and truncates under pressure, so the status indicator and the
+      // remove control to its right always keep their place inside the row.
       m(
         "span",
-        {
-          "data-grant-name": grant.key,
-          class: "type-body text-primary whitespace-nowrap",
-        },
-        text.primary,
-      ),
-      text.secondary === null
-        ? null
-        : m(
+        { class: "min-w-0 flex-1 flex items-baseline gap-2 overflow-hidden" },
+        [
+          m(
             "span",
-            { class: "type-body text-tertiary whitespace-nowrap" },
-            text.secondary,
+            {
+              "data-grant-name": grant.key,
+              class: "min-w-0 truncate type-body text-primary",
+            },
+            text.primary,
           ),
-      m("span", { class: "grow" }),
-      // Reserved for the invitation work: an outcome per row, and the control
-      // that starts one. Both keep their height so filling them later does not
-      // move the row.
-      m("span", {
-        "data-slot": "status",
-        class: "flex h-6 shrink-0 items-center",
-      }),
-      m("span", {
-        "data-slot": "action",
-        class: "flex h-6 shrink-0 items-center",
-      }),
+          text.secondary === null
+            ? null
+            : m(
+                "span",
+                { class: "shrink-0 type-body text-tertiary" },
+                text.secondary,
+              ),
+        ],
+      ),
+      renderInvitationStatusIndicator(share, grant),
       renderGrantState(share, grant),
       isOwned
         ? m(
@@ -745,6 +755,96 @@ function renderGrantRow(
 function rowSurfaceClass(share: SharePanelModel, isDomain: boolean): string {
   if (!share.isPublished) return ROW_INACTIVE_CLASS;
   return isDomain ? ROW_DOMAIN_CLASS : ROW_PERSON_CLASS;
+}
+
+/** The one typed thing the row's invitation status indicator shows (the model reduces the request, the
+ * refusal, and the outcome to a single value, so exactly one is ever on screen): a fixed-height
+ * cell so an outcome arriving never moves the row, holding the status and, when a re-invite can
+ * be requested, an "Invite again" control. The first invitation is automatic, so there is no
+ * first "Invite" button here. */
+function renderInvitationStatusIndicator(share: SharePanelModel, grant: Grant): m.Children {
+  const target = share.currentTarget;
+  const state = share.invitationStatusIndicator(target, grant);
+  return m(
+    "span",
+    {
+      "data-slot": "invitation",
+      class: "flex h-6 min-w-0 shrink items-center gap-1.5 type-helper",
+    },
+    invitationStatusIndicatorContents(share, grant, state),
+  );
+}
+
+function reinviteButton(share: SharePanelModel, grant: Grant): m.Children {
+  return m(
+    Button,
+    {
+      variant: "ghost",
+      size: "icon",
+      "data-invite": grant.key,
+      "aria-label": "Invite again",
+      onclick: () => void share.invite(share.currentTarget, grant.key),
+    },
+    "Invite again",
+  );
+}
+
+function indicatorText(classes: string, text: string, tooltip: string | null): m.Children {
+  return m(
+    "span",
+    { class: `min-w-0 truncate ${classes}`, ...(tooltip === null ? {} : { "data-tooltip": tooltip }) },
+    text,
+  );
+}
+
+function invitationStatusIndicatorContents(
+  share: SharePanelModel,
+  grant: Grant,
+  state: InvitationStatusIndicator,
+): m.Children {
+  const nowMs = Date.now();
+  switch (state.kind) {
+    case "none":
+      return null;
+    case "inviting":
+      return [m(Spinner, { size: "sm", extra: "shrink-0" }), indicatorText("text-tertiary", "Inviting", null)];
+    case "invited":
+      return [
+        indicatorText(
+          "text-tertiary",
+          state.at === null ? "Invited" : `Invited ${formatRelativeAgo(state.at, nowMs)}`,
+          state.at === null ? null : `Invited ${localeTime(state.at)}`,
+        ),
+        state.canReinvite ? reinviteButton(share, grant) : null,
+      ];
+    case "could_not_invite":
+      return [
+        indicatorText("text-warning", "Could not invite", null),
+        state.canReinvite ? reinviteButton(share, grant) : null,
+      ];
+    case "refused":
+      return [
+        indicatorText("text-important", state.message, state.message),
+        state.canReinvite ? reinviteButton(share, grant) : null,
+      ];
+    case "joined":
+      return indicatorText(
+        "text-success",
+        state.firstAt === null ? "Joined" : `Joined ${formatRelativeAgo(state.firstAt, nowMs)}`,
+        visitsTooltip(state.firstAt, state.lastAt),
+      );
+  }
+}
+
+function visitsTooltip(firstAt: string | null, lastAt: string | null): string | null {
+  const parts: string[] = [];
+  if (firstAt !== null) parts.push(`First visited ${localeTime(firstAt)}`);
+  if (lastAt !== null) parts.push(`last visited ${localeTime(lastAt)}`);
+  return parts.length === 0 ? null : parts.join(", ");
+}
+
+function localeTime(iso: string): string {
+  return new Date(iso).toLocaleString();
 }
 
 function renderGrantState(share: SharePanelModel, grant: Grant): m.Children {

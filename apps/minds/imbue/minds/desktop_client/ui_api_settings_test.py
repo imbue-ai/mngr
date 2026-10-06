@@ -6,7 +6,10 @@ from flask.testing import FlaskClient
 from pydantic import AnyUrl
 
 from imbue.minds.config.data_types import ClientEnvConfig
+from imbue.minds.desktop_client.conftest import FakeImbueCloudCli
 from imbue.minds.desktop_client.conftest import build_desktop_client_for_test
+from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.latchkey.testing import build_permission_grant_handler
 from imbue.minds.desktop_client.minds_config import DEFAULT_UPDATE_WINDOW
 from imbue.minds.desktop_client.minds_config import MindsConfig
@@ -528,3 +531,45 @@ def test_a_failed_browser_import_answers_with_latchkeys_reason(tmp_path: Path) -
         "is_success": False,
         "detail": "Google Chrome is not installed in any of the standard locations.",
     }
+
+
+def _preferences_client(tmp_path: Path, cli: FakeImbueCloudCli) -> FlaskClient:
+    cli.add_account(user_id="user-123", email="owner@example.com", is_active=True)
+    store = make_session_store_for_test(tmp_path / "sessions", cli=cli)
+    client, _app, _auth_store = build_desktop_client_for_test(
+        tmp_path, is_authenticated=True, imbue_cloud_cli=cli, session_store=store
+    )
+    return client
+
+
+def test_account_notification_preferences_read_and_write_the_email_switch(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    client = _preferences_client(tmp_path, cli)
+
+    before = client.get("/ui/api/accounts/user-123/notification-preferences")
+    written = client.post("/ui/api/accounts/user-123/notification-preferences", json={"email_enabled": False})
+    after = client.get("/ui/api/accounts/user-123/notification-preferences")
+
+    assert before.status_code == 200
+    assert json.loads(before.data)["preferences"] == {"email_enabled": True, "in_app_enabled": True}
+    assert written.status_code == 200
+    assert json.loads(written.data)["preferences"] == {"email_enabled": False, "in_app_enabled": True}
+    assert json.loads(after.data)["preferences"] == {"email_enabled": False, "in_app_enabled": True}
+
+
+def test_account_notification_preferences_degrade_to_null_without_the_connector(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.is_notification_preferences_failing = True
+    client = _preferences_client(tmp_path, cli)
+
+    response = client.get("/ui/api/accounts/user-123/notification-preferences")
+    unknown_account = client.get("/ui/api/accounts/user-999/notification-preferences")
+
+    assert response.status_code == 200 and json.loads(response.data)["preferences"] is None
+    assert unknown_account.status_code == 200 and json.loads(unknown_account.data)["preferences"] is None
+
+
+def test_account_notification_preferences_require_authentication(tmp_path: Path) -> None:
+    client, _app, _auth_store = build_desktop_client_for_test(tmp_path, is_authenticated=False)
+
+    assert client.get("/ui/api/accounts/user-123/notification-preferences").status_code == 401

@@ -215,6 +215,24 @@ class ImbueCloudSyncConflictCliError(ImbueCloudCliError):
     stored_record: dict[str, Any] | None = None
 
 
+# The connector's structured refusals of a grants push or an invitation,
+# relayed by the plugin as the JSON body's ``code``.
+_SHARE_REFUSAL_CODES: Final[frozenset[str]] = frozenset({"not_published", "grants_out_of_date", "not_invitable"})
+
+
+class ImbueCloudShareRefusedCliError(ImbueCloudCliError):
+    """The connector refused a grants push or an invitation with a structured 409.
+
+    ``code`` is the reason: ``not_published`` (the workspace is unpublished),
+    ``grants_out_of_date`` (the centralized grants table holds no open grant
+    for the subject: push the document, then try once more), or
+    ``not_invitable`` (the grantee has already joined, or the workspace has no
+    link yet).
+    """
+
+    code: str = ""
+
+
 class ImbueCloudAuthSession(WireModel):
     """Result of a successful auth signin/signup/login invocation."""
 
@@ -326,6 +344,32 @@ class ShareCliInfo(WireModel):
     # from; the share panel repairs it by re-sharing. False against a connector
     # that predates the flag.
     needs_reshare: bool = False
+
+
+class InvitationCliResult(WireModel):
+    """Result of `mngr imbue_cloud shares invite`: what the granter may learn about the attempt."""
+
+    outcome: str
+    invited_at: str | None = None
+
+
+class InvitationOutcomeCliEntry(WireModel):
+    """One row of `mngr imbue_cloud shares invitation-outcomes`."""
+
+    kind: str
+    value: str
+    app: str
+    outcome: str | None = None
+    invited_at: str | None = None
+    joined_at: str | None = None
+    last_visited_at: str | None = None
+
+
+class NotificationPreferencesCliInfo(WireModel):
+    """Result of `mngr imbue_cloud account notification-preferences show|set`."""
+
+    email_enabled: bool = True
+    in_app_enabled: bool = True
 
 
 # How long a readiness poll may reuse a cached connector share lookup. The
@@ -889,6 +933,119 @@ class ImbueCloudCli(MutableModel):
             args.extend(["--user-id", user_id])
         result = self._run(args, cg_name="imbue-cloud-shares-set-grantees")
         self._expect_success(result, "shares set-grantees")
+
+    def _share_refusal_from(self, result: MngrCallResult, command_repr: str) -> ImbueCloudShareRefusedCliError | None:
+        """The typed refusal a failed push or invitation carries, or None when the failure is something else."""
+        if result.returncode == 0:
+            return None
+        body = _parse_stderr_error_body(result.stderr)
+        code = body.get("code") if body is not None else None
+        if not isinstance(code, str) or code not in _SHARE_REFUSAL_CODES:
+            return None
+        refused = ImbueCloudShareRefusedCliError(f"{command_repr}: {body['error'] if body else code}")
+        refused.code = code
+        refused.exit_code = result.returncode if result.returncode is not None else 1
+        refused.stdout = result.stdout
+        refused.stderr = result.stderr
+        return refused
+
+    def push_share_grants(self, *, account: str, host_id: str, document: Mapping[str, Any]) -> int:
+        """Record the workspace's grants document in the connector's centralized grants table; returns the events appended.
+
+        Raises :class:`ImbueCloudShareRefusedCliError` (code ``not_published``)
+        while the workspace is unpublished. The document travels via a temp
+        file like a sync record, since it can be long.
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            _json.dump(dict(document), handle)
+            document_path = handle.name
+        try:
+            result = self._run(
+                ["shares", "push-grants", host_id, "--account", account, "--document-file", document_path],
+                cg_name="imbue-cloud-shares-push-grants",
+            )
+        finally:
+            Path(document_path).unlink(missing_ok=True)
+        refused = self._share_refusal_from(result, "shares push-grants")
+        if refused is not None:
+            raise refused
+        body = self._expect_success(result, "shares push-grants")
+        appended = body.get("appended") if isinstance(body, dict) else None
+        return int(appended) if isinstance(appended, int) else 0
+
+    def invite_grantee(
+        self,
+        *,
+        account: str,
+        host_id: str,
+        user_id: str | None,
+        email: str | None,
+        app: str | None,
+        link: str | None,
+        workspace_name: str | None,
+    ) -> InvitationCliResult:
+        """Invite one grant's grantee; raises :class:`ImbueCloudShareRefusedCliError` on the connector's 409 codes."""
+        args = ["shares", "invite", host_id, "--account", account]
+        for option, value in (
+            ("--user-id", user_id),
+            ("--email", email),
+            ("--app", app),
+            ("--link", link),
+            ("--workspace-name", workspace_name),
+        ):
+            if value:
+                args.extend([option, value])
+        result = self._run(args, cg_name="imbue-cloud-shares-invite")
+        refused = self._share_refusal_from(result, "shares invite")
+        if refused is not None:
+            raise refused
+        parsed = self._expect_success(result, "shares invite")
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("outcome"), str):
+            raise ImbueCloudCliError("Malformed shares invite output: expected an outcome")
+        return InvitationCliResult.model_validate(parsed)
+
+    def list_invitation_outcomes(self, *, account: str, host_id: str) -> list[InvitationOutcomeCliEntry]:
+        """What the granter may learn about each open user or email grant of the share."""
+        result = self._run(
+            ["shares", "invitation-outcomes", host_id, "--account", account],
+            cg_name="imbue-cloud-shares-invitation-outcomes",
+        )
+        refused = self._share_refusal_from(result, "shares invitation-outcomes")
+        if refused is not None:
+            raise refused
+        parsed = self._expect_success(result, "shares invitation-outcomes")
+        if not isinstance(parsed, list):
+            raise ImbueCloudCliError("Malformed shares invitation-outcomes output: expected a list")
+        return [InvitationOutcomeCliEntry.model_validate(entry) for entry in parsed if isinstance(entry, dict)]
+
+    def get_notification_preferences(self, *, account: str) -> NotificationPreferencesCliInfo:
+        result = self._run(
+            ["account", "notification-preferences", "show", "--account", account],
+            cg_name="imbue-cloud-account-notification-preferences-show",
+        )
+        return NotificationPreferencesCliInfo.model_validate(
+            self._expect_success(result, "account notification-preferences show")
+        )
+
+    def set_notification_preferences(
+        self, *, account: str, email_enabled: bool, in_app_enabled: bool
+    ) -> NotificationPreferencesCliInfo:
+        result = self._run(
+            [
+                "account",
+                "notification-preferences",
+                "set",
+                "--email" if email_enabled else "--no-email",
+                "--in-app" if in_app_enabled else "--no-in-app",
+                "--account",
+                account,
+            ],
+            cg_name="imbue-cloud-account-notification-preferences-set",
+        )
+        return NotificationPreferencesCliInfo.model_validate(
+            self._expect_success(result, "account notification-preferences set")
+        )
 
     def list_share_relays(self, *, account: str) -> dict[str, tuple[str, ...]]:
         """The relay fleet as ``{region: tunnel-control endpoints}`` (for latency-based region picking)."""

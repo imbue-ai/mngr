@@ -110,6 +110,37 @@ export interface MachineSharingResponse {
   /** Set only on the read that moved the share off a content domain the tier
    * retired: the domain it lived at before. */
   migrated_domain_from?: string | null;
+  /** Whether the document has reached Imbue Cloud's centralized grants table,
+   * which invitations are made from: false when the push did not land (the
+   * next save or load sends it again), null while the workspace is
+   * unpublished, absent from desktops that predate invitations. */
+  grants_synced?: boolean | null;
+}
+
+/** One row of GET /api/v1/workspace-sharing/<id>/invitation-outcomes: what the
+ * granter may learn about an open user or email grant. */
+export interface InvitationOutcomeEntry {
+  kind: string;
+  /** The account id of a user grant, the address of an email grant. */
+  value: string;
+  /** The share target, the whole workspace under its service name. */
+  app: string;
+  /** invited, could_not_invite, or joined; null when nothing is known. */
+  outcome: string | null;
+  invited_at?: string | null;
+  joined_at?: string | null;
+  last_visited_at?: string | null;
+}
+
+export interface InvitationOutcomesResponse {
+  outcomes: InvitationOutcomeEntry[];
+}
+
+/** Response shape of POST /api/v1/workspace-sharing/<id>/invitations. */
+export interface InvitationResultResponse {
+  /** invited, could_not_invite, over_allowance, or too_soon. */
+  outcome: string;
+  invited_at?: string | null;
 }
 
 /** The route that resolves a typed address to an account (a 404 means "store an invite"). */

@@ -60,6 +60,18 @@ class ImbueCloudShareError(ImbueCloudError):
     """Raised when a self-hosted share operation fails."""
 
 
+class ImbueCloudShareRefusedError(ImbueCloudShareError):
+    """Raised when the connector refuses a grants push or an invitation with a structured 409.
+
+    ``code`` is the connector's reason: ``not_published``, ``grants_out_of_date``
+    (the panel pushes its document and retries once), or ``not_invitable``.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
 class ImbueCloudPaidListError(ImbueCloudError):
     """Raised when a paid-list (paid domains / emails) admin operation fails."""
 

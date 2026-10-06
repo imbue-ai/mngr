@@ -8,7 +8,17 @@ from imbue.mngr_imbue_cloud.wire_types import ShareInfo
 def test_shares_group_lists_subcommands() -> None:
     result = CliRunner().invoke(shares, ["--help"])
     assert result.exit_code == 0
-    for name in ("create", "delete", "status", "list", "relays", "set-grantees"):
+    for name in (
+        "create",
+        "delete",
+        "status",
+        "list",
+        "relays",
+        "set-grantees",
+        "push-grants",
+        "invite",
+        "invitation-outcomes",
+    ):
         assert name in result.output
 
 
@@ -84,3 +94,23 @@ def test_set_grantees_help_documents_the_repeatable_user_id_option() -> None:
     assert result.exit_code == 0
     assert "HOST_ID" in result.output
     assert "--user-id" in result.output
+
+
+def test_invite_help_documents_the_two_subjects_and_refuses_both_or_neither() -> None:
+    runner = CliRunner()
+    help_result = runner.invoke(shares, ["invite", "--help"])
+    neither = runner.invoke(shares, ["invite", "host-abc"])
+    both = runner.invoke(shares, ["invite", "host-abc", "--email", "bob@example.com", "--user-id", "u-1"])
+
+    assert help_result.exit_code == 0
+    for option in ("--user-id", "--email", "--app", "--link", "--workspace-name"):
+        assert option in help_result.output
+    assert neither.exit_code == 2 and "exactly one" in neither.output
+    assert both.exit_code == 2 and "exactly one" in both.output
+
+
+def test_push_grants_requires_an_existing_document_file() -> None:
+    result = CliRunner().invoke(shares, ["push-grants", "host-abc", "--document-file", "/nonexistent/grants.json"])
+
+    assert result.exit_code == 2
+    assert "does not exist" in result.output

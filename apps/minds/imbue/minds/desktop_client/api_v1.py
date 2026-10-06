@@ -99,6 +99,10 @@ from imbue.minds.desktop_client.api_models import DestroyOperationStatusResponse
 from imbue.minds.desktop_client.api_models import EmptyResponse
 from imbue.minds.desktop_client.api_models import EstablishSshRequest
 from imbue.minds.desktop_client.api_models import IdentityRecordResponse
+from imbue.minds.desktop_client.api_models import InvitationOutcomeEntryResponse
+from imbue.minds.desktop_client.api_models import InvitationOutcomesResponse
+from imbue.minds.desktop_client.api_models import InvitationResultResponse
+from imbue.minds.desktop_client.api_models import InviteGranteeRequest
 from imbue.minds.desktop_client.api_models import MachineSharingRequest
 from imbue.minds.desktop_client.api_models import MachineSharingResponse
 from imbue.minds.desktop_client.api_models import OkResponse
@@ -140,6 +144,7 @@ from imbue.minds.desktop_client.create_status import status_text_for
 from imbue.minds.desktop_client.host_names import normalize_host_name_slug
 from imbue.minds.desktop_client.host_names import resolve_create_host_name
 from imbue.minds.desktop_client.host_timezone import read_host_timezone
+from imbue.minds.desktop_client.imbue_cloud_cli import ImbueCloudShareRefusedCliError
 from imbue.minds.desktop_client.labeled_hosts import WORKSPACE_ID_LABELED_PROVIDER_NAMES
 from imbue.minds.desktop_client.labeled_hosts import find_host_by_create_attempt_id_label
 from imbue.minds.desktop_client.labeled_hosts import list_provider_hosts
@@ -154,6 +159,8 @@ from imbue.minds.desktop_client.sharing_handler import SharingError
 from imbue.minds.desktop_client.sharing_handler import get_active_share_cached
 from imbue.minds.desktop_client.sharing_handler import get_share_gateway_status_cached
 from imbue.minds.desktop_client.sharing_handler import get_sharing
+from imbue.minds.desktop_client.sharing_handler import invite_grantee_for_workspace
+from imbue.minds.desktop_client.sharing_handler import list_invitation_outcomes_for_workspace
 from imbue.minds.desktop_client.sharing_handler import probe_share_readiness
 from imbue.minds.desktop_client.sharing_handler import publish_workspace
 from imbue.minds.desktop_client.sharing_handler import publish_workspace_with_grants
@@ -2722,6 +2729,7 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
             if isinstance(raw_grants, dict)
             else SharingGrantsDocument()
         )
+    grants_synced = document.get("grants_synced")
     return MachineSharingResponse(
         host_id=str(document.get("host_id", "")),
         enabled=bool(document.get("enabled", False)),
@@ -2733,6 +2741,7 @@ def _sharing_document_to_response(document: dict[str, object]) -> MachineSharing
         service_labels=_service_labels(document),
         grants=grants,
         identities=_identities(document),
+        grants_synced=grants_synced if isinstance(grants_synced, bool) else None,
         migrated_domain_from=_optional_str(document, "migrated_domain_from"),
     )
 
@@ -2816,6 +2825,57 @@ def _handle_workspace_sharing_delete(workspace_id: str) -> MachineSharingRespons
     if host_id is None:
         return _json_error(f"Unknown workspace {workspace_id}", 404)
     return _unpublish_workspace_core(host_id)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(json=InviteGranteeRequest, resp=json_response_model(InvitationResultResponse))
+def _handle_workspace_sharing_invite(workspace_id: str) -> InvitationResultResponse | Response:
+    """Invite one grant's grantee; answers the granter-visible outcome, or 409 with the connector's refusal code."""
+    host_id = _sharing_host_for_workspace(workspace_id)
+    if host_id is None:
+        return _json_error(f"Unknown workspace {workspace_id}", 404)
+    body = InviteGranteeRequest.model_validate(request.get_json(silent=True, force=True) or {})
+    if (body.user_id is None) == (body.email is None):
+        return _json_error("Exactly one of user_id and email is required", 400)
+    state = get_state()
+    try:
+        with state.machine_sharing_locks.get_lock(host_id):
+            result = invite_grantee_for_workspace(host_id, body.user_id, body.email, body.app, state.backend_resolver)
+    except ImbueCloudShareRefusedCliError as exc:
+        return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return InvitationResultResponse(outcome=result.outcome, invited_at=result.invited_at)
+
+
+@require_api_or_cookie_auth
+@API_SPEC.validate(resp=json_response_model(InvitationOutcomesResponse))
+def _handle_workspace_sharing_invitation_outcomes(workspace_id: str) -> InvitationOutcomesResponse | Response:
+    """What the granter may learn about each open user or email grant: invited, could not invite, or joined."""
+    host_id = _sharing_host_for_workspace(workspace_id)
+    if host_id is None:
+        return _json_error(f"Unknown workspace {workspace_id}", 404)
+    state = get_state()
+    try:
+        entries = list_invitation_outcomes_for_workspace(host_id, state.backend_resolver)
+    except ImbueCloudShareRefusedCliError as exc:
+        return _json_response({"error": exc.code, "message": str(exc)}, status_code=409)
+    except SharingError as exc:
+        return _json_error(str(exc), 502)
+    return InvitationOutcomesResponse(
+        outcomes=tuple(
+            InvitationOutcomeEntryResponse(
+                kind=entry.kind,
+                value=entry.value,
+                app=entry.app,
+                outcome=entry.outcome,
+                invited_at=entry.invited_at,
+                joined_at=entry.joined_at,
+                last_visited_at=entry.last_visited_at,
+            )
+            for entry in entries
+        )
+    )
 
 
 @require_api_or_cookie_auth
@@ -3550,6 +3610,18 @@ def create_api_v1_blueprint() -> Blueprint:
         view_func=_handle_workspace_sharing_grants_put,
         endpoint="workspace_sharing_grants_put",
         methods=["PUT"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/invitations",
+        view_func=_handle_workspace_sharing_invite,
+        endpoint="workspace_sharing_invite",
+        methods=["POST"],
+    )
+    blueprint.add_url_rule(
+        "/workspace-sharing/<workspace_id>/invitation-outcomes",
+        view_func=_handle_workspace_sharing_invitation_outcomes,
+        endpoint="workspace_sharing_invitation_outcomes",
+        methods=["GET"],
     )
 
     # Machine sharing (compat shims for the routes above; agents likewise
