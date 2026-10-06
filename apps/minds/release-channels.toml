@@ -38,21 +38,21 @@ build_id = "261003ret49em92"
 version = "0.8.4"
 fallback_branch = "minds-v0.8.4"
 rollout_percentage = 100
-platforms = ["mac"]
+platforms = ["mac", "linux"]
 
 [channels.beta]
 build_id = "261003ret49em92"
 version = "0.8.4"
 fallback_branch = "minds-v0.8.4"
 rollout_percentage = 100
-platforms = ["mac"]
+platforms = ["mac", "linux"]
 
 [channels.alpha]
 build_id = "261003ret49em92"
 version = "0.8.4"
 fallback_branch = "minds-v0.8.4"
 rollout_percentage = 100
-platforms = ["mac"]
+platforms = ["mac", "linux"]
 
 # Which default-workspace-template tag browser-created workspaces pin to, per
 # channel. The hosted web chrome's create (the connector's POST /hosts/claim)
