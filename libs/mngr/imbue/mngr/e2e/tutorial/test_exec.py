@@ -4,6 +4,7 @@ Each test corresponds 1:1 to a tutorial script block. Each test creates real
 agents with the names the block references so the exec command has a target.
 """
 
+import platform
 import re
 from pathlib import Path
 
@@ -244,23 +245,21 @@ def test_exec_with_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # by default, start the agent's host if it's stopped, run the command, then leave it running
         # but you can be explicit about that behavior:
-        mngr exec my-task --start "cat /etc/os-release"
+        mngr exec my-task --start "uname -s"
 
     Scope: `--start` makes the default auto-start behavior explicit -- exec
-    succeeds, runs the command on the host, and forwards its real output. Every
-    Linux /etc/os-release contains an `ID=` field, proving exec captured the
-    host's file contents rather than just exiting cleanly.
+    succeeds, runs the command on the host, and forwards its real output.
     """
     _create_my_task(e2e, 100406)
     result = e2e.run(
-        'mngr exec my-task --start "cat /etc/os-release"',
+        'mngr exec my-task --start "uname -s"',
         comment="explicit --start behavior",
     )
     expect(result).to_succeed()
-    # Verify exec actually forwarded the command and captured the host's output,
-    # not just that it exited cleanly. /etc/os-release exists on every Linux host
-    # and always contains an os-release `ID=` field, regardless of distro.
-    expect(result.stdout).to_contain("ID=")
+    # The agent runs on this host, so `uname -s` returns this host's kernel name.
+    # Asserting on it proves exec captured the command's real output rather than
+    # just exiting cleanly.
+    expect(result.stdout).to_contain(platform.system())
 
 
 @pytest.mark.release
@@ -268,25 +267,24 @@ def test_exec_with_start(e2e: E2eSession) -> None:
 def test_exec_no_start(e2e: E2eSession) -> None:
     """Tutorial block:
         # and you can disable auto-starting as well (fails if agent is stopped):
-        mngr exec my-task --no-start "cat /etc/os-release"
+        mngr exec my-task --no-start "uname -s"
 
     Scope: `--no-start` disables auto-starting (it would fail if the agent were
     stopped). Here the host is already online from create, so exec succeeds
-    without starting anything and forwards the command's real output -- every
-    /etc/os-release defines `NAME=`, proving the command ran rather than no-op'd.
+    without starting anything and forwards the command's real output.
     """
     _create_my_task(e2e, 100407)
     # The agent's host is already online (create started it), so --no-start
-    # succeeds without auto-starting. Assert on the actual command output --
-    # every /etc/os-release defines NAME= -- to prove the command ran on the
-    # host and returned its contents rather than just exiting 0 as a no-op.
+    # succeeds without auto-starting. The agent runs on this host, so `uname -s`
+    # returns this host's kernel name; asserting on it proves the command ran
+    # rather than exec exiting 0 as a no-op.
     result = e2e.run(
-        'mngr exec my-task --no-start "cat /etc/os-release"',
+        'mngr exec my-task --no-start "uname -s"',
         comment="disable auto-starting",
         timeout=90.0,
     )
     expect(result).to_succeed()
-    expect(result.stdout).to_contain("NAME=")
+    expect(result.stdout).to_contain(platform.system())
 
 
 @pytest.mark.release

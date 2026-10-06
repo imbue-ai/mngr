@@ -438,10 +438,10 @@ mngr exec my-task --timeout 30 "python long_script.py"
 
 # by default, start the agent's host if it's stopped, run the command, then leave it running
 # but you can be explicit about that behavior:
-mngr exec my-task --start "cat /etc/os-release"
+mngr exec my-task --start "uname -s"
 
 # and you can disable auto-starting as well (fails if agent is stopped):
-mngr exec my-task --no-start "cat /etc/os-release"
+mngr exec my-task --no-start "uname -s"
 
 # control error handling when running on multiple agents
 mngr list --ids | mngr exec - --on-error continue "git log --oneline -5"

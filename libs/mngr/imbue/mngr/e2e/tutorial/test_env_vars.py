@@ -27,9 +27,10 @@ def test_create_with_env_vars(e2e: E2eSession) -> None:
         )
     ).to_succeed()
     # Verify the variables actually landed in the agent's environment, not just
-    # that the create succeeded: exec printenv inside the agent and check the values.
+    # that the create succeeded: read them back from inside the agent. BSD
+    # printenv takes a single operand, so ask for one variable per invocation.
     env_result = e2e.run(
-        "mngr exec my-task 'printenv DEBUG LOG_LEVEL'",
+        "mngr exec my-task 'printenv DEBUG; printenv LOG_LEVEL'",
         comment="confirm the agent received the env vars",
         timeout=120.0,
     )
