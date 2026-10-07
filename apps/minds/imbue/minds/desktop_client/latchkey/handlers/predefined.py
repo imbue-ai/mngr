@@ -5,10 +5,21 @@ This module is one of the two sibling handlers under
 flow for *predefined* (catalog-backed) permission requests: rendering
 the account + per-permission dialog, probing credential status, running
 ``latchkey auth browser`` when needed, rewriting the per-host
-``latchkey_permissions.json`` via the gateway extension, queueing the
-credential and the rule for the workspace's own machine (as one
-request, carried in the background) when it has one, appending the
+``latchkey_permissions.json`` via the gateway extension, pushing the
+credential and the rule to the workspace's own machine (as one
+change, waited for) when it has one, appending the
 response event, and nudging the request's chat with the verdict (:mod:`.messaging`).
+
+A request may also ask for a *proxy*: for the service's requests to leave
+through the computer that approves it (see
+:mod:`imbue.mngr_latchkey.desktop_egress`). That is not a permission -- the
+gateway carries the ask and never acts on it -- so the dialog offers it as a
+switch, on because the agent asked, and when the switch was left on this
+handler puts this computer first on the service's route in the same change that
+carries the grant to the machine. A service whose route already names this
+computer gets no switch: there is nothing to decide. A route that cannot be set
+fails the approval and leaves the request pending, like a grant the machine
+would not take.
 
 Grants are *per account*: the dialog always resolves to exactly one
 latchkey account (an existing one or a freshly signed-in one) and the
@@ -42,6 +53,7 @@ from collections.abc import Callable
 from collections.abc import Sequence
 from enum import auto
 from pathlib import Path
+from typing import Final
 
 from flask import Request
 from flask import Response
@@ -67,13 +79,20 @@ from imbue.minds.desktop_client.latchkey.handlers.recovery import maybe_recover_
 from imbue.minds.desktop_client.latchkey.handlers.resolution import resolve_request
 from imbue.minds.desktop_client.latchkey.machine_latchkey import machine_latchkey_for_host
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
+from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
+from imbue.minds.desktop_client.latchkey.permission_toggles import describe_why_workspace_desktop_egress_is_unsupported
 from imbue.minds.desktop_client.latchkey.permission_toggles import group_permissions_by_area
+from imbue.minds.desktop_client.latchkey.permission_toggles import list_workspace_desktops
+from imbue.minds.desktop_client.latchkey.permission_toggles import put_this_computer_first_on_desktop_egress_route
+from imbue.minds.desktop_client.latchkey.permission_toggles import read_workspace_desktop_egress_routes
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
 from imbue.minds.desktop_client.request_handler import UiManualCredentialsPrompt
 from imbue.minds.desktop_client.request_handler import UiPermissionAccountChoice
 from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
+from imbue.minds.desktop_client.request_handler import UiRequestedProxy
 from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
 from imbue.minds.desktop_client.request_handler import UiUnsupportedDetail
 from imbue.minds.desktop_client.responses import make_json_error_response
@@ -81,6 +100,7 @@ from imbue.minds.desktop_client.responses import make_response
 from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantRow
+from imbue.minds.desktop_client.ui_models import UiWorkspaceDesktop
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
 from imbue.mngr_latchkey.account_scopes import build_account_grant
@@ -97,6 +117,9 @@ from imbue.mngr_latchkey.credential_commands import describe_credential_command_
 from imbue.mngr_latchkey.credential_commands import parse_credential_command_example
 from imbue.mngr_latchkey.credential_commands import set_credentials_example_for
 from imbue.mngr_latchkey.custom_services import custom_service_credential_header
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressRoute
+from imbue.mngr_latchkey.desktop_egress import SELF_HOP
+from imbue.mngr_latchkey.desktop_egress import desktop_egress_route_for_service
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
@@ -121,6 +144,72 @@ class ManualCredentialSubmission(FrozenModel):
     account_name: str = Field(
         description="Name for the new account the credentials belong to; empty unless the dialog asked for one.",
     )
+
+
+class DesktopEgressDecision(FrozenModel):
+    """What an approval does about sending the service's requests through this computer, and what the agent hears."""
+
+    is_this_computer_put_first: bool = Field(
+        description=(
+            "Whether this computer is put first on the service's desktop egress route, in the change that "
+            "carries the grant to the machine. The agent is then told the route that results."
+        ),
+    )
+    note: str = Field(
+        description=(
+            "A sentence appended to the agent's grant notice when this computer is not put on the route; "
+            "empty when the request asked for no proxy."
+        ),
+    )
+
+
+# What ``grant`` is given for a request that asked for no proxy.
+NO_DESKTOP_EGRESS_CHANGE: Final[DesktopEgressDecision] = DesktopEgressDecision(
+    is_this_computer_put_first=False, note=""
+)
+
+# Form field carrying whether the dialog's proxy switch was on. Present only
+# when the dialog drew the switch.
+_PROXY_FIELD: Final[str] = "proxy"
+_PROXY_FIELD_ON: Final[str] = "true"
+_PROXY_FIELD_OFF: Final[str] = "false"
+
+
+def _describe_route_for_agent(route: DesktopEgressRoute) -> str:
+    """Spell a route out for the agent, naming desktops by the ids ``/devices`` gives it."""
+    places: list[str] = []
+    for hop in route.hops:
+        if hop == SELF_HOP:
+            places.append("your machine itself")
+        else:
+            places.append(f"the desktop {hop}")
+    return ", then ".join(places)
+
+
+def _format_route_note(service_display_name: str, proxied: DesktopEgressRouteThroughThisComputer) -> str:
+    described_route = _describe_route_for_agent(proxied.route)
+    if proxied.is_this_computer_added:
+        return f" Requests to {service_display_name} now leave from {described_route}."
+    return (
+        f" Requests to {service_display_name} already leave from {described_route}, so the proxy you asked for "
+        "changed nothing."
+    )
+
+
+def _format_proxy_not_set_up_note(reason: str) -> str:
+    return f" The proxy you asked for was not set up: {reason}"
+
+
+def _parse_proxy_form(raw_proxy: str) -> bool:
+    """Parse the dialog's proxy field. Raises :class:`LatchkeyPermissionFlowError` for anything but its two values."""
+    if raw_proxy == _PROXY_FIELD_ON:
+        return True
+    elif raw_proxy == _PROXY_FIELD_OFF:
+        return False
+    else:
+        raise LatchkeyPermissionFlowError(
+            f"The submitted proxy choice must be {_PROXY_FIELD_ON!r} or {_PROXY_FIELD_OFF!r}."
+        )
 
 
 def _services_info_or_assumed(latchkey: Latchkey, service_name: str) -> LatchkeyServiceInfo:
@@ -554,6 +643,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             "run on this computer."
         ),
     )
+    carry_grant_and_desktop_egress_rules_to_machine: Callable[[str, str, str], None] = Field(
+        description=(
+            "What ``carry_grant_to_machine`` does, with the desktop egress rules of the workspace pushed in "
+            "the same change: how a grant that also changes the service's route reaches the machine, once "
+            "the route has been written here. Raises MachineOperationError when the machine does not take it."
+        ),
+    )
+    refresh_machine_copies: Callable[[str], None] = Field(
+        description=(
+            "Makes this computer's copies of the asking agent's workspace say what its machine holds, "
+            "blocking until they do. Run before an approval that sets a route edits anything here, because "
+            "the route write rebuilds every service's route from the copy here and pushes the result whole. "
+            "Raises MachineOperationError when the machine cannot be read."
+        ),
+    )
 
     def grant(
         self,
@@ -564,6 +668,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         granted_permissions: Sequence[str],
         account_choice: str,
         manual_credentials: ManualCredentialSubmission,
+        desktop_egress: DesktopEgressDecision,
     ) -> GrantResult:
         """Apply a grant for one account, signing in / falling back as needed.
 
@@ -589,15 +694,21 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         form a previous ``NEEDS_MANUAL_CREDENTIALS`` result asked for; it is
         :data:`EMPTY_MANUAL_CREDENTIAL_SUBMISSION` on every other call.
 
+        ``desktop_egress`` says whether this computer is put first on the
+        service's route, which the dialog's proxy switch decides when it is
+        drawn; it is :data:`NO_DESKTOP_EGRESS_CHANGE` on every other call. The
+        machine is then read before anything is edited here, so the route is
+        built on the routes the machine holds, and the route travels to the
+        machine in the one change that carries the grant. A machine that cannot
+        be read, or a route that cannot be set, is a ``FAILED`` approval with
+        nothing granted on the machine.
+
         A remote workspace's machine holds both halves of what its agents may
         do -- the credentials and the policy its gateway enforces -- so both
-        are queued for it as one request, applied credential-first there, and
-        carried in the background: the verdict is written as soon as the
-        request is recorded, and a machine that turns out to refuse it is
-        reported to the user by notification (with the error reconcile walking
-        the local copy back). Only a request that cannot even be *recorded*
-        yields ``FAILED`` with the request left pending -- an unrecorded
-        change would be lost outright.
+        are pushed to it as one change, applied credential-first there, and
+        this waits for the machine to take it: the verdict is written only
+        afterwards, and a machine that does not take the change yields
+        ``FAILED`` with the request left pending.
 
         The resolve epilogue durably records and indexes the verdict;
         ``message`` is surfaced to both the agent (via the resolution nudge)
@@ -616,6 +727,16 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
             raise LatchkeyPermissionFlowError(
                 f"Granted permissions not in catalog for service '{service_info.name}': {invalid}",
             )
+
+        if desktop_egress.is_this_computer_put_first:
+            # The route write rebuilds every service's route and grants from the copies here, and they
+            # are pushed whole, so they must first say what the machine holds or the push erases what
+            # another of the user's computers set. Read before the sign-in and the grant: a refresh
+            # adopts the machine's credentials and policy over whatever here is not pushed yet.
+            try:
+                self.refresh_machine_copies(str(agent_id))
+            except MachineOperationError as e:
+                return GrantResult(outcome=GrantOutcome.FAILED, message=str(e), manual_credentials=None)
 
         # Credentials belong to the machine the agent runs on, so the sign-in
         # (and everything it reads back) happens against that machine's own
@@ -647,12 +768,29 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         # service are not written over with this computer's copies. It is only a
         # grant once the machine has taken it, so a machine that will not fails
         # the approval outright and leaves the request pending for a retry.
+        proxied: DesktopEgressRouteThroughThisComputer | None = None
         try:
-            self.carry_grant_to_machine(str(agent_id), service_info.name, resolved)
-        except MachineOperationError as e:
+            if desktop_egress.is_this_computer_put_first:
+                proxied = self._put_this_computer_first_on_route(agent_id, service_info, resolved)
+            # A route that was changed took the grant to the machine with it.
+            if proxied is None or not proxied.is_this_computer_added:
+                self.carry_grant_to_machine(str(agent_id), service_info.name, resolved)
+        except (PermissionToggleError, MachineOperationError) as e:
             return GrantResult(outcome=GrantOutcome.FAILED, message=str(e), manual_credentials=None)
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not set the route of {} via the gateway: {}", service_info.name, e)
+            return GrantResult(
+                outcome=GrantOutcome.FAILED,
+                message=f"Could not set the route through the latchkey gateway: {e}",
+                manual_credentials=None,
+            )
+        desktop_egress_note = (
+            desktop_egress.note if proxied is None else _format_route_note(service_info.service_display_name, proxied)
+        )
 
-        granted_message = _format_granted_message(service_info.display_name, granted_permissions, resolved)
+        granted_message = (
+            _format_granted_message(service_info.display_name, granted_permissions, resolved) + desktop_egress_note
+        )
         self._write_response_and_notify(
             request_event_id=request_event_id,
             agent_id=agent_id,
@@ -994,6 +1132,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         ) and latchkey_service_info.is_browser_auth_supported
 
         return UiPredefinedPermissionDetail(
+            proxy=self._requested_proxy(payload, host_id, service_info),
             request_id=permission_request.request_id,
             agent_id=permission_request.agent_id,
             ws_name=ws_name,
@@ -1084,6 +1223,10 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 status_code=503,
             )
         try:
+            desktop_egress = self._decide_desktop_egress(payload, host_id, service_info, form.get(_PROXY_FIELD))
+        except LatchkeyPermissionFlowError as e:
+            return make_json_error_response(str(e), status_code=400)
+        try:
             grant_result = self.grant(
                 request_event_id=request_event_id,
                 agent_id=parsed_agent_id,
@@ -1092,6 +1235,7 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
                 granted_permissions=granted_permissions,
                 account_choice=str(account_choice),
                 manual_credentials=manual_credentials,
+                desktop_egress=desktop_egress,
             )
         except LatchkeyPermissionFlowError as e:
             return make_json_error_response(str(e), status_code=400)
@@ -1142,6 +1286,139 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         return make_response(
             content=json.dumps({"outcome": "DENIED"}),
             media_type="application/json",
+        )
+
+    def _desktop_egress_unsupported_reason(self, host_id: HostId) -> str | None:
+        """Why no route but the machine itself can be set for this host's services, or ``None`` when one can."""
+        try:
+            return describe_why_workspace_desktop_egress_is_unsupported(
+                self.latchkey.plugin_data_dir, host_id, get_state().device_id
+            )
+        except PermissionToggleError as e:
+            logger.warning("Could not tell whether host {} supports desktop egress: {}", host_id, e)
+            return str(e)
+
+    def _last_known_route(self, host_id: HostId, service_info: ServicePermissionInfo) -> DesktopEgressRoute | None:
+        """The service's route in this computer's copies, or ``None`` when the host's permissions cannot be read."""
+        data_dir = self.latchkey.plugin_data_dir
+        try:
+            config = self.gateway_client.get_permissions_config(permissions_path_for_host(data_dir, host_id))
+        except LatchkeyGatewayClientError as e:
+            logger.warning("Could not read the permissions of host {}; its routes are unknown: {}", host_id, e)
+            return None
+        return desktop_egress_route_for_service(
+            read_workspace_desktop_egress_routes(data_dir, host_id, config, self.services_catalog.as_mapping()),
+            service_info.name,
+        )
+
+    def _requested_proxy(
+        self,
+        payload: PredefinedRequestPayload,
+        host_id: HostId | None,
+        service_info: ServicePermissionInfo,
+    ) -> UiRequestedProxy | None:
+        """What the dialog draws the proxy switch from, or ``None`` when it draws none.
+
+        It draws none when the agent asked for no proxy, when the workspace's
+        host is not known yet, when no route through a desktop can be set for
+        the workspace, when the host's permissions cannot be read, and when the
+        service's route already names this computer: there is then nothing for
+        the user to decide.
+        """
+        if not payload.proxy or host_id is None:
+            return None
+        if self._desktop_egress_unsupported_reason(host_id) is not None:
+            return None
+        last_known_route = self._last_known_route(host_id, service_info)
+        device_id = get_state().device_id
+        if last_known_route is None or device_id in last_known_route.hops:
+            return None
+        return UiRequestedProxy(
+            resulting_route=(device_id, *last_known_route.hops),
+            desktops=tuple(
+                UiWorkspaceDesktop.model_validate(desktop.model_dump())
+                for desktop in list_workspace_desktops(device_id, {service_info.name: last_known_route})
+            ),
+        )
+
+    def _decide_desktop_egress(
+        self,
+        payload: PredefinedRequestPayload,
+        host_id: HostId,
+        service_info: ServicePermissionInfo,
+        # The dialog's proxy field; ``None`` when it drew no proxy switch.
+        raw_proxy: str | None,
+    ) -> DesktopEgressDecision:
+        """Turn the dialog's proxy field into what the grant does about the service's route.
+
+        Raises :class:`LatchkeyPermissionFlowError` for a field that is not one
+        of the switch's two values, for a field on a request that asked for no
+        proxy, and for a proxy where the workspace cannot have one.
+        """
+        if not payload.proxy:
+            if raw_proxy is not None:
+                raise LatchkeyPermissionFlowError(
+                    "The request asked for no proxy, so the dialog cannot have submitted a choice about one.",
+                )
+            return NO_DESKTOP_EGRESS_CHANGE
+        unsupported_reason = self._desktop_egress_unsupported_reason(host_id)
+        if raw_proxy is None:
+            if unsupported_reason is not None:
+                return DesktopEgressDecision(
+                    is_this_computer_put_first=False, note=_format_proxy_not_set_up_note(unsupported_reason)
+                )
+            last_known_route = self._last_known_route(host_id, service_info)
+            if last_known_route is None or get_state().device_id not in last_known_route.hops:
+                # The dialog also draws no switch when it cannot read the route, and the user was
+                # then never asked whether the service's requests may leave through this computer.
+                return DesktopEgressDecision(
+                    is_this_computer_put_first=False,
+                    note=_format_proxy_not_set_up_note(
+                        "the approval dialog could not offer it. Ask again to set it up."
+                    ),
+                )
+            # The copy that names this computer can be ahead of the machine (a push it refused
+            # leaves it so), so the grant goes by what the machine holds once it has been read.
+            return DesktopEgressDecision(is_this_computer_put_first=True, note="")
+        if not _parse_proxy_form(raw_proxy):
+            return DesktopEgressDecision(
+                is_this_computer_put_first=False,
+                note=_format_proxy_not_set_up_note("the user turned it off."),
+            )
+        if unsupported_reason is not None:
+            raise LatchkeyPermissionFlowError(unsupported_reason)
+        return DesktopEgressDecision(is_this_computer_put_first=True, note="")
+
+    def _put_this_computer_first_on_route(
+        self,
+        agent_id: AgentId,
+        service_info: ServicePermissionInfo,
+        # The account just granted in the copy here, whose grant a changed route carries to the machine.
+        granted_account: str,
+    ) -> DesktopEgressRouteThroughThisComputer:
+        """Put this computer first on the service's route for the asking agent's workspace, and say what that came to.
+
+        A route that is changed is pushed to the machine together with the
+        grant of ``granted_account``, as one change. One that already names
+        this computer is left as it is, and nothing is pushed.
+
+        Raises :class:`PermissionToggleError` when the route cannot be set here
+        and :class:`MachineOperationError` when the machine does not take it;
+        gateway failures propagate as :class:`LatchkeyGatewayClientError`.
+        """
+        return put_this_computer_first_on_desktop_egress_route(
+            backend_resolver=get_state().backend_resolver,
+            gateway_client=self.gateway_client,
+            services_catalog=self.services_catalog,
+            latchkey=self.latchkey,
+            workspace_agent_id=str(agent_id),
+            service_name=service_info.name,
+            device_id=get_state().device_id,
+            push_permissions_and_desktop_egress_rules_to_machine=(
+                lambda workspace_agent_id: self.carry_grant_and_desktop_egress_rules_to_machine(
+                    workspace_agent_id, service_info.name, granted_account
+                )
+            ),
         )
 
     def _custom_service_credential_header(self, service_name: str) -> str | None:
@@ -1232,8 +1509,8 @@ class LatchkeyPermissionGrantHandler(RequestEventHandler):
         to carry the scope's own definition or the rule would reference a
         ``$def`` this file need not have -- the catalog entry supplies it.
 
-        Writes this computer's canonical copy only; ``carry_grant_to_machine``
-        is what pushes the result (with the credential it rides on) to a remote
+        Writes this computer's canonical copy only; the carry that follows is
+        what pushes the result (with the credential it rides on) to a remote
         workspace's own machine.
         """
         path = permissions_path_for_host(self.latchkey.plugin_data_dir, host_id)

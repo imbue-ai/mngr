@@ -19,6 +19,7 @@ import { Modal } from "../../components/Modal";
 import { Notice } from "../../components/Notice";
 import type { MarkTone } from "../../components/ServiceMark";
 import { serviceMark } from "../../components/ServiceMark";
+import { renderPermissionSwitch } from "../../components/PermissionSwitch";
 import { Spinner } from "../../components/Spinner";
 import { electronBridge } from "../../../electron-bridge";
 import type { StatusBadgeVariant } from "../../components/StatusBadge";
@@ -65,6 +66,8 @@ import {
 } from "../../../models/workspacePermissions";
 import { navEntryClass, splitPane } from "../../components/SplitPane";
 import { SETTING_SELECT_CLASS, renderFolderSyncSetting, renderSettingRow } from "../../components/FolderSyncSetting";
+import { renderDesktopEgressRouteSetting } from "../../components/DesktopEgressRouteSetting";
+import { areRoutesEqual } from "../../../models/desktopEgressRoute";
 import { warmRequestDetail } from "../../../models/requestDetailPrefetch";
 
 /** How long a "Revoke all" stays armed after its first click. */
@@ -95,9 +98,6 @@ const catalogFallbackMark = (): m.Children => m(Icon16, { name: "globe", extra: 
 const SELF_TOGGLE_BLOCKED_TITLE =
   "This grant can't be re-enabled; ask the agent to request it again.";
 const CONNECTOR_TOGGLE_BLOCKED_TITLE = "Connect this account before granting permissions.";
-const DESKTOP_EGRESS_LABEL = "Proxy through my desktop";
-/** Identifies the desktop egress switch among a panel's permission switches. */
-const DESKTOP_EGRESS_SWITCH_ID = "desktop-egress";
 /** Why every other control is inert while one change is being applied. */
 const PANE_BUSY_TITLE = "Waiting for the last change to reach this machine.";
 
@@ -140,6 +140,13 @@ interface PermissionsTabLocalState {
   /** Ticker that re-reads the pane while any sync is alive. Nothing else tells
    * this pane what the subprocess behind a sync is doing. */
   folderSyncPollTimer: ReturnType<typeof setInterval> | null;
+  /** The desktop egress route being edited and the service it belongs to, or
+   * null while no editor is open. Nothing is written until it is saved.
+   *
+   * It names the model it was opened on because this state outlives a
+   * navigation to another workspace's pane, where the same service must not
+   * pick the draft up. */
+  desktopEgressDraft: { model: PermissionsModel; serviceName: string; route: string[] } | null;
 }
 
 /** How often the pane re-reads while a sync is alive.
@@ -158,6 +165,7 @@ export function PermissionsTab(): m.Component<PermissionsTabAttrs> {
     disarmTimer: null,
     disconnectSectionId: null,
     folderSyncPollTimer: null,
+    desktopEgressDraft: null,
   };
 
   return {
@@ -250,6 +258,7 @@ function renderBody(
   const selectSection = (section: string): void => {
     disarmRevoke(local);
     local.disconnectSectionId = null;
+    local.desktopEgressDraft = null;
     model.clearErrorMessage();
     onSelectSection(section);
   };
@@ -278,8 +287,6 @@ function renderBody(
     renderConnectFailurePopup(model),
   ];
 }
-
-// -- Waiting on you -----------------------------------------------------------
 
 /** Pending permission requests from this machine's agents, oldest first (the
  * one the agent has been blocked on longest leads). Each row opens the review
@@ -314,8 +321,6 @@ function renderWaitingPanel(
     ),
   ]);
 }
-
-// -- Left nav -----------------------------------------------------------------
 
 function renderNav(
   connections: UiPermissionConnection[],
@@ -403,8 +408,6 @@ function renderNav(
   ];
 }
 
-// -- Right pane ---------------------------------------------------------------
-
 function renderSelectedPanel(
   model: PermissionsModel,
   local: PermissionsTabLocalState,
@@ -461,7 +464,7 @@ function renderConnectionPanel(
           "This account isn't connected, so agents can't use these grants right now. Reconnect it " +
             "from Add connection, or turn the leftover grants off here.",
         ),
-    connection.desktop_egress.is_supported ? renderDesktopEgressRow(model, connection) : null,
+    connection.desktop_egress.is_supported ? renderDesktopEgressRow(model, local, connection) : null,
     connection.scopes.map((scopePanel) => [
       connection.scopes.length > 1
         ? m("h3", { class: "type-heading text-primary mt-6 mb-1" }, scopePanel.heading)
@@ -1234,33 +1237,62 @@ function renderOtherMachinesPanel(model: PermissionsModel): m.Children {
 }
 
 /** The per-service desktop egress row. Drawn in every account panel of the
- * service with the same value, since the server keys it by service alone. */
-function renderDesktopEgressRow(model: PermissionsModel, connection: UiPermissionConnection): m.Children {
-  const rowKey = desktopEgressRowKey(connection.service_name);
-  return m("div", { class: "flex flex-col pr-4", "data-perm-desktop-egress": connection.service_name }, [
-    m("div", { class: TOGGLE_ROW_CLASS }, [
-      m("div", { class: "min-w-0" }, [
-        m("p", { class: "type-body text-primary truncate" }, DESKTOP_EGRESS_LABEL),
-        m(
-          "p",
-          { class: "type-helper text-tertiary mt-0.5" },
-          `Requests this workspace makes to ${connection.display_name} leave from this computer instead ` +
-            "of from the workspace's machine. This computer has to be running and connected for them to " +
-            "succeed.",
-        ),
-      ]),
-      renderSwitch({
-        isGranted: connection.desktop_egress.is_enabled,
-        isBusy: model.isRowBusy(rowKey),
-        isLocked: isLockedByAnotherWrite(model, rowKey),
-        isBlocked: false,
-        blockedTitle: "",
-        label: DESKTOP_EGRESS_LABEL,
-        permission: DESKTOP_EGRESS_SWITCH_ID,
-        onFlip: (enabled) => void model.toggleDesktopEgress(connection.service_name, enabled),
-      }),
-    ]),
-  ]);
+ * service with the same value, since the server keys it by service alone.
+ *
+ * The switch writes at once, like every other switch in the pane. The editor
+ * works on a draft instead: a route is rearranged over several clicks, and
+ * sending each one would push a string of routes nobody meant to the machine. */
+function renderDesktopEgressRow(
+  model: PermissionsModel,
+  local: PermissionsTabLocalState,
+  connection: UiPermissionConnection,
+): m.Children {
+  const serviceName = connection.service_name;
+  const rowKey = desktopEgressRowKey(serviceName);
+  const savedRoute = connection.desktop_egress.route;
+  const isBusy = model.isRowBusy(rowKey);
+  const held = local.desktopEgressDraft;
+  const draft = held !== null && held.model === model && held.serviceName === serviceName ? held : null;
+  return m(
+    "div",
+    { class: "perm-row pr-4 py-2", "data-perm-desktop-egress": serviceName },
+    renderDesktopEgressRouteSetting({
+      serviceName,
+      route: savedRoute,
+      desktops: model.data?.desktops ?? [],
+      isBusy,
+      lockedTitle: isLockedByAnotherWrite(model, rowKey) ? PANE_BUSY_TITLE : null,
+      onSwitch: (route) => {
+        void model.setDesktopEgressRoute(serviceName, route).then((isSaved) => {
+          // A flip that lands replaces the route the draft started from; a
+          // refused one leaves the route, and so the draft, as they were.
+          if (isSaved && draft !== null && local.desktopEgressDraft === draft) local.desktopEgressDraft = null;
+        });
+      },
+      onAdjust: () => {
+        local.desktopEgressDraft = { model, serviceName, route: [...savedRoute] };
+      },
+      editor:
+        draft === null
+          ? null
+          : {
+              route: draft.route,
+              onChange: (route) => {
+                local.desktopEgressDraft = { model, serviceName, route };
+              },
+              onClose: () => {
+                local.desktopEgressDraft = null;
+              },
+              isSaveDisabled: areRoutesEqual(draft.route, savedRoute),
+              onSave: () => {
+                void model.setDesktopEgressRoute(serviceName, draft.route).then((isSaved) => {
+                  // Refused: the editor stays open on the draft, beside the reason.
+                  if (isSaved && local.desktopEgressDraft === draft) local.desktopEgressDraft = null;
+                });
+              },
+            },
+    }),
+  );
 }
 
 function renderSelfSwitch(
@@ -1294,30 +1326,20 @@ interface SwitchOptions {
   onFlip: (enabled: boolean) => void;
 }
 
-/** A permission switch, spinning while its own write runs and inert while any
- * other one does.
- *
- * The write is not done until the workspace's own machine has taken it, so the
- * spinner is the honest state: the switch has not moved yet. Every other
- * control is locked meanwhile, because the response to a write is the whole
- * view -- two in flight would fight over what is on screen. */
+/** A permission switch, inert while any write other than its own runs: the
+ * response to a write is the whole view, so two in flight would fight over
+ * what is on screen. */
 function renderSwitch(options: SwitchOptions): m.Children {
-  const { isGranted, isBusy, isLocked, isBlocked, blockedTitle, label, permission, onFlip } = options;
-  const title = isBlocked ? blockedTitle : isLocked ? PANE_BUSY_TITLE : null;
-  return m("span", { class: "flex shrink-0 items-center gap-2" }, [
-    isBusy ? m(Spinner, { size: "sm" }) : null,
-    m("button", {
-      type: "button",
-      role: "switch",
-      "aria-checked": isGranted ? "true" : "false",
-      "aria-label": label,
-      "data-perm-permission": permission,
-      class: isBusy ? "perm-switch shrink-0 is-busy" : "perm-switch shrink-0",
-      disabled: isBlocked || isBusy || isLocked,
-      ...(title === null ? {} : { title }),
-      onclick: () => onFlip(!isGranted),
-    }),
-  ]);
+  const { isGranted, isLocked, isBlocked } = options;
+  return renderPermissionSwitch({
+    isOn: isGranted,
+    isBusy: options.isBusy,
+    isDisabled: isBlocked || isLocked,
+    title: isBlocked ? options.blockedTitle : isLocked ? PANE_BUSY_TITLE : null,
+    label: options.label,
+    permission: options.permission,
+    onFlip: options.onFlip,
+  });
 }
 
 

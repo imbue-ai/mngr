@@ -480,6 +480,10 @@ def run(
         mngr_message_sender=mngr_message_sender,
         gateway_client=gateway_client,
         carry_grant_to_machine=machine_operator.connect_service_with_permissions,
+        carry_grant_and_desktop_egress_rules_to_machine=(
+            machine_operator.connect_service_with_permissions_and_desktop_egress_rules
+        ),
+        refresh_machine_copies=machine_operator.refresh,
     )
     push_permissions_to_machine = machine_operator.push_permissions
     file_sharing_handler = FileSharingGrantHandler(

@@ -20,6 +20,7 @@ from urllib.parse import urlsplit
 
 import psutil
 import pytest
+from pydantic import JsonValue
 from pydantic import PrivateAttr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
@@ -34,6 +35,7 @@ from imbue.mngr_latchkey.core import LatchkeyServiceInfo
 from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.migrations.interface import PermissionsMigrationContext
+from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _POLL_INTERVAL_SECONDS: Final[float] = 0.05
@@ -378,6 +380,19 @@ def rule_keys_of_permissions_json(permissions_json: str | None) -> list[str]:
     """The key of every rule in a policy, in order: which grants it carries, as a migration leaves them."""
     assert permissions_json is not None
     return [key for rule in json.loads(permissions_json)["rules"] for key in rule]
+
+
+def permissions_config_holding_grants(
+    *grants: tuple[str, tuple[str, ...], dict[str, JsonValue]],
+) -> LatchkeyPermissionsConfig:
+    """The policy holding ``grants`` in order, each the ``(rule_key, permissions, schemas)`` a grant builder returns."""
+    schemas: dict[str, JsonValue] = {}
+    for _rule_key, _permissions, grant_schemas in grants:
+        schemas.update(grant_schemas)
+    return LatchkeyPermissionsConfig(
+        rules=tuple({rule_key: list(permissions)} for rule_key, permissions, _schemas in grants),
+        schemas=schemas,
+    )
 
 
 def write_raw_host_permissions(data_dir: Path, host_id: HostId, permissions_json: str) -> Path:

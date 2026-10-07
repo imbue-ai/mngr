@@ -28,7 +28,7 @@ export const SETTING_SELECT_CLASS =
 /** Everything the switch has to say, hung off a short rule under it. The rule
  * is what says "this belongs to the switch"; no indent to keep in step with
  * the switch's own width. */
-const SYNC_RAIL_CLASS =
+export const SETTING_RAIL_CLASS =
   "mt-2 pl-3.5 border-l-2 border-subtle flex flex-col gap-2";
 
 export const SYNC_SETTING_LABEL = "Keep a synchronized copy on the machine";
@@ -171,7 +171,7 @@ export function renderFolderSyncSetting(
         }),
       ]),
     ]),
-    m("div", { class: SYNC_RAIL_CLASS, "data-sync-detail": attrs.path }, [
+    m("div", { class: SETTING_RAIL_CLASS, "data-sync-detail": attrs.path }, [
       attrs.note ?? null,
       isUnavailable
         ? m(

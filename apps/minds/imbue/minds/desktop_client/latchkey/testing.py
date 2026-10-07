@@ -249,7 +249,8 @@ class FixedHostBackendResolver(StaticBackendResolver):
 def leave_grant_on_this_computer(workspace_agent_id: str, service_name: str, account: str) -> None:
     """Stand in for the grant handover of a workspace whose agents run on this computer.
 
-    Satisfies :attr:`LatchkeyPermissionGrantHandler.carry_grant_to_machine` for
+    Satisfies :attr:`LatchkeyPermissionGrantHandler.carry_grant_to_machine` and
+    its ``carry_grant_and_desktop_egress_rules_to_machine`` for
     tests whose hosts have no machine of their own: the real
     :class:`MachineOperator` resolves the same nothing-to-do for them, because a
     local workspace's credentials and policy are already where its gateway
@@ -263,6 +264,15 @@ def leave_permissions_on_this_computer(workspace_agent_id: str) -> None:
     Satisfies the ``push_permissions_to_machine`` parameter that every edit to a
     host's canonical policy takes. Tests that care what was pushed pass a
     recorder instead; this is for the ones whose subject is the edit.
+    """
+
+
+def leave_copies_on_this_computer_as_they_are(workspace_agent_id: str) -> None:
+    """Stand in for reading back the machine of a workspace whose agents run on this computer.
+
+    Satisfies :attr:`LatchkeyPermissionGrantHandler.refresh_machine_copies`: the
+    real :class:`MachineOperator` finds no machine to read for such a workspace,
+    whose copies here are the ones its gateway uses.
     """
 
 
@@ -287,6 +297,8 @@ def build_permission_grant_handler(
         ),
         gateway_client=gateway_client if gateway_client is not None else build_fake_gateway_client(),
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
 
 

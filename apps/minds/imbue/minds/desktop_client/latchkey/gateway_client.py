@@ -122,6 +122,14 @@ class PredefinedRequestPayload(FrozenModel):
             "the user then picks one (or signs a new one in) in the approval dialog."
         ),
     )
+    proxy: bool = Field(
+        default=False,
+        description=(
+            "Whether the agent also asks for the service's requests to leave through the desktop that "
+            "approves the request. Not a permission: the gateway carries it, and that desktop puts itself "
+            "first on the service's desktop egress route in the change that carries the grant to the machine."
+        ),
+    )
 
 
 # The rationale stored on a request Imbue Studio files for itself. The request is

@@ -230,11 +230,12 @@ settings.
 Some destinations block the datacenter IP ranges a remote workspace's VPS sits
 in, so a request to them is only accepted when it leaves from the user's own
 computer. Desktop egress sends a remote workspace's requests to a chosen
-service out through the user's computer. The workspace does nothing different:
-it calls its gateway as usual, and the machine's gateway decides per request
-where the request leaves from.
+service out through one of the user's computers. The workspace does nothing
+different: it calls its gateway as usual, and the machine's gateway decides per
+request where the request leaves from, following the service's **route**: the
+places to try, in order.
 
-A request to a routed service takes these steps:
+A request to a service whose route starts at a desktop takes these steps:
 
 1. The workspace sends the request to the machine's gateway (on the VPS).
 2. The machine's gateway runs its permission check, including the per-account
@@ -243,14 +244,15 @@ A request to a routed service takes these steps:
    `X-Latchkey-Matched-Service`.
 3. The machine's gateway runs curl through the curl router
    (`LATCHKEY_CURL`). The router looks up the matched service in the rules
-   file, finds that it is routed, removes the `X-Latchkey-Matched-Service`
-   header, and sends the request to the most recently announced desktop's
-   gateway over that desktop's reverse tunnel, with a header asking the
-   desktop gateway to inject no credentials. It picks the desktop the way the
-   forwarding extension does (see [Desktops](#desktops)), from the same
-   records (`LATCHKEY_EXTENSION_DEVICES_DIR`), and authenticates with the
-   gateway password and the permissions-override JWT for this host that the
-   record carries.
+   file, finds its route, removes the `X-Latchkey-Matched-Service` header, and
+   sends the request to the gateway of the first desktop on the route that it
+   can reach, over that desktop's reverse tunnel, with a header asking the
+   desktop gateway to inject no credentials. It knows the desktops from the
+   records the forwarding extension reads (see [Desktops](#desktops),
+   `LATCHKEY_EXTENSION_DEVICES_DIR`), and authenticates with the gateway
+   password and the permissions-override JWT for this host that the record
+   carries. A route may end at the machine itself, in which case the router
+   makes the request directly when no desktop before it can be reached.
 4. The desktop gateway runs its own permission check, then makes the request
    to the third party from the user's computer.
 
@@ -259,23 +261,41 @@ machine, and the desktop only forwards.
 
 ### The rules file
 
-`~/.latchkey/proxyRules.json` on the machine says which requests are routed. It
-is one JSON object. Each key is a latchkey service name, and a request that
-latchkey matched to a service whose value is truthy is sent through the desktop
-gateway:
+`~/.latchkey/proxyRules.json` on the machine gives services their routes. It
+is one JSON object. Each key is a latchkey service name, and its value is the
+service's route: a list of hops, tried in order.
 
 ```json
 {
-  "github": true,
-  "slack": true
+  "github": ["host-3f9c"],
+  "slack": ["host-3f9c", "host-81d2", "self"]
 }
 ```
+
+A hop is one of:
+
+- a desktop's device id: that desktop (see [Desktops](#desktops)). Every
+  desktop a route sends requests to is named this way: no hop stands for
+  whichever desktop happens to be connected;
+- `self`: the machine itself, which makes the request directly. It is always
+  there to do so, so nothing after it would ever be tried, and it is only
+  valid as the last hop.
+
+So `["host-a"]` sends the service's requests through one desktop,
+`["host-a", "host-b"]` tries one desktop and then another, and
+`["host-a", "self"]` tries a desktop and falls back to the machine. A route
+names no place twice, and one without `self` fails the request when none of
+its desktops can be reached.
+
+A service the file does not name has the route `["self"]`: the machine makes
+its requests itself. That route is never written out, so the file names only
+the services that go anywhere else.
 
 - The router does not match URLs itself. Latchkey states which service it
   matched a request to in the request header `X-Latchkey-Matched-Service`, and
   the router looks that name up in the file. Latchkey sets the header only on
   a request it injected credentials into, so a request it injected nothing
-  into is never routed.
+  into always leaves from the machine.
 - Latchkey sets that header only with its diagnostic headers turned on. The
   package's `gateway-run` script exports `LATCHKEY_DIAGNOSTIC_HEADERS=1` for
   that.
@@ -283,31 +303,38 @@ gateway:
   of the same name that the caller supplied in place. The router reads the
   first occurrence, which is latchkey's, and removes every occurrence before
   curl runs.
-- Every catalog service can be routed, including the ones whose URLs latchkey
-  matches by regular expression, such as GitHub and AWS.
+- Every catalog service can be given a route, including the ones whose URLs
+  latchkey matches by regular expression, such as GitHub and AWS.
 - A URL can belong to several services. The Google Drive files API, for
   example, is shared by Google Drive, Google Docs and Google Sheets. Latchkey
-  reports the service whose credentials it used, so routing `google-docs` does
-  not route a request that latchkey served with `google-drive` credentials.
+  reports the service whose credentials it used, so a route for `google-docs`
+  does not apply to a request that latchkey served with `google-drive`
+  credentials.
 - The package's `gateway-run` script creates the file as `{}` when the machine
   has none, and exports its path as `LATCHKEY_DESKTOP_PROXY_CONFIG`. The router fails
   every request when that variable names a missing file, which is why the
   script that exports the variable also creates the file.
 - The router reads the file on every request, so an edit takes effect without
   restarting the gateway.
-- The values are booleans rather than device ids. The router sends every
-  routed request to the most recently announced desktop (see
-  [Desktops](#desktops)); which desktop that is is not a per-service choice.
-  The router treats any truthy JSON value as on, in the JavaScript sense: an
-  empty list or object is on.
+
+The file used to hold a boolean per service, `true` sending the service's
+requests to the most recently announced desktop. A file still in that shape
+names no desktops, so a `true` in it is read as the desktops that hold a
+[device-gated rule](#the-device-gated-rule) for every scope of the service, in
+the order the host's permissions file lists them
+(`desktop_egress_route_from_grants`), and as `["self"]` when there is none. A
+`false` is read like a service the file does not name. Such a file is
+rewritten as routes by the first route change made for its host.
 
 This needs latchkey 3.15.0 or later, which added `LATCHKEY_DIAGNOSTIC_HEADERS`,
-and latchkey-curl-shims v0.5.0 or later, which reads service-keyed rules and
-picks the desktop from the device records. Both are what the install pins. With an
-older latchkey nothing is routed, because it ignores the variable and so never
-names the service. With an older router nothing is routed either: it expects a
-fixed desktop URL and a secret pair in two files, none of which the machine
-provides anymore.
+and latchkey-curl-shims v0.6.0 or later, the first release whose router reads
+routes. The router tries a route's hops in order and sends the request to the
+first one that is satisfied. A desktop satisfies its hop when its
+[device record](#desktops) was touched in the last three minutes, and `self`
+always does. The request is sent once: a failure at the desktop it went to is
+a failed request, not a reason to try the next hop. A `true` in a file still
+in the old shape goes to the most recently announced desktop whose record is
+that fresh.
 
 This computer keeps a copy of the file at
 `<latchkey_directory>/mngr_latchkey/hosts/<host_id>/proxyRules.json`, handled
@@ -321,14 +348,21 @@ like its copy of the host's permissions file:
 - A writer edits the copy here and its copy of the permissions file, then
   pushes snapshots of both with
   `MachineCredentials.set_permissions_and_desktop_egress_rules`, which costs
-  one remote command. An edit that is not pushed is discarded by the next
-  refresh.
+  one remote command. A permission grant that also changes a route pushes the
+  granted account with them, still in one remote command
+  (`MachineCredentials.connect_service_with_permissions_and_desktop_egress_rules`).
+  An edit that is not pushed is discarded by the next refresh.
+
+The rules file is the record of what the user chose. The rules in the
+permissions file that make a desktop accept a routed request follow from it,
+and are written in the same change as the route they serve (see below).
 
 ### The device-gated rule
 
 The desktop gateway checks a routed request against the host's permissions
 file (`hosts/<host_id>/latchkey_permissions.json` on this computer), like any
-other request from that host. The rule that allows it is gated on a device id:
+other request from that host. The rule that allows it is for one desktop: it
+is gated on that desktop's device id by a `const`:
 
 ```json
 {
@@ -358,8 +392,15 @@ other request from that host. The rule that allows it is gated on a device id:
 
 The gate is on the device id because the permissions file is shared between
 the user's computers: it is pushed to the machine, and every other computer
-the user connects from adopts it. Without the gate, a rule written on one
-computer would make every other computer forward the service's requests too.
+the user connects from adopts it. Without the gate, a rule for one desktop
+would make every other computer forward the service's requests too.
+
+A route needs one rule per scope of its service for each desktop it names
+(`desktop_egress_forwarders`); a route of `["self"]` needs none. Whoever
+writes a route writes these rules with it and deletes the ones no route needs
+any more, so a desktop forwards exactly the services whose routes name it.
+This is also why a route names its desktops one by one: there is no rule for
+a desktop nobody named.
 
 The device id reaches the check through detent's custom metadata. An embedder
 starts the desktop gateway with `DETENT_CUSTOM_METADATA={"deviceId": "<id>"}`
@@ -391,13 +432,22 @@ allows.
 
 `imbue.mngr_latchkey.desktop_egress` is the single owner of both shapes:
 
+- `DesktopEgressRoute` is a route, and `build_desktop_egress_route` builds
+  one from hops, refusing hops that do not form one with a
+  `DesktopEgressError`. `desktop_egress_forwarders` gives the desktops a route
+  names, and `desktop_egress_mode_for_route` says what an on/off switch on one
+  computer can show for it (`DesktopEgressMode`): off for `["self"]`, on for
+  the route through that computer alone, custom for any other.
 - `build_desktop_egress_grant` composes a rule (key, permissions, backing
-  schema), and `list_desktop_egress_grants` reads rules back by inspecting the
-  schema structure. As with per-account grants, the rule key is only a name
-  and is never parsed.
-- `build_desktop_egress_rules`, `serialize_desktop_egress_rules`,
-  `parse_desktop_egress_rules` and `is_service_routed` write and read the
-  rules file.
+  schema) for one desktop, and `list_desktop_egress_grants` reads rules back
+  by inspecting the schema structure. As with per-account grants, the rule key
+  (`desktop_egress_scope_key`) is only a name and is never parsed.
+- `serialize_desktop_egress_rules` and `parse_desktop_egress_rules` write and
+  read the rules file. Reading gives a `DesktopEgressRules`: the routes the
+  file holds, and the services that a file written before routes turned on
+  with a bare `true`, whose routes `desktop_egress_route_from_grants` derives
+  from the rules in the permissions file. `desktop_egress_route_for_service`
+  gives a service its route from the routes read.
 
 ## Remote gateway package
 
@@ -593,8 +643,9 @@ knowing:
 `MachineCredentials` is built for the duration of one exchange -- the caller
 opens the machine's outer host, does what it came to do, and lets both go --
 and every method costs a single remote command: `connect_service`,
-`disconnect_account`, `set_permissions`, `connect_service_with_permissions` and
-`set_permissions_and_desktop_egress_rules` push, and `refresh` reads the
+`disconnect_account`, `set_permissions`, `connect_service_with_permissions`,
+`set_permissions_and_desktop_egress_rules` and
+`connect_service_with_permissions_and_desktop_egress_rules` push, and `refresh` reads the
 machine's credentials, its policy *and* its [desktop egress
 rules](#the-rules-file) back in one go. Nothing is queued: an exchange either succeeds before its caller
 returns or raises `RemoteGatewayError`, so an embedder (the Imbue Studio desktop app)
@@ -805,7 +856,8 @@ consume the stream and approve/delete on resolution.
   Two `type` values are accepted:
   * `"predefined"` -- detent scope/permission grant for one signed-in
     account of the service, with payload
-    `{"scope": "...", "permissions": ["...", ...], "account": "..."}`.
+    `{"scope": "...", "permissions": ["...", ...], "account": "...",
+    "proxy": true}`.
     The scope must be one named in the bundled `services.json` catalog,
     and each permission must be either one the catalog lists for that
     scope or the catch-all `any`. `account` is the latchkey account the
@@ -815,6 +867,16 @@ consume the stream and approve/delete on resolution.
     can only be resolved by a client that names the chosen account in the
     approve override body (see below), which is what the Imbue Studio dialog
     does after the user picks or signs one in.
+
+    An optional `"proxy": true` asks Imbue Studio to also send the service's
+    requests out through the user's computer once the grant is approved: the
+    computer that approves the request is put first on the service's
+    [desktop egress route](#the-rules-file). The user decides in the approval
+    dialog, and a request cannot name a route or any other computer. The
+    extension only checks that `proxy` is a boolean (anything else is a 400)
+    and stores `true`; `false`, `null` and an absent `proxy` store nothing.
+    It never acts on it: like a file-sharing `sync` it is not a permission,
+    so it does not enter the `effect`.
   * `"file-sharing"` -- access to one path through the `minds-api-proxy`
     extension, with payload `{"path": "<absolute-path>", "access":
     "READ"|"WRITE"}`. The path must be absolute (or start with `~`, which is
@@ -832,7 +894,7 @@ consume the stream and approve/delete on resolution.
     `/minds-api-proxy/api/v1/files/<device id><path>`, which is where that
     desktop's file server serves the path. A desktop therefore never grants
     access to another desktop's files; a workspace asks a particular desktop
-    by sending the request there (the `X-Latchkey-Desktop` header, see
+    by sending the request there (the `X-Latchkey-Device` header, see
     [Desktops](#desktops)). A gateway without a device id refuses
     file-sharing requests with a 503. `imbue.mngr_latchkey.file_sharing`
     reads these names back. It also reads the names from before grants named
@@ -1034,10 +1096,11 @@ a workspace asks about desktops and addresses them the same way whether its
 gateway runs on a machine or on the desktop.
 
 Desktop egress reads the same records: the curl router sends a routed request
-to the most recently announced desktop, over that desktop's tunnel and with
-the pair its record carries, exactly as a request without the header is
-forwarded. It never takes the header, so it cannot be pointed at a particular
-desktop yet.
+to a desktop over that desktop's tunnel and with the pair its record carries,
+exactly as the extension forwards a request. It never takes the header: which
+desktop it picks is said by the service's route in
+[the rules file](#the-rules-file), whose hops name desktops by these device
+ids.
 
 ### `permissions` extension
 

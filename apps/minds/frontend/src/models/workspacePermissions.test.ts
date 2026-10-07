@@ -274,37 +274,54 @@ describe("PermissionsModel writes", () => {
     });
   });
 
-  it("posts the service and new state of a desktop egress flip and adopts the returned view", async () => {
+  it("posts the service and its new desktop egress route and adopts the returned view", async () => {
     const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
     const refreshed = permissionsView({
-      connections: [slackConnection({ desktop_egress: desktopEgress({ is_enabled: true }) })],
+      connections: [slackConnection({ desktop_egress: desktopEgress(["host-here", "self"]) })],
     });
     const { model, requests } = makeModel((url) =>
-      okWith(url.endsWith("/desktop-egress-toggle") ? refreshed : before),
+      okWith(url.endsWith("/desktop-egress-route") ? refreshed : before),
     );
     await model.load();
 
-    await model.toggleDesktopEgress("slack", true);
+    const isSaved = await model.setDesktopEgressRoute("slack", ["host-here", "self"]);
 
+    expect(isSaved).toBe(true);
     expect(requests[1]).toEqual({
-      url: `${PERMISSIONS_URL}/desktop-egress-toggle`,
+      url: `${PERMISSIONS_URL}/desktop-egress-route`,
       method: "POST",
-      body: { service_name: "slack", enabled: true },
+      body: { service_name: "slack", route: ["host-here", "self"] },
     });
     expect(model.data).toEqual(refreshed);
     expect(model.errorMessage).toBe("");
   });
 
+  it("keeps the last view and says why when the machine refuses a desktop egress route", async () => {
+    const before = permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] });
+    const { model } = makeModel((url) =>
+      url.endsWith("/desktop-egress-route")
+        ? Promise.resolve({ ok: false, status: 502, body: { error: "the machine did not take it" } })
+        : okWith(before),
+    );
+    await model.load();
+
+    const isSaved = await model.setDesktopEgressRoute("slack", ["host-here"]);
+
+    expect(isSaved).toBe(false);
+    expect(model.data).toEqual(before);
+    expect(model.errorMessage).toBe("Could not save the change: the machine did not take it");
+  });
+
   it("marks the desktop egress row busy while its write is in flight", async () => {
     let release: (response: StubResponse) => void = () => {};
     const { model } = makeModel((url) =>
-      url.endsWith("/desktop-egress-toggle")
+      url.endsWith("/desktop-egress-route")
         ? new Promise<StubResponse>((resolve) => (release = resolve))
         : okWith(permissionsView()),
     );
     await model.load();
 
-    const flip = model.toggleDesktopEgress("slack", true);
+    const flip = model.setDesktopEgressRoute("slack", ["host-here"]);
     await settle();
 
     expect(model.isRowBusy(desktopEgressRowKey("slack"))).toBe(true);

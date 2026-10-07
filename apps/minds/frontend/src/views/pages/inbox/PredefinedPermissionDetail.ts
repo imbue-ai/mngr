@@ -20,8 +20,13 @@ import {
   isPermissionCheckboxDisabled,
   submittedPermissions,
 } from "../../../models/inbox";
+import {
+  DESKTOP_EGRESS_LABEL,
+  renderDesktopEgressHops,
+} from "../../components/DesktopEgressRouteSetting";
 import { Select } from "../../components/FormControls";
 import { Icon16 } from "../../components/Icon";
+import { renderPermissionSwitch } from "../../components/PermissionSwitch";
 import { serviceMark } from "../../components/ServiceMark";
 import { PermissionsShell } from "./PermissionsShell";
 
@@ -239,6 +244,52 @@ function editorView(model: InboxModel, detail: Detail): m.Children {
   ]);
 }
 
+const PROXY_SUMMARY_ID = "permissions-proxy-summary";
+
+/** The agent's ask to also send the service's requests through this computer.
+ * The switch rides on Approve: denying, or closing the dialog, leaves the
+ * route as it is now. */
+function proxySection(model: InboxModel, detail: Detail): m.Children {
+  const requested = detail.proxy;
+  if (requested === null) return null;
+  return m("div", { id: "permissions-proxy", class: "flex flex-col gap-1.5" }, [
+    m("h3", { class: "type-section text-tertiary" }, "Where requests leave from"),
+    m(
+      "p",
+      { class: "type-body text-secondary" },
+      `The agent asked for this workspace's requests to ${detail.display_name} to leave through this computer.`,
+    ),
+    m("div", { class: "flex items-center justify-between gap-4" }, [
+      m("div", { class: "min-w-0" }, [
+        m("p", { class: "type-body text-primary truncate" }, DESKTOP_EGRESS_LABEL),
+        m(
+          "p",
+          { id: PROXY_SUMMARY_ID, class: "type-helper text-tertiary mt-0.5" },
+          model.isProxyOn
+            ? [
+                "Requests will leave from ",
+                renderDesktopEgressHops(requested.resulting_route, requested.desktops, true),
+                ".",
+              ]
+            : "Requests will keep leaving from where they do now.",
+        ),
+      ]),
+      renderPermissionSwitch({
+        isOn: model.isProxyOn,
+        isBusy: false,
+        isDisabled: false,
+        title: null,
+        label: DESKTOP_EGRESS_LABEL,
+        describedBy: PROXY_SUMMARY_ID,
+        permission: "proxy",
+        onFlip: (isOn) => {
+          model.isProxyOn = isOn;
+        },
+      }),
+    ]),
+  ]);
+}
+
 export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissionDetailAttrs> {
   return {
     view(vnode) {
@@ -261,9 +312,10 @@ export function PredefinedPermissionDetailView(): m.Component<PredefinedPermissi
         progressLabel: detail.will_open_browser
           ? `Opening a browser window for you to sign in to ${detail.display_name}…`
           : "Granting permission...",
-        body: model.isPermissionEditorShown
-          ? editorView(model, detail)
-          : summaryView(model, detail),
+        body: [
+          model.isPermissionEditorShown ? editorView(model, detail) : summaryView(model, detail),
+          proxySection(model, detail),
+        ],
       });
     },
   };

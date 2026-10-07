@@ -50,6 +50,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   selected_account_value: "",
   new_account_value: ":new-account",
   wildcard_permission: "any",
+  proxy: null,
   will_open_browser: false,
   manual_credentials: null,
 };

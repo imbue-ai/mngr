@@ -69,9 +69,11 @@ class DeviceScopedFileSharingMigration(PermissionsMigration):
             scoped_name = file_sharing_permission_name(
                 FileSharingGrant(access=legacy_grant.access, device_id=context.device_id, path=legacy_grant.path)
             )
+            if scoped_name in permissions.schemas:
+                # The twin was made before, so a rule without it is one the user took it out of.
+                continue
+            schemas[scoped_name] = scoped_schema
             scoped_name_by_legacy_name[name] = scoped_name
-            if scoped_name not in permissions.schemas:
-                schemas[scoped_name] = scoped_schema
         rules = tuple(_add_scoped_twins(rule, scoped_name_by_legacy_name) for rule in permissions.rules)
         if schemas == permissions.schemas and rules == permissions.rules:
             return permissions

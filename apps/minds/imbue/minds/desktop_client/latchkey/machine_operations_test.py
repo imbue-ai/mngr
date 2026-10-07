@@ -30,7 +30,7 @@ from imbue.mngr_latchkey.store import permissions_path_for_host
 
 _EMPTY_POLICY = '{"rules": []}'
 _SLACK_POLICY = '{"rules": [{"slack-api:a@example.com": ["slack-read-all"]}]}'
-_SLACK_DESKTOP_EGRESS_RULES = '{"slack": true}'
+_SLACK_DESKTOP_EGRESS_RULES = '{"slack": ["device-1"]}'
 
 
 class _RecordingMachine(MachineCredentials):
@@ -43,7 +43,7 @@ class _RecordingMachine(MachineCredentials):
     )
 
     def refresh(self, migration_context: PermissionsMigrationContext) -> FetchedMachineState:
-        self._note("refresh")
+        self._note(f"refresh as {migration_context.device_id}")
         return FetchedMachineState(
             credentials=None,
             permissions_json=None,
@@ -65,6 +65,11 @@ class _RecordingMachine(MachineCredentials):
 
     def connect_service_with_permissions(self, service_name: str, account: str, permissions_json: str) -> None:
         self._note(f"grant {service_name} {account} {permissions_json}")
+
+    def connect_service_with_permissions_and_desktop_egress_rules(
+        self, service_name: str, account: str, permissions_json: str, desktop_egress_rules_json: str
+    ) -> None:
+        self._note(f"grant {service_name} {account} {permissions_json} {desktop_egress_rules_json}")
 
     def _note(self, call: str) -> None:
         if self.refusal:
@@ -146,6 +151,7 @@ def test_a_local_workspaces_state_is_already_where_its_gateway_reads_it(tmp_path
     operator.push_permissions(agent_id)
     operator.push_permissions_and_desktop_egress_rules(agent_id)
     operator.connect_service(agent_id, "slack", "a@example.com")
+    operator.connect_service_with_permissions_and_desktop_egress_rules(agent_id, "slack", "a@example.com")
     operator.refresh(agent_id)
 
     assert machine.calls == []
@@ -232,6 +238,43 @@ def test_a_grant_with_no_policy_to_snapshot_still_carries_the_credential(tmp_pat
     assert machine.calls == ["connect slack a@example.com"]
 
 
+def test_a_grant_that_changes_a_route_carries_the_account_the_policy_and_the_rules_in_one_exchange(
+    tmp_path: Path,
+) -> None:
+    operator, machine, agent_id = _operator(
+        tmp_path,
+        is_machine_of_its_own=True,
+        policy=_SLACK_POLICY,
+        desktop_egress_rules=_SLACK_DESKTOP_EGRESS_RULES,
+    )
+
+    operator.connect_service_with_permissions_and_desktop_egress_rules(agent_id, "slack", "a@example.com")
+
+    assert machine.calls == [f"grant slack a@example.com {_SLACK_POLICY} {_SLACK_DESKTOP_EGRESS_RULES}"]
+
+
+def test_a_grant_that_changes_a_route_with_no_rules_copy_to_push_fails(tmp_path: Path) -> None:
+    operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True, policy=_SLACK_POLICY)
+
+    with pytest.raises(MachineOperationError, match="no copy of the desktop egress rules") as failure:
+        operator.connect_service_with_permissions_and_desktop_egress_rules(agent_id, "slack", "a@example.com")
+
+    assert "apply the slack grant on that workspace" in str(failure.value)
+    assert machine.calls == []
+
+
+def test_a_grant_that_changes_a_route_with_no_policy_to_snapshot_fails(tmp_path: Path) -> None:
+    """The caller writes the grant right before the carry, so a missing policy is a failed write."""
+    operator, machine, agent_id = _operator(
+        tmp_path, is_machine_of_its_own=True, desktop_egress_rules=_SLACK_DESKTOP_EGRESS_RULES
+    )
+
+    with pytest.raises(MachineOperationError, match="no copy of the permissions"):
+        operator.connect_service_with_permissions_and_desktop_egress_rules(agent_id, "slack", "a@example.com")
+
+    assert machine.calls == []
+
+
 def test_a_sign_out_clears_the_account_on_the_machine_itself(tmp_path: Path) -> None:
     """Clearing only the copy here would leave the machine's agents still able to use the credential."""
     operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True)
@@ -241,12 +284,13 @@ def test_a_sign_out_clears_the_account_on_the_machine_itself(tmp_path: Path) -> 
     assert machine.calls == ["disconnect slack a@example.com"]
 
 
-def test_a_read_asks_the_machine_what_it_holds(tmp_path: Path) -> None:
+def test_a_read_asks_the_machine_what_it_holds_as_this_install(tmp_path: Path) -> None:
+    """The device a read names is the one a migrated file-sharing grant is scoped to."""
     operator, machine, agent_id = _operator(tmp_path, is_machine_of_its_own=True)
 
     operator.refresh(agent_id)
 
-    assert machine.calls == ["refresh"]
+    assert machine.calls == [f"refresh as {device_id_for_test('machine-operations')}"]
 
 
 def test_a_machine_that_refuses_a_change_fails_the_call_that_asked_for_it(tmp_path: Path) -> None:

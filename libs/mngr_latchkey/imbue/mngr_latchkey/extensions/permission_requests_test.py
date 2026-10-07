@@ -273,16 +273,6 @@ def node_extension_as_desktop_client(tmp_path: Path) -> Generator[tuple[str, Pat
         yield base_url, latchkey_directory, admin_permissions_path
 
 
-@pytest.fixture
-def node_extension_without_a_device(tmp_path: Path) -> Generator[tuple[str, Path, Path], None, None]:
-    """The driver on a gateway that was not told which desktop it runs on."""
-    latchkey_directory = tmp_path / "latchkey"
-    latchkey_directory.mkdir()
-    permissions_config_path = tmp_path / "permissions.json"
-    with _running_extension(latchkey_directory, permissions_config_path, None) as base_url:
-        yield base_url, latchkey_directory, permissions_config_path
-
-
 @contextlib.contextmanager
 def _staged_extension(tmp_path: Path, extra_services: dict[str, object]) -> Generator[str, None, None]:
     """Run the extension against a copy of its data files, with the catalog doctored.
@@ -527,22 +517,33 @@ def test_post_creates_file_sharing_request_with_schemas_and_rules(
     assert perm_schema["properties"]["method"] == {"enum": list(expected_methods)}
 
 
+@pytest.mark.parametrize(
+    ("local_device_id", "expected_reason"),
+    [
+        (None, "is not set"),
+        ("a/b", "is not a valid device id"),
+    ],
+)
 def test_file_sharing_is_refused_by_a_gateway_that_does_not_know_its_desktop(
-    node_extension_without_a_device: tuple[str, Path, Path],
+    tmp_path: Path, local_device_id: str | None, expected_reason: str
 ) -> None:
     """A grant names the desktop whose file it shares, so without one there is nothing to grant."""
-    base_url, latchkey_directory, _permissions_config_path = node_extension_without_a_device
-    status, body = _post_json(
-        f"{base_url}/permission-requests",
-        {
-            "agent_id": _VALID_AGENT_ID,
-            "rationale": "needs to access example data",
-            "type": "file-sharing",
-            "payload": {"path": "/home/example/data.txt", "access": "READ"},
-        },
-    )
+    latchkey_directory = tmp_path / "latchkey"
+    latchkey_directory.mkdir()
+    with _running_extension(latchkey_directory, tmp_path / "permissions.json", local_device_id) as base_url:
+        status, body = _post_json(
+            f"{base_url}/permission-requests",
+            {
+                "agent_id": _VALID_AGENT_ID,
+                "rationale": "needs to access example data",
+                "type": "file-sharing",
+                "payload": {"path": "/home/example/data.txt", "access": "READ"},
+            },
+        )
     assert status == 503
-    assert LOCAL_DEVICE_ID_ENV_VAR in json.loads(body)["error"]
+    error = json.loads(body)["error"]
+    assert LOCAL_DEVICE_ID_ENV_VAR in error
+    assert expected_reason in error
     assert not (latchkey_directory / "permission_requests").exists()
 
 
@@ -957,6 +958,77 @@ def test_post_rejects_a_malformed_file_sharing_sync(
     )
     assert status == 400, body
     assert expected_message_fragment in json.loads(body)["error"].lower()
+
+
+def test_post_carries_a_predefined_proxy_ask_without_touching_the_effect(
+    node_extension: tuple[str, Path, Path],
+) -> None:
+    """A proxy ask is carried on the request for the desktop, not granted by the gateway.
+
+    The effect is exactly the one an otherwise identical request without the ask has.
+    """
+    base_url, *_ = node_extension
+    payload = {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "alice@example.com"}
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {"agent_id": _VALID_AGENT_ID, "rationale": "x", "type": "predefined", "payload": {**payload, "proxy": True}},
+    )
+    assert status == 201, body
+    parsed = json.loads(body)
+    assert parsed["payload"] == {**payload, "proxy": True}
+    status, plain_body = _post_json(
+        f"{base_url}/permission-requests",
+        {"agent_id": _VALID_AGENT_ID, "rationale": "x", "type": "predefined", "payload": payload},
+    )
+    assert status == 201, plain_body
+    rule_key = account_scope_key("slack-api", "alice@example.com")
+    assert parsed["effect"] == {
+        "schemas": {rule_key: build_account_scope_schema("slack-api", "alice@example.com")},
+        "rules": [{rule_key: ["slack-read-all"]}],
+    }
+    assert parsed["effect"] == json.loads(plain_body)["effect"]
+
+
+@pytest.mark.parametrize(
+    "proxy_fields",
+    [
+        {},
+        {"proxy": False},
+        {"proxy": None},
+    ],
+)
+def test_post_omits_proxy_from_a_predefined_payload_that_asked_for_none(
+    node_extension: tuple[str, Path, Path],
+    proxy_fields: dict[str, object],
+) -> None:
+    """A request that asks for no proxy is stored the same whether it said so or said nothing."""
+    base_url, *_ = node_extension
+    payload = {"scope": "slack-api", "permissions": ["slack-read-all"], "account": "alice@example.com"}
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {"agent_id": _VALID_AGENT_ID, "rationale": "x", "type": "predefined", "payload": {**payload, **proxy_fields}},
+    )
+    assert status == 201, body
+    assert json.loads(body)["payload"] == payload
+
+
+@pytest.mark.parametrize("proxy", ["true", "", 1, 0, ["host-a"], {}])
+def test_post_rejects_a_predefined_proxy_that_is_not_a_boolean(
+    node_extension: tuple[str, Path, Path],
+    proxy: object,
+) -> None:
+    base_url, *_ = node_extension
+    status, body = _post_json(
+        f"{base_url}/permission-requests",
+        {
+            "agent_id": _VALID_AGENT_ID,
+            "rationale": "x",
+            "type": "predefined",
+            "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "proxy": proxy},
+        },
+    )
+    assert status == 400, body
+    assert json.loads(body)["error"] == "Invalid request body: payload.'proxy' must be a boolean when present."
 
 
 def test_post_rejects_unknown_type(node_extension: tuple[str, Path, Path]) -> None:

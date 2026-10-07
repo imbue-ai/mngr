@@ -115,7 +115,7 @@ export function selfToggleRowKey(permission: string): string {
   return ["self", permission].join("\u0000");
 }
 
-/** Keyed by service alone: the toggle is one value per service, drawn in every
+/** Keyed by service alone: the route is one value per service, drawn in every
  * account panel of it. */
 export function desktopEgressRowKey(serviceName: string): string {
   return ["desktop-egress", serviceName].join("\u0000");
@@ -495,14 +495,16 @@ export class PermissionsModel {
     );
   }
 
-  async toggleDesktopEgress(
+  /** Set where one service's requests leave from. Resolves to whether the
+   * machine took the route, so an editor knows whether to keep its draft. */
+  async setDesktopEgressRoute(
     serviceName: string,
-    enabled: boolean,
-  ): Promise<void> {
-    await this.writeFlip(
+    route: readonly string[],
+  ): Promise<boolean> {
+    return this.writeFlip(
       desktopEgressRowKey(serviceName),
-      "desktop-egress-toggle",
-      { service_name: serviceName, enabled },
+      "desktop-egress-route",
+      { service_name: serviceName, route },
       "Could not save the change: ",
     );
   }

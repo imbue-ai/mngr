@@ -80,8 +80,12 @@ def test_schema_version_tracks_breaking_wire_changes() -> None:
     fetches that route, and would say its accounts could not be loaded, and to
     24 when an update row gained ``dispatch_failure`` -- an older window drops
     it, so an update that never went out would leave the row saying nothing
-    once its modal closed, which is the silence the field was added to end."""
-    assert UI_SCHEMA_VERSION == 24
+    once its modal closed, which is the silence the field was added to end, and
+    to 25 when a connection's desktop egress became a route set through
+    ``desktop-egress-route`` -- an older window reads ``is_enabled`` off a
+    setting that no longer has it, and posts to a toggle route that is no
+    longer registered."""
+    assert UI_SCHEMA_VERSION == 25
 
 
 def test_hello_message_serializes_with_type_discriminator() -> None:
@@ -90,7 +94,7 @@ def test_hello_message_serializes_with_type_discriminator() -> None:
     # fail, whatever the constant becomes.
     frame = UiHelloMessage(schema_version=UI_SCHEMA_VERSION).model_dump_json()
     parsed = json.loads(frame)
-    assert parsed == {"type": "hello", "schema_version": 24}
+    assert parsed == {"type": "hello", "schema_version": 25}
 
 
 def test_workspaces_message_round_trips_through_json() -> None:
@@ -142,6 +146,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
     assert sorted(schema["$defs"].keys()) == snapshot(
         [
             "AgentHealth",
+            "DesktopEgressMode",
             "DiscoveryHealth",
             "EnvironmentCondition",
             "FileSharingAccess",
@@ -164,8 +169,8 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiConnectorRevokeAllRequest",
             "UiConnectorToggleRequest",
             "UiCredentialParameter",
-            "UiDesktopEgressToggle",
-            "UiDesktopEgressToggleRequest",
+            "UiDesktopEgressRouteRequest",
+            "UiDesktopEgressSetting",
             "UiDiscoveryHealthMessage",
             "UiEnvironmentMessage",
             "UiFolderSyncDiscardCopyRequest",
@@ -197,6 +202,7 @@ def test_wire_schema_defs_inventory_is_stable() -> None:
             "UiSharedPathRequest",
             "UiSnapshot",
             "UiWaitingPermissionRequest",
+            "UiWorkspaceDesktop",
             "UiWorkspaceEntry",
             "UiWorkspacePermissions",
             "UiWorkspaceRefreshMessage",

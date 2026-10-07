@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from flask.testing import FlaskClient
 from pydantic import Field
+from pydantic import SecretStr
 
 from imbue.concurrency_group.concurrency_group import ConcurrencyGroup
 from imbue.minds.config.data_types import InstallationPaths
@@ -17,24 +18,38 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.backend_resolver import StaticBackendResolver
 from imbue.minds.desktop_client.cookie_manager import SESSION_COOKIE_NAME
 from imbue.minds.desktop_client.cookie_manager import create_session_cookie
+from imbue.minds.desktop_client.latchkey.gateway_client import LatchkeyGatewayClientError
+from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.account_choices import NEW_ACCOUNT_FORM_VALUE
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import DesktopEgressDecision
 from imbue.minds.desktop_client.latchkey.handlers.predefined import EMPTY_MANUAL_CREDENTIAL_SUBMISSION
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionFlowError
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
+from imbue.minds.desktop_client.latchkey.handlers.predefined import NO_DESKTOP_EGRESS_CHANGE
 from imbue.minds.desktop_client.latchkey.handlers.predefined import _build_account_choices
+from imbue.minds.desktop_client.latchkey.handlers.predefined import _describe_route_for_agent
+from imbue.minds.desktop_client.latchkey.handlers.predefined import _format_proxy_not_set_up_note
+from imbue.minds.desktop_client.latchkey.handlers.predefined import _format_route_note
+from imbue.minds.desktop_client.latchkey.handlers.predefined import _parse_proxy_form
 from imbue.minds.desktop_client.latchkey.machine_operations import MachineOperationError
+from imbue.minds.desktop_client.latchkey.permission_toggles import DesktopEgressRouteThroughThisComputer
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import load_response_events
 from imbue.minds.desktop_client.latchkey.testing import FakeLatchkeyGatewayClient
+from imbue.minds.desktop_client.latchkey.testing import FixedHostBackendResolver
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import build_permissions_test_catalog
+from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
 from imbue.minds.desktop_client.request_handler import UiPredefinedPermissionDetail
+from imbue.minds.desktop_client.request_handler import UiRequestedProxy
 from imbue.minds.desktop_client.request_handler import UiUnknownScopeDetail
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import create_predefined_permission_request
+from imbue.minds.desktop_client.ui_models import UiWorkspaceDesktop
 from imbue.minds.utils.testing import RecordingMngrCaller
 from imbue.mngr.primitives import AgentId
 from imbue.mngr.primitives import HostId
@@ -47,10 +62,19 @@ from imbue.mngr_latchkey.core import ServiceAccountCredential
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 from imbue.mngr_latchkey.custom_services import build_custom_service_registration
 from imbue.mngr_latchkey.custom_services import custom_service_name
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressRoute
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_route
+from imbue.mngr_latchkey.desktop_egress import desktop_egress_scope_key
+from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
+from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
+from imbue.mngr_latchkey.desktop_egress import serialize_desktop_egress_rules
+from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.services_catalog import ServicePermissionInfo
 from imbue.mngr_latchkey.services_catalog import ServicesCatalog
 from imbue.mngr_latchkey.services_catalog import WILDCARD_PERMISSION_NAME
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
+from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
 from imbue.mngr_latchkey.store import permissions_path_for_host
 from imbue.mngr_latchkey.store import save_permissions
 
@@ -268,6 +292,10 @@ def _build_handler(
     auth_set_stderr: str = "",
     connected_credential_status: str = "valid",
     carry_grant_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
+    carry_grant_and_desktop_egress_rules_to_machine: Callable[[str, str, str], None] = leave_grant_on_this_computer,
+    refresh_machine_copies: Callable[[str], None] = leave_copies_on_this_computer_as_they_are,
+    services_catalog: ServicesCatalog | None = None,
+    gateway_client: FakeLatchkeyGatewayClient | None = None,
 ) -> LatchkeyPermissionGrantHandler:
     latchkey = _make_latchkey_with_status(
         tmp_path,
@@ -286,14 +314,13 @@ def _build_handler(
     return LatchkeyPermissionGrantHandler(
         data_dir=tmp_path,
         latchkey=latchkey,
-        services_catalog=_build_slack_services_catalog(),
+        services_catalog=services_catalog if services_catalog is not None else _build_slack_services_catalog(),
         mngr_message_sender=_message_sender(),
-        gateway_client=build_fake_gateway_client(),
+        gateway_client=gateway_client if gateway_client is not None else build_fake_gateway_client(),
         carry_grant_to_machine=carry_grant_to_machine,
+        carry_grant_and_desktop_egress_rules_to_machine=carry_grant_and_desktop_egress_rules_to_machine,
+        refresh_machine_copies=refresh_machine_copies,
     )
-
-
-# -- LatchkeyPermissionGrantHandler.grant --
 
 
 def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(tmp_path: Path) -> None:
@@ -309,6 +336,7 @@ def test_grant_with_valid_credentials_skips_auth_browser_and_writes_permissions(
         granted_permissions=("slack-read-all", "slack-write-all"),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -346,6 +374,7 @@ def test_grant_with_missing_credentials_invokes_auth_browser(tmp_path: Path) -> 
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -365,6 +394,7 @@ def test_grant_with_invalid_credentials_also_invokes_auth_browser(tmp_path: Path
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -389,6 +419,7 @@ def test_grant_with_unknown_credentials_proceeds_without_invoking_auth_browser(t
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -417,6 +448,7 @@ def test_grant_with_unknown_credentials_and_set_only_auth_proceeds(tmp_path: Pat
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -471,6 +503,7 @@ def test_grant_failed_browser_flow_stays_pending_without_denying(tmp_path: Path)
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     # A failed sign-in is a FAILED outcome, not a denial.
@@ -499,6 +532,7 @@ def test_grant_rejects_empty_granted_permissions(tmp_path: Path) -> None:
             granted_permissions=(),
             account_choice="",
             manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+            desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
         )
 
     # Defence-in-depth: nothing should have been written.
@@ -517,6 +551,7 @@ def test_grant_rejects_permissions_outside_catalog(tmp_path: Path) -> None:
             granted_permissions=("not-a-real-permission",),
             account_choice="",
             manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+            desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
         )
 
     assert load_response_events(tmp_path) == []
@@ -535,6 +570,7 @@ def test_grant_replaces_existing_rule_for_same_scope_and_account(tmp_path: Path)
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
     handler.grant(
         request_event_id="evt-2",
@@ -544,13 +580,11 @@ def test_grant_replaces_existing_rule_for_same_scope_and_account(tmp_path: Path)
         granted_permissions=("slack-read-all", "slack-write-all"),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
     assert on_disk["rules"] == [{account_scope_key("slack-api", ""): ["slack-read-all", "slack-write-all"]}]
-
-
-# -- LatchkeyPermissionGrantHandler.grant: NEEDS_MANUAL_CREDENTIALS path --
 
 
 _AWS_SET_EXAMPLE: str = "latchkey auth set-nocurl aws <access-key-id> <secret-access-key>"
@@ -591,6 +625,7 @@ def test_grant_asks_for_the_command_parameters_when_browser_auth_unsupported(tmp
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -631,6 +666,7 @@ def test_grant_falls_back_to_generic_example_when_latchkey_omits_one(tmp_path: P
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -656,6 +692,7 @@ def test_grant_returns_an_empty_form_when_the_example_has_no_parameters(tmp_path
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -686,6 +723,7 @@ def test_grant_runs_the_filled_in_credential_command_and_then_grants(tmp_path: P
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -732,6 +770,8 @@ def test_a_custom_services_registered_header_is_what_the_typed_token_is_stored_u
         mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
     (service_info,) = catalog.as_mapping()[service_name]
 
@@ -743,6 +783,7 @@ def test_a_custom_services_registered_header_is_what_the_typed_token_is_stored_u
         granted_permissions=(WILDCARD_PERMISSION_NAME,),
         account_choice="",
         manual_credentials=_submission({"token": "k-1"}),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -767,6 +808,7 @@ def test_grant_stores_manual_credentials_under_the_selected_account(tmp_path: Pa
         granted_permissions=("slack-read-all",),
         account_choice="alice@x",
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -805,6 +847,7 @@ def test_grant_asks_for_an_account_name_when_adding_a_second_account(tmp_path: P
         granted_permissions=("slack-read-all",),
         account_choice=NEW_ACCOUNT_FORM_VALUE,
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
     assert unnamed.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
     assert "Enter a name" in unnamed.message
@@ -818,6 +861,7 @@ def test_grant_asks_for_an_account_name_when_adding_a_second_account(tmp_path: P
         granted_permissions=("slack-read-all",),
         account_choice=NEW_ACCOUNT_FORM_VALUE,
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES, account_name="  bob@x  "),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
     assert named.outcome == GrantOutcome.GRANTED
     assert _read_set_recording(tmp_path)[0]["argv"][:2] == ["--account", "bob@x"]
@@ -841,6 +885,7 @@ def test_grant_re_shows_the_form_when_a_value_is_left_blank(tmp_path: Path) -> N
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=_submission({"access-key-id": "AKIA-3f9e21", "secret-access-key": "   "}),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -876,6 +921,7 @@ def test_grant_re_shows_the_form_when_the_credential_command_fails(tmp_path: Pat
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -907,6 +953,7 @@ def test_grant_reports_a_generic_failure_when_the_command_says_nothing_useful(tm
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -939,6 +986,7 @@ def test_grant_re_shows_the_form_when_the_stored_credentials_are_rejected(tmp_pa
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=_submission(_AWS_CREDENTIAL_VALUES),
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
@@ -989,6 +1037,8 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
     agent_id = AgentId()
     host_id = HostId()
@@ -1001,6 +1051,7 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
     assert first.outcome == GrantOutcome.NEEDS_MANUAL_CREDENTIALS
 
@@ -1015,12 +1066,10 @@ def test_grant_re_checks_credentials_on_second_call_after_manual_setup(tmp_path:
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
     assert second.outcome == GrantOutcome.GRANTED
     assert [e.status for e in load_response_events(tmp_path)] == [str(RequestStatus.GRANTED)]
-
-
-# -- LatchkeyPermissionGrantHandler.deny --
 
 
 def test_deny_writes_response_event_without_touching_permissions_file(tmp_path: Path) -> None:
@@ -1076,6 +1125,8 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
         mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
     host_id = HostId()
 
@@ -1087,6 +1138,7 @@ def test_grant_calls_gateway_client_set_permission_and_delete_request(tmp_path: 
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1112,6 +1164,8 @@ def test_deny_calls_gateway_delete_permission_request_only(tmp_path: Path) -> No
         mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
 
     handler.deny(
@@ -1128,24 +1182,29 @@ def _build_authenticated_client(
     tmp_path: Path,
     handler: LatchkeyPermissionGrantHandler,
     inbox: StaticPendingRequests,
+    backend_resolver: BackendResolverInterface | None = None,
+    device_id: str = "",
 ) -> FlaskClient:
     """Wire ``handler`` into a desktop-client app with a valid session cookie.
 
     Mirrors the helper used by ``file_sharing_test.py`` so the
-    HTTP-level deny test below exercises the same dispatcher path the
-    real desktop client uses.
+    HTTP-level tests below exercise the same dispatcher path the
+    real desktop client uses. ``backend_resolver`` defaults to one that
+    knows no agent.
     """
     auth_dir = tmp_path / "auth"
     auth_store = FileAuthStore(data_directory=auth_dir)
-    backend_resolver: BackendResolverInterface = StaticBackendResolver(url_by_agent_and_service={})
     paths = InstallationPaths(data_dir=tmp_path)
     app = create_desktop_client(
         auth_store=auth_store,
-        backend_resolver=backend_resolver,
+        backend_resolver=(
+            backend_resolver if backend_resolver is not None else StaticBackendResolver(url_by_agent_and_service={})
+        ),
         http_client=None,
         paths=paths,
         pending_requests=inbox,
         request_event_handlers=(handler,),
+        device_id=device_id,
     )
     client = app.test_client()
     cookie_value = create_session_cookie(signing_key=auth_store.get_signing_key())
@@ -1174,6 +1233,8 @@ def test_apply_deny_request_succeeds_for_unknown_scope(tmp_path: Path) -> None:
         mngr_message_sender=handler.mngr_message_sender,
         gateway_client=fake_client,
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
     agent_id = AgentId()
     event = create_predefined_permission_request(
@@ -1221,6 +1282,8 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
         mngr_message_sender=_message_sender(),
         gateway_client=fake_client,
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
     host_id = HostId()
     host_path = permissions_path_for_host(tmp_path / "mngr_latchkey", host_id)
@@ -1245,6 +1308,7 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     on_disk = json.loads(host_path.read_text())
@@ -1254,9 +1318,6 @@ def test_grant_preserves_existing_schemas_block_in_permissions_file(tmp_path: Pa
     assert on_disk["schemas"]["latchkey-self"] == baseline["schemas"]["latchkey-self"]
     assert {"latchkey-self": baseline["rules"][0]["latchkey-self"]} in on_disk["rules"]
     assert {rule_key: ["slack-read-all"]} in on_disk["rules"]
-
-
-# -- Per-account grants ---------------------------------------------------------
 
 
 def _make_multi_account_latchkey(
@@ -1319,6 +1380,8 @@ def _build_handler_for_latchkey(
         mngr_message_sender=_message_sender(),
         gateway_client=build_fake_gateway_client(),
         carry_grant_to_machine=carry_grant_to_machine,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
     )
 
 
@@ -1336,6 +1399,7 @@ def test_grant_for_one_account_does_not_touch_another_accounts_rule(tmp_path: Pa
         granted_permissions=("slack-read-all",),
         account_choice="alice@x",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
     handler.grant(
         request_event_id="evt-2",
@@ -1345,6 +1409,7 @@ def test_grant_for_one_account_does_not_touch_another_accounts_rule(tmp_path: Pa
         granted_permissions=("slack-write-all",),
         account_choice="bob@x",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     on_disk = json.loads(permissions_path_for_host(tmp_path / "mngr_latchkey", host_id).read_text())
@@ -1370,6 +1435,7 @@ def test_grant_with_new_account_choice_grants_the_account_that_signed_in(tmp_pat
         granted_permissions=("slack-read-all",),
         account_choice=NEW_ACCOUNT_FORM_VALUE,
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1395,6 +1461,7 @@ def test_grant_re_signs_in_a_specific_stale_account(tmp_path: Path) -> None:
         granted_permissions=("slack-read-all",),
         account_choice="alice@x",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1441,6 +1508,7 @@ def test_grant_fails_when_the_signed_in_account_is_ambiguous(tmp_path: Path) -> 
         granted_permissions=("slack-read-all",),
         account_choice=NEW_ACCOUNT_FORM_VALUE,
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.FAILED
@@ -1523,6 +1591,7 @@ def test_grant_for_a_requested_account_that_is_not_connected_signs_it_in(tmp_pat
         granted_permissions=("slack-read-all",),
         account_choice="bob@x",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1546,6 +1615,7 @@ def test_grant_for_an_unconnected_account_follows_the_account_actually_signed_in
         granted_permissions=("slack-read-all",),
         account_choice="bob@x",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1862,6 +1932,7 @@ def test_grant_hands_the_machine_both_halves_in_one_carry(tmp_path: Path) -> Non
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1891,6 +1962,7 @@ def test_grant_hands_the_machine_exactly_the_account_it_resolved(tmp_path: Path)
         granted_permissions=("slack-read-all",),
         account_choice=NEW_ACCOUNT_FORM_VALUE,
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.GRANTED
@@ -1921,9 +1993,956 @@ def test_grant_is_not_recorded_when_the_machine_would_not_take_it(tmp_path: Path
         granted_permissions=("slack-read-all",),
         account_choice="",
         manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+        desktop_egress=NO_DESKTOP_EGRESS_CHANGE,
     )
 
     assert result.outcome == GrantOutcome.FAILED
     assert "unreachable" in result.message
     # No verdict was recorded, so the request stays pending for the user to retry.
+    assert load_response_events(tmp_path) == []
+
+
+_THIS_DEVICE_ID: str = "desktop-this-5820"
+_OTHER_DEVICE_ID: str = "desktop-other-7341"
+
+
+def _workspace_resolver(agent_id: AgentId, host_id: HostId) -> FixedHostBackendResolver:
+    return FixedHostBackendResolver(url_by_agent_and_service={}, fixed_host_id=host_id, known_agent_ids=(agent_id,))
+
+
+def _build_workspace_client(
+    tmp_path: Path,
+    handler: LatchkeyPermissionGrantHandler,
+    agent_id: AgentId,
+    host_id: HostId,
+    pending: tuple[StreamedPermissionRequest, ...] = (),
+    device_id: str = _THIS_DEVICE_ID,
+    is_machine_of_its_own: bool = True,
+) -> FlaskClient:
+    """A desktop client whose state resolves ``agent_id`` to ``host_id``.
+
+    A device id and a machine of its own are together what lets the host's
+    services be routed through a desktop; pass ``""`` or ``False`` for a
+    workspace that cannot be. Direct handler calls read the same state inside
+    ``client.application.app_context()``.
+    """
+    data_dir = handler.latchkey.plugin_data_dir
+    # A host discovery has placed already has its canonical permissions file; without one the
+    # approval route first tries to rebuild it from the request's target.
+    save_permissions(permissions_path_for_host(data_dir, host_id), LatchkeyPermissionsConfig())
+    if is_machine_of_its_own:
+        store_machine_encryption_key(data_dir, host_id, SecretStr("machine-key-5820"))
+    return _build_authenticated_client(
+        tmp_path,
+        handler,
+        StaticPendingRequests(pending=pending),
+        backend_resolver=_workspace_resolver(agent_id, host_id),
+        device_id=device_id,
+    )
+
+
+def _create_slack_request(agent_id: AgentId, proxy: bool) -> StreamedPermissionRequest:
+    """A Slack request; ``proxy`` is whether it also asks for Slack's requests to leave through this computer."""
+    return create_predefined_permission_request(
+        agent_id=str(agent_id),
+        scope="slack-api",
+        permissions=("slack-read-all",),
+        rationale="need to read a channel",
+        proxy=proxy,
+    )
+
+
+def _rules_copy_path(handler: LatchkeyPermissionGrantHandler, host_id: HostId) -> Path:
+    return desktop_egress_rules_path_for_host(handler.latchkey.plugin_data_dir, host_id)
+
+
+def _write_rules_copy(
+    handler: LatchkeyPermissionGrantHandler, host_id: HostId, route_by_service_name: dict[str, DesktopEgressRoute]
+) -> str:
+    """Write this computer's copy of the host's rules file and return its text."""
+    rules_json = serialize_desktop_egress_rules(route_by_service_name)
+    rules_path = _rules_copy_path(handler, host_id)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(rules_json)
+    return rules_json
+
+
+def _routes_in_rules_copy(handler: LatchkeyPermissionGrantHandler, host_id: HostId) -> dict[str, DesktopEgressRoute]:
+    """The routes this computer's copy of the host's rules file names."""
+    return parse_desktop_egress_rules(_rules_copy_path(handler, host_id).read_text()).route_by_service_name
+
+
+def _set_rule_keys(handler: LatchkeyPermissionGrantHandler) -> list[str]:
+    """The key of every rule the handler wrote through its gateway client, in order."""
+    gateway_client = handler.gateway_client
+    assert isinstance(gateway_client, FakeLatchkeyGatewayClient)
+    return [call.rule_key for call in gateway_client.set_calls]
+
+
+def _deleted_request_ids(handler: LatchkeyPermissionGrantHandler) -> tuple[str, ...]:
+    gateway_client = handler.gateway_client
+    assert isinstance(gateway_client, FakeLatchkeyGatewayClient)
+    return gateway_client.deleted_request_ids
+
+
+def _grant_slack_read(
+    handler: LatchkeyPermissionGrantHandler,
+    client: FlaskClient,
+    agent_id: AgentId,
+    host_id: HostId,
+    desktop_egress: DesktopEgressDecision,
+) -> tuple[GrantOutcome, str]:
+    """Approve ``slack-read-all`` for the default account, and return the outcome and its message."""
+    with client.application.app_context():
+        result = handler.grant(
+            request_event_id="evt-abc",
+            agent_id=agent_id,
+            host_id=host_id,
+            service_info=_SLACK_SERVICE_INFO,
+            granted_permissions=("slack-read-all",),
+            account_choice="",
+            manual_credentials=EMPTY_MANUAL_CREDENTIAL_SUBMISSION,
+            desktop_egress=desktop_egress,
+        )
+    return result.outcome, result.message
+
+
+def _post_grant(
+    client: FlaskClient, event: StreamedPermissionRequest, raw_proxy: str | None
+) -> tuple[int, dict[str, str]]:
+    """Submit the dialog's approval of ``event``; ``raw_proxy`` is its proxy field (``None`` omits the field)."""
+    form = {"permissions": "slack-read-all", "account": ""}
+    if raw_proxy is not None:
+        form["proxy"] = raw_proxy
+    response = client.post(f"/requests/{event.request_id}/grant", data=form)
+    body = response.get_json()
+    assert isinstance(body, dict), response.text
+    return response.status_code, body
+
+
+def _detail_proxy(
+    handler: LatchkeyPermissionGrantHandler,
+    client: FlaskClient,
+    event: StreamedPermissionRequest,
+    agent_id: AgentId,
+    host_id: HostId,
+) -> UiRequestedProxy | None:
+    """What the detail payload of ``event`` gives the dialog to draw its proxy switch from."""
+    with client.application.app_context():
+        payload = handler.build_request_detail_payload(
+            permission_request=event,
+            backend_resolver=_workspace_resolver(agent_id, host_id),
+        )
+    assert isinstance(payload, UiPredefinedPermissionDetail)
+    return payload.proxy
+
+
+class _UnreadablePermissionsGatewayClient(FakeLatchkeyGatewayClient):
+    """A gateway that cannot be asked for a host's permissions."""
+
+    def get_permissions_config(self, permissions_file_path: Path) -> LatchkeyPermissionsConfig:
+        raise LatchkeyGatewayClientError(f"the gateway did not answer for {permissions_file_path.name}")
+
+
+_PUT_THIS_COMPUTER_FIRST: DesktopEgressDecision = DesktopEgressDecision(is_this_computer_put_first=True, note="")
+
+
+def _record_carry(carried: list[tuple[str, str, str]]) -> Callable[[str, str, str], None]:
+    """A grant handover that records the workspace, service and account it was asked to carry."""
+    return lambda workspace_agent_id, service, account: carried.append((workspace_agent_id, service, account))
+
+
+_THIS_DESKTOP: UiWorkspaceDesktop = UiWorkspaceDesktop(device_id=_THIS_DEVICE_ID, is_this_computer=True)
+_OTHER_DESKTOP: UiWorkspaceDesktop = UiWorkspaceDesktop(device_id=_OTHER_DEVICE_ID, is_this_computer=False)
+
+
+def test_detail_payload_carries_the_proxy_for_a_workspace_that_can_be_routed(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    event = _create_slack_request(agent_id, proxy=True)
+
+    proxy = _detail_proxy(handler, client, event, agent_id, host_id)
+
+    assert proxy == UiRequestedProxy(resulting_route=(_THIS_DEVICE_ID, "self"), desktops=(_THIS_DESKTOP,))
+
+
+@pytest.mark.parametrize(
+    "last_known_hops",
+    [
+        pytest.param((_OTHER_DEVICE_ID,), id="another-desktop-only"),
+        pytest.param((_OTHER_DEVICE_ID, "self"), id="another-desktop-then-the-machine"),
+    ],
+)
+def test_detail_payload_puts_this_computer_ahead_of_the_last_known_route(
+    tmp_path: Path, last_known_hops: tuple[str, ...]
+) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route(last_known_hops)})
+    event = _create_slack_request(agent_id, proxy=True)
+
+    proxy = _detail_proxy(handler, client, event, agent_id, host_id)
+
+    assert proxy == UiRequestedProxy(
+        resulting_route=(_THIS_DEVICE_ID, *last_known_hops), desktops=(_THIS_DESKTOP, _OTHER_DESKTOP)
+    )
+
+
+def test_detail_payload_does_not_list_a_desktop_only_another_services_route_names(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid", services_catalog=build_permissions_test_catalog())
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    _write_rules_copy(handler, host_id, {"github": build_desktop_egress_route((_OTHER_DEVICE_ID, "self"))})
+    event = _create_slack_request(agent_id, proxy=True)
+
+    proxy = _detail_proxy(handler, client, event, agent_id, host_id)
+
+    assert proxy == UiRequestedProxy(resulting_route=(_THIS_DEVICE_ID, "self"), desktops=(_THIS_DESKTOP,))
+
+
+@pytest.mark.parametrize(
+    "last_known_hops",
+    [
+        pytest.param((_THIS_DEVICE_ID,), id="alone"),
+        pytest.param((_THIS_DEVICE_ID, _OTHER_DEVICE_ID, "self"), id="first"),
+        pytest.param((_OTHER_DEVICE_ID, _THIS_DEVICE_ID), id="later"),
+    ],
+)
+def test_detail_payload_carries_no_proxy_when_the_route_already_names_this_computer(
+    tmp_path: Path, last_known_hops: tuple[str, ...]
+) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route(last_known_hops)})
+    event = _create_slack_request(agent_id, proxy=True)
+
+    assert _detail_proxy(handler, client, event, agent_id, host_id) is None
+
+
+def test_detail_payload_reads_the_last_known_route_of_a_rules_copy_from_before_routes_off_the_grants(
+    tmp_path: Path,
+) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    rule_key, permissions, schemas = build_desktop_egress_grant("slack-api", _OTHER_DEVICE_ID, None)
+    save_permissions(
+        permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id),
+        LatchkeyPermissionsConfig(rules=({rule_key: list(permissions)},), schemas=schemas),
+    )
+    rules_path = _rules_copy_path(handler, host_id)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(json.dumps({"slack": True}))
+    event = _create_slack_request(agent_id, proxy=True)
+
+    proxy = _detail_proxy(handler, client, event, agent_id, host_id)
+
+    assert proxy == UiRequestedProxy(
+        resulting_route=(_THIS_DEVICE_ID, _OTHER_DEVICE_ID), desktops=(_THIS_DESKTOP, _OTHER_DESKTOP)
+    )
+
+
+def test_detail_payload_carries_no_proxy_when_the_request_asks_for_none(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    event = _create_slack_request(agent_id, proxy=False)
+
+    assert _detail_proxy(handler, client, event, agent_id, host_id) is None
+
+
+@pytest.mark.parametrize(
+    "device_id,is_machine_of_its_own",
+    [
+        pytest.param(_THIS_DEVICE_ID, False, id="no-machine-of-its-own"),
+        pytest.param("", True, id="no-device-id"),
+    ],
+)
+def test_detail_payload_carries_no_proxy_for_a_workspace_that_cannot_be_routed(
+    tmp_path: Path, device_id: str, is_machine_of_its_own: bool
+) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid")
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(
+        tmp_path, handler, agent_id, host_id, device_id=device_id, is_machine_of_its_own=is_machine_of_its_own
+    )
+    event = _create_slack_request(agent_id, proxy=True)
+
+    assert _detail_proxy(handler, client, event, agent_id, host_id) is None
+
+
+def test_detail_payload_carries_no_proxy_when_the_hosts_permissions_cannot_be_read(tmp_path: Path) -> None:
+    handler = _build_handler(tmp_path, credential_status="valid", gateway_client=_UnreadablePermissionsGatewayClient())
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))})
+    event = _create_slack_request(agent_id, proxy=True)
+
+    assert _detail_proxy(handler, client, event, agent_id, host_id) is None
+
+
+@pytest.mark.parametrize(
+    "hops,expected_description",
+    [
+        pytest.param((_THIS_DEVICE_ID,), f"the desktop {_THIS_DEVICE_ID}", id="one-desktop"),
+        pytest.param(("self",), "your machine itself", id="the-machine-itself"),
+        pytest.param(
+            (_THIS_DEVICE_ID, _OTHER_DEVICE_ID, "self"),
+            f"the desktop {_THIS_DEVICE_ID}, then the desktop {_OTHER_DEVICE_ID}, then your machine itself",
+            id="desktops-then-the-machine",
+        ),
+    ],
+)
+def test_describe_route_for_agent_names_each_place_in_order(hops: tuple[str, ...], expected_description: str) -> None:
+    assert _describe_route_for_agent(build_desktop_egress_route(hops)) == expected_description
+
+
+def test_format_route_note_names_the_service_and_where_its_requests_leave_from() -> None:
+    route = build_desktop_egress_route((_THIS_DEVICE_ID, "self"))
+
+    added_note = _format_route_note(
+        "Slack", DesktopEgressRouteThroughThisComputer(route=route, is_this_computer_added=True)
+    )
+    unchanged_note = _format_route_note(
+        "Slack", DesktopEgressRouteThroughThisComputer(route=route, is_this_computer_added=False)
+    )
+
+    assert added_note == f" Requests to Slack now leave from the desktop {_THIS_DEVICE_ID}, then your machine itself."
+    assert unchanged_note == (
+        f" Requests to Slack already leave from the desktop {_THIS_DEVICE_ID}, then your machine itself, so the "
+        "proxy you asked for changed nothing."
+    )
+
+
+def test_format_proxy_not_set_up_note_gives_the_reason() -> None:
+    assert (
+        _format_proxy_not_set_up_note("the user turned it off.")
+        == " The proxy you asked for was not set up: the user turned it off."
+    )
+
+
+@pytest.mark.parametrize(
+    "raw_proxy,expected_is_on",
+    [
+        pytest.param("true", True, id="on"),
+        pytest.param("false", False, id="off"),
+    ],
+)
+def test_parse_proxy_form_reads_the_two_values_of_the_switch(raw_proxy: str, expected_is_on: bool) -> None:
+    assert _parse_proxy_form(raw_proxy) is expected_is_on
+
+
+@pytest.mark.parametrize("raw_proxy", ["", "True", "1", "on", "null", json.dumps([_THIS_DEVICE_ID])])
+def test_parse_proxy_form_rejects_anything_but_the_two_values_of_the_switch(raw_proxy: str) -> None:
+    with pytest.raises(LatchkeyPermissionFlowError, match="must be 'true' or 'false'"):
+        _parse_proxy_form(raw_proxy)
+
+
+def test_grant_puts_this_computer_first_on_the_route_and_appends_the_route_note(tmp_path: Path) -> None:
+    steps: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=lambda workspace_agent_id, service, account: steps.append("carry"),
+        carry_grant_and_desktop_egress_rules_to_machine=lambda workspace_agent_id, service, account: steps.append(
+            "carry with rules"
+        ),
+        refresh_machine_copies=lambda workspace_agent_id: steps.append("refresh"),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID, "self"))})
+
+    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+
+    assert outcome == GrantOutcome.GRANTED
+    note = (
+        f" Requests to Slack now leave from the desktop {_THIS_DEVICE_ID}, then the desktop {_OTHER_DEVICE_ID},"
+        " then your machine itself."
+    )
+    assert message.endswith(note)
+    assert note in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    # The machine is read before anything is edited here, and the grant and the route then reach it together.
+    assert steps == ["refresh", "carry with rules"]
+    # The grant itself, then the grants that let each desktop the route names forward Slack.
+    assert _set_rule_keys(handler) == [
+        account_scope_key("slack-api", ""),
+        desktop_egress_scope_key("slack-api", _THIS_DEVICE_ID),
+        desktop_egress_scope_key("slack-api", _OTHER_DEVICE_ID),
+    ]
+    assert _routes_in_rules_copy(handler, host_id) == {
+        "slack": build_desktop_egress_route((_THIS_DEVICE_ID, _OTHER_DEVICE_ID, "self"))
+    }
+    assert [response.status for response in load_response_events(tmp_path)] == [str(RequestStatus.GRANTED)]
+
+
+def test_grant_reads_the_machine_before_the_sign_in_whose_account_it_carries_with_the_route(tmp_path: Path) -> None:
+    """Reading the machine adopts its credentials over the copy here, so a later read would lose the sign-in."""
+    sign_in_counts_at_refresh: list[int] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="missing",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=lambda workspace_agent_id: sign_in_counts_at_refresh.append(
+            len(_read_recording(tmp_path / "auth_latchkey_report.jsonl"))
+        ),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+
+    outcome, _message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+
+    assert outcome == GrantOutcome.GRANTED
+    assert sign_in_counts_at_refresh == [0]
+    assert len(_read_recording(tmp_path / "auth_latchkey_report.jsonl")) == 1
+    assert carried_with_rules == [(str(agent_id), "slack", _SIGNED_IN_ACCOUNT)]
+
+
+def test_grant_leaves_a_route_that_already_names_this_computer_as_it_is(tmp_path: Path) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=_record_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    rules_json = _write_rules_copy(
+        handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID, _THIS_DEVICE_ID))}
+    )
+
+    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+
+    assert outcome == GrantOutcome.GRANTED
+    assert message.endswith(
+        f" Requests to Slack already leave from the desktop {_OTHER_DEVICE_ID}, then the desktop {_THIS_DEVICE_ID},"
+        " so the proxy you asked for changed nothing."
+    )
+    assert refreshed == [str(agent_id)]
+    assert _rules_copy_path(handler, host_id).read_text() == rules_json
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    # The rules did not change, so the grant travels without them.
+    assert carried == [(str(agent_id), "slack", "")]
+    assert carried_with_rules == []
+
+
+def test_grant_appends_the_note_of_a_decision_that_sets_no_route(tmp_path: Path) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    note = " The proxy you asked for was not set up: the test says so."
+
+    outcome, message = _grant_slack_read(
+        handler, client, agent_id, host_id, DesktopEgressDecision(is_this_computer_put_first=False, note=note)
+    )
+
+    assert outcome == GrantOutcome.GRANTED
+    assert message.endswith(note)
+    assert note in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert refreshed == []
+    assert carried_with_rules == []
+    assert [response.status for response in load_response_events(tmp_path)] == [str(RequestStatus.GRANTED)]
+
+
+def test_grant_without_a_route_decision_leaves_the_rules_copy_alone_and_does_not_read_the_machine(
+    tmp_path: Path,
+) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    rules_json = _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))})
+
+    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, NO_DESKTOP_EGRESS_CHANGE)
+
+    assert outcome == GrantOutcome.GRANTED
+    assert "leave from" not in message
+    assert "proxy" not in message
+    assert _rules_copy_path(handler, host_id).read_text() == rules_json
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert refreshed == []
+    assert carried_with_rules == []
+
+
+def test_grant_fails_and_stays_pending_when_the_route_cannot_be_set_for_the_workspace(tmp_path: Path) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=_record_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, is_machine_of_its_own=False)
+
+    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+
+    assert outcome == GrantOutcome.FAILED
+    assert "does not run on a machine of its own" in message
+    assert load_response_events(tmp_path) == []
+    assert _deleted_request_ids(handler) == ()
+    assert _recorded_mngr_argvs(handler) == []
+    # The account grant is written to the copy here by the time the route is refused; nothing of the route is.
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried == []
+    assert carried_with_rules == []
+
+
+def test_grant_fails_and_stays_pending_when_the_machine_would_not_take_the_grant_with_the_route(
+    tmp_path: Path,
+) -> None:
+    def refuse(workspace_agent_id: str, service: str, account: str) -> None:
+        del workspace_agent_id, service, account
+        raise MachineOperationError("that workspace is unreachable")
+
+    carried: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=_record_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=refuse,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+    _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))})
+
+    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+
+    assert outcome == GrantOutcome.FAILED
+    assert "unreachable" in message
+    assert load_response_events(tmp_path) == []
+    assert _deleted_request_ids(handler) == ()
+    assert _recorded_mngr_argvs(handler) == []
+    # The grant has no other way to the machine than the carry that was refused.
+    assert carried == []
+    # The route and its grants are written to the copies here before the machine refuses the push.
+    assert _set_rule_keys(handler) == [
+        account_scope_key("slack-api", ""),
+        desktop_egress_scope_key("slack-api", _THIS_DEVICE_ID),
+        desktop_egress_scope_key("slack-api", _OTHER_DEVICE_ID),
+    ]
+    assert _routes_in_rules_copy(handler, host_id) == {
+        "slack": build_desktop_egress_route((_THIS_DEVICE_ID, _OTHER_DEVICE_ID))
+    }
+
+
+def test_grant_fails_and_stays_pending_when_the_machine_cannot_be_read_before_the_route_is_set(tmp_path: Path) -> None:
+    def refuse(workspace_agent_id: str) -> None:
+        del workspace_agent_id
+        raise MachineOperationError("that workspace is unreachable")
+
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=_record_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refuse,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id)
+
+    outcome, message = _grant_slack_read(handler, client, agent_id, host_id, _PUT_THIS_COMPUTER_FIRST)
+
+    assert outcome == GrantOutcome.FAILED
+    assert "unreachable" in message
+    assert load_response_events(tmp_path) == []
+    assert _deleted_request_ids(handler) == ()
+    assert _recorded_mngr_argvs(handler) == []
+    # Nothing is written on top of copies that could not be brought up to date, so nothing is carried either.
+    assert _set_rule_keys(handler) == []
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried == []
+    assert carried_with_rules == []
+
+
+def test_apply_grant_request_fails_the_approval_when_the_gateway_cannot_be_asked_while_setting_the_route(
+    tmp_path: Path,
+) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        gateway_client=_UnreadablePermissionsGatewayClient(),
+        carry_grant_to_machine=_record_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+
+    status_code, body = _post_grant(client, event, "true")
+
+    assert status_code == 200, body
+    assert body["outcome"] == "FAILED"
+    assert body["message"].startswith("Could not set the route through the latchkey gateway: ")
+    # The grant is written to the copy here before the route is tried; nothing reaches the machine, and the
+    # request stays pending for a retry.
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried == []
+    assert carried_with_rules == []
+    assert _deleted_request_ids(handler) == ()
+    assert load_response_events(tmp_path) == []
+
+
+def test_apply_grant_request_builds_the_route_on_what_the_machine_holds_when_the_copy_here_is_missing(
+    tmp_path: Path,
+) -> None:
+    steps: list[str] = []
+    agent_id = AgentId()
+    host_id = HostId()
+    github_route = build_desktop_egress_route((_THIS_DEVICE_ID,))
+
+    def adopt_the_rules_another_computer_set(workspace_agent_id: str) -> None:
+        del workspace_agent_id
+        steps.append("refresh")
+        _write_rules_copy(
+            handler, host_id, {"github": github_route, "slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))}
+        )
+
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=lambda workspace_agent_id, service, account: steps.append("carry"),
+        carry_grant_and_desktop_egress_rules_to_machine=lambda workspace_agent_id, service, account: steps.append(
+            "carry with rules"
+        ),
+        refresh_machine_copies=adopt_the_rules_another_computer_set,
+        services_catalog=build_permissions_test_catalog(),
+    )
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+    permissions_path = permissions_path_for_host(handler.latchkey.plugin_data_dir, host_id)
+    github_rule_key, github_permissions, github_schemas = build_desktop_egress_grant(
+        "github-rest-api", _THIS_DEVICE_ID, None
+    )
+    save_permissions(
+        permissions_path,
+        LatchkeyPermissionsConfig(rules=({github_rule_key: list(github_permissions)},), schemas=github_schemas),
+    )
+    assert not _rules_copy_path(handler, host_id).exists()
+
+    status_code, body = _post_grant(client, event, "true")
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    assert steps == ["refresh", "carry with rules"]
+    assert _routes_in_rules_copy(handler, host_id) == {
+        "github": github_route,
+        "slack": build_desktop_egress_route((_THIS_DEVICE_ID, _OTHER_DEVICE_ID)),
+    }
+    gateway_client = handler.gateway_client
+    assert isinstance(gateway_client, FakeLatchkeyGatewayClient)
+    assert gateway_client.deleted_rule_calls == ()
+    assert {
+        grant.rule_key for grant in list_desktop_egress_grants(gateway_client.get_permissions_config(permissions_path))
+    } == {
+        github_rule_key,
+        desktop_egress_scope_key("slack-api", _THIS_DEVICE_ID),
+        desktop_egress_scope_key("slack-api", _OTHER_DEVICE_ID),
+    }
+
+
+def test_apply_grant_request_puts_this_computer_first_when_the_proxy_switch_was_on(tmp_path: Path) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+
+    status_code, body = _post_grant(client, event, "true")
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    note = f" Requests to Slack now leave from the desktop {_THIS_DEVICE_ID}, then your machine itself."
+    assert body["message"].endswith(note)
+    assert note in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert _routes_in_rules_copy(handler, host_id) == {"slack": build_desktop_egress_route((_THIS_DEVICE_ID, "self"))}
+    assert carried_with_rules == [(str(agent_id), "slack", "")]
+
+
+def test_apply_grant_request_tells_the_agent_when_the_user_turned_the_proxy_off(tmp_path: Path) -> None:
+    carried: list[tuple[str, str, str]] = []
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_to_machine=_record_carry(carried),
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+
+    status_code, body = _post_grant(client, event, "false")
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    note = " The proxy you asked for was not set up: the user turned it off."
+    assert body["message"].endswith(note)
+    assert note in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert refreshed == []
+    assert carried == [(str(agent_id), "slack", "")]
+    assert carried_with_rules == []
+
+
+def test_apply_grant_request_sets_no_route_when_the_dialog_drew_no_switch_for_a_route_without_this_computer(
+    tmp_path: Path,
+) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+    rules_json = _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID,))})
+
+    # A dialog that could not read the route draws no switch either, so its form has no proxy field.
+    status_code, body = _post_grant(client, event, None)
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    note = " The proxy you asked for was not set up: the approval dialog could not offer it. Ask again to set it up."
+    assert body["message"].endswith(note)
+    assert note in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert _rules_copy_path(handler, host_id).read_text() == rules_json
+    assert refreshed == []
+    assert carried_with_rules == []
+
+
+def test_apply_grant_request_tells_the_agent_its_proxy_was_not_set_up_for_a_workspace_that_cannot_be_routed(
+    tmp_path: Path,
+) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(
+        tmp_path, handler, agent_id, host_id, pending=(event,), is_machine_of_its_own=False
+    )
+
+    # The dialog drew no proxy switch for this workspace, so its form has no proxy field.
+    status_code, body = _post_grant(client, event, None)
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    assert " The proxy you asked for was not set up: " in body["message"]
+    assert "does not run on a machine of its own" in body["message"]
+    assert "was not set up" in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried_with_rules == []
+
+
+def test_apply_grant_request_tells_the_agent_when_the_route_already_names_this_computer(tmp_path: Path) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    refreshed: list[str] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=refreshed.append,
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+    rules_json = _write_rules_copy(
+        handler, host_id, {"slack": build_desktop_egress_route((_OTHER_DEVICE_ID, _THIS_DEVICE_ID))}
+    )
+
+    # The dialog draws no proxy switch for a route this computer is already on, so its form has no proxy field.
+    status_code, body = _post_grant(client, event, None)
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    note = (
+        f" Requests to Slack already leave from the desktop {_OTHER_DEVICE_ID}, then the desktop {_THIS_DEVICE_ID},"
+        " so the proxy you asked for changed nothing."
+    )
+    assert body["message"].endswith(note)
+    assert note in _nudge_text(_wait_for_recorded_mngr_argvs(handler)[0])
+    assert refreshed == [str(agent_id)]
+    assert _rules_copy_path(handler, host_id).read_text() == rules_json
+    assert _set_rule_keys(handler) == [account_scope_key("slack-api", "")]
+    assert carried_with_rules == []
+
+
+def test_apply_grant_request_sets_the_route_when_this_computers_copy_was_ahead_of_the_machine(
+    tmp_path: Path,
+) -> None:
+    """A push the machine refused leaves this computer on the route in the copy here alone.
+
+    The dialog then draws no switch, and the approval must still go by what the
+    machine holds rather than report a route nothing follows.
+    """
+    carried_with_rules: list[tuple[str, str, str]] = []
+    agent_id = AgentId()
+    host_id = HostId()
+    rules_copy_paths: list[Path] = []
+
+    def adopt_a_machine_that_holds_no_route(workspace_agent_id: str) -> None:
+        rules_copy_paths[0].unlink()
+
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+        refresh_machine_copies=adopt_a_machine_that_holds_no_route,
+    )
+    rules_copy_paths.append(_rules_copy_path(handler, host_id))
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+    _write_rules_copy(handler, host_id, {"slack": build_desktop_egress_route((_THIS_DEVICE_ID, "self"))})
+
+    status_code, body = _post_grant(client, event, None)
+
+    assert status_code == 200, body
+    assert body["outcome"] == "GRANTED"
+    assert body["message"].endswith(
+        f" Requests to Slack now leave from the desktop {_THIS_DEVICE_ID}, then your machine itself."
+    )
+    assert _routes_in_rules_copy(handler, host_id) == {"slack": build_desktop_egress_route((_THIS_DEVICE_ID, "self"))}
+    assert desktop_egress_scope_key("slack-api", _THIS_DEVICE_ID) in _set_rule_keys(handler)
+    assert carried_with_rules == [(str(agent_id), "slack", "")]
+
+
+def test_apply_grant_request_rejects_the_proxy_for_a_workspace_that_cannot_be_routed(tmp_path: Path) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(
+        tmp_path, handler, agent_id, host_id, pending=(event,), is_machine_of_its_own=False
+    )
+
+    status_code, body = _post_grant(client, event, "true")
+
+    assert status_code == 400, body
+    assert "does not run on a machine of its own" in body["error"]
+    assert _set_rule_keys(handler) == []
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried_with_rules == []
+    assert load_response_events(tmp_path) == []
+
+
+@pytest.mark.parametrize("raw_proxy", ["true", "false"])
+def test_apply_grant_request_rejects_a_proxy_choice_for_a_request_that_asked_for_none(
+    tmp_path: Path, raw_proxy: str
+) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=False)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+
+    status_code, body = _post_grant(client, event, raw_proxy)
+
+    assert status_code == 400, body
+    assert "asked for no proxy" in body["error"]
+    assert _set_rule_keys(handler) == []
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried_with_rules == []
+    assert load_response_events(tmp_path) == []
+
+
+@pytest.mark.parametrize("raw_proxy", ["", "True", "1", "on", json.dumps([_THIS_DEVICE_ID])])
+def test_apply_grant_request_rejects_a_proxy_field_that_is_not_one_of_the_switchs_values(
+    tmp_path: Path, raw_proxy: str
+) -> None:
+    carried_with_rules: list[tuple[str, str, str]] = []
+    handler = _build_handler(
+        tmp_path,
+        credential_status="valid",
+        carry_grant_and_desktop_egress_rules_to_machine=_record_carry(carried_with_rules),
+    )
+    agent_id = AgentId()
+    host_id = HostId()
+    event = _create_slack_request(agent_id, proxy=True)
+    client = _build_workspace_client(tmp_path, handler, agent_id, host_id, pending=(event,))
+
+    status_code, body = _post_grant(client, event, raw_proxy)
+
+    assert status_code == 400, body
+    assert "must be 'true' or 'false'" in body["error"]
+    # Refused before anything was granted: no rule, no route, no verdict.
+    assert _set_rule_keys(handler) == []
+    assert not _rules_copy_path(handler, host_id).exists()
+    assert carried_with_rules == []
     assert load_response_events(tmp_path) == []

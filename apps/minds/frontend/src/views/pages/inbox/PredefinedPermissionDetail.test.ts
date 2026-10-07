@@ -2,10 +2,11 @@ import m from "mithril";
 import { describe, expect, it } from "vitest";
 import { InboxModel } from "../../../models/inbox";
 import type { PredefinedPermissionDetail } from "../../../models/inbox";
+import { DESKTOPS } from "../../../models/workspacePermissions.testing";
 import { Select } from "../../components/FormControls";
 import { PredefinedPermissionDetailView } from "./PredefinedPermissionDetail";
 import type { AnyVnode } from "../../../testing";
-import { classesOf, collectText, collectVnodes } from "../../../testing";
+import { classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
 
 const DETAIL: PredefinedPermissionDetail = {
   kind: "predefined",
@@ -75,6 +76,7 @@ const DETAIL: PredefinedPermissionDetail = {
   selected_account_value: "alice@x",
   new_account_value: ":new-account",
   wildcard_permission: "any",
+  proxy: null,
   will_open_browser: false,
   manual_credentials: null,
 };
@@ -413,5 +415,146 @@ describe("PredefinedPermissionDetailView editor", () => {
       "slack-chat-read",
       "slack-chat-write",
     ]);
+  });
+});
+
+describe("PredefinedPermissionDetailView proxy", () => {
+  const WITH_PROXY: PredefinedPermissionDetail = {
+    ...DETAIL,
+    proxy: { resulting_route: ["host-here", "self"], desktops: DESKTOPS },
+  };
+  const NEXT_WITH_PROXY: PredefinedPermissionDetail = { ...WITH_PROXY, request_id: "req-next" };
+
+  /** A model that loaded the detail the way the popup does, so the switch
+   * starts where the model seeded it, and whose grant POSTs are recorded. */
+  async function openModel(
+    detail: PredefinedPermissionDetail,
+    others: PredefinedPermissionDetail[] = [],
+  ): Promise<{ model: InboxModel; grants: FormData[] }> {
+    const grants: FormData[] = [];
+    const model = new InboxModel({
+      fetcher: (url, init) => {
+        if (init?.method === "POST") {
+          grants.push(init.body as FormData);
+          return Promise.resolve(new Response(JSON.stringify({ outcome: "GRANTED", message: "" })));
+        }
+        const requested = others.find((other) => String(url).includes(`/${other.request_id}/`)) ?? detail;
+        return Promise.resolve(new Response(JSON.stringify({ detail: requested })));
+      },
+    });
+    await model.select(detail.request_id);
+    return { model, grants };
+  }
+
+  function textOf(node: unknown): string {
+    return collectText(node).join("");
+  }
+
+  function proxySwitch(node: unknown): AnyVnode {
+    const switches = collectVnodes(node).filter((vnode) => vnode.attrs?.role === "switch");
+    expect(switches).toHaveLength(1);
+    return switches[0];
+  }
+
+  function flip(model: InboxModel, detail: PredefinedPermissionDetail): void {
+    (proxySwitch(renderBody(model, detail)).attrs?.onclick as () => void)();
+  }
+
+  it("draws nothing about proxying for a request without one, and submits no proxy field", async () => {
+    const { model, grants } = await openModel(DETAIL);
+    const body = renderBody(model, DETAIL);
+    expect(findById(body, "permissions-proxy")).toBeUndefined();
+    expect(collectVnodes(body).filter((vnode) => vnode.attrs?.role === "switch")).toHaveLength(0);
+    expect(textOf(body)).not.toContain("Proxy through my desktop");
+
+    await model.approve();
+
+    expect(grants).toHaveLength(1);
+    expect(grants[0].has("proxy")).toBe(false);
+  });
+
+  it("starts with the switch on and says in words where requests will leave from", async () => {
+    const { model, grants } = await openModel(WITH_PROXY);
+    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    expect(textOf(section)).toContain(
+      "The agent asked for this workspace's requests to Slack to leave through this computer.",
+    );
+    const toggle = proxySwitch(section);
+    expect(toggle.attrs?.["aria-label"]).toBe("Proxy through my desktop");
+    expect(toggle.attrs?.["aria-checked"]).toBe("true");
+    expect(toggle.attrs?.disabled).toBe(false);
+    expect(toggle.attrs?.["aria-describedby"]).toBe("permissions-proxy-summary");
+    expect(textOf(findById(section, "permissions-proxy-summary"))).toBe(
+      "Requests will leave from this computer, then the workspace's own machine.",
+    );
+
+    await model.approve();
+
+    expect(grants).toHaveLength(1);
+    expect(grants[0].get("proxy")).toBe("true");
+  });
+
+  it("draws only the switch: no editor or badge", async () => {
+    const { model } = await openModel(WITH_PROXY);
+    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    expect(withAttr(section, "data-desktop-egress-adjust")).toHaveLength(0);
+    expect(withAttr(section, "data-desktop-egress-editor")).toHaveLength(0);
+    expect(withAttr(section, "data-desktop-egress-custom")).toHaveLength(0);
+    expect(collectVnodes(section).filter((vnode) => vnode.tag === "button")).toHaveLength(1);
+  });
+
+  it("shows another computer on the resulting route by its device id, as an identifier", async () => {
+    const viaOffice: PredefinedPermissionDetail = {
+      ...DETAIL,
+      proxy: { resulting_route: ["host-here", "host-office", "self"], desktops: DESKTOPS },
+    };
+    const { model } = await openModel(viaOffice);
+    const summary = findById(renderBody(model, viaOffice), "permissions-proxy-summary");
+    expect(textOf(summary)).toBe(
+      "Requests will leave from this computer, then host-office, then the workspace's own machine.",
+    );
+    const identifiers = collectVnodes(summary).filter((vnode) => classesOf(vnode).includes("font-mono"));
+    expect(identifiers.map(textOf)).toEqual(["host-office"]);
+  });
+
+  it("says the route stays as it is once switched off, and submits that", async () => {
+    const { model, grants } = await openModel(WITH_PROXY);
+    flip(model, WITH_PROXY);
+
+    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    expect(proxySwitch(section).attrs?.["aria-checked"]).toBe("false");
+    expect(textOf(findById(section, "permissions-proxy-summary"))).toBe(
+      "Requests will keep leaving from where they do now.",
+    );
+    await model.approve();
+
+    expect(grants).toHaveLength(1);
+    expect(grants[0].get("proxy")).toBe("false");
+  });
+
+  it("can be switched back on", async () => {
+    const { model, grants } = await openModel(WITH_PROXY);
+    flip(model, WITH_PROXY);
+    flip(model, WITH_PROXY);
+
+    const section = findById(renderBody(model, WITH_PROXY), "permissions-proxy");
+    expect(proxySwitch(section).attrs?.["aria-checked"]).toBe("true");
+    expect(textOf(findById(section, "permissions-proxy-summary"))).toContain("Requests will leave from this computer");
+    await model.approve();
+
+    expect(grants[0].get("proxy")).toBe("true");
+  });
+
+  it("starts the next request that asks with the switch on again", async () => {
+    const { model, grants } = await openModel(WITH_PROXY, [NEXT_WITH_PROXY]);
+    flip(model, WITH_PROXY);
+    expect(proxySwitch(renderBody(model, WITH_PROXY)).attrs?.["aria-checked"]).toBe("false");
+
+    await model.select(NEXT_WITH_PROXY.request_id);
+
+    expect(proxySwitch(renderBody(model, NEXT_WITH_PROXY)).attrs?.["aria-checked"]).toBe("true");
+    await model.approve();
+    expect(grants).toHaveLength(1);
+    expect(grants[0].get("proxy")).toBe("true");
   });
 });

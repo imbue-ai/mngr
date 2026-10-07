@@ -606,6 +606,23 @@ def test_a_grant_lands_both_halves_on_the_machine_in_one_round_trip(tmp_path: Pa
     assert as_vps(outer).written == []
 
 
+def test_a_grant_that_changes_a_route_lands_all_three_on_the_machine_in_one_round_trip(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
+    as_vps(outer).run_under_key(MACHINE_KEY)
+    credentials = _credentials_of(tmp_path, host_id, outer, machine_accounts={"slack": ["a@example.com"]})
+
+    credentials.connect_service_with_permissions_and_desktop_egress_rules(
+        "slack", "a@example.com", SLACK_GRANTED, _SLACK_ROUTED
+    )
+
+    assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
+    assert as_vps(outer).machine_permissions() == SLACK_GRANTED
+    assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
+    assert len(as_vps(outer).recorded) == 1
+    assert as_vps(outer).written == []
+
+
 def test_a_grant_reads_nothing_back_like_every_other_push(tmp_path: Path) -> None:
     host_id = HostId.generate()
     outer = fake_vps(tmp_path, {"slack": ["already@example.com"]})

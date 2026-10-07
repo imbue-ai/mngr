@@ -218,6 +218,24 @@ class MachineCredentials(FrozenModel):
         so a grant costs one round trip and neither half can be reported done
         without the other.
         """
+        self._push_grant(service_name, account, permissions_json, desktop_egress_rules_json=None)
+
+    def connect_service_with_permissions_and_desktop_egress_rules(
+        self, service_name: str, account: str, permissions_json: str, desktop_egress_rules_json: str
+    ) -> None:
+        """Carry a permission grant that also changes a route: the account, the policy and the desktop egress rules.
+
+        What :meth:`connect_service_with_permissions` and
+        :meth:`set_permissions_and_desktop_egress_rules` would do in two round
+        trips, in one, under their contracts: all three land under one
+        ``set -e``, and the two snapshots are of copies the caller has already
+        edited.
+        """
+        self._push_grant(service_name, account, permissions_json, desktop_egress_rules_json=desktop_egress_rules_json)
+
+    def _push_grant(
+        self, service_name: str, account: str, permissions_json: str, desktop_egress_rules_json: str | None
+    ) -> None:
         push_credentials_with_permissions(
             self.host,
             self._machine_latchkey(),
@@ -227,6 +245,7 @@ class MachineCredentials(FrozenModel):
             self._machine_key(),
             permissions_json,
             self._permissions_format_version(),
+            desktop_egress_rules_json,
             config_json=self._config_for(service_name),
         )
 

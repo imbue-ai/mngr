@@ -47,7 +47,6 @@ from imbue.mngr_latchkey.account_scopes import build_account_grant
 from imbue.mngr_latchkey.core import Latchkey
 from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_grant
 from imbue.mngr_latchkey.desktop_egress import list_desktop_egress_grants
-from imbue.mngr_latchkey.desktop_egress import parse_desktop_egress_rules
 from imbue.mngr_latchkey.remote._mirror import store_machine_encryption_key
 from imbue.mngr_latchkey.store import LatchkeyPermissionsConfig
 from imbue.mngr_latchkey.store import desktop_egress_rules_path_for_host
@@ -60,6 +59,8 @@ _ACCOUNT: str = "alice@example.com"
 _START_TIMEOUT_SECONDS: float = 20.0
 _WORKSPACE_NAME: str = "My Machine"
 _DEVICE_ID: str = "device-2b9d64"
+_OTHER_DEVICE_ID: str = "device-7c41aa"
+_THIRD_DEVICE_ID: str = "device-e05f13"
 _SHARED_PATH_PERMISSION: str = f"minds-file-server-read-{_DEVICE_ID}:/Users/me/notes"
 # A ``latchkey-self`` name this screen does not own; every self-toggle write
 # must leave it exactly where it was.
@@ -220,7 +221,7 @@ _WRITE_ROUTES: tuple[tuple[str, dict[str, object]], ...] = (
         {"scope": "slack-api", "account": _ACCOUNT, "permission": "slack-chat-read", "enabled": True},
     ),
     ("permissions/self-toggle", {"permission": _SHARED_PATH_PERMISSION, "enabled": False}),
-    ("permissions/desktop-egress-toggle", {"service_name": "slack", "enabled": True}),
+    ("permissions/desktop-egress-route", {"service_name": "slack", "route": [_DEVICE_ID]}),
     ("permissions/connector-revoke-all", {"service_name": "slack", "account": _ACCOUNT}),
     ("permissions/connector-disconnect", {"service_name": "slack", "account": _ACCOUNT}),
     ("permissions/connect-credentials", {"service_name": "aws", "value_by_parameter_name": _AWS_CREDENTIALS}),
@@ -856,88 +857,411 @@ def _remote_slack_latchkey(tmp_path: Path, host_id: HostId) -> FakeAccountsLatch
     return latchkey
 
 
-def test_desktop_egress_toggle_turns_it_on_and_returns_the_refreshed_view(tmp_path: Path) -> None:
+def _post_desktop_egress_route(client: FlaskClient, agent_id: AgentId, service_name: str, route: list[str]) -> Any:
+    return client.post(
+        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-route",
+        json={"service_name": service_name, "route": route},
+    )
+
+
+def _desktop_egress_grant_targets(latchkey: Latchkey, host_id: HostId) -> list[tuple[str, str]]:
+    """``(scope, device id)`` of every desktop egress grant in the host's permissions file, sorted."""
+    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
+    return sorted((grant.scope, grant.device_id) for grant in list_desktop_egress_grants(config))
+
+
+def _desktop_egress_rules_copy(latchkey: Latchkey, host_id: HostId) -> dict[str, Any]:
+    """What this computer's copy of the host's rules file says, as the JSON it holds."""
+    return json.loads(desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).read_text())
+
+
+def _write_desktop_egress_rules_copy(latchkey: Latchkey, host_id: HostId, rules: dict[str, Any]) -> None:
+    rules_path = desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    rules_path.write_text(json.dumps(rules))
+
+
+def test_desktop_egress_route_through_this_computer_is_set_and_returns_the_refreshed_view(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
     operator = _recording_operator(tmp_path, latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
     before = json.loads(client.get(f"/ui/api/workspaces/{agent_id}/permissions").data)
-    response = client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
-        json={"service_name": "slack", "enabled": True},
-    )
+    response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
-    assert _slack_connection(before)["desktop_egress"] == {"is_supported": True, "is_enabled": False}
+    assert _slack_connection(before)["desktop_egress"] == {"is_supported": True, "mode": "OFF", "route": ["self"]}
     assert response.status_code == 200
-    assert _slack_connection(json.loads(response.data))["desktop_egress"] == {"is_supported": True, "is_enabled": True}
-    config = load_permissions(permissions_path_for_host(latchkey.plugin_data_dir, host_id))
-    assert [(grant.scope, grant.device_id) for grant in list_desktop_egress_grants(config)] == [
-        ("slack-api", _DEVICE_ID)
-    ]
-    rules_path = desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id)
-    assert parse_desktop_egress_rules(rules_path.read_text()) == {"slack": True}
+    payload = json.loads(response.data)
+    assert _slack_connection(payload)["desktop_egress"] == {
+        "is_supported": True,
+        "mode": "ON",
+        "route": [_DEVICE_ID],
+    }
+    assert payload["desktops"] == [{"device_id": _DEVICE_ID, "is_this_computer": True}]
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [("slack-api", _DEVICE_ID)]
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": [_DEVICE_ID]}
     assert operator.pushed_with_desktop_egress_rules_agent_ids == [str(agent_id)]
 
-    off_response = client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
-        json={"service_name": "slack", "enabled": False},
-    )
+    off_response = _post_desktop_egress_route(client, agent_id, "slack", ["self"])
 
     assert off_response.status_code == 200
     assert _slack_connection(json.loads(off_response.data))["desktop_egress"] == {
         "is_supported": True,
-        "is_enabled": False,
+        "mode": "OFF",
+        "route": ["self"],
     }
-    assert parse_desktop_egress_rules(rules_path.read_text()) == {}
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {}
+    assert _desktop_egress_grant_targets(latchkey, host_id) == []
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == [str(agent_id), str(agent_id)]
 
 
-def test_desktop_egress_toggle_rejects_a_malformed_body(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "hops,forwarder_device_ids",
+    [
+        ([_OTHER_DEVICE_ID], [_OTHER_DEVICE_ID]),
+        ([_DEVICE_ID, "self"], [_DEVICE_ID]),
+        ([_OTHER_DEVICE_ID, _DEVICE_ID], [_DEVICE_ID, _OTHER_DEVICE_ID]),
+        ([_OTHER_DEVICE_ID, _DEVICE_ID, "self"], [_DEVICE_ID, _OTHER_DEVICE_ID]),
+    ],
+)
+def test_desktop_egress_route_other_than_this_computer_alone_is_custom_and_grants_each_desktop_it_names(
+    tmp_path: Path, hops: list[str], forwarder_device_ids: list[str]
+) -> None:
     agent_id, host_id = AgentId(), HostId()
-    client = _build_client(tmp_path, _latchkey(tmp_path), (agent_id,), host_id, device_id=_DEVICE_ID)
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
-    response = client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
-        json={"service_name": "slack", "enabled": "yes please"},
-    )
+    response = _post_desktop_egress_route(client, agent_id, "slack", hops)
+
+    assert response.status_code == 200
+    assert _slack_connection(json.loads(response.data))["desktop_egress"] == {
+        "is_supported": True,
+        "mode": "CUSTOM",
+        "route": hops,
+    }
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": hops}
+    # The machine itself needs no grant: only the desktops the route sends requests to do.
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [
+        ("slack-api", device_id) for device_id in forwarder_device_ids
+    ]
+
+
+def test_desktop_egress_route_that_replaces_another_drops_the_grants_of_the_desktops_it_no_longer_names(
+    tmp_path: Path,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    first_response = _post_desktop_egress_route(client, agent_id, "slack", [_OTHER_DEVICE_ID, _DEVICE_ID, "self"])
+    replaced_response = _post_desktop_egress_route(client, agent_id, "slack", [_THIRD_DEVICE_ID, _DEVICE_ID])
+
+    assert (first_response.status_code, replaced_response.status_code) == (200, 200)
+    assert json.loads(first_response.data)["desktops"] == [
+        {"device_id": _DEVICE_ID, "is_this_computer": True},
+        {"device_id": _OTHER_DEVICE_ID, "is_this_computer": False},
+    ]
+    replaced_payload = json.loads(replaced_response.data)
+    assert _slack_connection(replaced_payload)["desktop_egress"] == {
+        "is_supported": True,
+        "mode": "CUSTOM",
+        "route": [_THIRD_DEVICE_ID, _DEVICE_ID],
+    }
+    # A desktop is offered only while a route names it, so the one the route dropped is gone.
+    assert replaced_payload["desktops"] == [
+        {"device_id": _DEVICE_ID, "is_this_computer": True},
+        {"device_id": _THIRD_DEVICE_ID, "is_this_computer": False},
+    ]
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": [_THIRD_DEVICE_ID, _DEVICE_ID]}
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [
+        ("slack-api", _DEVICE_ID),
+        ("slack-api", _THIRD_DEVICE_ID),
+    ]
+
+    shrunk_response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
+
+    assert shrunk_response.status_code == 200
+    assert _slack_connection(json.loads(shrunk_response.data))["desktop_egress"] == {
+        "is_supported": True,
+        "mode": "ON",
+        "route": [_DEVICE_ID],
+    }
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": [_DEVICE_ID]}
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [("slack-api", _DEVICE_ID)]
+
+
+def test_desktop_egress_route_of_one_service_leaves_the_routes_of_the_others_in_place(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    slack_response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
+    github_response = _post_desktop_egress_route(client, agent_id, "github", [_OTHER_DEVICE_ID])
+
+    assert (slack_response.status_code, github_response.status_code) == (200, 200)
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": [_DEVICE_ID], "github": [_OTHER_DEVICE_ID]}
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [
+        ("github-rest-api", _OTHER_DEVICE_ID),
+        ("slack-api", _DEVICE_ID),
+    ]
+
+    slack_off_response = _post_desktop_egress_route(client, agent_id, "slack", ["self"])
+
+    assert slack_off_response.status_code == 200
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"github": [_OTHER_DEVICE_ID]}
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [("github-rest-api", _OTHER_DEVICE_ID)]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"service_name": "slack", "route": _DEVICE_ID},
+        {"service_name": "slack", "route": [1]},
+        {"service_name": "slack", "enabled": True},
+        {"route": [_DEVICE_ID]},
+    ],
+)
+def test_desktop_egress_route_rejects_a_malformed_body(tmp_path: Path, body: dict[str, object]) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.post(f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-route", json=body)
 
     assert response.status_code == 400
-    assert json.loads(response.data) == {"error": "service_name and enabled are required."}
+    assert json.loads(response.data) == {"error": "service_name and route are required."}
+    assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == []
 
 
-def test_desktop_egress_toggle_refuses_a_workspace_that_runs_on_this_computer(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "hops,problem",
+    [
+        ([], "a route must name at least one place for requests to leave from"),
+        (["self", _DEVICE_ID], "'self' must come last in a route"),
+        ([_DEVICE_ID, _OTHER_DEVICE_ID, _DEVICE_ID], "a route must not name the same place twice"),
+        (["not a device id"], "'not a device id' is not 'self' or a device id."),
+        ([f" {_DEVICE_ID}"], f"' {_DEVICE_ID}' is not 'self' or a device id."),
+    ],
+)
+def test_desktop_egress_route_rejects_hops_that_do_not_form_a_route(
+    tmp_path: Path, hops: list[str], problem: str
+) -> None:
     agent_id, host_id = AgentId(), HostId()
-    latchkey = FakeAccountsLatchkey(
-        latchkey_directory=tmp_path / "latchkey",
-        latchkey_binary="/nonexistent",
-        accounts_by_service={"slack": [_ACCOUNT]},
-    )
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = _post_desktop_egress_route(client, agent_id, "slack", hops)
+
+    assert response.status_code == 400
+    error = json.loads(response.data)["error"]
+    assert error.startswith("Not a desktop egress route: ")
+    assert problem in error
+    assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert _desktop_egress_grant_targets(latchkey, host_id) == []
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == []
+
+
+def test_desktop_egress_route_rejects_an_unknown_service(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = _post_desktop_egress_route(client, agent_id, "no-such-service", [_DEVICE_ID])
+
+    assert response.status_code == 400
+    assert json.loads(response.data) == {"error": "Unknown service 'no-such-service'."}
+    assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == []
+
+
+def test_desktop_egress_route_through_a_desktop_is_refused_for_a_workspace_on_this_computer(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, device_id=_DEVICE_ID)
 
-    response = client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
-        json={"service_name": "slack", "enabled": True},
-    )
+    response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
     assert response.status_code == 400
     assert "machine of its own" in json.loads(response.data)["error"]
     # Nothing was granted: the refusal comes before the first write.
     assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
 
 
-def test_desktop_egress_toggle_reports_a_machine_that_would_not_take_it_as_502(tmp_path: Path) -> None:
+def test_desktop_egress_route_back_to_the_machine_itself_is_accepted_for_a_workspace_on_this_computer(
+    tmp_path: Path,
+) -> None:
+    """Only a route through a desktop needs the support check, so the default route can always be set."""
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _latchkey(tmp_path)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, device_id=_DEVICE_ID)
+
+    response = _post_desktop_egress_route(client, agent_id, "slack", ["self"])
+
+    assert response.status_code == 200
+    payload = json.loads(response.data)
+    assert _slack_connection(payload)["desktop_egress"] == {"is_supported": False, "mode": "OFF", "route": ["self"]}
+    # The default route needs no grant, so no permissions file came into being for one.
+    assert not permissions_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+
+
+def test_desktop_egress_route_rejects_a_workspace_that_cannot_be_resolved(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
+
+    assert response.status_code == 400
+    assert json.loads(response.data) == {
+        "error": f"Could not resolve host for workspace '{agent_id}'; cannot change permissions."
+    }
+    assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == []
+
+
+def test_desktop_egress_route_through_a_desktop_is_refused_without_a_device_id(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id="")
+
+    response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
+
+    assert response.status_code == 400
+    assert "does not know this computer's device id" in json.loads(response.data)["error"]
+    assert _desktop_egress_grant_targets(latchkey, host_id) == []
+    assert not desktop_egress_rules_path_for_host(latchkey.plugin_data_dir, host_id).exists()
+    assert operator.pushed_with_desktop_egress_rules_agent_ids == []
+
+
+def test_desktop_egress_route_reports_a_machine_that_would_not_take_it_as_502(tmp_path: Path) -> None:
     agent_id, host_id = AgentId(), HostId()
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
     operator = _recording_operator(tmp_path, latchkey, push_refusal="Could not reach that workspace: it is asleep")
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
 
-    response = client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
-        json={"service_name": "slack", "enabled": True},
-    )
+    response = _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
     assert response.status_code == 502
     assert json.loads(response.data) == {"error": "Could not reach that workspace: it is asleep"}
+
+
+def test_workspace_permissions_lists_this_computer_first_then_the_other_desktops_its_routes_name(
+    tmp_path: Path,
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    # The file names slack first, so listing the desktops in file order would put them the other way round.
+    _write_desktop_egress_rules_copy(
+        latchkey,
+        host_id,
+        {
+            "slack": [_DEVICE_ID, _OTHER_DEVICE_ID, "self"],
+            "github": [_THIRD_DEVICE_ID, _OTHER_DEVICE_ID],
+        },
+    )
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+
+    assert response.status_code == 200
+    assert json.loads(response.data)["desktops"] == [
+        {"device_id": _DEVICE_ID, "is_this_computer": True},
+        {"device_id": _THIRD_DEVICE_ID, "is_this_computer": False},
+        {"device_id": _OTHER_DEVICE_ID, "is_this_computer": False},
+    ]
+
+
+@pytest.mark.parametrize(
+    "granted_device_ids,expected_mode,expected_route",
+    [
+        ([_DEVICE_ID], "ON", [_DEVICE_ID]),
+        ([_OTHER_DEVICE_ID], "CUSTOM", [_OTHER_DEVICE_ID]),
+        ([_OTHER_DEVICE_ID, _DEVICE_ID], "CUSTOM", [_OTHER_DEVICE_ID, _DEVICE_ID]),
+        ([], "OFF", ["self"]),
+    ],
+)
+def test_workspace_permissions_reads_the_route_of_a_service_turned_on_before_routes_off_its_grants(
+    tmp_path: Path, granted_device_ids: list[str], expected_mode: str, expected_route: list[str]
+) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    permissions_path = permissions_path_for_host(latchkey.plugin_data_dir, host_id)
+    for granted_device_id in granted_device_ids:
+        build_fake_gateway_client().set_permission_rule(
+            permissions_path, *build_desktop_egress_grant("slack-api", granted_device_id, None)
+        )
+    _write_desktop_egress_rules_copy(latchkey, host_id, {"slack": True})
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+
+    assert response.status_code == 200
+    payload = json.loads(response.data)
+    assert _slack_connection(payload)["desktop_egress"] == {
+        "is_supported": True,
+        "mode": expected_mode,
+        "route": expected_route,
+    }
+    assert payload["desktops"] == [{"device_id": _DEVICE_ID, "is_this_computer": True}] + [
+        {"device_id": granted_device_id, "is_this_computer": False}
+        for granted_device_id in granted_device_ids
+        if granted_device_id != _DEVICE_ID
+    ]
+    # Reading resolves the route and writes nothing: the copy stays as the machine wrote it.
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": True}
+
+
+def test_desktop_egress_route_rewrites_a_rules_copy_from_before_routes_as_routes(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    latchkey = _remote_slack_latchkey(tmp_path, host_id)
+    operator = _recording_operator(tmp_path, latchkey)
+    build_fake_gateway_client().set_permission_rule(
+        permissions_path_for_host(latchkey.plugin_data_dir, host_id),
+        *build_desktop_egress_grant("slack-api", _OTHER_DEVICE_ID, None),
+    )
+    _write_desktop_egress_rules_copy(latchkey, host_id, {"slack": True})
+    client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
+
+    response = _post_desktop_egress_route(client, agent_id, "github", [_DEVICE_ID])
+
+    assert response.status_code == 200
+    payload = json.loads(response.data)
+    assert _slack_connection(payload)["desktop_egress"] == {
+        "is_supported": True,
+        "mode": "CUSTOM",
+        "route": [_OTHER_DEVICE_ID],
+    }
+    assert _desktop_egress_rules_copy(latchkey, host_id) == {"slack": [_OTHER_DEVICE_ID], "github": [_DEVICE_ID]}
+    assert _desktop_egress_grant_targets(latchkey, host_id) == [
+        ("github-rest-api", _DEVICE_ID),
+        ("slack-api", _OTHER_DEVICE_ID),
+    ]
+
+
+def test_workspace_permissions_offers_no_desktops_for_a_workspace_on_this_computer(tmp_path: Path) -> None:
+    agent_id, host_id = AgentId(), HostId()
+    client = _build_client(tmp_path, _latchkey(tmp_path), (agent_id,), host_id, device_id=_DEVICE_ID)
+
+    response = client.get(f"/ui/api/workspaces/{agent_id}/permissions")
+
+    assert response.status_code == 200
+    payload = json.loads(response.data)
+    assert payload["permissions_unavailable"] is False
+    assert payload["desktops"] == []
+    assert _slack_connection(payload)["desktop_egress"] == {"is_supported": False, "mode": "OFF", "route": ["self"]}
 
 
 def test_revoke_all_leaves_desktop_egress_grants_in_place(tmp_path: Path) -> None:
@@ -946,10 +1270,7 @@ def test_revoke_all_leaves_desktop_egress_grants_in_place(tmp_path: Path) -> Non
     latchkey = _remote_slack_latchkey(tmp_path, host_id)
     operator = _recording_operator(tmp_path, latchkey)
     client = _build_client(tmp_path, latchkey, (agent_id,), host_id, machine_operator=operator, device_id=_DEVICE_ID)
-    client.post(
-        f"/ui/api/workspaces/{agent_id}/permissions/desktop-egress-toggle",
-        json={"service_name": "slack", "enabled": True},
-    )
+    _post_desktop_egress_route(client, agent_id, "slack", [_DEVICE_ID])
 
     revoke_response = client.post(
         f"/ui/api/workspaces/{agent_id}/permissions/connector-revoke-all",

@@ -97,7 +97,7 @@ def test_a_legacy_grant_whose_twin_was_revoked_since_is_not_granted_again() -> N
     legacy_name = "minds-file-server-read-/tmp/x"
     scoped_name = f"minds-file-server-read-{MIGRATING_DEVICE_ID}:/tmp/x"
     policy = LatchkeyPermissionsConfig(
-        rules=({"latchkey-self": [_BASELINE_PERMISSION]},),
+        rules=({"latchkey-self": [_BASELINE_PERMISSION, legacy_name]},),
         schemas={
             legacy_name: _grant_schema("^/minds-api-proxy/api/v1/files/tmp/x(/.*)?$"),
             scoped_name: _grant_schema(f"^/minds-api-proxy/api/v1/files/{MIGRATING_DEVICE_ID}/tmp/x(/.*)?$"),

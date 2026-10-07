@@ -264,6 +264,46 @@ def test_iter_permission_requests_parses_jsonl_stream() -> None:
     assert workspace_payload.target_workspace_id == "agent-" + "1" * 32
 
 
+def test_iter_permission_requests_parses_whether_a_predefined_request_asks_for_a_proxy() -> None:
+    """A predefined request line may carry ``proxy: true``; one without it asks for no proxy."""
+    base = {
+        "agent_id": "a1",
+        "rationale": "why",
+        "request_type": "predefined",
+        "target": "/tmp/permissions.json",
+        "effect": {"rules": [{"slack-api": ["slack-read-all"]}]},
+    }
+    with_proxy = {
+        **base,
+        "request_id": "with-proxy",
+        "payload": {
+            "scope": "slack-api",
+            "permissions": ["slack-read-all"],
+            "account": None,
+            "proxy": True,
+        },
+    }
+    without_proxy = {
+        **base,
+        "request_id": "without-proxy",
+        "payload": {"scope": "slack-api", "permissions": ["slack-read-all"], "account": None},
+    }
+    body = "".join(json.dumps(item) + "\n" for item in (with_proxy, without_proxy)).encode("utf-8")
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        del request
+        return httpx.Response(200, content=body)
+
+    items = list(_build_client(_handler).iter_permission_requests())
+
+    assert [item.request_id for item in items] == ["with-proxy", "without-proxy"]
+    payload_with_proxy, payload_without_proxy = items[0].payload, items[1].payload
+    assert isinstance(payload_with_proxy, PredefinedRequestPayload)
+    assert payload_with_proxy.proxy is True
+    assert isinstance(payload_without_proxy, PredefinedRequestPayload)
+    assert payload_without_proxy.proxy is False
+
+
 def test_streamed_request_payload_selected_by_request_type() -> None:
     """The payload variant is chosen from ``request_type``, not pydantic shape.
 
@@ -441,9 +481,6 @@ def test_iter_permission_requests_raises_on_http_error() -> None:
     client = _build_client(_handler)
     with pytest.raises(LatchkeyGatewayClientError):
         list(client.iter_permission_requests())
-
-
-# -- Connect-level self-healing -------------------------------------------
 
 
 def test_invalidate_initialization_clears_cached_state() -> None:

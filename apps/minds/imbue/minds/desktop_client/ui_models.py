@@ -45,6 +45,7 @@ from imbue.minds.desktop_client.update_status import UpdateActivity
 from imbue.minds.desktop_client.update_status import UpdateAvailability
 from imbue.minds.desktop_client.update_status import UpdateUnknownReason
 from imbue.minds.desktop_client.update_status import UpdateVerdict
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressMode
 from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 
 # Bumped on ANY breaking change to the models in this module. The server
@@ -54,7 +55,7 @@ from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 # while a window stayed open across a reconnect -- it cannot catch assets
 # built for another version being served with a matching bootstrap, since
 # both values come from the same live server.
-UI_SCHEMA_VERSION: int = 24
+UI_SCHEMA_VERSION: int = 25
 
 
 class UiWorkspaceEntry(FrozenModel):
@@ -652,11 +653,26 @@ class UiServiceSignIn(FrozenModel):
     )
 
 
-class UiDesktopEgressToggle(FrozenModel):
-    """Whether one service's requests from this workspace are sent out through this computer."""
+class UiDesktopEgressSetting(FrozenModel):
+    """Where one service's requests from this workspace leave from."""
 
-    is_supported: bool = Field(description="Whether the toggle is offered for this workspace and service")
-    is_enabled: bool = Field(description="Whether this computer forwards the service's requests")
+    is_supported: bool = Field(description="Whether the setting is offered for this workspace and service")
+    mode: DesktopEgressMode = Field(
+        description="What the switch shows: OFF for the machine itself, ON for this computer alone, CUSTOM for any other route"
+    )
+    route: tuple[str, ...] = Field(
+        description=(
+            "The route's hops in the order the machine tries them: a desktop's device id, or 'self' for the "
+            "machine itself"
+        )
+    )
+
+
+class UiWorkspaceDesktop(FrozenModel):
+    """One of the user's desktops a desktop egress route can name."""
+
+    device_id: str = Field(description="The desktop's device id; the hop that names it in a route")
+    is_this_computer: bool = Field(description="Whether it is the computer this app runs on")
 
 
 class UiPermissionConnection(FrozenModel):
@@ -671,8 +687,8 @@ class UiPermissionConnection(FrozenModel):
     granted_count: int = Field(description="Total permissions currently granted across the service's scopes")
     scopes: tuple[UiPermissionScopePanel, ...] = Field(description="One toggle panel per scope the service exposes")
     sign_in: UiServiceSignIn = Field(description="How connecting this service establishes its credentials")
-    desktop_egress: UiDesktopEgressToggle = Field(
-        description="The service's desktop egress toggle; identical across its accounts"
+    desktop_egress: UiDesktopEgressSetting = Field(
+        description="The service's desktop egress setting; identical across its accounts"
     )
 
 
@@ -831,6 +847,10 @@ class UiWorkspacePermissions(FrozenModel):
     )
     shared_paths: tuple[UiSharedPath, ...] = Field(default=(), description="Local files rows, one per shared path")
     workspace_toggles: tuple[UiSelfPermissionToggle, ...] = Field(description="Other machines (verb) rows")
+    desktops: tuple[UiWorkspaceDesktop, ...] = Field(
+        default=(),
+        description="The desktops a desktop egress route can name, this computer first; empty when unsupported",
+    )
     waiting_requests: tuple[UiWaitingPermissionRequest, ...] = Field(
         description="Pending permission requests from this workspace, oldest first"
     )
@@ -862,11 +882,13 @@ class UiSelfToggleRequest(FrozenModel):
     enabled: bool = Field(description="The permission's new state")
 
 
-class UiDesktopEgressToggleRequest(FrozenModel):
-    """Body of POST /ui/api/workspaces/<agent_id>/permissions/desktop-egress-toggle."""
+class UiDesktopEgressRouteRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/desktop-egress-route."""
 
-    service_name: str = Field(description="Catalog service whose requests are sent through this computer")
-    enabled: bool = Field(description="The toggle's new state")
+    service_name: str = Field(description="Catalog service whose route is being set")
+    route: tuple[str, ...] = Field(
+        description="The route's new hops, in order: desktops' device ids, and 'self' (only ever last)"
+    )
 
 
 class UiConnectorRevokeAllRequest(FrozenModel):
@@ -964,7 +986,7 @@ class UiWireSchema(FrozenModel):
     workspace_permissions: UiWorkspacePermissions = Field(description="workspace permissions payload")
     connector_toggle: UiConnectorToggleRequest = Field(description="connector-toggle request body")
     self_toggle: UiSelfToggleRequest = Field(description="self-toggle request body")
-    desktop_egress_toggle: UiDesktopEgressToggleRequest = Field(description="desktop-egress-toggle request body")
+    desktop_egress_route: UiDesktopEgressRouteRequest = Field(description="desktop-egress-route request body")
     connector_revoke_all: UiConnectorRevokeAllRequest = Field(description="connector-revoke-all request body")
     connector_disconnect: UiConnectorDisconnectRequest = Field(description="connector-disconnect request body")
     connect_credentials: UiConnectCredentialsRequest = Field(description="connect-credentials request body")

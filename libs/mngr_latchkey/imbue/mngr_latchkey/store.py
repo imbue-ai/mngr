@@ -93,8 +93,8 @@ _PERMISSIONS_FILENAME: Final[str] = "latchkey_permissions.json"
 # user's computer instead of making itself. It lives in the machine's
 # ``~/.latchkey``, and this computer keeps a copy of it under the same name in
 # the host's directory. One JSON object: each key is a latchkey service name,
-# and a request latchkey matched to a service whose value is truthy is sent
-# through the desktop gateway. The machine's curl router reads it on every
+# and its value is the route a request latchkey matched to that service
+# takes. The machine's curl router reads it on every
 # request, so an edit takes effect without a restart. The shape is owned by
 # :mod:`imbue.mngr_latchkey.desktop_egress`.
 DESKTOP_EGRESS_RULES_FILENAME: Final[str] = "proxyRules.json"

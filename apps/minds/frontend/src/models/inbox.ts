@@ -15,7 +15,7 @@
 // answer a question nobody had asked yet. The list they picked from is where
 // closing takes them (see returnToPanelAfterRequest).
 
-import type { FolderSyncConflict, UiPermissionGrantGroup } from "../generated/ui";
+import type { FolderSyncConflict, UiPermissionGrantGroup, UiWorkspaceDesktop } from "../generated/ui";
 import {
   BrowserImportModel,
   isBrowserImportOfferDue,
@@ -86,6 +86,19 @@ export interface PredefinedPermissionDetail {
   wildcard_permission: string;
   will_open_browser: boolean;
   manual_credentials: ManualCredentialsPrompt | null;
+  /** Set when the agent asked for the service to also be proxied through the
+   * approving computer, the workspace can have a route, and this computer is
+   * not on the service's route yet. */
+  proxy: RequestedProxy | null;
+}
+
+/** What approving a predefined request with its proxy on does to the
+ * service's desktop egress route. */
+export interface RequestedProxy {
+  /** The route the service will then have: this computer, then its route now. */
+  resulting_route: string[];
+  /** The desktops that route can name. */
+  desktops: UiWorkspaceDesktop[];
 }
 
 export interface FileSharingPermissionDetail {
@@ -326,6 +339,9 @@ export class InboxModel {
   targetScope: "selected" | "all" = "selected";
   /** Whether the predefined dialog shows its full editor instead of the summary. */
   isPermissionEditorShown = false;
+  /** Whether Approve also proxies the service through this computer. Only
+   * read for a request that asks for it. */
+  isProxyOn = false;
 
   /** The one-time "import your Chrome sign-ins" offer: up between an Approve
    * click that is about to open a browser and the approval itself. */
@@ -518,9 +534,12 @@ export class InboxModel {
     // Each request is reviewed from its summary; only this user's Adjust
     // click opens the editor, and never for the request that follows.
     this.isPermissionEditorShown = false;
+    this.isProxyOn = false;
     if (detail.kind === "predefined") {
       this.checkedPermissions = new Set(detail.checked_permissions);
       this.selectedAccount = detail.selected_account_value;
+      // On because the agent asked; the user can still switch it off.
+      this.isProxyOn = detail.proxy !== null;
     } else if (detail.kind === "workspace") {
       this.checkedPermissions = new Set(detail.checked_permissions);
       this.targetScope = detail.show_target_choice ? "selected" : "all";
@@ -669,6 +688,9 @@ export class InboxModel {
         form.append("permissions", permission);
       }
       form.append("account", this.selectedAccount);
+      if (detail.proxy !== null) {
+        form.append("proxy", this.isProxyOn ? "true" : "false");
+      }
       this.appendManualCredentialFields(form);
     } else if (detail.kind === "workspace") {
       for (const permission of this.checkedPermissions)

@@ -856,7 +856,10 @@ Grants follow the same ownership, and travel the same way. A machine's
 edit made here is pushed to the machine as a full snapshot of the host's
 canonical file. The permission dialog's Approve carries the credential and the
 snapshot as **one change** (applied credential-first on the machine, failed
-together), so neither half of a grant can land without the other; a toggle, a
+together), so neither half of a grant can land without the other -- and when
+the approval also [puts this computer on the service's
+route](#an-agent-asking-for-a-proxy), the desktop egress rules travel in that
+same change; a toggle, a
 revoke, a sign-out cleanup, and the grants that go through the gateway's own
 approve endpoint (cross-workspace access, file sharing, accounts) each push a
 plain snapshot. A machine that will not take one fails the action that asked
@@ -976,23 +979,78 @@ or Machine settings down with it.
 
 Some services refuse requests that come from the datacenter IP ranges a remote
 workspace's machine sits in. Each connection panel of a remote workspace
-therefore has a **Proxy through my desktop** toggle. While it is on, the
-requests the workspace makes to that service leave from this computer instead
-of from the workspace's machine. This computer has to be running and connected
-to the workspace for those requests to succeed. The mechanism is described
-under "Desktop egress" in `libs/mngr_latchkey/README.md`.
+therefore has a **Proxy through my desktop** setting, which says where the
+requests the workspace makes to that service leave from. The mechanism is
+described under "Desktop egress" in `libs/mngr_latchkey/README.md`.
 
-The toggle is per service and per desktop:
+What the setting holds is a **route**: an ordered list of places for the
+workspace's machine to try. A place is one of the user's computers, named by
+its device id, or `self`, the workspace's own machine, which can only come
+last. Every computer on a route is named: no place stands for whichever
+computer happens to be connected.
+
+| Route | Meaning |
+|---|---|
+| `[self]` | Requests leave from the workspace's own machine. The default. |
+| `[host-3f9c]` | One computer sends them. |
+| `[host-3f9c, host-81d2]` | One computer, then another. |
+| `[host-3f9c, self]` | One computer, then the workspace's own machine. |
+
+A computer has to be running Imbue Studio and be connected to the workspace
+for requests to leave through it. A route that does not end at the workspace's
+own machine fails the request when none of its computers is.
+
+Trying the places of a route in order is the work of the machine's curl
+router (see "The rules file" in `libs/mngr_latchkey/README.md`). It sends a
+request to the first place on the route that is there to take it: a computer
+that the machine has heard from in the last three minutes, or the workspace's
+own machine. The request is sent once, so a failure at the computer it went to
+is a failed request rather than a reason to try the next place.
+
+The row draws the route as a switch with three states:
+
+* **Off** is `[self]`.
+* **On** is this computer alone: the route whose one place is this computer's
+  device id. Flipping the switch moves between these two, so turning it on
+  sets the route to this computer alone, whatever it was before.
+* **Custom** is any other route: one through another computer, through
+  several, or one that falls back to the workspace's own machine. The switch
+  reads as on, marked *Custom*, with the route spelled out beside it; flipping
+  it off returns to `[self]`.
+
+Because on means this computer, one route reads differently from different
+computers. A route through a single computer is on there and custom on every
+other.
+
+An **Adjust** link under the switch opens the route itself: the places in
+order, each of which can be moved earlier, moved later or removed, and an
+**Add** menu for the ones not yet on it. The menu offers:
+
+* this computer;
+* the other computers this workspace's routes already name, for any service.
+  They are shown by device id, because Imbue Studio has no names for them;
+* the workspace's own machine, which always stays last.
+
+Nothing is written until **Save**.
+
+Imbue Studio has no list of the user's computers, so the editor adds a computer
+to a route only from Imbue Studio on that computer, where it is "this
+computer". Once a route of the workspace names it, every one of the user's
+computers offers it in the menu and can reorder or remove it. Approving [an
+agent's request for a proxy](#an-agent-asking-for-a-proxy) follows the same
+rule: the computer it puts on the route is the one the request is approved on.
+
+The setting is per service and per machine:
 
 * Per service: it is drawn in every account panel of the service and has the
   same value in each, because the machine routes requests by the service
   latchkey matched them to, not by account.
-* Per desktop: the permissions file is shared between every computer the user
-  connects to the machine from, so each grant names the device id of the
-  computer that forwards. The toggle on this computer reads and writes only the
-  grants that carry this computer's device id.
+* Per machine: the route is the workspace's machine's, not any one computer's.
+  Each computer reads it from the machine when the Permissions tab is opened,
+  and shows and edits what it read then. So all of the user's computers show
+  the same route, even where their switches draw it differently.
 
-The toggle is offered only when both of these hold. When either of them does
+The setting is offered only when both of these hold. When either of them does
 not, the row is not drawn at all.
 
 1. Imbue Studio knows this computer's device id.
@@ -1000,52 +1058,184 @@ not, the row is not drawn at all.
    recorded for its host on this computer. A workspace that runs on this
    computer already sends its requests from here.
 
-Every catalog service can be routed, so the toggle does not depend on the
-service.
+Every catalog service can be given a route, so the setting does not depend on
+the service.
 
-The toggle reads as on for this computer when every scope of the service has a
-grant for this computer's device id, and the service is routed according to
-this computer's copy of the machine's rules file
-(`hosts/<host_id>/proxyRules.json`), which is keyed by latchkey service name. A
-missing copy, or one that cannot be parsed, routes nothing.
+The route shown is the one in this computer's copy of the machine's rules file
+(`hosts/<host_id>/proxyRules.json`), which is keyed by latchkey service name
+and brought up to date from the machine whenever the tab is opened. A service
+the file does not name is at `[self]`, and `[self]` is never written to the
+file. A missing copy, or one that cannot be parsed, reads as every service
+being at `[self]`.
 
-A flip posts `{ "service_name", "enabled" }` to
-`permissions/desktop-egress-toggle`, and the server does the following
-(`apply_desktop_egress_toggle` in `latchkey/permission_toggles.py`):
+The computers the Add menu offers come from the same copy
+(`list_workspace_desktops`): this computer, then every other device id that a
+route of any service names. The machine is not asked which computers it knows.
 
-1. Turning on writes one device-gated grant per scope of the service through
-   the gateway's `permissions` extension. Turning off deletes this computer's
-   grant of each scope, and leaves the grants of other computers alone.
-2. It reads the permissions file back and rebuilds the rules file from it. The
-   rules file names every catalog service that has a grant on any of its
-   scopes, for any device. The grants are the only record of what is enabled,
-   and the rules file is never edited by itself. Two consequences follow.
-   Turning a service off on this computer keeps it routed while another of the
-   user's computers still has a grant for it. A rules file that no longer
-   matches the grants is corrected by the next flip.
-3. It writes the rebuilt rules to this computer's copy, then pushes the
-   permissions file and the rules file to the machine in one round trip
-   (`MachineOperator.push_permissions_and_desktop_egress_rules`). The response
-   is the refreshed view, as for every other write in this tab.
+A change posts `{ "service_name", "route" }` to
+`permissions/desktop-egress-route`, and the server does the following
+(`apply_desktop_egress_route` in `latchkey/permission_toggles.py`):
 
-The machine sends a routed request to the most recently connected of the user's
-computers (see [Desktops](#desktops)). When the user turns the toggle on from a
-second computer, that computer adds its own grant and nothing is taken away
-from the first. The computer the request reaches forwards it only when it has a
-grant of its own; a computer without one refuses the routed requests.
+1. It puts the service's new route in place of its old one among the routes
+   in this computer's copy of the rules file, and brings the device-gated
+   grants in the host's permissions file in line with every one of those
+   routes, through the gateway's `permissions` extension
+   (`plan_desktop_egress_grant_changes`). Each such grant names exactly one
+   computer's device id. A route needs one grant per scope of its service for
+   each computer it names. The grants the file lacks are written, and the
+   grants no route needs any more are deleted. A grant on a scope of no
+   service this computer's catalog knows is left alone, because it may belong
+   to a service that only another of the user's computers has registered. So
+   the rules file is the record of what the user chose, and the grants are
+   never edited by themselves.
+2. It writes those routes to this computer's copy of the rules file.
+3. It pushes the permissions file and the rules file to the machine in one
+   round trip (`MachineOperator.push_permissions_and_desktop_egress_rules`).
+   The response is the refreshed view, as for every other write in this tab.
+
+The change is refused before any of this when this computer's copy of the
+rules file is there but cannot be read or parsed, because the other services'
+routes are rebuilt from it. It is also refused when the new route names a computer and the
+setting is not offered for the workspace.
+
+A computer forwards a routed request only under a grant that names it. The
+permissions file is shared between every computer the user connects to the
+machine from, so each grant is gated on one device id, and no grant applies to
+whichever computer happens to be connected. That is why a route names its
+computers one by one. A computer that no route names holds no grant, and
+refuses a routed request that reaches it.
+
+Workspaces set up before routes had an on/off toggle per computer. Their rules
+file names no computers: it holds a bare `true` for each service that was
+turned on. Such a service reads as a route through the computers that had
+turned it on, which are the ones that hold a grant on every scope of the
+service, in the order the permissions file lists them
+(`resolve_desktop_egress_routes`). It reads as `[self]` when no computer does.
+So the switch shows on at a computer that was the only one with the toggle on,
+and custom wherever the route names another computer. Nothing is migrated in
+the permissions file, whose grants already name one computer each. The first
+route change made for the workspace, for any service, rewrites the whole rules
+file as routes.
 
 Some addresses are used by several services. The Google Drive files API, for
 example, is used by Google Drive, Google Docs and Google Sheets. The machine
-routes a request by the service whose credentials latchkey used for it. So
-turning the toggle on for Google Docs does not send a request through this
-computer when latchkey made that request with the Google Drive account's
-credentials. To send those requests through this computer too, turn the toggle
-on for Google Drive as well.
+routes a request by the service whose credentials latchkey used for it. So a
+route set for Google Docs does not apply to a request latchkey made with the
+Google Drive account's credentials. To send those requests the same way, set
+the route for Google Drive as well.
 
-Revoke all and Sign out do not remove these grants, and neither does turning an
-account's permissions off. That is deliberate. The machine's gateway runs the
-per-account permission check before it routes a request, so a grant that is
-left behind allows nothing by itself.
+Revoke all and Sign out do not change the route or remove these grants, and
+neither does turning an account's permissions off. That is deliberate. The
+machine's gateway runs the per-account permission check before it routes a
+request, so a grant that is left behind allows nothing by itself.
+
+### An agent asking for a proxy
+
+An agent that finds a service refusing its machine's requests can ask, as part
+of its permission request, for the service to be proxied through the user's
+desktop: it sets a `predefined` payload's optional `proxy` field to `true`.
+
+```json
+{
+  "scope": "slack-api",
+  "permissions": ["slack-read-all"],
+  "proxy": true
+}
+```
+
+The field is a yes or no, and the gateway refuses anything but a boolean with
+HTTP 400. It stores the ask and does nothing else with it: a proxy is not a
+permission, so it never enters the request's `effect`, and the grant is the
+same with or without it. A payload that leaves the field out, or sets it to
+`false` or `null`, is stored as a request that asks for no proxy.
+
+The approval dialog draws a **Proxy through my desktop** switch under the
+permission list, with a line saying the agent asked for the service's requests
+to leave through this computer. The switch starts on, because the agent asked,
+and the line beside it spells out the route the service would then have: this
+computer first, then the places its route names now. For a service at `[self]`
+that is this computer and then the workspace's own machine, so the requests
+still leave from the machine when this computer is not connected. The user can
+turn the switch off, and the line then says the requests will keep leaving
+from where they do now. The switch takes effect only with Approve: denying the
+request, or closing the dialog, leaves the route as it is.
+
+The route the dialog shows is worked out from this computer's copy of the
+machine's rules file. Opening the dialog does not read the machine, so another
+computer may have changed the route since.
+
+The dialog draws no switch when there is nothing for the user to decide:
+
+* The service's route already names this computer, wherever on it.
+* The setting is not offered for the workspace: it has no machine of its own,
+  or Imbue Studio does not know this computer's device id (the two conditions
+  listed under [Proxy through my desktop](#proxy-through-my-desktop)).
+* The host's permissions file cannot be read, so this computer cannot tell
+  what the service's route is.
+
+Approve carries the switch (`proxy`, as `true` or `false`) with the grant. A
+value that is neither, one sent for a request that asked for no proxy, or the
+switch sent on for a workspace the setting is not offered for, is refused
+before anything is granted. An approval that carries no switch for a
+request that asked for a proxy is treated as the switch left on when this
+computer's copy has this computer on the service's route: the dialog drew
+none for that reason, and the copy can be ahead of the machine (a push the
+machine refused leaves it so), so the approval goes by what the machine holds.
+When the copy does not have this computer on the route, or cannot be read, the
+user was never offered the switch, so the grant goes ahead and the route is
+left alone.
+
+Such an approval costs two round trips to the machine, one read and one write:
+
+1. The machine is read (`MachineOperator.refresh`), so this computer is added
+   to the routes the machine holds rather than to this computer's last copy of
+   them. The read comes before the sign-in and before anything is edited here,
+   because it adopts the machine's credentials and policy over this computer's
+   copies, and would discard a sign-in or a grant that had not been pushed yet.
+2. The account is signed in when it needs to be, and the grant is written to
+   this computer's copy of the permissions file.
+3. This computer is put first on the service's route
+   (`put_this_computer_first_on_desktop_egress_route` in
+   `latchkey/permission_toggles.py`) by the same code the Permissions tab
+   runs: its grants are written for every scope of the service, and the route
+   is written to this computer's copy of the rules file. The places the route
+   already named stay on it, after this computer.
+4. The account's credential, the permissions file and the rules file are
+   pushed to the machine in one round trip
+   (`MachineOperator.connect_service_with_permissions_and_desktop_egress_rules`).
+
+When the machine turns out to hold a route that already names this computer,
+the route is left as it is, and the grant is carried without the rules file, as
+it is for a request that asked for no proxy.
+
+A machine that cannot be read, or a route that cannot be set, fails the
+approval and leaves the request pending with the reason, like a grant the
+machine would not take. The grant and the route travel as one change, so a
+failed approval never leaves the grant in force without the route. Approving
+again starts over from the read.
+
+The notice the agent receives says what became of its ask:
+
+* This computer was put on the route: the notice ends with where the service's
+  requests now leave from, naming each computer by the device id that
+  `GET /devices` reports for it ("Requests to Slack now leave from the desktop
+  host-3f9c, then your machine itself.").
+* The user turned the switch off: "The proxy you asked for was not set up: the
+  user turned it off."
+* The setting is not offered for the workspace: "The proxy you asked for was
+  not set up:" followed by the reason, such as the workspace not running on a
+  machine of its own.
+* The machine's route for the service already named this computer: the notice
+  says where the service's requests already leave from, and that the proxy the
+  agent asked for changed nothing.
+* The dialog drew no switch although this computer is not on the route in this
+  computer's copy: "The proxy you asked for was not set up: the approval
+  dialog could not offer it. Ask again to set it up."
+
+A request can only ask for the approving computer to be put first. To send a
+service's requests through a different computer, or through several in a
+particular order, the user opens the Adjust editor in the Permissions tab. An
+agent cannot ask for that.
 
 ### Keeping a copy on the machine
 
@@ -1267,6 +1457,9 @@ Agents are expected to:
   and, if it wants a copy it can reach while the user's computer is offline,
   a `sync` (see [An agent asking for a synchronized
   copy](#an-agent-asking-for-a-synchronized-copy)).
+  A request for a catalog service may also carry `"proxy": true`, when the
+  service refuses requests from the workspace's machine (see [An agent asking
+  for a proxy](#an-agent-asking-for-a-proxy)).
 * Stop the turn and wait. The agent will receive a message from the
   desktop (through the workspace's chat app) with the decision and can
   decide whether to retry.

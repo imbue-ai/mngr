@@ -27,6 +27,7 @@ from imbue.minds.desktop_client.backend_resolver import BackendResolverInterface
 from imbue.minds.desktop_client.folder_sync_settings import FolderSyncConflict
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.ui_models import UiPermissionGrantGroup
+from imbue.minds.desktop_client.ui_models import UiWorkspaceDesktop
 from imbue.mngr_latchkey.credential_commands import CredentialCommandParameter
 from imbue.mngr_latchkey.custom_services import DomainWarning
 
@@ -73,6 +74,20 @@ class UiWorkspaceVerbChoice(FrozenModel):
     is_targeted: bool = Field(description="Whether the verb is scoped to a target workspace id")
 
 
+class UiRequestedProxy(FrozenModel):
+    """What the dialog shows when the agent asked for the service's requests to leave through this computer."""
+
+    resulting_route: tuple[str, ...] = Field(
+        description=(
+            "The hops of the route the service will have once approved with the proxy on: this computer's "
+            "device id first, then the route it was last known to have ('self' is the workspace's own machine)"
+        )
+    )
+    desktops: tuple[UiWorkspaceDesktop, ...] = Field(
+        description="The desktops the route's hops can be labelled from, this computer first"
+    )
+
+
 class UiPredefinedPermissionDetail(FrozenModel):
     """Inbox detail payload for a predefined (catalog-backed) permission request."""
 
@@ -102,6 +117,14 @@ class UiPredefinedPermissionDetail(FrozenModel):
         description=(
             "The credential form to show while an account that needs credential setup is selected. None when "
             "the service signs in through a browser, so no form is ever needed."
+        ),
+    )
+    proxy: UiRequestedProxy | None = Field(
+        default=None,
+        description=(
+            "Set when the agent also asked for the service's requests to leave through this computer, the "
+            "workspace has a machine of its own to route them from, and this computer is not on the "
+            "service's route yet. None hides the option."
         ),
     )
 

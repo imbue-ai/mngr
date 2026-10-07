@@ -12,7 +12,7 @@
  *         - ``payload``    (object whose shape depends on ``type``)
  *       For ``type=="predefined"`` the payload is
  *         ``{scope: <string>, permissions: [<string>, ...],
- *           account: <string>|null}``,
+ *           account: <string>|null, proxy?: <boolean>}``,
  *       a detent-flavored scope/permission grant for one signed-in
  *       account of the service. The scope must be one of the Detent
  *       scopes named in the bundled ``services.json`` catalog, and
@@ -27,6 +27,12 @@
  *       ``effect``: it can only be resolved by a client that supplies
  *       the chosen account in the approve override body, never by a
  *       bare ``/approve`` call.
+ *       ``proxy: true`` asks Minds to also send the service's requests
+ *       out through the desktop that approves the request, once the grant
+ *       is approved: that desktop puts itself first on the service's
+ *       desktop egress route. Like a file-sharing ``sync`` it is not a
+ *       permission: it is carried on the request for the desktop to act
+ *       on, and never enters the ``effect``.
  *       For ``type=="file-sharing"`` the payload is
  *         ``{path: <absolute_or_tilde_path>, access: "READ"|"WRITE",
  *           sync?: {conflict?: "NEWER"|"THIS_COMPUTER"|"WORKSPACE"}}``;
@@ -46,7 +52,7 @@
  *       (``LATCHKEY_EXTENSION_LOCAL_DEVICE_ID``), so a desktop can only
  *       ever share its own files. A workspace addresses another desktop by
  *       sending the request there (a remote machine routes it by the
- *       ``X-Latchkey-Desktop`` header). Without a device id the gateway
+ *       ``X-Latchkey-Device`` header). Without a device id the gateway
  *       refuses file-sharing requests with HTTP 503.
  *       For ``type=="custom-service"`` the payload is
  *         ``{domain: <hostname>, scheme: "https"|"http", login: {url, flow, flow_params}|null,
@@ -941,7 +947,8 @@ function validateOptionalAccount(rawAccount, fieldPrefix) {
 
 /**
  * Validate the payload object for a ``predefined`` permission request.
- * Returns the canonical payload shape (``{scope, permissions, account}``).
+ * Returns the canonical payload shape (``{scope, permissions, account}``,
+ * plus ``proxy: true`` when the request asked for one).
  *
  * Beyond structural type-checking, the scope and permissions are
  * cross-checked against the bundled services catalog so a request can
@@ -955,13 +962,24 @@ function validatePredefinedPayload(payload) {
   }
   ensureNonEmptyString('payload.', 'scope', payload.scope);
   ensureStringArray('payload.', 'permissions', payload.permissions);
-  ensureNoExtraneousFields('payload ', ['scope', 'permissions', 'account'], payload);
+  ensureNoExtraneousFields('payload ', ['scope', 'permissions', 'account', 'proxy'], payload);
   validatePredefinedAgainstCatalog(payload.scope, payload.permissions);
-  return {
+  const canonical = {
     scope: payload.scope,
     permissions: [...payload.permissions],
     account: validateOptionalAccount(payload.account, 'payload.'),
   };
+  if (payload.proxy !== undefined && payload.proxy !== null) {
+    if (typeof payload.proxy !== 'boolean') {
+      throw new InvalidRequestBodyError("payload.'proxy' must be a boolean when present.");
+    }
+    // Only an ask is stored: a request that asks for no proxy reads the same
+    // whether it said so or said nothing.
+    if (payload.proxy) {
+      canonical.proxy = true;
+    }
+  }
+  return canonical;
 }
 
 /**

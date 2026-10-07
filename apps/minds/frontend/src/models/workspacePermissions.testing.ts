@@ -8,13 +8,15 @@
 
 import type {
   UiAvailableConnection,
-  UiDesktopEgressToggle,
+  UiDesktopEgressSetting,
   UiPathSync,
   UiPermissionConnection,
   UiSharedPath,
   UiServiceSignIn,
+  UiWorkspaceDesktop,
   UiWorkspacePermissions,
 } from "../generated/ui";
+import { desktopEgressMode, thisComputerDeviceId } from "./desktopEgressRoute";
 
 /** A two-way sync, up and running. */
 export function pathSync(overrides: Partial<UiPathSync> = {}): UiPathSync {
@@ -60,12 +62,26 @@ export function credentialsSignIn(overrides: Partial<UiServiceSignIn> = {}): UiS
   };
 }
 
-/** The toggle of a workspace that runs on this computer: not offered at all. */
-export const DESKTOP_EGRESS_UNSUPPORTED: UiDesktopEgressToggle = { is_supported: false, is_enabled: false };
+/** The setting of a workspace that runs on this computer: not offered at all. */
+export const DESKTOP_EGRESS_UNSUPPORTED: UiDesktopEgressSetting = {
+  is_supported: false,
+  mode: "OFF",
+  route: ["self"],
+};
 
-/** The toggle of a remote workspace: offered, and off. */
-export function desktopEgress(overrides: Partial<UiDesktopEgressToggle> = {}): UiDesktopEgressToggle {
-  return { is_supported: true, is_enabled: false, ...overrides };
+/** The desktops a route can name: this computer, then two others some route
+ * of the workspace already names. */
+export const DESKTOPS: UiWorkspaceDesktop[] = [
+  { device_id: "host-here", is_this_computer: true },
+  { device_id: "host-office", is_this_computer: false },
+  { device_id: "host-studio", is_this_computer: false },
+];
+
+/** The setting of a remote workspace: offered, and on the given route (off
+ * unless one is given). The mode follows the route as seen from this
+ * computer, as the server's does. */
+export function desktopEgress(route: string[] = ["self"]): UiDesktopEgressSetting {
+  return { is_supported: true, mode: desktopEgressMode(route, thisComputerDeviceId(DESKTOPS)), route };
 }
 
 export function slackConnection(overrides: Partial<UiPermissionConnection> = {}): UiPermissionConnection {

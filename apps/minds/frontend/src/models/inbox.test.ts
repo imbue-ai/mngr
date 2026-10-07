@@ -79,6 +79,7 @@ const PREDEFINED_DETAIL: PredefinedPermissionDetail = {
   selected_account_value: "",
   new_account_value: ":new-account",
   wildcard_permission: "any",
+  proxy: null,
   will_open_browser: false,
   manual_credentials: null,
 };
@@ -429,6 +430,79 @@ describe("InboxModel", () => {
     });
     await unsyncable.select("evt-a");
     expect(unsyncable.isSharePathSynced).toBe(false);
+  });
+
+  const PROXY_DETAIL: PredefinedPermissionDetail = {
+    ...PREDEFINED_DETAIL,
+    proxy: { resulting_route: ["host-a", "self"], desktops: [{ device_id: "host-a", is_this_computer: true }] },
+  };
+
+  it("starts a request that asks for the proxy with it on, and submits it with the grant", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PROXY_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
+    });
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
+    await model.select("evt-a");
+    expect(model.isProxyOn).toBe(true);
+
+    await model.approve();
+
+    const form = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
+    expect(form.getAll("proxy")).toEqual(["true"]);
+  });
+
+  it("submits the proxy as off once it was switched off", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PROXY_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
+    });
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
+    await model.select("evt-a");
+
+    model.isProxyOn = false;
+    await model.approve();
+
+    const form = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
+    expect(form.getAll("proxy")).toEqual(["false"]);
+  });
+
+  it("sends no proxy field for a request that did not ask for one", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PREDEFINED_DETAIL }),
+      "POST /requests/evt-a/grant": () => jsonResponse({ outcome: "GRANTED", message: "done" }),
+    });
+    model.cards = [CARD_A];
+    model.isListLoaded = true;
+    await model.select("evt-a");
+    expect(model.isProxyOn).toBe(false);
+
+    await model.approve();
+
+    const form = calls.find((call) => call.url.includes("/grant"))?.init?.body as FormData;
+    expect(form.has("proxy")).toBe(false);
+  });
+
+  it("starts each next request's proxy from that request's default", async () => {
+    const model = makeModel({
+      "GET /ui/api/inbox/evt-a/detail": () => jsonResponse({ detail: PROXY_DETAIL }),
+      "GET /ui/api/inbox/evt-b/detail": () =>
+        jsonResponse({ detail: { ...PROXY_DETAIL, request_id: "evt-b" } }),
+      "GET /ui/api/inbox/evt-c/detail": () =>
+        jsonResponse({ detail: { ...PREDEFINED_DETAIL, request_id: "evt-c" } }),
+    });
+    model.cards = [CARD_A, CARD_B, { ...CARD_B, id: "evt-c" }];
+    model.isListLoaded = true;
+    await model.select("evt-a");
+    model.isProxyOn = false;
+
+    await model.select("evt-b");
+    expect(model.isProxyOn).toBe(true);
+
+    await model.select("evt-c");
+    expect(model.isProxyOn).toBe(false);
   });
 
   it("submits the predefined grant form and closes, leaving the rest alone", async () => {

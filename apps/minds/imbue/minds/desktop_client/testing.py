@@ -1241,13 +1241,14 @@ def create_predefined_permission_request(
     permissions: tuple[str, ...] = (),
     account: str | None = None,
     target: str = "/tmp/permissions.json",
+    proxy: bool = False,
 ) -> StreamedPermissionRequest:
     """Build a predefined permission request as the gateway would stream it."""
     return _streamed_request(
         agent_id=agent_id,
         rationale=rationale,
         request_type=REQUEST_TYPE_PREDEFINED,
-        payload=PredefinedRequestPayload(scope=scope, permissions=permissions, account=account),
+        payload=PredefinedRequestPayload(scope=scope, permissions=permissions, account=account, proxy=proxy),
         target=target,
     )
 

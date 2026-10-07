@@ -427,7 +427,12 @@ def test_a_connect_without_a_config_leaves_the_machines_alone(tmp_path: Path) ->
 
 
 def _push_grant(
-    tmp_path: Path, host_id: HostId, outer: OuterHostInterface, account: str, permissions_json: str = _SLACK_ANY
+    tmp_path: Path,
+    host_id: HostId,
+    outer: OuterHostInterface,
+    account: str,
+    permissions_json: str = _SLACK_ANY,
+    desktop_egress_rules_json: str | None = None,
 ) -> None:
     latchkey = desktop_latchkey(tmp_path, host_id=host_id, machine_accounts={"slack": ["a@example.com"]})
     machine_latchkey = latchkey_for_machine(latchkey, plugin_data_dir(latchkey.latchkey_directory), host_id)
@@ -440,6 +445,7 @@ def _push_grant(
         SecretStr(MACHINE_KEY),
         permissions_json,
         PermissionsFormatVersion(0),
+        desktop_egress_rules_json,
     )
 
 
@@ -455,6 +461,44 @@ def test_a_grant_costs_one_remote_command(tmp_path: Path) -> None:
     assert as_vps(outer).written == []
     assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
     assert as_vps(outer).machine_permissions() == _SLACK_ANY
+
+
+def test_a_grant_that_changes_a_route_still_costs_one_remote_command(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path, {"github": ["kept@example.com"]})
+    as_vps(outer).run_under_key(MACHINE_KEY)
+
+    _push_grant(tmp_path, host_id, outer, "a@example.com", desktop_egress_rules_json=_SLACK_ROUTED)
+
+    assert len(as_vps(outer).recorded) == 1
+    assert as_vps(outer).written == []
+    assert as_vps(outer).machine_accounts() == {"github": ["kept@example.com"], "slack": ["a@example.com"]}
+    assert as_vps(outer).machine_permissions() == _SLACK_ANY
+    assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
+
+
+def test_a_grant_without_desktop_egress_rules_leaves_the_machines_alone(tmp_path: Path) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).run_under_key(MACHINE_KEY)
+    as_vps(outer).hold_desktop_egress_rules(_SLACK_ROUTED)
+
+    _push_grant(tmp_path, host_id, outer, "a@example.com")
+
+    assert as_vps(outer).machine_desktop_egress_rules() == _SLACK_ROUTED
+
+
+def test_a_grant_with_desktop_egress_rules_the_router_could_not_read_never_reaches_the_machine(
+    tmp_path: Path,
+) -> None:
+    host_id = HostId.generate()
+    outer = fake_vps(tmp_path)
+    as_vps(outer).run_under_key(MACHINE_KEY)
+
+    with pytest.raises(RemoteGatewayError, match="unreadable desktop egress rules"):
+        _push_grant(tmp_path, host_id, outer, "a@example.com", desktop_egress_rules_json="not json")
+
+    assert as_vps(outer).recorded == []
 
 
 def test_a_connect_costs_one_remote_command(tmp_path: Path) -> None:
@@ -776,6 +820,7 @@ def test_every_push_of_a_policy_carries_its_format_stamp(tmp_path: Path) -> None
         SecretStr(MACHINE_KEY),
         _SLACK_ANY,
         PermissionsFormatVersion(3),
+        None,
     )
     assert as_vps(outer).machine_permissions_format_version() == 3
 

@@ -11,7 +11,8 @@ never leaves this computer.
 Everything this computer *pushes* to a machine -- a connect (with the config
 snapshot the credential needs the gateway to have), a disconnect, a permissions
 snapshot (alone, or with a desktop egress rules snapshot), or a permission
-grant (a connect and a snapshot together) -- is one
+grant (a connect and a snapshot together, with a desktop egress rules snapshot
+when the grant also changes a route) -- is one
 :class:`~imbue.mngr_latchkey.remote._machine.RemoteStateUpdate`
 applied by the machine's ``mngr-latchkey apply-state`` in a single remote
 command, and reading a machine back (:func:`fetch_machine_state`) is one
@@ -317,6 +318,8 @@ def push_credentials_with_permissions(
     machine_key: SecretStr,
     permissions_json: str,
     permissions_format_version: PermissionsFormatVersion,
+    # The rules of a grant that also changes a route; ``None`` leaves the machine's rules as they are.
+    desktop_egress_rules_json: str | None,
     config_json: str | None = None,
 ) -> None:
     """Add one account to the machine's store and make ``permissions_json`` its policy, in one round trip.
@@ -327,13 +330,17 @@ def push_credentials_with_permissions(
     ``config_json`` lands ahead of both (see :func:`push_credentials`), and
     ``permissions_format_version`` -- the format the snapshot is written in --
     after the policy (see :func:`push_permissions_snapshot`).
+    ``desktop_egress_rules_json`` lands between the credential and the policy
+    (see :func:`push_permissions_and_desktop_egress_rules`).
 
     Raises:
-        RemoteGatewayError: when the snapshot is not a policy this build can
-            read, the bundle cannot be built, or the machine refuses or fails
-            the update.
+        RemoteGatewayError: when a snapshot is not one this build can read,
+            the bundle cannot be built, or the machine refuses or fails the
+            update.
     """
     _validate_permissions_snapshot(host_id, permissions_json)
+    if desktop_egress_rules_json is not None:
+        _validate_desktop_egress_rules_snapshot(host_id, desktop_egress_rules_json)
     with log_span(
         "Adding {} to the credentials of host {} and applying its permissions on VPS {}",
         service_name,
@@ -346,6 +353,7 @@ def push_credentials_with_permissions(
                 encryption_key=machine_key,
                 config_json=config_json,
                 credential_merge=_merge_of(machine_latchkey, host_id, service_name, account, machine_key),
+                desktop_egress_rules_json=desktop_egress_rules_json,
                 permissions_json=permissions_json,
                 permissions_format_version=permissions_format_version,
             ),

@@ -166,6 +166,39 @@ class MachineOperator(MutableModel):
             else:
                 machine.connect_service_with_permissions(service_name, account, permissions_json)
 
+    def connect_service_with_permissions_and_desktop_egress_rules(
+        self, workspace_agent_id: str, service_name: str, account: str
+    ) -> None:
+        """Carry a granted account, the policy that grants it and the desktop egress rules as one change.
+
+        What a grant that also changes the service's route asks for, once both
+        copies have been edited here: one round trip instead of
+        :meth:`connect_service_with_permissions` and then
+        :meth:`push_permissions_and_desktop_egress_rules`, and nothing of the
+        grant or the route lands without the rest.
+
+        Raises:
+            MachineOperationError: when a snapshot cannot be read, when there
+                is no copy of the policy or of the rules to push, or when the
+                machine does not take the change.
+        """
+        failure_description = grant_failure_description(service_name)
+        with self._machine(workspace_agent_id, failure_description) as machine:
+            if machine is None:
+                return
+            permissions_json = self._host_permissions(machine.host_id, failure_description)
+            if permissions_json is None:
+                raise MachineOperationError(
+                    f"Could not {failure_description}: this computer has no copy of the permissions of host "
+                    f"{machine.host_id}."
+                )
+            machine.connect_service_with_permissions_and_desktop_egress_rules(
+                service_name,
+                account,
+                permissions_json,
+                self._host_desktop_egress_rules(machine.host_id, failure_description),
+            )
+
     def push_permissions(self, workspace_agent_id: str) -> None:
         """Make this computer's copy of a workspace's policy the one its machine enforces.
 

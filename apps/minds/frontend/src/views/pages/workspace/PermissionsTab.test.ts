@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { settle } from "../../../testing";
 import {
   BROWSER_SIGN_IN,
+  DESKTOPS,
   awsAvailable,
   credentialsSignIn,
   desktopEgress,
@@ -21,7 +22,7 @@ import { TITLEBAR_POPUP_ICONS } from "../../shell/RaisedTitlebarIcons";
 import { forgetFailedServiceMarks } from "../../components/ServiceMark";
 import { Spinner } from "../../components/Spinner";
 import type { AnyVnode } from "../../../testing";
-import { allText, attrsOf, classesOf, collectVnodes, withAttr } from "../../../testing";
+import { allText, attrsOf, classesOf, collectText, collectVnodes, withAttr } from "../../../testing";
 
 const AGENT_ID = "agent-" + "c".repeat(8);
 
@@ -72,6 +73,9 @@ interface RenderResult {
   root: m.Vnode;
   /** Draw the tab again, for a step that changed what it should show. */
   rerender: () => m.Vnode;
+  /** Draw the same tab instance over another workspace's model, the way a
+   * navigation between two workspaces' panes hands it new attrs. */
+  rerenderFor: (other: PermissionsModel) => m.Vnode;
   /** Run the component's onremove, for a test that armed something with a
    * timer behind it -- an armed "Revoke all" outlives the test otherwise. */
   remove: () => void;
@@ -157,8 +161,13 @@ async function render(
   (instance.oninit as unknown as (v: m.Vnode) => void).call(instance, vnode);
   await settle();
   const rerender = (): m.Vnode => (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(instance, vnode);
+  const rerenderFor = (other: PermissionsModel): m.Vnode =>
+    (instance.view as unknown as (v: m.Vnode) => m.Vnode).call(
+      instance,
+      m(instance, { ...attrs, model: other } as unknown as m.Attributes) as m.Vnode,
+    );
   const remove = (): void => (instance.onremove as unknown as () => void).call(instance);
-  return { root: rerender(), rerender, remove, model, selectedSections, reviewedRequests, requests };
+  return { root: rerender(), rerender, rerenderFor, remove, model, selectedSections, reviewedRequests, requests };
 }
 
 /** A connect awaits the sign-in, then the reload, then the selection -- more
@@ -366,48 +375,363 @@ describe("PermissionsTab connection panel", () => {
     expect(switches(root)).toHaveLength(2);
   });
 
+  function egressView(route: string[]): UiWorkspacePermissions {
+    return permissionsView({
+      desktops: DESKTOPS,
+      connections: [slackConnection({ desktop_egress: desktopEgress(route) })],
+    });
+  }
+
+  function egressRow(root: unknown): AnyVnode {
+    return withAttr(root, "data-perm-desktop-egress")[0];
+  }
+
+  function clickEgress(root: unknown, attr: string, hop?: string): void {
+    const targets = withAttr(egressRow(root), attr).filter((node) => hop === undefined || attrsOf(node)[attr] === hop);
+    expect(targets).toHaveLength(1);
+    expect(attrsOf(targets[0]).disabled).not.toBe(true);
+    (attrsOf(targets[0]).onclick as () => void)();
+  }
+
+  /** The text as a browser would show it: a line that draws a device id as
+   * an identifier is several text nodes, with no space between them. */
+  function exactText(node: unknown): string {
+    return collectText(node).join("");
+  }
+
+  function editorHops(root: unknown): string[] {
+    return withAttr(egressRow(root), "data-desktop-egress-hop-label").map((node) => exactText(node));
+  }
+
+  function addOptions(root: unknown): string[] {
+    return collectVnodes(withAttr(egressRow(root), "data-desktop-egress-add")[0])
+      .filter((node) => node.tag === "option")
+      .map((node) => allText(node));
+  }
+
+  /** The texts drawn as identifiers under `node`. */
+  function deviceIdTexts(node: unknown): string[] {
+    return collectVnodes(node)
+      .filter((child) => classesOf(child) === "font-mono")
+      .map((child) => exactText(child));
+  }
+
   it("draws the desktop egress row above the permission toggles when it is supported", async () => {
-    const { root } = await render(
-      permissionsView({
-        connections: [slackConnection({ desktop_egress: desktopEgress({ is_enabled: true }) })],
-      }),
-    );
-    const rows = withAttr(root, "data-perm-desktop-egress");
-    expect(rows).toHaveLength(1);
-    expect(allText(rows[0])).toContain("Proxy through my desktop");
-    expect(allText(rows[0])).toContain(
-      "Requests this workspace makes to Slack leave from this computer instead of from the workspace's " +
-        "machine. This computer has to be running and connected for them to succeed.",
-    );
+    const { root } = await render(egressView(["host-here"]));
+    expect(withAttr(root, "data-perm-desktop-egress")).toHaveLength(1);
+    expect(allText(egressRow(root))).toContain("Proxy through my desktop");
     const controls = switches(root);
     expect(controls.map((node) => attrsOf(node)["data-perm-permission"])).toEqual([
       "desktop-egress",
       "slack-chat-read",
       "slack-chat-write",
     ]);
-    expect(attrsOf(controls[0])["aria-checked"]).toBe("true");
     expect(attrsOf(controls[0])["aria-label"]).toBe("Proxy through my desktop");
   });
 
-  it("flips desktop egress through the model with the service name", async () => {
+  it.each([
+    { route: ["self"], mode: "OFF", checked: "false", summary: "Requests leave from the workspace's own machine." },
+    { route: ["host-here"], mode: "ON", checked: "true", summary: "Requests leave from this computer." },
+    { route: ["host-office"], mode: "CUSTOM", checked: "true", summary: "host-office" },
+    {
+      route: ["host-here", "self"],
+      mode: "CUSTOM",
+      checked: "true",
+      summary: "This computer, then the workspace's own machine",
+    },
+    {
+      route: ["host-here", "host-office", "self"],
+      mode: "CUSTOM",
+      checked: "true",
+      summary: "This computer, then host-office, then the workspace's own machine",
+    },
+  ])("draws the desktop egress route $route as $mode", async ({ route, mode, checked, summary }) => {
+    const { root } = await render(egressView(route));
+    const row = egressRow(root);
+    expect(attrsOf(withAttr(row, "data-desktop-egress-mode")[0])["data-desktop-egress-mode"]).toBe(mode);
+    const control = attrsOf(switches(row)[0]);
+    expect(control["aria-checked"]).toBe(checked);
+    expect(control["aria-label"]).toBe(
+      mode === "CUSTOM" ? "Proxy through my desktop (custom route)" : "Proxy through my desktop",
+    );
+    const summaryNode = withAttr(row, "data-desktop-egress-summary")[0];
+    expect(exactText(summaryNode)).toBe(summary);
+    expect(control["aria-describedby"]).toBe("desktop-egress-summary-slack");
+    expect(attrsOf(summaryNode).id).toBe("desktop-egress-summary-slack");
+    expect(deviceIdTexts(summaryNode)).toEqual(route.filter((hop) => hop === "host-office"));
+    const customMarks = withAttr(row, "data-desktop-egress-custom");
+    expect(customMarks.map((node) => allText(node))).toEqual(mode === "CUSTOM" ? ["Custom"] : []);
+    expect(withAttr(row, "data-desktop-egress-editor")).toHaveLength(0);
+  });
+
+  it.each([
+    { from: ["self"], to: ["host-here"] },
+    { from: ["host-here"], to: ["self"] },
+    { from: ["host-here", "self"], to: ["self"] },
+    { from: ["host-office"], to: ["self"] },
+  ])("flips desktop egress from $from to $to at once", async ({ from, to }) => {
     const { root, requests } = await render(
       permissionsView({
-        connections: [slackConnection({ account: "work@example.com", desktop_egress: desktopEgress() })],
+        desktops: DESKTOPS,
+        connections: [slackConnection({ account: "work@example.com", desktop_egress: desktopEgress(from) })],
       }),
       { requestedSection: "conn:slack:work@example.com" },
     );
-    (attrsOf(switches(withAttr(root, "data-perm-desktop-egress")[0])[0]).onclick as () => void)();
+    (attrsOf(switches(egressRow(root))[0]).onclick as () => void)();
     await settle();
-    expect(requests[1]).toEqual({
-      url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-toggle`,
-      body: { service_name: "slack", enabled: true },
+    expect(requests.slice(1)).toEqual([
+      {
+        url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-route`,
+        body: { service_name: "slack", route: to },
+      },
+    ]);
+  });
+
+  function egressViewWithoutThisComputer(route: string[]): UiWorkspacePermissions {
+    return permissionsView({
+      desktops: DESKTOPS.filter((desktop) => !desktop.is_this_computer),
+      connections: [slackConnection({ desktop_egress: desktopEgress(route) })],
     });
+  }
+
+  it("cannot turn desktop egress on when no desktop is this computer", async () => {
+    const { root, requests } = await render(egressViewWithoutThisComputer(["self"]));
+    const control = attrsOf(switches(egressRow(root))[0]);
+    expect(control["aria-checked"]).toBe("false");
+    expect(control.disabled).toBe(true);
+    expect(control.title).toBe("This computer's id is not known, so requests cannot be sent through it.");
+    (control.onclick as () => void)();
+    await settle();
+    expect(requests).toHaveLength(1);
+    expect(attrsOf(withAttr(egressRow(root), "data-desktop-egress-adjust")[0]).disabled).toBe(false);
+  });
+
+  it("can still turn desktop egress off when no desktop is this computer", async () => {
+    const { root, requests } = await render(egressViewWithoutThisComputer(["host-here"]));
+    const row = egressRow(root);
+    expect(attrsOf(withAttr(row, "data-desktop-egress-mode")[0])["data-desktop-egress-mode"]).toBe("CUSTOM");
+    expect(exactText(withAttr(row, "data-desktop-egress-summary")[0])).toBe("host-here");
+    const control = attrsOf(switches(row)[0]);
+    expect(control.disabled).toBe(false);
+    expect(control.title).toBeUndefined();
+    (control.onclick as () => void)();
+    await settle();
+    expect(requests.slice(1)).toEqual([
+      {
+        url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-route`,
+        body: { service_name: "slack", route: ["self"] },
+      },
+    ]);
+  });
+
+  it("edits a desktop egress route as a draft and posts it on Save", async () => {
+    const saved = ["host-here", "host-studio", "host-office", "self"];
+    const { root, rerender, requests } = await render(egressView(["host-here", "self"]), {
+      respond: (url) =>
+        url.endsWith("/desktop-egress-route")
+          ? Promise.resolve({ ok: true, status: 200, body: egressView(saved) })
+          : null,
+    });
+
+    clickEgress(root, "data-desktop-egress-adjust");
+    expect(editorHops(rerender())).toEqual(["1. This computer", "2. The workspace's own machine"]);
+    const add = withAttr(egressRow(rerender()), "data-desktop-egress-add")[0];
+    expect(addOptions(rerender())).toEqual(["Add…", "host-office", "host-studio"]);
+    expect(allText(withAttr(egressRow(rerender()), "data-desktop-egress-add-hint")[0])).toBe(
+      "Another computer is added from Imbue Studio on that computer.",
+    );
+    const onAdd = attrsOf(add).onchange as (event: unknown) => void;
+    onAdd({ target: { value: "host-office" } });
+    (attrsOf(withAttr(egressRow(rerender()), "data-desktop-egress-add")[0]).onchange as typeof onAdd)({
+      target: { value: "host-studio" },
+    });
+    clickEgress(rerender(), "data-desktop-egress-move-up", "host-studio");
+    expect(editorHops(rerender())).toEqual([
+      "1. This computer",
+      "2. host-studio",
+      "3. host-office",
+      "4. The workspace's own machine",
+    ]);
+    expect(deviceIdTexts(withAttr(egressRow(rerender()), "data-desktop-egress-editor")[0])).toEqual([
+      "host-studio",
+      "host-office",
+    ]);
+    expect(addOptions(rerender())).toEqual([]);
+    // Nothing is written, and the row still shows the saved route, until Save.
+    expect(requests).toHaveLength(1);
+    expect(exactText(withAttr(egressRow(rerender()), "data-desktop-egress-summary")[0])).toBe(
+      "This computer, then the workspace's own machine",
+    );
+
+    clickEgress(rerender(), "data-desktop-egress-save");
+    await settle();
+
+    expect(requests.slice(1)).toEqual([
+      {
+        url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-route`,
+        body: { service_name: "slack", route: saved },
+      },
+    ]);
+    const after = egressRow(rerender());
+    expect(withAttr(after, "data-desktop-egress-editor")).toHaveLength(0);
+    expect(exactText(withAttr(after, "data-desktop-egress-summary")[0])).toBe(
+      "This computer, then host-studio, then host-office, then the workspace's own machine",
+    );
+  });
+
+  it("discards a desktop egress draft when another section is selected", async () => {
+    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "self"]));
+
+    clickEgress(root, "data-desktop-egress-adjust");
+    clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
+    (attrsOf(withAttr(rerender(), "data-perm-nav")[0]).onclick as () => void)();
+
+    expect(withAttr(egressRow(rerender()), "data-desktop-egress-editor")).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    clickEgress(rerender(), "data-desktop-egress-adjust");
+    expect(editorHops(rerender())).toEqual([
+      "1. This computer",
+      "2. host-office",
+      "3. The workspace's own machine",
+    ]);
+  });
+
+  it("shows a desktop egress draft only on the workspace it was opened for", async () => {
+    const { root, rerender, rerenderFor } = await render(egressView(["host-here", "host-office", "self"]));
+    clickEgress(root, "data-desktop-egress-adjust");
+    clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
+
+    const other = new PermissionsModel("agent-" + "d".repeat(8), {
+      fetchJson: () => Promise.resolve({ ok: true, status: 200, body: egressView(["self"]) }),
+      redraw: () => undefined,
+    });
+    await other.load();
+    const otherRow = egressRow(rerenderFor(other));
+
+    expect(exactText(withAttr(otherRow, "data-desktop-egress-summary")[0])).toBe(
+      "Requests leave from the workspace's own machine.",
+    );
+    expect(withAttr(otherRow, "data-desktop-egress-editor")).toHaveLength(0);
+    expect(editorHops(rerender())).toEqual(["1. This computer", "2. The workspace's own machine"]);
+  });
+
+  it("discards a desktop egress draft on Cancel", async () => {
+    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "self"]));
+
+    clickEgress(root, "data-desktop-egress-adjust");
+    expect(attrsOf(withAttr(egressRow(rerender()), "data-desktop-egress-save")[0]).disabled).toBe(true);
+    clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
+    expect(editorHops(rerender())).toEqual(["1. This computer", "2. The workspace's own machine"]);
+    expect(attrsOf(withAttr(egressRow(rerender()), "data-desktop-egress-save")[0]).disabled).toBe(false);
+    clickEgress(rerender(), "data-desktop-egress-cancel");
+
+    expect(withAttr(egressRow(rerender()), "data-desktop-egress-editor")).toHaveLength(0);
+    expect(requests).toHaveLength(1);
+    clickEgress(rerender(), "data-desktop-egress-adjust");
+    expect(editorHops(rerender())).toEqual([
+      "1. This computer",
+      "2. host-office",
+      "3. The workspace's own machine",
+    ]);
+  });
+
+  it("offers no move that would break a desktop egress route, and never removes its last hop", async () => {
+    const { root, rerender } = await render(egressView(["host-here", "self"]));
+    clickEgress(root, "data-desktop-egress-adjust");
+    const isDisabled = (attr: string, hop: string): unknown =>
+      attrsOf(withAttr(egressRow(rerender()), attr).filter((node) => attrsOf(node)[attr] === hop)[0]).disabled;
+
+    expect(isDisabled("data-desktop-egress-move-up", "host-here")).toBe(true);
+    expect(isDisabled("data-desktop-egress-move-down", "host-here")).toBe(true);
+    expect(isDisabled("data-desktop-egress-move-up", "self")).toBe(true);
+    expect(isDisabled("data-desktop-egress-move-down", "self")).toBe(true);
+    expect(isDisabled("data-desktop-egress-remove", "self")).toBe(false);
+
+    expect(addOptions(rerender())).toEqual(["Add…", "host-office", "host-studio"]);
+    clickEgress(rerender(), "data-desktop-egress-remove", "self");
+    expect(editorHops(rerender())).toEqual(["1. This computer"]);
+    expect(isDisabled("data-desktop-egress-remove", "host-here")).toBe(true);
+    expect(addOptions(rerender())).toEqual(["Add…", "host-office", "host-studio", "The workspace's own machine"]);
+  });
+
+  it("keeps a desktop egress draft open when the machine refuses it", async () => {
+    const { root, rerender } = await render(egressView(["host-here", "self"]), {
+      respond: (url) =>
+        url.endsWith("/desktop-egress-route")
+          ? Promise.resolve({ ok: false, status: 502, body: { error: "the machine did not take it" } })
+          : null,
+    });
+    clickEgress(root, "data-desktop-egress-adjust");
+    clickEgress(rerender(), "data-desktop-egress-remove", "self");
+    clickEgress(rerender(), "data-desktop-egress-save");
+    await settle();
+
+    const after = rerender();
+    expect(editorHops(after)).toEqual(["1. This computer"]);
+    expect(allText(after)).toContain("Could not save the change: the machine did not take it");
+  });
+
+  it.each([
+    { outcome: "closes the editor once the flip is saved", isRefused: false },
+    { outcome: "keeps the draft when the flip is refused", isRefused: true },
+  ])("flips the switch over an open desktop egress draft and $outcome", async ({ isRefused }) => {
+    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "self"]), {
+      respond: (url) => {
+        if (!url.endsWith("/desktop-egress-route")) return null;
+        return Promise.resolve(
+          isRefused
+            ? { ok: false, status: 502, body: { error: "the machine did not take it" } }
+            : { ok: true, status: 200, body: egressView(["self"]) },
+        );
+      },
+    });
+    clickEgress(root, "data-desktop-egress-adjust");
+    clickEgress(rerender(), "data-desktop-egress-remove", "host-office");
+
+    (attrsOf(switches(egressRow(rerender()))[0]).onclick as () => void)();
+    await settle();
+
+    expect(requests.slice(1)).toEqual([
+      {
+        url: `/ui/api/workspaces/${AGENT_ID}/permissions/desktop-egress-route`,
+        body: { service_name: "slack", route: ["self"] },
+      },
+    ]);
+    expect(editorHops(rerender())).toEqual(isRefused ? ["1. This computer", "2. The workspace's own machine"] : []);
+  });
+
+  it("locks the open desktop egress editor while its save is in flight, except for Cancel", async () => {
+    const { root, rerender, requests } = await render(egressView(["host-here", "host-office", "host-studio"]), {
+      respond: (url) => (url.endsWith("/desktop-egress-route") ? new Promise(() => undefined) : null),
+    });
+    clickEgress(root, "data-desktop-egress-adjust");
+    clickEgress(rerender(), "data-desktop-egress-remove", "host-studio");
+    const disabledStates = (attr: string): unknown[] =>
+      withAttr(egressRow(rerender()), attr).map((node) => attrsOf(node).disabled);
+    // Before the save there is something to lock: both hops can swap places.
+    expect(disabledStates("data-desktop-egress-move-up")).toEqual([true, false]);
+    expect(disabledStates("data-desktop-egress-move-down")).toEqual([false, true]);
+
+    clickEgress(rerender(), "data-desktop-egress-save");
+    await settle();
+
+    expect(disabledStates("data-desktop-egress-save")).toEqual([true]);
+    expect(disabledStates("data-desktop-egress-move-up")).toEqual([true, true]);
+    expect(disabledStates("data-desktop-egress-move-down")).toEqual([true, true]);
+    expect(disabledStates("data-desktop-egress-remove")).toEqual([true, true]);
+    expect(disabledStates("data-desktop-egress-add")).toEqual([true]);
+    expect(editorHops(rerender())).toEqual(["1. This computer", "2. host-office"]);
+
+    clickEgress(rerender(), "data-desktop-egress-cancel");
+
+    expect(withAttr(egressRow(rerender()), "data-desktop-egress-editor")).toHaveLength(0);
+    expect(requests).toHaveLength(2);
   });
 
   it("spins the desktop egress row while its write is in flight and locks the other toggles", async () => {
     const { root, rerender } = await render(
-      permissionsView({ connections: [slackConnection({ desktop_egress: desktopEgress() })] }),
-      { respond: (url) => (url.endsWith("/desktop-egress-toggle") ? new Promise(() => undefined) : null) },
+      egressView(["self"]),
+      { respond: (url) => (url.endsWith("/desktop-egress-route") ? new Promise(() => undefined) : null) },
     );
 
     (attrsOf(switches(root)[0]).onclick as () => void)();
@@ -416,6 +740,7 @@ describe("PermissionsTab connection panel", () => {
 
     expect(classesOf(switches(after)[0])).toContain("is-busy");
     expect(spinners(after)).toHaveLength(1);
+    expect(attrsOf(withAttr(after, "data-desktop-egress-adjust")[0]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).disabled).toBe(true);
     expect(attrsOf(switches(after)[1]).title).toBe("Waiting for the last change to reach this machine.");
   });

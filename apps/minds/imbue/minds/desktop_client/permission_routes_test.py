@@ -29,13 +29,16 @@ from imbue.minds.desktop_client.latchkey.gateway_client import AccountsRequestPa
 from imbue.minds.desktop_client.latchkey.gateway_client import PermissionEffect
 from imbue.minds.desktop_client.latchkey.gateway_client import StreamedPermissionRequest
 from imbue.minds.desktop_client.latchkey.handlers.messaging import MngrMessageSender
+from imbue.minds.desktop_client.latchkey.handlers.predefined import DesktopEgressDecision
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantOutcome
 from imbue.minds.desktop_client.latchkey.handlers.predefined import GrantResult
 from imbue.minds.desktop_client.latchkey.handlers.predefined import LatchkeyPermissionGrantHandler
 from imbue.minds.desktop_client.latchkey.handlers.predefined import ManualCredentialSubmission
+from imbue.minds.desktop_client.latchkey.handlers.predefined import NO_DESKTOP_EGRESS_CHANGE
 from imbue.minds.desktop_client.latchkey.response_events import RequestStatus
 from imbue.minds.desktop_client.latchkey.response_events import create_request_response_event
 from imbue.minds.desktop_client.latchkey.testing import build_fake_gateway_client
+from imbue.minds.desktop_client.latchkey.testing import leave_copies_on_this_computer_as_they_are
 from imbue.minds.desktop_client.latchkey.testing import leave_grant_on_this_computer
 from imbue.minds.desktop_client.request_handler import RequestDetailPayload
 from imbue.minds.desktop_client.request_handler import RequestEventHandler
@@ -97,6 +100,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
         granted_permissions: Sequence[str],
         account_choice: str,
         manual_credentials: ManualCredentialSubmission,
+        desktop_egress: DesktopEgressDecision,
     ) -> GrantResult:
         self.grant_calls.append(
             {
@@ -107,6 +111,7 @@ class _RecordingHandler(LatchkeyPermissionGrantHandler):
                 "granted_permissions": tuple(granted_permissions),
                 "account_choice": account_choice,
                 "manual_credentials": manual_credentials,
+                "desktop_egress": desktop_egress,
             }
         )
         # NEEDS_MANUAL_CREDENTIALS and FAILED keep the request pending and
@@ -230,6 +235,8 @@ def _make_recording_handler(
         gateway_client=gateway_client,
         # ``_RecordingHandler`` overrides grant, so no handover is ever attempted.
         carry_grant_to_machine=leave_grant_on_this_computer,
+        carry_grant_and_desktop_egress_rules_to_machine=leave_grant_on_this_computer,
+        refresh_machine_copies=leave_copies_on_this_computer_as_they_are,
         grant_outcome=grant_outcome,
         grant_message=grant_message,
         grant_manual_credentials=grant_manual_credentials,
@@ -366,6 +373,7 @@ def test_post_permission_grant_calls_handler_and_resolves_inbox(tmp_path: Path) 
     call = handler.grant_calls[0]
     assert call["scope"] == "slack-api"
     assert call["granted_permissions"] == ("slack-read-all", "slack-write-all")
+    assert call["desktop_egress"] == NO_DESKTOP_EGRESS_CHANGE
     # The route resolved the agent to its host via the backend resolver
     # and threaded that host_id into the grant call so the handler
     # writes to ``permissions_path_for_host``.
@@ -691,9 +699,6 @@ def test_unauthenticated_grant_post_returns_403(tmp_path: Path) -> None:
 
     assert response.status_code == 403
     assert handler.grant_calls == []
-
-
-# -- Dispatch by request type --
 
 
 class _StubOtherHandler(RequestEventHandler):

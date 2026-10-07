@@ -9,9 +9,10 @@ the user typed into the pane (the browser-sign-in half of Add connection is the
 settings page's own route). A fifth signs an account out: it clears the stored
 credential of the store this workspace's machine reads, so the account is gone
 for every workspace that reads the same store -- that one alone for a machine
-of its own, every local workspace for this computer's. A sixth turns desktop
-egress on or off for one service: whether a remote workspace's requests to it
-are sent out through this computer.
+of its own, every local workspace for this computer's. A sixth sets one
+service's desktop egress route: which of the user's desktops a remote
+workspace's requests to it are sent out through, in what order, and whether its
+own machine sends them when none of those will.
 
 Every write posts exactly one flip. The SERVER then recomputes the affected
 rule's COMPLETE permission set from the workspace's current permissions file
@@ -93,7 +94,7 @@ from imbue.minds.desktop_client.latchkey.permission_overview import revoke_servi
 from imbue.minds.desktop_client.latchkey.permission_toggles import PermissionToggleError
 from imbue.minds.desktop_client.latchkey.permission_toggles import WorkspacePermissionsView
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_connector_toggle
-from imbue.minds.desktop_client.latchkey.permission_toggles import apply_desktop_egress_toggle
+from imbue.minds.desktop_client.latchkey.permission_toggles import apply_desktop_egress_route
 from imbue.minds.desktop_client.latchkey.permission_toggles import apply_self_toggle
 from imbue.minds.desktop_client.latchkey.permission_toggles import build_workspace_permissions_view
 from imbue.minds.desktop_client.latchkey.permission_toggles import connect_service_with_credentials
@@ -108,7 +109,7 @@ from imbue.minds.desktop_client.ui_models import UiConnectCredentialsRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorDisconnectRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorRevokeAllRequest
 from imbue.minds.desktop_client.ui_models import UiConnectorToggleRequest
-from imbue.minds.desktop_client.ui_models import UiDesktopEgressToggleRequest
+from imbue.minds.desktop_client.ui_models import UiDesktopEgressRouteRequest
 from imbue.minds.desktop_client.ui_models import UiPathSync
 from imbue.minds.desktop_client.ui_models import UiPermissionConnection
 from imbue.minds.desktop_client.ui_models import UiSelfPermissionToggle
@@ -117,10 +118,13 @@ from imbue.minds.desktop_client.ui_models import UiSharedPath
 from imbue.minds.desktop_client.ui_models import UiSharedPathRemoveRequest
 from imbue.minds.desktop_client.ui_models import UiSharedPathRequest
 from imbue.minds.desktop_client.ui_models import UiWaitingPermissionRequest
+from imbue.minds.desktop_client.ui_models import UiWorkspaceDesktop
 from imbue.minds.desktop_client.ui_models import UiWorkspacePermissions
 from imbue.minds.errors import FolderSyncError
 from imbue.mngr.primitives import AgentId
 from imbue.mngr_latchkey.core import Latchkey
+from imbue.mngr_latchkey.desktop_egress import DesktopEgressError
+from imbue.mngr_latchkey.desktop_egress import build_desktop_egress_route
 from imbue.mngr_latchkey.devices import DesktopDeviceId
 from imbue.mngr_latchkey.file_sharing import FileSharingAccess
 from imbue.mngr_latchkey.file_sharing import FileSharingGrant
@@ -431,6 +435,7 @@ def build_permissions_payload(agent_id: str) -> UiWorkspacePermissions:
         workspace_toggles=tuple(
             UiSelfPermissionToggle.model_validate(toggle.model_dump()) for toggle in view.workspace_toggles
         ),
+        desktops=tuple(UiWorkspaceDesktop.model_validate(desktop.model_dump()) for desktop in view.desktops),
         waiting_requests=_build_waiting_requests(agent_id),
         permissions_unavailable=False,
         is_sync_supported=manager is not None,
@@ -586,27 +591,31 @@ def _handle_self_toggle(agent_id: str) -> Response:
     )
 
 
-def _handle_desktop_egress_toggle(agent_id: str) -> Response:
-    """POST .../permissions/desktop-egress-toggle: send one service's requests through this computer, or stop."""
+def _handle_desktop_egress_route(agent_id: str) -> Response:
+    """POST .../permissions/desktop-egress-route: set where one service's requests leave from."""
     prelude = _write_prelude(agent_id)
     if isinstance(prelude, Response):
         return prelude
     body, handler = prelude
     try:
-        toggle_request = UiDesktopEgressToggleRequest.model_validate(body)
+        route_request = UiDesktopEgressRouteRequest.model_validate(body)
     except ValidationError as e:
-        logger.debug("Rejected a malformed desktop-egress-toggle body: {}", e)
-        return make_json_error_response("service_name and enabled are required.", 400)
+        logger.debug("Rejected a malformed desktop-egress-route body: {}", e)
+        return make_json_error_response("service_name and route are required.", 400)
+    try:
+        route = build_desktop_egress_route(route_request.route)
+    except DesktopEgressError as e:
+        return make_json_error_response(str(e), 400)
     return _apply_and_refresh(
         agent_id,
-        lambda: apply_desktop_egress_toggle(
+        lambda: apply_desktop_egress_route(
             backend_resolver=get_state().backend_resolver,
             gateway_client=handler.gateway_client,
             services_catalog=handler.services_catalog,
             latchkey=handler.latchkey,
             workspace_agent_id=agent_id,
-            service_name=toggle_request.service_name,
-            enabled=toggle_request.enabled,
+            service_name=route_request.service_name,
+            route=route,
             device_id=get_state().device_id,
             push_permissions_and_desktop_egress_rules_to_machine=(
                 _push_permissions_and_desktop_egress_rules_to_machine()
@@ -1117,8 +1126,8 @@ def register_permissions_routes(blueprint: Blueprint) -> None:
         methods=["POST"],
     )
     blueprint.add_url_rule(
-        "/api/workspaces/<agent_id>/permissions/desktop-egress-toggle",
-        view_func=_handle_desktop_egress_toggle,
+        "/api/workspaces/<agent_id>/permissions/desktop-egress-route",
+        view_func=_handle_desktop_egress_route,
         methods=["POST"],
     )
     blueprint.add_url_rule(
